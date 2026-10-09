@@ -14,7 +14,8 @@ pub const AMALGAMATION: &str = include_str!("../csrc/crmath_amalgamation.c");
 
 const SECTION_MARKER: &str = "/* ==== kernel ";
 
-/// One correctly rounded kernel: a [05-OP-46] function at one arithmetic width.
+/// One correctly rounded kernel: a [05-OP-46] function or [05-OP-79]'s `pow` at one
+/// arithmetic width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kernel {
     ExpF32,
@@ -26,6 +27,7 @@ pub enum Kernel {
     TanhF32,
     ErfF32,
     ErfcF32,
+    PowF32,
     ExpF64,
     LogF64,
     SinF64,
@@ -35,11 +37,12 @@ pub enum Kernel {
     TanhF64,
     ErfF64,
     ErfcF64,
+    PowF64,
 }
 
 impl Kernel {
     /// Every kernel, in amalgamation order.
-    pub const ALL: [Kernel; 18] = [
+    pub const ALL: [Kernel; 20] = [
         Kernel::ExpF32,
         Kernel::LogF32,
         Kernel::SinF32,
@@ -49,6 +52,7 @@ impl Kernel {
         Kernel::TanhF32,
         Kernel::ErfF32,
         Kernel::ErfcF32,
+        Kernel::PowF32,
         Kernel::ExpF64,
         Kernel::LogF64,
         Kernel::SinF64,
@@ -58,6 +62,7 @@ impl Kernel {
         Kernel::TanhF64,
         Kernel::ErfF64,
         Kernel::ErfcF64,
+        Kernel::PowF64,
     ];
 
     /// The amalgamation's name for the kernel (`expf`, `exp`, ...).
@@ -72,6 +77,7 @@ impl Kernel {
             Kernel::TanhF32 => "tanhf",
             Kernel::ErfF32 => "erff",
             Kernel::ErfcF32 => "erfcf",
+            Kernel::PowF32 => "powf",
             Kernel::ExpF64 => "exp",
             Kernel::LogF64 => "log",
             Kernel::SinF64 => "sin",
@@ -81,11 +87,13 @@ impl Kernel {
             Kernel::TanhF64 => "tanh",
             Kernel::ErfF64 => "erf",
             Kernel::ErfcF64 => "erfc",
+            Kernel::PowF64 => "pow",
         }
     }
 
-    /// The `static` C entry generated code calls (`chelis_cr_expf`, ...). It takes and
-    /// returns the width's C floating type and canonicalizes every NaN result.
+    /// The `static` C entry generated code calls (`chelis_cr_expf`, ...). It takes
+    /// [`Kernel::arity`] operands of the width's C floating type, returns that type,
+    /// and canonicalizes every NaN result.
     pub fn entry(self) -> &'static str {
         match self {
             Kernel::ExpF32 => "chelis_cr_expf",
@@ -97,6 +105,7 @@ impl Kernel {
             Kernel::TanhF32 => "chelis_cr_tanhf",
             Kernel::ErfF32 => "chelis_cr_erff",
             Kernel::ErfcF32 => "chelis_cr_erfcf",
+            Kernel::PowF32 => "chelis_cr_powf",
             Kernel::ExpF64 => "chelis_cr_exp",
             Kernel::LogF64 => "chelis_cr_log",
             Kernel::SinF64 => "chelis_cr_sin",
@@ -106,6 +115,7 @@ impl Kernel {
             Kernel::TanhF64 => "chelis_cr_tanh",
             Kernel::ErfF64 => "chelis_cr_erf",
             Kernel::ErfcF64 => "chelis_cr_erfc",
+            Kernel::PowF64 => "chelis_cr_pow",
         }
     }
 
@@ -122,7 +132,8 @@ impl Kernel {
             | Kernel::AtanF32
             | Kernel::TanhF32
             | Kernel::ErfF32
-            | Kernel::ErfcF32 => "float",
+            | Kernel::ErfcF32
+            | Kernel::PowF32 => "float",
             Kernel::ExpF64
             | Kernel::LogF64
             | Kernel::SinF64
@@ -131,7 +142,33 @@ impl Kernel {
             | Kernel::AtanF64
             | Kernel::TanhF64
             | Kernel::ErfF64
-            | Kernel::ErfcF64 => "double",
+            | Kernel::ErfcF64
+            | Kernel::PowF64 => "double",
+        }
+    }
+
+    /// How many operands the entry takes: 2 for `pow` ([05-OP-79]), 1 otherwise.
+    pub fn arity(self) -> usize {
+        match self {
+            Kernel::PowF32 | Kernel::PowF64 => 2,
+            Kernel::ExpF32
+            | Kernel::LogF32
+            | Kernel::SinF32
+            | Kernel::CosF32
+            | Kernel::TanF32
+            | Kernel::AtanF32
+            | Kernel::TanhF32
+            | Kernel::ErfF32
+            | Kernel::ErfcF32
+            | Kernel::ExpF64
+            | Kernel::LogF64
+            | Kernel::SinF64
+            | Kernel::CosF64
+            | Kernel::TanF64
+            | Kernel::AtanF64
+            | Kernel::TanhF64
+            | Kernel::ErfF64
+            | Kernel::ErfcF64 => 1,
         }
     }
 
@@ -146,7 +183,7 @@ impl Kernel {
 /// The amalgamation split at its section markers: the prelude, then each kernel's
 /// section in amalgamation order. Panics if the amalgamation does not have exactly
 /// one section per kernel in [`Kernel::ALL`] order, which the crate's tests check.
-fn sections() -> (&'static str, [&'static str; 18]) {
+fn sections() -> (&'static str, [&'static str; 20]) {
     let mut starts = AMALGAMATION
         .match_indices(SECTION_MARKER)
         .map(|(at, _)| at)
@@ -158,7 +195,7 @@ fn sections() -> (&'static str, [&'static str; 18]) {
     );
     let prelude = &AMALGAMATION[..starts[0]];
     starts.push(AMALGAMATION.len());
-    let bodies: [&'static str; 18] =
+    let bodies: [&'static str; 20] =
         std::array::from_fn(|index| &AMALGAMATION[starts[index]..starts[index + 1]]);
     for (kernel, body) in Kernel::ALL.into_iter().zip(bodies) {
         let expected = format!("{SECTION_MARKER}{}: ", kernel.section_name());

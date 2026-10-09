@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Vendor CORE-MATH kernels and generate the `chelis-crmath` amalgamation (chelis#2957).
 
-`spec/design/correctly_rounded_math.md` section 3.3 owns the design. The eighteen
+`spec/design/correctly_rounded_math.md` section 3.3 owns the design. The twenty
 upstream kernel files under `crates/chelis-crmath/vendor/core-math/` are kept
 byte-for-byte as upstream ships them; `VENDOR.toml` beside them records the
 upstream commit, each file's SHA-256, and the file-scope identifiers of each
@@ -11,7 +11,7 @@ inputs alone (no compiler needed) this script generates
 every lane compiles:
 
 1. every file-scope identifier and macro of a kernel gets the kernel's prefix
-   (`chelis_cr_expf__`), so the eighteen kernels coexist in one unit;
+   (`chelis_cr_expf__`), so the twenty kernels coexist in one unit;
 2. the kernel's external entry (`cr_expf`) is declared `static` before its
    definition, so every definition has internal linkage;
 3. a `static` entry `chelis_cr_<name>` calls the kernel and replaces any NaN
@@ -82,11 +82,28 @@ AMALGAMATION = CRATE / "csrc" / "crmath_amalgamation.c"
 FIXTURES = CRATE / "tests" / "fixtures"
 CANARY_FIXTURE = FIXTURES / "canary.txt"
 WORST_CASE_FIXTURE = FIXTURES / "binary64_worst_cases.txt"
+POW_WORST_CASE_FIXTURE = FIXTURES / "pow_worst_cases.txt"
 UPSTREAM_URL = "https://gitlab.inria.fr/core-math/core-math"
 
 # The [05-OP-46] transcendentals at both widths. `sqrt` needs no kernel: IEEE 754
 # makes the hardware square root correctly rounded.
 FUNCTIONS = ("exp", "log", "sin", "cos", "tan", "atan", "tanh", "erf", "erfc")
+# The two-operand correctly rounded functions: [05-OP-79]'s `pow`. Their kernels
+# follow the unary ones at each width; the unary fixtures (`canary.txt`,
+# `binary64_worst_cases.txt`) do not name them, and their rows live in
+# `profile_obligations.txt` and `pow_worst_cases.txt`.
+BINARY_FUNCTIONS = ("pow",)
+# Local headers each kernel includes, directly or through another local header.
+LOCAL_INCLUDES = {"log": ("dint.h",), "pow": ("pow.h", "dint.h", "qint.h")}
+
+
+def worst_case_corpora() -> dict[str, str]:
+    """Upstream worst-case corpora recorded in VENDOR.toml, by key: each unary
+    function's binary64 corpus, and both widths' corpora of each binary function
+    (the binary32 key carries the `f` suffix)."""
+    corpora = {fn: f"src/binary64/{fn}/{fn}.wc" for fn in FUNCTIONS + BINARY_FUNCTIONS}
+    corpora |= {f"{fn}f": f"src/binary32/{fn}/{fn}f.wc" for fn in BINARY_FUNCTIONS}
+    return corpora
 
 
 @dataclass(frozen=True)
@@ -98,6 +115,7 @@ class Kernel:
     width: int  # 32 or 64
     path: str  # relative to the upstream root and to VENDOR
     local_includes: tuple[str, ...] = ()
+    arity: int = 1
 
     @property
     def ctype(self) -> str:
@@ -120,9 +138,12 @@ def _kernels() -> tuple[Kernel, ...]:
     out = []
     for fn in FUNCTIONS:
         out.append(Kernel(f"{fn}f", fn, 32, f"src/binary32/{fn}/{fn}f.c"))
+    for fn in BINARY_FUNCTIONS:
+        out.append(Kernel(f"{fn}f", fn, 32, f"src/binary32/{fn}/{fn}f.c", arity=2))
     for fn in FUNCTIONS:
-        includes = ("dint.h",) if fn == "log" else ()
-        out.append(Kernel(fn, fn, 64, f"src/binary64/{fn}/{fn}.c", includes))
+        out.append(Kernel(fn, fn, 64, f"src/binary64/{fn}/{fn}.c", LOCAL_INCLUDES.get(fn, ())))
+    for fn in BINARY_FUNCTIONS:
+        out.append(Kernel(fn, fn, 64, f"src/binary64/{fn}/{fn}.c", LOCAL_INCLUDES.get(fn, ()), arity=2))
     return tuple(out)
 
 
@@ -185,14 +206,20 @@ def rename_identifiers(text: str, names: set[str], prefix: str) -> str:
 
 
 def inline_local_includes(text: str, kernel: Kernel, read) -> str:
-    """Replace `#include "dint.h"`-style lines with the vendored header's text."""
+    """Replace `#include "dint.h"`-style lines with the vendored header's text, the
+    headers a header includes too. Each header is spliced at its first include only;
+    every vendored header guards itself, so a later include of it is empty."""
     base = kernel.path.rsplit("/", 1)[0]
+    spliced: set[str] = set()
 
     def splice(m: re.Match[str]) -> str:
         header = m.group(1)
         if header not in kernel.local_includes:
             raise VendorError(f"{kernel.path}: undeclared local include {header!r}")
-        body = read(f"{base}/{header}")
+        if header in spliced:
+            return f"/* {base}/{header} already inlined */"
+        spliced.add(header)
+        body = _LOCAL_INCLUDE.sub(splice, read(f"{base}/{header}"))
         return f"/* begin inlined {base}/{header} */\n{body}\n/* end inlined {base}/{header} */"
 
     return _LOCAL_INCLUDE.sub(splice, text)
@@ -218,10 +245,16 @@ _ROUNDING_SWITCH = re.compile(
     r"[ \t]*case FE_TONEAREST:\n"
     r"(?P<body>(?:(?![ \t]*break;).*\n)+?)"
     r"[ \t]*break;\n"
-    r"(?:[ \t]*case FE_(?:DOWNWARD|UPWARD|TOWARDZERO):\n(?:(?![ \t]*break;).*\n)*?[ \t]*break;\n)+"
+    r"(?P<rest>[ \t]*case FE_(?:DOWNWARD|UPWARD|TOWARDZERO):\n(?:(?!\1\}\n).*\n)*?)"
     r"\1\}\n"
 )
-_ATTRIBUTE = re.compile(r"__attribute__\(\((?:cold|noinline)(?:,(?:cold|noinline))*\)\)[ \t]*")
+# The directed-rounding cases a `_ROUNDING_SWITCH` drops: each a `case FE_*:` label,
+# its statements, and comments (binary64 `pow` ends with a `FE_TOWARDZERO` case
+# without a `break`, or with a comment naming it).
+_DIRECTED_CASES = re.compile(
+    r"(?:[ \t]*case FE_(?:DOWNWARD|UPWARD|TOWARDZERO):\n(?:(?![ \t]*case )(?!.*\bswitch\b).*\n)*?)+"
+)
+_ATTRIBUTE = re.compile(r"__attribute__\(\((?:cold|noinline|unused)(?:,(?:cold|noinline|unused))*\)\)[ \t]*")
 _RAISE = re.compile(r"^[ \t]*feraiseexcept[ \t]*\([A-Z_]+\);[^\n]*\n", re.MULTILINE)
 # binary64 erfc saves the underflow flag on entry and clears a spurious underflow
 # before it returns; both only manage status flags, which Chelis never observes.
@@ -313,7 +346,7 @@ def contract_clean(text: str, origin: str) -> str:
     """Reduce one kernel's text to the generated-C contract (module docstring, item 4)."""
     text = keep_portable_arms(text)
     text = hoist_defines_before_else(text, origin)
-    text = _ROUNDING_SWITCH.sub(lambda m: _reindent(m.group("body"), m.group(1)), text)
+    text = _ROUNDING_SWITCH.sub(lambda m: _round_to_nearest_case(m, origin), text)
     text = _RAISE.sub("", text)
     text = _FLAG_CLEAR.sub("", _FLAG_SAVE.sub("", text))
     text = _DROPPED_LINES.sub("", text)
@@ -410,6 +443,76 @@ def require_inline_roundeven(text: str, origin: str) -> None:
             raise VendorError(f"{origin}: a {prefix}roundeven_finite definition is not the inline helper")
 
 
+# The `pow` kernels save the inexact status flag on entry and restore it on the
+# exact-result paths, which only manages a status flag Chelis never observes
+# ([05-OP-46]); the save becomes a constant and the restore a no-op. binary64 `pow`
+# also includes `<math.h>` for the `NAN` and `INFINITY` macros, which become the
+# compiler builtins they expand to, `<stdlib.h>` for an `exit` no input reaches
+# (below), and `<errno.h>` outside the `CORE_MATH_SUPPORT_ERRNO` arms that use it.
+_POW_FLAG_TYPE = re.compile(
+    r"^#ifdef __x86_64__\n#include <x86intrin.h>\n#define FLAG_T uint32_t\n#else\n#define FLAG_T fexcept_t\n#endif\n",
+    re.MULTILINE,
+)
+_POW_GET_FLAG = re.compile(
+    r"^static FLAG_T\nget_flag \(void\)\n\{\n#if defined\(__x86_64__\)\n.*?\n#endif\n\}\n", re.MULTILINE | re.DOTALL
+)
+_POW_SET_FLAG = re.compile(
+    r"^static void\nset_flag \(FLAG_T flag\)\n\{\n#if defined\(__x86_64__\)\n.*?\n#endif\n\}\n", re.MULTILINE | re.DOTALL
+)
+_POW_DROPPED_INCLUDES = re.compile(
+    r"^#include <(?:math\.h> // needed for NAN and INFINITY|stdlib\.h> // for exit|errno\.h>)\n", re.MULTILINE
+)
+_POW_MACROS = {"NAN": '__builtin_nan ("")', "INFINITY": "__builtin_inf ()"}
+# binary64 `pow` ends its third Ziv iteration with a report-and-`exit` arm for an
+# input outside upstream's proof that the 240-bit approximation always rounds
+# correctly. No input reaches it; it returns that approximation instead, so a built
+# program carries no process exit.
+_POW_UNEXPECTED = (
+    '  printf ("Unexpected worst-case found.\\n");\n'
+    '  printf ("Please report to core-math@inria.fr:\\n");\n'
+    '  printf ("Worst-case of pow found: x,y=%la,%la\\n", x, y);\n'
+    "  exit (1);\n"
+)
+_POW_UNEXPECTED_RETURN = (
+    "  /* unreachable: CORE-MATH proves the approximation above rounds correctly */\n"
+    "  qZ.sgn = s == -1.0;\n"
+    "  return qint_tod (&qZ);\n"
+)
+
+
+def drop_pow_environment(text: str, origin: str) -> str:
+    """A `pow` kernel's text without its status-flag management and libm macros."""
+    for pattern, replacement in (
+        (_POW_FLAG_TYPE, "#define FLAG_T int\n"),
+        (_POW_GET_FLAG, "static FLAG_T\nget_flag (void)\n{\n  return 0;\n}\n"),
+        (_POW_SET_FLAG, "static void\nset_flag (FLAG_T flag)\n{\n  (void) flag;\n}\n"),
+    ):
+        text, count = pattern.subn(replacement, text)
+        if count != 1:
+            raise VendorError(f"{origin}: the inexact-flag management no longer has the shape this drops")
+    text = _POW_DROPPED_INCLUDES.sub("", text)
+    if origin == "src/binary64/pow/pow.c":
+        if text.count(_POW_UNEXPECTED) != 1:
+            raise VendorError(f"{origin}: the unexpected-worst-case arm no longer has the shape this replaces")
+        text = text.replace(_POW_UNEXPECTED, _POW_UNEXPECTED_RETURN)
+    if "exit" in _code_tokens(text):
+        raise VendorError(f"{origin}: calls `exit`, which the generated-C contract has no header for")
+    out: list[str] = []
+    pos = 0
+    for m in _TOKEN.finditer(text):
+        if m.lastgroup == "ident" and m.group() in _POW_MACROS:
+            out += [text[pos : m.start()], _POW_MACROS[m.group()]]
+            pos = m.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _round_to_nearest_case(m: re.Match[str], origin: str) -> str:
+    if not _DIRECTED_CASES.fullmatch(m.group("rest")):
+        raise VendorError(f"{origin}: a rounding-mode switch has a case other than the four modes")
+    return _reindent(m.group("body"), m.group(1))
+
+
 def _reindent(body: str, indent: str) -> str:
     """The round-to-nearest case body, moved out of its `case` to `indent`."""
     lines = [line for line in body.split("\n") if line.strip()]
@@ -461,11 +564,12 @@ def render_manifest(m: Manifest) -> str:
     for k in KERNELS:
         names = ", ".join(f'"{n}"' for n in m.identifiers[k.name])
         lines += ["[[kernel]]", f'name = "{k.name}"', f"identifiers = [{names}]", ""]
+    corpora = worst_case_corpora()
     for fn in sorted(m.worst_cases):
         lines += [
             "[[worst_cases]]",
             f'function = "{fn}"',
-            f'path = "src/binary64/{fn}/{fn}.wc"',
+            f'path = "{corpora[fn]}"',
             f'sha256 = "{m.worst_cases[fn]}"',
             "",
         ]
@@ -480,8 +584,8 @@ HEADER = """\
  * keeps its upstream copyright and permission notice). Do not edit: regenerate with
  * `.venv/bin/python scripts/vendor_core_math.py`; `--check` fails on any drift.
  *
- * Correctly rounded exp, log, sin, cos, tan, atan, tanh, erf, and erfc at binary32 and binary64
- * ([05-OP-46], spec/design/correctly_rounded_math.md). Every definition is static;
+ * Correctly rounded exp, log, sin, cos, tan, atan, tanh, erf, erfc, and pow at binary32 and binary64
+ * ([05-OP-46], [05-OP-79], spec/design/correctly_rounded_math.md). Every definition is static;
  * the entries are chelis_cr_<name>, and each returns [04-NUM-2]'s canonical quiet NaN
  * for every NaN result. */
 
@@ -522,6 +626,13 @@ static {ctype} {entry}({ctype} x) {{
 }}
 """
 
+BINARY_ENTRY = """\
+static {ctype} {entry}({ctype} x, {ctype} y) {{
+  {ctype} r = {inner}(x, y);
+  return r != r ? {nan}() : r;
+}}
+"""
+
 
 def kernel_text(kernel: Kernel, names: list[str], read) -> str:
     raw = read(kernel.path)
@@ -529,6 +640,8 @@ def kernel_text(kernel: Kernel, names: list[str], read) -> str:
     if kernel.path == "src/binary64/sin/sin.c":
         raw = route_sin_roundeven(raw)
     text = inline_roundeven(inline_local_includes(raw, kernel, read), kernel.path)
+    if kernel.function in BINARY_FUNCTIONS:
+        text = drop_pow_environment(text, kernel.path)
     if _ROUNDEVEN_DEFINITION.search(text):
         rename.add("roundeven_finite")
     text = contract_clean(text, kernel.path)
@@ -546,12 +659,14 @@ def kernel_text(kernel: Kernel, names: list[str], read) -> str:
     if count == 0:
         raise VendorError(f"{kernel.name}: no definition of {kernel.upstream_entry} found")
     nan = "chelis_cr_canonical_nanf" if kernel.width == 32 else "chelis_cr_canonical_nan"
+    params = ", ".join([kernel.ctype] * kernel.arity)
+    entry = ENTRY if kernel.arity == 1 else BINARY_ENTRY
     return "".join(
         [
             f"\n/* ==== kernel {kernel.name}: {kernel.path} ==== */\n\n",
-            f"static {kernel.ctype} {inner}({kernel.ctype});\n\n",
+            f"static {kernel.ctype} {inner}({params});\n\n",
             body.rstrip("\n") + "\n\n",
-            ENTRY.format(ctype=kernel.ctype, entry=kernel.entry, inner=inner, nan=nan),
+            entry.format(ctype=kernel.ctype, entry=kernel.entry, inner=inner, nan=nan),
         ]
     )
 
@@ -661,10 +776,7 @@ def import_upstream(upstream: Path, vendor: Path = VENDOR) -> Manifest:
             for config in AST_CONFIGS:
                 names |= _ast_names(src, config)
         identifiers[kernel.name] = sorted(names)
-    worst = {}
-    for fn in FUNCTIONS:
-        wc = upstream / f"src/binary64/{fn}/{fn}.wc"
-        worst[fn] = sha256(wc.read_bytes())
+    worst = {fn: sha256((upstream / rel).read_bytes()) for fn, rel in worst_case_corpora().items()}
     manifest = Manifest(commit, files, identifiers, worst)
     (vendor / "VENDOR.toml").write_text(render_manifest(manifest), encoding="utf-8")
     return manifest
@@ -883,6 +995,46 @@ def worst_case_rows(gmpy2, upstream: Path, manifest: Manifest) -> list[str]:
     return rows
 
 
+POW_WORST_CASE_SAMPLE = 96  # per width, deterministic
+
+
+def mpfr_pow_reference(gmpy2, x_bits: int, y_bits: int, width: int) -> int:
+    """The correctly rounded `pow` result bits under IEEE binary32/binary64."""
+    with gmpy2.context(_ctx(width)):
+        y = gmpy2.mpfr(bits_to_float(x_bits, width), 53) ** gmpy2.mpfr(bits_to_float(y_bits, width), 53)
+    return _result_bits(y, width)
+
+
+def pow_worst_case_rows(gmpy2, upstream: Path, manifest: Manifest) -> list[str]:
+    """`pow width x y expected # note` rows sampled from both widths' upstream
+    corpora, each pair also with its base negated (a NaN for a non-integer exponent,
+    a signed power for an integer one)."""
+    rows = []
+    corpora = worst_case_corpora()
+    for key, width in (("powf", 32), ("pow", 64)):
+        wc = upstream / corpora[key]
+        data = wc.read_bytes()
+        if manifest.worst_cases.get(key) != sha256(data):
+            raise VendorError(f"{wc}: does not match VENDOR.toml worst_cases sha256")
+        pairs = [
+            line.split("#")[0].strip().split(",")
+            for line in data.decode().splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        rng = random.Random(f"chelis-crmath-{key}")
+        picked = sorted(rng.sample(range(len(pairs)), min(POW_WORST_CASE_SAMPLE, len(pairs))))
+        digits = 8 if width == 32 else 16
+        for index in picked:
+            x, y = (float.fromhex(v) for v in pairs[index])
+            for base in (x, -x):
+                xb, yb = float_to_bits(base, width), float_to_bits(y, width)
+                expected = mpfr_pow_reference(gmpy2, xb, yb, width)
+                rows.append(
+                    f"pow f{width} {xb:0{digits}x} {yb:0{digits}x} {expected:0{digits}x} # {key}.wc line {index}"
+                )
+    return rows
+
+
 # --- Profile obligations (maintainer action; needs gmpy2) ---------------------
 #
 # `fixtures/profile_obligations.txt` is the arithmetic part of the floating-point
@@ -941,6 +1093,11 @@ def obligation_reference(primitive: str, width: int, operands: list[int]) -> int
     if primitive in ("narrow", "widen", "to_f16", "to_bf16"):
         target = TARGET_WIDTH[primitive]
         return _result_bits(_round_to(target, xs[0]) if xs[0] == xs[0] else gmpy2.nan(), target)
+    if primitive == "pow" and any(_is_signaling(bits, width) for bits in operands):
+        # IEEE 754 9.2.1's `pow(x, +-0)` and `pow(+1, y)` exceptions name quiet NaNs;
+        # a signaling NaN operand is an invalid operation (6.2). MPFR has no
+        # signaling NaN, so the rule is applied here.
+        return CANONICAL_NAN[width]
     m = [gmpy2.mpfr(x, 53) for x in xs]  # exact: every operand is a binary64 value
     with gmpy2.context(_ctx(width)):
         a = m[0]
@@ -948,13 +1105,20 @@ def obligation_reference(primitive: str, width: int, operands: list[int]) -> int
         c = m[2] if len(m) > 2 else None
         y = {
             "add": lambda: a + b, "sub": lambda: a - b, "mul": lambda: a * b,
-            "div": lambda: a / b, "sqrt": lambda: gmpy2.sqrt(a),
+            "div": lambda: a / b, "sqrt": lambda: gmpy2.sqrt(a), "pow": lambda: a ** b,
             "fma": lambda: gmpy2.fma(a, b, c),
             "mul_add": lambda: (a * b) + c, "add_sub": lambda: (a + b) - a,
             "div_three": lambda: a / 3, "add_zero": lambda: a + 0,
             "sub_self": lambda: a - a, "mul_zero": lambda: a * 0,
         }[primitive]()
     return _result_bits(y, width)
+
+
+def _is_signaling(bits: int, width: int) -> bool:
+    """Whether `bits` is a signaling NaN at `width` (quiet bit clear, payload nonzero)."""
+    exponent, quiet = (0x7F800000, 0x00400000) if width == 32 else (0x7FF0000000000000, 0x0008000000000000)
+    payload = quiet - 1
+    return bits & exponent == exponent and bits & quiet == 0 and bits & payload != 0
 
 
 def _is_tie(exact: Fraction, width: int) -> bool:
@@ -1092,6 +1256,59 @@ def obligation_inputs() -> list[tuple[str, int, list[int], str, str]]:
         add("sqrt", [two], "round-once", "sqrt(2)")
         add("sqrt", [three], "round-once", "sqrt(3)")
         add("sqrt", [s["max"]], "round-once", "sqrt of the largest finite")
+        # pow ([05-OP-79]): every IEEE 754 special case, signed results for integer
+        # exponents of a negative base, the subnormal and overflow edges, and exact
+        # powers.
+        # The kernel entry canonicalizes its own NaN results, so these NaN rows
+        # witness the IEEE rules rather than generated code's finalization.
+        add("pow", [s["pnan"], two], "ieee-special", "quiet NaN with payload base gives NaN")
+        add("pow", [two, s["nnan"]], "ieee-special", "negative quiet NaN exponent gives NaN")
+        add("pow", [s["snan"], three], "ieee-special", "signaling NaN base gives NaN")
+        add("pow", [s["pnan"], s["zero"]], "ieee-special", "pow(quiet NaN, +0) is 1")
+        add("pow", [s["nnan"], s["nzero"]], "ieee-special", "pow(quiet NaN, -0) is 1")
+        add("pow", [one, s["pnan"]], "ieee-special", "pow(1, quiet NaN) is 1")
+        add("pow", [s["nsnan"], s["zero"]], "ieee-special", "pow(signaling NaN, +0) is invalid")
+        add("pow", [one, s["snan"]], "ieee-special", "pow(1, signaling NaN) is invalid")
+        add("pow", [one, s["ninf"]], "ieee-special", "pow(1, -inf) is 1")
+        add("pow", [-one, s["inf"]], "ieee-special", "pow(-1, inf) is 1")
+        add("pow", [-one, s["ninf"]], "ieee-special", "pow(-1, -inf) is 1")
+        add("pow", [-two, 0.5], "ieee-special", "negative base, non-integer exponent is invalid")
+        add("pow", [s["ninf"], 0.5], "ieee-special", "pow(-inf, 0.5) is inf")
+        add("pow", [s["zero"], s["zero"]], "ieee-special", "pow(0, 0) is 1")
+        add("pow", [s["nzero"], -three], "signed-zero", "pow(-0, negative odd integer) is -inf")
+        add("pow", [s["zero"], -three], "ieee-special", "pow(+0, negative odd integer) is inf")
+        add("pow", [s["nzero"], -two], "signed-zero", "pow(-0, negative even integer) is inf")
+        add("pow", [s["nzero"], -0.5], "signed-zero", "pow(-0, negative non-integer) is inf")
+        add("pow", [s["nzero"], s["ninf"]], "signed-zero", "pow(-0, -inf) is inf")
+        add("pow", [s["nzero"], three], "signed-zero", "pow(-0, positive odd integer) is -0")
+        add("pow", [s["nzero"], two], "signed-zero", "pow(-0, positive even integer) is +0")
+        add("pow", [s["nzero"], 0.5], "signed-zero", "pow(-0, positive non-integer) is +0")
+        add("pow", [s["nzero"], s["inf"]], "signed-zero", "pow(-0, inf) is +0")
+        add("pow", [two, s["inf"]], "ieee-special", "pow(2, inf) is inf")
+        add("pow", [0.5, s["inf"]], "ieee-special", "pow(0.5, inf) is +0")
+        add("pow", [-two, s["ninf"]], "ieee-special", "pow(-2, -inf) is +0")
+        add("pow", [-0.5, s["ninf"]], "ieee-special", "pow(-0.5, -inf) is inf")
+        add("pow", [s["inf"], 0.5], "ieee-special", "pow(inf, positive) is inf")
+        add("pow", [s["inf"], -0.5], "ieee-special", "pow(inf, negative) is +0")
+        add("pow", [s["ninf"], three], "ieee-special", "pow(-inf, positive odd integer) is -inf")
+        add("pow", [s["ninf"], two], "ieee-special", "pow(-inf, positive even integer) is inf")
+        add("pow", [s["ninf"], -three], "signed-zero", "pow(-inf, negative odd integer) is -0")
+        add("pow", [s["ninf"], -two], "signed-zero", "pow(-inf, negative even integer) is +0")
+        add("pow", [-three, two], "correct-rounding", "negative base, even integer exponent is 9")
+        add("pow", [-three, three], "correct-rounding", "negative base, odd integer exponent is -27")
+        add("pow", [-two, -three], "correct-rounding", "negative base, negative odd exponent is -1/8")
+        add("pow", [-(one + u), 2.0 ** p], "correct-rounding", "negative base, exponent 2^p is an even integer")
+        add("pow", [6.0, 2.5], "correct-rounding", "6^2.5")
+        add("pow", [two, 0.5], "correct-rounding", "2^0.5 is sqrt(2)")
+        add("pow", [10.0, -one], "correct-rounding", "10^-1")
+        add("pow", [s["minsub"], 0.5], "gradual-underflow", "square root of the smallest subnormal")
+        add("pow", [s["maxsub"], one], "gradual-underflow", "subnormal base, exponent 1")
+        add("pow", [0.5, float({24: 129, 53: 1025}[p])], "gradual-underflow", "0.5^(3 - emin) is subnormal")
+        add("pow", [0.5, float(-{24: -149, 53: -1074}[p] + 1)], "gradual-underflow",
+            "half the smallest subnormal rounds to +0 (tie to even)")
+        add("pow", [two, float({24: 128, 53: 1024}[p])], "ieee-special", "2^emax+1 overflows to inf")
+        add("pow", [-two, float({24: 129, 53: 1025}[p])], "ieee-special", "(-2)^odd overflow is -inf")
+        add("pow", [s["max"], 0.5], "correct-rounding", "square root of the largest finite")
         # The explicit fused multiply-add ([05-OP-8]) rounds once.
         a = 1.0 + 2.0 ** -(p // 2 + 1)
         add("fma", [a, a, -(1.0 + 2.0 ** -(p // 2))], "round-once", "fused: keeps the low product bits")
@@ -1232,6 +1449,17 @@ def write_fixtures(upstream: Path) -> None:
     )
     WORST_CASE_FIXTURE.write_text(
         header + "\n".join(worst_case_rows(gmpy2, upstream, manifest)) + "\n", encoding="utf-8"
+    )
+    pow_header = (
+        "# Generated by `scripts/vendor_core_math.py fixtures` from MPFR (gmpy2) at the\n"
+        "# width's IEEE precision, exponent range, and subnormalization, round to\n"
+        "# nearest even; NaN results are [04-NUM-2]'s canonical quiet NaN.\n"
+        f"# Sample: {POW_WORST_CASE_SAMPLE} pairs per width from CORE-MATH {manifest.commit}'s\n"
+        "# powf.wc and pow.wc corpora (seeded by corpus name), each also with its base negated.\n"
+        "# Columns: function width base-bits exponent-bits expected-bits # note\n"
+    )
+    POW_WORST_CASE_FIXTURE.write_text(
+        pow_header + "\n".join(pow_worst_case_rows(gmpy2, upstream, manifest)) + "\n", encoding="utf-8"
     )
     write_obligations()
 

@@ -1,7 +1,7 @@
 //! Correctly rounded transcendentals for every Chelis lane.
 //!
-//! [05-OP-46] makes `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `tanh`, `erf`, and `erfc`
-//! correctly rounded: the exact real value rounded once, ties to even, at [04-NUM-8]'s
+//! [05-OP-46] makes `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `tanh`, `erf`, and `erfc`,
+//! and [05-OP-79] makes `pow`, correctly rounded: the exact real value rounded once, ties to even, at [04-NUM-8]'s
 //! arithmetic width, with every NaN result finalized to [04-NUM-2]'s canonical quiet
 //! NaN. This crate is the only place a Rust lane may compute them. The kernels are
 //! CORE-MATH's (vendored unmodified under `vendor/core-math`, MIT licence), compiled
@@ -48,6 +48,8 @@ mod ffi {
         pub safe fn chelis_crmath_ffi_tanh(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_erf(x: f64) -> f64;
         pub safe fn chelis_crmath_ffi_erfc(x: f64) -> f64;
+        pub safe fn chelis_crmath_ffi_powf(x: f32, y: f32) -> f32;
+        pub safe fn chelis_crmath_ffi_pow(x: f64, y: f64) -> f64;
     }
 }
 
@@ -99,6 +101,38 @@ correctly_rounded! {
     ("hyperbolic tangent", tanh_f32, tanh_f64, tanh_f16, tanh_bf16, chelis_crmath_ffi_tanhf, chelis_crmath_ffi_tanh),
     ("error function", erf_f32, erf_f64, erf_f16, erf_bf16, chelis_crmath_ffi_erff, chelis_crmath_ffi_erf),
     ("complementary error function", erfc_f32, erfc_f64, erfc_f16, erfc_bf16, chelis_crmath_ffi_erfcf, chelis_crmath_ffi_erfc),
+}
+
+/// Correctly rounded `x` raised to the power `y` at f32 ([05-OP-79]), with the IEEE 754
+/// `pow` special cases.
+#[inline]
+#[must_use]
+pub fn pow_f32(x: f32, y: f32) -> f32 {
+    ffi::chelis_crmath_ffi_powf(x, y)
+}
+
+/// Correctly rounded `x` raised to the power `y` at f64 ([05-OP-79]), with the IEEE 754
+/// `pow` special cases.
+#[inline]
+#[must_use]
+pub fn pow_f64(x: f64, y: f64) -> f64 {
+    ffi::chelis_crmath_ffi_pow(x, y)
+}
+
+/// The f16 `pow`: both operands widen exactly to f32, the power is correctly rounded at
+/// f32, and the result is finalized to f16 once ([05-OP-79]).
+#[inline]
+#[must_use]
+pub fn pow_f16(x: f16, y: f16) -> f16 {
+    f16::from_f32(pow_f32(x.to_f32(), y.to_f32()))
+}
+
+/// The bf16 `pow`: both operands widen exactly to f32, the power is correctly rounded
+/// at f32, and the result is finalized to bf16 once ([05-OP-79]).
+#[inline]
+#[must_use]
+pub fn pow_bf16(x: bf16, y: bf16) -> bf16 {
+    bf16::from_f32(pow_f32(x.to_f32(), y.to_f32()))
 }
 
 #[cfg(test)]

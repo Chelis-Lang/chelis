@@ -205,7 +205,7 @@ is valid only after `|>`; `cast(p)` and the named forms `cast_trunc(p)`,
 
 No operator overloading. No infix bitwise operators. Host-side integer bitwise work uses
 named built-ins such as `bitand`, `bitor`, `bitxor`, `shl`, and `shr`. No exponentiation
-operator — use `pow(x, n)` from `Std.Math`.
+operator: exponentiation is the float built-in `pow(x, y)` ([05-OP-79]).
 
 The `/` operator desugars to `div`, which is **float-only**:
 applying `/` (or `div`) to integer operands is a type error. Integer division

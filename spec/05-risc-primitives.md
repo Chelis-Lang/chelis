@@ -104,6 +104,7 @@ widths remain governed by [04-NUM-8].
 | `sub` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise direct subtraction | `(g, -g)` |
 | `mul` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise multiplication | `(g * y, g * x)` |
 | `div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise IEEE-754 division `a / b` (**float operands only**) | `(g / b, -g * (a/b) / b)` (= `(g/b, -g*y/b)` using `y = a/b`) |
+| `pow` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise correctly rounded power `x^y` with the IEEE-754 `pow` special cases (**float operands only**; [05-OP-79]) | `(where(y == 0, 0, g * (y * pow(x, y - 1))), where(x == 0, 0, g * (r * log(x))))` using `r = pow(x, y)` |
 | `floor_div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise floor division: `floor(a / b)`, rounding toward −∞ | Non-differentiable (piecewise constant); `grad` rejects it |
 | `trunc_div` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | Element-wise truncating division (round toward zero), **integer operands only** | Non-differentiable (piecewise constant); `grad` rejects it |
 | `wrap_add` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | Element-wise modular addition | Non-differentiable; `grad` rejects it |
@@ -144,6 +145,65 @@ operator on integer operands is likewise rejected, because `/`
 desugars to `div`). The diagnostic cites this section and points
 at the explicit `floor_div` / `trunc_div` integer primitives below.
 
+> **[05-OP-79]** Signature: `pow(x,y)` takes two same-dtype float scalars or
+> two same-shaped, same-dtype float tensors and returns that surface,
+> dimensions, and dtype: element-wise, `x` raised to the power `y`. Both tensor
+> operands are read-only `&tensor[D,p]` parameters under section 1.3.1.
+>
+> Domain: `f16`, `bf16`, `f32`, and `f64`. There is no integer power:
+> signed-integer, `bool`, `string`, and reserved dtype operands are type
+> errors, as are mixed dtypes or surfaces, a scalar beside a non-scalar tensor,
+> and mismatched tensor dimensions. An integer exponent is an integer-valued
+> float of the base's dtype; there is no separate integer-exponent form, and an
+> integer base is converted with an explicit `cast`.
+>
+> Result: The result is correctly rounded under exactly [05-OP-46]'s rule for
+> its transcendental operations: the exact real value of `x^y`, rounded once,
+> ties to even, to [04-NUM-8]'s arithmetic width of the dtype, with gradual
+> underflow and overflow to the correctly signed infinity; for `f16` and `bf16`
+> both operands widen exactly to `f32`, the power is correctly rounded at `f32`,
+> and [04-NUM-2] finalizes that value to storage once; and the result never
+> depends on the target, a lane's algorithm or library, whether an operand is a
+> literal, a folded constant, or a run-time value, or a dynamic floating-point
+> environment. A finite negative base with an integer-valued exponent has the
+> real value `(-1)^y * |x|^y`, negative exactly when `y` is an odd integer; a
+> finite negative base with a finite non-integer exponent is NaN. The IEEE 754
+> `pow` special cases apply, each taking precedence over the ones after it:
+> a signaling-NaN operand gives NaN; `pow(x, +-0)` is `1` for every other `x`,
+> a quiet NaN included; `pow(+1, y)` is `1` for every other `y`, a quiet NaN
+> included; otherwise a NaN operand gives NaN; `pow(+-0, y)` is
+> `+-inf` (the zero's sign) for `y` a negative odd integer, `+inf` for any other
+> negative `y` including `-inf`, `+-0` (the zero's sign) for `y` a positive odd
+> integer, and `+0` for any other positive `y` including `+inf`;
+> `pow(-1, +-inf)` is `1`; `pow(x, +inf)` is `+inf` for `|x| > 1` and `+0` for
+> `|x| < 1`, and `pow(x, -inf)` is `+0` for `|x| > 1` and `+inf` for `|x| < 1`;
+> `pow(+inf, y)` is `+inf` for `y > 0` and `+0` for `y < 0`; `pow(-inf, y)` is
+> `-inf` for `y` a positive odd integer, `+inf` for any other positive `y`,
+> `-0` for `y` a negative odd integer, and `+0` for any other negative `y`.
+> An `f16` or `bf16` signaling NaN reaches the `f32` power as [04-NUM-2]'s
+> canonical quiet NaN, because widening it is a conversion that produces a NaN.
+> Every NaN result finalizes to [04-NUM-2]'s canonical quiet NaN. `pow` is a
+> primitive because no composition of the other primitives computes it: the
+> rewrite `exp(y * log(x))` is NaN for every `x < 0` and for `pow(0, 0)`, and
+> rounds twice where `pow` rounds once.
+>
+> Failure: None. Exceptional values follow [04-NUM-2]; `pow` never traps, and
+> IEEE status flags are not observable.
+>
+> Adjoint: With cotangent `g` and the forward result `r = pow(x,y)`, the base
+> receives `where(y == 0, 0, g * (y * pow(x, y - 1)))` and the exponent receives
+> `where(x == 0, 0, g * (r * log(x)))`, where `==` is [05-OP-36]'s float
+> equality (so `-0 == 0`), `where` is [05-OP-53]'s selection, `0` is the
+> operand dtype's positive zero, and every other operation is its own primitive
+> at the operand dtype, `y - 1` included. A zero exponent is a constant-one
+> function of the base, so its base cotangent is exactly zero; a zero base is a
+> constant function of the exponent on each side of `y = 0`, so its exponent
+> cotangent is exactly zero. A negative base gives the exponent a NaN cotangent
+> through `log`, since `x^y` is not real for non-integer `y` near any `y`.
+>
+> Accumulator: None. An algebraic rewrite of `pow` (for example `pow(x, 2)` as
+> `x * x`) is admissible only where it yields the same bits for every operand.
+
 **`floor_div` semantics.** `floor_div(a, b)` computes
 `floor(a / b)` element-wise, rounding the quotient toward −∞.
 
@@ -183,7 +243,8 @@ the same precision. Exception: `cmplt` returns `bool` regardless of input
 precision. Additional restrictions: `div` admits only float precisions
 (integer operands are a type error citing this section); `trunc_div` and the
 three `wrap_*` operations admit only signed-integer precisions (float operands
-are a type error); `floor_div` admits both integer and float precisions.
+are a type error); `pow` admits only float precisions ([05-OP-79]); `floor_div`
+admits both integer and float precisions.
 
 **Scalar modular forms.** `wrap_add`, `wrap_sub`, and `wrap_mul` admit two
 scalar operands wherever [05-OP-17..19] admit the tensor form. The result is a

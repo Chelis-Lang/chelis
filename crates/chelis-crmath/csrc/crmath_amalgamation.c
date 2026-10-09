@@ -3,8 +3,8 @@
  * keeps its upstream copyright and permission notice). Do not edit: regenerate with
  * `.venv/bin/python scripts/vendor_core_math.py`; `--check` fails on any drift.
  *
- * Correctly rounded exp, log, sin, cos, tan, atan, tanh, erf, and erfc at binary32 and binary64
- * ([05-OP-46], spec/design/correctly_rounded_math.md). Every definition is static;
+ * Correctly rounded exp, log, sin, cos, tan, atan, tanh, erf, erfc, and pow at binary32 and binary64
+ * ([05-OP-46], [05-OP-79], spec/design/correctly_rounded_math.md). Every definition is static;
  * the entries are chelis_cr_<name>, and each returns [04-NUM-2]'s canonical quiet NaN
  * for every NaN result. */
 
@@ -1292,6 +1292,500 @@ static float chelis_cr_erfcf__cr_erfcf(float x){
 static float chelis_cr_erfcf(float x) {
   float y = chelis_cr_erfcf__cr_erfcf(x);
   return y != y ? chelis_cr_canonical_nanf() : y;
+}
+
+/* ==== kernel powf: src/binary32/pow/powf.c ==== */
+
+static float chelis_cr_powf__cr_powf(float, float);
+
+/* Correctly-rounded power function for binary32 values.
+
+Copyright (c) 2022-2025 Alexei Sibidanov and Paul Zimmermann
+
+This file is part of the CORE-MATH project
+(https://core-math.gitlabpages.inria.fr/).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
+#include <stdint.h>
+#define chelis_cr_powf__FLAG_T int
+
+// Warning: clang also defines __GNUC__
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wunknown-pragmas"
+#endif
+
+
+typedef union {float f; uint32_t u;} chelis_cr_powf__b32u32_u;
+typedef union {double f; uint64_t u;} chelis_cr_powf__b64u64_u;
+
+/* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
+   mode Chelis pins at every entry */
+static double
+chelis_cr_powf__roundeven_finite (double x)
+{
+  return __builtin_rint (x);
+}
+
+static inline int chelis_cr_powf__is_signalingf(float x) {
+  chelis_cr_powf__b32u32_u u = {.f = x};
+  /* To keep the following comparison simple, toggle the quiet/signaling bit,
+   so that it is set for sNaNs.  This is inverse to IEEE 754-2008 (as well as
+   common practice for IEEE 754-1985).  */
+  u.u ^= 0x00400000;
+  /* We have to compare for greater (instead of greater or equal), because x's
+     significand being all-zero designates infinity not NaN.  */
+  return (u.u & 0x7fffffff) > 0x7fc00000;
+}
+
+
+static inline double chelis_cr_powf__muldd(double xh, double xl, double ch, double cl, double *l){
+  double ahlh = ch*xl, alhh = cl*xh, ahhh = ch*xh, ahhl = __builtin_fma(ch, xh, -ahhh);
+  ahhl += alhh + ahlh;
+  ch = ahhh + ahhl;
+  *l = (ahhh - ch) + ahhl;
+  return ch;
+}
+
+static inline double chelis_cr_powf__mulddd(double xh, double xl, double ch, double *l){
+  double ahlh = ch*xl, ahhh = ch*xh, ahhl = __builtin_fma(ch, xh, -ahhh);
+  ahhl += ahlh;
+  ch = ahhh + ahhl;
+  *l = (ahhh - ch) + ahhl;
+  return ch;
+}
+
+static double chelis_cr_powf__polydd(double xh, double xl, int n, const double c[][2], double *l){
+  int i = n-1;
+  double ch = c[i][0], cl = c[i][1];
+  while(--i>=0){
+    ch = chelis_cr_powf__muldd(xh,xl,ch,cl,&cl);
+    double th = ch + c[i][0], tl = (c[i][0] - th) + ch;
+    ch = th;
+    cl += tl + c[i][1];
+  }
+  *l = cl;
+  return ch;
+}
+
+static float chelis_cr_powf__as_powf_accurate2(float, float, int, chelis_cr_powf__FLAG_T);
+
+static inline int chelis_cr_powf__isint(float y0){
+  chelis_cr_powf__b32u32_u wy = {.f = y0};
+  int ey = ((wy.u>>23) & 0xff) - 127, s = ey + 9;
+  if(ey>=0){
+    if(s>=32) return 1;
+    return !(wy.u<<s);
+  }
+  if(!(wy.u<<1)) return 1;
+  return 0;
+}
+
+static inline int chelis_cr_powf__isodd(float y0){
+  chelis_cr_powf__b32u32_u wy = {.f = y0};
+  int ey = ((wy.u>>23) & 0xff) - 127, s = ey + 9, odd = 0;
+  if(ey>=0){
+    if(s<32 && !(wy.u<<s)) odd = (wy.u>>(32-s))&1;
+    if(s==32) odd = wy.u&1;
+  }
+  return odd;
+}
+
+static chelis_cr_powf__FLAG_T
+chelis_cr_powf__get_flag (void)
+{
+  return 0;
+}
+
+static void
+chelis_cr_powf__set_flag (chelis_cr_powf__FLAG_T flag)
+{
+  (void) flag;
+}
+
+// return non-zero if x^y is exact (and exactly representable as a float)
+static int
+chelis_cr_powf__is_exact (float x, float y)
+{
+  /* All cases such that x^y might be exact are:
+     (a) |x| = 1
+     (b) y integer, 0 <= y <= 15
+         (where 15 is the largest integer k such that 3^k fits in 24 bits)
+     (c) y<0: x=1 or (x=2^e and |y|=n*2^-k with 2^k dividing e)
+     (d) y>0: y=n*2^f with -4 <= f <= -1 and 1 <= n <= 15
+     In cases (b)-(d), the low 16 bits of the encoding of y are zero,
+     thus we use that for an early exit test.
+     (For case (c), x=0x1p+1 and y=-0x1.2ap+7, only 16 low bits of the
+     encoding of y are zero.) */
+
+  chelis_cr_powf__b32u32_u v = {.f = x}, w = {.f = y};
+  if (__builtin_expect ((v.u << 1) != 0x7f000000 && // |x| <> 1
+                        (w.u << (32 - 16)) != 0, 1))
+    return 0;
+
+  if (__builtin_expect ((v.u << 1) == 0x7f000000, 0)) // |x| = 1
+    return 1;
+
+  // xmax[y] for 1<=y<=15 is the largest odd m such that m^y fits in 24 bits
+  static const uint32_t xmax[] = { 0, 0xffffff, 4095, 255, 63, 27, 15, 9,
+                                   7, 5, 5, 3, 3, 3, 3, 3};
+  if (y >= 0 && chelis_cr_powf__isint (y)) {
+    /* let x = m*2^e with m an odd integer, x^y is exact when
+       - y = 0 or y = 1
+       - m = 1 or -1 and -149 <= e*y < 128
+       - if |x| is not a power of 2, 2 <= y <= 15 and
+         m^y should fit in 24 bits
+    */
+    uint32_t m = v.u & 0x7fffff; // low 23 bits of significand
+    int32_t e = ((v.u << 1) >> 24) - 0x96;
+    if (e >= -149)
+      m |= 0x800000;
+    else // subnormal numbers
+      e++;
+    int t = __builtin_ctz (m);
+    m = m >> t;
+    e += t;
+    /* For normal numbers, we have x = m*2^e. */
+    if (y == 0 || y == 1)
+      return 1;
+    if (m == 1)
+      return -149 <= y * e && y * e < 128;
+    // now for y < 0 or 15 < y it cannot be exact
+    if (y < 0 || 15 < y)
+      return 0;
+    // now 2 <= y <= 15
+    int y_int = (int) y;
+    if (m > xmax[y_int])
+      return 0;
+    // |x^y| = m^y * 2^(e*y)
+    uint64_t my = m * m;
+    for (int i = 2; i < y_int; i++)
+      my = my * m;
+    // my = m^y
+    t = 32 - __builtin_clz (m);
+    // 2^(t-1) <= m^y < 2^t thus 2^(e*y + t - 1) <= |x^y| < 2^(e*y + t)
+    int32_t ez = e * y_int + t;
+    if (ez <= -149 || 128 < ez)
+      return 0;
+    // since m is odd, x^y is an odd multiple of 2^(e*y)
+    return e * y_int >= -149;
+  }
+
+  uint32_t n = w.u & 0x7fffff;
+  int32_t f = ((w.u << 1) >> 24) - 0x96;
+  if (f >= -149)
+    n |= 0x800000;
+  else // subnormal numbers
+    f++;
+  int t = __builtin_ctz (n);
+  n = n >> t;
+  f += t;
+  // |y| = n*2^f with n odd
+
+  uint32_t m = v.u & 0x7fffff;
+  int32_t e = ((v.u << 1) >> 24) - 0x96;
+  if (e >= -149)
+    m |= 0x800000;
+  else // subnormal numbers
+    e++;
+  t = __builtin_ctz (m);
+  m = m >> t;
+  e += t;
+  // |x| = m*2^e with m odd
+
+  /* if y < 0, the only cases where x^y might be exact are:
+   * if y = -n*2^f with f >= 0
+   * if y = -n*2^f with f < 0, if x = 2^e with 2^(-f) dividing e
+   */
+  if (y < 0)
+  {
+    int32_t ez;
+    if (m != 1) return 0;
+    // now x = 2^e
+    if (f >= 0)
+      ez = ((e >= 0) ? -(e << f) : (-e << f)) * n;
+    else {
+      // y = -n*2^f thus k = -f
+      // now e <> 0
+      t = __builtin_ctz (e);
+      if (-f > t) return 0; // 2^k does not divide e
+      ez = (-e >> (-f)) * n;
+    }
+    return -149 <= ez && ez < 128;
+  }
+
+  /* now y > 0, y is not a integer, y = n*2^f with n odd and f < 0.
+     Since x^(n*2^f) = (x^(2^f))^n, and n is odd, necessarily
+     x is an exact (2^k)th power with k=-f.
+     This implies x is a square. Since x = m*2^e with m odd,
+     necessarily m is a square, and e is even. */
+  while (f++) {
+    // try to extract a square from m*2^e
+    if (e&1) return 0;
+    e = e / 2;
+    float dm = (float) m;
+    float s = __builtin_roundf (__builtin_sqrtf (dm));
+    if (s * s != dm)
+      return 0;
+    /* The above call of sqrtf() might set the inexact flag, but in case
+       it happens, m is not a square, thus x^y cannot be exact. */
+    m = (uint32_t) s;
+  }
+
+  // Now |x^y| = (m*2^e)^n with m, n odd integers
+  // now for 15 < n it cannot be exact, unless m=1
+  if (m > 1)
+  {
+    if (15 < n)
+      return 0;
+    // now n <= 15
+    if (m > xmax[n])
+      return 0;
+  }
+  // |x^y| = m^n * 2^(e*n) with m odd
+  uint32_t my = m, n0 = n;
+  while (n0-- > 1)
+    my = my * m;
+  // |x^y| = my * 2^(e*n)
+  t = 32 - __builtin_clz (my); // number of significant bits of m^n
+  /* x^y is an odd multiple of 2^(e*n) thus we should have e*n >= -149,
+     we also have 2^(t-1) <= m^n thus 2^(e*n+t-1) <= |x^y| < 2^(e*n+t)
+     and we need e*n+t <= 128 */
+  return -149 <= e * (int) n && e * (int) n + t <= 128;
+}
+
+static float chelis_cr_powf__cr_powf(float x0, float y0){
+  volatile chelis_cr_powf__FLAG_T flag = chelis_cr_powf__get_flag ();
+  static const double ix[] = {
+    0x1p+0, 0x1.f07c1f07cp-1, 0x1.e1e1e1e1ep-1, 0x1.d41d41d42p-1,
+    0x1.c71c71c72p-1, 0x1.bacf914c2p-1, 0x1.af286bca2p-1, 0x1.a41a41a42p-1,
+    0x1.99999999ap-1, 0x1.8f9c18f9cp-1, 0x1.861861862p-1, 0x1.7d05f417dp-1,
+    0x1.745d1745dp-1, 0x1.6c16c16c1p-1, 0x1.642c8590bp-1, 0x1.5c9882b93p-1,
+    0x1.555555555p-1, 0x1.4e5e0a72fp-1, 0x1.47ae147aep-1, 0x1.414141414p-1,
+    0x1.3b13b13b1p-1, 0x1.3521cfb2bp-1, 0x1.2f684bda1p-1, 0x1.29e4129e4p-1,
+    0x1.249249249p-1, 0x1.1f7047dc1p-1, 0x1.1a7b9611ap-1, 0x1.15b1e5f75p-1,
+    0x1.111111111p-1, 0x1.0c9714fbdp-1, 0x1.084210842p-1, 0x1.041041041p-1, 0x1p-1
+  };
+  
+  static const double lix[][2] = {
+    {0x0p+0, 0x0p+0}, {-0x1.6cp-5, 0x1.4b229b87f3f89p-15},
+    {-0x1.66p-4, -0x1.fb7d654235799p-15}, {-0x1.08p-3, -0x1.8b119b2c9c87bp-12},
+    {-0x1.5cp-3, -0x1.a39fa6533294dp-19}, {-0x1.acp-3, -0x1.ebc5b663dd4b8p-12},
+    {-0x1.fcp-3, 0x1.f4a37fe0fa46fp-14}, {-0x1.24p-2, -0x1.01eac33103e6bp-12},
+    {-0x1.4ap-2, 0x1.61ed0d15725ep-12}, {-0x1.6ep-2, -0x1.10e6ceb499ba9p-13},
+    {-0x1.92p-2, 0x1.115db8ada837dp-12}, {-0x1.b4p-2, -0x1.fafdce266d7aep-12},
+    {-0x1.d6p-2, -0x1.d4f80cd19906fp-12}, {-0x1.f8p-2, 0x1.5ea5ccd0a7396p-12},
+    {0x1.e8p-2, -0x1.0500d67fe62ebp-13}, {0x1.c8p-2, 0x1.9dc2d41aa4626p-14},
+    {0x1.a8p-2, 0x1.ff2e2ff321344p-11}, {0x1.8ap-2, 0x1.130157f4c3a3ep-11},
+    {0x1.6cp-2, 0x1.61ed0cad929ccp-11}, {0x1.5p-2, -0x1.2089a632d7949p-11},
+    {0x1.32p-2, 0x1.7fdc6dfb2d21ap-11}, {0x1.16p-2, 0x1.380a6c36088f3p-11},
+    {0x1.f6p-3, -0x1.3ab7dc7ba81acp-18}, {0x1.cp-3, -0x1.cc2c0061ef1a2p-14},
+    {0x1.8ap-3, 0x1.130157c97bbep-12}, {0x1.56p-3, 0x1.ee14ff34c4128p-14},
+    {0x1.22p-3, 0x1.b5b854c4fde69p-12}, {0x1.ep-4, 0x1.635d1df7cb0b5p-13},
+    {0x1.7ep-4, -0x1.3f6d2636c101ep-13}, {0x1.1cp-4, -0x1.33567f1b193a4p-14},
+    {0x1.78p-5, -0x1.8d66c5313a71dp-14}, {0x1.74p-6, 0x1.f7430ee200ep-17}, {0x0p+0, 0x0p+0}
+  };
+  double x = x0, y = y0;
+  chelis_cr_powf__b64u64_u tx = {.f = x}, ty = {.f = y};
+  int xsgn = 0;
+  if(__builtin_expect (tx.u<<1 == (uint64_t)0x3ff<<53, 0)){ // |x|=1
+    if(tx.u>>63){ // x=-1
+      if((ty.u<<1) > (uint64_t)0x7ff<<53) return y0 + y0; // y=nan
+      if(chelis_cr_powf__isint(y0)) return (chelis_cr_powf__isodd(y0)) ? x0 : -x0;
+      return (x - x) / (x - x);  // NaN /  (-1)^y for non-integer y, should raise 'Invalid operation' exception.
+    }
+    return chelis_cr_powf__is_signalingf (y0) ? x0 + y0 : x0; // 1^y = 1 except for y = sNaN
+  }
+  if(__builtin_expect (ty.u<<1 == 0, 0))
+    return chelis_cr_powf__is_signalingf (x0) ? x0 + y0 : 1.0f; // x^0 = 1 except for x = sNaN
+  if(__builtin_expect (ty.u == (0x3ffull<<52), 0))
+    return chelis_cr_powf__is_signalingf (x0) ? x0 + y0 : x0; // x^1 = x except for x = sNaN
+  if(__builtin_expect ((ty.u<<1) >= (uint64_t)0x7ff<<53, 0)){ // y=Inf/NaN
+    // the case |x|=1 was already checked above
+    if((tx.u<<1) > (uint64_t)0x7ff<<53) return x0 + y0; // x=NaN
+    if((ty.u<<1) == (uint64_t)0x7ff<<53){
+      if(((tx.u<<1) < ((uint64_t)0x3ff<<53)) ^ (ty.u>>63)){
+	return 0;
+      } else {
+	return __builtin_inff();
+      }
+    }
+    return x0 + y0;
+  }
+  if(__builtin_expect (tx.u >= (uint64_t)0x7ff<<52, 0)){ // x is Inf, NaN or less than 0
+    if((tx.u<<1) == (uint64_t)0x7ff<<53){ // x is +Inf or -Inf
+      if(!chelis_cr_powf__isodd(y0)) x0 = __builtin_fabsf(x0);
+      if(ty.u>>63)return 1/x0; else return x0;
+    }
+    if((tx.u<<1) > (uint64_t)0x7ff<<53) return x0 + x0; // x is NaN
+    if(__builtin_expect(tx.u > (uint64_t)0x7ff<<52, 0)){ // x <= 0
+      xsgn = 1;
+      if(!chelis_cr_powf__isint(y0) && x != 0) {
+	return (x - x) / (x - x);  // NaN, should raise 'Invalid operation' exception.
+      }
+    }
+  }
+  if(__builtin_expect (!(tx.u<<1), 0)){ // x=+0 or -0
+    if(ty.u>>63){ // y < 0
+      if(chelis_cr_powf__isodd(y0)) {
+	return 1.0f/__builtin_copysignf(0.0f,x0);
+      }  else {
+	return 1.0f/0.0f;
+      }
+    } else { // y > 0
+      if(chelis_cr_powf__isodd(y0))
+	return __builtin_copysignf(1.0f,x0)*0.0f;
+      else
+	return 0.0f;
+    }
+  }
+  uint64_t m = tx.u & ~(uint64_t)0>>12;
+  int e = ((tx.u>>52)&0x7ff) - 0x3ff;
+  int j = (m + ((int64_t)1<<(52-6)))>>(52-5), k = j>13;
+  e += k;
+  chelis_cr_powf__b64u64_u xd = {.u = m | (uint64_t)0x3ff<<52};
+  double z = __builtin_fma(xd.f, ix[j], -1.0);
+  static const double c[] =
+    {0x1.71547652b82fep+0, -0x1.71547652b82fep-1, 0x1.ec709dc3a2d0bp-2, -0x1.71547652bc4a9p-2,
+     0x1.2776c441b72ep-2, -0x1.ec709bdf453ecp-3, 0x1.a6406efd4b877p-3, -0x1.717d824a520f7p-3};
+  double z2 = z*z, z4 = z2*z2;
+  double c6 = c[6] + z*c[7];
+  double c4 = c[4] + z*c[5];
+  double c2 = c[2] + z*c[3];
+  double c0 = c[0] + z*c[1];
+  c0 += z2*c2;
+  c4 += z2*c6;
+  c0 += z4*c4;
+  double l = z*c0 - lix[j][1];
+  y *= 16;
+  double zt = (e - lix[j][0])*y;
+  z = l*y + zt;
+  if(__builtin_expect(z>2048, 0)){
+    if(chelis_cr_powf__isodd(y0))
+      return __builtin_copysignf(0x1p127f, x0)*0x1p127f;
+    else {
+      return 0x1p127f*0x1p127f;
+    }
+  }
+  if(__builtin_expect(z<-2400, 0)){
+    if(chelis_cr_powf__isodd(y0))
+      return __builtin_copysignf(0x1p-126f, x0)*0x1p-126f;
+    else
+      /* Warning: the expression 0x1p-126f*0x1p-126f should be evaluated
+         at run time, with the current rounding mode, and not constant folded
+         at compile time. See the comment about -frounding-math in README. */
+      return 0x1p-126f*0x1p-126f;
+  }
+  if(__builtin_fabs(z)<0x1p-26) return 1.0 + z;
+  double ia = __builtin_floor(z), h = __builtin_fma(l, y, zt - ia);
+  static const double ce[] =
+    {0x1.62e42fefa398bp-5, 0x1.ebfbdff84555ap-11, 0x1.c6b08d4ad86d3p-17,
+     0x1.3b2ad1b1716a2p-23, 0x1.5d7472718ce9dp-30, 0x1.4a1d7f457ac56p-37};
+  static const double tb[] =
+    {0x1p+0, 0x1.0b5586cf9890fp+0, 0x1.172b83c7d517bp+0, 0x1.2387a6e756238p+0,
+     0x1.306fe0a31b715p+0, 0x1.3dea64c123422p+0, 0x1.4bfdad5362a27p+0, 0x1.5ab07dd485429p+0,
+     0x1.6a09e667f3bcdp+0, 0x1.7a11473eb0187p+0, 0x1.8ace5422aa0dbp+0, 0x1.9c49182a3f09p+0,
+     0x1.ae89f995ad3adp+0, 0x1.c199bdd85529cp+0, 0x1.d5818dcfba487p+0, 0x1.ea4afa2a490dap+0};
+  int64_t il = ia, jl = il&0xf, el = il - jl;
+  el >>= 4;
+  double s = tb[jl];
+  chelis_cr_powf__b64u64_u su = {.u = (el + (uint64_t)0x3ff)<<52};
+  s *= su.f;
+  double h2 = h*h;
+  c0 = ce[0] + h*ce[1];
+  c2 = ce[2] + h*ce[3];
+  c4 = ce[4] + h*ce[5];
+  c0 += h2*(c2 + h2*c4);
+  double w = s*h;
+  chelis_cr_powf__b64u64_u rr = {.f = s + w*c0};
+  // with off=467, fails for x,y=0x1.fd12b4p-1,-0x1.d0b058p+13 and RNDZ
+  uint64_t off = 468;
+  if(((rr.u+off)&0xfffffff) <= 2*off)
+    return chelis_cr_powf__as_powf_accurate2 (x0, y0, chelis_cr_powf__is_exact (x0, y0), flag);
+  if(__builtin_expect(xsgn && chelis_cr_powf__isodd(y0), 0)) rr.f = -rr.f;
+  float res = rr.f;
+  return res;
+}
+
+// when is_exact is non-zero, flag is the original inexact flag
+static float chelis_cr_powf__as_powf_accurate2(float x0, float y0, int chelis_cr_powf__is_exact, chelis_cr_powf__FLAG_T flag){
+  static const double o[] = {1, 2};
+  static const double ch[][2] =
+    {{0x1.71547652b82fep+1, 0x1.777d0ffda2b89p-55}, {0x1.ec709dc3a03fdp-1, 0x1.d27f04ff73b3ap-55},
+     {0x1.2776c50ef9bfep-1, 0x1.e4b514251d0ecp-55}, {0x1.a61762a7aded9p-2, 0x1.de632dc7f6998p-57},
+     {0x1.484b13d7c02aep-2, 0x1.a320ec342ddb3p-56}, {0x1.0c9a84993fd48p-2, -0x1.e6425ce9a74a4p-57},
+     {0x1.c68f568d8beafp-3, -0x1.03a175487feabp-57}, {0x1.89f3b14657dfbp-3, 0x1.f04a3acf0bcf7p-57},
+     {0x1.5b9ad2f2d12ap-3, -0x1.68fdff6815a6fp-58}, {0x1.3702165b88acbp-3, 0x1.45b052ace6c8ep-60},
+     {0x1.1998f60f2f005p-3, -0x1.79a94f62fb524p-57}, {0x1.f9bc428e30809p-4, -0x1.51f063387e47p-59},
+     {0x1.1ac0ab871296ap-3, 0x1.2ba6a2e1a625bp-57}
+    };
+  static const double ce[][2] =
+    {{0x1p+0, 0x1.f7d70599926c4p-98}, {0x1.62e42fefa39efp-1, 0x1.abc9e3b39856bp-56},
+     {0x1.ebfbdff82c58fp-3, -0x1.5e43a540c283dp-57}, {0x1.c6b08d704a0cp-5, -0x1.d3316277451e6p-59},
+     {0x1.3b2ab6fba4e77p-7, 0x1.4e66003ba7f85p-62}, {0x1.5d87fe78a6731p-10, 0x1.07183d46a9697p-66},
+     {0x1.430912f86c787p-13, 0x1.bc81afca4c93p-67}, {0x1.ffcbfc588b0c7p-17, -0x1.e63f6f0116f4cp-71},
+     {0x1.62c0223a5c826p-20, -0x1.30542d98ea4a5p-74}, {0x1.b5253d395e7c6p-24, -0x1.9285a132ce05ep-80},
+     {0x1.e4cf5158b7b01p-28, -0x1.9ac1facae1b88p-83}, {0x1.e8cac7351a7a8p-32, -0x1.4fb82adebd76bp-91},
+     {0x1.c3bd65182746dp-36, 0x1.84ad0689d30ep-91}, {0x1.8161931d765c3p-40, -0x1.254c6535279cep-95},
+     {0x1.314943a26c9e2p-44, -0x1.f4f2fdc14fb82p-98}, {0x1.c36e53b459602p-49, 0x1.f0d06a5a63c41p-103},
+     {0x1.397637b3876a4p-53, -0x1.5632c551ae458p-107}, {0x1.98fbfefdddb51p-58, -0x1.fd134923d52b4p-115}};
+  double x = x0, y = y0;
+  chelis_cr_powf__b64u64_u t = {.f = x};
+  int e = ((t.u>>52)&0x7ff) - 0x3ff, xsgn = t.u>>63;
+  t.u &= ~(uint64_t)0>>12;
+  int k = t.u > 0x6a09e667f3bcdull;
+  e += k;
+  t.u |= (int64_t)0x3ff<<52;
+  x = t.f;
+  double xm = x-o[k], xp = x+o[k], zh = xm/xp, zl = __builtin_fma(zh,-xp,xm)/xp;
+  double z2l, z2h = chelis_cr_powf__muldd(zh, zl, zh, zl, &z2l);
+  z2h = chelis_cr_powf__polydd(z2h,z2l, 13, ch, &z2l);
+  zh = chelis_cr_powf__muldd(zh,zl, z2h,z2l, &zl);
+  zh = chelis_cr_powf__mulddd(zh,zl, y, &zl);
+  double ey = e*y, eh = ey + zh, el = ((ey - eh) + zh) + zl, ee = chelis_cr_powf__roundeven_finite(eh);
+  eh -= ee;
+  eh = chelis_cr_powf__polydd(eh, el, 18, ce, &el);
+  chelis_cr_powf__b64u64_u r = {.u = ((uint64_t)0x3ff+(int64_t)ee)<<52};
+  chelis_cr_powf__b64u64_u ll = {.f = el}, lh = {.f = eh};
+  if((!chelis_cr_powf__is_exact && (lh.u&0xfffffff) == 0) || (chelis_cr_powf__is_exact && ((lh.u+1)&0xfffffff) <= 2)){
+    if(__builtin_fabs(ll.f)>0x1p-91){
+      if(el<0){
+	lh.u--;
+	eh = lh.f;
+      } else {
+	lh.u++;
+	eh = lh.f;
+      }
+    }
+  }
+  eh *= r.f;
+  if(xsgn && chelis_cr_powf__isodd(y0)) eh = -eh;
+  float res = eh;
+  if (chelis_cr_powf__is_exact)
+    chelis_cr_powf__set_flag (flag);
+  return res;
+}
+
+static float chelis_cr_powf(float x, float y) {
+  float r = chelis_cr_powf__cr_powf(x, y);
+  return r != r ? chelis_cr_canonical_nanf() : r;
 }
 
 /* ==== kernel exp: src/binary64/exp/exp.c ==== */
@@ -11132,4 +11626,5532 @@ chelis_cr_erfc__cr_erfc (double x)
 static double chelis_cr_erfc(double x) {
   double y = chelis_cr_erfc__cr_erfc(x);
   return y != y ? chelis_cr_canonical_nan() : y;
+}
+
+/* ==== kernel pow: src/binary64/pow/pow.c ==== */
+
+static double chelis_cr_pow__cr_pow(double, double);
+
+/* Correctly-rounded power function for two binary64 values.
+
+Copyright (c) 2022-2025 CERN and Inria
+Authors: Tom Hubrecht and Paul Zimmermann
+
+This file is part of the CORE-MATH project
+(https://core-math.gitlabpages.inria.fr/).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
+/* For reference, the files in this directory were copied from the private
+   git repository gitlab.inria.fr:zimmerma/core-math-power.git, branch
+   two_step, revision f153eb68, before edition in the CORE-MATH git
+   repository. */
+
+/* References:
+   [1] Note on FastTwoSum with Directed Rounding, Paul Zimmermann,
+       https://hal.inria.fr/hal-03798376/, 2022.
+   [2] An efficient rounding boundary test for pow(x,y) in double precision,
+       Christoph Lauter, Vincent Lefèvre,
+       https://hal-ens-lyon.archives-ouvertes.fr/ensl-00169409, 2007.
+   [3] Arrondi correct de fonctions mathématiques, Fonctions univariées et
+       bivariées, certification et automatisation, Christoph Quirin Lauter,
+       PhD thesis, 2008, in french,
+       http://www.ens-lyon.fr/LIP/Pub/Rapports/PhD/PhD2008/PhD2008-07.pdf
+   [4] An efficient rounding boundary test for pow(x,y) in double precision,
+       Christoph Lauter, Vincent Lefèvre, IEEE Transactions on Computers,
+       volume 58, number 2, 197-207, 2009.
+   [5] Towards a correctly-rounded and fast power function in binary64
+       arithmetic, Tom Hubrecht, Claude-Pierre Jeannerod, Paul Zimmermann,
+       ARITH 2023 - 30th IEEE Symposium on Computer Arithmetic, 2023.
+       Detailed version (with full proofs) available at
+       https://inria.hal.science/hal-04159652.
+   [6] On Ziv's rounding test, F. De Dinechin, C. Lauter, J.-M. Muller,
+       S. Torres, ACM Trans. Math. Soft., volume 39, number 3, 2013.
+
+   This code corresponds to reference [5].       
+*/
+
+#include <stdio.h> // needed in case of rounding-test failure
+#include <stdint.h>
+#define chelis_cr_pow__FLAG_T int
+
+/* begin inlined src/binary64/pow/pow.h */
+/* Correctly-rounded power function for two binary64 values.
+
+Copyright (c) 2022-2025 CERN and Inria
+Authors: Tom Hubrecht and Paul Zimmermann
+
+This file is part of the CORE-MATH project
+(https://core-math.gitlabpages.inria.fr/).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
+#ifndef chelis_cr_pow__CR_POW_H
+#define chelis_cr_pow__CR_POW_H
+
+#include <stdint.h>
+
+/*
+  Type definition
+*/
+
+typedef union {
+  double f;
+  uint64_t u;
+} chelis_cr_pow__f64_u;
+
+// Extract both the mantissa and exponent of a double
+static inline void chelis_cr_pow__fast_extract (int64_t *e, uint64_t *m, double x) {
+  chelis_cr_pow__f64_u _x = {.f = x};
+
+  *e = (_x.u >> 52) & 0x7ff;
+  *m = (_x.u & (~0ull >> 12)) + (*e ? (1ull << 52) : 0);
+  *e = *e - 0x3ff;
+}
+
+#define chelis_cr_pow__CORE_MATH_POW
+/* begin inlined src/binary64/pow/dint.h */
+/* Correctly-rounded power function for two binary64 values.
+
+Copyright (c) 2022, 2023 CERN and Inria
+Authors: Tom Hubrecht and Paul Zimmermann
+
+This file is part of the CORE-MATH project
+(https://core-math.gitlabpages.inria.fr/).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
+/*
+  This file contains type definition and functions to manipulate the dint64_t
+  data type used in the second iteration of Ziv's method. It is composed of two
+  uint64_t values for the mantissa and the exponent is represented by a signed
+  int64_t value.
+*/
+
+#ifndef chelis_cr_pow__DINT_H
+#define chelis_cr_pow__DINT_H
+
+#include <stdint.h>
+#include <inttypes.h>
+#include <stdio.h>
+
+/*
+  Type and structure definitions
+*/
+
+#ifndef chelis_cr_pow__UINT128_T
+#define chelis_cr_pow__UINT128_T
+
+typedef unsigned __int128 chelis_cr_pow__u128;
+
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+typedef union {
+  chelis_cr_pow__u128 r;
+  struct {
+    uint64_t l;
+    uint64_t h;
+  };
+} chelis_cr_pow__uint128_t;
+#else
+typedef union {
+  chelis_cr_pow__u128 r;
+  struct {
+    uint64_t h;
+    uint64_t l;
+  };
+} chelis_cr_pow__uint128_t;
+#endif
+
+// Add two 128-bit integers and return 1 if a carry occurred
+static inline uint64_t chelis_cr_pow__addu_128 (chelis_cr_pow__uint128_t a, chelis_cr_pow__uint128_t b, chelis_cr_pow__uint128_t *r) {
+  r->r = a.r + b.r;
+  // Return the overflow
+  return r->r < a.r;
+}
+
+// Subtract two 128 bit integers and return 1 if a borrow occurred
+static inline int chelis_cr_pow__subu_128 (chelis_cr_pow__uint128_t a, chelis_cr_pow__uint128_t b, chelis_cr_pow__uint128_t *r) {
+  r->r = a.r - b.r;
+  // Return the borrow
+  return r->r > a.r;
+}
+
+static inline int chelis_cr_pow__cmp(int64_t a, int64_t b) { return (a > b) - (a < b); }
+
+static inline int chelis_cr_pow__cmpu(uint64_t a, uint64_t b) { return (a > b) - (a < b); }
+
+static inline int chelis_cr_pow__cmpu128 (chelis_cr_pow__u128 a, chelis_cr_pow__u128 b) { return (a > b) - (a < b); }
+
+#endif
+
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+typedef union {
+  struct {
+    chelis_cr_pow__u128 r;
+    int64_t _ex;
+    uint64_t _sgn;
+  };
+  struct {
+    uint64_t lo;
+    uint64_t hi;
+    int64_t ex;
+    uint64_t sgn;
+  };
+} chelis_cr_pow__dint64_t;
+#else
+typedef union {
+  struct {
+    chelis_cr_pow__u128 r;
+    int64_t _ex;
+    uint64_t _sgn;
+  };
+  struct {
+    uint64_t hi;
+    uint64_t lo;
+    int64_t ex;
+    uint64_t sgn;
+  };
+} chelis_cr_pow__dint64_t;
+#endif
+
+/*
+  Constants
+*/
+
+/* ONE is a dint64_t representation of 1 */
+static const chelis_cr_pow__dint64_t chelis_cr_pow__ONE = {
+    .hi = 0x8000000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0};
+
+/* M_ONE is a dint64_t representation of -1 */
+static const chelis_cr_pow__dint64_t chelis_cr_pow__M_ONE = {
+    .hi = 0x8000000000000000, .lo = 0x0, .ex = 0, .sgn = 0x1};
+
+/* LOG2 is a dint64_t approximation of log(2) to nearest, with absolute error
+   bounded by 2^-129.97 */
+static const chelis_cr_pow__dint64_t chelis_cr_pow__LOG2 = {
+    .hi = 0xb17217f7d1cf79ab, .lo = 0xc9e3b39803f2f6af, .ex = -1, .sgn = 0x0};
+
+/* LOG2_INV approximates 2^12/log(2), with absolute error < 2^-52.96 */
+static const chelis_cr_pow__dint64_t chelis_cr_pow__LOG2_INV = {
+    .hi = 0xb8aa3b295c17f0bc, .lo = 0x0, .ex = 12, .sgn = 0x0};
+
+/* ZERO is a dint64_t representation of 0, which ensures that
+   dint_tod(ZERO) = 0 */
+static const chelis_cr_pow__dint64_t chelis_cr_pow__ZERO = {.hi = 0x0, .lo = 0x0, .ex = -1076, .sgn = 0x0};
+
+/*
+  Base functions
+*/
+
+// Copy a dint64_t value
+static inline void chelis_cr_pow__cp_dint(chelis_cr_pow__dint64_t *r, const chelis_cr_pow__dint64_t *a) {
+  r->ex = a->ex;
+  r->r = a->r;
+  r->sgn = a->sgn;
+}
+
+// Return non-zero if a = 0
+static inline int
+chelis_cr_pow__dint_zero_p (const chelis_cr_pow__dint64_t *a)
+{
+  return a->hi == 0;
+}
+
+// Compare the absolute values of a and b
+// Return -1 if |a| < |b|
+// Return  0 if |a| = |b|
+// Return +1 if |a| > |b|
+static inline signed char
+chelis_cr_pow__cmp_dint_abs (const chelis_cr_pow__dint64_t *a, const chelis_cr_pow__dint64_t *b) {
+  if (chelis_cr_pow__dint_zero_p (a))
+    return chelis_cr_pow__dint_zero_p (b) ? 0 : -1;
+  if (chelis_cr_pow__dint_zero_p (b))
+    return +1;
+  char c1 = chelis_cr_pow__cmp (a->ex, b->ex);
+  return c1 ? c1 : chelis_cr_pow__cmpu128 (a->r, b->r);
+}
+
+static inline signed char chelis_cr_pow__cmp_dint_11(const chelis_cr_pow__dint64_t *a, const chelis_cr_pow__dint64_t *b) {
+  char c1 = chelis_cr_pow__cmp (a->ex, b->ex);
+  return c1 ? c1 : chelis_cr_pow__cmpu (a->hi, b->hi);
+}
+
+// Prints a dint64_t value for debugging purposes
+static inline void chelis_cr_pow__print_dint(const chelis_cr_pow__dint64_t *a) {
+  printf("{.hi=0x%"PRIx64", .lo=0x%"PRIx64", .ex=%"PRId64", .sgn=0x%"PRIx64"}\n", a->hi, a->lo, a->ex,
+         a->sgn);
+}
+
+// Add two dint64_t values, with error bounded by 2 ulps (ulp_128)
+// (more precisely 1 ulp when a and b have same sign, 2 ulps otherwise)
+// Moreover, when Sterbenz theorem applies, i.e., |b| <= |a| <= 2|b|
+// and a,b are of different signs, there is no error, i.e., r = a-b.
+static inline void
+chelis_cr_pow__add_dint (chelis_cr_pow__dint64_t *r, const chelis_cr_pow__dint64_t *a, const chelis_cr_pow__dint64_t *b) {
+  if (!(a->hi | a->lo)) {
+    chelis_cr_pow__cp_dint (r, b);
+    return;
+  }
+
+  switch (chelis_cr_pow__cmp_dint_abs (a, b)) {
+  case 0:
+    if (a->sgn ^ b->sgn) {
+      chelis_cr_pow__cp_dint (r, &chelis_cr_pow__ZERO);
+      return;
+    }
+
+    chelis_cr_pow__cp_dint (r, a);
+    r->ex++;
+    return;
+
+  case -1: // |A| < |B|
+    {
+      // swap operands
+      const chelis_cr_pow__dint64_t *tmp = a; a = b; b = tmp;
+      break; // fall through the case |A| > |B|
+    }
+  }
+
+  // From now on, |A| > |B| thus a->ex >= b->ex
+
+  chelis_cr_pow__u128 A = a->r, B = b->r;
+  uint64_t k = a->ex - b->ex;
+
+  if (k > 0) {
+    /* Warning: the right shift x >> k is only defined for 0 <= k < n
+       where n is the bit-width of x. See for example
+       https://developer.arm.com/documentation/den0024/a/The-A64-instruction-set/Data-processing-instructions/Shift-operations
+       where it is said that k is interpreted modulo n. */
+    B = (k < 128) ? B >> k : 0;
+  }
+
+  chelis_cr_pow__u128 C;
+  unsigned char sgn = a->sgn;
+
+  r->ex = a->ex; /* tentative exponent for the result */
+
+  if (a->sgn ^ b->sgn) {
+    /* a and b have different signs C = A + (-B)
+       Sterbenz case |a|/2 <= |b| <= |a| can occur only when:
+       * k=0: then B is not truncated, and C is exact below
+       * k=1 and ex>0 below: then we ensure C is exact
+     */
+    C = A - B;
+    uint64_t ch = C >> 64;
+    /* We can't have C=0 here since we excluded the case |A| = |B|,
+       thus __builtin_clzll(C) is well-defined below. */
+    uint64_t ex = ch ? __builtin_clzll(ch) : 64 + __builtin_clzll(C);
+    /* The error from the truncated part of B (1 ulp) is multiplied by 2^ex,
+       thus by 2 ulps when ex <= 1. */
+    if (ex > 0)
+    {
+      if (k == 1) /* Sterbenz case */
+        C = (A << ex) - (b->r << (ex - 1));
+      else
+        C = (A << ex) - (B << ex);
+      /* If C0 is the previous value of C, we have:
+         (C0-1)*2^ex < A*2^ex-B*2^ex <= C0*2^ex
+         since some neglected bits from B might appear which contribute
+         a value less than ulp(C0)=1.
+         As a consequence since 2^(127-ex) <= C0 < 2^(128-ex), because C0 had
+         ex leading zero bits, we have 2^127-2^ex <= A*2^ex-B*2^ex < 2^128.
+         Thus the value of C, which is truncated to 128 bits, is the right
+         one (as if no truncation); moreover in some rare cases we need to
+         shift by 1 bit to the left. */
+      r->ex -= ex;
+      ex = __builtin_clzll (C >> 64);
+      /* Fall through with the code for ex = 0. */
+    }
+    C = C << ex;
+    r->ex -= ex;
+    /* The neglected part of B is bounded by 2 ulp(C) when ex=0, 1 ulp
+       when ex > 0 but ex=0 at the end, and by 2*ulp(C) when ex > 0 and there
+       is an extra shift at the end (in that case necessarily ex=1). */
+  } else {
+    C = A + B;
+    if (C < A)
+    {
+      C = ((chelis_cr_pow__u128) 1 << 127) | (C >> 1);
+      r->ex ++;
+    }
+  }
+
+  /* In the addition case, we loose the truncated part of B, which
+     contributes to at most 1 ulp. If there is an exponent shift, we
+     might also loose the least significant bit of C, which counts as
+     1/2 ulp, but the truncated part of B is now less than 1/2 ulp too,
+     thus in all cases the error is less than 1 ulp(r). */
+
+  r->sgn = sgn;
+  r->r = C;
+}
+
+// same as add_dint, but assumes the lower limbs and a and b are zero
+// error is bounded by 2 ulps (ulp_64)
+static inline void
+chelis_cr_pow__add_dint_11 (chelis_cr_pow__dint64_t *r, const chelis_cr_pow__dint64_t *a, const chelis_cr_pow__dint64_t *b) {
+  if (!a->hi) {
+    chelis_cr_pow__cp_dint (r, b);
+    return;
+  }
+
+  if (!b->hi) {
+    chelis_cr_pow__cp_dint (r, a);
+    return;
+  }
+
+  switch (chelis_cr_pow__cmp_dint_11 (a, b)) {
+  case 0:
+    if (a->sgn ^ b->sgn) {
+      chelis_cr_pow__cp_dint (r, &chelis_cr_pow__ZERO);
+      return;
+    }
+
+    chelis_cr_pow__cp_dint (r, a);
+    r->ex++;
+    return;
+
+  case -1: // |A| < |B|
+    {
+      // swap operands
+      const chelis_cr_pow__dint64_t *tmp = a; a = b; b = tmp;
+      break; // fall through the case |A| > |B|
+    }
+  }
+
+  // From now on, |A| > |B| thus a->ex >= b->ex
+
+  uint64_t A = a->hi, B = b->hi;
+
+  if (a->ex > b->ex) {
+    /* Warning: the right shift x >> k is only defined for 0 <= k < n
+       where n is the bit-width of x. See for example
+       https://developer.arm.com/documentation/den0024/a/The-A64-instruction-set/Data-processing-instructions/Shift-operations
+       where it is said that k is interpreted modulo n. */
+    uint64_t k = a->ex - b->ex;
+    B = (k < 64) ? B >> k : 0;
+  }
+
+  chelis_cr_pow__u128 C;
+  unsigned char sgn = a->sgn;
+
+  r->ex = a->ex; /* tentative exponent for the result */
+
+  if (a->sgn ^ b->sgn) {
+    // a and b have different signs C = A + (-B)
+    C = A - B;
+    /* we can't have C=0 here since we excluded the case |A| = |B|,
+       thus __builtin_clzll(C) is well-defined below */
+    uint64_t ex = __builtin_clzll (C);
+    /* The error from the truncated part of B (1 ulp) is multiplied by 2^ex.
+       Thus for ex <= 2, we get an error bounded by 4 ulps in the final result.
+       For ex >= 3, we pre-shift the operands. */
+    if (ex > 0)
+    {
+      C = (A << ex) - (B << ex);
+      /* If C0 is the previous value of C, we have:
+         (C0-1)*2^ex < A*2^ex-B*2^ex <= C0*2^ex
+         since here some neglected bits from B might appear which contribute
+         a value less than ulp(C0)=1.
+         As a consequence since 2^(63-ex) <= C0 < 2^(64-ex), because C0 had
+         ex leading zero bits, we have 2^63-2^ex <= A*2^ex-B*2^ex < 2^64.
+         Thus the value of C, which is truncated to 64 bits, is the right
+         one (as if no truncation); moreover in some rare cases we need to
+         shift by 1 bit to the left. */
+      r->ex -= ex;
+      ex = __builtin_clzll (C);
+      /* Fall through with the code for ex = 0. */
+    }
+    C = C << ex;
+    r->ex -= ex;
+    /* The neglected part of B is bounded by ulp(C) when ex=0, or when
+       ex > 0 but the ex=0 at the end, and by 2*ulp(C) when ex>0 and there
+       is an extra shift at the end (in that case necessarily ex=1). */
+  } else {
+    C = A + B;
+    if (C < A)
+    {
+      C = ((uint64_t) 1 << 63) | (C >> 1);
+      r->ex ++;
+    }
+  }
+
+  /* In the addition case, we loose the truncated part of B, which
+     contributes to at most 1 ulp. If there is an exponent shift, we
+     might also loose the least significant bit of C, which counts as
+     1/2 ulp, but the truncated part of B is now less than 1/2 ulp too,
+     thus in all cases the error is less than 1 ulp(r). */
+
+  r->sgn = sgn;
+  r->hi = C;
+}
+
+// Multiply two dint64_t numbers, with error bounded by 6 ulps
+// on the 128-bit floating-point numbers.
+// Overlap between r and a is allowed
+static inline void
+chelis_cr_pow__mul_dint (chelis_cr_pow__dint64_t *r, const chelis_cr_pow__dint64_t *a, const chelis_cr_pow__dint64_t *b) {
+  chelis_cr_pow__u128 bh = b->hi, bl = b->lo;
+
+  /* compute the two middle terms */
+  chelis_cr_pow__u128 m1 = (chelis_cr_pow__u128)(a->hi) * bl;
+  chelis_cr_pow__u128 m2 = (chelis_cr_pow__u128)(a->lo) * bh;
+
+  /* put the 128-bit product of the high terms in r */
+  r->r = (chelis_cr_pow__u128)(a->hi) * bh;
+
+  /* there can be no overflow in the following addition since r <= (B-1)^2
+     with B=2^64, (m1>>64) <= B-1 and (m2>>64) <= B-1, thus the sum is
+     bounded by (B-1)^2+2*(B-1) = B^2-1 */
+  r->r += (m1 >> 64) + (m2 >> 64);
+
+  // Ensure that r->hi starts with a 1
+  uint64_t ex = r->hi >> 63;
+  r->r = r->r << (1 - ex);
+
+  // Exponent and sign
+  r->ex = a->ex + b->ex + ex;
+  r->sgn = a->sgn ^ b->sgn;
+
+  /* The ignored part can be as large as 3 ulps before the shift (one
+     for the low part of a->hi * bl, one for the low part of a->lo * bh,
+     and one for the neglected a->lo * bl term). After the shift this can
+     be as large as 6 ulps. */
+}
+
+// Multiply two dint64_t numbers, assuming the low part of b is zero
+// with error bounded by 2 ulps
+static inline void
+chelis_cr_pow__mul_dint_21 (chelis_cr_pow__dint64_t *r, const chelis_cr_pow__dint64_t *a, const chelis_cr_pow__dint64_t *b) {
+  chelis_cr_pow__u128 bh = b->hi;
+  chelis_cr_pow__u128 hi = (chelis_cr_pow__u128) (a->hi) * bh;
+  chelis_cr_pow__u128 lo = (chelis_cr_pow__u128) (a->lo) * bh;
+
+  /* put the 128-bit product of the high terms in r */
+  r->r = hi;
+
+  /* add the middle term */
+  r->r += lo >> 64;
+
+  // Ensure that r->hi starts with a 1
+  uint64_t ex = r->hi >> 63;
+  r->r = r->r << (1 - ex);
+
+  // Exponent and sign
+  r->ex = a->ex + b->ex + ex;
+  r->sgn = a->sgn ^ b->sgn;
+
+  /* The ignored part can be as large as 1 ulp before the shift (truncated
+     part of lo). After the shift this can be as large as 2 ulps. */
+}
+
+// Multiply an integer with a dint64_t variable
+static inline void chelis_cr_pow__mul_dint_2(chelis_cr_pow__dint64_t *r, int64_t b, const chelis_cr_pow__dint64_t *a) {
+  chelis_cr_pow__uint128_t t;
+
+  if (!b) {
+    chelis_cr_pow__cp_dint(r, &chelis_cr_pow__ZERO);
+    return;
+  }
+
+  uint64_t c = b < 0 ? -b : b;
+  r->sgn = b < 0 ? !a->sgn : a->sgn;
+
+  t.r = (chelis_cr_pow__u128)(a->hi) * (chelis_cr_pow__u128)c;
+
+  int m = t.h ? __builtin_clzll(t.h) : 64;
+  t.r = (t.r << m);
+
+  // Will pose issues if b is too large but for now we assume it never happens
+  // TODO: FIXME
+  chelis_cr_pow__uint128_t l = {.r = (chelis_cr_pow__u128)(a->lo) * (chelis_cr_pow__u128)c};
+  l.r = (l.r << (m - 1)) >> 63;
+
+  if (chelis_cr_pow__addu_128(l, t, &t)) {
+    t.r += t.r & 0x1;
+    t.r = ((chelis_cr_pow__u128)1 << 127) | (t.r >> 1);
+    m--;
+  }
+
+  r->hi = t.h;
+  r->lo = t.l;
+  r->ex = a->ex + 64 - m;
+}
+
+/* Same as mul_dint_21, but assumes the low part of a and b is zero.
+   This operation is exact. */
+static inline void
+chelis_cr_pow__mul_dint_11 (chelis_cr_pow__dint64_t *r, const chelis_cr_pow__dint64_t *a, const chelis_cr_pow__dint64_t *b) {
+  /* put the 128-bit product of the high terms in r */
+  r->r = (chelis_cr_pow__u128)(a->hi) * (chelis_cr_pow__u128)(b->hi);
+
+  // Ensure that r->hi starts with a 1
+  uint64_t ex = r->hi >> 63;
+  r->r = r->r << (1 - ex);
+
+  // Exponent and sign
+  r->ex = a->ex + b->ex + ex;
+  r->sgn = a->sgn ^ b->sgn;
+}
+
+// Multiply an integer with a dint64_t variable, with error < 1 ulp
+// r and b should not overlap
+static inline void
+chelis_cr_pow__mul_dint_int64 (chelis_cr_pow__dint64_t *r, const chelis_cr_pow__dint64_t *a, int64_t b) {
+  if (!b) {
+    chelis_cr_pow__cp_dint (r, &chelis_cr_pow__ZERO);
+    return;
+  }
+
+  uint64_t c = b < 0 ? -b : b;
+  r->sgn = b < 0 ? !a->sgn : a->sgn;
+  r->ex = a->ex + 64;
+
+  r->r = (chelis_cr_pow__u128) (a->hi) * (chelis_cr_pow__u128) c;
+
+  // Warning: if c=1, we might have r->hi=0
+  int m = r->hi ? __builtin_clzll (r->hi) : 64;
+  r->r = r->r << m;
+  r->ex -= m;
+
+  // Will pose issues if b is too large but for now we assume it never happens
+  // TODO: FIXME
+  chelis_cr_pow__u128 l = (chelis_cr_pow__u128) a->lo * (chelis_cr_pow__u128) c;
+  /* We have to shift l by 64 bits to the right to align with hi*c,
+     and by m bits to the left to align with t.r << m. Since hi*c < 2^(128-m)
+     and hi >= 2^63, we know that c < 2^(65-m) thus
+     l*2^(m-1) < 2^64*2^(65-m)*2^(m-1) = 2^128, and l << (m - 1) will
+     not overflow. */
+  l = (l << (m - 1)) >> 63;
+
+  r->r += l;
+  if (r->r < l) {
+    r->r = ((chelis_cr_pow__u128) 1 << 127) | (r->r >> 1);
+    r->ex ++;
+  }
+
+  /* The ignored part of a->lo*c is at most 1 ulp(r), even in the overflow
+     case "r->r < l", since before the right shift, the error was at most
+     1 ulp, thus 1/2 ulp after the shift, and the ignored least significant
+     bit of r->r which is discarded counts also as 1/2 ulp. */
+}
+
+// Convert a non-zero double to the corresponding dint64_t value
+static inline void chelis_cr_pow__dint_fromd (chelis_cr_pow__dint64_t *a, double b) {
+  chelis_cr_pow__fast_extract (&a->ex, &a->hi, b);
+
+  /* |b| = 2^(ex-52)*hi */
+
+  uint32_t t = __builtin_clzll (a->hi);
+
+  a->sgn = b < 0.0;
+  a->hi = a->hi << t;
+  a->ex = a->ex - (t > 11 ? t - 12 : 0);
+  /* b = 2^ex*hi/2^63 where 1 <= hi/2^63 < 2 */
+  a->lo = 0;
+}
+
+/* put in r an approximation of 1/a, assuming a is not zero */
+static inline void chelis_cr_pow__inv_dint (chelis_cr_pow__dint64_t *r, double a)
+{
+  chelis_cr_pow__dint64_t q, A;
+  chelis_cr_pow__dint_fromd (r, 1.0 / a); /* accurate to about 53 bits */
+  /* we use Newton's iteration: r -> r + r*(1-a*r) */
+  chelis_cr_pow__dint_fromd (&A, -a);
+  chelis_cr_pow__mul_dint (&q, &A, r);    /* -a*r */
+  chelis_cr_pow__add_dint (&q, &chelis_cr_pow__ONE, &q); /* 1-a*r */
+  chelis_cr_pow__mul_dint (&q, r, &q);    /* r*(1-a*r) */
+  chelis_cr_pow__add_dint (r, r, &q);
+}
+
+/* put in r an approximation of b/a, assuming a is not zero */
+static inline void chelis_cr_pow__div_dint (chelis_cr_pow__dint64_t *r, double b, double a)
+{
+  chelis_cr_pow__dint64_t B;
+  chelis_cr_pow__inv_dint (r, a);
+  chelis_cr_pow__dint_fromd (&B, b);
+  chelis_cr_pow__mul_dint (r, r, &B);
+}
+
+/*
+  Approximation tables
+*/
+
+/* For 90 <= i <= 181, _INVERSE_2_1[i-90] is an approximation of the inverse
+   of x for i/2^7 <= x < (i+1)/2^7, where an entry (hi,lo,ex,sgn) represents
+   (-1)^sgn*(hi+lo/2^64)*2^(ex-63)
+   (the binary point is after the most significant bit of hi).
+   For i=127 and i=128, we force _INVERSE_2_1[i-90]=1.
+   If was generated with output_inverse_2_1(7,9,90,181) from the
+   accompanying file dint.sage.
+   There is no rounding error here, the only approximation error is in
+   _LOG_INV_2_1[]. */
+static const chelis_cr_pow__dint64_t chelis_cr_pow___INVERSE_2_1[] = {
+    {.hi = 0xb500000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=90 */
+    {.hi = 0xb300000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=91 */     
+    {.hi = 0xb100000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=92 */     
+    {.hi = 0xaf00000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=93 */     
+    {.hi = 0xad80000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=94 */     
+    {.hi = 0xab80000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=95 */     
+    {.hi = 0xaa00000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=96 */     
+    {.hi = 0xa800000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=97 */     
+    {.hi = 0xa680000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=98 */     
+    {.hi = 0xa480000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=99 */     
+    {.hi = 0xa300000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=100 */    
+    {.hi = 0xa180000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=101 */    
+    {.hi = 0xa000000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=102 */    
+    {.hi = 0x9e80000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=103 */    
+    {.hi = 0x9d00000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=104 */    
+    {.hi = 0x9b80000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=105 */    
+    {.hi = 0x9a00000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=106 */    
+    {.hi = 0x9880000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=107 */    
+    {.hi = 0x9700000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=108 */    
+    {.hi = 0x9580000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=109 */    
+    {.hi = 0x9480000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=110 */    
+    {.hi = 0x9300000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=111 */    
+    {.hi = 0x9180000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=112 */    
+    {.hi = 0x9080000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=113 */    
+    {.hi = 0x8f00000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=114 */    
+    {.hi = 0x8e00000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=115 */
+    {.hi = 0x8c80000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=116 */
+    {.hi = 0x8b80000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=117 */
+    {.hi = 0x8a80000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=118 */
+    {.hi = 0x8900000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=119 */
+    {.hi = 0x8800000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=120 */
+    {.hi = 0x8700000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=121 */
+    {.hi = 0x8580000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=122 */
+    {.hi = 0x8480000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=123 */
+    {.hi = 0x8380000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=124 */
+    {.hi = 0x8280000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=125 */
+    {.hi = 0x8180000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=126 */
+    {.hi = 0x8000000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=127 */
+    {.hi = 0x8000000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* i=128 */
+    {.hi = 0xfd00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=129 */
+    {.hi = 0xfb00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=130 */
+    {.hi = 0xf900000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=131 */
+    {.hi = 0xf780000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=132 */
+    {.hi = 0xf580000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=133 */
+    {.hi = 0xf380000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=134 */
+    {.hi = 0xf200000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=135 */
+    {.hi = 0xf000000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=136 */
+    {.hi = 0xee80000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=137 */
+    {.hi = 0xec80000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=138 */
+    {.hi = 0xeb00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=139 */
+    {.hi = 0xe900000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=140 */
+    {.hi = 0xe780000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=141 */
+    {.hi = 0xe600000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=142 */
+    {.hi = 0xe480000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=143 */
+    {.hi = 0xe300000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=144 */
+    {.hi = 0xe100000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=145 */
+    {.hi = 0xdf80000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=146 */
+    {.hi = 0xde00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=147 */
+    {.hi = 0xdc80000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=148 */
+    {.hi = 0xdb00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=149 */
+    {.hi = 0xd980000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=150 */
+    {.hi = 0xd880000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=151 */
+    {.hi = 0xd700000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=152 */
+    {.hi = 0xd580000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=153 */
+    {.hi = 0xd400000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=154 */
+    {.hi = 0xd280000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=155 */
+    {.hi = 0xd180000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=156 */
+    {.hi = 0xd000000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=157 */
+    {.hi = 0xce80000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=158 */
+    {.hi = 0xcd80000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=159 */
+    {.hi = 0xcc00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=160 */
+    {.hi = 0xcb00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=161 */
+    {.hi = 0xc980000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=162 */
+    {.hi = 0xc880000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=163 */
+    {.hi = 0xc700000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=164 */
+    {.hi = 0xc600000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=165 */
+    {.hi = 0xc500000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=166 */
+    {.hi = 0xc380000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=167 */
+    {.hi = 0xc280000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=168 */
+    {.hi = 0xc180000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=169 */
+    {.hi = 0xc000000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=170 */
+    {.hi = 0xbf00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=171 */
+    {.hi = 0xbe00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=172 */
+    {.hi = 0xbd00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=173 */
+    {.hi = 0xbc00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=174 */
+    {.hi = 0xba80000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=175 */
+    {.hi = 0xb980000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=176 */
+    {.hi = 0xb880000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=177 */
+    {.hi = 0xb780000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=178 */
+    {.hi = 0xb680000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=179 */
+    {.hi = 0xb580000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=180 */
+    {.hi = 0xb480000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* i=181 */
+};
+
+/* For 8128 <= j <= 8256, _INVERSE_2_2[j-8128] is an approximation of the
+   inverse of j/2^13, where an entry (hi,lo,ex,sgn) represents
+   (-1)^sgn*(hi+lo/2^64)*2^(ex-63)
+   (the binary point is after the most significant bit of hi).
+   For j=8191 and j=8192, we force _INVERSE_2_2[j-8128]=1.
+   If was generated with output_inverse_2_2(6,14,8128,8256,7,62) from the
+   accompanying file dint.sage.
+   There is no rounding error here, the only approximation error is in
+   _LOG_INV_2_2[]. */
+static const chelis_cr_pow__dint64_t chelis_cr_pow___INVERSE_2_2[] = {
+    {.hi = 0x8100000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8128 */
+    {.hi = 0x80fc000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8129 */
+    {.hi = 0x80f8000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8130 */
+    {.hi = 0x80f4000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8131 */
+    {.hi = 0x80f0000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8132 */
+    {.hi = 0x80ec000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8133 */
+    {.hi = 0x80e8000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8134 */
+    {.hi = 0x80e4000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8135 */
+    {.hi = 0x80e0000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8136 */
+    {.hi = 0x80dc000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8137 */
+    {.hi = 0x80d8000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8138 */
+    {.hi = 0x80d4000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8139 */
+    {.hi = 0x80d0000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8140 */
+    {.hi = 0x80cc000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8141 */
+    {.hi = 0x80c8000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8142 */
+    {.hi = 0x80c4000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8143 */
+    {.hi = 0x80c0000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8144 */
+    {.hi = 0x80bc000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8145 */
+    {.hi = 0x80b8000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8146 */
+    {.hi = 0x80b4000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8147 */
+    {.hi = 0x80b0000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8148 */
+    {.hi = 0x80ac000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8149 */
+    {.hi = 0x80a8000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8150 */
+    {.hi = 0x80a4000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8151 */
+    {.hi = 0x80a0000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8152 */
+    {.hi = 0x809c000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8153 */
+    {.hi = 0x8098000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8154 */
+    {.hi = 0x8094000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8155 */
+    {.hi = 0x8090000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8156 */
+    {.hi = 0x808c000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8157 */
+    {.hi = 0x8088000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8158 */
+    {.hi = 0x8084000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8159 */
+    {.hi = 0x8080000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8160 */
+    {.hi = 0x807c000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8161 */
+    {.hi = 0x8078000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8162 */
+    {.hi = 0x8074000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8163 */
+    {.hi = 0x8070000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8164 */
+    {.hi = 0x806c000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8165 */
+    {.hi = 0x8068000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8166 */
+    {.hi = 0x8064000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8167 */
+    {.hi = 0x8060000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8168 */
+    {.hi = 0x805c000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8169 */
+    {.hi = 0x8058000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8170 */
+    {.hi = 0x8054000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8171 */
+    {.hi = 0x8050000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8172 */
+    {.hi = 0x804c000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8173 */
+    {.hi = 0x8048000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8174 */
+    {.hi = 0x8044000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8175 */
+    {.hi = 0x8040000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8176 */
+    {.hi = 0x803c000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8177 */
+    {.hi = 0x8038000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8178 */
+    {.hi = 0x8034000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8179 */
+    {.hi = 0x8030000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8180 */
+    {.hi = 0x802c000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8181 */
+    {.hi = 0x8028000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8182 */
+    {.hi = 0x8024000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8183 */
+    {.hi = 0x8020000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8184 */
+    {.hi = 0x801c000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8185 */
+    {.hi = 0x8018000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8186 */
+    {.hi = 0x8014000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8187 */
+    {.hi = 0x8010000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8188 */
+    {.hi = 0x800c000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8189 */
+    {.hi = 0x8008000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8190 */
+    {.hi = 0x8000000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8191 */
+    {.hi = 0x8000000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0}, /* j=8192 */
+    {.hi = 0xfff4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8193 */
+    {.hi = 0xffec000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8194 */
+    {.hi = 0xffe4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8195 */
+    {.hi = 0xffdc000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8196 */
+    {.hi = 0xffd4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8197 */
+    {.hi = 0xffcc000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8198 */
+    {.hi = 0xffc4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8199 */
+    {.hi = 0xffbc000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8200 */
+    {.hi = 0xffb4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8201 */
+    {.hi = 0xffac000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8202 */
+    {.hi = 0xffa4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8203 */
+    {.hi = 0xff9c000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8204 */
+    {.hi = 0xff94000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8205 */
+    {.hi = 0xff8c000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8206 */
+    {.hi = 0xff84000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8207 */
+    {.hi = 0xff7c000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8208 */
+    {.hi = 0xff74000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8209 */
+    {.hi = 0xff6c000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8210 */
+    {.hi = 0xff64000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8211 */
+    {.hi = 0xff5c000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8212 */
+    {.hi = 0xff54000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8213 */
+    {.hi = 0xff4c000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8214 */
+    {.hi = 0xff44000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8215 */
+    {.hi = 0xff3c000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8216 */
+    {.hi = 0xff34000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8217 */
+    {.hi = 0xff2c000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8218 */
+    {.hi = 0xff24000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8219 */
+    {.hi = 0xff1c000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8220 */
+    {.hi = 0xff14000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8221 */
+    {.hi = 0xff0c000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8222 */
+    {.hi = 0xff04000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8223 */
+    {.hi = 0xfefc000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8224 */
+    {.hi = 0xfef4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8225 */
+    {.hi = 0xfeec000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8226 */
+    {.hi = 0xfee4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8227 */
+    {.hi = 0xfedc000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8228 */
+    {.hi = 0xfed4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8229 */
+    {.hi = 0xfecc000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8230 */
+    {.hi = 0xfec4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8231 */
+    {.hi = 0xfebc000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8232 */
+    {.hi = 0xfeb4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8233 */
+    {.hi = 0xfeac000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8234 */
+    {.hi = 0xfea4000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8235 */
+    {.hi = 0xfe9c000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8236 */
+    {.hi = 0xfe98000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8237 */
+    {.hi = 0xfe90000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8238 */
+    {.hi = 0xfe88000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8239 */
+    {.hi = 0xfe80000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8240 */
+    {.hi = 0xfe78000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8241 */
+    {.hi = 0xfe70000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8242 */
+    {.hi = 0xfe68000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8243 */
+    {.hi = 0xfe60000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8244 */
+    {.hi = 0xfe58000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8245 */
+    {.hi = 0xfe50000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8246 */
+    {.hi = 0xfe48000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8247 */
+    {.hi = 0xfe40000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8248 */
+    {.hi = 0xfe38000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8249 */
+    {.hi = 0xfe30000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8250 */
+    {.hi = 0xfe28000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8251 */
+    {.hi = 0xfe20000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8252 */
+    {.hi = 0xfe18000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8253 */
+    {.hi = 0xfe10000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8254 */
+    {.hi = 0xfe08000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8255 */
+    {.hi = 0xfe00000000000000, .lo = 0x0, .ex = -1, .sgn = 0x0}, /* j=8256 */
+};
+
+/* For 90 <= i <= 181, _LOG_INV_2_1[i-90] is an approximation of
+   -log(_INVERSE_2_1[i-90]), where an entry (hi,lo,ex,sgn) represents
+   (-1)^sgn*(hi+lo/2^64)*2^(ex-63)
+   (the binary point is after the most significant bit of hi).
+   If was generated with output_log_inv_2_1(7,9,90,181) from the
+   accompanying file dint.sage.
+   The approximation error is bounded by 2^-130 (absolute) and 2^-128 (rel). */
+static const chelis_cr_pow__dint64_t chelis_cr_pow___LOG_INV_2_1[] = {
+    {.hi = 0xb1641795ce3ca97b, .lo = 0x7af915300e517391, .ex = -2, .sgn = 0x1}, /* i=90 */
+    {.hi = 0xabb3b8ba2ad362a4, .lo = 0xd5b6506cc17a01f1, .ex = -2, .sgn = 0x1}, /* i=91 */
+    {.hi = 0xa5f2fcabbbc506da, .lo = 0x64ca4fb7ec323d73, .ex = -2, .sgn = 0x1}, /* i=92 */
+    {.hi = 0xa0218434353f1de8, .lo = 0x6093efa632530ac8, .ex = -2, .sgn = 0x1}, /* i=93 */
+    {.hi = 0x9bb93315fec2d792, .lo = 0xa7589fba0865790e, .ex = -2, .sgn = 0x1}, /* i=94 */
+    {.hi = 0x95c981d5c4e924ed, .lo = 0x29404f5aa577d6b2, .ex = -2, .sgn = 0x1}, /* i=95 */
+    {.hi = 0x914a0fde7bcb2d12, .lo = 0x1429ed3aea197a5d, .ex = -2, .sgn = 0x1}, /* i=96 */
+    {.hi = 0x8b3ae55d5d30701c, .lo = 0xe63eab883717047e, .ex = -2, .sgn = 0x1}, /* i=97 */
+    {.hi = 0x86a35abcd5ba5903, .lo = 0xec81c3cbd925cccf, .ex = -2, .sgn = 0x1}, /* i=98 */
+    {.hi = 0x8073622d6a80e634, .lo = 0x6a97009015316071, .ex = -2, .sgn = 0x1}, /* i=99 */
+    {.hi = 0xf7856e5ee2c9b290, .lo = 0xc6f2a1b84190a7d7, .ex = -3, .sgn = 0x1}, /* i=100 */
+    {.hi = 0xee0de5055f63eb06, .lo = 0x98a33316df83ba57, .ex = -3, .sgn = 0x1}, /* i=101 */
+    {.hi = 0xe47fbe3cd4d10d61, .lo = 0x2ec0f797fdcd1257, .ex = -3, .sgn = 0x1}, /* i=102 */
+    {.hi = 0xdada8cf47dad2374, .lo = 0x4ffb833c3409ee78, .ex = -3, .sgn = 0x1}, /* i=103 */
+    {.hi = 0xd11de0ff15ab18c9, .lo = 0xb88d83d4cc613f20, .ex = -3, .sgn = 0x1}, /* i=104 */
+    {.hi = 0xc74946f4436a0552, .lo = 0xc4f5cb531201c0d1, .ex = -3, .sgn = 0x1}, /* i=105 */
+    {.hi = 0xbd5c481086c848df, .lo = 0x1b596b5030403240, .ex = -3, .sgn = 0x1}, /* i=106 */
+    {.hi = 0xb3566a13956a86f6, .lo = 0xff1b1e1574d9fd54, .ex = -3, .sgn = 0x1}, /* i=107 */
+    {.hi = 0xa9372f1d0da1bd17, .lo = 0x200eb71e58cd36de, .ex = -3, .sgn = 0x1}, /* i=108 */
+    {.hi = 0x9efe158766314e54, .lo = 0xc571827efe892fc4, .ex = -3, .sgn = 0x1}, /* i=109 */
+    {.hi = 0x981eb8c723fe97f4, .lo = 0xa31c134fb702d432, .ex = -3, .sgn = 0x1}, /* i=110 */
+    {.hi = 0x8db956a97b3d0148, .lo = 0x3023472cd739f9de, .ex = -3, .sgn = 0x1}, /* i=111 */
+    {.hi = 0x8338a89652cb7150, .lo = 0xc647eb86498c2ce1, .ex = -3, .sgn = 0x1}, /* i=112 */
+    {.hi = 0xf85186008b15330b, .lo = 0xe64b8b775997898d, .ex = -4, .sgn = 0x1}, /* i=113 */
+    {.hi = 0xe2f2a47ade3a18ae, .lo = 0xb0bf7c0b0d8bb4ed, .ex = -4, .sgn = 0x1}, /* i=114 */
+    {.hi = 0xd49369d256ab1b28, .lo = 0x5e9154e1d5263cd5, .ex = -4, .sgn = 0x1}, /* i=115 */
+    {.hi = 0xbed3b36bd8966422, .lo = 0x240644d7d9ed08af, .ex = -4, .sgn = 0x1}, /* i=116 */
+    {.hi = 0xb032c549ba861d8e, .lo = 0xf74e27bc92ce336a, .ex = -4, .sgn = 0x1}, /* i=117 */
+    {.hi = 0xa176e5f5323781dd, .lo = 0xd4f935996c92e8cc, .ex = -4, .sgn = 0x1}, /* i=118 */
+    {.hi = 0x8b29b7751bd70743, .lo = 0x12e0b9ee992f236d, .ex = -4, .sgn = 0x1}, /* i=119 */
+    {.hi = 0xf85186008b15330b, .lo = 0xe64b8b775997898d, .ex = -5, .sgn = 0x1}, /* i=120 */
+    {.hi = 0xda16eb88cb8df614, .lo = 0x68a63ecfb66e94ac, .ex = -5, .sgn = 0x1}, /* i=121 */
+    {.hi = 0xac52dd7e4726a463, .lo = 0x547a963a91bb3012, .ex = -5, .sgn = 0x1}, /* i=122 */
+    {.hi = 0x8d86cc491ecbfe16, .lo = 0x51776453b7e8254d, .ex = -5, .sgn = 0x1}, /* i=123 */
+    {.hi = 0xdcfe013d7c8cbfde, .lo = 0xa32dbac46f30cfff, .ex = -6, .sgn = 0x1}, /* i=124 */
+    {.hi = 0x9e75221a352ba779, .lo = 0xa52b7ea62f2198d0, .ex = -6, .sgn = 0x1}, /* i=125 */
+    {.hi = 0xbee23afc0853b6e9, .lo = 0x289782c20df350a1, .ex = -7, .sgn = 0x1}, /* i=126 */
+    {.hi = 0x0, .lo = 0x0, .ex = 127, .sgn = 0x1}, /* i=127 */
+    {.hi = 0x0, .lo = 0x0, .ex = 127, .sgn = 0x1}, /* i=128 */
+    {.hi = 0xc122451c45155104, .lo = 0xb16137f09a002b3c, .ex = -7, .sgn = 0x0}, /* i=129 */
+    {.hi = 0xa195492cc06604e6, .lo = 0x4a18dff7cdb4ae5c, .ex = -6, .sgn = 0x0}, /* i=130 */
+    {.hi = 0xe31e9760a5578c63, .lo = 0xf9eb2f284f31c35c, .ex = -6, .sgn = 0x0}, /* i=131 */
+    {.hi = 0x8a4f1f2002d46756, .lo = 0x5be970314148c645, .ex = -5, .sgn = 0x0}, /* i=132 */
+    {.hi = 0xab8ae2601e777722, .lo = 0x3b89d7f254f8d4d, .ex = -5, .sgn = 0x0}, /* i=133 */
+    {.hi = 0xcd0c3dab9ef3dd1b, .lo = 0x13b26f298aa357c8, .ex = -5, .sgn = 0x0}, /* i=134 */
+    {.hi = 0xe65b9e6eed965c36, .lo = 0xe09f5fe2058d6006, .ex = -5, .sgn = 0x0}, /* i=135 */
+    {.hi = 0x842cc5acf1d03445, .lo = 0x1fecdfa819b96098, .ex = -4, .sgn = 0x0}, /* i=136 */
+    {.hi = 0x9103dae3c2a4ec67, .lo = 0xe0863df62ab5671a, .ex = -4, .sgn = 0x0}, /* i=137 */
+    {.hi = 0xa242f01edefd6a37, .lo = 0x469355b78dc796e3, .ex = -4, .sgn = 0x0}, /* i=138 */
+    {.hi = 0xaf4ad26cbc8e5be7, .lo = 0xe8b8b88a14ff0ce, .ex = -4, .sgn = 0x0}, /* i=139 */
+    {.hi = 0xc0cbf17a071f80dc, .lo = 0xf96ffdf76a147ccc, .ex = -4, .sgn = 0x0}, /* i=140 */
+    {.hi = 0xce06196a692a41fb, .lo = 0xbe3ccc15326765f, .ex = -4, .sgn = 0x0}, /* i=141 */
+    {.hi = 0xdb56446d6ad8deff, .lo = 0xa8112e35a60e6375, .ex = -4, .sgn = 0x0}, /* i=142 */
+    {.hi = 0xe8bcbc410c9b219d, .lo = 0xaf7df76ad29e5b60, .ex = -4, .sgn = 0x0}, /* i=143 */
+    {.hi = 0xf639cc185088fe5d, .lo = 0x4066e87f2c0f7340, .ex = -4, .sgn = 0x0}, /* i=144 */
+    {.hi = 0x842cc5acf1d03445, .lo = 0x1fecdfa819b96098, .ex = -3, .sgn = 0x0}, /* i=145 */
+    {.hi = 0x8b064012593d85a5, .lo = 0x52013c7a80ad089b, .ex = -3, .sgn = 0x0}, /* i=146 */
+    {.hi = 0x91eb89524e100d23, .lo = 0x8fd3df5c52d67e7b, .ex = -3, .sgn = 0x0}, /* i=147 */
+    {.hi = 0x98dcca69d27c263b, .lo = 0x8e94203f336fc8c5, .ex = -3, .sgn = 0x0}, /* i=148 */
+    {.hi = 0x9fda2d2cc9465c4f, .lo = 0x32b9565f5355182, .ex = -3, .sgn = 0x0}, /* i=149 */
+    {.hi = 0xa6e3dc4bde0e3cdb, .lo = 0x570ff874170d2a9, .ex = -3, .sgn = 0x0}, /* i=150 */
+    {.hi = 0xab9be6480c66ea9e, .lo = 0x9ae21fd871b8d27c, .ex = -3, .sgn = 0x0}, /* i=151 */
+    {.hi = 0xb2ba75f46099cf8b, .lo = 0x2c3c2e77904afa78, .ex = -3, .sgn = 0x0}, /* i=152 */
+    {.hi = 0xb9e5c83a7e8a655b, .lo = 0xcbffe9661fe72421, .ex = -3, .sgn = 0x0}, /* i=153 */
+    {.hi = 0xc11e0b2a8d1e0ddb, .lo = 0x9a631e830fd30904, .ex = -3, .sgn = 0x0}, /* i=154 */
+    {.hi = 0xc8636dcfe5e6ca0a, .lo = 0x88e72835b3292d50, .ex = -3, .sgn = 0x0}, /* i=155 */
+    {.hi = 0xcd43bc6f5d51c3e8, .lo = 0xfbfb0e3f0fd23074, .ex = -3, .sgn = 0x0}, /* i=156 */
+    {.hi = 0xd49f69e456cf1b79, .lo = 0x5f53bd2e406e66e7, .ex = -3, .sgn = 0x0}, /* i=157 */
+    {.hi = 0xdc08b985c11e9068, .lo = 0x3b9cd767c3b1ac53, .ex = -3, .sgn = 0x0}, /* i=158 */
+    {.hi = 0xe1014558bfcda3e2, .lo = 0x35470a74be1230ec, .ex = -3, .sgn = 0x0}, /* i=159 */
+    {.hi = 0xe881bf932af3dac0, .lo = 0xc524848e3443e040, .ex = -3, .sgn = 0x0}, /* i=160 */
+    {.hi = 0xed89ed86a44a01aa, .lo = 0x11d49f96cb88317b, .ex = -3, .sgn = 0x0}, /* i=161 */
+    {.hi = 0xf52224f82557a459, .lo = 0x8dcca8d7f17fa2a9, .ex = -3, .sgn = 0x0}, /* i=162 */
+    {.hi = 0xfa3a589a6f9146d8, .lo = 0x388212895529a6fb, .ex = -3, .sgn = 0x0}, /* i=163 */
+    {.hi = 0x80f572b1363487b9, .lo = 0xf5bd0b5b3479d5f4, .ex = -2, .sgn = 0x0}, /* i=164 */
+    {.hi = 0x8389c3026ac3139b, .lo = 0x62dda9d2270fa1f4, .ex = -2, .sgn = 0x0}, /* i=165 */
+    {.hi = 0x86216b3b0b17188b, .lo = 0x163ceae88f720f1e, .ex = -2, .sgn = 0x0}, /* i=166 */
+    {.hi = 0x8a0b3f79b3bc180f, .lo = 0x49b55ea7d3730d7, .ex = -2, .sgn = 0x0}, /* i=167 */
+    {.hi = 0x8cab69dcde17d2f7, .lo = 0x3ad1aa142b94f16a, .ex = -2, .sgn = 0x0}, /* i=168 */
+    {.hi = 0x8f4f0b3c44cfa2a2, .lo = 0x586e9343c9cfdbac, .ex = -2, .sgn = 0x0}, /* i=169 */
+    {.hi = 0x934b1089a6dc93c1, .lo = 0xdf5bb3b60554e152, .ex = -2, .sgn = 0x0}, /* i=170 */
+    {.hi = 0x95f783e6e49a9cfa, .lo = 0x4a5004f3ef063313, .ex = -2, .sgn = 0x0}, /* i=171 */
+    {.hi = 0x98a78f0e9ae71d85, .lo = 0x2cdec34784707839, .ex = -2, .sgn = 0x0}, /* i=172 */
+    {.hi = 0x9b5b3bb5f088b766, .lo = 0xd878bbe3d392be25, .ex = -2, .sgn = 0x0}, /* i=173 */
+    {.hi = 0x9e1293b9998c1daa, .lo = 0x5b035eae273a855f, .ex = -2, .sgn = 0x0}, /* i=174 */
+    {.hi = 0xa22c8f029cfa45a9, .lo = 0xdb5b709e0b69e773, .ex = -2, .sgn = 0x0}, /* i=175 */
+    {.hi = 0xa4ed3f9de620f666, .lo = 0x9b5e973353638c11, .ex = -2, .sgn = 0x0}, /* i=176 */
+    {.hi = 0xa7b1bf5dd4c07d4e, .lo = 0x699db68db75e9a7f, .ex = -2, .sgn = 0x0}, /* i=177 */
+    {.hi = 0xaa7a18dbdf0d44aa, .lo = 0x604884a8dd76d08a, .ex = -2, .sgn = 0x0}, /* i=178 */
+    {.hi = 0xad4656ddf6fd070c, .lo = 0x9ea10260fe452ba2, .ex = -2, .sgn = 0x0}, /* i=179 */
+    {.hi = 0xb0168457848f5f48, .lo = 0xbb6f9fb246068d52, .ex = -2, .sgn = 0x0}, /* i=180 */
+    {.hi = 0xb2eaac6a67005513, .lo = 0xf4b716f6fec8156b, .ex = -2, .sgn = 0x0}, /* i=181 */
+};
+
+/* For 8128 <= j <= 8256, _LOG_INV_2_2[j-8128] is an approximation of
+   -log(_INVERSE_2_2[j-8128]), where an entry (hi,lo,ex,sgn) represents
+   (-1)^sgn*(hi+lo/2^64)*2^(ex-63)
+   (the binary point is after the most significant bit of hi).
+   If was generated with output_log_inv_2_2(6,14,8128,8256,7,62) from the
+   accompanying file dint.sage.
+   The approximation error is bounded by 2^-136 (absolute, attained for j=8256)
+   and 2^-128 (relative, attained for j=8209). */
+static const chelis_cr_pow__dint64_t chelis_cr_pow___LOG_INV_2_2[] = {
+    {.hi = 0xff015358833c47e1, .lo = 0xbb481c8ee141695a, .ex = -8, .sgn = 0x1}, /* j=8128 */
+    {.hi = 0xfb0933b732572a6d, .lo = 0x214cca3dd1d4796a, .ex = -8, .sgn = 0x1}, /* j=8129 */
+    {.hi = 0xf710f492711d9d26, .lo = 0xfbc7b38b17b2019, .ex = -8, .sgn = 0x1}, /* j=8130 */
+    {.hi = 0xf31895e84b1a6be6, .lo = 0xb76782b9e88c84cb, .ex = -8, .sgn = 0x1}, /* j=8131 */
+    {.hi = 0xef2017b6cba9cf9a, .lo = 0x2dc85881664025b5, .ex = -8, .sgn = 0x1}, /* j=8132 */
+    {.hi = 0xeb2779fbfdf96874, .lo = 0xce4ab4e678d0ed03, .ex = -8, .sgn = 0x1}, /* j=8133 */
+    {.hi = 0xe72ebcb5ed08382b, .lo = 0xb60585f4c4bb6062, .ex = -8, .sgn = 0x1}, /* j=8134 */
+    {.hi = 0xe335dfe2a3a69c2b, .lo = 0x59bcffe9d5650564, .ex = -8, .sgn = 0x1}, /* j=8135 */
+    {.hi = 0xdf3ce3802c7647cd, .lo = 0x3602021fa93b1e18, .ex = -8, .sgn = 0x1}, /* j=8136 */
+    {.hi = 0xdb43c78c91ea3e8c, .lo = 0x9944002534d09b3d, .ex = -8, .sgn = 0x1}, /* j=8137 */
+    {.hi = 0xd74a8c05de46ce3a, .lo = 0x87aa95782311a277, .ex = -8, .sgn = 0x1}, /* j=8138 */
+    {.hi = 0xd35130ea1ba18930, .lo = 0xb88be10313a1303d, .ex = -8, .sgn = 0x1}, /* j=8139 */
+    {.hi = 0xcf57b63753e14083, .lo = 0xad54bc31433dddba, .ex = -8, .sgn = 0x1}, /* j=8140 */
+    {.hi = 0xcb5e1beb90bdfe33, .lo = 0xe1b7d813e3f825e1, .ex = -8, .sgn = 0x1}, /* j=8141 */
+    {.hi = 0xc7646204dbc0ff5e, .lo = 0x14f8c1be7370f219, .ex = -8, .sgn = 0x1}, /* j=8142 */
+    {.hi = 0xc36a88813e44ae6a, .lo = 0xac27c5a6139cd30c, .ex = -8, .sgn = 0x1}, /* j=8143 */
+    {.hi = 0xbf708f5ec1749d3c, .lo = 0x2d23a0744e00f594, .ex = -8, .sgn = 0x1}, /* j=8144 */
+    {.hi = 0xbb76769b6e4d7f5c, .lo = 0xd235e25fb9644c31, .ex = -8, .sgn = 0x1}, /* j=8145 */
+    {.hi = 0xb77c3e354d9d242b, .lo = 0x361ee0bcb5db0449, .ex = -8, .sgn = 0x1}, /* j=8146 */
+    {.hi = 0xb381e62a68027106, .lo = 0x18660815da3d7963, .ex = -8, .sgn = 0x1}, /* j=8147 */
+    {.hi = 0xaf876e78c5ed5b77, .lo = 0x39c357b6bfdf81b5, .ex = -8, .sgn = 0x1}, /* j=8148 */
+    {.hi = 0xab8cd71e6f9ee35d, .lo = 0x5076c62c951204f6, .ex = -8, .sgn = 0x1}, /* j=8149 */
+    {.hi = 0xa79220196d290d15, .lo = 0x146244d643f7fa2b, .ex = -8, .sgn = 0x1}, /* j=8150 */
+    {.hi = 0xa3974967c66edba1, .lo = 0x62bb0f3208d9a1bb, .ex = -8, .sgn = 0x1}, /* j=8151 */
+    {.hi = 0x9f9c530783244ad2, .lo = 0x7926e92808bd580d, .ex = -8, .sgn = 0x1}, /* j=8152 */
+    {.hi = 0x9ba13cf6aace496c, .lo = 0x4819e620d5fcc068, .ex = -8, .sgn = 0x1}, /* j=8153 */
+    {.hi = 0x97a6073344c2b34b, .lo = 0xdc494943d427214e, .ex = -8, .sgn = 0x1}, /* j=8154 */
+    {.hi = 0x93aab1bb58284b8b, .lo = 0xdf0805c4161e404c, .ex = -8, .sgn = 0x1}, /* j=8155 */
+    {.hi = 0x8faf3c8cebf6b6a8, .lo = 0x2d615caaa0514c3c, .ex = -8, .sgn = 0x1}, /* j=8156 */
+    {.hi = 0x8bb3a7a606f674a0, .lo = 0x85c60c12eca0aedc, .ex = -8, .sgn = 0x1}, /* j=8157 */
+    {.hi = 0x87b7f304afc0db1a, .lo = 0x4c207a522524f8de, .ex = -8, .sgn = 0x1}, /* j=8158 */
+    {.hi = 0x83bc1ea6ecc00f81, .lo = 0x64243e02c6215a4f, .ex = -8, .sgn = 0x1}, /* j=8159 */
+    {.hi = 0xff805515885e0250, .lo = 0x435ab4da6a5bb48d, .ex = -9, .sgn = 0x1}, /* j=8160 */
+    {.hi = 0xf7882d5c7832c6cc, .lo = 0x9e06fc84b6ea5e24, .ex = -9, .sgn = 0x1}, /* j=8161 */
+    {.hi = 0xef8fc61eb4b74f6e, .lo = 0x91ab122ee427cfb5, .ex = -9, .sgn = 0x1}, /* j=8162 */
+    {.hi = 0xe7971f584945efae, .lo = 0x5f832513e3211643, .ex = -9, .sgn = 0x1}, /* j=8163 */
+    {.hi = 0xdf9e390540da5fbe, .lo = 0x5e7b48cfeeb85aa8, .ex = -9, .sgn = 0x1}, /* j=8164 */
+    {.hi = 0xd7a51321a611b0c1, .lo = 0xb36a9f58eb4ccd08, .ex = -9, .sgn = 0x1}, /* j=8165 */
+    {.hi = 0xcfabada9832a4101, .lo = 0x3360751e43c7af35, .ex = -9, .sgn = 0x1}, /* j=8166 */
+    {.hi = 0xc7b20898e203b01e, .lo = 0x6fab78aca91193cb, .ex = -9, .sgn = 0x1}, /* j=8167 */
+    {.hi = 0xbfb823ebcc1ed344, .lo = 0xeb432409cffdad8d, .ex = -9, .sgn = 0x1}, /* j=8168 */
+    {.hi = 0xb7bdff9e4a9da959, .lo = 0x793b5acf3a336462, .ex = -9, .sgn = 0x1}, /* j=8169 */
+    {.hi = 0xafc39bac66434f27, .lo = 0xc3ea2cd93f316b34, .ex = -9, .sgn = 0x1}, /* j=8170 */
+    {.hi = 0xa7c8f8122773f38d, .lo = 0xfc679a28e9d9f212, .ex = -9, .sgn = 0x1}, /* j=8171 */
+    {.hi = 0x9fce14cb9634cba6, .lo = 0xb20f215bd3b58c61, .ex = -9, .sgn = 0x1}, /* j=8172 */
+    {.hi = 0x97d2f1d4ba2c06f0, .lo = 0xd1aacedcefe9d377, .ex = -9, .sgn = 0x1}, /* j=8173 */
+    {.hi = 0x8fd78f299aa0c375, .lo = 0xcbef6fac33691e95, .ex = -9, .sgn = 0x1}, /* j=8174 */
+    {.hi = 0x87dbecc63e7b01ed, .lo = 0xe2f1775134c8da75, .ex = -9, .sgn = 0x1}, /* j=8175 */
+    {.hi = 0xffc0154d588733c5, .lo = 0x3c742a7c76356396, .ex = -10, .sgn = 0x1}, /* j=8176 */
+    {.hi = 0xefc7d18dd4485b9e, .lo = 0xca47c52b7d7ffce2, .ex = -10, .sgn = 0x1}, /* j=8177 */
+    {.hi = 0xdfcf0e45fbce3e80, .lo = 0x7e4cfbd830393b88, .ex = -10, .sgn = 0x1}, /* j=8178 */
+    {.hi = 0xcfd5cb6dd9ef05dd, .lo = 0x7370ae83f9e72748, .ex = -10, .sgn = 0x1}, /* j=8179 */
+    {.hi = 0xbfdc08fd78c229b9, .lo = 0xe6dbb624f9739782, .ex = -10, .sgn = 0x1}, /* j=8180 */
+    {.hi = 0xafe1c6ece1a058dd, .lo = 0x97fa2fd0c9dc723e, .ex = -10, .sgn = 0x1}, /* j=8181 */
+    {.hi = 0x9fe705341d236102, .lo = 0x7199cd06ae5d39b3, .ex = -10, .sgn = 0x1}, /* j=8182 */
+    {.hi = 0x8febc3cb332616ff, .lo = 0x7b6d1248c3e1fd40, .ex = -10, .sgn = 0x1}, /* j=8183 */
+    {.hi = 0xffe0055455887de0, .lo = 0x26828c92649a3a39, .ex = -11, .sgn = 0x1}, /* j=8184 */
+    {.hi = 0xdfe7839214b4e8ae, .lo = 0xda6959f7f0e01bf0, .ex = -11, .sgn = 0x1}, /* j=8185 */
+    {.hi = 0xbfee023faf0c2480, .lo = 0xb47505bfa5a03b06, .ex = -11, .sgn = 0x1}, /* j=8186 */
+    {.hi = 0x9ff3814d2e4a36b2, .lo = 0xa8740b91c95df537, .ex = -11, .sgn = 0x1}, /* j=8187 */
+    {.hi = 0xfff0015535588833, .lo = 0x3c56c598c659c2a3, .ex = -12, .sgn = 0x1}, /* j=8188 */
+    {.hi = 0xbff7008ff5e0c257, .lo = 0x379eba7e6465ff63, .ex = -12, .sgn = 0x1}, /* j=8189 */
+    {.hi = 0xfff8005551558885, .lo = 0xde026e271ee0549d, .ex = -13, .sgn = 0x1}, /* j=8190 */
+    {.hi = 0x0, .lo = 0x0, .ex = 127, .sgn = 0x1}, /* j=8191 */
+    {.hi = 0x0, .lo = 0x0, .ex = 127, .sgn = 0x1}, /* j=8192 */
+    {.hi = 0xc004802401440c26, .lo = 0xdfeb485085f6f454, .ex = -13, .sgn = 0x0}, /* j=8193 */
+    {.hi = 0xa00640535a37a37a, .lo = 0x6bc1e20eac8448b4, .ex = -12, .sgn = 0x0}, /* j=8194 */
+    {.hi = 0xe00c40e4bd6e4efd, .lo = 0xc72446cc1bf728bd, .ex = -12, .sgn = 0x0}, /* j=8195 */
+    {.hi = 0x900a20f319a3e273, .lo = 0x569b26aaa485ea5c, .ex = -11, .sgn = 0x0}, /* j=8196 */
+    {.hi = 0xb00f21bbe3e388ee, .lo = 0x5f69768284463b9b, .ex = -11, .sgn = 0x0}, /* j=8197 */
+    {.hi = 0xd01522dcc4f87991, .lo = 0x14d9d76196d8043a, .ex = -11, .sgn = 0x0}, /* j=8198 */
+    {.hi = 0xf01c2465c5e61b6f, .lo = 0x661e135f49a47c40, .ex = -11, .sgn = 0x0}, /* j=8199 */
+    {.hi = 0x881213337898871e, .lo = 0x9a31ba0cbc030353, .ex = -10, .sgn = 0x0}, /* j=8200 */
+    {.hi = 0x98169478296fad41, .lo = 0x7ad1e9c315328f7e, .ex = -10, .sgn = 0x0}, /* j=8201 */
+    {.hi = 0xa81b9608fc3c50ec, .lo = 0xf105b66ec4703ede, .ex = -10, .sgn = 0x0}, /* j=8202 */
+    {.hi = 0xb82117edf8832797, .lo = 0xd6aef30cd312169a, .ex = -10, .sgn = 0x0}, /* j=8203 */
+    {.hi = 0xc8271a2f2689e388, .lo = 0xe6e2acf8f4d4c24a, .ex = -10, .sgn = 0x0}, /* j=8204 */
+    {.hi = 0xd82d9cd48f574c00, .lo = 0x28bb3cd9f2a65fb5, .ex = -10, .sgn = 0x0}, /* j=8205 */
+    {.hi = 0xe8349fe63cb35564, .lo = 0x224a96f5a7471c46, .ex = -10, .sgn = 0x0}, /* j=8206 */
+    {.hi = 0xf83c236c39273972, .lo = 0xd462b63756c87e80, .ex = -10, .sgn = 0x0}, /* j=8207 */
+    {.hi = 0x842213b747fec7bb, .lo = 0x3ff51287882500ed, .ex = -9, .sgn = 0x0}, /* j=8208 */
+    {.hi = 0x8c2655faa6a1323f, .lo = 0x1ab9679b55f78a6b, .ex = -9, .sgn = 0x0}, /* j=8209 */
+    {.hi = 0x942ad8843ee1a9cd, .lo = 0x17e4b7ac6c600cb4, .ex = -9, .sgn = 0x0}, /* j=8210 */
+    {.hi = 0x9c2f9b581787cf0d, .lo = 0xfd1a09c848e3950e, .ex = -9, .sgn = 0x0}, /* j=8211 */
+    {.hi = 0xa4349e7a37bc21ed, .lo = 0x318b2ddd9d0a33b4, .ex = -9, .sgn = 0x0}, /* j=8212 */
+    {.hi = 0xac39e1eea7080dbc, .lo = 0x9dd91e52c79fd070, .ex = -9, .sgn = 0x0}, /* j=8213 */
+    {.hi = 0xb43f65b96d55f55a, .lo = 0x72de1d99ce252efd, .ex = -9, .sgn = 0x0}, /* j=8214 */
+    {.hi = 0xbc4529de92f13f58, .lo = 0xd7bd1d62ef25480d, .ex = -9, .sgn = 0x0}, /* j=8215 */
+    {.hi = 0xc44b2e6220866227, .lo = 0x7f921124f1ecb59e, .ex = -9, .sgn = 0x0}, /* j=8216 */
+    {.hi = 0xcc5173481f22f03f, .lo = 0x271ee1cd6d5cdf9e, .ex = -9, .sgn = 0x0}, /* j=8217 */
+    {.hi = 0xd457f8949835a44e, .lo = 0xfad0cc8b5faea8cc, .ex = -9, .sgn = 0x0}, /* j=8218 */
+    {.hi = 0xdc5ebe4b958e6d6b, .lo = 0xe57a0acb9d5cd4df, .ex = -9, .sgn = 0x0}, /* j=8219 */
+    {.hi = 0xe465c471215e7b41, .lo = 0xc81bb5a8d789f444, .ex = -9, .sgn = 0x0}, /* j=8220 */
+    {.hi = 0xec6d0b0946384a46, .lo = 0x9b1beb40437575f5, .ex = -9, .sgn = 0x0}, /* j=8221 */
+    {.hi = 0xf47492180f0fafef, .lo = 0x7944509046652d99, .ex = -9, .sgn = 0x0}, /* j=8222 */
+    {.hi = 0xfc7c59a18739e6e7, .lo = 0x94e51ebff53a2f15, .ex = -9, .sgn = 0x0}, /* j=8223 */
+    {.hi = 0x824230d4dd36cda4, .lo = 0x8bbc7f765b13ebbe, .ex = -8, .sgn = 0x0}, /* j=8224 */
+    {.hi = 0x8646551a5a617b6b, .lo = 0xf61305ef7390939c, .ex = -8, .sgn = 0x0}, /* j=8225 */
+    {.hi = 0x8a4a99a34159d69f, .lo = 0x3abc32a78afd4b7b, .ex = -8, .sgn = 0x0}, /* j=8226 */
+    {.hi = 0x8e4efe71988d8426, .lo = 0x17596a598cb29436, .ex = -8, .sgn = 0x0}, /* j=8227 */
+    {.hi = 0x92538387669afa1b, .lo = 0x1c890bee9a9d743c, .ex = -8, .sgn = 0x0}, /* j=8228 */
+    {.hi = 0x965828e6b25185ec, .lo = 0xeaafbd07b543145d, .ex = -8, .sgn = 0x0}, /* j=8229 */
+    {.hi = 0x9a5cee9182b15280, .lo = 0x6517bc4112d64b17, .ex = -8, .sgn = 0x0}, /* j=8230 */
+    {.hi = 0x9e61d489deeb6e53, .lo = 0xdb94a1dfd653d3a5, .ex = -8, .sgn = 0x0}, /* j=8231 */
+    {.hi = 0xa266dad1ce61d1a3, .lo = 0x2ada01ce7ed36080, .ex = -8, .sgn = 0x0}, /* j=8232 */
+    {.hi = 0xa66c016b58a7648c, .lo = 0xd3b36c029ea7bb5d, .ex = -8, .sgn = 0x0}, /* j=8233 */
+    {.hi = 0xaa71485885800538, .lo = 0x94c529f32403828, .ex = -8, .sgn = 0x0}, /* j=8234 */
+    {.hi = 0xae76af9b5ce08dfb, .lo = 0xb6b6676248bba139, .ex = -8, .sgn = 0x0}, /* j=8235 */
+    {.hi = 0xb27c3735e6eedb86, .lo = 0x7bdd0c2a9c7a679a, .ex = -8, .sgn = 0x0}, /* j=8236 */
+    {.hi = 0xb47f0724b1906935, .lo = 0x23deb274e953a259, .ex = -8, .sgn = 0x0}, /* j=8237 */
+    {.hi = 0xb884bf4697559ffa, .lo = 0xdae7e343fa859415, .ex = -8, .sgn = 0x0}, /* j=8238 */
+    {.hi = 0xbc8a97c544fdd5eb, .lo = 0x17759bff5c717993, .ex = -8, .sgn = 0x0}, /* j=8239 */
+    {.hi = 0xc09090a2c35aa070, .lo = 0x52e7e4dde874dace, .ex = -8, .sgn = 0x0}, /* j=8240 */
+    {.hi = 0xc496a9e11b6eb30c, .lo = 0xa88971f8277a4d11, .ex = -8, .sgn = 0x0}, /* j=8241 */
+    {.hi = 0xc89ce382566de587, .lo = 0x269de85f0df92588, .ex = -8, .sgn = 0x0}, /* j=8242 */
+    {.hi = 0xcca33d887dbd3a1a, .lo = 0x180d255422c3377c, .ex = -8, .sgn = 0x0}, /* j=8243 */
+    {.hi = 0xd0a9b7f59af2e3a2, .lo = 0x46da70925ee85c05, .ex = -8, .sgn = 0x0}, /* j=8244 */
+    {.hi = 0xd4b052cbb7d64bcf, .lo = 0x37968ceafaf7b453, .ex = -8, .sgn = 0x0}, /* j=8245 */
+    {.hi = 0xd8b70e0cde601954, .lo = 0x5dfba4cfdd38a059, .ex = -8, .sgn = 0x0}, /* j=8246 */
+    {.hi = 0xdcbde9bb18ba361b, .lo = 0x4ae21abe75d5a19b, .ex = -8, .sgn = 0x0}, /* j=8247 */
+    {.hi = 0xe0c4e5d8713fd576, .lo = 0xd3bd4fd98a1e6fe5, .ex = -8, .sgn = 0x0}, /* j=8248 */
+    {.hi = 0xe4cc0266f27d7a57, .lo = 0x33cf7d5ebfb93ad3, .ex = -8, .sgn = 0x0}, /* j=8249 */
+    {.hi = 0xe8d33f68a730fd7f, .lo = 0x2743c805a4928087, .ex = -8, .sgn = 0x0}, /* j=8250 */
+    {.hi = 0xecda9cdf9a4993ba, .lo = 0x5dbeb9795455a5, .ex = -8, .sgn = 0x0}, /* j=8251 */
+    {.hi = 0xf0e21acdd6e7d412, .lo = 0xb6ed80852ae6fd63, .ex = -8, .sgn = 0x0}, /* j=8252 */
+    {.hi = 0xf4e9b935685dbe0b, .lo = 0xf237cff1acb306b3, .ex = -8, .sgn = 0x0}, /* j=8253 */
+    {.hi = 0xf8f178185a2ebfd9, .lo = 0xd81648249cece4c, .ex = -8, .sgn = 0x0}, /* j=8254 */
+    {.hi = 0xfcf95778b80fbc98, .lo = 0x176cd56887ac7fe9, .ex = -8, .sgn = 0x0}, /* j=8255 */
+    {.hi = 0x8080abac46f38946, .lo = 0x662d417ced007a46, .ex = -7, .sgn = 0x0}, /* j=8256 */
+};
+
+/* for 0 <= i < 64, T1_2[i] is a 128-bit nearest approximation of 2^(i/64),
+   with error bounded by 2^-128 (both absolutely and relatively).
+   Table generated by output_T1_2() from the accompanying dint.sage file. */
+static const chelis_cr_pow__dint64_t chelis_cr_pow__T1_2[] = {
+    {.hi = 0x8000000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8164d1f3bc030773, .lo = 0x7be56527bd14def5, .ex = 0, .sgn = 0x0},
+    {.hi = 0x82cd8698ac2ba1d7, .lo = 0x3e2a475b46520bff, .ex = 0, .sgn = 0x0},
+    {.hi = 0x843a28c3acde4046, .lo = 0x1af92eca13fd1582, .ex = 0, .sgn = 0x0},
+    {.hi = 0x85aac367cc487b14, .lo = 0xc5c95b8c2154c1b2, .ex = 0, .sgn = 0x0},
+    {.hi = 0x871f61969e8d1010, .lo = 0x3a1727c57b52a956, .ex = 0, .sgn = 0x0},
+    {.hi = 0x88980e8092da8527, .lo = 0x5df8d76c98c67563, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8a14d575496efd9a, .lo = 0x80ca1d92c3680c2, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8b95c1e3ea8bd6e6, .lo = 0xfbe4628758a53c90, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8d1adf5b7e5ba9e5, .lo = 0xb4c7b4968e41ad36, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8ea4398b45cd53c0, .lo = 0x2dc0144c8783d4c6, .ex = 0, .sgn = 0x0},
+    {.hi = 0x9031dc431466b1dc, .lo = 0x775814a8494e87e2, .ex = 0, .sgn = 0x0},
+    {.hi = 0x91c3d373ab11c336, .lo = 0xfd6d8e0ae5ac9d8, .ex = 0, .sgn = 0x0},
+    {.hi = 0x935a2b2f13e6e92b, .lo = 0xd339940e9d924ee7, .ex = 0, .sgn = 0x0},
+    {.hi = 0x94f4efa8fef70961, .lo = 0x2e8afad12551de54, .ex = 0, .sgn = 0x0},
+    {.hi = 0x96942d3720185a00, .lo = 0x48ea9b683a9c22c5, .ex = 0, .sgn = 0x0},
+    {.hi = 0x9837f0518db8a96f, .lo = 0x46ad23182e42f6f6, .ex = 0, .sgn = 0x0},
+    {.hi = 0x99e0459320b7fa64, .lo = 0xe43086cb34b5fcaf, .ex = 0, .sgn = 0x0},
+    {.hi = 0x9b8d39b9d54e5538, .lo = 0xa2a817a2a3cc3f1f, .ex = 0, .sgn = 0x0},
+    {.hi = 0x9d3ed9a72cffb750, .lo = 0xde494cf050e99b0b, .ex = 0, .sgn = 0x0},
+    {.hi = 0x9ef5326091a111ad, .lo = 0xa0911f09ebb9fdd1, .ex = 0, .sgn = 0x0},
+    {.hi = 0xa0b0510fb9714fc2, .lo = 0x192dc79edb0fd9a9, .ex = 0, .sgn = 0x0},
+    {.hi = 0xa27043030c496818, .lo = 0x9b7a04ef80cfdea8, .ex = 0, .sgn = 0x0},
+    {.hi = 0xa43515ae09e6809e, .lo = 0xd1db4831781e1ef, .ex = 0, .sgn = 0x0},
+    {.hi = 0xa5fed6a9b15138ea, .lo = 0x1cbd7f621710701b, .ex = 0, .sgn = 0x0},
+    {.hi = 0xa7cd93b4e9653569, .lo = 0x9ec5b4d5039f72af, .ex = 0, .sgn = 0x0},
+    {.hi = 0xa9a15ab4ea7c0ef8, .lo = 0x541e24ec3531fa73, .ex = 0, .sgn = 0x0},
+    {.hi = 0xab7a39b5a93ed337, .lo = 0x658023b2759e0079, .ex = 0, .sgn = 0x0},
+    {.hi = 0xad583eea42a14ac6, .lo = 0x4980a8c8f59a2ec4, .ex = 0, .sgn = 0x0},
+    {.hi = 0xaf3b78ad690a4374, .lo = 0xdf26101ccbb35033, .ex = 0, .sgn = 0x0},
+    {.hi = 0xb123f581d2ac258f, .lo = 0x87d037e96d215d8e, .ex = 0, .sgn = 0x0},
+    {.hi = 0xb311c412a9112489, .lo = 0x3ecf14dc798a519c, .ex = 0, .sgn = 0x0},
+    {.hi = 0xb504f333f9de6484, .lo = 0x597d89b3754abe9f, .ex = 0, .sgn = 0x0},
+    {.hi = 0xb6fd91e328d17791, .lo = 0x7165f0ddd541a5a, .ex = 0, .sgn = 0x0},
+    {.hi = 0xb8fbaf4762fb9ee9, .lo = 0x1b879778566b65a2, .ex = 0, .sgn = 0x0},
+    {.hi = 0xbaff5ab2133e45fb, .lo = 0x74d519d24593838c, .ex = 0, .sgn = 0x0},
+    {.hi = 0xbd08a39f580c36be, .lo = 0xa8811fb66d0faf7a, .ex = 0, .sgn = 0x0},
+    {.hi = 0xbf1799b67a731082, .lo = 0xe815d0abcbf0b851, .ex = 0, .sgn = 0x0},
+    {.hi = 0xc12c4cca66709456, .lo = 0x7c457d59a50087b5, .ex = 0, .sgn = 0x0},
+    {.hi = 0xc346ccda24976407, .lo = 0x20ec856128b83a42, .ex = 0, .sgn = 0x0},
+    {.hi = 0xc5672a115506dadd, .lo = 0x3e2ad0c964dd9f37, .ex = 0, .sgn = 0x0},
+    {.hi = 0xc78d74c8abb9b15c, .lo = 0xc13a2e3976c0277e, .ex = 0, .sgn = 0x0},
+    {.hi = 0xc9b9bd866e2f27a2, .lo = 0x80e1f92a0511697e, .ex = 0, .sgn = 0x0},
+    {.hi = 0xcbec14fef2727c5c, .lo = 0xf4907c8f45ebf6dd, .ex = 0, .sgn = 0x0},
+    {.hi = 0xce248c151f8480e3, .lo = 0xe235838f95f2c6ed, .ex = 0, .sgn = 0x0},
+    {.hi = 0xd06333daef2b2594, .lo = 0xd6d45c6559a4d502, .ex = 0, .sgn = 0x0},
+    {.hi = 0xd2a81d91f12ae45a, .lo = 0x12248e57c3de4028, .ex = 0, .sgn = 0x0},
+    {.hi = 0xd4f35aabcfedfa1f, .lo = 0x5921deffa6262c5b, .ex = 0, .sgn = 0x0},
+    {.hi = 0xd744fccad69d6af4, .lo = 0x39a68bb9902d3fde, .ex = 0, .sgn = 0x0},
+    {.hi = 0xd99d15c278afd7b5, .lo = 0xfe873deca3e12bac, .ex = 0, .sgn = 0x0},
+    {.hi = 0xdbfbb797daf23755, .lo = 0x3d840d5a9e29aa64, .ex = 0, .sgn = 0x0},
+    {.hi = 0xde60f4825e0e9123, .lo = 0xdd07a2d9e8466859, .ex = 0, .sgn = 0x0},
+    {.hi = 0xe0ccdeec2a94e111, .lo = 0x65895048dd333ca, .ex = 0, .sgn = 0x0},
+    {.hi = 0xe33f8972be8a5a51, .lo = 0x9bfe90795980eed, .ex = 0, .sgn = 0x0},
+    {.hi = 0xe5b906e77c8348a8, .lo = 0x1e5e8f4a4edbb0ed, .ex = 0, .sgn = 0x0},
+    {.hi = 0xe8396a503c4bdc68, .lo = 0x791790d0ac70c7de, .ex = 0, .sgn = 0x0},
+    {.hi = 0xeac0c6e7dd24392e, .lo = 0xd02d75b3706e54fb, .ex = 0, .sgn = 0x0},
+    {.hi = 0xed4f301ed9942b84, .lo = 0x600d2db6a64bfb12, .ex = 0, .sgn = 0x0},
+    {.hi = 0xefe4b99bdcdaf5cb, .lo = 0x46561cf6948db913, .ex = 0, .sgn = 0x0},
+    {.hi = 0xf281773c59ffb139, .lo = 0xe8980a9cc8f47a4b, .ex = 0, .sgn = 0x0},
+    {.hi = 0xf5257d152486cc2c, .lo = 0x7b9d0c7aed980fc3, .ex = 0, .sgn = 0x0},
+    {.hi = 0xf7d0df730ad13bb8, .lo = 0xfe90d496d60fb6eb, .ex = 0, .sgn = 0x0},
+    {.hi = 0xfa83b2db722a033a, .lo = 0x7c25bb14315d7fcd, .ex = 0, .sgn = 0x0},
+    {.hi = 0xfd3e0c0cf486c174, .lo = 0x853f3a5931e0ee03, .ex = 0, .sgn = 0x0},
+};
+
+/* for 0 <= i < 64, T2_2[i] is a 128-bit nearest approximation of 2^(i/2^12),
+   with error bounded by 2^-128 (both absolutely and relatively).
+   Table generated by output_T2_2() from the accompanying dint.sage file. */
+static const chelis_cr_pow__dint64_t chelis_cr_pow__T2_2[] = {
+    {.hi = 0x8000000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80058baf7fee3b5d, .lo = 0x1c718b38e549cb93, .ex = 0, .sgn = 0x0},
+    {.hi = 0x800b179c82028fd0, .lo = 0x945e54e2ae18f2f0, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8010a3c708e73282, .lo = 0x2b96d62d51c15a07, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8016302f17467628, .lo = 0x3690dfe44d11d008, .ex = 0, .sgn = 0x0},
+    {.hi = 0x801bbcd4afcacb08, .lo = 0xe23a986bd3e626f0, .ex = 0, .sgn = 0x0},
+    {.hi = 0x802149b7d51ebefb, .lo = 0x7bdbadbc888aeb29, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8026d6d889ecfd69, .lo = 0xb904bbfb40d3a2b7, .ex = 0, .sgn = 0x0},
+    {.hi = 0x802c6436d0e04f50, .lo = 0xff8ce94a6797b3ce, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8031f1d2aca39b43, .lo = 0xad9db772901d96b6, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80377fac1fe1e56a, .lo = 0x61cd0bffd7cfc683, .ex = 0, .sgn = 0x0},
+    {.hi = 0x803d0dc32d464f85, .lo = 0x43456f71b96affd4, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80429c17d77c18ed, .lo = 0x49fc841afba9c3c6, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80482aaa212e9e95, .lo = 0x86f7b54f6c45c85e, .ex = 0, .sgn = 0x0},
+    {.hi = 0x804db97a0d095b0c, .lo = 0x6c9f1f7d1efcfe68, .ex = 0, .sgn = 0x0},
+    {.hi = 0x805348879db7e67d, .lo = 0x171eb1ceef1d1f28, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8058d7d2d5e5f6b0, .lo = 0x94d589f608ee4aa2, .ex = 0, .sgn = 0x0},
+    {.hi = 0x805e675bb83f5f0f, .lo = 0x2ed38ab8472b2144, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8063f722477010a1, .lo = 0xb1652de1378af1a1, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8069872686241a12, .lo = 0xb4ad9233a0390cad, .ex = 0, .sgn = 0x0},
+    {.hi = 0x806f17687707a7af, .lo = 0xe54ec5f966eb1872, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8074a7e81cc7036b, .lo = 0x4d204ecfc11f4aab, .ex = 0, .sgn = 0x0},
+    {.hi = 0x807a38a57a0e94dc, .lo = 0x9bf3ef4d9be2d1e4, .ex = 0, .sgn = 0x0},
+    {.hi = 0x807fc9a0918ae142, .lo = 0x7068ab2230585d13, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80855ad965e88b83, .lo = 0xa0cc0a49c10ea66b, .ex = 0, .sgn = 0x0},
+    {.hi = 0x808aec4ff9d45430, .lo = 0x84099bf6830f2768, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80907e044ffb1984, .lo = 0x3aa8b9cbbc65a8ab, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80960ff66b09d765, .lo = 0xf7d88c0928ba3947, .ex = 0, .sgn = 0x0},
+    {.hi = 0x809ba2264dada76a, .lo = 0x4a8a4f44bb703db6, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80a13493fa93c0d4, .lo = 0x6699dc50dd96b774, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80a6c73f74697897, .lo = 0x6e0472ed4ccfa2e0, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80ac5a28bddc4157, .lo = 0xba2dc7e0c72e51ba, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80b1ed4fd999ab6c, .lo = 0x25335719b6e6fd20, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80b780b4ca4f64df, .lo = 0x534dfa7417846aa4, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80bd145792ab3970, .lo = 0xfc41c5c2d5336ccc, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80c2a838355b1297, .lo = 0x34dc28baed8f3fde, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80c83c56b50cf77f, .lo = 0xb880575ea03548c1, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80cdd0b3146f0d11, .lo = 0x32c1f98704428c71, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80d3654d562f95ec, .lo = 0x890e222a5eb95372, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80d8fa257cfcf26e, .lo = 0x24628efd9ca9d59b, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80de8f3b8b85a0af, .lo = 0x3b13310f5ad57fb1, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80e4248f84783c87, .lo = 0x1a9dfefaeb616564, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80e9ba216a837f8c, .lo = 0x718d1151d109bf98, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80ef4ff140564116, .lo = 0x996709da2e25f04c, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80f4e5ff089f763e, .lo = 0xe0adc640acaa6b0b, .ex = 0, .sgn = 0x0},
+    {.hi = 0x80fa7c4ac60e31e1, .lo = 0xd4eb5edc6b341283, .ex = 0, .sgn = 0x0},
+    {.hi = 0x810012d47b51a4a0, .lo = 0x8ccd7223820719e3, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8105a99c2b191ce1, .lo = 0xf24ebd6eb9ca4292, .ex = 0, .sgn = 0x0},
+    {.hi = 0x810b40a1d81406d4, .lo = 0xcef03ab14a66550, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8110d7e584f1ec6d, .lo = 0x4bf94297d1519822, .ex = 0, .sgn = 0x0},
+    {.hi = 0x81166f673462756d, .lo = 0xd0d8372f966cf15e, .ex = 0, .sgn = 0x0},
+    {.hi = 0x811c0726e9156760, .lo = 0xb97931db7b7be2ec, .ex = 0, .sgn = 0x0},
+    {.hi = 0x81219f24a5baa59d, .lo = 0x6abd3b0eab9c7048, .ex = 0, .sgn = 0x0},
+    {.hi = 0x812737606d023148, .lo = 0xdaf888e96508151a, .ex = 0, .sgn = 0x0},
+    {.hi = 0x812ccfda419c2956, .lo = 0xdc8046821f46122e, .ex = 0, .sgn = 0x0},
+    {.hi = 0x813268922638ca8b, .lo = 0x6846ad73a8d9027f, .ex = 0, .sgn = 0x0},
+    {.hi = 0x813801881d886f7b, .lo = 0xe885724f14131287, .ex = 0, .sgn = 0x0},
+    {.hi = 0x813d9abc2a3b9090, .lo = 0x83768490519df895, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8143342e4f02c405, .lo = 0x661b22b45e25de18, .ex = 0, .sgn = 0x0},
+    {.hi = 0x8148cdde8e8ebdec, .lo = 0xf11430fef78c6ee, .ex = 0, .sgn = 0x0},
+    {.hi = 0x814e67cceb90502c, .lo = 0x99775205944eadc4, .ex = 0, .sgn = 0x0},
+    {.hi = 0x815401f968b86a87, .lo = 0x7de463a40d18261, .ex = 0, .sgn = 0x0},
+    {.hi = 0x81599c6408b81a94, .lo = 0x8f4a0b6748df7960, .ex = 0, .sgn = 0x0},
+    {.hi = 0x815f370cce408bc8, .lo = 0xe2404468cfe5ab9f, .ex = 0, .sgn = 0x0},
+};
+
+#ifdef chelis_cr_pow__CORE_MATH_POW
+/* The following is a degree-9 polynomial generated by Sollya, with zero
+   constant coefficient, which approximates log(1+z) for |z| < 0.0001221,
+   see sollya/approximations_r2.sollya.
+   The coefficients of largest degree are first.
+   The relative error is bounded by 2^-128.316.
+   Table generated by output_P2() in the accompanying dint.sage file.
+*/
+static const chelis_cr_pow__dint64_t chelis_cr_pow__P_2[] = {
+    {.hi = 0xe38e3954a09e560e, .lo = 0x0, .ex = -4, .sgn = 0x0},
+    {.hi = 0x800000399d09d767, .lo = 0x0, .ex = -3, .sgn = 0x1},
+    {.hi = 0x9249249249248676, .lo = 0x0, .ex = -3, .sgn = 0x0},
+    {.hi = 0xaaaaaaaaaaaa9fdd, .lo = 0x0, .ex = -3, .sgn = 0x1},
+    {.hi = 0xcccccccccccccccc, .lo = 0xcccdc5fe0ef93b8d, .ex = -3, .sgn = 0x0},
+    {.hi = 0x8000000000000000, .lo = 0x600135b960d8, .ex = -2, .sgn = 0x1},
+    {.hi = 0xaaaaaaaaaaaaaaaa, .lo = 0xaaaaaaaaaaa77b5e, .ex = -2, .sgn = 0x0},
+    {.hi = 0xffffffffffffffff, .lo = 0xfffffffffffe33ca, .ex = -2, .sgn = 0x1},
+    {.hi = 0x8000000000000000, .lo = 0x0, .ex = 0, .sgn = 0x0},
+};
+#endif
+
+/* The following is a degree-7 polynomial generated by Sollya,
+   which approximates exp(z) for |z| < 0.00016923,
+   see sollya/approximations_r2.sollya.
+   The coefficients of largest degree are first.
+   The relative error is bounded by 2^-122.415.
+   Table generated by output_Q2() in the accompanying dint.sage file.
+*/
+static const chelis_cr_pow__dint64_t chelis_cr_pow__Q_2[] = {
+    {.hi = 0xd00d00cd98416862, .lo = 0x0, .ex = -13, .sgn = 0x0},
+    {.hi = 0xb60b60b932146a54, .lo = 0x0, .ex = -10, .sgn = 0x0},
+    {.hi = 0x8888888888888897, .lo = 0x0, .ex = -7, .sgn = 0x0},
+    {.hi = 0xaaaaaaaaaaaaaaa3, .lo = 0x0, .ex = -5, .sgn = 0x0},
+    {.hi = 0xaaaaaaaaaaaaaaaa, .lo = 0xaaaaaa6a1e0776ae, .ex = -3, .sgn = 0x0},
+    {.hi = 0x8000000000000000, .lo = 0xc06f3cd29, .ex = -1, .sgn = 0x0},
+    {.hi = 0x8000000000000000, .lo = 0x88, .ex = 0, .sgn = 0x0},
+    {.hi = 0xffffffffffffffff, .lo = 0xffffffffffffffd0, .ex = -1, .sgn = 0x0},
+};
+
+#endif
+
+/* end inlined src/binary64/pow/dint.h */
+/* begin inlined src/binary64/pow/qint.h */
+/* Correctly-rounded power function for two binary64 values.
+
+Copyright (c) 2022, 2023 CERN and Inria
+Authors: Tom Hubrecht and Paul Zimmermann
+
+This file is part of the CORE-MATH project
+(https://core-math.gitlabpages.inria.fr/).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
+/*
+  This file contains type definition and functions to manipulate the qint64_t
+  data type used in the third iteration of Ziv's method. It is composed of four
+  uint64_t values for the mantissa and the exponent is represented by a signed
+  int64_t value.
+*/
+
+#ifndef chelis_cr_pow__QINT_H
+#define chelis_cr_pow__QINT_H
+
+#include <stdint.h>
+#include <stdio.h>
+#include <inttypes.h>
+
+/*
+  Type definition
+*/
+
+#ifndef chelis_cr_pow__UINT128_T
+#define chelis_cr_pow__UINT128_T
+
+#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14)
+typedef unsigned _BitInt(128) chelis_cr_pow__u128;
+#else
+typedef unsigned __int128 chelis_cr_pow__u128;
+#endif
+
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+typedef union {
+  chelis_cr_pow__u128 r;
+  struct {
+    uint64_t l;
+    uint64_t h;
+  };
+} chelis_cr_pow__uint128_t;
+#else
+typedef union {
+  chelis_cr_pow__u128 r;
+  struct {
+    uint64_t h;
+    uint64_t l;
+  };
+} chelis_cr_pow__uint128_t;
+#endif
+
+// Add two 128-bit integers and return 1 if a carry occured
+static inline int chelis_cr_pow__addu_128 (chelis_cr_pow__uint128_t a, chelis_cr_pow__uint128_t b, chelis_cr_pow__uint128_t *r) {
+  r->r = a.r + b.r;
+  // Return the carry
+  return r->r < a.r;
+}
+
+// Subtract two 128-bit integers and return 1 if a borrow occured
+static inline int chelis_cr_pow__subu_128 (chelis_cr_pow__uint128_t a, chelis_cr_pow__uint128_t b, chelis_cr_pow__uint128_t *r) {
+  r->r = a.r - b.r;
+  // Return the borrow
+  return r->r > a.r;
+}
+
+// Compare two 64-bit signed integers
+// Return +1 if a > b, 0 if a=b, -1 if a < b
+static inline signed char chelis_cr_pow__cmp (int64_t a, int64_t b) {
+  return (a > b) - (a < b);
+}
+
+// Compare two 64-bit unsigned integers
+// Return +1 if a > b, 0 if a=b, -1 if a < b
+static inline signed char chelis_cr_pow__cmpu (uint64_t a, uint64_t b) {
+  return (a > b) - (a < b);
+}
+
+#endif
+
+// Add two 128-bit integers and return 1 if a carry occured
+static inline int chelis_cr_pow__addu128 (chelis_cr_pow__u128 a, chelis_cr_pow__u128 b, chelis_cr_pow__u128 *r) {
+  *r = a + b;
+  // Return the carry
+  return *r < a;
+}
+
+// Subtract two 128-bit integers and return 1 if a borrow occured
+static inline int chelis_cr_pow__subu128 (chelis_cr_pow__u128 a, chelis_cr_pow__u128 b, chelis_cr_pow__u128 *r) {
+  *r = a - b;
+  // Return the borrow
+  return *r > a;
+}
+
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+typedef union {
+  /* Use a little-endian representation.
+     FIXME: adapt for big-endian processors. */
+  struct {
+    chelis_cr_pow__u128 rl;
+    chelis_cr_pow__u128 rh;
+    int64_t _ex;
+    uint64_t _sgn;
+  };
+  struct {
+    uint64_t ll; /* lower low part */
+    uint64_t lh; /* upper low part */
+    uint64_t hl; /* lower high part */
+    uint64_t hh; /* upper high part */
+    int64_t ex;
+    uint64_t sgn;
+  };
+} chelis_cr_pow__qint64_t;
+#else
+typedef union {
+  struct {
+    chelis_cr_pow__u128 rl;
+    chelis_cr_pow__u128 rh;
+    int64_t _ex;
+    uint64_t _sgn;
+  };
+  struct {
+    uint64_t lh; /* upper low part */
+    uint64_t ll; /* lower low part */
+    uint64_t hh; /* upper high part */
+    uint64_t hl; /* lower high part */
+    int64_t ex;
+    uint64_t sgn;
+  };
+} chelis_cr_pow__qint64_t;
+#endif
+
+/*
+  Constants
+*/
+
+// this encodes 1 (exact)
+static const chelis_cr_pow__qint64_t chelis_cr_pow__ONE_Q = {.hh = 0x8000000000000000,
+                               .hl = 0x0,
+                               .lh = 0x0,
+                               .ll = 0x0,
+                               .ex = 0,
+                               .sgn = 0x0};
+
+// this encodes -1 (exact)
+static const chelis_cr_pow__qint64_t chelis_cr_pow__M_ONE_Q = {.hh = 0x8000000000000000,
+                                 .hl = 0x0,
+                                 .lh = 0x0,
+                                 .ll = 0x0,
+                                 .ex = 0,
+                                 .sgn = 0x1};
+
+// LOG2_Q approximates log(2), with absolute error < 2^-256.14
+static const chelis_cr_pow__qint64_t chelis_cr_pow__LOG2_Q = {.hh = 0xb17217f7d1cf79ab,
+                                .hl = 0xc9e3b39803f2f6af,
+                                .lh = 0x40f343267298b62d,
+                                .ll = 0x8a0d175b8baafa2b,
+                                .ex = -1,
+                                .sgn = 0x0};
+
+// LOG2_INV_Q approximates 2^12/log(2), with absolute error < 2^-52.96
+static const chelis_cr_pow__qint64_t chelis_cr_pow__LOG2_INV_Q = {.hh = 0xb8aa3b295c17f0bc,
+                                    .hl = 0x0,
+                                    .lh = 0x0,
+                                    .ll = 0x0,
+                                    .ex = 12,
+                                    .sgn = 0x0};
+
+// this encodes 0 (exact)
+static const chelis_cr_pow__qint64_t chelis_cr_pow__ZERO_Q = {
+    .hh = 0x0, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0};
+
+/*
+  Base functions
+*/
+
+// Copy a qint64_t value
+static inline void chelis_cr_pow__cp_qint (chelis_cr_pow__qint64_t *r, const chelis_cr_pow__qint64_t *a) {
+  r->ex = a->ex;
+  r->rh = a->rh;
+  r->rl = a->rl;
+  r->sgn = a->sgn;
+}
+
+/* Compare the absolute values of a and b:
+   return +1 if |a| > |b|, 0 if |a| = |b|, -1 if |a| < |b| */
+static inline signed char chelis_cr_pow__cmp_qint(const chelis_cr_pow__qint64_t *a, const chelis_cr_pow__qint64_t *b) {
+  return chelis_cr_pow__cmp(a->ex, b->ex)  ? chelis_cr_pow__cmp(a->ex, b->ex)
+    : chelis_cr_pow__cmpu128(a->rh, b->rh) ? chelis_cr_pow__cmpu128(a->rh, b->rh)
+    : chelis_cr_pow__cmpu128(a->rl, b->rl);
+}
+
+/* same as cmp_qint, but only compare the upper 2 limbs */
+static inline signed char chelis_cr_pow__cmp_qint_22(const chelis_cr_pow__qint64_t *a, const chelis_cr_pow__qint64_t *b) {
+  return chelis_cr_pow__cmp(a->ex, b->ex)  ? chelis_cr_pow__cmp(a->ex, b->ex)
+    : chelis_cr_pow__cmpu128(a->rh, b->rh);
+}
+
+/* Add two qint64_t values, with error bounded by 2 ulps (ulp_256).
+   If Sterbenz theorem applies, i.e., a and b are of opposite signs
+   with |a|/2 <= |b| <= |a|, then the operation is exact. */
+static inline void
+chelis_cr_pow__add_qint (chelis_cr_pow__qint64_t *r, const chelis_cr_pow__qint64_t *a, const chelis_cr_pow__qint64_t *b) {
+  if (a->rh == 0 && a->rl == 0) {
+    chelis_cr_pow__cp_qint (r, b); // exact
+    return;
+  }
+
+    if (b->rh == 0 && b->rl == 0) {
+    chelis_cr_pow__cp_qint (r, a); // exact
+    return;
+  }
+
+  /* compare the absolute values of a and b */
+  switch (chelis_cr_pow__cmp_qint (a, b)) {
+  case 0: /* |a| = |b| */
+    if (a->sgn ^ b->sgn) { /* signs differ */
+      chelis_cr_pow__cp_qint (r, &chelis_cr_pow__ZERO_Q); // exact
+      return;
+    }
+
+    chelis_cr_pow__cp_qint (r, a);
+    r->ex++; // exact
+    return;
+
+  case -1: /* |a| < |b| */
+    chelis_cr_pow__add_qint (r, b, a);
+    return;
+  }
+
+  // From now on, |A| > |B|
+
+  chelis_cr_pow__u128 ah = a->rh, al = a->rl, bh = b->rh, bl = b->rl;
+
+  int64_t m_ex = a->ex;
+  int64_t k = a->ex - b->ex;
+
+  if (k > 0) {
+    if (k >= 128) {
+      bl = (k < 256) ? bh >> (k - 128) : 0;
+      bh = 0;
+    } else { /* 1 <= k <= 127 */
+      bl = (bl >> k) | (bh << (128 - k));
+      bh = bh >> k;
+    }
+  }
+
+  /* now we have to add (ah,al) + (bh,bl), with error <= 1 ulp
+     corresponding to the ignored part of (bh,bl) */
+
+  unsigned char sgn = a->sgn;
+  uint64_t ex;
+  chelis_cr_pow__u128 ch, cl;
+
+  r->ex = m_ex;
+
+  if (a->sgn ^ b->sgn) { // subtraction case
+    /* a and b have different signs: C = A + (-B) */
+    ch = ah - bh;
+
+    if (chelis_cr_pow__subu128 (al, bl, &cl))
+      ch --;
+    /* we cannot have C=0 since |A| > |B| */
+    uint64_t chh = ch >> 64, clh = cl >> 64;
+    ex =
+      chh ? __builtin_clzll(chh)
+      : 64 + (ch ? __builtin_clzll(ch)
+              : 64 + (clh ? __builtin_clzll(clh)
+                      : 64 + __builtin_clzll(cl)));
+    /* ex < 256 since |A| > |B| */
+
+    /* If ex=0 or ex=1, the rounding error is bounded by 2 ulps. */
+    if (ex > 0)
+      {
+        /* shift A by ex bits to the left, and B by ex-k bits to the left */
+        if (ex >= 128)
+          {
+            ah = al << (ex - 128);
+            al = 0;
+          }
+        else /* 1 <= ex < 128 */
+          {
+            ah = (ah << ex) | (al >> (128 - ex));
+            al = al << ex;
+          }
+        int sh = ex - k;
+        bh = b->rh;
+        bl = b->rl;
+        if (sh >= 0) {
+          if (sh >= 128) {
+            bh = bl << (sh - 128);
+            bl = 0;
+          }
+          else if (sh > 0) { /* 1 <= sh < 128 */
+            bh = (bh << sh) | (bl >> (128 - sh));
+            bl = bl << sh;
+          }
+        }
+        else { /* sh < 0: shift b by -sh bits to the right */
+          int j = -sh;
+          if (j >= 128) {
+            bl = bh >> (j - 128);
+            bh = 0;
+          }
+          else { /* 0 < j < 128 (j cannot be 0 since sh < 0) */
+            bl = (bh << (128 - j)) | (bl >> j);
+            bh = bh >> j;
+          }
+        }
+        r->ex -= ex;
+        ch = ah - bh;
+
+        if (chelis_cr_pow__subu128 (al, bl, &cl))
+          ch --;
+        /* we cannot have C=0 since |A| > |B| */
+        chh = ch >> 64;
+        clh = cl >> 64;
+        ex =
+          chh ? __builtin_clzll(chh)
+          : 64 + (ch ? __builtin_clzll(ch)
+                  : 64 + (clh ? __builtin_clzll(clh)
+                          : 64 + __builtin_clzll(cl)));
+      }
+    if (ex) {
+      ch = (ch << ex) | (cl >> (128 - ex));
+      cl = cl << ex;
+    }
+    r->ex -= ex;
+    /* We distinguish three cases according to the first value of ex:
+       If ex=0, the error is bounded by 1 ulp (ignored part of B).
+       If ex=1, the error is bounded by 2 ulps (ignored part of B
+         multiplied by 2).
+       In the case ex>1, the error is bounded by 1 ulp (truncated part of B),
+       which might be multiplied by 2 if the final value of ex is 1.
+    */
+  } else { // addition case
+    char cy = chelis_cr_pow__addu128 (ah, bh, &ch);
+
+    if (chelis_cr_pow__addu128 (al, bl, &cl))
+      cy += !(++ch);
+
+    /* 0 <= cy <= 1 */
+
+    if (cy) { // carry in the 256-bit addition
+      cl = (ch << 127) | (cl >> 1);
+      ch = ((chelis_cr_pow__u128)1 << 127) | (ch >> 1);
+      r->ex ++;
+    }
+    /* In the addition case, the rounding error is bounded by 1 ulp. */
+  }
+
+  r->sgn = sgn;
+  r->rh = ch;
+  r->rl = cl;
+}
+
+/* same as add_qint, but only considers the upper 2 limbs of a and b,
+   with rounding error < 2 ulps(128) */
+static inline void
+chelis_cr_pow__add_qint_22 (chelis_cr_pow__qint64_t *r, const chelis_cr_pow__qint64_t *a, const chelis_cr_pow__qint64_t *b) {
+  if (a->rh == 0) {
+    chelis_cr_pow__cp_qint (r, b); // exact
+    return;
+  }
+
+    if (b->rh == 0) {
+    chelis_cr_pow__cp_qint (r, a); // exact
+    return;
+  }
+
+  /* compare the absolute values of a and b */
+  switch (chelis_cr_pow__cmp_qint_22 (a, b)) {
+  case 0: /* |a| = |b| */
+    if (a->sgn ^ b->sgn) { /* signs differ */
+      chelis_cr_pow__cp_qint (r, &chelis_cr_pow__ZERO_Q); // exact
+      return;
+    }
+
+    chelis_cr_pow__cp_qint (r, a);
+    r->ex++; // exact
+    return;
+
+  case -1: /* |a| < |b| */
+    chelis_cr_pow__add_qint_22 (r, b, a);
+    return;
+  }
+
+  // From now on, |A| > |B|
+
+  chelis_cr_pow__u128 ah = a->rh, bh = b->rh;
+
+  int64_t m_ex = a->ex;
+  uint64_t k = a->ex - b->ex;
+
+  if (k > 0)
+    bh = (k >= 128) ? 0 : bh >> k;
+
+  /* now we have to add ah + bh, with error <= 1 ulp
+     corresponding to the ignored part of bh */
+
+  unsigned char sgn = a->sgn;
+  uint64_t ex;
+  chelis_cr_pow__u128 ch;
+
+  r->ex = m_ex;
+
+  if (a->sgn ^ b->sgn) { // subtraction case
+    /* a and b have different signs: C = A + (-B) */
+    ch = ah - bh;
+
+    /* we cannot have ch=0 since |A| > |B| */
+    uint64_t chh = ch >> 64;
+    ex = chh ? __builtin_clzll(chh) : 64 + __builtin_clzll(ch);
+
+    /* ex < 128 since |A| > |B| */
+
+    if (ex > 0)
+      {
+        /* shift A and B by ex bits to the left */
+        ah = ah << ex;
+        /* for B, we have to shift by k bits to the right and ex to the left */
+        if (ex >= k)
+          bh = b->rh << (ex - k); // since ex < 128, the shift is well defined
+        else
+          bh = b->rh >> (k - ex);
+        /* since k < 128 (otherwise bh=0 and ch=ah thus ex=0), this shift is
+           also well defined */
+        r->ex -= ex;
+        ch = ah - bh;
+
+        /* we cannot have C=0 since |A| > |B| */
+        chh = ch >> 64;
+        ex = chh ? __builtin_clzll(chh) : 64 + __builtin_clzll(ch);
+        /* rounding error is bounded by 1 ulp(128) */
+      }
+    ch = ch << ex;
+    /* if ex=1, the rounding error is multiplied by 2, thus < 2 ulp(128) */
+    r->ex -= ex;
+  } else { // addition case
+    char cy = chelis_cr_pow__addu128 (ah, bh, &ch);
+
+    if (cy) { // carry in the 128-bit addition
+      ch = ((chelis_cr_pow__u128) 1 << 127) | (ch >> 1);
+      r->ex ++;
+    }
+    /* In the addition case, the rounding error is bounded by 1 ulp(128) */
+  }
+
+  r->sgn = sgn;
+  r->rh = ch;
+  r->rl = 0;
+}
+
+// Multiply two dint64_t numbers, with error < 14 ulps
+static inline void
+chelis_cr_pow__mul_qint (chelis_cr_pow__qint64_t *r, const chelis_cr_pow__qint64_t *a, const chelis_cr_pow__qint64_t *b) {
+  chelis_cr_pow__u128 r33 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 r32 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->hl);
+  chelis_cr_pow__u128 r23 = (chelis_cr_pow__u128)(a->hl) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 r31 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->lh);
+  chelis_cr_pow__u128 r13 = (chelis_cr_pow__u128)(a->lh) * (chelis_cr_pow__u128)(b->hh);
+  chelis_cr_pow__u128 r22 = (chelis_cr_pow__u128)(a->hl) * (chelis_cr_pow__u128)(b->hl);
+
+  chelis_cr_pow__u128 r30 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->ll);
+  chelis_cr_pow__u128 r03 = (chelis_cr_pow__u128)(a->ll) * (chelis_cr_pow__u128)(b->hh);
+  chelis_cr_pow__u128 r21 = (chelis_cr_pow__u128)(a->hl) * (chelis_cr_pow__u128)(b->lh);
+  chelis_cr_pow__u128 r12 = (chelis_cr_pow__u128)(a->lh) * (chelis_cr_pow__u128)(b->hl);
+
+  chelis_cr_pow__u128 t6, t5, t4, t3;
+  chelis_cr_pow__u128 c5, c4;
+
+  t3 = (r12 >> 64) + (r21 >> 64) + (r03 >> 64) + (r30 >> 64);
+  /* no overflow since each term is < 2^64, thus the sum < 2^66 */
+
+  /* t3 is the sum of the terms of "degree" 3 divided by 2^64 */
+
+  c4 = chelis_cr_pow__addu128 (r22, t3, &t4);
+  c4 += chelis_cr_pow__addu128 (r13, t4, &t4);
+  c4 += chelis_cr_pow__addu128 (r31, t4, &t4);
+
+  /* (c4:1,t4:128) is the sum of the terms of "degree" 3 and 4 */
+
+  c5 = chelis_cr_pow__addu128 (r23, t4 >> 64, &t5);
+  c5 += chelis_cr_pow__addu128 (r32, t5, &t5);
+
+  /* (c5:1,t5:128,low(t4):64) is the sum of the terms of "degree" 3 to 5 */
+
+  t6 = r33 + ((c5 << 64) | (t5 >> 64)) + c4;
+
+  /* (t6:128,low(t5):64,low(t4):64) is the sum of the terms of "degree" 3-6 */
+
+  /* No carry can happen since the full product of the significands is
+     bounded by 2^512.
+     The approximated sum is:
+     t6 (128 bits) + low(t5) (64 bits) + low(t4) (64 bits) + low(t3) (64 bits)
+     with error bounded by:
+     * 3*(B-1)^2/B^2 ulp for the neglected terms of "degree" 2: r20 + r11 + r02
+     * 2*(B-1)^2/B^3 ulp for the neglected terms of "degree" 1: r10 + r01
+     * 1*(B-1)^2/B^4 ulp for the neglected term of "degree" 0: r00
+     * 1 ulp for each of the neglected low parts of r12, r21, r03 and r30
+       thus 4 ulps in total
+     The sum of the first three terms is less than 3, thus bounded by 3 ulps.
+     This yields an error bound of 7 ulps so far.
+  */
+
+  uint64_t ex = !(t6 >> 127);
+
+  t5 = (t5 << 64) | (t4 & (chelis_cr_pow__u128) 0xffffffffffffffff);
+  if (ex) { /* ex=1 */
+    r->rh = (t6 << 1) | (t5 >> 127);
+    r->rl = t5 << 1;
+    /* the previous rounding error is multiplied by 2, thus < 14 ulps now */
+  }
+  else { /* ex=0 */
+    r->rh = t6;
+    r->rl = t5;
+    /* error < 7 ulps */
+  }
+
+  r->ex = a->ex + b->ex + 1 - ex;
+
+  r->sgn = a->sgn ^ b->sgn;
+}
+
+/* same as mul_qint, but considering only the upper 3 limbs from a and b,
+   and with error < 6 ulps */
+static inline void
+chelis_cr_pow__mul_qint_33 (chelis_cr_pow__qint64_t *r, const chelis_cr_pow__qint64_t *a, const chelis_cr_pow__qint64_t *b) {
+  chelis_cr_pow__u128 r33 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 r32 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->hl);
+  chelis_cr_pow__u128 r23 = (chelis_cr_pow__u128)(a->hl) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 r31 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->lh);
+  chelis_cr_pow__u128 r13 = (chelis_cr_pow__u128)(a->lh) * (chelis_cr_pow__u128)(b->hh);
+  chelis_cr_pow__u128 r22 = (chelis_cr_pow__u128)(a->hl) * (chelis_cr_pow__u128)(b->hl);
+
+  chelis_cr_pow__u128 r21 = (chelis_cr_pow__u128)(a->hl) * (chelis_cr_pow__u128)(b->lh);
+  chelis_cr_pow__u128 r12 = (chelis_cr_pow__u128)(a->lh) * (chelis_cr_pow__u128)(b->hl);
+
+  chelis_cr_pow__u128 t6, t5, t4, t3;
+  chelis_cr_pow__u128 c5, c4;
+
+  t3 = (r12 >> 64) + (r21 >> 64);
+  /* no overflow since each term is < 2^64, thus the sum < 2*2^64 */
+
+  /* t3 is the sum of the terms of "degree" 3 divided by 2^64 */
+
+  c4 = chelis_cr_pow__addu128 (r22, t3, &t4);
+  c4 += chelis_cr_pow__addu128 (r13, t4, &t4);
+  c4 += chelis_cr_pow__addu128 (r31, t4, &t4);
+
+  /* (c4:1,t4:128) is the sum of the terms of "degree" 3 and 4 */
+
+  c5 = chelis_cr_pow__addu128 (r23, t4 >> 64, &t5);
+  c5 += chelis_cr_pow__addu128 (r32, t5, &t5);
+
+  /* (c5:1,t5:128,low(t4):64) is the sum of the terms of "degree" 3 to 5 */
+
+  t6 = r33 + ((c5 << 64) | (t5 >> 64)) + c4;
+
+  /* (t6:128,low(t5):64,low(t4):64) is the sum of the terms of "degree" 3-6 */
+
+  /* No carry can happen since the full product of the significands is
+     bounded by 2^512.
+     The approximated sum is:
+     t6 (128 bits) + low(t5) (64 bits) + low(t4) (64 bits) + low(t3) (64 bits)
+     with error bounded by:
+     * 1 ulp for the neglected term of "degree" 2: r11
+     * 1 ulp for each of the neglected low parts of r12, r21
+       thus 2 ulps in total
+     This yields an error bound of 3 ulps so far.
+  */
+
+  uint64_t ex = !(t6 >> 127);
+
+  t5 = (t5 << 64) | (t4 & (chelis_cr_pow__u128) 0xffffffffffffffff);
+  if (ex) { /* ex=1 */
+    r->rh = (t6 << 1) | (t5 >> 127);
+    r->rl = t5 << 1;
+    /* the previous rounding error is multiplied by 2, thus < 6 ulps now */
+  }
+  else { /* ex=0 */
+    r->rh = t6;
+    r->rl = t5;
+    /* error < 3 ulps */
+  }
+
+  r->ex = a->ex + b->ex + 1 - ex;
+
+  r->sgn = a->sgn ^ b->sgn;
+}
+
+/* same as mul_qint, but considering only the upper limb from b,
+   and with error < 2 ulps */
+static inline void
+chelis_cr_pow__mul_qint_41 (chelis_cr_pow__qint64_t *r, const chelis_cr_pow__qint64_t *a, const chelis_cr_pow__qint64_t *b) {
+  chelis_cr_pow__u128 r33 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 r23 = (chelis_cr_pow__u128)(a->hl) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 r13 = (chelis_cr_pow__u128)(a->lh) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 r03 = (chelis_cr_pow__u128)(a->ll) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 t6, t5, t4, t3;
+  chelis_cr_pow__u128 c5, c4;
+
+  t3 = r03 >> 64;
+
+  /* t3 is the term of "degree" 3 divided by 2^64 */
+
+  c4 = chelis_cr_pow__addu128 (r13, t3, &t4);
+
+  /* (c4:1,t4:128) is the sum of the terms of "degree" 3 and 4 */
+
+  c5 = chelis_cr_pow__addu128 (r23, t4 >> 64, &t5);
+
+  /* (c5:1,t5:128,low(t4):64) is the sum of the terms of "degree" 3 to 5 */
+
+  t6 = r33 + ((c5 << 64) | (t5 >> 64)) + c4;
+
+  /* (t6:128,low(t5):64,low(t4):64) is the sum of the terms of "degree" 3-6 */
+
+  /* No carry can happen since the full product of the significands is
+     bounded by 2^512.
+     The approximated sum is:
+     t6 (128 bits) + low(t5) (64 bits) + low(t4) (64 bits) + low(t3) (64 bits)
+     with error bounded by 1 ulp for the neglected low part of r03.
+  */
+
+  uint64_t ex = !(t6 >> 127);
+
+  t5 = (t5 << 64) | (t4 & (chelis_cr_pow__u128) 0xffffffffffffffff);
+  if (ex) { /* ex=1 */
+    r->rh = (t6 << 1) | (t5 >> 127);
+    r->rl = t5 << 1;
+    /* the previous rounding error is multiplied by 2, thus < 2 ulps now */
+  }
+  else { /* ex=0 */
+    r->rh = t6;
+    r->rl = t5;
+    /* error < 1 ulp */
+  }
+
+  r->ex = a->ex + b->ex + 1 - ex;
+
+  r->sgn = a->sgn ^ b->sgn;
+}
+
+/* same as mul_qint, but considering only the 3 upper limbs from a,
+   and the upper limb from b, with no error (exact product) */
+static inline void
+chelis_cr_pow__mul_qint_31 (chelis_cr_pow__qint64_t *r, const chelis_cr_pow__qint64_t *a, const chelis_cr_pow__qint64_t *b) {
+  chelis_cr_pow__u128 r33 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->hh);
+  chelis_cr_pow__u128 r23 = (chelis_cr_pow__u128)(a->hl) * (chelis_cr_pow__u128)(b->hh);
+  chelis_cr_pow__u128 r13 = (chelis_cr_pow__u128)(a->lh) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 t6, t5, t4;
+  chelis_cr_pow__u128 c5;
+
+  t4 = r13;
+
+  /* t4 is the only term of "degree" 4 */
+
+  c5 = chelis_cr_pow__addu128 (r23, t4 >> 64, &t5);
+
+  /* (c5:1,t5:128,low(t4):64) is the sum of the terms of "degree" 4 to 5 */
+
+  t6 = r33 + ((c5 << 64) | (t5 >> 64));
+
+  /* (t6:128,low(t5):64,low(t4):64) is the sum of the terms of "degree" 4-6 */
+
+  /* No carry can happen since the full product of the significands is
+     bounded by 2^512.
+     The approximated sum is:
+     t6 (128 bits) + low(t5) (64 bits) + low(t4) (64 bits)
+     with no error.
+  */
+
+  uint64_t ex = !(t6 >> 127);
+
+  t5 = (t5 << 64) | (t4 & (chelis_cr_pow__u128) 0xffffffffffffffff);
+  if (ex) { /* ex=1 */
+    r->rh = (t6 << 1) | (t5 >> 127);
+    r->rl = t5 << 1;
+    /* the previous rounding error is multiplied by 2, thus < 2 ulps now */
+  }
+  else { /* ex=0 */
+    r->rh = t6;
+    r->rl = t5;
+    /* error < 1 ulp */
+  }
+
+  r->ex = a->ex + b->ex + 1 - ex;
+
+  r->sgn = a->sgn ^ b->sgn;
+}
+
+/* same as mul_qint, but considering only the 2 upper limbs from a and b,
+   with no error (exact product) */
+static inline void
+chelis_cr_pow__mul_qint_22 (chelis_cr_pow__qint64_t *r, const chelis_cr_pow__qint64_t *a, const chelis_cr_pow__qint64_t *b) {
+  chelis_cr_pow__u128 r33 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 r32 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->hl);
+  chelis_cr_pow__u128 r23 = (chelis_cr_pow__u128)(a->hl) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 r22 = (chelis_cr_pow__u128)(a->hl) * (chelis_cr_pow__u128)(b->hl);
+
+  chelis_cr_pow__u128 t6, t5, t4;
+  chelis_cr_pow__u128 c5;
+
+  t4 = r22;
+
+  c5 = chelis_cr_pow__addu128 (r23, t4 >> 64, &t5);
+  c5 += chelis_cr_pow__addu128 (r32, t5, &t5);
+
+  /* (c5:1,t5:128,low(t4):64) is the sum of the terms of "degree" 3 to 5 */
+
+  t6 = r33 + ((c5 << 64) | (t5 >> 64));
+
+  /* (t6:128,low(t5):64,low(t4):64) is the sum of the terms of "degree" 3-6 */
+
+  /* No carry can happen since the full product of the significands is
+     bounded by 2^512.
+     The exact sum is:
+     t6 (128 bits) + low(t5) (64 bits) + low(t4) (64 bits)
+  */
+
+  uint64_t ex = !(t6 >> 127);
+
+  t5 = (t5 << 64) | (t4 & (chelis_cr_pow__u128) 0xffffffffffffffff);
+  if (ex) { /* ex=1 */
+    r->rh = (t6 << 1) | (t5 >> 127);
+    r->rl = t5 << 1;
+  }
+  else { /* ex=0 */
+    r->rh = t6;
+    r->rl = t5;
+  }
+
+  r->ex = a->ex + b->ex + 1 - ex;
+
+  r->sgn = a->sgn ^ b->sgn;
+}
+
+/* same as mul_qint, but considering only the 2 upper limbs from a, and the
+   upper limb of b, with no error (exact product) */
+static inline void
+chelis_cr_pow__mul_qint_21 (chelis_cr_pow__qint64_t *r, const chelis_cr_pow__qint64_t *a, const chelis_cr_pow__qint64_t *b) {
+  chelis_cr_pow__u128 r33 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->hh);
+  chelis_cr_pow__u128 r23 = (chelis_cr_pow__u128)(a->hl) * (chelis_cr_pow__u128)(b->hh);
+
+  chelis_cr_pow__u128 t6 = r33 + (r23 >> 64);
+
+  /* No carry can happen since the full product of the significands is
+     bounded by 2^512.
+  */
+
+  uint64_t ex = !(t6 >> 127);
+
+  chelis_cr_pow__u128 t5 = r23 << 64;
+  if (ex) { /* ex=1 */
+    r->rh = (t6 << 1) | (t5 >> 127);
+    r->rl = t5 << 1;
+  }
+  else { /* ex=0 */
+    r->rh = t6;
+    r->rl = t5;
+  }
+
+  r->ex = a->ex + b->ex + 1 - ex;
+
+  r->sgn = a->sgn ^ b->sgn;
+}
+
+/* same as mul_qint, but considering only the upper limb from a and b,
+   with no error (exact product) */
+static inline void
+chelis_cr_pow__mul_qint_11 (chelis_cr_pow__qint64_t *r, const chelis_cr_pow__qint64_t *a, const chelis_cr_pow__qint64_t *b) {
+  chelis_cr_pow__u128 t6 = (chelis_cr_pow__u128)(a->hh) * (chelis_cr_pow__u128)(b->hh);
+  uint64_t ex = !(t6 >> 127);
+
+  /* ex can be 0 or 1 */
+
+  r->rh = t6 << ex;
+  r->rl = 0;
+  r->ex = a->ex + b->ex + 1 - ex;
+  r->sgn = a->sgn ^ b->sgn;
+}
+
+// Multiply an integer with a qint64_t variable, with error < 2 ulps
+static inline void chelis_cr_pow__mul_qint_2 (chelis_cr_pow__qint64_t *r, int64_t b, const chelis_cr_pow__qint64_t *a) {
+  if (!b) {
+    chelis_cr_pow__cp_qint (r, &chelis_cr_pow__ZERO_Q); // exact
+    return;
+  }
+
+  uint64_t c = b < 0 ? -b : b;
+  if (c == 1) {
+    chelis_cr_pow__cp_qint (r, a); // exact
+    r->sgn = (b < 0) ^ a->sgn;
+
+    return;
+  }
+
+  r->sgn = (b < 0) ^ a->sgn;
+  r->ex = a->ex + 64;
+
+  /* scale c so that 2^63 <= c < 2^64 */
+  int k = __builtin_clzll (c);
+  c = c << k;
+  r->ex -= k;
+
+  chelis_cr_pow__u128 t3 = (chelis_cr_pow__u128) a->hh * (chelis_cr_pow__u128) c;
+  chelis_cr_pow__u128 t2 = (chelis_cr_pow__u128) a->hl * (chelis_cr_pow__u128) c;
+  chelis_cr_pow__u128 t1 = (chelis_cr_pow__u128) a->lh * (chelis_cr_pow__u128) c;
+  chelis_cr_pow__u128 t0 = (chelis_cr_pow__u128) a->ll * (chelis_cr_pow__u128) c;
+
+  chelis_cr_pow__u128 cy;
+  chelis_cr_pow__u128 t = t0 >> 64;
+
+  /* t:64 is the term of degree 0 (divided by 2^64) */
+
+  cy = chelis_cr_pow__addu128 (t, t1, &t1);
+  /* (cy:1,t1:128) is the sum of the terms of degree 0 and 1 */
+
+  t = ((chelis_cr_pow__u128) cy << 64) | (t1 >> 64);
+  cy = chelis_cr_pow__addu128 (t, t2, &t2);
+  /* (cy:1,t2:128,low(t1):64) is the sum of the terms of degree 0 to 2 */
+
+  t3 += (((chelis_cr_pow__u128) cy << 64) | (t2 >> 64));
+  /* (t3,low(t2):64,low(t1):64) is the sum of the terms of degree 0 to 3 */
+
+  uint32_t ex = __builtin_clzll (t3 >> 64);
+
+  t2 = (t2 << 64) | (t1 & (chelis_cr_pow__u128) 0xffffffffffffffff);
+
+  /* ex is 0 or 1 because a and c are normalized (2^63 <= a->hh, c < 2^64) */
+
+  /* we only ignore the low part of t0 which contributes less than 1 ulp */
+
+  if (ex)
+    {
+      r->rh = (t3 << 1) | (t2 >> 127);
+      r->rl = t2 << 1;
+      /* the error is scaled by 2, thus less than 2 ulps */
+      r->ex --;
+    }
+  else
+    {
+      r->rh = t3;
+      r->rl = t2;
+      /* error less than 1 ulp in that case */
+    }
+}
+
+// Prints a qint64_t value for debugging purposes
+static inline void chelis_cr_pow__print_qint(const chelis_cr_pow__qint64_t *a) {
+  printf("{.hh=0x%"PRIx64", .hl=0x%"PRIx64", .lh=0x%"PRIx64", .ll=0x%"PRIx64", .ex=%"PRId64", .sgn=0x%"PRIx64"}\n",
+         a->hh, a->hl, a->lh, a->ll, a->ex, a->sgn);
+}
+/*
+  Approximation tables
+*/
+
+/* For 90 <= i <= 181, _INVERSE_3_1[i-90] is an approximation of the inverse
+   of x for i/2^7 <= x < (i+1)/2^7, where an entry (hh,hl,lh,ll,ex,sgn)
+   represents (-1)^sgn*(hh+hl/2^64+lh/2^128+ll/2^192)*2^(ex-63)
+   (the binary point is after the most significant bit of hh).
+   For i=127 and i=128, we force _INVERSE_3_1[i-90]=1.
+   If was generated with output_inverse_3_1(7,9,90,181) from the
+   accompanying file qint.sage.
+   There is no rounding error here, the only approximation error is in
+   _LOG_INV_3_1[]. */
+static const chelis_cr_pow__qint64_t chelis_cr_pow___INVERSE_3_1[] = {
+    {.hh = 0xb500000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=90 */
+    {.hh = 0xb300000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=91 */
+    {.hh = 0xb100000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=92 */
+    {.hh = 0xaf00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=93 */
+    {.hh = 0xad80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=94 */
+    {.hh = 0xab80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=95 */
+    {.hh = 0xaa00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=96 */
+    {.hh = 0xa800000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=97 */
+    {.hh = 0xa680000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=98 */
+    {.hh = 0xa480000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=99 */
+    {.hh = 0xa300000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=100 */
+    {.hh = 0xa180000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=101 */
+    {.hh = 0xa000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=102 */
+    {.hh = 0x9e80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=103 */
+    {.hh = 0x9d00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=104 */
+    {.hh = 0x9b80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=105 */
+    {.hh = 0x9a00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=106 */
+    {.hh = 0x9880000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=107 */
+    {.hh = 0x9700000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=108 */
+    {.hh = 0x9580000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=109 */
+    {.hh = 0x9480000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=110 */
+    {.hh = 0x9300000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=111 */
+    {.hh = 0x9180000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=112 */
+    {.hh = 0x9080000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=113 */
+    {.hh = 0x8f00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=114 */
+    {.hh = 0x8e00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=115 */
+    {.hh = 0x8c80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=116 */
+    {.hh = 0x8b80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=117 */
+    {.hh = 0x8a80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=118 */
+    {.hh = 0x8900000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=119 */
+    {.hh = 0x8800000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=120 */
+    {.hh = 0x8700000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=121 */
+    {.hh = 0x8580000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=122 */
+    {.hh = 0x8480000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=123 */
+    {.hh = 0x8380000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=124 */
+    {.hh = 0x8280000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=125 */
+    {.hh = 0x8180000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=126 */
+    {.hh = 0x8000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=127 */
+    {.hh = 0x8000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* i=128 */
+    {.hh = 0xfd00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=129 */
+    {.hh = 0xfb00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=130 */
+    {.hh = 0xf900000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=131 */
+    {.hh = 0xf780000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=132 */
+    {.hh = 0xf580000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=133 */
+    {.hh = 0xf380000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=134 */
+    {.hh = 0xf200000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=135 */
+    {.hh = 0xf000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=136 */
+    {.hh = 0xee80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=137 */
+    {.hh = 0xec80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=138 */
+    {.hh = 0xeb00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=139 */
+    {.hh = 0xe900000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=140 */
+    {.hh = 0xe780000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=141 */
+    {.hh = 0xe600000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=142 */
+    {.hh = 0xe480000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=143 */
+    {.hh = 0xe300000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=144 */
+    {.hh = 0xe100000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=145 */
+    {.hh = 0xdf80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=146 */
+    {.hh = 0xde00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=147 */
+    {.hh = 0xdc80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=148 */
+    {.hh = 0xdb00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=149 */
+    {.hh = 0xd980000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=150 */
+    {.hh = 0xd880000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=151 */
+    {.hh = 0xd700000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=152 */
+    {.hh = 0xd580000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=153 */
+    {.hh = 0xd400000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=154 */
+    {.hh = 0xd280000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=155 */
+    {.hh = 0xd180000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=156 */
+    {.hh = 0xd000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=157 */
+    {.hh = 0xce80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=158 */
+    {.hh = 0xcd80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=159 */
+    {.hh = 0xcc00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=160 */
+    {.hh = 0xcb00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=161 */
+    {.hh = 0xc980000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=162 */
+    {.hh = 0xc880000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=163 */
+    {.hh = 0xc700000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=164 */
+    {.hh = 0xc600000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=165 */
+    {.hh = 0xc500000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=166 */
+    {.hh = 0xc380000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=167 */
+    {.hh = 0xc280000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=168 */
+    {.hh = 0xc180000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=169 */
+    {.hh = 0xc000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=170 */
+    {.hh = 0xbf00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=171 */
+    {.hh = 0xbe00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=172 */
+    {.hh = 0xbd00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=173 */
+    {.hh = 0xbc00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=174 */
+    {.hh = 0xba80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=175 */
+    {.hh = 0xb980000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=176 */
+    {.hh = 0xb880000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=177 */
+    {.hh = 0xb780000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=178 */
+    {.hh = 0xb680000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=179 */
+    {.hh = 0xb580000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=180 */
+    {.hh = 0xb480000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* i=181 */
+};
+
+/* For 8128 <= j <= 8256, _INVERSE_3_2[j-8128] is an approximation of the
+   inverse of j/2^13, where an entry (hh,hl,lh,ll,ex,sgn) represents
+   (-1)^sgn*(hh+hl/2^64+lh/2^128+ll/2^192)*2^(ex-63)
+   (the binary point is after the most significant bit of hh).
+   For j=8191 and j=8192, we force _INVERSE_3_2[j-8128]=1.
+   If was generated with output_inverse_3_2(6,14,8128,8256,7,62) from the
+   accompanying file qint.sage.
+   There is no rounding error here, the only approximation error is in
+   _LOG_INV_3_2[]. */
+static const chelis_cr_pow__qint64_t chelis_cr_pow___INVERSE_3_2[] = {
+    {.hh = 0x8100000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8128 */
+    {.hh = 0x80fc000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8129 */
+    {.hh = 0x80f8000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8130 */
+    {.hh = 0x80f4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8131 */
+    {.hh = 0x80f0000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8132 */
+    {.hh = 0x80ec000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8133 */
+    {.hh = 0x80e8000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8134 */
+    {.hh = 0x80e4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8135 */
+    {.hh = 0x80e0000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8136 */
+    {.hh = 0x80dc000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8137 */
+    {.hh = 0x80d8000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8138 */ 
+   {.hh = 0x80d4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8139 */
+    {.hh = 0x80d0000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8140 */
+    {.hh = 0x80cc000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8141 */
+    {.hh = 0x80c8000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8142 */
+    {.hh = 0x80c4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8143 */
+    {.hh = 0x80c0000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8144 */
+    {.hh = 0x80bc000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8145 */
+    {.hh = 0x80b8000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8146 */
+    {.hh = 0x80b4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8147 */
+    {.hh = 0x80b0000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8148 */
+    {.hh = 0x80ac000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8149 */
+    {.hh = 0x80a8000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8150 */
+    {.hh = 0x80a4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8151 */
+    {.hh = 0x80a0000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8152 */
+    {.hh = 0x809c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8153 */
+    {.hh = 0x8098000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8154 */
+    {.hh = 0x8094000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8155 */
+    {.hh = 0x8090000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8156 */
+    {.hh = 0x808c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8157 */
+    {.hh = 0x8088000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8158 */
+    {.hh = 0x8084000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8159 */
+    {.hh = 0x8080000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8160 */
+    {.hh = 0x807c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8161 */
+    {.hh = 0x8078000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8162 */
+    {.hh = 0x8074000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8163 */
+    {.hh = 0x8070000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8164 */
+    {.hh = 0x806c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8165 */
+    {.hh = 0x8068000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8166 */
+    {.hh = 0x8064000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8167 */
+    {.hh = 0x8060000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8168 */
+    {.hh = 0x805c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8169 */
+    {.hh = 0x8058000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8170 */
+    {.hh = 0x8054000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8171 */
+    {.hh = 0x8050000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8172 */
+    {.hh = 0x804c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8173 */
+    {.hh = 0x8048000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8174 */
+    {.hh = 0x8044000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8175 */
+    {.hh = 0x8040000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8176 */
+    {.hh = 0x803c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8177 */
+    {.hh = 0x8038000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8178 */
+    {.hh = 0x8034000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8179 */
+    {.hh = 0x8030000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8180 */
+    {.hh = 0x802c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8181 */
+    {.hh = 0x8028000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8182 */
+    {.hh = 0x8024000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8183 */
+    {.hh = 0x8020000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8184 */
+    {.hh = 0x801c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8185 */
+    {.hh = 0x8018000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8186 */
+    {.hh = 0x8014000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8187 */
+    {.hh = 0x8010000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8188 */
+    {.hh = 0x800c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8189 */
+    {.hh = 0x8008000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8190 */
+    {.hh = 0x8000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8191 */
+    {.hh = 0x8000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* j=8192 */
+    {.hh = 0xfff4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8193 */
+    {.hh = 0xffec000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8194 */
+    {.hh = 0xffe4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8195 */
+    {.hh = 0xffdc000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8196 */
+    {.hh = 0xffd4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8197 */
+    {.hh = 0xffcc000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8198 */
+    {.hh = 0xffc4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8199 */
+    {.hh = 0xffbc000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8200 */
+    {.hh = 0xffb4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8201 */
+    {.hh = 0xffac000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8202 */
+    {.hh = 0xffa4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8203 */
+    {.hh = 0xff9c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8204 */
+    {.hh = 0xff94000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8205 */
+    {.hh = 0xff8c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8206 */
+    {.hh = 0xff84000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8207 */
+    {.hh = 0xff7c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8208 */
+    {.hh = 0xff74000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8209 */
+    {.hh = 0xff6c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8210 */
+    {.hh = 0xff64000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8211 */
+    {.hh = 0xff5c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8212 */
+    {.hh = 0xff54000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8213 */
+    {.hh = 0xff4c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8214 */
+    {.hh = 0xff44000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8215 */
+    {.hh = 0xff3c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8216 */
+    {.hh = 0xff34000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8217 */
+    {.hh = 0xff2c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8218 */
+    {.hh = 0xff24000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8219 */
+    {.hh = 0xff1c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8220 */
+    {.hh = 0xff14000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8221 */
+    {.hh = 0xff0c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8222 */
+    {.hh = 0xff04000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8223 */
+    {.hh = 0xfefc000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8224 */
+    {.hh = 0xfef4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8225 */
+    {.hh = 0xfeec000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8226 */
+    {.hh = 0xfee4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8227 */
+    {.hh = 0xfedc000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8228 */
+    {.hh = 0xfed4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8229 */
+    {.hh = 0xfecc000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8230 */
+    {.hh = 0xfec4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8231 */
+    {.hh = 0xfebc000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8232 */
+    {.hh = 0xfeb4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8233 */
+    {.hh = 0xfeac000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8234 */
+    {.hh = 0xfea4000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8235 */
+    {.hh = 0xfe9c000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8236 */
+    {.hh = 0xfe98000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8237 */
+    {.hh = 0xfe90000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8238 */
+    {.hh = 0xfe88000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8239 */
+    {.hh = 0xfe80000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8240 */
+    {.hh = 0xfe78000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8241 */
+    {.hh = 0xfe70000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8242 */
+    {.hh = 0xfe68000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8243 */
+    {.hh = 0xfe60000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8244 */
+    {.hh = 0xfe58000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8245 */
+    {.hh = 0xfe50000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8246 */
+    {.hh = 0xfe48000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8247 */
+    {.hh = 0xfe40000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8248 */
+    {.hh = 0xfe38000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8249 */
+    {.hh = 0xfe30000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8250 */
+    {.hh = 0xfe28000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8251 */
+    {.hh = 0xfe20000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8252 */
+    {.hh = 0xfe18000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8253 */
+    {.hh = 0xfe10000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8254 */
+    {.hh = 0xfe08000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8255 */
+    {.hh = 0xfe00000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -1, .sgn = 0x0}, /* j=8256 */
+};
+    
+/* For 90 <= i <= 181, _LOG_INV_3_1[i-90] is an approximation of
+   -log(_INVERSE_3_1[i-90]), where an entry (hh,hl,lh,ll,ex,sgn) represents
+   (-1)^sgn*(hh+hl/2^64+lh/2^128+ll/2^192)*2^(ex-63)
+   (the binary point is after the most significant bit of hh).
+   If was generated with output_log_inv_3_1(7,9,90,181) from the
+   accompanying file qint.sage.
+   The approximation error is bounded by 2^-258 (absolute) and 2^-256 (rel). */
+static const chelis_cr_pow__qint64_t chelis_cr_pow___LOG_INV_3_1[] = {
+    {.hh = 0xb1641795ce3ca97b, .hl = 0x7af915300e517391, .lh = 0x362aee92bfa25a80, .ll = 0x1646679ea2568305, .ex = -2, .sgn = 0x1}, /* i=90 */
+    {.hh = 0xabb3b8ba2ad362a4, .hl = 0xd5b6506cc17a01f1, .lh = 0x706866327ef7c050, .ll = 0x628f2d55f109eac9, .ex = -2, .sgn = 0x1}, /* i=91 */
+    {.hh = 0xa5f2fcabbbc506da, .hl = 0x64ca4fb7ec323d72, .lh = 0xa68b0ce7a5e0a7ea, .ll = 0xd6cad0f0b6c847ef, .ex = -2, .sgn = 0x1}, /* i=92 */
+    {.hh = 0xa0218434353f1de8, .hl = 0x6093efa632530ac8, .lh = 0x304fb3b2345b41a9, .ll = 0xe440d92b32eac488, .ex = -2, .sgn = 0x1}, /* i=93 */
+    {.hh = 0x9bb93315fec2d792, .hl = 0xa7589fba0865790d, .lh = 0x82b75e91fcdfa14e, .ll = 0x98d12c3138e33333, .ex = -2, .sgn = 0x1}, /* i=94 */
+    {.hh = 0x95c981d5c4e924ed, .hl = 0x29404f5aa577d6b1, .lh = 0xba0ea3f2ae1e1d07, .ll = 0x758e4ab7f718ea9f, .ex = -2, .sgn = 0x1}, /* i=95 */
+    {.hh = 0x914a0fde7bcb2d12, .hl = 0x1429ed3aea197a5d, .lh = 0x355a6f4f0ec5ce8f, .ll = 0xc4eca5fff76cbf20, .ex = -2, .sgn = 0x1}, /* i=96 */
+    {.hh = 0x8b3ae55d5d30701c, .hl = 0xe63eab883717047e, .lh = 0xcfa09487833ea69, .ll = 0x8791b8732b281e2f, .ex = -2, .sgn = 0x1}, /* i=97 */
+    {.hh = 0x86a35abcd5ba5903, .hl = 0xec81c3cbd925cccf, .lh = 0x6a2f869f2c41ea0a, .ll = 0x261913d1bbc49faf, .ex = -2, .sgn = 0x1}, /* i=98 */
+    {.hh = 0x8073622d6a80e634, .hl = 0x6a97009015316070, .lh = 0x9f1d0d49f7cf8122, .ll = 0xc0baf08f2dd617cf, .ex = -2, .sgn = 0x1}, /* i=99 */
+    {.hh = 0xf7856e5ee2c9b290, .hl = 0xc6f2a1b84190a7d6, .lh = 0x94261a0e91f0e8f2, .ll = 0x960d286867d7da8d, .ex = -3, .sgn = 0x1}, /* i=100 */
+    {.hh = 0xee0de5055f63eb06, .hl = 0x98a33316df83ba56, .lh = 0xa28f0225cea42f20, .ll = 0xc8c87785c07b059d, .ex = -3, .sgn = 0x1}, /* i=101 */
+    {.hh = 0xe47fbe3cd4d10d61, .hl = 0x2ec0f797fdcd1257, .lh = 0x1d97a9d046b706c5, .ll = 0xc3c4cfd592ff1d1b, .ex = -3, .sgn = 0x1}, /* i=102 */
+    {.hh = 0xdada8cf47dad2374, .hl = 0x4ffb833c3409ee78, .lh = 0x3713df786be7d79f, .ll = 0xdfdccbdb9cc5e4fc, .ex = -3, .sgn = 0x1}, /* i=103 */
+    {.hh = 0xd11de0ff15ab18c9, .hl = 0xb88d83d4cc613f1f, .lh = 0x8db36c5996f30e02, .ll = 0x67caaac70b1e203f, .ex = -3, .sgn = 0x1}, /* i=104 */
+    {.hh = 0xc74946f4436a0552, .hl = 0xc4f5cb531201c0d0, .lh = 0xe377c62941756dda, .ll = 0xbf31ff26e7952aa7, .ex = -3, .sgn = 0x1}, /* i=105 */
+    {.hh = 0xbd5c481086c848df, .hl = 0x1b596b503040323f, .lh = 0xf0a4a6c408595abb, .ll = 0x18b2e81de5a7413d, .ex = -3, .sgn = 0x1}, /* i=106 */
+    {.hh = 0xb3566a13956a86f6, .hl = 0xff1b1e1574d9fd53, .lh = 0xd790e4993973cb21, .ll = 0xb570c1978023c83, .ex = -3, .sgn = 0x1}, /* i=107 */
+    {.hh = 0xa9372f1d0da1bd17, .hl = 0x200eb71e58cd36de, .lh = 0x631daa222aa1cc5e, .ll = 0xc53df36a99bd161e, .ex = -3, .sgn = 0x1}, /* i=108 */
+    {.hh = 0x9efe158766314e54, .hl = 0xc571827efe892fc4, .lh = 0x5fb87ab4717a500, .ll = 0x73890974d65b5cfd, .ex = -3, .sgn = 0x1}, /* i=109 */
+    {.hh = 0x981eb8c723fe97f4, .hl = 0xa31c134fb702d431, .lh = 0xa1267633d7a950a6, .ll = 0xf1d435478be2e98d, .ex = -3, .sgn = 0x1}, /* i=110 */
+    {.hh = 0x8db956a97b3d0148, .hl = 0x3023472cd739f9de, .lh = 0x3f642654cbb04a9b, .ll = 0x501b839196278b37, .ex = -3, .sgn = 0x1}, /* i=111 */
+    {.hh = 0x8338a89652cb7150, .hl = 0xc647eb86498c2ce1, .lh = 0x6fdaaacd24ed99fc, .ll = 0x73619b3ac0a2580e, .ex = -3, .sgn = 0x1}, /* i=112 */
+    {.hh = 0xf85186008b15330b, .hl = 0xe64b8b775997898d, .lh = 0x3474d3375b525967, .ll = 0x1851f0a96f698496, .ex = -4, .sgn = 0x1}, /* i=113 */
+    {.hh = 0xe2f2a47ade3a18ae, .hl = 0xb0bf7c0b0d8bb4ec, .lh = 0xb357c6e1bb965608, .ll = 0xb1f3fb65de3326ac, .ex = -4, .sgn = 0x1}, /* i=114 */
+    {.hh = 0xd49369d256ab1b28, .hl = 0x5e9154e1d5263cd4, .lh = 0xfb3f11769cc680ef, .ll = 0x5588fd21488d3117, .ex = -4, .sgn = 0x1}, /* i=115 */
+    {.hh = 0xbed3b36bd8966422, .hl = 0x240644d7d9ed08ae, .lh = 0x8bd331e0f0163a57, .ll = 0xad0c8b665d0ba662, .ex = -4, .sgn = 0x1}, /* i=116 */
+    {.hh = 0xb032c549ba861d8e, .hl = 0xf74e27bc92ce336a, .lh = 0x476c441f8cbfb247, .ll = 0xb421b4cceddb6dec, .ex = -4, .sgn = 0x1}, /* i=117 */
+    {.hh = 0xa176e5f5323781dd, .hl = 0xd4f935996c92e8cb, .lh = 0xb1ed0cd9e5eb16c4, .ll = 0xd070037b7a65dbb6, .ex = -4, .sgn = 0x1}, /* i=118 */
+    {.hh = 0x8b29b7751bd70743, .hl = 0x12e0b9ee992f236d, .lh = 0x21482d3342d35569, .ll = 0xbf365c4132567724, .ex = -4, .sgn = 0x1}, /* i=119 */
+    {.hh = 0xf85186008b15330b, .hl = 0xe64b8b775997898d, .lh = 0x3474d3375b525967, .ll = 0x1851f0a96f698496, .ex = -5, .sgn = 0x1}, /* i=120 */
+    {.hh = 0xda16eb88cb8df614, .hl = 0x68a63ecfb66e94ab, .lh = 0xce26340fc53dc9e7, .ll = 0x7778bea9e4485112, .ex = -5, .sgn = 0x1}, /* i=121 */
+    {.hh = 0xac52dd7e4726a463, .hl = 0x547a963a91bb3012, .lh = 0x6146c24c8704d774, .ll = 0x9181c8e24fdd9bf3, .ex = -5, .sgn = 0x1}, /* i=122 */
+    {.hh = 0x8d86cc491ecbfe16, .hl = 0x51776453b7e8254d, .lh = 0x1fe3399d400c4228, .ll = 0x939ae69b03a586bc, .ex = -5, .sgn = 0x1}, /* i=123 */
+    {.hh = 0xdcfe013d7c8cbfde, .hl = 0xa32dbac46f30cffe, .lh = 0xda998fa29b9bb98b, .ll = 0x121d35ae45b4e2e1, .ex = -6, .sgn = 0x1}, /* i=124 */
+    {.hh = 0x9e75221a352ba779, .hl = 0xa52b7ea62f2198d0, .lh = 0x797189a4ceffb772, .ll = 0x67b1205aea8ed5f1, .ex = -6, .sgn = 0x1}, /* i=125 */
+    {.hh = 0xbee23afc0853b6e9, .hl = 0x289782c20df350a1, .lh = 0x4943001d3f0647d1, .ll = 0x907db46b91a9be11, .ex = -7, .sgn = 0x1}, /* i=126 */
+    {.hh = 0x0, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 255, .sgn = 0x1}, /* i=127 */
+    {.hh = 0x0, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 255, .sgn = 0x1}, /* i=128 */
+    {.hh = 0xc122451c45155104, .hl = 0xb16137f09a002b3c, .lh = 0x114425f06f494d45, .ll = 0xe2fa6c6fbca3a43a, .ex = -7, .sgn = 0x0}, /* i=129 */
+    {.hh = 0xa195492cc06604e6, .hl = 0x4a18dff7cdb4ae5c, .lh = 0x1b120e15ca3dceb7, .ll = 0x62148cc46c40db43, .ex = -6, .sgn = 0x0}, /* i=130 */
+    {.hh = 0xe31e9760a5578c63, .hl = 0xf9eb2f284f31c35c, .lh = 0x739276a47bc0067f, .ll = 0x13d3be097b445a02, .ex = -6, .sgn = 0x0}, /* i=131 */
+    {.hh = 0x8a4f1f2002d46756, .hl = 0x5be970314148c644, .lh = 0xd7177b23dafc1e78, .ll = 0x62496477de5b9b70, .ex = -5, .sgn = 0x0}, /* i=132 */
+    {.hh = 0xab8ae2601e777722, .hl = 0x3b89d7f254f8d4d, .lh = 0x7fea49aded4406bd, .ll = 0xbd68cbc383b2b959, .ex = -5, .sgn = 0x0}, /* i=133 */
+    {.hh = 0xcd0c3dab9ef3dd1b, .hl = 0x13b26f298aa357c8, .lh = 0x307b8ee396d79ef6, .ll = 0x801ddc72263552e3, .ex = -5, .sgn = 0x0}, /* i=134 */
+    {.hh = 0xe65b9e6eed965c36, .hl = 0xe09f5fe2058d6005, .lh = 0xb58f9a65c1043b41, .ll = 0xe2faca238c300fa9, .ex = -5, .sgn = 0x0}, /* i=135 */
+    {.hh = 0x842cc5acf1d03445, .hl = 0x1fecdfa819b96097, .lh = 0xe362c7f8dd18e5cb, .ll = 0x2c885ebb0a67bc24, .ex = -4, .sgn = 0x0}, /* i=136 */
+    {.hh = 0x9103dae3c2a4ec67, .hl = 0xe0863df62ab56719, .lh = 0xe0c7d4d12db021b8, .ll = 0x55776e4da79f922a, .ex = -4, .sgn = 0x0}, /* i=137 */
+    {.hh = 0xa242f01edefd6a37, .hl = 0x469355b78dc796e2, .lh = 0xb3c575a2031956ec, .ll = 0x395fd54d8695b022, .ex = -4, .sgn = 0x0}, /* i=138 */
+    {.hh = 0xaf4ad26cbc8e5be7, .hl = 0xe8b8b88a14ff0cd, .lh = 0x9ad6b7f2deaa8ae6, .ll = 0x47e37e4affafd5a1, .ex = -4, .sgn = 0x0}, /* i=139 */
+    {.hh = 0xc0cbf17a071f80dc, .hl = 0xf96ffdf76a147ccc, .lh = 0x3700761ca4fb5278, .ll = 0xf6961709acabf991, .ex = -4, .sgn = 0x0}, /* i=140 */
+    {.hh = 0xce06196a692a41fb, .hl = 0xbe3ccc15326765f, .lh = 0x733187c6d6f39bb8, .ll = 0xe3f54edc6e2e0350, .ex = -4, .sgn = 0x0}, /* i=141 */
+    {.hh = 0xdb56446d6ad8deff, .hl = 0xa8112e35a60e6374, .lh = 0xdd62571dda9ce602, .ll = 0xe44b58c81d361f18, .ex = -4, .sgn = 0x0}, /* i=142 */
+    {.hh = 0xe8bcbc410c9b219d, .hl = 0xaf7df76ad29e5b5f, .lh = 0xe6a09f8913389334, .ll = 0x7de7a2535752b786, .ex = -4, .sgn = 0x0}, /* i=143 */
+    {.hh = 0xf639cc185088fe5d, .hl = 0x4066e87f2c0f733f, .lh = 0x8296a39b87519924, .ll = 0x5a18333a98b0adbc, .ex = -4, .sgn = 0x0}, /* i=144 */
+    {.hh = 0x842cc5acf1d03445, .hl = 0x1fecdfa819b96097, .lh = 0xe362c7f8dd18e5cb, .ll = 0x2c885ebb0a67bc24, .ex = -3, .sgn = 0x0}, /* i=145 */
+    {.hh = 0x8b064012593d85a5, .hl = 0x52013c7a80ad089b, .lh = 0x42ada32f6b02af2d, .ll = 0x88cfab3b8ffc09bc, .ex = -3, .sgn = 0x0}, /* i=146 */
+    {.hh = 0x91eb89524e100d23, .hl = 0x8fd3df5c52d67e7b, .lh = 0x2024f18ebc9b8af6, .ll = 0x81f936979eefae26, .ex = -3, .sgn = 0x0}, /* i=147 */
+    {.hh = 0x98dcca69d27c263b, .hl = 0x8e94203f336fc8c4, .lh = 0xcfe4e777e9932f10, .ll = 0x9ed7ba1820b6ff5, .ex = -3, .sgn = 0x0}, /* i=148 */
+    {.hh = 0x9fda2d2cc9465c4f, .hl = 0x32b9565f5355181, .lh = 0xdc751798a72b3dc9, .ll = 0x56eca518e7d2fe44, .ex = -3, .sgn = 0x0}, /* i=149 */
+    {.hh = 0xa6e3dc4bde0e3cdb, .hl = 0x570ff874170d2a8, .lh = 0xc7be23c834886156, .ll = 0xbd706a5a2627f5aa, .ex = -3, .sgn = 0x0}, /* i=150 */
+    {.hh = 0xab9be6480c66ea9e, .hl = 0x9ae21fd871b8d27c, .lh = 0x7851f4e516e5c9bf, .ll = 0xc1c5a79f56e96b76, .ex = -3, .sgn = 0x0}, /* i=151 */
+    {.hh = 0xb2ba75f46099cf8b, .hl = 0x2c3c2e77904afa78, .lh = 0x77fa400e7e689a3, .ll = 0x30a5f043d61bad59, .ex = -3, .sgn = 0x0}, /* i=152 */
+    {.hh = 0xb9e5c83a7e8a655b, .hl = 0xcbffe9661fe72421, .lh = 0x2096b17331fac5dc, .ll = 0x7775b110db2591bd, .ex = -3, .sgn = 0x0}, /* i=153 */
+    {.hh = 0xc11e0b2a8d1e0ddb, .hl = 0x9a631e830fd30903, .lh = 0xd59edb68f6b3f63b, .ll = 0x9ede162ed215bb6b, .ex = -3, .sgn = 0x0}, /* i=154 */
+    {.hh = 0xc8636dcfe5e6ca0a, .hl = 0x88e72835b3292d4f, .lh = 0xd07fb98b088395ee, .ll = 0x10b2726db3c15971, .ex = -3, .sgn = 0x0}, /* i=155 */
+    {.hh = 0xcd43bc6f5d51c3e8, .hl = 0xfbfb0e3f0fd23074, .lh = 0x435c6598be364fab, .ll = 0x938d2827ce902e72, .ex = -3, .sgn = 0x0}, /* i=156 */
+    {.hh = 0xd49f69e456cf1b79, .hl = 0x5f53bd2e406e66e7, .lh = 0x7188af8f4f45b9ee, .ll = 0x7ec0d7bfb6b65f0d, .ex = -3, .sgn = 0x0}, /* i=157 */
+    {.hh = 0xdc08b985c11e9068, .hl = 0x3b9cd767c3b1ac52, .lh = 0x81fdd139ee15996c, .ll = 0xdf9da9ae69110ecb, .ex = -3, .sgn = 0x0}, /* i=158 */
+    {.hh = 0xe1014558bfcda3e2, .hl = 0x35470a74be1230ec, .lh = 0x7ea4f73313d9cef6, .ll = 0x7a6dd1127f07bf9a, .ex = -3, .sgn = 0x0}, /* i=159 */
+    {.hh = 0xe881bf932af3dac0, .hl = 0xc524848e3443e03f, .lh = 0xc22bd8fede6ee351, .ll = 0x93f48308bc589a07, .ex = -3, .sgn = 0x0}, /* i=160 */
+    {.hh = 0xed89ed86a44a01aa, .hl = 0x11d49f96cb88317a, .lh = 0xb09cac07eab378a8, .ll = 0xe6342851611cc8be, .ex = -3, .sgn = 0x0}, /* i=161 */
+    {.hh = 0xf52224f82557a459, .hl = 0x8dcca8d7f17fa2a9, .lh = 0x330d7e7fe8c1c62a, .ll = 0x18d25c613e0e9a6d, .ex = -3, .sgn = 0x0}, /* i=162 */
+    {.hh = 0xfa3a589a6f9146d8, .hl = 0x388212895529a6fa, .lh = 0x937d820ed16d615e, .ll = 0x6bf1e0ae92585a10, .ex = -3, .sgn = 0x0}, /* i=163 */
+    {.hh = 0x80f572b1363487b9, .hl = 0xf5bd0b5b3479d5f4, .lh = 0x501b8b4a63fd6f67, .ll = 0x6e9f54a7361289b3, .ex = -2, .sgn = 0x0}, /* i=164 */
+    {.hh = 0x8389c3026ac3139b, .hl = 0x62dda9d2270fa1f4, .lh = 0x29aec44c9ebb0731, .ll = 0xee2b9479c54b01fb, .ex = -2, .sgn = 0x0}, /* i=165 */
+    {.hh = 0x86216b3b0b17188b, .hl = 0x163ceae88f720f1d, .lh = 0x9a8ffa0ca490b651, .ll = 0x815baea454ee87ca, .ex = -2, .sgn = 0x0}, /* i=166 */
+    {.hh = 0x8a0b3f79b3bc180f, .hl = 0x49b55ea7d3730d7, .lh = 0x1f95d048ae9871b6, .ll = 0xb7eb0007a2dfe5c0, .ex = -2, .sgn = 0x0}, /* i=167 */
+    {.hh = 0x8cab69dcde17d2f7, .hl = 0x3ad1aa142b94f169, .lh = 0x82d7e38d0ce7657c, .ll = 0x800bbe6769b633e0, .ex = -2, .sgn = 0x0}, /* i=168 */
+    {.hh = 0x8f4f0b3c44cfa2a2, .hl = 0x586e9343c9cfdbac, .lh = 0x1fee2e686760d584, .ll = 0xc0243088b56a6c0f, .ex = -2, .sgn = 0x0}, /* i=169 */
+    {.hh = 0x934b1089a6dc93c1, .hl = 0xdf5bb3b60554e151, .lh = 0x87a486e65aa1bcd5, .ll = 0xad047f998c197d96, .ex = -2, .sgn = 0x0}, /* i=170 */
+    {.hh = 0x95f783e6e49a9cfa, .hl = 0x4a5004f3ef063312, .lh = 0xcac9f0589aff46a5, .ll = 0x3b2136f4975a446e, .ex = -2, .sgn = 0x0}, /* i=171 */
+    {.hh = 0x98a78f0e9ae71d85, .hl = 0x2cdec34784707839, .lh = 0x4861cab8c5ee1c94, .ll = 0xb0ddc91e9b86138f, .ex = -2, .sgn = 0x0}, /* i=172 */
+    {.hh = 0x9b5b3bb5f088b766, .hl = 0xd878bbe3d392be25, .lh = 0x24f04843d0f8f41, .ll = 0xd27746bfed0adcfe, .ex = -2, .sgn = 0x0}, /* i=173 */
+    {.hh = 0x9e1293b9998c1daa, .hl = 0x5b035eae273a855e, .lh = 0xf58182e4db06261c, .ll = 0x73db477d896b83f5, .ex = -2, .sgn = 0x0}, /* i=174 */
+    {.hh = 0xa22c8f029cfa45a9, .hl = 0xdb5b709e0b69e773, .lh = 0x5e171935b5381c36, .ll = 0x930e7dec83978f45, .ex = -2, .sgn = 0x0}, /* i=175 */
+    {.hh = 0xa4ed3f9de620f666, .hl = 0x9b5e973353638c10, .lh = 0xd81763d28db5c039, .ll = 0xaef301c1c91f3649, .ex = -2, .sgn = 0x0}, /* i=176 */
+    {.hh = 0xa7b1bf5dd4c07d4e, .hl = 0x699db68db75e9a7e, .lh = 0x8e98852150ea76b5, .ll = 0x2d4a158846053fd7, .ex = -2, .sgn = 0x0}, /* i=177 */
+    {.hh = 0xaa7a18dbdf0d44aa, .hl = 0x604884a8dd76d08a, .lh = 0x6c40e044972eeeb2, .ll = 0x8d4e70541a83bec5, .ex = -2, .sgn = 0x0}, /* i=178 */
+    {.hh = 0xad4656ddf6fd070c, .hl = 0x9ea10260fe452ba2, .lh = 0x59b0b64abac9cb07, .ll = 0x30a999bf35a66756, .ex = -2, .sgn = 0x0}, /* i=179 */
+    {.hh = 0xb0168457848f5f48, .hl = 0xbb6f9fb246068d52, .lh = 0x3e567a3312c2443d, .ll = 0xe963d8ddfd9f7f8b, .ex = -2, .sgn = 0x0}, /* i=180 */
+    {.hh = 0xb2eaac6a67005513, .hl = 0xf4b716f6fec8156b, .lh = 0x2c74b8f4ed61d394, .ll = 0x1166335bb2b54fe0, .ex = -2, .sgn = 0x0}, /* i=181 */
+};
+
+/* For 8128 <= j <= 8256, _LOG_INV_3_2[j-8128] is an approximation of
+   -log(_INVERSE_3_2[j-8128]), where an entry (hh,hl,lh,ll,ex,sgn) represents
+   (-1)^sgn*(hh+hl/2^64+lh/2^128+ll/2^192)*2^(ex-63)
+   (the binary point is after the most significant bit of hh).
+   If was generated with output_log_inv_3_2(6,14,8128,8256,7,62) from the
+   accompanying file qint.sage.
+   The approximation error is bounded by 2^-263 (absolute) and 2^-256 (rel). */
+static const chelis_cr_pow__qint64_t chelis_cr_pow___LOG_INV_3_2[] = {
+    {.hh = 0xff015358833c47e1, .hl = 0xbb481c8ee1416959, .lh = 0xed961f7cd039d43b, .ll = 0x3813c435abc461e9, .ex = -8, .sgn = 0x1}, /* j=8128 */
+    {.hh = 0xfb0933b732572a6d, .hl = 0x214cca3dd1d4796a, .lh = 0x63275973180916, .ll = 0xce33d61e9d12b379, .ex = -8, .sgn = 0x1}, /* j=8129 */
+    {.hh = 0xf710f492711d9d26, .hl = 0xfbc7b38b17b2019, .lh = 0x53eb4b80e74f4d9f, .ll = 0xec0f1ece69a0881, .ex = -8, .sgn = 0x1}, /* j=8130 */
+    {.hh = 0xf31895e84b1a6be6, .hl = 0xb76782b9e88c84cb, .lh = 0x3765e2cb07bc7842, .ll = 0x1b2970050550b17b, .ex = -8, .sgn = 0x1}, /* j=8131 */
+    {.hh = 0xef2017b6cba9cf9a, .hl = 0x2dc85881664025b4, .lh = 0xce96efdd54fdcc41, .ll = 0xc953aa9864a2c806, .ex = -8, .sgn = 0x1}, /* j=8132 */
+    {.hh = 0xeb2779fbfdf96874, .hl = 0xce4ab4e678d0ed03, .lh = 0x7c9ecdfd8f89db96, .ll = 0xa637f86e778c350c, .ex = -8, .sgn = 0x1}, /* j=8133 */
+    {.hh = 0xe72ebcb5ed08382b, .hl = 0xb60585f4c4bb6062, .lh = 0x1caec15031f4dc54, .ll = 0x197d0a42fdccbac4, .ex = -8, .sgn = 0x1}, /* j=8134 */
+    {.hh = 0xe335dfe2a3a69c2b, .hl = 0x59bcffe9d5650564, .lh = 0x50c342f5fce295a8, .ll = 0xac842dc0defcda11, .ex = -8, .sgn = 0x1}, /* j=8135 */
+    {.hh = 0xdf3ce3802c7647cd, .hl = 0x3602021fa93b1e18, .lh = 0x4f178f6a8fbb9ca5, .ll = 0x4f07c79076670299, .ex = -8, .sgn = 0x1}, /* j=8136 */
+    {.hh = 0xdb43c78c91ea3e8c, .hl = 0x9944002534d09b3d, .lh = 0x2354c6de776e85ab, .ll = 0x7bfb018bb7288d07, .ex = -8, .sgn = 0x1}, /* j=8137 */
+    {.hh = 0xd74a8c05de46ce3a, .hl = 0x87aa95782311a277, .lh = 0x2ba2456733804a75, .ll = 0x33512ca3a3f6fe2b, .ex = -8, .sgn = 0x1}, /* j=8138 */
+    {.hh = 0xd35130ea1ba18930, .hl = 0xb88be10313a1303c, .lh = 0xc17153c5ab3b0225, .ll = 0xe1f11ff3205d196e, .ex = -8, .sgn = 0x1}, /* j=8139 */
+    {.hh = 0xcf57b63753e14083, .hl = 0xad54bc31433dddba, .lh = 0x3d675807b776c8c3, .ll = 0x50075ac879e03385, .ex = -8, .sgn = 0x1}, /* j=8140 */
+    {.hh = 0xcb5e1beb90bdfe33, .hl = 0xe1b7d813e3f825e0, .lh = 0xd24faf76303783f0, .ll = 0x55ff6c2398186fbe, .ex = -8, .sgn = 0x1}, /* j=8141 */
+    {.hh = 0xc7646204dbc0ff5e, .hl = 0x14f8c1be7370f218, .lh = 0xb165fd239443b62c, .ll = 0x237e837cc1f0bdfb, .ex = -8, .sgn = 0x1}, /* j=8142 */
+    {.hh = 0xc36a88813e44ae6a, .hl = 0xac27c5a6139cd30c, .lh = 0x3e814a96bc97e05e, .ll = 0xa2417a23566b2cd7, .ex = -8, .sgn = 0x1}, /* j=8143 */
+    {.hh = 0xbf708f5ec1749d3c, .hl = 0x2d23a0744e00f594, .lh = 0x68f9c68b2e5248, .ll = 0x1d701478d6f6c2b6, .ex = -8, .sgn = 0x1}, /* j=8144 */
+    {.hh = 0xbb76769b6e4d7f5c, .hl = 0xd235e25fb9644c30, .lh = 0x869c4dd8468b27de, .ll = 0x605b72cc1d8025bc, .ex = -8, .sgn = 0x1}, /* j=8145 */
+    {.hh = 0xb77c3e354d9d242b, .hl = 0x361ee0bcb5db0449, .lh = 0x567cab7f031b369, .ll = 0xd9bec487ee14afeb, .ex = -8, .sgn = 0x1}, /* j=8146 */
+    {.hh = 0xb381e62a68027106, .hl = 0x18660815da3d7962, .lh = 0xd14621e31d9f0de1, .ll = 0x8fbb93f3b4e5b10e, .ex = -8, .sgn = 0x1}, /* j=8147 */
+    {.hh = 0xaf876e78c5ed5b77, .hl = 0x39c357b6bfdf81b4, .lh = 0xf2591df10cea40d0, .ll = 0x730872806a501e6e, .ex = -8, .sgn = 0x1}, /* j=8148 */
+    {.hh = 0xab8cd71e6f9ee35d, .hl = 0x5076c62c951204f5, .lh = 0xb058f99c8186daa4, .ll = 0xae0d7dcbc2a675ab, .ex = -8, .sgn = 0x1}, /* j=8149 */
+    {.hh = 0xa79220196d290d15, .hl = 0x146244d643f7fa2a, .lh = 0x90fee0b93d40db31, .ll = 0xe67bce480f351d7b, .ex = -8, .sgn = 0x1}, /* j=8150 */
+    {.hh = 0xa3974967c66edba1, .hl = 0x62bb0f3208d9a1ba, .lh = 0xcdd5aab43dfdb463, .ll = 0x9338ef1dac85e113, .ex = -8, .sgn = 0x1}, /* j=8151 */
+    {.hh = 0x9f9c530783244ad2, .hl = 0x7926e92808bd580c, .lh = 0x9a874314df180c72, .ll = 0x2272c79abfdb422c, .ex = -8, .sgn = 0x1}, /* j=8152 */
+    {.hh = 0x9ba13cf6aace496c, .hl = 0x4819e620d5fcc067, .lh = 0x9066b677760637d4, .ll = 0x308f6e39ffa6ca4c, .ex = -8, .sgn = 0x1}, /* j=8153 */
+    {.hh = 0x97a6073344c2b34b, .hl = 0xdc494943d427214e, .lh = 0x423f0610339ed04b, .ll = 0x185c41879a1a0e44, .ex = -8, .sgn = 0x1}, /* j=8154 */
+    {.hh = 0x93aab1bb58284b8b, .hl = 0xdf0805c4161e404b, .lh = 0xb467a7c6839cc262, .ll = 0x831c3f31eb48d551, .ex = -8, .sgn = 0x1}, /* j=8155 */
+    {.hh = 0x8faf3c8cebf6b6a8, .hl = 0x2d615caaa0514c3b, .lh = 0xf729c68cd270f129, .ll = 0xaab9342f19cba76c, .ex = -8, .sgn = 0x1}, /* j=8156 */
+    {.hh = 0x8bb3a7a606f674a0, .hl = 0x85c60c12eca0aedb, .lh = 0xa3fb0e5c1d39e0e8, .ll = 0x1dca7781b6e7202f, .ex = -8, .sgn = 0x1}, /* j=8157 */
+    {.hh = 0x87b7f304afc0db1a, .hl = 0x4c207a522524f8de, .lh = 0x3d54277ac7f378a6, .ll = 0xa5d1bbca5392d277, .ex = -8, .sgn = 0x1}, /* j=8158 */
+    {.hh = 0x83bc1ea6ecc00f81, .hl = 0x64243e02c6215a4e, .lh = 0xb38c33565546e35c, .ll = 0x19646b6a5fd02489, .ex = -8, .sgn = 0x1}, /* j=8159 */
+    {.hh = 0xff805515885e0250, .hl = 0x435ab4da6a5bb48c, .lh = 0xcd29dd6d72582491, .ll = 0xba6e335a1a33227f, .ex = -9, .sgn = 0x1}, /* j=8160 */
+    {.hh = 0xf7882d5c7832c6cc, .hl = 0x9e06fc84b6ea5e24, .lh = 0x699801dab452e328, .ll = 0x96dc3d1e75ba8032, .ex = -9, .sgn = 0x1}, /* j=8161 */
+    {.hh = 0xef8fc61eb4b74f6e, .hl = 0x91ab122ee427cfb4, .lh = 0x8862e24ccd48f678, .ll = 0x95fa76270a5d0366, .ex = -9, .sgn = 0x1}, /* j=8162 */
+    {.hh = 0xe7971f584945efae, .hl = 0x5f832513e3211642, .lh = 0xa65998dde4dd76e0, .ll = 0xbbb102dc658c60, .ex = -9, .sgn = 0x1}, /* j=8163 */
+    {.hh = 0xdf9e390540da5fbe, .hl = 0x5e7b48cfeeb85aa7, .lh = 0xbcaca74cb74df3d2, .ll = 0x55bfb0c4fdd76008, .ex = -9, .sgn = 0x1}, /* j=8164 */
+    {.hh = 0xd7a51321a611b0c1, .hl = 0xb36a9f58eb4ccd07, .lh = 0x8770a2e82b32cf54, .ll = 0xc9fdca283fb5d971, .ex = -9, .sgn = 0x1}, /* j=8165 */
+    {.hh = 0xcfabada9832a4101, .hl = 0x3360751e43c7af35, .lh = 0x5d10db5217ec2ab8, .ll = 0xc60248447782dce7, .ex = -9, .sgn = 0x1}, /* j=8166 */
+    {.hh = 0xc7b20898e203b01e, .hl = 0x6fab78aca91193cb, .lh = 0x5e4d97ba155a9de6, .ll = 0xcdd79f978d1afd7b, .ex = -9, .sgn = 0x1}, /* j=8167 */
+    {.hh = 0xbfb823ebcc1ed344, .hl = 0xeb432409cffdad8d, .lh = 0x568dc2013b32ced6, .ll = 0x72b53615be59209e, .ex = -9, .sgn = 0x1}, /* j=8168 */
+    {.hh = 0xb7bdff9e4a9da959, .hl = 0x793b5acf3a336461, .lh = 0x9cffddada1c113a2, .ll = 0xb54d414e644993a8, .ex = -9, .sgn = 0x1}, /* j=8169 */
+    {.hh = 0xafc39bac66434f27, .hl = 0xc3ea2cd93f316b33, .lh = 0xbfcaabcf0318ef95, .ll = 0x85a480f694e7b857, .ex = -9, .sgn = 0x1}, /* j=8170 */
+    {.hh = 0xa7c8f8122773f38d, .hl = 0xfc679a28e9d9f212, .lh = 0x487785d971aec0af, .ll = 0x61cbdae5b7255821, .ex = -9, .sgn = 0x1}, /* j=8171 */
+    {.hh = 0x9fce14cb9634cba6, .hl = 0xb20f215bd3b58c60, .lh = 0xd8ba6eedf272eeb0, .ll = 0x574dfcf4f87b33e8, .ex = -9, .sgn = 0x1}, /* j=8172 */
+    {.hh = 0x97d2f1d4ba2c06f0, .hl = 0xd1aacedcefe9d376, .lh = 0xb21c7fe4cdbc5967, .ll = 0xd35c35c4241c3714, .ex = -9, .sgn = 0x1}, /* j=8173 */
+    {.hh = 0x8fd78f299aa0c375, .hl = 0xcbef6fac33691e95, .lh = 0x466fab846a1e3e70, .ll = 0xef6ef4000ffc2f4b, .ex = -9, .sgn = 0x1}, /* j=8174 */
+    {.hh = 0x87dbecc63e7b01ed, .hl = 0xe2f1775134c8da75, .lh = 0x134f09715ee9c6cf, .ll = 0x48be7593379645aa, .ex = -9, .sgn = 0x1}, /* j=8175 */
+    {.hh = 0xffc0154d588733c5, .hl = 0x3c742a7c76356395, .lh = 0xb1d845d134023d8e, .ll = 0x66ad982559cdd0ce, .ex = -10, .sgn = 0x1}, /* j=8176 */
+    {.hh = 0xefc7d18dd4485b9e, .hl = 0xca47c52b7d7ffce2, .lh = 0x13c8ea71e3d8fe30, .ll = 0x8edd8e108ea7f135, .ex = -10, .sgn = 0x1}, /* j=8177 */
+    {.hh = 0xdfcf0e45fbce3e80, .hl = 0x7e4cfbd830393b87, .lh = 0x83304a61505642d8, .ll = 0xceeccccf5069ebf8, .ex = -10, .sgn = 0x1}, /* j=8178 */
+    {.hh = 0xcfd5cb6dd9ef05dd, .hl = 0x7370ae83f9e72748, .lh = 0x140f4a016e0c0d28, .ll = 0x5aea5efc41fa18fd, .ex = -10, .sgn = 0x1}, /* j=8179 */
+    {.hh = 0xbfdc08fd78c229b9, .hl = 0xe6dbb624f9739781, .lh = 0xbbd85b81581c98f8, .ll = 0xe1340de77cd6a600, .ex = -10, .sgn = 0x1}, /* j=8180 */
+    {.hh = 0xafe1c6ece1a058dd, .hl = 0x97fa2fd0c9dc723d, .lh = 0x998985ef1e4636e0, .ll = 0x306c5597c846f0b9, .ex = -10, .sgn = 0x1}, /* j=8181 */
+    {.hh = 0x9fe705341d236102, .hl = 0x7199cd06ae5d39b3, .lh = 0x67da60b1a110ff9, .ll = 0x14c940c27f248ced, .ex = -10, .sgn = 0x1}, /* j=8182 */
+    {.hh = 0x8febc3cb332616ff, .hl = 0x7b6d1248c3e1fd3f, .lh = 0xd8ceb8a313143c9c, .ll = 0xe1449e20d24508b2, .ex = -10, .sgn = 0x1}, /* j=8183 */
+    {.hh = 0xffe0055455887de0, .hl = 0x26828c92649a3a38, .lh = 0xc3585d8bbd3ac1b8, .ll = 0xd315929badc83115, .ex = -11, .sgn = 0x1}, /* j=8184 */
+    {.hh = 0xdfe7839214b4e8ae, .hl = 0xda6959f7f0e01bf0, .lh = 0x3ff9151061ec91aa, .ll = 0x8f307c96ffa40bba, .ex = -11, .sgn = 0x1}, /* j=8185 */
+    {.hh = 0xbfee023faf0c2480, .hl = 0xb47505bfa5a03b06, .lh = 0x2b8ff7c8377c9037, .ll = 0x6cd9392c0d17528b, .ex = -11, .sgn = 0x1}, /* j=8186 */
+    {.hh = 0x9ff3814d2e4a36b2, .hl = 0xa8740b91c95df537, .lh = 0x5526081fe3d93a56, .ll = 0x3f68c3cd00e45f8b, .ex = -11, .sgn = 0x1}, /* j=8187 */
+    {.hh = 0xfff0015535588833, .hl = 0x3c56c598c659c2a2, .lh = 0xf5c74f2f07e4f272, .ll = 0xc451b2e04ebd63ee, .ex = -12, .sgn = 0x1}, /* j=8188 */
+    {.hh = 0xbff7008ff5e0c257, .hl = 0x379eba7e6465ff63, .lh = 0x3535a7e74bbb0089, .ll = 0x937a324b4307d36, .ex = -12, .sgn = 0x1}, /* j=8189 */
+    {.hh = 0xfff8005551558885, .hl = 0xde026e271ee0549c, .lh = 0x8cd0b8002d083c9b, .ll = 0x2e9198222f25f83c, .ex = -13, .sgn = 0x1}, /* j=8190 */
+    {.hh = 0x0, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 255, .sgn = 0x1}, /* j=8191 */
+    {.hh = 0x0, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 255, .sgn = 0x1}, /* j=8192 */
+    {.hh = 0xc004802401440c26, .hl = 0xdfeb485085f6f453, .lh = 0xb62f8fe41e621f91, .ll = 0x274178d2188f9ea7, .ex = -13, .sgn = 0x0}, /* j=8193 */
+    {.hh = 0xa00640535a37a37a, .hl = 0x6bc1e20eac8448b4, .lh = 0xdf9f60ec72f7062, .ll = 0x6f190de53deca5e8, .ex = -12, .sgn = 0x0}, /* j=8194 */
+    {.hh = 0xe00c40e4bd6e4efd, .hl = 0xc72446cc1bf728bd, .lh = 0x5e7d3be7e456c8a7, .ll = 0x180e4b0fc869da77, .ex = -12, .sgn = 0x0}, /* j=8195 */
+    {.hh = 0x900a20f319a3e273, .hl = 0x569b26aaa485ea5b, .lh = 0xf5e4d6d9243bca81, .ll = 0x2714208ba14d04c8, .ex = -11, .sgn = 0x0}, /* j=8196 */
+    {.hh = 0xb00f21bbe3e388ee, .hl = 0x5f69768284463b9b, .lh = 0x18baa187613466f, .ll = 0x5b94041491764cd7, .ex = -11, .sgn = 0x0}, /* j=8197 */
+    {.hh = 0xd01522dcc4f87991, .hl = 0x14d9d76196d8043a, .lh = 0x179e870f7485c2eb, .ll = 0x7931552a9aec92fb, .ex = -11, .sgn = 0x0}, /* j=8198 */
+    {.hh = 0xf01c2465c5e61b6f, .hl = 0x661e135f49a47c40, .lh = 0x42882a135aa4aa82, .ll = 0x82166812bed98c2d, .ex = -11, .sgn = 0x0}, /* j=8199 */
+    {.hh = 0x881213337898871e, .hl = 0x9a31ba0cbc030352, .lh = 0xdc58134f3ce2ed6e, .ll = 0x6c0826bdc4127939, .ex = -10, .sgn = 0x0}, /* j=8200 */
+    {.hh = 0x98169478296fad41, .hl = 0x7ad1e9c315328f7d, .lh = 0xcc0b6a758f391573, .ll = 0xa0bdfad5f77c4a7f, .ex = -10, .sgn = 0x0}, /* j=8201 */
+    {.hh = 0xa81b9608fc3c50ec, .hl = 0xf105b66ec4703ede, .lh = 0x76406288c82a0e9c, .ll = 0xc06e5c3eaccc9b65, .ex = -10, .sgn = 0x0}, /* j=8202 */
+    {.hh = 0xb82117edf8832797, .hl = 0xd6aef30cd312169a, .lh = 0x24ed9892618f8da1, .ll = 0x6091c8f53e42724e, .ex = -10, .sgn = 0x0}, /* j=8203 */
+    {.hh = 0xc8271a2f2689e388, .hl = 0xe6e2acf8f4d4c249, .lh = 0x830dad0cbcb297de, .ll = 0x6f8eeb67afc8978d, .ex = -10, .sgn = 0x0}, /* j=8204 */
+    {.hh = 0xd82d9cd48f574c00, .hl = 0x28bb3cd9f2a65fb4, .lh = 0x9c8f264a305434a2, .ll = 0x719267af576b8da7, .ex = -10, .sgn = 0x0}, /* j=8205 */
+    {.hh = 0xe8349fe63cb35564, .hl = 0x224a96f5a7471c45, .lh = 0xd39ed746e5b2ba94, .ll = 0xdb742c4b8aeaa82e, .ex = -10, .sgn = 0x0}, /* j=8206 */
+    {.hh = 0xf83c236c39273972, .hl = 0xd462b63756c87e80, .lh = 0x157ee3bffb879ef4, .ll = 0x9e384ccad23b6068, .ex = -10, .sgn = 0x0}, /* j=8207 */
+    {.hh = 0x842213b747fec7bb, .hl = 0x3ff51287882500ed, .lh = 0x124d4848d57cf1e2, .ll = 0xca3575b044a7e9d6, .ex = -9, .sgn = 0x0}, /* j=8208 */
+    {.hh = 0x8c2655faa6a1323f, .hl = 0x1ab9679b55f78a6a, .lh = 0x84963a91b59a785c, .ll = 0xf77577a5e4380677, .ex = -9, .sgn = 0x0}, /* j=8209 */
+    {.hh = 0x942ad8843ee1a9cd, .hl = 0x17e4b7ac6c600cb4, .lh = 0x6767118f1a71745b, .ll = 0x98a85668eda9496f, .ex = -9, .sgn = 0x0}, /* j=8210 */
+    {.hh = 0x9c2f9b581787cf0d, .hl = 0xfd1a09c848e3950d, .lh = 0xe0e66fad558345db, .ll = 0xd0914651b6655eb2, .ex = -9, .sgn = 0x0}, /* j=8211 */
+    {.hh = 0xa4349e7a37bc21ed, .hl = 0x318b2ddd9d0a33b3, .lh = 0x9dd7a4359a20f4ae, .ll = 0x176ea6faed5bf263, .ex = -9, .sgn = 0x0}, /* j=8212 */
+    {.hh = 0xac39e1eea7080dbc, .hl = 0x9dd91e52c79fd070, .lh = 0x184596be172aa3d1, .ll = 0x8a86b1bb367fee8, .ex = -9, .sgn = 0x0}, /* j=8213 */
+    {.hh = 0xb43f65b96d55f55a, .hl = 0x72de1d99ce252efd, .lh = 0x149ec47368e2b10f, .ll = 0xb294ccdf83577dc0, .ex = -9, .sgn = 0x0}, /* j=8214 */
+    {.hh = 0xbc4529de92f13f58, .hl = 0xd7bd1d62ef25480d, .lh = 0x7b1a44d708e0875b, .ll = 0x83a3462cb58566da, .ex = -9, .sgn = 0x0}, /* j=8215 */
+    {.hh = 0xc44b2e6220866227, .hl = 0x7f921124f1ecb59e, .lh = 0x7696655fbc6715a6, .ll = 0xb820b79a7e7be96f, .ex = -9, .sgn = 0x0}, /* j=8216 */
+    {.hh = 0xcc5173481f22f03f, .hl = 0x271ee1cd6d5cdf9d, .lh = 0x808228274a503b4b, .ll = 0x3ec027918b227262, .ex = -9, .sgn = 0x0}, /* j=8217 */
+    {.hh = 0xd457f8949835a44e, .hl = 0xfad0cc8b5faea8cb, .lh = 0xa39dee1517d770f7, .ll = 0x87b62eb6a5071ae6, .ex = -9, .sgn = 0x0}, /* j=8218 */
+    {.hh = 0xdc5ebe4b958e6d6b, .hl = 0xe57a0acb9d5cd4de, .lh = 0xd926113c7cf9cae4, .ll = 0x2cc6a626c5980669, .ex = -9, .sgn = 0x0}, /* j=8219 */
+    {.hh = 0xe465c471215e7b41, .hl = 0xc81bb5a8d789f443, .lh = 0x8c30a4efa2085a91, .ll = 0xd8416fa14d8a0531, .ex = -9, .sgn = 0x0}, /* j=8220 */
+    {.hh = 0xec6d0b0946384a46, .hl = 0x9b1beb40437575f4, .lh = 0x86e839aee0bd3623, .ll = 0x447c2a52014276c5, .ex = -9, .sgn = 0x0}, /* j=8221 */
+    {.hh = 0xf47492180f0fafef, .hl = 0x7944509046652d98, .lh = 0xb65fa4f60aca7f76, .ll = 0x4229769700e69546, .ex = -9, .sgn = 0x0}, /* j=8222 */
+    {.hh = 0xfc7c59a18739e6e7, .hl = 0x94e51ebff53a2f15, .lh = 0x12a476e601733b9f, .ll = 0xe7eb2f0e037ceedb, .ex = -9, .sgn = 0x0}, /* j=8223 */
+    {.hh = 0x824230d4dd36cda4, .hl = 0x8bbc7f765b13ebbe, .lh = 0x68772abd1ce3258c, .ll = 0xe7cf18b488213d56, .ex = -8, .sgn = 0x0}, /* j=8224 */
+    {.hh = 0x8646551a5a617b6b, .hl = 0xf61305ef7390939c, .lh = 0x1819673e1d680b66, .ll = 0x3bb660c119045dcb, .ex = -8, .sgn = 0x0}, /* j=8225 */
+    {.hh = 0x8a4a99a34159d69f, .hl = 0x3abc32a78afd4b7a, .lh = 0xea68f0383acd9ff4, .ll = 0xe7d3305627ebab51, .ex = -8, .sgn = 0x0}, /* j=8226 */
+    {.hh = 0x8e4efe71988d8426, .hl = 0x17596a598cb29436, .lh = 0x3dddd5d01649b409, .ll = 0x314d41b7d5759903, .ex = -8, .sgn = 0x0}, /* j=8227 */
+    {.hh = 0x92538387669afa1b, .hl = 0x1c890bee9a9d743c, .lh = 0x7139a25d67ed976c, .ll = 0x715b9888be5228e7, .ex = -8, .sgn = 0x0}, /* j=8228 */
+    {.hh = 0x965828e6b25185ec, .hl = 0xeaafbd07b543145c, .lh = 0xb28914b789a13376, .ll = 0xc286d314221430a0, .ex = -8, .sgn = 0x0}, /* j=8229 */
+    {.hh = 0x9a5cee9182b15280, .hl = 0x6517bc4112d64b17, .lh = 0x3e099f46da82a60f, .ll = 0x5ac8c579eeb8644c, .ex = -8, .sgn = 0x0}, /* j=8230 */
+    {.hh = 0x9e61d489deeb6e53, .hl = 0xdb94a1dfd653d3a5, .lh = 0x46503739bf42fb2e, .ll = 0xeabea04e3ce90eed, .ex = -8, .sgn = 0x0}, /* j=8231 */
+    {.hh = 0xa266dad1ce61d1a3, .hl = 0x2ada01ce7ed3607f, .lh = 0x99d41a958f292523, .ll = 0x2b08613964628dc6, .ex = -8, .sgn = 0x0}, /* j=8232 */
+    {.hh = 0xa66c016b58a7648c, .hl = 0xd3b36c029ea7bb5d, .lh = 0x36f49e73617ad152, .ll = 0x967313472d10eeee, .ex = -8, .sgn = 0x0}, /* j=8233 */
+    {.hh = 0xaa71485885800538, .hl = 0x94c529f32403828, .lh = 0x253f332743a0ff31, .ll = 0x6548b3ed5877119a, .ex = -8, .sgn = 0x0}, /* j=8234 */
+    {.hh = 0xae76af9b5ce08dfb, .hl = 0xb6b6676248bba138, .lh = 0xb6c98155115da0b7, .ll = 0x6fcf6732c378b707, .ex = -8, .sgn = 0x0}, /* j=8235 */
+    {.hh = 0xb27c3735e6eedb86, .hl = 0x7bdd0c2a9c7a679a, .lh = 0x5fb1c32c4c750e98, .ll = 0xb5b84cc7549d184a, .ex = -8, .sgn = 0x0}, /* j=8236 */
+    {.hh = 0xb47f0724b1906935, .hl = 0x23deb274e953a258, .lh = 0x990d7e42e0f2ed1b, .ll = 0xe6c4e93f7ba138fe, .ex = -8, .sgn = 0x0}, /* j=8237 */
+    {.hh = 0xb884bf4697559ffa, .hl = 0xdae7e343fa859415, .lh = 0x5e4e41c1b5e85e4a, .ll = 0xf82d9009ecaad498, .ex = -8, .sgn = 0x0}, /* j=8238 */
+    {.hh = 0xbc8a97c544fdd5eb, .hl = 0x17759bff5c717992, .lh = 0x949294749166f218, .ll = 0x780bea6b173a668d, .ex = -8, .sgn = 0x0}, /* j=8239 */
+    {.hh = 0xc09090a2c35aa070, .hl = 0x52e7e4dde874dacd, .lh = 0xa952b40de6b303a6, .ll = 0x46e9f250087d1466, .ex = -8, .sgn = 0x0}, /* j=8240 */
+    {.hh = 0xc496a9e11b6eb30c, .hl = 0xa88971f8277a4d10, .lh = 0xcc6e1825f856fe70, .ll = 0x18193291e2b36381, .ex = -8, .sgn = 0x0}, /* j=8241 */
+    {.hh = 0xc89ce382566de587, .hl = 0x269de85f0df92587, .lh = 0xe65771fd08853e31, .ll = 0xa9b4b0681339900, .ex = -8, .sgn = 0x0}, /* j=8242 */
+    {.hh = 0xcca33d887dbd3a1a, .hl = 0x180d255422c3377c, .lh = 0x35564b2dfc6a51cc, .ll = 0xad4c9d66d29442ba, .ex = -8, .sgn = 0x0}, /* j=8243 */
+    {.hh = 0xd0a9b7f59af2e3a2, .hl = 0x46da70925ee85c05, .lh = 0x7b96716bbe5fc916, .ll = 0x949df14f9331856d, .ex = -8, .sgn = 0x0}, /* j=8244 */
+    {.hh = 0xd4b052cbb7d64bcf, .hl = 0x37968ceafaf7b452, .lh = 0x866ac7791182f8a4, .ll = 0x879a1365f37550b8, .ex = -8, .sgn = 0x0}, /* j=8245 */
+    {.hh = 0xd8b70e0cde601954, .hl = 0x5dfba4cfdd38a058, .lh = 0xc04093a8c6018f91, .ll = 0x343b553466b61759, .ex = -8, .sgn = 0x0}, /* j=8246 */
+    {.hh = 0xdcbde9bb18ba361b, .hl = 0x4ae21abe75d5a19a, .lh = 0xd62f6d57c561e135, .ll = 0x49b45337d2f46eb8, .ex = -8, .sgn = 0x0}, /* j=8247 */
+    {.hh = 0xe0c4e5d8713fd576, .hl = 0xd3bd4fd98a1e6fe5, .lh = 0x625d637fcaa83aa9, .ll = 0x32bb34856444782c, .ex = -8, .sgn = 0x0}, /* j=8248 */
+    {.hh = 0xe4cc0266f27d7a57, .hl = 0x33cf7d5ebfb93ad3, .lh = 0x6a8d8f7f711ab809, .ll = 0xe15b1d297f6f796c, .ex = -8, .sgn = 0x0}, /* j=8249 */
+    {.hh = 0xe8d33f68a730fd7f, .hl = 0x2743c805a4928086, .lh = 0x8923300474737280, .ll = 0xd02a66f2f0de4bef, .ex = -8, .sgn = 0x0}, /* j=8250 */
+    {.hh = 0xecda9cdf9a4993ba, .hl = 0x5dbeb9795455a5, .lh = 0x5b168ca67fe36520, .ll = 0xaf0629427a97e44f, .ex = -8, .sgn = 0x0}, /* j=8251 */
+    {.hh = 0xf0e21acdd6e7d412, .hl = 0xb6ed80852ae6fd62, .lh = 0xdfbedfa9caad16a4, .ll = 0x5f822584035372e8, .ex = -8, .sgn = 0x0}, /* j=8252 */
+    {.hh = 0xf4e9b935685dbe0b, .hl = 0xf237cff1acb306b3, .lh = 0x8557e05d2318ee0, .ll = 0x5453667bec383296, .ex = -8, .sgn = 0x0}, /* j=8253 */
+    {.hh = 0xf8f178185a2ebfd9, .hl = 0xd81648249cece4c, .lh = 0x3f4609735b1102e2, .ll = 0x295ae12732b36daf, .ex = -8, .sgn = 0x0}, /* j=8254 */
+    {.hh = 0xfcf95778b80fbc98, .hl = 0x176cd56887ac7fe8, .lh = 0xaa02e8447626768d, .ll = 0x553f90bb90928bc4, .ex = -8, .sgn = 0x0}, /* j=8255 */
+    {.hh = 0x8080abac46f38946, .hl = 0x662d417ced007a45, .lh = 0xc0be1062bd88c8e8, .ll = 0xe925964e76028722, .ex = -7, .sgn = 0x0}, /* j=8256 */
+};
+
+/* for 0 <= i < 64, T1_3[i] is a 256-bit nearest approximation of 2^(i/64),
+   with error bounded by 2^-256 (both absolutely and relatively) */
+static const chelis_cr_pow__qint64_t chelis_cr_pow__T1_3[] = {
+    {.hh = 0x8000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8164d1f3bc030773, .hl = 0x7be56527bd14def4, .lh = 0x9eb851655e2e5c4d, .ll = 0xd08075ac1f200e4c, .ex = 0, .sgn = 0x0},
+    {.hh = 0x82cd8698ac2ba1d7, .hl = 0x3e2a475b46520bff, .lh = 0x29f1a4afbefa5d7c, .ll = 0x2502f15067378a17, .ex = 0, .sgn = 0x0},
+    {.hh = 0x843a28c3acde4046, .hl = 0x1af92eca13fd1582, .lh = 0xd96b414ec4c9d06, .ll = 0x806bddad09d9c4a3, .ex = 0, .sgn = 0x0},
+    {.hh = 0x85aac367cc487b14, .hl = 0xc5c95b8c2154c1b2, .lh = 0x148a0459e7585151, .ll = 0x5d42b362af1ee859, .ex = 0, .sgn = 0x0},
+    {.hh = 0x871f61969e8d1010, .hl = 0x3a1727c57b52a956, .lh = 0x259ac58894f4fcb3, .ll = 0x5229a7352c9b247b, .ex = 0, .sgn = 0x0},
+    {.hh = 0x88980e8092da8527, .hl = 0x5df8d76c98c67562, .lh = 0xe623d58b3772ba13, .ll = 0x8bc3587fb118c94d, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8a14d575496efd9a, .hl = 0x80ca1d92c3680c2, .lh = 0x259c4df53d76e910, .ll = 0xe9c32d22e935007d, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8b95c1e3ea8bd6e6, .hl = 0xfbe4628758a53c90, .lh = 0x1aa84ffbebac349f, .ll = 0x91e135ee84a3f734, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8d1adf5b7e5ba9e5, .hl = 0xb4c7b4968e41ad36, .lh = 0x183926ae7d718dc2, .ll = 0x724a166325437476, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8ea4398b45cd53c0, .hl = 0x2dc0144c8783d4c5, .lh = 0xa11037230b367828, .ll = 0xeb90ce3700bf59b6, .ex = 0, .sgn = 0x0},
+    {.hh = 0x9031dc431466b1dc, .hl = 0x775814a8494e87e2, .lh = 0x43e90e15c2002132, .ll = 0x6f398dfe3f7903f1, .ex = 0, .sgn = 0x0},
+    {.hh = 0x91c3d373ab11c336, .hl = 0xfd6d8e0ae5ac9d8, .lh = 0x1942b34816fb4f26, .ll = 0xf1203caf65bfb9b9, .ex = 0, .sgn = 0x0},
+    {.hh = 0x935a2b2f13e6e92b, .hl = 0xd339940e9d924ee7, .lh = 0x2748c36eeaffa273, .ll = 0x583eab6852a22bb1, .ex = 0, .sgn = 0x0},
+    {.hh = 0x94f4efa8fef70961, .hl = 0x2e8afad12551de54, .lh = 0x4856046901ff6c05, .ll = 0x35fb634c2e63a0f, .ex = 0, .sgn = 0x0},
+    {.hh = 0x96942d3720185a00, .hl = 0x48ea9b683a9c22c4, .lh = 0xe0e68d9f200c5358, .ll = 0x9a22b1526bb6a2e4, .ex = 0, .sgn = 0x0},
+    {.hh = 0x9837f0518db8a96f, .hl = 0x46ad23182e42f6f6, .lh = 0x5e139a1b14fa8178, .ll = 0xd78b65cbefa7bb70, .ex = 0, .sgn = 0x0},
+    {.hh = 0x99e0459320b7fa64, .hl = 0xe43086cb34b5fcae, .lh = 0x8ac981ca9ceca6b3, .ll = 0x1560e51a5df911dc, .ex = 0, .sgn = 0x0},
+    {.hh = 0x9b8d39b9d54e5538, .hl = 0xa2a817a2a3cc3f1f, .lh = 0x928b5fce34cdf21, .ll = 0x9769d9b0a908a786, .ex = 0, .sgn = 0x0},
+    {.hh = 0x9d3ed9a72cffb750, .hl = 0xde494cf050e99b0b, .lh = 0x1ff17c29677589a0, .ll = 0x33a6fe2d4fd53e8a, .ex = 0, .sgn = 0x0},
+    {.hh = 0x9ef5326091a111ad, .hl = 0xa0911f09ebb9fdd1, .lh = 0x65c15c122133e2a2, .ll = 0x21f977fe7c7fa118, .ex = 0, .sgn = 0x0},
+    {.hh = 0xa0b0510fb9714fc2, .hl = 0x192dc79edb0fd9a9, .lh = 0x782a0735d02b1a20, .ll = 0x9f33f7bc78dc629f, .ex = 0, .sgn = 0x0},
+    {.hh = 0xa27043030c496818, .hl = 0x9b7a04ef80cfdea7, .lh = 0x9da4384dbc2c8eae, .ll = 0x5a7a799221808de9, .ex = 0, .sgn = 0x0},
+    {.hh = 0xa43515ae09e6809e, .hl = 0xd1db4831781e1ee, .lh = 0xbae743abfbc07376, .ll = 0x4c72418596cc5bd0, .ex = 0, .sgn = 0x0},
+    {.hh = 0xa5fed6a9b15138ea, .hl = 0x1cbd7f621710701b, .lh = 0x1dd170ace2bcfc17, .ll = 0x2589c98a8290d3f0, .ex = 0, .sgn = 0x0},
+    {.hh = 0xa7cd93b4e9653569, .hl = 0x9ec5b4d5039f72af, .lh = 0x1424bd194d3999e, .ll = 0xdd30939a1d1e929c, .ex = 0, .sgn = 0x0},
+    {.hh = 0xa9a15ab4ea7c0ef8, .hl = 0x541e24ec3531fa73, .lh = 0x3951f214c02d824a, .ll = 0x325c9e2203504517, .ex = 0, .sgn = 0x0},
+    {.hh = 0xab7a39b5a93ed337, .hl = 0x658023b2759e0079, .lh = 0x7ad59ec00ebe6393, .ll = 0x967357d6b36df9f8, .ex = 0, .sgn = 0x0},
+    {.hh = 0xad583eea42a14ac6, .hl = 0x4980a8c8f59a2ec4, .lh = 0x6be409407034fded, .ll = 0xb165f141833a67da, .ex = 0, .sgn = 0x0},
+    {.hh = 0xaf3b78ad690a4374, .hl = 0xdf26101ccbb35032, .lh = 0xa4502c14f429ded9, .ll = 0x5a8c73beaa946990, .ex = 0, .sgn = 0x0},
+    {.hh = 0xb123f581d2ac258f, .hl = 0x87d037e96d215d8e, .lh = 0x757cfb9913adc577, .ll = 0x97ced890d5b0b0c0, .ex = 0, .sgn = 0x0},
+    {.hh = 0xb311c412a9112489, .hl = 0x3ecf14dc798a519b, .lh = 0xfa6e051d6f8bc3ff, .ll = 0xba1e54cf684354df, .ex = 0, .sgn = 0x0},
+    {.hh = 0xb504f333f9de6484, .hl = 0x597d89b3754abe9f, .lh = 0x1d6f60ba893ba84c, .ll = 0xed17ac8583339915, .ex = 0, .sgn = 0x0},
+    {.hh = 0xb6fd91e328d17791, .hl = 0x7165f0ddd541a59, .lh = 0xf88abbe777df360e, .ll = 0x20850e774a86cd8f, .ex = 0, .sgn = 0x0},
+    {.hh = 0xb8fbaf4762fb9ee9, .hl = 0x1b879778566b65a1, .lh = 0xa5ab16cf451056ed, .ll = 0x322d7893ed4da9a8, .ex = 0, .sgn = 0x0},
+    {.hh = 0xbaff5ab2133e45fb, .hl = 0x74d519d24593838c, .lh = 0x2f30d0bdcaa516d, .ll = 0x6c373a75c2828202, .ex = 0, .sgn = 0x0},
+    {.hh = 0xbd08a39f580c36be, .hl = 0xa8811fb66d0faf7a, .lh = 0x15b34bbcb0298f41, .ll = 0xd9a4be023ece032, .ex = 0, .sgn = 0x0},
+    {.hh = 0xbf1799b67a731082, .hl = 0xe815d0abcbf0b850, .lh = 0xa13fc7e6faf9c830, .ll = 0x83ea957596be426d, .ex = 0, .sgn = 0x0},
+    {.hh = 0xc12c4cca66709456, .hl = 0x7c457d59a50087b5, .lh = 0x6b2e5dd607a9969c, .ll = 0xdefefee72ae7a33d, .ex = 0, .sgn = 0x0},
+    {.hh = 0xc346ccda24976407, .hl = 0x20ec856128b83a42, .lh = 0x6b9f89b7dabbcb2b, .ll = 0x5b718d616c4fef19, .ex = 0, .sgn = 0x0},
+    {.hh = 0xc5672a115506dadd, .hl = 0x3e2ad0c964dd9f37, .lh = 0x6b0f939998251a36, .ll = 0xc7686006e4e6c093, .ex = 0, .sgn = 0x0},
+    {.hh = 0xc78d74c8abb9b15c, .hl = 0xc13a2e3976c0277e, .lh = 0x4da570a2c574a304, .ll = 0xcea65224bc9900d0, .ex = 0, .sgn = 0x0},
+    {.hh = 0xc9b9bd866e2f27a2, .hl = 0x80e1f92a0511697e, .lh = 0x257ac0db1f419377, .ll = 0xf4dd023ff93c7ffb, .ex = 0, .sgn = 0x0},
+    {.hh = 0xcbec14fef2727c5c, .hl = 0xf4907c8f45ebf6dc, .lh = 0xeb8a25b7b40c0426, .ll = 0x639aa6f940962626, .ex = 0, .sgn = 0x0},
+    {.hh = 0xce248c151f8480e3, .hl = 0xe235838f95f2c6ed, .lh = 0x6f28610b8c36485a, .ll = 0x2bbd398af35c079f, .ex = 0, .sgn = 0x0},
+    {.hh = 0xd06333daef2b2594, .hl = 0xd6d45c6559a4d502, .lh = 0x11546d3ea28976d6, .ll = 0x2a33269ab05c3e5d, .ex = 0, .sgn = 0x0},
+    {.hh = 0xd2a81d91f12ae45a, .hl = 0x12248e57c3de4028, .lh = 0x52029c0b81f7be57, .ll = 0xfa7663033f05357b, .ex = 0, .sgn = 0x0},
+    {.hh = 0xd4f35aabcfedfa1f, .hl = 0x5921deffa6262c5a, .lh = 0xb8e7a32e5783da5c, .ll = 0xfa628009459a2417, .ex = 0, .sgn = 0x0},
+    {.hh = 0xd744fccad69d6af4, .hl = 0x39a68bb9902d3fde, .lh = 0x1d733af522058b16, .ll = 0xb5c13ada0e77829a, .ex = 0, .sgn = 0x0},
+    {.hh = 0xd99d15c278afd7b5, .hl = 0xfe873deca3e12bab, .lh = 0xc0edda4d891be43d, .ll = 0xb70cfbb1bdf6eb5d, .ex = 0, .sgn = 0x0},
+    {.hh = 0xdbfbb797daf23755, .hl = 0x3d840d5a9e29aa64, .lh = 0x481e1ab725b12d56, .ll = 0x613b0d1dbfa0d717, .ex = 0, .sgn = 0x0},
+    {.hh = 0xde60f4825e0e9123, .hl = 0xdd07a2d9e8466859, .lh = 0x1438495eacdf256, .ll = 0xcc2490c8643ef6b4, .ex = 0, .sgn = 0x0},
+    {.hh = 0xe0ccdeec2a94e111, .hl = 0x65895048dd333ca, .lh = 0x224b251b33092002, .ll = 0x1cb99d3f1ff298a2, .ex = 0, .sgn = 0x0},
+    {.hh = 0xe33f8972be8a5a51, .hl = 0x9bfe90795980eec, .lh = 0xf358a8d368fceaea, .ll = 0xfa8fcbb2e85b853f, .ex = 0, .sgn = 0x0},
+    {.hh = 0xe5b906e77c8348a8, .hl = 0x1e5e8f4a4edbb0ec, .lh = 0xaacd6065b6e9f6ac, .ll = 0xcefcd5b62a14b818, .ex = 0, .sgn = 0x0},
+    {.hh = 0xe8396a503c4bdc68, .hl = 0x791790d0ac70c7dd, .lh = 0xfe312f84fa665204, .ll = 0x3a1c6473409c261d, .ex = 0, .sgn = 0x0},
+    {.hh = 0xeac0c6e7dd24392e, .hl = 0xd02d75b3706e54fa, .lh = 0xc4faace043b7f91c, .ll = 0x17d8d1e8ca31880b, .ex = 0, .sgn = 0x0},
+    {.hh = 0xed4f301ed9942b84, .hl = 0x600d2db6a64bfb12, .lh = 0x3787630a764ae4c9, .ll = 0xc8e7c95b06416e6d, .ex = 0, .sgn = 0x0},
+    {.hh = 0xefe4b99bdcdaf5cb, .hl = 0x46561cf6948db912, .lh = 0xd4a277eaddaa925c, .ll = 0x9392870834f21a53, .ex = 0, .sgn = 0x0},
+    {.hh = 0xf281773c59ffb139, .hl = 0xe8980a9cc8f47a4b, .lh = 0x2cf0b49df0bd70e9, .ll = 0x7c43b0ea5d43228d, .ex = 0, .sgn = 0x0},
+    {.hh = 0xf5257d152486cc2c, .hl = 0x7b9d0c7aed980fc3, .lh = 0x6f510308677709f5, .ll = 0xbdd80329364aa2a0, .ex = 0, .sgn = 0x0},
+    {.hh = 0xf7d0df730ad13bb8, .hl = 0xfe90d496d60fb6ea, .lh = 0xe914ffb4723793f1, .ll = 0xef6797b5a11efb7c, .ex = 0, .sgn = 0x0},
+    {.hh = 0xfa83b2db722a033a, .hl = 0x7c25bb14315d7fcc, .lh = 0x8006fe21a95d14dc, .ll = 0x4844b29bf4af18e8, .ex = 0, .sgn = 0x0},
+    {.hh = 0xfd3e0c0cf486c174, .hl = 0x853f3a5931e0ee03, .lh = 0x61b7bb285a60791, .ll = 0x9d2285b6754edd61, .ex = 0, .sgn = 0x0},
+};
+
+/* for 0 <= i < 64, T2_3[i] is a 256-bit nearest approximation of 2^(i/2^12),
+   with error bounded by 2^-256 (both absolutely and relatively) */
+static const chelis_cr_pow__qint64_t chelis_cr_pow__T2_3[] = {
+    {.hh = 0x8000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80058baf7fee3b5d, .hl = 0x1c718b38e549cb93, .lh = 0x34a318717a85d198, .ll = 0x945b3ca6120b7d55, .ex = 0, .sgn = 0x0},
+    {.hh = 0x800b179c82028fd0, .hl = 0x945e54e2ae18f2f0, .lh = 0x36ee988aaff03620, .ll = 0x76cc37ff9584ce15, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8010a3c708e73282, .hl = 0x2b96d62d51c15a07, .lh = 0x68b51f6090715cda, .ll = 0xe7a99fea0d150e10, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8016302f17467628, .hl = 0x3690dfe44d11d008, .lh = 0x403605216aed73f0, .ll = 0x49b8f71dcaa49423, .ex = 0, .sgn = 0x0},
+    {.hh = 0x801bbcd4afcacb08, .hl = 0xe23a986bd3e626f0, .lh = 0x5bdd95c213fb273c, .ll = 0x9e66ef0d411e38d0, .ex = 0, .sgn = 0x0},
+    {.hh = 0x802149b7d51ebefb, .hl = 0x7bdbadbc888aeb29, .lh = 0x201cf874aa8cafc4, .ll = 0x92f52199af16c4de, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8026d6d889ecfd69, .hl = 0xb904bbfb40d3a2b6, .lh = 0x84a6d5d525029ce2, .ll = 0x32bdce1e8420f0a8, .ex = 0, .sgn = 0x0},
+    {.hh = 0x802c6436d0e04f50, .hl = 0xff8ce94a6797b3ce, .lh = 0x345f82f5b1fae20e, .ll = 0x3d0b18c06975c162, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8031f1d2aca39b43, .hl = 0xad9db772901d96b5, .lh = 0x8f6321e8e84c97d3, .ll = 0x3cc84ae246bf5abb, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80377fac1fe1e56a, .hl = 0x61cd0bffd7cfc682, .lh = 0xc0432e96c959387b, .ll = 0xb9c4ef247a66c427, .ex = 0, .sgn = 0x0},
+    {.hh = 0x803d0dc32d464f85, .hl = 0x43456f71b96affd4, .lh = 0x34c51656768b5277, .ll = 0xb09b272d97fcc8, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80429c17d77c18ed, .hl = 0x49fc841afba9c3c5, .lh = 0xaedee98517f79365, .ll = 0x836514d2d81fdf14, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80482aaa212e9e95, .hl = 0x86f7b54f6c45c85e, .lh = 0x14747b1b6977fb14, .ll = 0xbec69e11682e0863, .ex = 0, .sgn = 0x0},
+    {.hh = 0x804db97a0d095b0c, .hl = 0x6c9f1f7d1efcfe68, .lh = 0x6b994b07993e3561, .ll = 0x9e86080e1001781d, .ex = 0, .sgn = 0x0},
+    {.hh = 0x805348879db7e67d, .hl = 0x171eb1ceef1d1f28, .lh = 0x5629bb4d6d20a74a, .ll = 0x7407003ab22ffa82, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8058d7d2d5e5f6b0, .hl = 0x94d589f608ee4aa2, .lh = 0x2adc0c3f864ba0f5, .ll = 0x9dc70119154b8f9a, .ex = 0, .sgn = 0x0},
+    {.hh = 0x805e675bb83f5f0f, .hl = 0x2ed38ab8472b2143, .lh = 0xc40f99da125c266f, .ll = 0x94d103f4365ed44b, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8063f722477010a1, .hl = 0xb1652de1378af1a0, .lh = 0x8e5b66f89923f0ce, .ll = 0x4c9bb4d5be541cc3, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8069872686241a12, .hl = 0xb4ad9233a0390cac, .lh = 0x930d2b4079a002bd, .ll = 0x5cf73638639bbbd6, .ex = 0, .sgn = 0x0},
+    {.hh = 0x806f17687707a7af, .hl = 0xe54ec5f966eb1872, .lh = 0x76754509f037248a, .ll = 0xd762ffd79b46d451, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8074a7e81cc7036b, .hl = 0x4d204ecfc11f4aaa, .lh = 0xf02c00376690ea79, .ll = 0x233e0911cc8de5f9, .ex = 0, .sgn = 0x0},
+    {.hh = 0x807a38a57a0e94dc, .hl = 0x9bf3ef4d9be2d1e4, .lh = 0x6dbfe64309a2b072, .ll = 0x3c5cacc11f785d53, .ex = 0, .sgn = 0x0},
+    {.hh = 0x807fc9a0918ae142, .hl = 0x7068ab2230585d12, .lh = 0x9fe6067d9e828773, .ll = 0xdc2ac4e4e300cb2c, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80855ad965e88b83, .hl = 0xa0cc0a49c10ea66a, .lh = 0xf0eb8fefacaf32d8, .ll = 0x78899d5679c5b99e, .ex = 0, .sgn = 0x0},
+    {.hh = 0x808aec4ff9d45430, .hl = 0x84099bf6830f2767, .lh = 0x9a875f4408858619, .ll = 0xdfa0d299eae4aa3a, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80907e044ffb1984, .hl = 0x3aa8b9cbbc65a8aa, .lh = 0x8b22713e014be438, .ll = 0x47da7d37d3e079f6, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80960ff66b09d765, .hl = 0xf7d88c0928ba3946, .lh = 0xd1441da0989f9760, .ll = 0xff7e8daa7390655a, .ex = 0, .sgn = 0x0},
+    {.hh = 0x809ba2264dada76a, .hl = 0x4a8a4f44bb703db6, .lh = 0x212bb24b9d533796, .ll = 0xfcdbcb683daab7f0, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80a13493fa93c0d4, .hl = 0x6699dc50dd96b773, .lh = 0x8712128a139dc866, .ll = 0xab9445c9a773244f, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80a6c73f74697897, .hl = 0x6e0472ed4ccfa2df, .lh = 0xc2857930dae5bef1, .ll = 0x95df5640f17d2dbe, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80ac5a28bddc4157, .hl = 0xba2dc7e0c72e51ba, .lh = 0x6765fb22ac558aca, .ll = 0x9a33e936c809a0e7, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80b1ed4fd999ab6c, .hl = 0x25335719b6e6fd20, .lh = 0x1f60261b05f1202, .ll = 0x3c355acba4df4fa, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80b780b4ca4f64df, .hl = 0x534dfa7417846aa4, .lh = 0x68164a4ae2414ea4, .ll = 0x2c64cb5808ef6fa6, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80bd145792ab3970, .hl = 0xfc41c5c2d5336ccc, .lh = 0x65250abea5b33d49, .ll = 0xad82dbaac7bfa2e3, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80c2a838355b1297, .hl = 0x34dc28baed8f3fde, .lh = 0x533c9eca3a17497d, .ll = 0xa1b8b14b109d4838, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80c83c56b50cf77f, .hl = 0xb880575ea03548c1, .lh = 0x4704388d9f1b3cd2, .ll = 0x86f4e188e2ca8a59, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80cdd0b3146f0d11, .hl = 0x32c1f98704428c71, .lh = 0x7e5ed5955b2d4887, .ll = 0x5b7e292a686df542, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80d3654d562f95ec, .hl = 0x890e222a5eb95372, .lh = 0x1197e58ebf689d43, .ll = 0x3896d92dd4431f8b, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80d8fa257cfcf26e, .hl = 0x24628efd9ca9d59a, .lh = 0xc5f4be776ef6a61a, .ll = 0x101735de189170ec, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80de8f3b8b85a0af, .hl = 0x3b13310f5ad57fb0, .lh = 0x9bad68937edd6b38, .ll = 0xeae4250b29447d4b, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80e4248f84783c87, .hl = 0x1a9dfefaeb616563, .lh = 0x94426c99024f23f0, .ll = 0x235b5252cafbaa02, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80e9ba216a837f8c, .hl = 0x718d1151d109bf97, .lh = 0x85189bdd7ac4b012, .ll = 0x9bea88f10391b325, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80ef4ff140564116, .hl = 0x996709da2e25f04b, .lh = 0xe18453f8dafeabf1, .ll = 0xf5867174289d8d94, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80f4e5ff089f763e, .hl = 0xe0adc640acaa6b0a, .lh = 0x8b6d28b5eb20d2f2, .ll = 0xb125fb6305bf7e6d, .ex = 0, .sgn = 0x0},
+    {.hh = 0x80fa7c4ac60e31e1, .hl = 0xd4eb5edc6b341283, .lh = 0x370761b5ce7d7e44, .ll = 0xf1eb5df89b727f7c, .ex = 0, .sgn = 0x0},
+    {.hh = 0x810012d47b51a4a0, .hl = 0x8ccd7223820719e3, .lh = 0x118525e07f78529c, .ll = 0x97f6dffe47385081, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8105a99c2b191ce1, .hl = 0xf24ebd6eb9ca4292, .lh = 0x70f4efb7d5c90568, .ll = 0x5301745d3b39c4d0, .ex = 0, .sgn = 0x0},
+    {.hh = 0x810b40a1d81406d4, .hl = 0xcef03ab14a6654f, .lh = 0xa9c9ffc2ca67ffde, .ll = 0xada5b6f36036c85a, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8110d7e584f1ec6d, .hl = 0x4bf94297d1519822, .lh = 0x9ee96b903910b0f, .ll = 0x45fe2b1237a101fc, .ex = 0, .sgn = 0x0},
+    {.hh = 0x81166f673462756d, .hl = 0xd0d8372f966cf15d, .lh = 0xb70c0ef050a08aa9, .ll = 0xd499953c6b9aa8f0, .ex = 0, .sgn = 0x0},
+    {.hh = 0x811c0726e9156760, .hl = 0xb97931db7b7be2ec, .lh = 0x135c526104fa1c29, .ll = 0x215ef11d179cc996, .ex = 0, .sgn = 0x0},
+    {.hh = 0x81219f24a5baa59d, .hl = 0x6abd3b0eab9c7047, .lh = 0xa7712808fe956328, .ll = 0x717f9b1d39438323, .ex = 0, .sgn = 0x0},
+    {.hh = 0x812737606d023148, .hl = 0xdaf888e965081519, .lh = 0xada38ad7502e18a9, .ll = 0x6ebf0e93981c95f2, .ex = 0, .sgn = 0x0},
+    {.hh = 0x812ccfda419c2956, .hl = 0xdc8046821f46122d, .lh = 0x8b2f742bd9d4370a, .ll = 0x5718a10a231edabf, .ex = 0, .sgn = 0x0},
+    {.hh = 0x813268922638ca8b, .hl = 0x6846ad73a8d9027f, .lh = 0x1163a8bcf6bffce3, .ll = 0x2e1b37721d94b76, .ex = 0, .sgn = 0x0},
+    {.hh = 0x813801881d886f7b, .hl = 0xe885724f14131286, .lh = 0x9cea3c3530355654, .ll = 0xf9c7f1fa9145fa7f, .ex = 0, .sgn = 0x0},
+    {.hh = 0x813d9abc2a3b9090, .hl = 0x83768490519df895, .lh = 0x605362ea89eb07d4, .ll = 0x4794c4e3bcb98244, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8143342e4f02c405, .hl = 0x661b22b45e25de17, .lh = 0xa82b3121936ae61d, .ll = 0x91fe35aa6124aefb, .ex = 0, .sgn = 0x0},
+    {.hh = 0x8148cdde8e8ebdec, .hl = 0xf11430fef78c6ee, .lh = 0x932801def6b0fb, .ll = 0x8aa35adbcc33b28e, .ex = 0, .sgn = 0x0},
+    {.hh = 0x814e67cceb90502c, .hl = 0x99775205944eadc4, .lh = 0x2555ab2151b96f7c, .ll = 0x1ab6ca4ae6eda941, .ex = 0, .sgn = 0x0},
+    {.hh = 0x815401f968b86a87, .hl = 0x7de463a40d18260, .lh = 0xdc941f1fd7a051c0, .ll = 0xdddfd0f8f59dec56, .ex = 0, .sgn = 0x0},
+    {.hh = 0x81599c6408b81a94, .hl = 0x8f4a0b6748df795f, .lh = 0x988da3f28bde163d, .ll = 0x951855dd23786b9c, .ex = 0, .sgn = 0x0},
+    {.hh = 0x815f370cce408bc8, .hl = 0xe2404468cfe5ab9f, .lh = 0x4db5f07dc6319207, .ll = 0x221ce2379e877086, .ex = 0, .sgn = 0x0},
+};
+
+/* The following is a degree-18 polynomial generated by Sollya, with zero
+   constant coefficient, which approximates log(1+z) for |z| < 2^-13,
+   see sollya/approximations_r3.sollya.
+   The coefficients of largest degree are first.
+   The relative error is bounded by 2^-255.0786, and the absolute error by
+   2^-268.1653 (according to Sollya).
+   The coefficient of degree 18 has only one non-zero limb (hh),
+   those of degree 11-17 have only two non-zero limbs (hh and hl),
+   and the other ones have full 256-bit precision.
+   Table obtained by output_P3() from the accompanying file qint.sage.
+*/
+static const chelis_cr_pow__qint64_t chelis_cr_pow__P_3[] = {
+    {.hh = 0xe38e39d490f62b2f, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -5, .sgn = 0x1}, /* degree 18 */
+    {.hh = 0xf0f0f1e1e1d4e1cf, .hl = 0xbbb343000334fd0f, .lh = 0x0, .ll = 0x0, .ex = -5, .sgn = 0x0}, /* degree 17 */
+    {.hh = 0xffffffffffff88b8, .hl = 0xc17633c5a3181e76, .lh = 0x0, .ll = 0x0, .ex = -5, .sgn = 0x1}, /* degree 16 */
+    {.hh = 0x8888888888885088, .hl = 0x8f6a4426b02f93be, .lh = 0x0, .ll = 0x0, .ex = -4, .sgn = 0x0}, /* degree 15 */
+    {.hh = 0x9249249249249249, .hl = 0x24a2676c009fc980, .lh = 0x0, .ll = 0x0, .ex = -4, .sgn = 0x1}, /* degree 14 */
+    {.hh = 0x9d89d89d89d89d89, .hl = 0xd8ab89d5a96621f1, .lh = 0x0, .ll = 0x0, .ex = -4, .sgn = 0x0}, /* degree 13 */
+    {.hh = 0xaaaaaaaaaaaaaaaa, .hl = 0xaaaaaaaaa815192a, .lh = 0x0, .ll = 0x0, .ex = -4, .sgn = 0x1}, /* degree 12 */
+    {.hh = 0xba2e8ba2e8ba2e8b, .hl = 0xa2e8ba2e899ae964, .lh = 0x0, .ll = 0x0, .ex = -4, .sgn = 0x0}, /* degree 11 */
+    {.hh = 0xcccccccccccccccc, .hl = 0xcccccccccccccccd, .lh = 0xcc491481418dc51, .ll = 0x1cebff4e21be093e, .ex = -4, .sgn = 0x1}, /* degree 10 */
+    {.hh = 0xe38e38e38e38e38e, .hl = 0x38e38e38e38e38e3, .lh = 0xba38ce3dcedbed7d, .ll = 0xfa2cc6f77565683f, .ex = -4, .sgn = 0x0}, /* degree 9 */
+    {.hh = 0xffffffffffffffff, .hl = 0xffffffffffffffff, .lh = 0xfffffffc6072860a, .ll = 0x786bd58754911c58, .ex = -4, .sgn = 0x1}, /* degree 8 */
+    {.hh = 0x9249249249249249, .hl = 0x2492492492492492, .lh = 0x492492481c930545, .ll = 0xf0298bcd6e1b2310, .ex = -3, .sgn = 0x0}, /* degree 7 */
+    {.hh = 0xaaaaaaaaaaaaaaaa, .hl = 0xaaaaaaaaaaaaaaaa, .lh = 0xaaaaaaaaaaaaaab8, .ll = 0xd8b61a619485f089, .ex = -3, .sgn = 0x1}, /* degree 6 */
+    {.hh = 0xcccccccccccccccc, .hl = 0xcccccccccccccccc, .lh = 0xccccccccccccccd2, .ll = 0xccc65d183d01d5ef, .ex = -3, .sgn = 0x0}, /* degree 5 */
+    {.hh = 0xffffffffffffffff, .hl = 0xffffffffffffffff, .lh = 0xffffffffffffffff, .ll = 0xffffffcdc3a6a23c, .ex = -3, .sgn = 0x1}, /* degree 4 */
+    {.hh = 0xaaaaaaaaaaaaaaaa, .hl = 0xaaaaaaaaaaaaaaaa, .lh = 0xaaaaaaaaaaaaaaaa, .ll = 0xaaaaaaa4aab50b70, .ex = -2, .sgn = 0x0}, /* degree 3 */
+    {.hh = 0x8000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0xd, .ex = -1, .sgn = 0x1}, /* degree 2 */
+    {.hh = 0x8000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* degree 1 */
+};
+
+/* The following is a degree-14 polynomial generated by Sollya,
+   which approximates exp(z) for |z| < 0.00016923,
+   see sollya/approximations_r3.sollya.
+   The coefficients of largest degree are first.
+   The absolute error is bounded by 2^-242.181, thus relative error bounded
+   by 2^-242.181/exp(-0.00016923) < 2^-242.180.
+*/
+static const chelis_cr_pow__qint64_t chelis_cr_pow__Q_3[] = {
+    {.hh = 0xc9cba547af749429, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -37, .sgn = 0x0}, /* degree 14 */
+    {.hh = 0xb092309ec73dd7db, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = -33, .sgn = 0x0}, /* degree 13 */
+    {.hh = 0x8f76c77fc6c4bda8, .hl = 0xcd9aab7578033f6d, .lh = 0x0, .ll = 0x0, .ex = -29, .sgn = 0x0}, /* degree 12 */
+    {.hh = 0xd7322b3faa271c7d, .hl = 0xb3537cbfd60dcb9, .lh = 0x0, .ll = 0x0, .ex = -26, .sgn = 0x0}, /* degree 11 */
+    {.hh = 0x93f27dbbc4fae397, .hl = 0x780b69f6554de3d9, .lh = 0x0, .ll = 0x0, .ex = -22, .sgn = 0x0}, /* degree 10 */
+    {.hh = 0xb8ef1d2ab6399c7d, .hl = 0x560e44741a6a8e66, .lh = 0x0, .ll = 0x0, .ex = -19, .sgn = 0x0}, /* degree 9 */
+    {.hh = 0xd00d00d00d00d00d, .hl = 0xd00d00d00d00cf, .lh = 0x0, .ll = 0x0, .ex = -16, .sgn = 0x0}, /* degree 8 */
+    {.hh = 0xd00d00d00d00d00d, .hl = 0xd00d00d00d00ce, .lh = 0xca5a80878f19216b, .ll = 0xd236a7fa15252936, .ex = -13, .sgn = 0x0}, /* degree 7 */
+    {.hh = 0xb60b60b60b60b60b, .hl = 0x60b60b60b60b60b6, .lh = 0xb60b60be6ac2e60, .ll = 0x800a9987617257e3, .ex = -10, .sgn = 0x0}, /* degree 6 */
+    {.hh = 0x8888888888888888, .hl = 0x8888888888888888, .lh = 0x888888890ac16c5a, .ll = 0xf78e687c535a714, .ex = -7, .sgn = 0x0}, /* degree 5 */
+    {.hh = 0xaaaaaaaaaaaaaaaa, .hl = 0xaaaaaaaaaaaaaaaa, .lh = 0xaaaaaaaaaaaaaaaa, .ll = 0x6b3ad4c251cd03d5, .ex = -5, .sgn = 0x0}, /* degree 4 */
+    {.hh = 0xaaaaaaaaaaaaaaaa, .hl = 0xaaaaaaaaaaaaaaaa, .lh = 0xaaaaaaaaaaaaaaaa, .ll = 0x4df8c3de374c499e, .ex = -3, .sgn = 0x0}, /* degree 3 */
+    {.hh = 0x8000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x1446e270, .ex = -1, .sgn = 0x0}, /* degree 2 */
+    {.hh = 0x8000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x262ce809, .ex = 0, .sgn = 0x0}, /* degree 1 */
+    {.hh = 0x8000000000000000, .hl = 0x0, .lh = 0x0, .ll = 0x0, .ex = 0, .sgn = 0x0}, /* degree 0 */
+};
+
+#endif
+
+/* end inlined src/binary64/pow/qint.h */
+
+static double chelis_cr_pow__cr_pow(double x, double y);
+
+/* round x to nearest integer, breaking ties to even, in the round-to-nearest-even
+   mode Chelis pins at every entry */
+static double
+chelis_cr_pow__roundeven_finite (double x)
+{
+  return __builtin_rint (x);
+}
+
+/*
+  Utility functions
+*/
+
+// When x is a NaN, returns 1 if x is an sNaN and 0 if it is a qNaN
+static inline int chelis_cr_pow__is_signaling(double x) {
+  chelis_cr_pow__f64_u _x = {.f = x};
+
+  return !(_x.u & (1ull << 51));
+}
+
+/* Add a + b, such that *hi + *lo approximates a + b.
+   Assumes |a| >= |b|.
+   For rounding to nearest we have hi + lo = a + b exactly.
+   For directed rounding, we have
+   (a) hi + lo = a + b exactly when the exponent difference between a and b
+       is at most 53 (the binary64 precision)
+   (b) otherwise |(a+b)-(hi+lo)| <= 2^-105 min(|a+b|,|hi|)
+       (see https://hal.inria.fr/hal-03798376)
+   We also have |lo| < ulp(hi). */
+static inline void chelis_cr_pow__fast_two_sum(double *hi, double *lo, double a, double b) {
+  double e;
+
+  // assert (a == 0 || __builtin_fabs (a) >= __builtin_fabs (b));
+  *hi = a + b;
+  e = *hi - a; /* exact */
+  *lo = b - e; /* exact */
+}
+
+/* Algorithm 2 from https://hal.science/hal-01351529 */
+static inline void chelis_cr_pow__two_sum (double *s, double *t, double a, double b)
+{
+  *s = a + b;
+  double a_prime = *s - b;
+  double b_prime = *s - a_prime;
+  double delta_a = a - a_prime;
+  double delta_b = b - b_prime;
+  *t = delta_a + delta_b;
+}
+
+// Add a + (bh + bl), assuming |a| >= |bh|
+static inline void chelis_cr_pow__fast_sum(double *hi, double *lo, double a, double bh,
+                            double bl) {
+  chelis_cr_pow__fast_two_sum(hi, lo, a, bh);
+  /* |(a+bh)-(hi+lo)| <= 2^-105 |hi| and |lo| < ulp(hi) */
+  *lo += bl;
+  /* |(a+bh+bl)-(hi+lo)| <= 2^-105 |hi| + ulp(lo),
+     where |lo| <= ulp(hi) + |bl|. */
+}
+
+// Multiply exactly a and b, such that *hi + *lo = a * b.
+static inline void chelis_cr_pow__a_mul(double *hi, double *lo, double a, double b) {
+  *hi = a * b;
+  *lo = __builtin_fma (a, b, -*hi);
+}
+
+// Multiply a double with a double double : a * (bh + bl)
+static inline void chelis_cr_pow__s_mul (double *hi, double *lo, double a, double bh,
+                          double bl) {
+  double s;
+
+  chelis_cr_pow__a_mul (hi, &s, a, bh); /* exact */
+  *lo = __builtin_fma (a, bl, s);
+  /* the error is bounded by ulp(lo), where |lo| < |a*bl| + ulp(hi) */
+}
+
+// Returns (ah + al) * (bh + bl) - (al * bl)
+// We can ignore al * bl when assuming al <= ulp(ah) and bl <= ulp(bh)
+static inline void chelis_cr_pow__d_mul(double *hi, double *lo, double ah, double al,
+                         double bh, double bl) {
+  double s, t;
+
+  chelis_cr_pow__a_mul(hi, &s, ah, bh);
+  t = __builtin_fma(al, bh, s);
+  *lo = __builtin_fma(ah, bl, t);
+}
+
+static inline void chelis_cr_pow__d_square(double *hi, double *lo, double ah, double al) {
+  double s, b = al + al;
+
+  chelis_cr_pow__a_mul(hi, &s, ah, ah);
+  *lo = __builtin_fma(ah, b, s);
+}
+
+static inline long chelis_cr_pow__dtoi(double x) { return (long)x; }
+
+// Returns 1 if x is an integer
+static inline int chelis_cr_pow__is_int(double x) { return x == chelis_cr_pow__roundeven_finite (x); }
+
+// Returns (e, m) such that m is odd and x = 2^E \times m
+static inline void chelis_cr_pow__extract(int64_t *e, uint64_t *m, double x) {
+  chelis_cr_pow__f64_u _x = {.f = x};
+
+  *e = (_x.u >> 52) & 0x7ff;
+  *m = (_x.u & (~0ull >> 12)) + (*e ? (1ull << 52) : 0);
+  int32_t t = __builtin_ctzll(*m);
+  *m = *m >> t;
+  *e = *e + t - (0x433 - !*e);
+}
+
+// Rounds a dint64_t value to 54 bits, a shortcut is taken as in `exact_pow`, we
+// only consider numbers that end with only ones or only zeroes
+static inline void chelis_cr_pow__round_54(int64_t *G, int64_t *k, const chelis_cr_pow__dint64_t *x) {
+  *G = x->ex - 53;
+  *k = (x->hi >> 10) + ((x->hi >> 9) & 0x1);
+}
+
+// Multiply x by 2^e
+static inline void chelis_cr_pow__pow2(double *x, int64_t e) {
+  if (e & 0x1)
+    *x *= 0x1p+1;
+
+  chelis_cr_pow__f64_u e2 = {.u = ((uint64_t)((e >> 1) + 0x3ff) & 0x7ff) << 52};
+  *x = (*x * e2.f) * e2.f;
+}
+
+// Convert a dint64_t value to an integer, rounding towards zero
+static inline int64_t chelis_cr_pow__dint_toi(const chelis_cr_pow__dint64_t *a) {
+  if (a->ex < 0)
+    return 0ll;
+
+  int64_t r = a->hi >> (63 - a->ex);
+
+  return a->sgn ? -r : r;
+}
+
+// round a, assuming a is in the subnormal range
+// exact is non-zero iff x^y is exact
+static inline double chelis_cr_pow__dint_tod_subnormal(chelis_cr_pow__dint64_t *a, int exact) {
+  int underflow = 1;
+  double ret = 0;
+
+  uint64_t ex = -(1011 + a->ex); // ex >= 12
+  // we have to shift right hi,lo by ex bits so that the least significant
+  // bit of hi corresponds to 2^-1074 (the number of extra bits is
+  // -1022 - a->ex, and we add 11 = 64 - 53 since hi has 64 bits)
+
+  uint64_t rb, sb;
+
+  if (ex >= 64) { // all bits disappear: |a| < 2^-1074
+    /* round to nearest, the only mode Chelis runs in */
+    rb = (a->hi >> 63);        // only used when e=64
+    sb = (a->hi << 1) | a->lo; // idem
+    ret = (ex > 64 || rb == 0 || sb == 0) ? +0.0 : 0x1p-1074;
+    ret = (a->sgn) ? -ret : ret;
+    goto end;
+  }
+
+  // now ex < 64
+  uint64_t hi;
+  hi = a->hi >> ex;
+  rb = (a->hi >> (ex - 1)) & 0x1; // round bit
+  sb = (a->hi << (65 - ex)) || a->lo; // sticky bit
+
+  /* round to nearest, the only mode Chelis runs in */
+  // if ex=12 there is no underflow when hi rounds to 2^52 and rb=1
+  // and the next bit is 1 too
+  hi += sb ? rb : hi & rb;
+  if (ex == 12 && (hi >> 52) && rb)
+  {
+    uint64_t rbb = (a->hi >> (ex - 2)) & 0x1; // next bit after the round bit
+    if (rbb)
+      underflow = 0;
+  }
+
+  // now hi <= 2^52 stores the low bits of the result (up to sign)
+  // (if hi has overflowed in 2^52 this is exactly what we want)
+
+  chelis_cr_pow__f64_u v = {.u = hi};
+  v.u |= a->sgn << 63;
+  ret = v.f;
+
+ end:
+  if (underflow && !exact) {
+  }
+
+  return ret;
+}
+
+// Convert a dint64_t value to a double
+// exact is non-zero iff x^y is exact
+static inline double chelis_cr_pow__dint_tod(chelis_cr_pow__dint64_t *a, int exact) {
+  if (__builtin_expect (a->ex < -1022, 0))
+    return chelis_cr_pow__dint_tod_subnormal (a, exact);
+
+  // r is the significand in [1,2)
+  chelis_cr_pow__f64_u r = {.u = (a->hi >> 11) | (0x3ffll << 52)};
+
+  // round r
+  double rd = 0.0;
+  if ((a->hi >> 10) & 0x1)
+    rd += 0x1p-53;
+
+  if (a->hi & 0x3ff || a->lo)
+    rd += 0x1p-54;
+
+  if (a->sgn)
+    rd = -rd;
+
+  r.u = r.u | a->sgn << 63;
+  r.f += rd;
+
+  chelis_cr_pow__f64_u e;
+
+  if (a->ex > -1023) { // The result is a normal double
+    if (a->ex > 1023) {
+      if (a->ex == 1024) { // 2^1024 <= |a| < 2^1025
+        r.f = r.f * 0x1p+1;
+        e.f = 0x1p+1023;
+      } else { // |a| >= 2^1025
+        r.f = 0x1.fffffffffffffp+1023;
+        e.f = 0x1.fffffffffffffp+1023;
+      }
+    }
+    else
+      e.u = ((a->ex + 1023) & 0x7ff) << 52;
+  } else { // subnormal case
+    if (!exact) {
+    }
+    if (a->ex < -1074) {
+      if (a->ex == -1075) {
+        r.f = r.f * 0x1p-1;
+        e.f = 0x1p-1074;
+      } else {
+        r.f = 0x0.0000000000001p-1022;
+        e.f = 0x0.0000000000001p-1022;
+      }
+    } else {
+      e.u = 1ll << (a->ex + 1074);
+    }
+  }
+
+
+  return r.f * e.f;
+}
+
+// Convert a double to the corresponding qint64_t value
+static inline void chelis_cr_pow__qint_fromd (chelis_cr_pow__qint64_t *a, double b) {
+  chelis_cr_pow__fast_extract (&a->ex, &a->hh, b);
+
+  /* |b| = 2^(ex-52)*hi */
+
+  uint32_t t = __builtin_clzll (a->hh);
+
+  a->sgn = b < 0.0;
+  a->ex = a->ex - (t > 11 ? t - 12 : 0);
+  a->hh = a->hh << t;
+  a->lh = 0;
+  a->hl = 0;
+  a->ll = 0;
+  /* b = 2^ex*hh/2^64 where 1 <= hh/2^63 < 2 */
+}
+
+// Convert a qint64_t value to an integer
+static inline int64_t chelis_cr_pow__qint_toi(const chelis_cr_pow__qint64_t *a) {
+  if (a->ex < 0)
+    return 0ll;
+
+  int64_t r = a->hh >> (63 - a->ex);
+
+  return a->sgn ? -r : r;
+}
+
+static inline void chelis_cr_pow__subnormalize_qint(chelis_cr_pow__qint64_t *a) {
+  if (a->ex > -1023)
+    return;
+
+  uint64_t ex = -(1011 + a->ex);
+
+  uint64_t hi = a->hh >> ex;
+  uint64_t md = (a->hh >> (ex - 1)) & 0x1;
+  uint64_t lo = (a->hh & (~0ull >> ex)) || a->hl || a->lh || a->ll;
+
+  /* round to nearest, the only mode Chelis runs in */
+  hi += lo ? md : hi & md;
+
+  a->hh = hi << ex;
+  a->hl = 0;
+  a->lh = 0;
+  a->ll = 0;
+
+  if (!a->hh) {
+    a->ex++;
+    a->hh = (1ull << 63);
+  }
+}
+
+// Convert a dint64_t value to a double
+static inline double chelis_cr_pow__qint_tod(chelis_cr_pow__qint64_t *a) {
+  chelis_cr_pow__subnormalize_qint(a);
+
+  chelis_cr_pow__f64_u r = {.u = (a->hh >> 11) | (0x3ffll << 52)};
+
+  double rd = 0.0;
+  if (a->hh & 0x400)
+    rd += 0x1p-53;
+
+  if (a->hh & 0x3ff || a->hl || a->lh || a->ll)
+    rd += 0x1p-54;
+
+  if (a->sgn)
+    rd = -rd;
+
+  r.u = r.u | a->sgn << 63;
+  r.f += rd;
+
+  chelis_cr_pow__f64_u e;
+
+  if (a->ex > -1023) { // The result is a normal double
+    if (a->ex > 1023)
+      if (a->ex == 1024) {
+        r.f = r.f * 0x1p+1;
+        e.f = 0x1p+1023;
+      } else {
+        r.f = 0x1.fffffffffffffp+1023;
+        e.f = 0x1.fffffffffffffp+1023;
+      }
+    else
+      e.u = ((a->ex + 1023) & 0x7ff) << 52;
+  } else { // subnormal case
+    if (a->ex < -1074) {
+      if (a->ex == -1075) {
+        r.f = r.f * 0x1p-1;
+        e.f = 0x1p-1074;
+      } else {
+        r.f = 0x0.0000000000001p-1022;
+        e.f = 0x0.0000000000001p-1022;
+      }
+    } else {
+      e.u = 1ll << (a->ex + 1074);
+    }
+  }
+
+  return r.f * e.f;
+}
+
+/*
+  Approximation tables
+*/
+
+/* for 181 <= i <= 362, r[i] = _INVERSE[i-181] is a 9-bit approximation of
+   1/x[i], where i*2^-8 <= x[i] < (i+1)*2^-8.
+   More precisely r[i] is a 9-bit value such that r[i]*y-1 is representable
+   exactly on 53 bits for for any y, i*2^-8 <= y < (i+1)*2^-8.
+   Moreover |r[i]*y-1| < 0.0040283203125.
+   Table generated with the accompanying pow.sage file,
+   with l=inverse_centered(k=8,prec=9,maxbits=53,verbose=false) */
+static const double chelis_cr_pow___INVERSE[182]= {
+    0x1.69p+0, 0x1.67p+0, 0x1.65p+0, 0x1.63p+0, 0x1.61p+0, 0x1.5fp+0, 0x1.5ep+0,
+    0x1.5cp+0, 0x1.5ap+0, 0x1.58p+0, 0x1.56p+0, 0x1.54p+0, 0x1.53p+0, 0x1.51p+0,
+    0x1.4fp+0, 0x1.4ep+0, 0x1.4cp+0, 0x1.4ap+0, 0x1.48p+0, 0x1.47p+0, 0x1.45p+0,
+    0x1.44p+0, 0x1.42p+0, 0x1.4p+0, 0x1.3fp+0, 0x1.3dp+0, 0x1.3cp+0, 0x1.3ap+0,
+    0x1.39p+0, 0x1.37p+0, 0x1.36p+0, 0x1.34p+0, 0x1.33p+0, 0x1.32p+0, 0x1.3p+0,
+    0x1.2fp+0, 0x1.2dp+0, 0x1.2cp+0, 0x1.2bp+0, 0x1.29p+0, 0x1.28p+0, 0x1.27p+0,
+    0x1.25p+0, 0x1.24p+0, 0x1.23p+0, 0x1.21p+0, 0x1.2p+0, 0x1.1fp+0, 0x1.1ep+0,
+    0x1.1cp+0, 0x1.1bp+0, 0x1.1ap+0, 0x1.19p+0, 0x1.17p+0, 0x1.16p+0, 0x1.15p+0,
+    0x1.14p+0, 0x1.13p+0, 0x1.12p+0, 0x1.1p+0, 0x1.0fp+0, 0x1.0ep+0, 0x1.0dp+0,
+    0x1.0cp+0, 0x1.0bp+0, 0x1.0ap+0, 0x1.09p+0, 0x1.08p+0, 0x1.07p+0, 0x1.06p+0,
+    0x1.05p+0, 0x1.04p+0, 0x1.03p+0, 0x1.02p+0, 0x1.00p+0, 0x1.00p+0, 0x1.fdp-1,
+    0x1.fbp-1, 0x1.f9p-1, 0x1.f7p-1, 0x1.f5p-1, 0x1.f3p-1, 0x1.f1p-1, 0x1.fp-1,
+    0x1.eep-1, 0x1.ecp-1, 0x1.eap-1, 0x1.e8p-1, 0x1.e6p-1, 0x1.e5p-1, 0x1.e3p-1,
+    0x1.e1p-1, 0x1.dfp-1, 0x1.ddp-1, 0x1.dcp-1, 0x1.dap-1, 0x1.d8p-1, 0x1.d7p-1,
+    0x1.d5p-1, 0x1.d3p-1, 0x1.d2p-1, 0x1.dp-1, 0x1.cep-1, 0x1.cdp-1, 0x1.cbp-1,
+    0x1.c9p-1, 0x1.c8p-1, 0x1.c6p-1, 0x1.c5p-1, 0x1.c3p-1, 0x1.c2p-1, 0x1.cp-1,
+    0x1.bfp-1, 0x1.bdp-1, 0x1.bcp-1, 0x1.bap-1, 0x1.b9p-1, 0x1.b7p-1, 0x1.b6p-1,
+    0x1.b4p-1, 0x1.b3p-1, 0x1.b1p-1, 0x1.bp-1, 0x1.aep-1, 0x1.adp-1, 0x1.acp-1,
+    0x1.aap-1, 0x1.a9p-1, 0x1.a7p-1, 0x1.a6p-1, 0x1.a5p-1, 0x1.a3p-1, 0x1.a2p-1,
+    0x1.a1p-1, 0x1.9fp-1, 0x1.9ep-1, 0x1.9dp-1, 0x1.9cp-1, 0x1.9ap-1, 0x1.99p-1,
+    0x1.98p-1, 0x1.96p-1, 0x1.95p-1, 0x1.94p-1, 0x1.93p-1, 0x1.91p-1, 0x1.9p-1,
+    0x1.8fp-1, 0x1.8ep-1, 0x1.8dp-1, 0x1.8bp-1, 0x1.8ap-1, 0x1.89p-1, 0x1.88p-1,
+    0x1.87p-1, 0x1.86p-1, 0x1.84p-1, 0x1.83p-1, 0x1.82p-1, 0x1.81p-1, 0x1.8p-1,
+    0x1.7fp-1, 0x1.7ep-1, 0x1.7cp-1, 0x1.7bp-1, 0x1.7ap-1, 0x1.79p-1, 0x1.78p-1,
+    0x1.77p-1, 0x1.76p-1, 0x1.75p-1, 0x1.74p-1, 0x1.73p-1, 0x1.72p-1, 0x1.71p-1,
+    0x1.7p-1, 0x1.6fp-1, 0x1.6ep-1, 0x1.6dp-1, 0x1.6cp-1, 0x1.6bp-1, 0x1.6ap-1,
+};
+
+/* For 181 <= i <= 362, (h,l) = _LOG_INV[i-181] is a double-double nearest
+   approximation of -log(r) for r=_INVERSE[i-181], h being an integer
+   multiple of 2^-42.
+   Since |l| < 2^-43, the maximal error is 1/2 ulp(l) <= 2^-97. */
+static const double chelis_cr_pow___LOG_INV[182][2] = {
+    {-0x1.5ff3070a79p-2, -0x1.e9e439f105039p-45},
+    {-0x1.5a42ab0f4dp-2, 0x1.e63af2df7ba69p-50},
+    {-0x1.548a2c3addp-2, -0x1.3167e63081cf7p-45},
+    {-0x1.4ec97326p-2, -0x1.34d7aaf04d104p-45},
+    {-0x1.4900680401p-2, 0x1.8bccffe1a0f8cp-44},
+    {-0x1.432ef2a04fp-2, 0x1.fb129931715adp-44},
+    {-0x1.404308686ap-2, -0x1.f8ef43049f7d3p-44},
+    {-0x1.3a64c55694p-2, -0x1.7a71cbcd735dp-44},
+    {-0x1.347dd9a988p-2, 0x1.5594dd4c58092p-45},
+    {-0x1.2e8e2bae12p-2, 0x1.67b1e99b72bd8p-45},
+    {-0x1.2895a13de8p-2, -0x1.a8d7ad24c13fp-44},
+    {-0x1.22941fbcf8p-2, 0x1.a6976f5eb0963p-44},
+    {-0x1.1f8ff9e48ap-2, -0x1.7946c040cbe77p-45},
+    {-0x1.1980d2dd42p-2, -0x1.b7b3a7a361c9ap-45},
+    {-0x1.136870293bp-2, 0x1.d3e8499d67123p-44},
+    {-0x1.1058bf9ae5p-2, 0x1.4ab9d817d52cdp-44},
+    {-0x1.0a324e2739p-2, -0x1.c6bee7ef4030ep-47},
+    {-0x1.0402594b4dp-2, -0x1.036b89ef42d7fp-48},
+    {-0x1.fb9186d5e4p-3, 0x1.d572aab993c87p-47},
+    {-0x1.f550a564b8p-3, 0x1.323e3a09202fep-45},
+    {-0x1.e8c0252aa6p-3, 0x1.6805b80e8e6ffp-45},
+    {-0x1.e27076e2bp-3, 0x1.a342c2af0003cp-44},
+    {-0x1.d5c216b4fcp-3, 0x1.1ba91bbca681bp-45},
+    {-0x1.c8ff7c79aap-3, 0x1.7794f689f8434p-45},
+    {-0x1.c2968558c2p-3, 0x1.cfd73dee38a4p-45},
+    {-0x1.b5b519e8fcp-3, 0x1.4b722ec011f31p-44},
+    {-0x1.af3c94e80cp-3, 0x1.a4e633fcd9066p-52},
+    {-0x1.a23bc1fe2cp-3, 0x1.539cd91dc9f0bp-44},
+    {-0x1.9bb362e7ep-3, 0x1.1f2a8a1ce0ffcp-45},
+    {-0x1.8e928de886p-3, -0x1.a8154b13d72d5p-44},
+    {-0x1.87fa06520cp-3, -0x1.22120401202fcp-44},
+    {-0x1.7ab890210ep-3, 0x1.bdb9072534a58p-45},
+    {-0x1.740f8f5404p-3, 0x1.0b66c99018aa1p-44},
+    {-0x1.6d60fe719ep-3, 0x1.bc6e557134767p-44},
+    {-0x1.5ff3070a7ap-3, 0x1.8586f183bebf2p-44},
+    {-0x1.59338d9982p-3, -0x1.0ba68b7555d4ap-48},
+    {-0x1.4ba36f39a6p-3, 0x1.4354bb3f219e5p-44},
+    {-0x1.44d2b6ccb8p-3, 0x1.70cc16135783cp-46},
+    {-0x1.3dfc2b0eccp-3, -0x1.8a72a62b8c13fp-45},
+    {-0x1.303d718e48p-3, 0x1.680b5ce3ecb05p-50},
+    {-0x1.29552f82p-3, 0x1.5b967f4471dfcp-44},
+    {-0x1.2266f190a6p-3, 0x1.4d20ab840e7f6p-45},
+    {-0x1.1478584674p-3, -0x1.563451027c75p-46},
+    {-0x1.0d77e7cd08p-3, -0x1.cb2cd2ee2f482p-44},
+    {-0x1.0671512ca6p-3, 0x1.a47579cdc0a3dp-45},
+    {-0x1.f0a30c0118p-4, 0x1.d599e83368e91p-44},
+    {-0x1.e27076e2bp-4, 0x1.a342c2af0003cp-45},
+    {-0x1.d4313d66ccp-4, 0x1.9454379135713p-45},
+    {-0x1.c5e548f5bcp-4, -0x1.d0c57585fbe06p-46},
+    {-0x1.a926d3a4acp-4, -0x1.563650bd22a9cp-44},
+    {-0x1.9ab4246204p-4, 0x1.8a64826787061p-45},
+    {-0x1.8c345d6318p-4, -0x1.b20f5acb42a66p-44},
+    {-0x1.7da766d7bp-4, -0x1.2cc844480c89bp-44},
+    {-0x1.60658a9374p-4, -0x1.0c3b1dee9c4f8p-44},
+    {-0x1.51b073f06p-4, -0x1.83f69278e686ap-44},
+    {-0x1.42edcbea64p-4, -0x1.bc0eeea7c9acdp-46},
+    {-0x1.341d7961bcp-4, -0x1.1d0929983761p-44},
+    {-0x1.253f62f0ap-4, -0x1.416f8fb69a701p-44},
+    {-0x1.16536eea38p-4, 0x1.47c5e768fa309p-46},
+    {-0x1.f0a30c0118p-5, 0x1.d599e83368e91p-45},
+    {-0x1.d276b8adbp-5, -0x1.6a423c78a64bp-46},
+    {-0x1.b42dd71198p-5, 0x1.c827ae5d6704cp-46},
+    {-0x1.95c830ec9p-5, 0x1.c148297c5feb8p-45},
+    {-0x1.77458f633p-5, 0x1.181dce586af09p-44},
+    {-0x1.58a5bafc9p-5, 0x1.b2b739570ad39p-45},
+    {-0x1.39e87b9fe8p-5, -0x1.eafd480ad9015p-44},
+    {-0x1.1b0d98924p-5, 0x1.3401e9ae889bbp-44},
+    {-0x1.f829b0e78p-6, -0x1.980267c7e09e4p-45},
+    {-0x1.b9fc027bp-6, 0x1.b9a010ae6922ap-44},
+    {-0x1.7b91b07d6p-6, 0x1.3b955b602ace4p-44},
+    {-0x1.3cea44347p-6, 0x1.6a2c432d6a40bp-44},
+    {-0x1.fc0a8b0fcp-7, -0x1.f1e7cf6d3a69cp-50},
+    {-0x1.7dc475f82p-7, 0x1.eb1245b5da1f5p-44},
+    {-0x1.fe02a6b1p-8, -0x1.9e23f0dda40e4p-46},
+    {0, 0},
+    {0, 0},
+    {0x1.812121458p-8, 0x1.ad50382973f27p-46},
+    {0x1.41929f968p-7, 0x1.977c755d01368p-46},
+    {0x1.c317384c8p-7, -0x1.41f33fcefb9fep-44},
+    {0x1.228fb1feap-6, 0x1.713e3284991fep-45},
+    {0x1.63d617869p-6, 0x1.7abf389596542p-47},
+    {0x1.a55f548c6p-6, -0x1.de0709f2d03c9p-45},
+    {0x1.e72bf2814p-6, -0x1.8d75149774d47p-45},
+    {0x1.0415d89e78p-5, -0x1.dddc7f461c516p-44},
+    {0x1.252f32f8dp-5, 0x1.83e9ae021b67bp-45},
+    {0x1.466aed42ep-5, -0x1.c167375bdfd28p-45},
+    {0x1.67c94f2d48p-5, 0x1.dac20827cca0cp-44},
+    {0x1.894aa149f8p-5, 0x1.9a19a8be97661p-44},
+    {0x1.aaef2d0fbp-5, 0x1.0fc1a353bb42ep-45},
+    {0x1.bbcebfc69p-5, -0x1.7bf868c317c2ap-46},
+    {0x1.dda8adc68p-5, -0x1.1b1ac64d9e42fp-45},
+    {0x1.ffa6911ab8p-5, 0x1.3008c98381a8fp-45},
+    {0x1.10e45b3cbp-4, -0x1.7cf69284a3465p-44},
+    {0x1.2207b5c784p-4, 0x1.49d8cfc10c7bfp-44},
+    {0x1.2aa04a447p-4, 0x1.7a48ba8b1cb41p-44},
+    {0x1.3bdf5a7d2p-4, -0x1.19bd0ad125895p-44},
+    {0x1.4d3115d208p-4, -0x1.53a2582f4e1efp-48},
+    {0x1.55e10050ep-4, 0x1.c1d740c53c72ep-47},
+    {0x1.674f089364p-4, 0x1.a79994c9d3302p-44},
+    {0x1.78d02263d8p-4, 0x1.69b5794b69fb7p-47},
+    {0x1.8197e2f41p-4, -0x1.c0fe460d20041p-44},
+    {0x1.9335e5d594p-4, 0x1.3115c3abd47dap-45},
+    {0x1.a4e7640b1cp-4, -0x1.e42b6b94407c8p-47},
+    {0x1.adc77ee5bp-4, -0x1.573b209c31904p-44},
+    {0x1.bf968769fcp-4, 0x1.4218c8d824283p-45},
+    {0x1.d179788218p-4, 0x1.36433b5efbeedp-44},
+    {0x1.da72763844p-4, 0x1.a89401fa71733p-46},
+    {0x1.ec739830ap-4, 0x1.11fcba80cdd1p-44},
+    {0x1.f57bc7d9p-4, 0x1.76a6c9ea8b04ep-46},
+    {0x1.03cdc0a51ep-3, 0x1.81a9cf169fc5cp-44},
+    {0x1.08598b59e4p-3, -0x1.7e5dd7009902cp-45},
+    {0x1.1178e8227ep-3, 0x1.1ef78ce2d07f2p-45},
+    {0x1.160c8024b2p-3, 0x1.ec2d2a9009e3dp-45},
+    {0x1.1f3b925f26p-3, -0x1.5f74e9b083633p-46},
+    {0x1.23d712a49cp-3, 0x1.00d238fd3df5cp-46},
+    {0x1.2d1610c868p-3, 0x1.39d6ccb81b4a1p-47},
+    {0x1.31b994d3a4p-3, 0x1.f098ee3a5081p-44},
+    {0x1.3b08b6758p-3, -0x1.aade8f29320fbp-44},
+    {0x1.3fb45a5992p-3, 0x1.19713c0cae559p-44},
+    {0x1.4913d8333cp-3, -0x1.53e43558124c4p-44},
+    {0x1.4dc7b897bcp-3, 0x1.c79b60ae1ff0fp-47},
+    {0x1.5737cc9018p-3, 0x1.9baa7a6b887f6p-44},
+    {0x1.5bf406b544p-3, -0x1.27023eb68981cp-46},
+    {0x1.6574ebe8c2p-3, -0x1.98c1d34f0f462p-44},
+    {0x1.6a399dabbep-3, -0x1.8f934e66a15a6p-44},
+    {0x1.6f0128b756p-3, 0x1.577390d31ef0fp-44},
+    {0x1.7898d85444p-3, 0x1.8e67be3dbaf3fp-44},
+    {0x1.7d6903caf6p-3, -0x1.4c06b17c301d7p-45},
+    {0x1.871213750ep-3, 0x1.328eb42f9af75p-44},
+    {0x1.8beafeb39p-3, -0x1.73d54aae92cd1p-47},
+    {0x1.90c6db9fccp-3, -0x1.935f57718d7cap-46},
+    {0x1.9a8778debap-3, 0x1.470fa3efec39p-44},
+    {0x1.9f6c40708ap-3, -0x1.337d94bcd3f43p-44},
+    {0x1.a454082e6ap-3, 0x1.60a77c81f7171p-44},
+    {0x1.ae2ca6f672p-3, 0x1.7a8d5ae54f55p-44},
+    {0x1.b31d8575bcp-3, 0x1.c794e562a63cbp-44},
+    {0x1.b811730b82p-3, 0x1.e90683b9cd768p-46},
+    {0x1.bd087383bep-3, -0x1.d4bc4595412b6p-45},
+    {0x1.c6ffbc6fp-3, 0x1.ee138d3a69d43p-44},
+    {0x1.cc000c9db4p-3, -0x1.d6d585d57aff9p-46},
+    {0x1.d1037f2656p-3, -0x1.84a7e75b6f6e4p-47},
+    {0x1.db13db0d48p-3, 0x1.2806a847527e6p-44},
+    {0x1.e020cc6236p-3, -0x1.52b00adb91424p-45},
+    {0x1.e530effe72p-3, -0x1.fdbdbb13f7c18p-44},
+    {0x1.ea4449f04ap-3, 0x1.5e91663732a36p-44},
+    {0x1.f474b134ep-3, -0x1.bae49f1df7b5ep-44},
+    {0x1.f991c6cb3cp-3, -0x1.90d04cd7cc834p-44},
+    {0x1.feb2233eap-3, 0x1.f3418de00938bp-45},
+    {0x1.01eae5626cp-2, 0x1.a43dcfade85aep-44},
+    {0x1.047e60cde8p-2, 0x1.dbdf10d397f3cp-45},
+    {0x1.09aa572e6cp-2, 0x1.b50a1e1734342p-44},
+    {0x1.0c42d67616p-2, 0x1.7188b163ceae9p-45},
+    {0x1.0edd060b78p-2, 0x1.019b52d8435f5p-47},
+    {0x1.1178e8227ep-2, 0x1.1ef78ce2d07f2p-44},
+    {0x1.14167ef367p-2, 0x1.e0c07824daaf5p-44},
+    {0x1.16b5ccbadp-2, -0x1.23299042d74bfp-44},
+    {0x1.1bf99635a7p-2, -0x1.1ac89575c2125p-44},
+    {0x1.1e9e16788ap-2, -0x1.82eaed3c8b65ep-44},
+    {0x1.214456d0ecp-2, -0x1.caf0428b728a3p-44},
+    {0x1.23ec5991ecp-2, -0x1.6dbe448a2e522p-44},
+    {0x1.269621134ep-2, -0x1.1b61f10522625p-44},
+    {0x1.2941afb187p-2, -0x1.210c2b730e28bp-44},
+    {0x1.2bef07cdc9p-2, 0x1.a9cfa4a5004f4p-45},
+    {0x1.314f1e1d36p-2, -0x1.8e27ad3213cb8p-45},
+    {0x1.3401e12aedp-2, -0x1.17c73556e291dp-44},
+    {0x1.36b6776be1p-2, 0x1.16ecdb0f177c8p-46},
+    {0x1.396ce359bcp-2, -0x1.5839c5663663dp-47},
+    {0x1.3c25277333p-2, 0x1.83b54b606bd5cp-46},
+    {0x1.3edf463c17p-2, -0x1.f067c297f2c3fp-44},
+    {0x1.419b423d5fp-2, -0x1.ce379226de3ecp-44},
+    {0x1.44591e053ap-2, -0x1.6e95892923d88p-47},
+    {0x1.4718dc271cp-2, 0x1.06c18fb4c14c5p-44},
+    {0x1.49da7f3bccp-2, 0x1.07b334daf4b9ap-44},
+    {0x1.4c9e09e173p-2, -0x1.e20891b0ad8a4p-45},
+    {0x1.4f637ebbaap-2, -0x1.fc158cb3124b9p-44},
+    {0x1.522ae0738ap-2, 0x1.ebe708164c759p-45},
+    {0x1.54f431b7bep-2, 0x1.a8954c0910952p-46},
+    {0x1.57bf753c8dp-2, 0x1.fadedee5d40efp-46},
+    {0x1.5a8cadbbeep-2, -0x1.7c79b0af7ecf8p-48},
+    {0x1.5d5bddf596p-2, -0x1.a0b2a08a465dcp-47},
+    {0x1.602d08af09p-2, 0x1.ebe9176df3f65p-46},
+    {0x1.630030b3abp-2, -0x1.db623e731aep-45},
+};
+
+/* For 0 <= i < 64, T1[i] = (h,l) such that h+l is the best double-double
+   approximation of 2^(i/64). The approximation error is bounded as follows:
+   |h + l - 2^(i/64)| < 2^-107. */
+static const double chelis_cr_pow__T1[][2] = {
+    {              0x1p+0,                 0x0p+0},
+    {0x1.02c9a3e778061p+0, -0x1.19083535b085dp-56},
+    {0x1.059b0d3158574p+0,  0x1.d73e2a475b465p-55},
+    {0x1.0874518759bc8p+0,  0x1.186be4bb284ffp-57},
+    {0x1.0b5586cf9890fp+0,  0x1.8a62e4adc610bp-54},
+    {0x1.0e3ec32d3d1a2p+0,  0x1.03a1727c57b53p-59},
+    {0x1.11301d0125b51p+0, -0x1.6c51039449b3ap-54},
+    { 0x1.1429aaea92dep+0, -0x1.32fbf9af1369ep-54},
+    {0x1.172b83c7d517bp+0, -0x1.19041b9d78a76p-55},
+    {0x1.1a35beb6fcb75p+0,  0x1.e5b4c7b4968e4p-55},
+    {0x1.1d4873168b9aap+0,  0x1.e016e00a2643cp-54},
+    {0x1.2063b88628cd6p+0,  0x1.dc775814a8495p-55},
+    {0x1.2387a6e756238p+0,  0x1.9b07eb6c70573p-54},
+    {0x1.26b4565e27cddp+0,  0x1.2bd339940e9d9p-55},
+    {0x1.29e9df51fdee1p+0,  0x1.612e8afad1255p-55},
+    {0x1.2d285a6e4030bp+0,  0x1.0024754db41d5p-54},
+    {0x1.306fe0a31b715p+0,  0x1.6f46ad23182e4p-55},
+    {0x1.33c08b26416ffp+0,  0x1.32721843659a6p-54},
+    {0x1.371a7373aa9cbp+0, -0x1.63aeabf42eae2p-54},
+    {0x1.3a7db34e59ff7p+0, -0x1.5e436d661f5e3p-56},
+    {0x1.3dea64c123422p+0,  0x1.ada0911f09ebcp-55},
+    {0x1.4160a21f72e2ap+0, -0x1.ef3691c309278p-58},
+    {0x1.44e086061892dp+0,   0x1.89b7a04ef80dp-59},
+    { 0x1.486a2b5c13cdp+0,   0x1.3c1a3b69062fp-56},
+    {0x1.4bfdad5362a27p+0,  0x1.d4397afec42e2p-56},
+    {0x1.4f9b2769d2ca7p+0, -0x1.4b309d25957e3p-54},
+    {0x1.5342b569d4f82p+0, -0x1.07abe1db13cadp-55},
+    {0x1.56f4736b527dap+0,  0x1.9bb2c011d93adp-54},
+    {0x1.5ab07dd485429p+0,  0x1.6324c054647adp-54},
+    {0x1.5e76f15ad2148p+0,  0x1.ba6f93080e65ep-54},
+    {0x1.6247eb03a5585p+0, -0x1.383c17e40b497p-54},
+    {0x1.6623882552225p+0, -0x1.bb60987591c34p-54},
+    {0x1.6a09e667f3bcdp+0, -0x1.bdd3413b26456p-54},
+    {0x1.6dfb23c651a2fp+0, -0x1.bbe3a683c88abp-57},
+    {0x1.71f75e8ec5f74p+0, -0x1.16e4786887a99p-55},
+    {0x1.75feb564267c9p+0, -0x1.0245957316dd3p-54},
+    {0x1.7a11473eb0187p+0, -0x1.41577ee04992fp-55},
+    {0x1.7e2f336cf4e62p+0,  0x1.05d02ba15797ep-56},
+    {0x1.82589994cce13p+0, -0x1.d4c1dd41532d8p-54},
+    {0x1.868d99b4492edp+0, -0x1.fc6f89bd4f6bap-54},
+    {0x1.8ace5422aa0dbp+0,  0x1.6e9f156864b27p-54},
+    {0x1.8f1ae99157736p+0,  0x1.5cc13a2e3976cp-55},
+    {0x1.93737b0cdc5e5p+0, -0x1.75fc781b57ebcp-57},
+    { 0x1.97d829fde4e5p+0, -0x1.d185b7c1b85d1p-54},
+    { 0x1.9c49182a3f09p+0,  0x1.c7c46b071f2bep-56},
+    {0x1.a0c667b5de565p+0, -0x1.359495d1cd533p-54},
+    {0x1.a5503b23e255dp+0, -0x1.d2f6edb8d41e1p-54},
+    {0x1.a9e6b5579fdbfp+0,  0x1.0fac90ef7fd31p-54},
+    {0x1.ae89f995ad3adp+0,  0x1.7a1cd345dcc81p-54},
+    {0x1.b33a2b84f15fbp+0, -0x1.2805e3084d708p-57},
+    {0x1.b7f76f2fb5e47p+0, -0x1.5584f7e54ac3bp-56},
+    {0x1.bcc1e904bc1d2p+0,  0x1.23dd07a2d9e84p-55},
+    {0x1.c199bdd85529cp+0,  0x1.11065895048ddp-55},
+    {0x1.c67f12e57d14bp+0,  0x1.2884dff483cadp-54},
+    {0x1.cb720dcef9069p+0,  0x1.503cbd1e949dbp-56},
+    {0x1.d072d4a07897cp+0, -0x1.cbc3743797a9cp-54},
+    {0x1.d5818dcfba487p+0,  0x1.2ed02d75b3707p-55},
+    {0x1.da9e603db3285p+0,  0x1.c2300696db532p-54},
+    {0x1.dfc97337b9b5fp+0, -0x1.1a5cd4f184b5cp-54},
+    {0x1.e502ee78b3ff6p+0,  0x1.39e8980a9cc8fp-55},
+    {0x1.ea4afa2a490dap+0, -0x1.e9c23179c2893p-54},
+    {0x1.efa1bee615a27p+0,   0x1.dc7f486a4b6bp-54},
+    { 0x1.f50765b6e454p+0,  0x1.9d3e12dd8a18bp-54},
+    {0x1.fa7c1819e90d8p+0,  0x1.74853f3a5931ep-55},
+};
+
+/* For 0 <= i < 64, T2[i] = (h,l) such that h+l is the best double-double
+   approximation of 2^(i/2^12). The approximation error is bounded as follows:
+   |h + l - 2^(i/2^12)| < 2^-107. */
+static const double chelis_cr_pow__T2[][2] = {
+    {              0x1p+0,                 0x0p+0},
+    {0x1.000b175effdc7p+0,  0x1.ae8e38c59c72ap-54},
+    {0x1.00162f3904052p+0, -0x1.7b5d0d58ea8f4p-58},
+    {0x1.0021478e11ce6p+0,  0x1.4115cb6b16a8ep-54},
+    {0x1.002c605e2e8cfp+0, -0x1.d7c96f201bb2fp-55},
+    {0x1.003779a95f959p+0,  0x1.84711d4c35e9fp-54},
+    {0x1.0042936faa3d8p+0, -0x1.0484245243777p-55},
+    { 0x1.004dadb113dap+0, -0x1.4b237da2025f9p-54},
+    {0x1.0058c86da1c0ap+0, -0x1.5e00e62d6b30dp-56},
+    {0x1.0063e3a559473p+0,  0x1.a1d6cedbb9481p-54},
+    {0x1.006eff583fc3dp+0, -0x1.4acf197a00142p-54},
+    {0x1.007a1b865a8cap+0, -0x1.eaf2ea42391a5p-57},
+    {0x1.0085382faef83p+0,  0x1.da93f90835f75p-56},
+    {0x1.00905554425d4p+0, -0x1.6a79084ab093cp-55},
+    {0x1.009b72f41a12bp+0,  0x1.86364f8fbe8f8p-54},
+    {0x1.00a6910f3b6fdp+0, -0x1.82e8e14e3110ep-55},
+    {0x1.00b1afa5abcbfp+0, -0x1.4f6b2a7609f71p-55},
+    {0x1.00bcceb7707ecp+0, -0x1.e1a258ea8f71bp-56},
+    {0x1.00c7ee448ee02p+0,  0x1.4362ca5bc26f1p-56},
+    {0x1.00d30e4d0c483p+0,  0x1.095a56c919d02p-54},
+    {0x1.00de2ed0ee0f5p+0, -0x1.406ac4e81a645p-57},
+    { 0x1.00e94fd0398ep+0,  0x1.b5a6902767e09p-54},
+    {0x1.00f4714af41d3p+0, -0x1.91b2060859321p-54},
+    {0x1.00ff93412315cp+0,  0x1.427068ab22306p-55},
+    {0x1.010ab5b2cbd11p+0,  0x1.c1d0660524e08p-54},
+    {0x1.0115d89ff3a8bp+0, -0x1.e7bdfb3204be8p-54},
+    {0x1.0120fc089ff63p+0,  0x1.843aa8b9cbbc6p-55},
+    {0x1.012c1fecd613bp+0, -0x1.34104ee7edae9p-56},
+    {0x1.0137444c9b5b5p+0, -0x1.2b6aeb6176892p-56},
+    {0x1.01426927f5278p+0,  0x1.a8cd33b8a1bb3p-56},
+    {0x1.014d8e7ee8d2fp+0,  0x1.2edc08e5da99ap-56},
+    {0x1.0158b4517bb88p+0,  0x1.57ba2dc7e0c73p-55},
+    {0x1.0163da9fb3335p+0,  0x1.b61299ab8cdb7p-54},
+    {0x1.016f0169949edp+0, -0x1.90565902c5f44p-54},
+    {0x1.017a28af25567p+0,  0x1.70fc41c5c2d53p-55},
+    {0x1.018550706ab62p+0,  0x1.4b9a6e145d76cp-54},
+    {0x1.019078ad6a19fp+0, -0x1.008eff5142bf9p-56},
+    {0x1.019ba16628de2p+0, -0x1.77669f033c7dep-54},
+    {0x1.01a6ca9aac5f3p+0, -0x1.09bb78eeead0ap-54},
+    {0x1.01b1f44af9f9ep+0,  0x1.371231477ece5p-54},
+    {0x1.01bd1e77170b4p+0,  0x1.5e7626621eb5bp-56},
+    {0x1.01c8491f08f08p+0, -0x1.bc72b100828a5p-54},
+    { 0x1.01d37442d507p+0, -0x1.ce39cbbab8bbep-57},
+    {0x1.01de9fe280ac8p+0,  0x1.16996709da2e2p-55},
+    {0x1.01e9cbfe113efp+0, -0x1.c11f5239bf535p-55},
+    {0x1.01f4f8958c1c6p+0,  0x1.e1d4eb5edc6b3p-55},
+    {0x1.020025a8f6a35p+0, -0x1.afb99946ee3fp-54},
+    {0x1.020b533856324p+0, -0x1.8f06d8a148a32p-54},
+    {0x1.02168143b0281p+0, -0x1.2bf310fc54eb6p-55},
+    {0x1.0221afcb09e3ep+0, -0x1.c95a035eb4175p-54},
+    {0x1.022cdece68c4fp+0, -0x1.491793e46834dp-54},
+    {0x1.02380e4dd22adp+0, -0x1.3e8d0d9c49091p-56},
+    {0x1.02433e494b755p+0, -0x1.314aa16278aa3p-54},
+    {0x1.024e6ec0da046p+0,  0x1.48daf888e9651p-55},
+    {0x1.02599fb483385p+0,  0x1.56dc8046821f4p-55},
+    {0x1.0264d1244c719p+0,  0x1.45b42356b9d47p-54},
+    {0x1.027003103b10ep+0, -0x1.082ef51b61d7ep-56},
+    {0x1.027b357854772p+0,  0x1.2106ed0920a34p-56},
+    {0x1.0286685c9e059p+0, -0x1.fd4cf26ea5d0fp-54},
+    {0x1.02919bbd1d1d8p+0, -0x1.09f8775e78084p-54},
+    {0x1.029ccf99d720ap+0,  0x1.64cbba902ca27p-58},
+    {0x1.02a803f2d170dp+0,  0x1.4383ef231d207p-54},
+    {0x1.02b338c811703p+0,  0x1.4a47a505b3a47p-54},
+    {0x1.02be6e199c811p+0,  0x1.e47120223467fp-54},
+};
+
+/* The following is a degree-8 polynomial generated by Sollya for
+   log(1+x)-x+x^2/2 over [-0.0040283203125,0.0040283203125]
+   with absolute error < 2^-81.63
+   and relative error < 2^-72.423 (see sollya/P_1.sollya).
+   The relative error is for x - x^2/2 + P(x) with respect to log(1+x). */
+static const double chelis_cr_pow__P_1[] = {0x1.5555555555558p-2,  /* degree 3 */
+                             -0x1.0000000000003p-2, /* degree 4 */
+                             0x1.999999981f535p-3,  /* degree 5 */
+                             -0x1.55555553d1eb4p-3, /* degree 6 */
+                             0x1.2494526fd4a06p-3,  /* degree 7 */
+                             -0x1.0001f0c80e8cep-3, /* degree 8 */
+};
+
+/* The following is a degree-4 polynomial generated by Sollya for exp(x)
+   over [-2^-12.905,2^-12.905]
+   with absolute error < 2^-74.34 (see sollya/Q_1.sollya). */
+static const double chelis_cr_pow__Q_1[] = {0x1p0,                 /* degree 0 */
+                             0x1p0,                 /* degree 1 */
+                             0x1p-1,                /* degree 2 */
+                             0x1.5555555997996p-3,  /* degree 3 */
+                             0x1.5555555849d8dp-5   /* degree 4 */
+};
+
+#endif
+
+/* end inlined src/binary64/pow/pow.h */
+
+// Warning: clang also defines __GNUC__
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wunknown-pragmas"
+#endif
+
+
+#ifndef chelis_cr_pow__POW_ITERATION
+#define chelis_cr_pow__POW_ITERATION 15
+#endif
+
+#define chelis_cr_pow__ENABLE_FP (chelis_cr_pow__POW_ITERATION & 0x1)
+#define chelis_cr_pow__ENABLE_ZIV2 (chelis_cr_pow__POW_ITERATION & 0x2)
+#define chelis_cr_pow__ENABLE_EXACT (chelis_cr_pow__POW_ITERATION & 0x4)
+#define chelis_cr_pow__ENABLE_ZIV3 (chelis_cr_pow__POW_ITERATION & 0x8)
+
+static chelis_cr_pow__FLAG_T
+chelis_cr_pow__get_flag (void)
+{
+  return 0;
+}
+
+static void
+chelis_cr_pow__set_flag (chelis_cr_pow__FLAG_T flag)
+{
+  (void) flag;
+}
+
+/***************** polynomial approximations of exp(z) ***********************/
+
+/* Given z such that |z| < 2^-12.905,
+   this routine puts in qh+ql an approximation of exp(z) such that
+
+   | (qh+ql) / exp(z) - 1 | < 2^-64.902632
+
+   and |ql| <= 2^-51.999. See Lemma 6 from reference [5].
+*/
+static inline void chelis_cr_pow__q_1 (double *qh, double *ql, double z) {
+  double q, h0, h1, l1;
+
+  q = __builtin_fma (chelis_cr_pow__Q_1[4], z, chelis_cr_pow__Q_1[3]);
+
+  q = __builtin_fma (q, z, chelis_cr_pow__Q_1[2]);
+
+  h0 = __builtin_fma (q, z, chelis_cr_pow__Q_1[1]);
+
+  chelis_cr_pow__a_mul (&h1, &l1, z, h0);
+
+  chelis_cr_pow__fast_sum (qh, ql, chelis_cr_pow__Q_1[0], h1, l1);
+}
+
+/* Given |y| < 0.00016923 < 2^-12.52, put in r an approximation of exp(y),
+   with relative error bounded by 2^-122.29.
+ */
+static inline void chelis_cr_pow__q_2 (chelis_cr_pow__dint64_t *r, chelis_cr_pow__dint64_t *y) {
+  chelis_cr_pow__mul_dint_11 (r, y, &chelis_cr_pow__Q_2[0]);
+  /* |y| < 2^-12.52 and |Q_2[0]| < 2^-12.29 thus |r| < 2^-24.81;
+     mul_dint_11() is exact, and the low part of Q_2[0] is 0,
+     but we ignore y.lo * Q_2[0], which is bounded by
+     ulp64(2^-12.52)*2^-12.29 < 2^-88.29 */
+  chelis_cr_pow__add_dint_11 (r, &chelis_cr_pow__Q_2[1], r);
+  /* |Q_2[1]| < 2^-9.49 and |r_in| < 2^-24.81 thus |r| < 2^-9.48;
+     the rounding error on add_dint_11() is bounded by 2 ulps,
+     thus < 2^-72. We also ignore the low part of r_in, which is
+     bounded by ulp64(2^-24.81) = 2^-88.
+     The total error on r is thus < 2^-88.29 + 2^-72 + 2^-88 < 2^-71.99.
+     This error is multiplied by y^6 below, thus contributes to at most
+     err1 = 2^-71.99*y^6 < 2^-147.16 */
+
+  chelis_cr_pow__mul_dint_11 (r, y, r);
+  /* |y| < 2^-12.52 and |r_in| < 2^-9.48 thus |r| < 2^-22.00;
+     mul_dint_11() is exact;
+     we ignore y * low(r_in) < 2^-12.52*ulp64(2^-9.48) = 2^-85.52;
+     we also ignore low(y) * r_in < ulp64(2^-12.52)*2^-9.48 = 2^-85.48 */
+  chelis_cr_pow__add_dint_11 (r, &chelis_cr_pow__Q_2[2], r);
+  /* |Q_2[2]| < 2^-6.90 and |r_in| < 2^-22.00 thus |r| < 2^-6.89;
+     the rounding error on add_dint_11() is bounded by 2 ulps,
+     thus < 2^-69. We also ignore the low part of r_in, which is
+     bounded by ulp64(2^-22.00-eps) = 2^-86.
+     The total error on r is thus < 2^-85.52+2^-85.48+2^-69+2^-86 < 2^-68.99.
+     This error is multiplied by y^5 below, thus contributes to at most
+     err2 = 2^-68.99*y^5 < 2^-131.64 */
+
+  chelis_cr_pow__mul_dint_11 (r, y, r);
+  /* |y| < 2^-12.52 and |r_in| < 2^-6.89 thus |r| < 2^-19.41;
+     mul_dint_11() is exact;
+     we ignore y * low(r_in) < 2^-12.52*ulp64(2^-6.89) = 2^-82.52;
+     we also ignore low(y) * r_in < ulp64(2^-12.52)*2^-6.89 = 2^-82.89 */
+  chelis_cr_pow__add_dint (r, &chelis_cr_pow__Q_2[3], r);
+  /* |Q_2[3]| < 2^-4.58 and |r_in| < 2^-19.41 thus |r| < 2^-4.57;
+     the rounding error on add_dint() is bounded by 2 ulps,
+     thus < 2^-131.
+     The total error on r is thus < 2^-82.52+2^-82.89+2^-131 < 2^-81.69.
+     This error is multiplied by y^4 below, thus contributes to at most
+     err3 = 2^-81.69*y^4 < 2^-131.80 */
+
+  chelis_cr_pow__mul_dint (r, y, r);
+  /* |y| < 2^-12.52 and |r_in| < 2^-4.57 thus |r| < 2^-17.09;
+     the rounding error of mul_dint() is bounded by 6 ulps,
+     thus < 2^-142.41 */
+  chelis_cr_pow__add_dint (r, &chelis_cr_pow__Q_2[4], r);
+  /* |Q_2[4]| < 2^-2.58 and |r_in| < 2^-17.09 thus |r| < 2^-2.57;
+     the rounding error on add_dint() is bounded by 2 ulps,
+     thus < 2^-129.
+     The total error on r is thus < 2^-142.41+2^-129 < 2^-128.99.
+     This error is multiplied by y^3 below, thus contributes to at most
+     err4 = 2^-128.99*y^3 < 2^-166.57 */
+
+  chelis_cr_pow__mul_dint (r, y, r);
+  /* |y| < 2^-12.52 and |r_in| < 2^-2.57 thus |r| < 2^-15.09;
+     the rounding error of mul_dint() is bounded by 6 ulps,
+     thus < 2^-140.41 */
+  chelis_cr_pow__add_dint (r, &chelis_cr_pow__Q_2[5], r);
+  /* |Q_2[5]| < 2^-0.99 and |r_in| < 2^-15.09 thus |r| < 2^-0.98;
+     the rounding error on add_dint() is bounded by 2 ulps,
+     thus < 2^-127.
+     The total error on r is thus < 2^-140.41+2^-127 < 2^-126.99.
+     This error is multiplied by y^2 below, thus contributes to at most
+     err5 = 2^-126.99*y^2 < 2^-152.04 */
+
+  chelis_cr_pow__mul_dint (r, y, r);
+  /* |y| < 2^-12.52 and |r_in| < 2^-0.98 thus |r| < 2^-13.50;
+     the rounding error of mul_dint() is bounded by 6 ulps,
+     thus < 2^-138.41 */
+  chelis_cr_pow__add_dint (r, &chelis_cr_pow__Q_2[6], r);
+  /* |Q_2[6]| < 1.01 and |r_in| < 2^-13.50 thus |r| < 1.02;
+     the rounding error on add_dint() is bounded by 2 ulps,
+     thus < 2^-126.
+     The total error on r is thus < 2^-138.41+2^-126 < 2^-125.99.
+     This error is multiplied by y below, thus contributes to at most
+     err6 = 2^-125.99*y < 2^-138.51 */
+
+  chelis_cr_pow__mul_dint (r, y, r);
+  /* |y| < 2^-12.52 and |r_in| < 1.02 thus |r| < 2^-12.49;
+     the rounding error of mul_dint() is bounded by 6 ulps,
+     thus < 2^-137.41 */
+  chelis_cr_pow__add_dint (r, &chelis_cr_pow__Q_2[7], r);
+  /* |Q_2[7]| < 1 and |r_in| < 2^-12.49 thus |r| < 1.01;
+     the rounding error on add_dint() is bounded by 2 ulps,
+     thus < 2^-126.
+     The total error on r is thus err7 < 2^-137.41+2^-126 < 2^-125.99. */
+
+  /* Total absolute errors:
+     err1 < 2^-147.16
+     err2 < 2^-131.64
+     err3 < 2^-131.80
+     err4 < 2^-166.57
+     err5 < 2^-152.04
+     err6 < 2^-138.51
+     err7 < 2^-125.99
+     Total err1+...+err7 < 2^-125.93. Since |y| < 0.00016923, this translates
+     into a relative error < 2^-125.93/exp(-0.00016923) < 2^-125.92.
+     We also have the approximation error from the Sollya polynomial,
+     which is bounded by 2^-122.415 (relative).
+     The total relative error is thus bounded with e1=2^-125.92 and
+     e2=2^-122.415 by (1+e1)*(1+e2)-1 < 2^-122.29.
+  */
+}
+
+/* Given |y| < 0.00016923 < 2^-12.52, put in r an approximation of exp(y),
+   with 0.999830 < r < 1.000170, absolute/relative error bounded by 2^-241.11.
+   The error analysis is from the analyze_q3() function in the accompanying
+   file qint.sage. */
+static inline void chelis_cr_pow__q_3 (chelis_cr_pow__qint64_t *r, chelis_cr_pow__qint64_t *y) {
+  /* the absolute error from the Sollya polynomial is at most 2^-242.181 */
+
+  /* the coefficients of degree 13 and 14 (Q_3[0-1]) have 64 bits only */
+
+  chelis_cr_pow__mul_qint_11 (r, y, &chelis_cr_pow__Q_3[0]);
+  /* here |y| < 0.00016923 and |Q_3[0]| < 2^-36.34 thus |r| < 2^-48.86;
+     mul_qint_11() is exact (providing a 128-bit product), but we ignore
+     the low part of y, which contributes to at most ulp64(y)*Q_3[0]
+     < 2^-112.34. */
+  chelis_cr_pow__add_qint_22 (r, &chelis_cr_pow__Q_3[1], r);
+  /* here |Q_3[1]| < 2^-32.53 and |r_in| < 2^-48.86, thus |r| < 2^-32.52;
+     the rounding error of add_qint_22() is bounded by 2 ulps_128, thus 2^-159;
+     the low part of Q_3[1] is 0, but we ignore the low part of r_in, which
+     contributes to at most ulp128(r_in) = 2^-176.
+     The total error on for the two above instructions is thus bounded by
+     2^-112.34 + 2^-159 + 2^-176 < 2^-112.34.
+     This error is multiplied by y^13 below, thus contributes to at most
+     err1 < 2^-275.21 (confirmed by analyze_q3()).
+  */
+
+  /* the coefficients of degree 8 to 12 (Q_3[2-6]) have 128 bits only */
+
+  for (int32_t k = 2; k < 7; k++) {
+    chelis_cr_pow__mul_qint_22 (r, y, r);
+    /* mul_qint_22() is exact (with a 256-bit result), but we might ignore
+       as input y*low(r) and low(y)*r, which accounts for y*ulp128(r_in)
+       + ulp128(y)*r */
+    chelis_cr_pow__add_qint_22 (r, &chelis_cr_pow__Q_3[k], r);
+    /* the rounding error in add_qint_22() is less than 2 ulps_128,
+       we have no ignored part of Q_3[k],
+       but we ignore the low 128 bits from r_in,
+       and the error of these two instructions is multiplied by y^(15-k) */
+  }
+
+  /* the coefficients of degree 0 to 7 (Q_3[7-14]) have 256 bits,
+     thus we use the full add_qint() routine to add them, but for
+     the larger degrees, we truncate to 3 limbs */
+
+  for (int32_t k = 7; k < 12; k++) {
+    chelis_cr_pow__mul_qint_33 (r, y, r);
+    /* the rounding error of mul_qint_33() is at most 6 ulps(256),
+       and we ignore as input y*low(r) and low(y)*r,
+       which accounts for y*ulp192(r_in) + ulp192(y)*r */
+    chelis_cr_pow__add_qint (r, &chelis_cr_pow__Q_3[k], r);
+    /* the rounding error of add_qint() is bounded by 2 ulps(256) */
+  }
+
+  for (int32_t k = 12; k < 15; k++) {
+    chelis_cr_pow__mul_qint (r, y, r);
+    /* the rounding error of mul_qint() is at most 14 ulps, and there is
+       no ignored part */
+    chelis_cr_pow__add_qint (r, &chelis_cr_pow__Q_3[k], r);
+    /* the rounding error of add_qint() is bounded by 2 ulps(256) */
+  }
+
+  /* The function analyze_q3() from the accompanying qint.sage file gives
+     a total absolute error bounded by 2^-241.113. Since r > exp(-0.00016923),
+     this corresponds to a relative error < 2^-241.113/exp(-0.00016923)
+     < 2^-241.11. */
+}
+
+/**************** polynomial approximations of log(1+x) **********************/
+
+/* Given |z| <= 33*2^-13, with z an integer multiple of 2^-61,
+   this routine puts in ph+pl an approximation of log(1+z)-z such that
+
+   | ph + pl - (log(1 + z) - z) | < 2^-75.492
+
+   with |ph| < 2^-16.9, |pl| < 2^-25.446.
+   Moreover if z<>0, and assuming further |z| < 32*2^-13, the relative error
+   satisfies:
+
+   | (z + ph + pl) / log(1+z) - 1 | < 2^-67.441
+
+   See Lemma 2 from reference [5].
+*/
+static inline void chelis_cr_pow__p_1 (double *ph, double *pl, double z) {
+  double wh, wl;
+  chelis_cr_pow__a_mul (&wh, &wl, z, z);
+  double t = __builtin_fma (chelis_cr_pow__P_1[5], z, chelis_cr_pow__P_1[4]);
+  double u = __builtin_fma (chelis_cr_pow__P_1[3], z, chelis_cr_pow__P_1[2]);
+  double v = __builtin_fma (chelis_cr_pow__P_1[1], z, chelis_cr_pow__P_1[0]);
+  u = __builtin_fma (t, wh, u);
+  v = __builtin_fma (u, wh, v);
+  u = v * wh;
+  *ph = -0.5 * wh;
+  *pl = __builtin_fma (u, z, -0.5 * wl);
+}
+
+// Approximation for the second iteration
+// Return in r an approximation of log(1+z) for |z| <= 2^-13
+// The low part of z is assumed to be 0.
+// with relative error bounded by 2^-124.82 and absolute error by 2^-137.95
+// The coefficients of degree 6 to 9 (P_2[0] to P_2[3]) have precision 64 bits only.
+// For the error analysis, see the analyze_p2() function in the
+// accompanying dint.sage file.
+static inline void chelis_cr_pow__p_2 (chelis_cr_pow__dint64_t *r, chelis_cr_pow__dint64_t *z) {
+  /* the error analysis below first consider the absolute error, then we
+     switch to the relative error after the final multiplication by z */
+  chelis_cr_pow__mul_dint_11 (r, z, &chelis_cr_pow__P_2[0]);
+  /* here |z| <= 2^-13 and |P_2[0]| < 2^-3.16 thus |r| < 2^-16.16;
+     mul_dint_11() is exact (the low part of z and P_2[0] is 0),
+     but we ignore the low part of r below, which contributes to
+     at most ulp64(2^-16.16) < 2^-80. */
+  chelis_cr_pow__add_dint_11 (r, &chelis_cr_pow__P_2[1], r);
+  /* here |P_2[1]| < 2^-2.99 and |r_in| < 2^-16.16, thus |r| < 2^-2.98;
+     the rounding error of add_dint_11() is bounded by 2 ulps_64, thus 2^-65;
+     the low part of P_2[1] is 0, but we ignore the low part of r_in (see
+     above).
+     The total error for the two above instructions is thus bounded by
+     2^-80+2^-65 < 2^-64.99. This error is multiplied by z^7
+     below (not counting the final multiplication by z),
+     thus contributes to at most err1 < 2^-155.99. */
+
+  chelis_cr_pow__mul_dint_11 (r, z, r);
+  /* here |z| <= 2^-13 and |r_in| < 2^-2.98 thus |r| < 2^-15.98;
+     mul_dint_11() is exact (the low part of z and r_in is 0) */
+  chelis_cr_pow__add_dint_11 (r, &chelis_cr_pow__P_2[2], r);
+  /* here |P_2[2]| < 2^-2.80 and |r_in| < 2^-15.98, thus |r| < 2^-2.79;
+     the rounding error of add_dint_11() is bounded by 2 ulps_64, thus 2^-65;
+     the low part of P_2[2] is 0, but we ignore the low part of r_in, which
+     contributes to at most ulp_64(2^-15.98) < 2^-79.
+     The total error for the two above instructions is thus bounded by
+     2^-65+2^-79 < 2^-64.99. This error is multiplied by z^6
+     below (not counting the final multiplication by z),
+     thus contributes to at most err2 < 2^-142.99. */
+
+  chelis_cr_pow__mul_dint_11 (r, z, r);
+  /* here |z| <= 2^-13 and |r_in| < 2^-2.79 thus |r| < 2^-15.79;
+     mul_dint_11() is exact (the low part of z and r_in is 0) */
+  chelis_cr_pow__add_dint_11 (r, &chelis_cr_pow__P_2[3], r);
+  /* here |P_2[3]| < 2^-2.58 and |r_in| < 2^-15.79, thus |r| < 2^-2.57;
+     the rounding error of add_dint_11() is bounded by 2 ulps_64, thus 2^-65;
+     the low part of P_2[3] is 0, but we ignore the low part of r_in, which
+     contributes to at most ulp_64(2^-15.79) < 2^-79.
+     The total error for the two above instructions is thus bounded by
+     2^-65+2^-79 < 2^-64.99. This error is multiplied by z^5
+     below (not counting the final multiplication by z),
+     thus contributes to at most err3 < 2^-129.99. */
+
+  chelis_cr_pow__mul_dint_11 (r, z, r);
+  /* here |z| <= 2^-13 and |r_in| < 2^-2.57 thus |r| < 2^-15.57;
+     mul_dint_11() is exact (the low part of z and r_in is 0) */
+  chelis_cr_pow__add_dint (r, &chelis_cr_pow__P_2[4], r);
+  /* here |P_2[4]| < 2^-2.32 and |r_in| < 2^-15.57, thus |r| < 2^-2.31;
+     the rounding error of add_dint() is bounded by 2 ulps_128, thus 2^-129.
+     The total error for the two above instructions is thus bounded by 2^-129.
+     This error is multiplied by z^4 below (not counting the final
+     multiplication by z), thus contributes to at most err4 < 2^-181. */
+
+  chelis_cr_pow__mul_dint_21 (r, r, z);
+  /* here |z| <= 2^-13 and |r_in| < 2^-2.31 thus |r| < 2^-15.31;
+     the rounding error of mul_dint_21() is bounded by 2 ulps, thus 2^-142. */
+  chelis_cr_pow__add_dint (r, &chelis_cr_pow__P_2[5], r);
+  /* here |P_2[5]| < 2^-1.999 and |r_in| < 2^-15.31, thus |r| < 2^-1.99;
+     the rounding error of add_dint() is bounded by 2 ulps_128, thus 2^-128.
+     The total error for the two above instructions is thus bounded by
+     2^-142+2^-128 < 2^-127.99. This error is multiplied by z^3
+     below (not counting the final multiplication by z),
+     thus contributes to at most err5 < 2^-166.99. */
+
+  chelis_cr_pow__mul_dint_21 (r, r, z);
+  /* here |z| <= 2^-13 and |r_in| < 2^-1.99 thus |r| < 2^-14.99;
+     the rounding error of mul_dint_21() is bounded by 2 ulps, thus 2^-141. */
+  chelis_cr_pow__add_dint (r, &chelis_cr_pow__P_2[6], r);
+  /* here |P_2[6]| < 2^-1.58 and |r_in| < 2^-14.99, thus |r| < 2^-1.57;
+     the rounding error of add_dint() is bounded by 2 ulps_128, thus 2^-128.
+     The total error for the two above instructions is thus bounded by
+     2^-141+2^-128 < 2^-127.99. This error is multiplied by z^2
+     below (not counting the final multiplication by z),
+     thus contributes to at most err6 < 2^-153.99. */
+
+  chelis_cr_pow__mul_dint_21 (r, r, z);
+  /* here |z| <= 2^-13 and |r_in| < 2^-1.57 thus |r| < 2^-14.57;
+     the rounding error of mul_dint_21() is bounded by 2 ulps, thus 2^-141. */
+  chelis_cr_pow__add_dint (r, &chelis_cr_pow__P_2[7], r);
+  /* here |P_2[7]| < 2^-1 and |r_in| < 2^-14.57, thus |r| < 2^-0.99;
+     the rounding error of add_dint() is bounded by 2 ulps_128, thus 2^-127.
+     The total error for the two above instructions is thus bounded by
+     2^-141+2^-127 < 2^-126.99. This error is multiplied by z
+     below (not counting the final multiplication by z),
+     thus contributes to at most err7 < 2^-133.99. */
+
+  chelis_cr_pow__mul_dint_21 (r, r, z);
+  /* here |z| <= 2^-13 and |r_in| < 2^-0.99 thus |r| < 2^-13.99;
+     the rounding error of mul_dint_21() is bounded by 6 ulps, thus 2^-140. */
+  chelis_cr_pow__add_dint (r, &chelis_cr_pow__P_2[8], r);
+  /* here P_2[8] = 1 and |r_in| < 2^-13.99, thus |r| < 1.0001;
+     the rounding error of add_dint() is bounded by 2 ulps_128, thus 2^-126.
+     The total error for the two above instructions is thus bounded by
+     err8 = 2^-140+2^-126 < 2^-125.99. */
+
+  /* Maximal absolute error on r up to here:
+     err1 < 2^-155.99
+     err2 < 2^-142.99
+     err3 < 2^-129.99
+     err4 < 2^-181
+     err5 < 2^-166.99
+     err6 < 2^-153.99
+     err7 < 2^-133.99
+     err8 < 2^-125.99
+     Total absolute error < err1+...+err8 < 2^-125.89.
+     We now transform this into relative error, knowing that
+     |r| >= 1 - 2^-13.99, this gives a relative error < 2^-125.88
+     (2^-125.90 with analyze_p2()).
+  */
+
+  chelis_cr_pow__mul_dint_21 (r, r, z);
+  /* We bound both the absolute and relative error.
+
+     Absolute error:
+     here |z| <= 2^-13 and |r_in| < 1.01 thus |r| < 2^-12.98;
+     the rounding error of mul_dint_21() is bounded by 2 ulps, thus 2^-139.
+     We add the previous total absolute error on r_in multiplied by z,
+     which gives 2^-139+2^-125.88*2^-13 < 2^-137.93
+     (2^-137.95 with analyze_p2()).
+
+     The relative error on the Sollya polynomial is bounded by
+     eps0 = 2^-128.316.
+     The relative error on r_in is bounded by eps1=2^-125.88
+     and the error from mul_dint_21 is bounded by 2 ulps
+     (which yields a relative error less than eps2=2*2^-127).
+     This yields a relative error on r less than:
+     |(1 + eps0) * (1 + eps1) * (1 + eps2) - 1| < 2^-124.80
+     (2^-124.82 with analyze_p2()). */
+}
+
+/* Approximation of log(1+z) for the last iteration, with |z| <= 2^-13
+   and z having only its upper limb being non-zero.
+   For the error analysis, see function analyze_p3() in accompanying file
+   qint.sage.
+   Maximal relative error: 2^-252.66, maximal absolute error: 2^-265.67,
+   and |r| < 0.0001221. */
+static inline void
+chelis_cr_pow__p_3 (chelis_cr_pow__qint64_t *r, chelis_cr_pow__qint64_t *z) {
+  chelis_cr_pow__mul_qint_11 (r, &chelis_cr_pow__P_3[0], z); /* coefficient of degree 18 */
+  /* here |P_3[0]| < 2^-4.16 and |z| <= 2^-13 thus |r| < 2^-17.16;
+     mul_qint_11() is exact giving a 128-bit product
+     (note that P_3[0] and z have only their upper limb non-zero). */
+  chelis_cr_pow__add_qint_22 (r, &chelis_cr_pow__P_3[1], r); /* coefficient of degree 17 */
+  /* here |P_3[1]| < 2^-4.08 and |r_in| < 2^-17.16, thus |r| < 2^-4.07;
+     the rounding error of add_qint_22() is bounded by 2 ulps_128, thus 2^-131;
+     and the low part of P_3[1] is 0.
+     The total error for the two above instructions is thus bounded by
+     2^-131. This error is multiplied by z^16
+     below (not counting the final multiplication by z),
+     thus contributes to at most err1 < 2^-339. */
+
+  /* the coefficients of degree 15-16 (P_3[2] to P_3[3]) have two non-zero
+     limbs */
+  for (int32_t k = 2; k < 4 ; k++) {
+    chelis_cr_pow__mul_qint_11 (r, r, z);
+    /* mul_qint_11() is exact (giving a 128-bit product), but we ignore
+       as input (r_in->hl)*z, which accounts for ulp64(r_in)*z */
+    chelis_cr_pow__add_qint_22 (r, &chelis_cr_pow__P_3[k], r);
+    /* the rounding error in add_qint_22() is less than 2 ulps_128,
+       and the error of these two instructions is multiplied by z^(17-k)
+       (not counting the final multiplication by z). */
+  }
+
+  /* the coefficients of degree 11-14 (P_3[4] to P_3[7]) have two non-zero
+     limbs */
+  for (int32_t k = 4; k < 8 ; k++) {
+    chelis_cr_pow__mul_qint_21 (r, r, z);
+    /* mul_qint_21() is exact (giving a 192-bit product), but we ignore the
+       "lh" limb of r in add_qint_22() below, which accounts for ulp128(r) */
+    chelis_cr_pow__add_qint_22 (r, &chelis_cr_pow__P_3[k], r);
+    /* the rounding error in add_qint_22() is less than 2 ulps_128,
+       and the error of these two instructions is multiplied by z^(17-k)
+       (not counting the final multiplication by z). */
+  }
+
+  /* the coefficients of degree 5-10 (P_3[8] to P_3[13]) have full 256-bit
+     accuracy */
+  for (int32_t k = 8; k < 14 ; k++) {
+    chelis_cr_pow__mul_qint_31 (r, r, z);
+    /* mul_qint_31() is exact, but we ignore in input the 4th
+       limb of r, which accounts for ulp192(r_in)*z (except for k=8
+       since r was computed by add_qint_22() above, and we already took
+       into account the truncated part of r) */
+    chelis_cr_pow__add_qint (r, &chelis_cr_pow__P_3[k], r);
+    /* the rounding error in add_qint() is less than 2 ulps_256,
+       and the error of these two instructions is multiplied by z^(17-k)
+       (not counting the final multiplication by z). */
+  }
+
+  for (int32_t k = 14; k < 18; k++) {
+    chelis_cr_pow__mul_qint_41 (r, r, z);
+    /* mul_qint_41() has an error < 2 ulps */
+    chelis_cr_pow__add_qint (r, &chelis_cr_pow__P_3[k], r);
+    /* the rounding error in add_qint() is less than 2 ulps_256,
+       and the error of these two instructions is multiplied by z^(17-k)
+       (not counting the final multiplication by z). */
+  }
+
+  /* The total absolute error up to here is bounded by 2^-253.92 (see
+     function analyze_p3 in accompanyng file qint.sage).
+     We have r > 0.99993896, thus the relative error is bounded by
+     2^-253.92/0.99993896 < 2^-253.91. */
+
+  /* since the polynomial has zero constant coefficient, we multiply by z */
+  chelis_cr_pow__mul_qint_41 (r, r, z);
+  /* We bound both the absolute and relative error.
+
+     Absolute error:
+     here |z| <= 2^-13 and |r_in| < 1.01 thus |r| < 2^-12.98;
+     the rounding error of mul_qint_41() is bounded by 2 ulps, thus 2^-267.
+     We add the previous total absolute error on r_in multiplied by z,
+     which gives 2^-267+2^-253.92*2^-13 < 2^-265.95.
+     The absolute error on the Sollya polynomial is bounded by 2^-268.1653.
+     This yields a total absolute < 2^-265.95+2^-268.1653 < 2^-265.66.
+     (The analyze_p3() routine in the accompanying file yields 2^-265.67.)
+
+     The relative error on the Sollya polynomial is bounded by
+     eps0 = 2^-255.0786,
+     the relative error on r_in is bounded by eps1=2^-253.91
+     and the error from mul_dint_41 is bounded by 2 ulps
+     (which yields a relative error less than eps2=2*2^-255).
+     This yields a relative error on r less than:
+     |(1 + eps0) * (1 + eps1) * (1 + eps2) - 1| < 2^-252.65.
+     (The analyze_p3() routine in the accompanying file yields 2^-252.66.) */
+}
+
+/* Given 2^-1074 <= x <= 0x1.fffffffffffffp+1023, this routine puts in h+l
+   an approximation of log(x) such that |l| < 2^-23.89*|h| and
+
+   | h + l - log(x) | <= elog * |log x|
+
+   with elog = 2^-73.527  if x < 1/sqrt(2) or sqrt(2) < x,
+   and  elog = 2^-67.0544 if 1/sqrt(2) < x < sqrt(2)
+   (note that x cannot equal 1/sqrt(2) nor sqrt(2)).
+
+   See Lemma 4 from reference [5].
+*/
+static inline int chelis_cr_pow__log_1 (double *h, double *l, double x) {
+  chelis_cr_pow__f64_u _x = {.f = x};
+  uint64_t _m = _x.u & (~0ull >> 12);
+  int64_t _e = (_x.u >> 52) & 0x7ff;
+
+  chelis_cr_pow__f64_u _t;
+
+  if (__builtin_expect(_e,1)) {
+    _t.u = _m | (0x3ffll << 52);
+    _m += 1ull << 52;
+    _e -= 0x3ff;
+  } else { /* x is a subnormal double  */
+    uint32_t k = __builtin_clzll (_m) - 11;
+
+    _e = -0x3fell - k;
+    _m <<= k;
+    _t.u = _m | (0x3ffll << 52);
+  }
+
+  /* now |x| = 2^_e*_t = 2^(_e-52)*m with 1 <= _t < 2,
+     and 2^52 <= _m < 2^53 */
+
+  //   log(x) = log(t) + E · log(2)
+  double t = _t.f;
+
+  // Find the lookup index
+  uint64_t i;
+
+  // If m > sqrt(2) we divide it by 2 so ensure 1/sqrt(2) < t < sqrt(2)
+  uint64_t c = _m >= 0x16a09e667f3bcd;
+  static const double cy[] = {1.0, 0.5};
+  static const uint64_t cm[] = {44, 45};
+
+  _e += c;
+  double E = _e;
+  i = _m >> cm[c]; /* i/2^8 <= t < (i+1)/2^8 */
+  /* when c=1, we have 0x16a09e667f3bcd <= m < 2^53, thus 90 <= i <= 127;
+     when c=0, we have 2^52 <= m < 0x16a09e667f3bcd, thus 128 <= i <= 181 */
+  t *= cy[c];
+  /* now 0x1.6a09e667f3bcdp-1 <= t < 0x1.6a09e667f3bcdp+0,
+     and log(x) = E * log(2) + log(t) */
+
+  double r = chelis_cr_pow___INVERSE[i-181];
+  double l1 = chelis_cr_pow___LOG_INV[i-181][0];
+  double l2 = chelis_cr_pow___LOG_INV[i-181][1];
+
+  double z = __builtin_fma (r, t, -1.0);
+
+#define chelis_cr_pow__LOG2_H 0x1.62e42fefa38p-1
+#define chelis_cr_pow__LOG2_L 0x1.ef35793c7673p-45
+
+  double th, tl;
+  th = __builtin_fma (E, chelis_cr_pow__LOG2_H, l1);
+  tl = __builtin_fma (E, chelis_cr_pow__LOG2_L, l2);
+
+  chelis_cr_pow__fast_sum (h, l, th, z, tl);
+  double ph, pl;
+  chelis_cr_pow__p_1 (&ph, &pl, z);
+  chelis_cr_pow__fast_sum (h, l, *h, ph, *l + pl);
+
+  if (_e == 0 && __builtin_fabs (*l) > __builtin_fabs (*h) * 0x1p-24)
+  {
+    chelis_cr_pow__fast_two_sum (h, l, *h, *l);
+    return 1;
+  }
+
+  return 0;
+}
+
+/* Put in r an approximation of log(x), with relative error bounded by
+   2^-122.88. */
+static void chelis_cr_pow__log_2 (chelis_cr_pow__dint64_t *r, chelis_cr_pow__dint64_t *x) {
+  int64_t E = x->ex;
+  uint16_t i, j;
+
+  /* x = 2^(E-63) * hi */
+
+  // find the 1st lookup index i = floor(x*2^7)
+  if (x->hi > 0xb504f333f9de6484) { /* hi/2^63 > sqrt(2) */
+    E++;
+    i = x->hi >> (63 + 1 - 7); // the +1 accounts for the division x/2
+  }
+  else
+    i = x->hi >> (63 - 7);
+
+  /* now 90 <= i <= 181 */
+
+  x->ex = x->ex - E;
+
+  /* now sqrt(2)/2 < x < sqrt(2) */
+
+  chelis_cr_pow__dint64_t z;
+  chelis_cr_pow__mul_dint_11 (&z, x, &chelis_cr_pow___INVERSE_2_1[i - 90]); /* exact */
+  /* The low limb of z is zero, since x has 53 significant bits, and
+     _INVERSE_2_1[i-90] has 9 significant bits, thus the product fits
+     in 64 bits. We have 0.9921875 <= z <= 1.0078125 here. */
+
+  // find the 2nd lookup index j = floor(x*2^13)
+  j = z.hi >> (63 - 13 - z.ex);
+
+  chelis_cr_pow__mul_dint_11 (&z, &z, &chelis_cr_pow___INVERSE_2_2[j - 8128]); /* exact */
+  /* here z.lo might be non-zero */
+  /* we have 0.9998779296875 <= z <= 1.0001220703125 here */
+  
+  // subtract 1, since 1/2 < z < 2 this is exact */
+  chelis_cr_pow__add_dint (&z, &chelis_cr_pow__M_ONE, &z);
+
+  /* _INVERSE_2_2[j-8128] has at most 14 significant bits, thus in principle
+     before the subtraction of 1, z might have up to 53+9+14 = 76 significant
+     bits. However for sqrt(2)/2 < x < 1, since x has 53 significant
+     bits, x is an integer multiple of 2^-53; then _INVERSE_2_1[i-90] is an
+     integer multiple of 2^-8, then x*_INVERSE_2_1[i-90] is an integer multiple
+     of 2^-61. If 1 <= x < sqrt(2), x is an integer multiple of 2^-52 and
+     _INVERSE_2_1[i-90] an integer multiple of 2^-9, thus again
+     x*_INVERSE_2_1[i-90] an integer multiple of 2^-61.
+     Now _INVERSE_2_2[j-8128] is an integer multiple of 2^-14, thus
+     z0 := x*_INVERSE_2_1[i-90]*_INVERSE_2_2[j-8128] is an integer multiple of
+     2^-61*2^-14=2^-75.
+     Write z0 = 1 + t*2^-75 with t integer.
+     Since 0.9998779296875 <= z0 <= 1.0001220703125, we deduce |t| <= 2^62,
+     thus z0-1 is exactly representable on 64 bits. */
+
+  /* now |z| <= 0.0001220703125 = 2^-13 */
+
+  // E·log(2)
+  chelis_cr_pow__mul_dint_int64 (r, &chelis_cr_pow__LOG2, E);
+  /* The rounding error in mul_dint_int64() is at most 1 ulp.
+     Since |E| <= 1074, this is at most ulp(1074*log(2))=2^-118,
+     and |r| <= 1074*log(2) < 2^9.55.
+     We also have the approximation error on log(2), which is < 2^-129.97,
+     and multiplied by |E| <= 1074, thus < 2^-119.90.
+     This yields an absolute error < 2^-118+2^-119.90 < 2^-117.65.
+     The relative rounding error in mul_dint_int64() is bounded by 1 ulp thus
+     2^-127, and that on log(2) is bounded by 1/2 ulp thus 2^-128, which
+     yields (1+2^-127)*(1+2^-128)-1 < 2^-126.41.
+  */
+
+  chelis_cr_pow__dint64_t p;
+
+  chelis_cr_pow__p_2 (&p, &z); /* relative error < 2^-124.82, absolute error < 2^-137.95,
+                   and |p| < 0.0001221 */
+
+  chelis_cr_pow__add_dint (&p, &chelis_cr_pow___LOG_INV_2_2[j - 8128], &p);
+  /* here we have |_LOG_INV_2_2[j-8128]| < 2^-6.99 and |p_in| < 0.0001221,
+     thus |p| < 2^-6.96, and the rounding error of add_dint() is bounded
+     by 2 ulps, thus < 2^-133 (absolute) and < 2^-126 (relative). */
+
+  chelis_cr_pow__add_dint (&p, &chelis_cr_pow___LOG_INV_2_1[i - 90], &p);
+  /* here we have |_LOG_INV_2_1[i-90]| < 2^-1.51 and |p_in| < 2^-6.96,
+     thus |p| < 2^-1.47, and the rounding error of add_dint() is bounded
+     by 2 ulps, thus < 2^-128 (absolute) and < 2^-126 (relative). */
+
+  chelis_cr_pow__add_dint (r, &p, r);
+  /* here |p| < 2^-1.47 and |r_in| < 2^9.55, thus |r| < 2^9.56.
+     The rounding error of add_dint() is bounded is bounded by 2 ulps,
+     thus < 2^-117 (absolute) or 2^-126 (relative). */
+
+  /* We have the following rounding errors:
+    (a) rounding error on E*log(2) which is bounded by 2^-117.65 (absolute)
+        and 2^-126.41 (relative)
+    (b) error on p_2() bounded by 2^-137.95 (absolute) and 2^-124.82 (relative)
+    (c1) approximation error on _LOG_INV_2_1[i-90],
+        bounded by 2^-130 (absolute) and 2^-128 (relative)
+    (c2) approximation error on _LOG_INV_2_2[j-8128],
+        bounded by 2^-136 (absolute) and 2^-128 (relative)
+    (d1) rounding error on _LOG_INV_2_1[i-90]+p, bounded by 2^-128 (absolute)
+         and 2^-126 (relative)
+    (d2) rounding error on _LOG_INV_2_2[j-8128]+p, bounded by 2^-133 (absolute)
+         and 2^-126 (relative)
+    (e) rounding error on p + r, bounded by 2^-117 (absolute) and 2^-126
+        (relative)
+     We distinguish two cases here: E<>0 and E=0.
+
+     If E<>0, then |r_in| > 2^-0.53 and |p| < 2^-1.47, thus |r| > 2^-1.59.
+     The absolute errors (b), (c1), (c2), (d1), (d2) are bounded by
+     2^-137.95 + 2^-130 + 2^-136 + 2^-128 + 2^-133 < 2^-127.63, which thus
+     converts to 2^-127.63/2^-1.59 < 2^-126.04 as relative error.
+     Together with the relative error (a) e1=2^-126.41 on E*log(2) and
+     (e) e2=2^-126 on p+r, this yields with e3=2^-126.04:
+     |(1+e1)*(1+e2)*(1+e3)-1| < 2^-124.55.
+
+     If E=0, then the rounding error (a) on E*log(2) vanishes, and likewise
+     the rounding error (e) on p + r, since r=0. We further distinguish two
+     cases: either i <> {127, 127}, or 127 <= i <= 128.
+
+     If E=0 and i <> {127, 128}: the errors (a) and (e) vanish since r=0.
+     Using interval arithmetic to analyze each of the possible (i,j) pairs,
+     using the fact that the errors (c1) and (c2) are bounded by 1/2 ulp
+     of the corresponding values, and that the errors (d1) and (d2) are
+     bounded by 2 ulps of the corresponding result, we find (see routine
+     max_rel_err_p2_case1 in the accompanying file dint.sage) that the
+     maximal relative error is bounded by 2^-123.89, obtained for i=126
+     and j=8256.
+
+     If E=0 and (i=127 or i=128), then we have _INVERSE_2_1[i-90]=1 thus
+     _LOG_INV_2_1[i-90]=0, and the errors (c1) and (d1) also vanish.
+     It only remains errors (b), (c2) and (d2). We further distinguish
+     two sub-cases: either j <> {8191, 8192}, or 8191 <= j <= 8192.
+
+     If E=0, i in {127,128} and j <> {8191, 8192}, then using the same method
+     as in case E=0 and i <> {127, 128}, we find that the relative error
+     is bounded by 2^-122.88 (attained for j=8193). See routine
+     max_rel_err_p2_case2() in the accompanying file dint.sage.
+
+     It remains the case E=0, i in {127,128} and j in {8191, 8192}. In this
+     case the errors (c2) and (d2) are also zero, it only remains error (b),
+     which is bounded by 2^-124.82 (relative).
+
+     In summary, the relative error is bounded:
+     * if E<>0, by 2^-124.55
+     * if E=0 and i <> {127, 128}, by 2^-123.89
+     * if E=0, i in {127, 128}, j <> {8191, 8192}, by 2^-122.88
+     * if E=0, i in {127, 128}, j in {8191, 8192}, by 2^-124.82
+
+     In all cases, the relative error is bounded by 2^-122.88,
+     where the largest bound comes from the case E=0, i in {127, 128},
+     and j <> {8191, 8192}.
+  */
+}
+
+/* put in r an approximation of log(x), with relative error < 2^-250.74 */
+static void chelis_cr_pow__log_3 (chelis_cr_pow__qint64_t *r, chelis_cr_pow__qint64_t *x) {
+  int64_t E = x->ex;
+
+  // Find the lookup index: upper 8 bits of x
+  uint16_t i, j;
+
+  /* x = 2^(E-63) * hh */
+
+  if (x->hh > 0xb504f333f9de6484) {
+    E++;
+    i = x->hh >> (63 + 1 - 7); // the +1 accounts for the division x/2
+  }
+  else
+    i = x->hh >> (63 - 7);
+
+  /* now 90 <= i <= 181 */
+
+  x->ex = x->ex - E;
+
+  /* now sqrt(2)/2 < x < sqrt(2) */
+
+  chelis_cr_pow__qint64_t z;
+  chelis_cr_pow__mul_qint (&z, x, &chelis_cr_pow___INVERSE_3_1[i - 90]);
+  /* The above operation is exact since x has 53 significant bits,
+     and _INVERSE_3_1[i - 90] has 9 significant bits.
+     We have 0.9921875 <= z <= 1.0078125. */
+
+    // find the 2nd lookup index j = floor(x*2^13)
+  j = z.hh >> (63 - 13 - z.ex);
+
+  chelis_cr_pow__mul_qint (&z, &z, &chelis_cr_pow___INVERSE_3_2[j - 8128]); /* exact */
+  /* here z.hl might be non-zero */
+  /* we have 0.9998779296875 <= z <= 1.0001220703125 here */
+
+  // subtract 1, since 1/2 < z < 2 this is exact */
+  chelis_cr_pow__add_qint (&z, &chelis_cr_pow__M_ONE_Q, &z);
+  /* z fits into 64 bits (same analysis as in log_2) */
+
+  /* now |z| <= 0.0001220703125 = 2^-13 */
+
+  // E·log(2)
+  chelis_cr_pow__mul_qint_2 (r, E, &chelis_cr_pow__LOG2_Q);
+  /* The rounding error in mul_qint_2() is at most 2 ulps.
+     Since |E| <= 1074, this is at most 2*ulp_256(1074*log(2))=2^-245,
+     and |r| <= 1074*log(2) < 2^9.55.
+     We also have the approximation error on log(2), which is < 2^-256.14,
+     and multiplied by |E| <= 1074, thus < 2^-246.07.
+     This yields an absolute error < 2^-245+2^-246.07 < 2^-244.43.
+     The relative rounding error in mul_qint_2() is bounded by 2 ulps thus
+     2^-254, and that on log(2) is bounded by 1/2 ulp thus 2^-256, which
+     yields (1+2^-254)*(1+2^-256)-1 < 2^-253.67. */
+
+  chelis_cr_pow__qint64_t p;
+  chelis_cr_pow__p_3 (&p, &z); /* relative error < 2^-252.66, and |p| < 0.0001221 */
+
+  /* We have to accumulate r which approximates E*log(2),
+     _LOG_INV_3_1[i-90] which approximates -log(_INVERSE_3_1[i-90]),
+     _LOG_INV_3_2[j-8128] which approximates -log(_INVERSE_3_2[i-8128]),
+     and p which approximates log (z). We start by the smallest
+     values to minimize the rounding error. */
+
+  chelis_cr_pow__add_qint (&p, &chelis_cr_pow___LOG_INV_3_2[j - 8128], &p);
+  /* here we have |_LOG_INV_3_2[j-8128]| < 0.0078432 and |p_in| < 0.0001221,
+     thus |p| < 0.0079653, and the rounding error of add_qint() is bounded
+     by 2 ulps, thus < 2^-261 (absolute) and 2^-254 (relative). */
+
+  chelis_cr_pow__add_qint (&p, &chelis_cr_pow___LOG_INV_3_1[i - 90], &p);
+  /* here we have |_LOG_INV_3_1[i-90]| < 0.34945 and |p_in| < 0.0079653,
+     thus |p| < 0.3574153, and the rounding error of add_qint() is bounded
+     by 2 ulps, thus < 2^-256 (absolute) and 2^-254 (relative). */
+
+  chelis_cr_pow__add_qint (r, &p, r);
+  /* here |p| < 0.3574153 and |r_in| < 2^9.55, thus |r| < 2^9.56.
+     The rounding error of add_qint() is bounded by 2 ulps,
+     thus < 2^-245 (absolute) or 2^-254 (relative). */
+
+  /* We have the following rounding errors:
+     (a) rounding error on E*log(2) which is bounded by 2^-244.43 (absolute)
+         and 2^-253.67 (relative)
+     (b) error on p_3() bounded by 2^-265.67 (absolute) and 2^-252.66 (rel)
+     (c1) approximation error on _LOG_INV_3_1[i-90], bounded by 2^-258
+         (absolute) and 2^-256 (relative) [1/2 ulp]
+     (c2) approximation error on _LOG_INV_3_2[j-8128], bounded by 2^-263
+         (absolute) and 2^-256 (relative) [1/2 ulp]
+     (d1) rounding error on _LOG_INV_3_1[i-90] + p, bounded by 2^-256
+          (absolute) and 2^-254 (relative)
+     (d2) rounding error on _LOG_INV_3_2[j-8128] + p, bounded by 2^-261
+          (absolute) and 2^-254 (relative)
+     (e) rounding error on p + r, bounded by 2^-245 (absolute) and
+         2^-254 (relative)
+     We distinguish two cases here: E<>0 and E=0.
+
+     If E<>0, then |r_in| > 0.69314 and |p| < 0.3574153, thus |r| > 0.33572.
+     The absolute errors (b), (c1), (c2), (d1), (d2) are bounded by
+     2^-265.67 + 2^-258 + 2^-263 + 2^-256 + 2^-261 < 2^-255.63, which thus
+     converts to 2^-255.63/0.33572 < 2^-254.05 as relative error.
+     Together with the relative error e1=2^-253.67 on E*log(2) and e2=2^-254
+     on p+r, this yields with e3=2^-254.05:
+     |(1+e1)*(1+e2)*(1+e3)-1| < 2^-252.31.
+
+     If E=0, then the rounding error (a) on E*log(2) vanishes, and likewise
+     the rounding error (e) on p + r, since r=0. We further distinguish two
+     cases: either i <> {127, 127}, or 127 <= i <= 128.
+
+     If E=0 and i <> {127, 128}: the errors (a) and (e) vanish since r=0.
+     Using interval arithmetic to analyze each of the possible (i,j) pairs,
+     using the fact that the errors (c1) and (c2) are bounded by 1/2 ulp
+     of the corresponding values, and that the errors (d1) and (d2) are
+     bounded by 2 ulps of the corresponding result, we find (see routine
+     max_rel_err_p3_case1 in the accompanying file qint.sage) that the
+     maximal relative error is bounded by 2^-251.88, obtained for i=126
+     and j=8256.
+
+     If E=0 and (i=127 or i=128), then we have _INVERSE_3_1[i-90]=1 thus
+     _LOG_INV_3_1[i-90]=0, and the errors (c1) and (d1) also vanish.
+     It only remains errors (b), (c2) and (d2). We further distinguish
+     two sub-cases: either j <> {8191, 8192}, or 8191 <= j <= 8192.
+
+     If E=0, i in {127,128} and j <> {8191, 8192}, then using the same method
+     as in case E=0 and i <> {127, 128}, we find that the relative error
+     is bounded by 2^-250.74 (attained for j=8193). See routine
+     max_rel_err_p3_case2() in the accompanying file dint.sage.
+
+     It remains the case E=0, i in {127,128} and j in {8191, 8192}. In this
+     case the errors (c2) and (d2) are also zero, it only remains error (b),
+     which is bounded by 2^-252.66 (relative).
+
+     In summary, the relative error is bounded:
+     * if E<>0, by 2^-252.31
+     * if E=0 and i <> {127, 128}, by 2^-251.88
+     * if E=0, i in {127, 128}, j <> {8191, 8192}, by 2^-250.74
+     * if E=0, i in {127, 128}, j in {8191, 8192}, by 2^-252.66
+
+     In all cases, the relative error is bounded by 2^-250.74
+     where the largest bound comes from the case E=0, i in {127, 128},
+     and j <> {8191, 8192}.
+  */
+}
+
+/* Given RHO1 <= rh <= RHO2, |rl/rh| < 2^-23.8899 and |rl| < 2^-14.4187,
+   this routine computes an approximation eh+el of exp(rh+rl) such that:
+
+   | (eh+el) / exp(rh+rl) - 1 | < 2^-63.78597.
+
+   Moreover |el/eh| <= 2^-49.2999.
+
+   See Lemma 7 from reference [5].
+
+   The result eh+el is multiplied by s (which is +1 or -1),
+   where s=-1 can only happen when x < 0 and y is an integer.
+*/
+static inline void
+chelis_cr_pow__exp_1 (double *eh, double *el, double rh, double rl, double s) {
+#define chelis_cr_pow__RHO0 -0x1.74910ee4e8a27p+9
+// #define RHO1 -0x1.577453f1799a6p+9
+/* We increase the initial value of RHO1 to avoid spurious underflow in
+   the result value el. However, it is not possible to obtain a lower
+   bound on |el| from the input value rh, thus this modified value of RHO1
+   is obtained experimentally. */
+#define chelis_cr_pow__RHO1 -0x1.483b8cca421afp+9
+#define chelis_cr_pow__RHO2 0x1.62e42e709a95bp+9
+#define chelis_cr_pow__RHO3 0x1.62e4316ea5df9p+9
+
+  /* Section 7.12.17 from the C standard (N3220) says: "Relational operators
+     may raise the "invalid" floating-point exception when argument
+     values are NaNs". We thus first check rh != rh to detect NaNs,
+     hoping this will not raise invalid. */
+  if (__builtin_expect(rh != rh || rh > chelis_cr_pow__RHO2, 0)) {
+    // again, first check rh == rh to detect NaNs
+    if (rh == rh && rh > chelis_cr_pow__RHO3) {
+      /* If rh > RHO3, we are sure there is overflow,
+         For s=1 we return eh = el = DBL_MAX, which yields
+         res_min = res_max = +Inf for rounding up or to nearest,
+         and res_min = res_max = DBL_MAX for rounding down or toward zero,
+         which will yield the correct rounding.
+         For s=-1 we return eh = el = -DBL_MAX, which similarly gives
+         res_min = res_max = -Inf or res_min = res_max = -DBL_MAX,
+         which is the correct rounding. */
+
+      *eh = 0x1.fffffffffffffp+1023 * s;
+      *el = 0x1.fffffffffffffp+1023 * s;
+    }
+    else
+      /* If RHO2 < rh <= RHO3, we are in the intermediate region
+         where there might be overflow or not, thus we set eh = el = NaN,
+         which will set res_min = res_max = NaN, the comparison
+         res_min == res_max will fail: we defer to the 2nd phase. */
+      *eh = *el = __builtin_nan ("");
+    return;
+  }
+
+  if (__builtin_expect(rh < chelis_cr_pow__RHO1, 0)) {
+    if (rh < chelis_cr_pow__RHO0)
+    {
+      *eh = +0.0 * s;
+      *el = 0x1p-1074 * (0.5 * s);
+      /* For s=1, we have eh=el=+0 except for rounding up,
+         thus res_min=+0 or -0, res_max=+0 in the main code,
+         the rounding test succeeds, and we return res_max which is the
+         expected result in the underflow case.
+         For s=1 and rounding up, we have eh=+0, el=2^-1074,
+         thus res_min = res_max = 2^-1074, which is the expected result too.
+         For s=-1, we have eh=el=-0 except for rounding down,
+         thus res_min=-0 or +0, res_max=-0 in the main code,
+         the rounding test succeeds, and we return res_max which is the
+         expected result in the underflow case.
+         For s=-1 and rounding down, we have eh=-0, el=-2^-1074,
+         thus res_min = res_max = -2^-1074, which is the expected result too.
+      */
+    }
+    else /* RHO0 <= rh < RHO1 or s < 0: we defer to the 2nd phase */
+      *eh = *el = __builtin_nan ("");
+    return;
+  }
+
+#define chelis_cr_pow__INVLOG2 0x1.71547652b82fep+12
+  /* Note: if the rounding mode is to nearest, we can save about 2 cycles
+     (on an i7-8700) by replacing the computation of k by the following
+     classical trick:
+     const double magic = 0x1.8p+52;
+     double k = __builtin_fma (rh, INVLOG2, magic) - magic;
+  */
+  double k = chelis_cr_pow__roundeven_finite (rh * chelis_cr_pow__INVLOG2);
+
+#define chelis_cr_pow__LOG2H 0x1.62e42fefa39efp-13
+#define chelis_cr_pow__LOG2L 0x1.abc9e3b39803fp-68
+
+  double zh, zl;
+  zh = __builtin_fma (chelis_cr_pow__LOG2H, -k, rh);
+  zl = __builtin_fma (chelis_cr_pow__LOG2L, -k, rl);
+
+  int64_t K = k; /* Note: k is an integer, this is just a conversion. */
+  int64_t M = (K >> 12) + 0x3ff;
+  int64_t i2 = (K >> 6) & 0x3f;
+  int64_t i1 = K & 0x3f;
+
+  double t1h = chelis_cr_pow__T1[i2][0], t1l = chelis_cr_pow__T1[i2][1], t2h = chelis_cr_pow__T2[i1][0], t2l = chelis_cr_pow__T2[i1][1];
+  chelis_cr_pow__d_mul (eh, el, t2h, t2l, t1h, t1l);
+
+  double qh, ql;
+  chelis_cr_pow__q_1 (&qh, &ql, zh + zl);
+
+  chelis_cr_pow__d_mul (eh, el, *eh, *el, qh, ql);
+  chelis_cr_pow__f64_u _d;
+
+  /* we should have 1 < M < 2047 here, since we filtered out
+     potential underflow/overflow cases at the beginning of this function */
+
+  _d.u = (uint64_t) M << 52;
+  _d.f *= s;
+  *eh *= _d.f;
+  *el *= _d.f;
+}
+
+/* put in r an approximation of exp(x), for |x| < 744.45,
+   with relative error < 2^-121.70 */
+static void chelis_cr_pow__exp_2 (chelis_cr_pow__dint64_t *r, chelis_cr_pow__dint64_t *x) {
+  chelis_cr_pow__dint64_t K, y;
+
+  if (x->ex >= 10) // underflow or overflow
+  {
+    chelis_cr_pow__cp_dint (r, x);
+    r->ex = (x->sgn == 0x1) ? -1076 : 1025;
+    r->sgn = 0;
+    return;
+  }
+
+  /* the following multiplication does not need to be fully accurate,
+     since it is only used to round x*2^12/log(2) to the nearest integer k */
+  chelis_cr_pow__mul_dint_11 (&K, x, &chelis_cr_pow__LOG2_INV);
+  /* mul_dint_11() is exact, assuming the low part of x is zero, but it is not
+     here, thus we ignore low(x)*LOG2_INV < ulp64(744.45)*LOG2_INV < 2^-41.47.
+     Since LOG2_INV approximates 2^12/log(2) with absolute error < 2^-52.96
+     and |x| < 744.45, the error from LOG2_INV is bounded by 2^-43.41.
+     This gives a total error < 2^-41.13. This error is multiplied by LOG2
+     below, and divided by 2^12, thus yields an error < 2^-53.65 on K in
+     the add_dint() call. */
+
+  int64_t k = chelis_cr_pow__dint_toi (&K); /* k = trunc(K) [rounded towards zero, exact] */
+
+  /* |k| <= 4399162 */
+
+  /* the following multiplication needs to be fully accurate, since we need
+     to compute x - k*log(2)/2^12 to full accuracy */
+  chelis_cr_pow__mul_dint_int64 (&K, &chelis_cr_pow__LOG2, k);
+  /* The rounding error of mul_dint_int64() is bounded by 6 ulps, thus since
+     |K| <= 4399162*log(2) < 3049267, the error on K is bounded by 2^-103.41.
+     This error is divided by 2^12 below, thus yields < 2^-115.41. */
+  K.ex -= 12;
+  K.sgn = !K.sgn;
+
+  chelis_cr_pow__add_dint (&y, x, &K); /* exact because Sterbenz theorem applies */
+  /* If all computations were exact above, we would have
+     K = -(x/log(2)-eps/2^12)*log(2) with |eps| < 1 and eps of the same
+     sign as x, thus x+K = eps*log(2)/2^12, and thus |y| < log(2)/2^12,
+     with y of same sign as x.
+     But we have a total rounded error < 2^-53.65 + 2^-115.41 < 2^-53.64
+     thus |y| < log(2)/2^12 + 2^-53.64 < 0.00016923. */
+
+  int64_t M = k >> 12;
+  int64_t i2 = (k >> 6) & 0x3f;
+  int64_t i1 = k & 0x3f;
+
+  chelis_cr_pow__q_2 (r, &y); /* relative error bounded by 2^-122.29, with |r| < 1.0002 */
+
+  chelis_cr_pow__mul_dint (r, &chelis_cr_pow__T1_2[i2], r);
+  /* the rounding error of mul_dint() is bounded by 6 ulps, which translates
+     into 6*2^-127 for the relative error;
+     the approximation error for T1_2[i2] is bounded by 2^-128 relatively. */
+
+  chelis_cr_pow__mul_dint (r, &chelis_cr_pow__T2_2[i1], r);
+  /* the rounding error of mul_dint() is bounded by 6 ulps, which translates
+     into 6*2^-127 for the relative error;
+     the approximation error for T2_2[i2] is bounded by 2^-128 relatively. */
+
+  /* Total relative errors:
+     2^-122.29 from q_2()
+     6*2^-127 and 2^-128 from the multiplication by T1_2[i2]
+     6*2^-127 and 2^-128 from the multiplication by T2_2[i1].
+     With e1=2^-122.29, e2=6*2^-127 and e3=2^-128, this gives:
+     (1+e1)*(1+e2)^2*(1+e3)^2 - 1 < 2^-121.70. */
+
+  r->ex = r->ex + M; /* exact */
+}
+
+/* put in r an approximation of exp(x), for |x| < 744.45,
+   with relative error < 2^-241.10 */
+static void chelis_cr_pow__exp_3 (chelis_cr_pow__qint64_t *r, chelis_cr_pow__qint64_t *x) {
+  chelis_cr_pow__qint64_t K, y;
+
+
+  /* the following multiplication does not need to be fully accurate,
+     since it is only used to round x*2^12/log(2) to the nearest integer k */
+  chelis_cr_pow__mul_qint_11 (&K, x, &chelis_cr_pow__LOG2_INV_Q);
+  /* mul_qint_11() is exact, assuming the low part of x is zero, but it is not
+     here, thus we ignore low(x)*LOG2_INV_Q < ulp64(744.45)*LOG2_INV_Q
+     < 2^-41.47.
+     Since LOG2_INV_Q approximates 2^12/log(2) with absolute error < 2^-52.96
+     and |x| < 744.45, the error from LOG2_INV_Q is bounded by 2^-43.41.
+     This gives a total error < 2^-41.47 + 2^-43.41 < 2^-41.13. This error is
+     multiplied by LOG2_Q below, thus yields an error < 2^-53.65 on K in
+     the add_qint() call. */
+
+  int64_t k = chelis_cr_pow__qint_toi (&K); /* k = trunc(K) [rounded towards zero, exact] */
+
+  /* |k| <= 4399162 */
+
+  /* the following multiplication needs to be fully accurate, since we need
+     to compute x - k*log(2)/2^12 to full accuracy */
+  chelis_cr_pow__mul_qint_2 (&K, k, &chelis_cr_pow__LOG2_Q);
+  /* The rounding error of mul_qint_2() is bounded by 2 ulps, thus since
+     |K| <= 4399162*log(2) < 3049267, the error on K is bounded by 2^-233.
+     This error is divided by 2^12 below, thus yields < 2^-245. */
+  K.ex -= 12;
+  K.sgn = !K.sgn;
+
+  chelis_cr_pow__add_qint (&y, x, &K); /* exact because Sterbenz theorem applies */
+  /* If all computations were exact above, we would have
+     K = -(x/log(2)-eps/2^12)*log(2) with |eps| < 1 and eps of the same
+     sign as x, thus x+K = eps*log(2)/2^12, and thus |y| < log(2)/2^12,
+     with y of same sign as x.
+     But we have a total rounded error < 2^-53.65 + 2^-245 < 2^-53.64
+     thus |y| < log(2)/2^12 + 2^-53.64 < 0.00016923. */
+
+  int64_t M = k >> 12;
+  int64_t i2 = (k >> 6) & 0x3f;
+  int64_t i1 = k & 0x3f;
+
+  chelis_cr_pow__q_3 (r, &y); /* relative error bounded by 2^-241.11, with |r| < 1.0002 */
+
+  chelis_cr_pow__mul_qint (r, &chelis_cr_pow__T1_3[i2], r);
+  /* the rounding error of mul_qint() is bounded by 14 ulps, which translates
+     into 14*2^-255 for the relative error;
+     the approximation error for T1_3[i2] is bounded by 2^-256 relatively. */
+
+  chelis_cr_pow__mul_qint (r, &chelis_cr_pow__T2_3[i1], r);
+  /* the rounding error of mul_qint() is bounded by 14 ulps, which translates
+     into 14*2^-127 for the relative error;
+     the approximation error for T2_3[i2] is bounded by 2^-128 relatively. */
+
+  /* Total relative errors:
+     2^-241.11 from q_3()
+     14*2^-255 and 2^-256 from the multiplication by T1_3[i2]
+     14*2^-255 and 2^-256 from the multiplication by T2_3[i1].
+     With e1=2^-241.11, e2=14*2^-255 and e3=2^-256, this gives:
+     (1+e1)*(1+e2)^2*(1+e3)^2 - 1 < 2^-241.10. */
+
+  r->ex = r->ex + M; /* exact */
+}
+
+/* The following are pairs (m,y) from the set S defined in [4]
+   such that m^y is not exact nor a midpoint, but is at relative
+   distance < 2^-112.55 from an exact value or a midpoint.
+   All these values should fail the 2nd rounding test, and thus enter
+   the exact_pow() routine.
+
+   Note: in [4] the 2nd part of the set S is (x,y) = (m,2^F*n)
+   for F integer, -5 <= F < 0, n odd integer, 3 <= n <= 34, m odd integer.
+   We believe it should be read instead:
+   (x,y) = (2^E*m,2^F*n) for E,F integers, -5 <= F < 0, n odd integer,
+   3 <= n <= 34, m odd integer.
+   The bound 35 from [2,3] was improved to 34 in [4].
+
+   All these inputs are in the F < 0 case.
+
+   The last entry is the denominator q of y as exact rational.
+   If (x,y) is a worst case, any (2^(j*q)*x,y) is also one.
+   For some x=2^E*n with n odd, if E is not divisible by q=2^-F,
+   then no E+j*q will be, so the corresponding entry will be rejected
+   by the "check that E is divisible by 2^-F" test.
+   The only remaining one is the first one, where 2^-F divides E.
+*/
+
+/*
+  Computes x^y and returns 1 if the result fits into 54 bits, i.e. computes
+  exactly x^y for exact and midpoint cases.
+  Implements Algorithm detectRoundingBoundaryCase from [4].
+  Requires that the relative error between x^y and the approximation z of
+  x^y is less than 2^-117: z = x^y * (1 + eps) with |eps| < 2^-117.
+  Can return 1 only when (x,y) are in the set S from [4]:
+  (a) either y is an integer, 2 <= y <= 34, or
+  (b) x=2^E*m with m odd and y = 2^F*n with -5 <= F < 0, n odd, 3 <= n <= 34
+  exact is non-zero iff x^y is exactly representable in binary64.
+  Note: [2] says 2 <= y <= 35 and 3 <= n <= 35, but the value 35 is not
+  possible, since 3^35 has 56 bits.
+*/
+static char
+chelis_cr_pow__exact_pow (double *r, double x, double y, const chelis_cr_pow__dint64_t *z,
+           int exact)
+{
+  int64_t _s = z->sgn ? -1 : 1;
+
+  // Check if x = 2^E
+  uint64_t m;
+  int64_t E;
+  chelis_cr_pow__extract (&E, &m, x); /* x = 2^E*m with m odd */
+
+  /* x is a power of 2 */
+  if (m == 1) {
+    double G = (double) E * y;
+
+    if (chelis_cr_pow__is_int (G)) {
+      *r = z->sgn ? -1.0 : 1.0;
+      int64_t g = (int64_t) G;
+      chelis_cr_pow__pow2(r, g);
+      return 1;
+    }
+    return 0;
+  }
+
+  if (y < 0.0 || y > 34.0)
+    return 0;
+
+  uint64_t n;
+  int64_t F;
+  chelis_cr_pow__extract (&F, &n, y); /* y = 2^F*n with n odd */
+
+  /* since y <= 34, if F >= 0, we have 2^F*n <= 34 */
+
+  if (n > 34 || F < -5)
+    return 0;
+
+  if (F < 0) { /* case (b) */
+    /* check that E is divisible by 2^-F */
+    if ((E & (~0ull >> (64 + F))))
+      return 0;
+
+    int64_t G, g = (E >> -F) * n; // since F < 0, the shift by -F is ok
+    /* g = E*y */
+    int64_t k;
+    chelis_cr_pow__round_54 (&G, &k, z); /* z is rounded to k*2^G */
+
+    /* In case exact=0, check condition at line 2 from [4]:
+       if |2^G*k-z| >= 2^-116*z, then return false
+       This test is not needed if the relative error from
+       the 2nd phase is less than 2^-116, since if |2^G*k-z| >= 2^-116*z
+       the rounding test from the 2nd phase did succeed.
+    */
+    if (!exact) {
+      int cnt = __builtin_clzll (k);
+      chelis_cr_pow__dint64_t d = { .hi = (uint64_t)k << cnt, .lo = 0, .ex = G + 63 - cnt,
+                     .sgn = 1 - z->sgn };
+      chelis_cr_pow__add_dint (&d, z, &d); /* exact by Sterbenz theorem */
+      /* multiply d by 2^116 */
+      d.ex += 116;
+    /* compare in absolute value with z */
+      if (chelis_cr_pow__cmp_dint_abs (&d, z) >= 0)
+        return 0;
+    }
+
+    if (G > g)
+      return 0;
+
+    /* The following code is used when k is a multiple of a power of 2,
+       to reduce to 2^X*r with odd r. It checks whether k is an odd number
+       multiplied by 2^(g-G). */
+    if (((k & ~(~1ull << (g - G))) == (1ull << (g - G)))) {
+      *r = (double)((k >> (g - G)) * _s);
+      chelis_cr_pow__pow2(r, g);
+      goto end;
+    }
+    return 0;
+  }
+
+  /* case (a) */
+
+  /* no overflow in n << F since 2^F*n <= 34 */
+  uint64_t t = n << F;
+  int64_t k = 1;
+
+  /* Compute k = m^t which should fit into 54 bits.
+     Invariant: k*m^t */
+  while (t) {
+    if (t & 0x1) {
+      // k = m * k;
+      if (__builtin_mul_overflow (m, k, &k)) /* m*k overflows */
+        return 0;
+    }
+    t = t >> 1;
+    // m *= m;
+    if (t != 0 && __builtin_mul_overflow (m, m, &m)) /* m*m overflows */
+      return 0;
+  }
+
+  /* check k has at most 54 bits */
+  if (k >> 54)
+    return 0;
+
+  *r = (double)(k * _s);
+  int64_t G = E * (n << F);
+  chelis_cr_pow__pow2(r, G);
+
+ end:
+
+  return 1;
+}
+
+// return non-zero if x^y is exact (and exactly representable as a double)
+static int
+chelis_cr_pow__is_exact (double x, double y)
+{
+  /* All cases such that x^y might be exact are:
+     (a) |x| = 1
+     (b) y integer, 0 <= y <= 33
+     (c) y<0: x=1 or (x=2^e and |y|=n*2^-k with 2^k dividing e)
+     (d) y>0: y=n*2^f with -5 <= f <= -1 and 1 <= n <= 33
+     In cases (b)-(d), the low 42 bits of the encoding of y are zero,
+     thus we use that for an early exit test. */
+
+  chelis_cr_pow__f64_u v = {.f = x}, w = {.f = y};
+  if (__builtin_expect ((v.u << 1) != 0x7fe0000000000000ull &&
+                        (w.u << 22) != 0, 1))
+    return 0;
+
+  if (__builtin_expect ((v.u << 1) == 0x7fe0000000000000ull, 0)) // |x| = 1
+    return 1;
+
+  // xmax[y] for 1<=y<=33 is the largest odd m such that m^y fits in 53 bits
+  static const uint64_t xmax[] = { 0, 0xffffffffffffffff,
+                                   94906265, 208063, 9741, 1551, 455, 189, 97,
+                                   59, 39, 27, 21, 15, 13, 11, 9, 7, 7, 5, 5,
+                                   5, 5, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3 };
+  if (y >= 0 && chelis_cr_pow__is_int (y)) {
+    /* let x = m*2^e with m an odd integer, x^y is exact when
+       - y = 0 or y = 1
+       - m = 1 or -1 and -1074 <= e*y < 1024
+       - if |x| is not a power of 2, 2 <= y <= 33 and
+         m^y should fit in 53 bits
+    */
+    uint64_t m = v.u & 0xfffffffffffffull;
+    int64_t e = ((v.u << 1) >> 53) - 0x433;
+    if (e >= -1074)
+      m |= 0x10000000000000ull;
+    else // subnormal numbers
+      e++;
+    int t = __builtin_ctzll (m);
+    m = m >> t;
+    e += t;
+    /* For normal numbers, we have x = m*2^e. */
+    if (y == 0 || y == 1)
+      return 1;
+    if (m == 1)
+      return -1074 <= y * e && y * e < 1024;
+    // now for y < 0 or 33 < y it cannot be exact
+    if (y < 0 || 33 < y)
+      return 0;
+    // now 2 <= y <= 33
+    int y_int = (int) y;
+    if (m > xmax[y_int])
+      return 0;
+    // |x^y| = m^y * 2^(e*y)
+    uint64_t my = m * m;
+    for (int i = 2; i < y_int; i++)
+      my = my * m;
+    // my = m^y
+    t = 64 - __builtin_clzll (m);
+    // 2^(t-1) <= m^y < 2^t thus 2^(e*y + t - 1) <= |x^y| < 2^(e*y + t)
+    int64_t ez = e * y_int + t;
+    if (ez <= -1074 || 1024 < ez)
+      return 0;
+    // since m is odd, x^y is an odd multiple of 2^(e*y)
+    return e * y_int >= -1074;
+  }
+
+  uint64_t n = w.u & 0xfffffffffffffull;
+  int64_t f = ((w.u << 1) >> 53) - 0x433;
+  if (f >= -1074)
+    n |= 0x10000000000000ull;
+  else // subnormal numbers
+    f++;
+  int t = __builtin_ctzll (n);
+  n = n >> t;
+  f += t;
+  // |y| = n*2^f with n odd
+
+  uint64_t m = v.u & 0xfffffffffffffull;
+  int64_t e = ((v.u << 1) >> 53) - 0x433;
+  if (e >= -1074)
+    m |= 0x10000000000000ull;
+  else // subnormal numbers
+    e++;
+  t = __builtin_ctzll (m);
+  m = m >> t;
+  e += t;
+  // |x| = m*2^e with m odd
+
+  /* if y < 0 and y is not an integer, the only case where x^y might be
+     exact is when x = 2^e and n*e*2^f is an integer */
+  if (y < 0)
+  {
+    if (m != 1) return 0;
+    // now e <> 0 since the case |x|=1 has already been treated
+    int64_t ez;
+    if (f >= 0)
+      // if f >= 12, since n*e <> 0, (n*e)<<f cannot be in [-1074,1024)
+      ez = (f < 12) ? (-n * e) << f : 1024;
+    else { // f < 0 thus 2^-f should divide e
+      t = __builtin_ctzll (e);
+      if (-f > t) return 0; // 2^-f does not divide e
+      ez = (-e >> (-f)) * n;
+    }
+    return -1074 <= ez && ez < 1024;
+  }
+
+  /* now y > 0, y is not a integer, y = n*2^f with n odd and f < 0.
+     Since x^(n*2^f) = (x^(2^f))^n, and n is odd, necessarily
+     x is an exact (2^k)th power with k=-f.
+     This implies x is a square. Since x = m*2^e with m odd,
+     necessarily m is a square, and e is even. */
+  while (f++) {
+    // try to extract a square from m*2^e
+    if (e&1) return 0;
+    e = e / 2;
+    double dm = (double) m;
+    double s = __builtin_round (__builtin_sqrt (dm));
+    if (s * s != dm)
+      return 0;
+    /* The above call of sqrt() might set the inexact flag, but in case
+       it happens, m is not a square, thus x^y cannot be exact. */
+    m = (uint64_t) s; // m remains odd (square root of an odd number)
+  }
+
+  // Now |x^y| = (m*2^e)^n with m, n odd integers
+  // now for 33 < n it cannot be exact, unless m=1
+  if (m > 1)
+  {
+    if (33 < n)
+      return 0;
+    // now n <= 33
+    if (m > xmax[n])
+      return 0;
+  }
+  // |x^y| = m^n * 2^(e*n) with m odd
+  uint64_t my = m, n0 = n;
+  while (n0-- > 1)
+    my = my * m;
+  // |x^y| = my * 2^(e*n)
+  t = 64 - __builtin_clzll (my); // number of significant bits of m^n
+  /* x^y is an odd multiple of 2^(e*n) thus we should have e*n >= -1074,
+     we also have 2^(t-1) <= m^n thus 2^(e*n+t-1) <= |x^y| < 2^(e*n+t)
+     and we need e*n+t <= 1024 */
+  return -1074 <= e * (int) n && e * (int) n + t <= 1024;
+}
+
+// Correctly rounded power function
+static double chelis_cr_pow__cr_pow (double x, double y) {
+  double s = 1.0; /* sign of the result */
+  double x0 = x; // original value of x
+
+  chelis_cr_pow__f64_u _x = {.f = x};
+  chelis_cr_pow__f64_u _y = {.f = y};
+
+  if (__builtin_expect((_x.u >= 0x7ff0000000000000 || _y.u >= 0x7ff0000000000000), 0)) {
+
+    if (__builtin_isnan(x)) {
+      // IEEE 754-2019: pow(x,+/-0) = 1 if x is not a signaling NaN
+      if (y == 0.0 && !chelis_cr_pow__is_signaling(x))
+        return 1.0;
+
+      /* pow(sNaN, y) = qNaN. This is implicit in IEEE 754-2019,
+         Section 7.2: "the default result of an operation that signals the
+         invalid operation exception shall be a quiet NaN" and "These
+         operations are: a) any general-computational operation on a signaling
+         NaN".
+
+         Moreover, in 6.2.3:
+         "An operation that propagates a NaN operand to its result and has a
+         single NaN as an input should produce a NaN with the payload of the
+         input NaN if representable in the destination format. If two or more
+         inputs are NaN, then the payload of the resulting NaN should be
+         identical to the payload of one of the input NaNs if representable in
+         the destination format. This standard does not specify which of the
+         input NaNs will provide the payload."
+
+         Returning x+x has the double effect to quiet the signaling bit
+         and to raise the invalid exception if x=sNaN. */
+      return x + x;
+    }
+
+    if (__builtin_isnan(y)) {
+      // IEEE 754-2019: pow(1,y) = 1 for any y (even a quiet NaN)
+      if (x == 1.0 && !chelis_cr_pow__is_signaling(y))
+        return 1.0;
+
+      // pow(x, sNaN) = qNaN (see above)
+      return y + y;
+    }
+
+    switch (_x.u) {
+
+    // x = +inf
+    case 0x7ff0000000000000:
+      if (y == 0.0)
+        return 1.0;
+
+      if (y < 0.0)
+        return 0.0;
+
+      if (y > 0.0)
+        return __builtin_inf ();
+
+      break;
+
+    // x = -inf
+    case 0xfff0000000000000:
+
+      /* first check y=+/-inf since is_int uses roundeven_finite
+         which might raise spurious invalid for Inf input */
+      if (_y.u == 0x7ff0000000000000ull)
+        return y; // -Inf^Inf = Inf
+
+      if (_y.u == 0xfff0000000000000ull)
+        return +0.0; // -Inf^-Inf = +0
+
+      // y is an odd integer
+      if (chelis_cr_pow__is_int(y) && !chelis_cr_pow__is_int(y * 0.5)) {
+
+        // y is a negative odd integer
+        if (y < 0.0)
+          return -0.0;
+
+        // y is a positive odd integer
+        else
+          return -__builtin_inf ();
+      }
+
+      // y is a negative even integer or is negative non-integer
+      if (y < 0.0)
+        return 0.0;
+
+      // y is a positive even integer or is positive non-integer
+      if (y > 0.0)
+        return __builtin_inf ();
+
+      break;
+    }
+
+    switch (_y.u) {
+
+    // y = +inf
+    case 0x7ff0000000000000:
+      if (x == 0.0)
+        return 0.0;
+
+      if (x == -1.0 || x == 1.0)
+        return 1.0;
+
+      if (-1.0 < x && x < 1.0)
+        return 0.0;
+
+      if (x < -1.0 || 1.0 < x)
+        return __builtin_inf ();
+
+      break;
+
+    // y = -inf
+    case 0xfff0000000000000:
+        if (x == 0.0)
+          return __builtin_inf ();
+
+      if (x == -1.0 || x == 1.0)
+        return 1.0;
+
+      if (-1.0 < x && x < 1.0)
+        return __builtin_inf ();
+
+      if (x < -1.0 || 1.0 < x)
+        return 0.0;
+
+      break;
+    }
+  } // From now on, x and y are finite values
+
+  /* first deal with the case x <= 0 */
+  if (x <= 0.0) {
+    /* pow(x,+/-0) is 1 if x is not a signaling NaN. */
+    if (y == 0.0)
+      return 1.0;
+
+    switch (_x.u) {
+
+    // x = +0.0
+    case 0x0:
+
+      // y is an odd integer
+      if (chelis_cr_pow__is_int(y) && !chelis_cr_pow__is_int(y * 0.5)) {
+
+        // y is a negative odd integer
+        if (y < 0.0) {
+          return __builtin_inf ();
+        }
+
+        // y is a positive odd integer
+        return 0.0;
+      }
+
+      // y is positive (non-integer or a positive even integer)
+      if (y > 0.0)
+        return 0.0;
+
+      // y is negative, finite and an even integer or a non-integer
+      return __builtin_inf ();
+
+    // x = -0.0
+    case 0x8000000000000000:
+
+      // y is an odd integer
+      if (chelis_cr_pow__is_int(y) && !chelis_cr_pow__is_int(y * 0.5)) {
+
+        // y is a negative odd integer
+        if (y < 0.0) {
+          return -__builtin_inf ();
+        }
+
+        // y is a positive odd integer
+        return -0.0;
+      }
+
+      // y is positive (non-integer or a positive even integer)
+      if (y > 0.0)
+        return 0.0;
+
+
+      // y is negative, finite and an even integer or a non-integer
+      return __builtin_inf ();
+
+    }
+
+    if (!chelis_cr_pow__is_int(y)) {
+      return __builtin_nan ("");
+    }
+
+    double cs[] = {1.0, -1.0};
+
+    // set sign to 1 for y even, to -1 for y odd
+    int y_parity = __builtin_fabs (y) >= 0x1p53 ? 0 : ((int64_t) y & 0x1);
+    s = cs[y_parity];
+
+    // Set x to |x| for the rest of the computation
+    x = -x;
+  } /* end of case x <= 0 */
+
+#if chelis_cr_pow__ENABLE_FP > 0
+  /* This is Algorithm phase_1 from reference [5]. */
+  double res_h, res_l;
+
+  double lh, ll;
+
+  chelis_cr_pow__FLAG_T flag = chelis_cr_pow__get_flag ();
+
+  // approximate log(x)
+  int cancel = chelis_cr_pow__log_1 (&lh, &ll, x);
+
+  /* We should avoid a spurious underflow/overflow in y*log(x).
+     Underflow: for x<>1, the smallest absolute value of log(x) is obtained
+     for x=1-2^-53, with |log(x)| ~ 2^-53. Thus to avoid a spurious underflow
+     we require |y| >= 2^-969.
+     Overflow: the largest absolute value of log(x) is obtained for x=2^-1074,
+     with |log(x)| < 745. Thus to avoid a spurious overflow we require
+     |y| < 2^1014. */
+  int ey = (_y.u >> 52) & 0x7ff;
+  if (__builtin_expect (ey < 0x36 || ey >= 0x7f5, 0))
+    lh = ll = __builtin_nan ("");
+
+  // approximate y * log(x)
+  double rh, rl;
+  chelis_cr_pow__s_mul (&rh, &rl, y, lh, ll);
+
+  /* We prove in Lemma 5 from reference [5] that if the exact product y*lh
+     satisfies 2^-969 <= |y*lh| <= 709.7827, then 2^-970 <= |rh| <= 709.79,
+     |rl| <= 2^-14.4187, |rl/rh| <= 2^-23.8899, |rh+rl| <= 709.79 and:
+
+     |rh + rl - y log(x)| <= emul
+
+     with emul = 2^-63.799 if x is not in (1/sqrt(2), sqrt(2))
+     and  emul = 2^-57.580 if 1/sqrt(2) < x < sqrt(2)
+  */
+
+  chelis_cr_pow__exp_1 (&res_h, &res_l, rh, rl, s); /* 1 <= res_h < 2 */
+  /* See Lemma 7 from reference [5] for the error analysis of exp_1(). */
+
+  /* avoid a spurious underflow: if |rh| < 2^-511, then exp(rh+rl) will
+     round to 1 */
+  if (__builtin_expect (rh * rh < 0x1p-1022, 0))
+    chelis_cr_pow__set_flag (flag);
+
+  /* The error bounds 2^-63.797 and 2^-57.579 are those from Algorithm
+     phase_1 from reference [5]. */
+  static const double err[] = { 0x1.27p-64, /* 2^-63.797 < 0x1.27p-64 */
+                                0x1.57p-58, /* 2^-57.579 < 0x1.57p-58 */
+  };
+  double res_min, res_max;
+  res_min = res_h + __builtin_fma (err[cancel], -res_h, res_l);
+  res_max = res_h + __builtin_fma (err[cancel], res_h, res_l);
+  /* if res_h < 0, we have res_max < res_min, but since we only check
+     equality between res_min and res_max, it does not matter */
+
+  int exact = chelis_cr_pow__is_exact (x, y);
+  if (exact)
+    // restore inexact flag
+    chelis_cr_pow__set_flag (flag);
+
+  if (__builtin_expect (res_min == res_max, 1)) {
+    /* when res_min * ex is in the subnormal range, exp_1() returns NaN
+       to avoid double-rounding issues */
+    return res_max;
+  }
+  /* the idea of returning res_max instead of res_min is due to Laurent
+     Théry: it is better in case of underflow since res_max = +0 always. */
+
+  // Easy cases
+  if (y == 1.0)
+    return s * x;
+  
+  if (y == 2.0) {
+    double z = x * x;
+      return z;
+  }
+
+  if (y == 0.5)
+    return __builtin_sqrt (x);
+
+  if (y == 0.0)
+    return 1.0;
+#endif /* ENABLE_FP */
+
+  uint64_t rd; // used in the 2nd and 3rd phases
+
+// Second iteration of rounding
+#if chelis_cr_pow__ENABLE_ZIV2 > 0
+  chelis_cr_pow__dint64_t X, Y;
+  chelis_cr_pow__dint_fromd (&X, x); /* exact: |x| = 2^(X->ex-63) * X->hi (X->lo = 0) */
+  chelis_cr_pow__dint_fromd (&Y, y); /* exact: |y| = 2^(Y->ex-63) * Y->hi (Y->lo = 0) */
+
+  X.sgn = 0x0; /* force the sign of X to +1 */
+
+  chelis_cr_pow__dint64_t R;
+  chelis_cr_pow__log_2 (&R, &X); /* relative error bounded by 2^-122.88 */
+
+  chelis_cr_pow__mul_dint_21 (&R, &R, &Y);
+  /* The rounding error of mul_dint_21() is bounded by 2 ulps, which is at most
+     2*2^-127 in terms of relative error. Thus the relative error on R is
+     bounded by (1+e1)*(1+e2)-1 with e1=2^-122.88 and e2=2*2^-127,
+     which gives: R = y*log|x| * (1+eps1) with |eps1| < 2^-122.72 */
+
+  chelis_cr_pow__exp_2 (&R, &R); /* relative error < 2^-121.70:
+                     R = exp(R_in) * (1+eps2) with |eps2| < 2^-121.70 */
+
+  /* We thus have R = |x|^y * exp(y*log|x|*eps1) * (1+eps2).
+     Since y*log|x| < 744.45, we have |y*log|x|*eps1| < 744.45*2^-122.72
+     < eps3 = 2^-113.179 thus the relative error is bounded by
+     exp(eps3)*(1+eps2)-1 < 2^-113.17.
+     This corresponds to an error of at most 2^-113.17*2^128 < 29126 ulps. */
+
+  /* Remark: since eps3 = 2^-113.179, it would suffice to get about 113 bits
+     of accuracy in exp_2(). We tried to reduce the degree of the minimax
+     polynomial in q_2() from 7 to 6, or to use only 64 bits for the degree-3
+     coefficient, but in both cases the accuracy was too small. */
+
+  // Rounding test
+
+  // 2^R.ex <= R < 2^(R.ex+1)
+
+  /* case R < 2^-1075: underflow case */
+  if (R.ex < -1075) {
+    return 0.5 * (s * 0x1p-1074);
+  }
+
+  if (R.ex < -1022) { /* subnormal case */
+    // for x^y = 2^-1022, we can have R < 2^-1022 here
+
+    /* -1075 <= R.ex <= -1023 thus 2^-1075 <= R < 2^-1022 */
+    uint64_t ex = -(1022 + R.ex); /* 1 <= ex <= 53 */
+    // the significand has to be shifted right by ex bits
+    uint64_t m = R.lo >> (10 + ex) | R.hi << (54 - ex);
+
+    /* We always have underflow when ex >= 2. However for ex=1,
+       where 2^-1023 <= R < 2^-1022, we might not have underflow
+       for rounding up if R >= 2^-1022 - 2^-1075, and for rounding
+       to nearest for R >= 2^-1022 - 2^-1076. */
+
+    /* In principle, the bound 28 which holds for the normal case below
+       should be replaced by ceil(28/2^ex) since the relative error bound
+       is the same as for the normal case, but since the round bit is 'shifted'
+       by 'ex' bits to the left, we get 'ex' extra bits after the round bit.
+       Since ex>=1 we replace 28 by 14. */
+
+    rd = m + 14 > (2*14);
+
+  } else {
+#define chelis_cr_pow__ERR_BND_2 28
+    uint64_t lo = R.lo >> 10 | R.hi << 54;
+    /* lo contains the 64 bits after the round bit */
+    rd = lo + chelis_cr_pow__ERR_BND_2 > (2*chelis_cr_pow__ERR_BND_2);
+    /* The value 28 comes from floor(29126/2^10): rd is 0 when lo <= 28 or
+       lo >= 2^64 - 28, which means that the approximation R is at distance
+       < 29*2^10 = 29696 ulps of a rounding boundary */
+  }
+
+  R.sgn = s == -1.0;
+
+  if (rd)
+    // dint_tod should deal with underflow/overflow/errno issues
+    return chelis_cr_pow__dint_tod (&R, exact);
+
+#if chelis_cr_pow__ENABLE_EXACT > 0
+  // Detect rounding boundary cases
+  double e;
+
+  if (chelis_cr_pow__exact_pow (&e, x0, y, &R, exact))
+    return e;
+#endif /* ENABLE_EXACT */
+#endif /* ENABLE_ZIV2 */
+
+  /* Note: exact and midpoint cases should be filtered by
+     exact_pow() above, and should not enter the 2nd iteration.
+     Thus check.sh might fail when POW_ITERATION | 2 == 0
+     or POW_ITERATION | 4 == 0. */
+
+#if chelis_cr_pow__ENABLE_ZIV3
+  // Hard to round cases
+  chelis_cr_pow__qint64_t qX, qY;
+  chelis_cr_pow__qint_fromd (&qX, x); /* exact */
+  chelis_cr_pow__qint_fromd (&qY, y); /* exact */
+
+  qX.sgn = 0x0; /* force the sign of X to +1 */
+
+  chelis_cr_pow__qint64_t qR;
+  chelis_cr_pow__log_3 (&qR, &qX); /* relative error bounded by 2^-250.74 */
+
+  chelis_cr_pow__mul_qint_41 (&qR, &qR, &qY);
+  /* The rounding error of mul_qint_41() is bounded by 2 ulps, which is at most
+     2*2^-255 in terms of relative error. Thus the relative error on qR is
+     bounded by (1+e1)*(1+e2)-1 with e1=2^-250.74 and e2=2*2^-255,
+     which gives a relative error less than 2^-250.59:
+     qR = y*log|x| * (1+eps1) with |eps1| < 2^-250.59 */
+
+  chelis_cr_pow__qint64_t qZ;
+  chelis_cr_pow__exp_3 (&qZ, &qR); /* relative error < 2^-241.10:
+                       qZ = exp(qR) * (1+eps2) with |eps2| < 2^-241.10 */
+
+  /* We thus have qZ = |x|^y * exp(y*log|x|*eps1) * (1+eps2).
+     Since y*log|x| < 744.45, we have |y*log|x|*eps1| < 744.45*2^-250.59
+     < eps3 = 2^-241.049 thus the relative error is bounded by
+     exp(eps3)*(1+eps2)-1 < 2^-240.07.
+     This corresponds to an error of at most 2^-240.07*2^256 < 62433 ulps. */
+
+  /* extra rounding test */
+#define chelis_cr_pow__ERR_BND_3 60 /* floor(62433/2^10) */
+  uint64_t r1 = qZ.hh << 54 | qZ.hl >> 10;
+  uint64_t r2 = qZ.hl << 54 | qZ.lh >> 10;
+  uint64_t r3 = qZ.lh << 54 | qZ.ll >> 10;
+  rd = !((r1 == 0 && r2 == 0 && r3 <= chelis_cr_pow__ERR_BND_3) ||
+         (~r1 == 0 && ~r2 == 0 && r3 + (2*chelis_cr_pow__ERR_BND_3) <= chelis_cr_pow__ERR_BND_3));
+
+  if (rd)
+  {
+    qZ.sgn = s == -1.0;
+    qZ.ll = qZ.ll & (~0ull << 10);
+
+    return chelis_cr_pow__qint_tod (&qZ);
+  }
+
+  /* We can end up here for x^y very close to 1. For |qR| < 2^-55,
+     we have 1-2^-54 < exp(qR) < 1+2^-53, thus exp(qR) rounds either
+     to nextbelow(1), to 1 or to nextabove(1). */
+  if (qR.ex < -56) /* the upper limb h of qR encodes h/2^63, thus a number
+                      in [1, 2) */
+    return (qR.sgn == 0x0) ? 1.0 + 0x1p-100 : 1.0 - 0x1p-100;
+
+  /* unreachable: CORE-MATH proves the approximation above rounds correctly */
+  qZ.sgn = s == -1.0;
+  return chelis_cr_pow__qint_tod (&qZ);
+
+#else
+  return -0.0;
+#endif /* ENABLE_ZIV3 */
+}
+
+static double chelis_cr_pow(double x, double y) {
+  double r = chelis_cr_pow__cr_pow(x, y);
+  return r != r ? chelis_cr_canonical_nan() : r;
 }
