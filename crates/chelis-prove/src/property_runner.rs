@@ -42,6 +42,7 @@ use smt_lower::{
 };
 
 mod beacon;
+mod beacon_scalar;
 mod injection;
 use crate::beacon_contract_prover::BeaconContractProver;
 use crate::composition::{
@@ -554,6 +555,15 @@ pub fn run_surf_decls_properties_with_contract_decls(
     options: &PropertyRunOptions,
 ) -> Result<PropertyRunResult, String> {
     let properties = collect_surf_properties(entry_decls, module_decls, options.only.as_deref())?;
+    // Proof-only scalar extraction bypasses the runtime lowerer. Check the
+    // exact linked declaration set once for all selected scalar Beacon goals,
+    // before any result can be reported by Tide or a direct library caller.
+    let scalar_check =
+        if options.tier == "beacon-only" && properties.iter().any(beacon::is_scalar_property) {
+            beacon::check_scalar_source(all_decls)
+        } else {
+            Ok(())
+        };
     let mut out = Vec::new();
     for property in &properties {
         // chelis#436: the discharged proposition travels with the record,
@@ -573,6 +583,7 @@ pub fn run_surf_decls_properties_with_contract_decls(
                 trusted_contract_decls,
                 property,
                 options,
+                &scalar_check,
             )
             .with_goal(goal),
         );
@@ -749,6 +760,7 @@ fn prove_surf_property(
     trusted_contract_decls: &[Decl],
     property: &Property,
     options: &PropertyRunOptions,
+    scalar_check: &Result<(), String>,
 ) -> PropertyOutcome {
     if expanded_contracts(property)
         .iter()
@@ -773,7 +785,7 @@ fn prove_surf_property(
         );
     }
     if options.tier == "beacon-only" {
-        return beacon::prove(decls, property, options);
+        return beacon::prove(decls, property, options, scalar_check);
     }
     let seed = options.effective_seed(property.seed);
     let contract_assumptions = match contract_assumptions(decls, property, options.runtime) {

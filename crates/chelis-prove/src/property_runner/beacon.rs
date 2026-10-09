@@ -222,15 +222,16 @@ fn literal(expr: &Expr) -> Result<f64, String> {
     Ok(value)
 }
 
-fn scalar_box(property: &Property) -> Result<IntervalBox, String> {
+fn scalar_box(property: &Property, scalar: bool) -> Result<IntervalBox, String> {
     let mut bounds = BTreeMap::new();
     for param in &property.params {
-        if !matches!(&param.ty, Some(TypeExpr::Tensor(dims, precision, _)) if dims.is_empty() && precision == "f64")
-            || bounds.insert(param.name.clone(), (None, None)).is_some()
-        {
-            return Err(
-                "Beacon bounds require distinct named rank-zero tensor[f64] parameters".into(),
-            );
+        let admitted = if scalar {
+            matches!(&param.ty, Some(TypeExpr::Named(dtype, _)) if dtype == "f64")
+        } else {
+            matches!(&param.ty, Some(TypeExpr::Tensor(dims, precision, _)) if dims.is_empty() && precision == "f64")
+        };
+        if !admitted || bounds.insert(param.name.clone(), (None, None)).is_some() {
+            return Err("Beacon bounds require distinct named f64 scalar or rank-zero tensor[f64] parameters".into());
         }
     }
     let mut pending: Vec<_> = property.preconditions.iter().collect();
@@ -242,7 +243,10 @@ fn scalar_box(property: &Property) -> Result<IntervalBox, String> {
         let Expr::Binary(op @ (BinOp::Le | BinOp::Ge), left, right, _) = condition else {
             return Err("Beacon input bounds must be closed scalar inequalities".into());
         };
-        let (name, value, lower) = match (scalar_input_name(left), scalar_input_name(right)) {
+        let (name, value, lower) = match (
+            scalar_input_name(left, scalar),
+            scalar_input_name(right, scalar),
+        ) {
             (Some(name), None) => (name, literal(right)?, *op == BinOp::Ge),
             (None, Some(name)) => (name, literal(left)?, *op == BinOp::Le),
             _ => return Err("Beacon input bounds must compare a parameter with a literal".into()),
@@ -258,15 +262,31 @@ fn scalar_box(property: &Property) -> Result<IntervalBox, String> {
         .map(|(name, (lo, hi))| {
             Ok((
                 name,
-                lo.ok_or("missing lower bound")?,
-                hi.ok_or("missing upper bound")?,
+                scalar_from_f64(
+                    "Beacon lower bound",
+                    Prim::F64,
+                    lo.ok_or("missing lower bound")?,
+                )
+                .map_err(|error| error.to_string())?,
+                scalar_from_f64(
+                    "Beacon upper bound",
+                    Prim::F64,
+                    hi.ok_or("missing upper bound")?,
+                )
+                .map_err(|error| error.to_string())?,
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(IntervalBox { dims })
 }
 
-fn scalar_input_name(expr: &Expr) -> Option<&str> {
+fn scalar_input_name(expr: &Expr, scalar: bool) -> Option<&str> {
+    if scalar {
+        return match expr {
+            Expr::Var(name, _) => Some(name),
+            _ => None,
+        };
+    }
     match tensor_operand(expr)? {
         Cow::Borrowed(Expr::Var(name, _)) => Some(name),
         _ => None,
@@ -304,7 +324,10 @@ fn tensor_operand(expr: &Expr) -> Option<Cow<'_, Expr>> {
     }
 }
 
-fn upper_expression(property: &Property) -> Result<(Cow<'_, Expr>, ScalarValue), String> {
+fn upper_expression(
+    property: &Property,
+    scalar: bool,
+) -> Result<(Cow<'_, Expr>, ScalarValue), String> {
     let Expr::Binary(op @ (BinOp::Le | BinOp::Ge), left, right, _) = &property.body else {
         return Err("Beacon property body must be a non-strict scalar upper bound".into());
     };
@@ -315,19 +338,70 @@ fn upper_expression(property: &Property) -> Result<(Cow<'_, Expr>, ScalarValue),
     };
     let threshold = scalar_from_f64("Beacon threshold transport", Prim::F64, literal(threshold)?)
         .map_err(|error| format!("invalid threshold: {error}"))?;
-    Ok((
+    let expression = if scalar {
+        Cow::Borrowed(expression)
+    } else {
         tensor_operand(expression)
-            .ok_or("Beacon output must use tensor_to_scalar on its scalar graph output")?,
-        threshold,
-    ))
+            .ok_or("Beacon output must use tensor_to_scalar on its scalar graph output")?
+    };
+    Ok((expression, threshold))
+}
+
+/// A scalar proof graph bypasses the ordinary runtime lowerer, so it must
+/// perform the compiler's whole-program check before extracting any graph.
+/// Check the linked declarations themselves: printing and reparsing them
+/// would lose the declaration identities the proof is about.
+pub(super) fn check_scalar_source(decls: &[Decl]) -> Result<(), String> {
+    let deep = chelis_surf::desugar::desugar_program(decls)
+        .map_err(|error| format!("Beacon scalar source desugar failed: {error}"))?;
+    let _linked = chelis_types::install_linked_program_guard();
+    chelis_types::check_typed_program(&deep).map_err(|infer| {
+        let diagnostics = infer
+            .errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "Beacon scalar source failed type checking: {}",
+            if diagnostics.is_empty() {
+                "compiler returned no diagnostics"
+            } else {
+                &diagnostics
+            }
+        )
+    })?;
+    Ok(())
+}
+
+pub(super) fn is_scalar_property(property: &Property) -> bool {
+    property
+        .params
+        .iter()
+        .all(|param| matches!(&param.ty, Some(TypeExpr::Named(_, _))))
 }
 
 pub(super) fn prove(
     decls: &[Decl],
     property: &Property,
     options: &PropertyRunOptions,
+    scalar_check: &Result<(), String>,
 ) -> PropertyOutcome {
     let seed = options.effective_seed(property.seed);
+    let scalar = is_scalar_property(property);
+    if scalar && let Err(reason) = scalar_check {
+        return PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Error,
+            PropertyTier::Beacon,
+            0,
+            seed,
+            None,
+            Some(reason.clone()),
+            false,
+            Vec::new(),
+        );
+    }
     let fail = |reason: String| {
         PropertyOutcome::new(
             property.name.clone(),
@@ -348,110 +422,127 @@ pub(super) fn prove(
         if decls.iter().any(|decl| matches!(decl, Decl::Import { .. })) {
             return Err("Beacon scalar lane requires self-contained source without imports".into());
         }
-        if property.params.iter().any(|param| param.name == "tensor_to_scalar") ||
-            decls.iter().any(|decl| matches!(decl, Decl::FunDef { name, .. } | Decl::LetDef { name, .. } | Decl::MacroDef { name, .. } | Decl::Sig { name, .. } if name == "tensor_to_scalar")) {
+        if !scalar && (property.params.iter().any(|param| param.name == "tensor_to_scalar") ||
+            decls.iter().any(|decl| matches!(decl, Decl::FunDef { name, .. } | Decl::LetDef { name, .. } | Decl::MacroDef { name, .. } | Decl::Sig { name, .. } if name == "tensor_to_scalar"))) {
             return Err("Beacon scalar bridge must not be shadowed".into());
         }
-        let mut inputs = scalar_box(property)?;
-        let (expression, upper) = upper_expression(property)?;
+        let mut inputs = scalar_box(property, scalar)?;
+        let (expression, upper) = upper_expression(property, scalar)?;
         let source_binding = source_binding(decls, property, &expression)?;
         Goal::scalar_upper_bound(inputs.clone(), upper).map_err(|e| e.to_string())?;
         let body = chelis_surf::format::format_expression(&expression);
-        // The goal graph is lowered from the declarations the property was
-        // checked against plus generated declarations, never from a printed
-        // and re-parsed copy of them (chelis#3172). The generated names avoid
-        // every name the declarations or the expression mention; their debug
-        // rendering is a superset of those names.
-        let mentioned = format!("{decls:?}{expression:?}");
-        let fresh = |base: String| {
-            let mut name = base;
-            while mentioned.contains(&name) {
-                name.push('_');
-            }
-            name
-        };
-        // Generated declarations carry the property's first parameter span,
-        // so a diagnostic about them points into the property.
-        let span = property
-            .params
-            .first()
-            .map_or_else(|| chelis_deep::Span::new(0, 0), |param| param.span);
-        let tensor_f64 = || TypeExpr::Tensor(Vec::new(), TensorPrecision::new("f64", span), span);
-        let entry = fresh("beacon_goal_output".to_string());
-        let function = fresh(format!("{entry}_function"));
-        let mut program = decls.to_vec();
-        program.push(Decl::FunDef {
-            name: function.clone(),
-            type_binders: Vec::new(),
-            params: property
+        let (dag, root, goal, input_bindings) = if scalar {
+            let (dag, root) = super::beacon_scalar::lower(decls, property, &expression)?;
+            let goal = Goal::scalar_upper_bound(inputs, upper).map_err(|e| e.to_string())?;
+            let input_bindings = property
                 .params
                 .iter()
-                .map(|param| Param {
-                    name: param.name.clone(),
-                    ty: Some(tensor_f64()),
-                    span,
-                })
-                .collect(),
-            ret_ty: Some(tensor_f64()),
-            effects: None,
-            body: expression.clone().into_owned(),
-            span,
-        });
-        let mut arguments = Vec::new();
-        let mut input_bindings = BTreeMap::new();
-        for (index, param) in property.params.iter().enumerate() {
-            let name = fresh(format!("beacon_input_{index}"));
-            program.push(Decl::LetDef {
-                name: name.clone(),
-                ty: None,
-                value: Expr::Annotate(Box::new(Expr::Var(name.clone(), span)), tensor_f64(), span),
+                .map(|param| (param.name.clone(), param.name.clone()))
+                .collect();
+            (dag, root, goal, input_bindings)
+        } else {
+            // The goal graph is lowered from the declarations the property was
+            // checked against plus generated declarations, never from a printed
+            // and re-parsed copy of them (chelis#3172). The generated names avoid
+            // every name the declarations or the expression mention; their debug
+            // rendering is a superset of those names.
+            let mentioned = format!("{decls:?}{expression:?}");
+            let fresh = |base: String| {
+                let mut name = base;
+                while mentioned.contains(&name) {
+                    name.push('_');
+                }
+                name
+            };
+            // Generated declarations carry the property's first parameter span,
+            // so a diagnostic about them points into the property.
+            let span = property
+                .params
+                .first()
+                .map_or_else(|| chelis_deep::Span::new(0, 0), |param| param.span);
+            let tensor_f64 =
+                || TypeExpr::Tensor(Vec::new(), TensorPrecision::new("f64", span), span);
+            let entry = fresh("beacon_goal_output".to_string());
+            let function = fresh(format!("{entry}_function"));
+            let mut program = decls.to_vec();
+            program.push(Decl::FunDef {
+                name: function.clone(),
+                type_binders: Vec::new(),
+                params: property
+                    .params
+                    .iter()
+                    .map(|param| Param {
+                        name: param.name.clone(),
+                        ty: Some(tensor_f64()),
+                        span,
+                    })
+                    .collect(),
+                ret_ty: Some(tensor_f64()),
+                effects: None,
+                body: expression.clone().into_owned(),
                 span,
             });
-            let dimension = inputs
-                .dims
-                .iter_mut()
-                .find(|(original, _, _)| original == &param.name)
-                .ok_or("missing input binding")?;
-            dimension.0.clone_from(&name);
-            input_bindings.insert(name.clone(), param.name.clone());
-            arguments.push(Expr::Var(name, span));
-        }
-        program.push(Decl::LetDef {
-            name: entry.clone(),
-            ty: None,
-            value: Expr::Apply(Box::new(Expr::Var(function, span)), arguments, span),
-            span,
-        });
-        let goal = Goal::scalar_upper_bound(inputs, upper).map_err(|e| e.to_string())?;
-        let lowered = compiler::lower_decls(&program, Some(&entry))
-            .map_err(|error| format!("Beacon graph lowering failed: {error:?}"))?;
-        lowered
-            .dag
-            .validate_wire_contract()
-            .map_err(|e| e.to_string())?;
-        let mut root = *lowered
-            .named_roots
-            .get(&entry)
-            .ok_or("lowered entry has no named root")?;
-        // A direct identity result is anchored by the compiler's terminal Store.
-        // Its value is the single operand; only peel our own generated output
-        // anchor, never an internal store or an unrelated named output.
-        if let Some(node) = lowered.dag.nodes.get(root as usize)
-            && matches!(&node.op,chelis_compiler_api::schema::WireRiscOp::Store { name } if name == &entry)
-            && node.inputs.len() == 1
-            && node.output_type.dims.is_empty()
-            && node.output_type.precision == "f64"
-            && lowered
+            let mut arguments = Vec::new();
+            let mut input_bindings = BTreeMap::new();
+            for (index, param) in property.params.iter().enumerate() {
+                let name = fresh(format!("beacon_input_{index}"));
+                program.push(Decl::LetDef {
+                    name: name.clone(),
+                    ty: None,
+                    value: Expr::Annotate(
+                        Box::new(Expr::Var(name.clone(), span)),
+                        tensor_f64(),
+                        span,
+                    ),
+                    span,
+                });
+                let dimension = inputs
+                    .dims
+                    .iter_mut()
+                    .find(|(original, _, _)| original == &param.name)
+                    .ok_or("missing input binding")?;
+                dimension.0.clone_from(&name);
+                input_bindings.insert(name.clone(), param.name.clone());
+                arguments.push(Expr::Var(name, span));
+            }
+            program.push(Decl::LetDef {
+                name: entry.clone(),
+                ty: None,
+                value: Expr::Apply(Box::new(Expr::Var(function, span)), arguments, span),
+                span,
+            });
+            let goal = Goal::scalar_upper_bound(inputs, upper).map_err(|e| e.to_string())?;
+            let lowered = compiler::lower_decls(&program, Some(&entry))
+                .map_err(|error| format!("Beacon graph lowering failed: {error:?}"))?;
+            lowered
                 .dag
-                .nodes
-                .get(node.inputs[0] as usize)
-                .is_some_and(|input| {
-                    input.output_type.dims.is_empty() && input.output_type.precision == "f64"
-                })
-        {
-            root = node.inputs[0];
-        }
-        let (dag, root) = crate::graph_extract::scalar_root_closure(&lowered.dag, root)?;
+                .validate_wire_contract()
+                .map_err(|e| e.to_string())?;
+            let mut root = *lowered
+                .named_roots
+                .get(&entry)
+                .ok_or("lowered entry has no named root")?;
+            // A direct identity result is anchored by the compiler's terminal Store.
+            // Its value is the single operand; only peel our own generated output
+            // anchor, never an internal store or an unrelated named output.
+            if let Some(node) = lowered.dag.nodes.get(root as usize)
+                && matches!(&node.op,chelis_compiler_api::schema::WireRiscOp::Store { name } if name == &entry)
+                && node.inputs.len() == 1
+                && node.output_type.dims.is_empty()
+                && node.output_type.precision == "f64"
+                && lowered
+                    .dag
+                    .nodes
+                    .get(node.inputs[0] as usize)
+                    .is_some_and(|input| {
+                        input.output_type.dims.is_empty() && input.output_type.precision == "f64"
+                    })
+            {
+                root = node.inputs[0];
+            }
+            let (dag, root) = crate::graph_extract::scalar_root_closure(&lowered.dag, root)?;
+            (dag, root, goal, input_bindings)
+        };
         let bytes = serde_json::to_vec(&dag).map_err(|e| e.to_string())?;
         let hash = format!("{:x}", Sha256::digest(&bytes));
         let store = WireDagByteStore::new();

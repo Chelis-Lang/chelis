@@ -70,6 +70,7 @@ use chelis_compiler_api::schema::{GradRequest, GradResult, SourceKind};
 use crate::discharge::{Discharge, IntervalBox, OutputRange};
 use crate::engine_registry::DischargeRegistry;
 use crate::graph_extract::{ExtractedGoal, GraphExtractError, box_range_goal_from_wire_dag};
+use chelis_types::ScalarValue;
 
 /// The box/range output range for one gradient target, naming the `wrt` input
 /// whose gradient (Greek) is being bounded plus the asserted `[lo, hi]`.
@@ -83,9 +84,9 @@ pub struct GradTargetRange {
     /// the `wrt_names` the gradient was taken with respect to.
     pub target: String,
     /// The asserted lower bound on the gradient at `target`.
-    pub lo: f64,
+    pub lo: ScalarValue,
     /// The asserted upper bound on the gradient at `target`.
-    pub hi: f64,
+    pub hi: ScalarValue,
 }
 
 /// A request to build the AD verification rail for one program: differentiate

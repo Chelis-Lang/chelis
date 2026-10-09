@@ -415,12 +415,12 @@ mod tests {
     fn box_range_goal() -> Goal {
         Goal::box_range(
             IntervalBox {
-                dims: vec![("s".to_string(), 0.0, 100.0)],
+                dims: crate::discharge::test_dims(vec![("s".to_string(), 0.0, 100.0)]),
             },
             OutputRange {
                 output: "price".to_string(),
-                lo: 0.0,
-                hi: 50.0,
+                lo: crate::discharge::test_f64(0.0),
+                hi: crate::discharge::test_f64(50.0),
             },
         )
         .expect("well-formed box goal")

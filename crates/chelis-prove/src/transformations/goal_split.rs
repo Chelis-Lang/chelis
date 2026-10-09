@@ -372,12 +372,12 @@ mod tests {
         use crate::discharge::{IntervalBox, OutputRange};
         let goal = Goal::box_range(
             IntervalBox {
-                dims: vec![("s".to_string(), 0.0, 100.0)],
+                dims: crate::discharge::test_dims(vec![("s".to_string(), 0.0, 100.0)]),
             },
             OutputRange {
                 output: "price".to_string(),
-                lo: 0.0,
-                hi: 50.0,
+                lo: crate::discharge::test_f64(0.0),
+                hi: crate::discharge::test_f64(50.0),
             },
         )
         .unwrap();

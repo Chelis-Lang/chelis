@@ -687,8 +687,8 @@ mod tests {
             IntervalBox { dims: vec![] },
             OutputRange {
                 output: "out".into(),
-                lo: 0.0,
-                hi: 1.0,
+                lo: crate::discharge::test_f64(0.0),
+                hi: crate::discharge::test_f64(1.0),
             },
         )
         .unwrap()

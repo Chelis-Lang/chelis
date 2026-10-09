@@ -79,16 +79,34 @@ fn fake_dag_hash() -> String {
 fn box_goal() -> Goal {
     Goal::box_range(
         IntervalBox {
-            dims: vec![("s".to_string(), 0.0, 100.0)],
+            dims: support::tagged_dims(vec![("s".to_string(), 0.0, 100.0)]),
         },
         OutputRange {
             output: "price".to_string(),
-            lo: 0.0,
-            hi: 50.0,
+            lo: support::tagged_f64(0.0),
+            hi: support::tagged_f64(50.0),
         },
     )
     .expect("well-formed box goal")
     .with_ir(IrHandle::from_wire_dag(fake_dag_hash(), 0))
+}
+
+#[test]
+fn mutated_box_range_rejects_wrong_numeric_tag_before_subprocess() {
+    crate::support::isolate();
+    let mut goal = box_goal();
+    let GoalShape::BoxRange { inputs, .. } = &mut goal.shape else {
+        panic!("box goal shape");
+    };
+    inputs.dims[0].1 =
+        chelis_types::scalar_from_f64("test bound", chelis_types::types::Prim::F32, 0.0)
+            .expect("exact f32 zero");
+    let discharge = shim().discharge(&goal, FAST_TIMEOUT_MS);
+    assert_ne!(discharge.soundness(), Soundness::SoundApproximate);
+    assert_eq!(
+        evidence_error(&discharge).as_deref(),
+        Some("invalid_box_range")
+    );
 }
 
 fn populated_store() -> WireDagByteStore {
@@ -115,12 +133,12 @@ fn large_dag_hash() -> String {
 fn large_box_goal() -> Goal {
     Goal::box_range(
         IntervalBox {
-            dims: vec![("s".to_string(), 0.0, 100.0)],
+            dims: support::tagged_dims(vec![("s".to_string(), 0.0, 100.0)]),
         },
         OutputRange {
             output: "price".to_string(),
-            lo: 0.0,
-            hi: 50.0,
+            lo: support::tagged_f64(0.0),
+            hi: support::tagged_f64(50.0),
         },
     )
     .expect("well-formed box goal")
@@ -425,12 +443,12 @@ fn unpopulated_ir_handle_fails_closed() {
     let _g = with_scenario("proved");
     let goal = Goal::box_range(
         IntervalBox {
-            dims: vec![("s".to_string(), 0.0, 1.0)],
+            dims: support::tagged_dims(vec![("s".to_string(), 0.0, 1.0)]),
         },
         OutputRange {
             output: "price".to_string(),
-            lo: 0.0,
-            hi: 1.0,
+            lo: support::tagged_f64(0.0),
+            hi: support::tagged_f64(1.0),
         },
     )
     .expect("well-formed box goal");
