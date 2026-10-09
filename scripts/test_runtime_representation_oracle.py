@@ -87,6 +87,7 @@ class SourceUniverseTests(unittest.TestCase):
         self.assertFalse(
             any(f"|path={source}|" in row["identity"] for row in regenerated["active_debt"])
         )
+        self.assertIn(source, regenerated["retired_files"])
         self.assertEqual(regenerated["foundation_rows"], baseline["foundation_rows"])
         self.assertEqual(regenerated["freeze_sha256"], baseline["freeze_sha256"])
 
@@ -97,7 +98,7 @@ class SourceUniverseTests(unittest.TestCase):
             with mock.patch.object(oracle, "BASELINE_PATH", copy):
                 with self.assertRaisesRegex(
                     oracle.OracleFailure,
-                    "only a departed file holding active debt can be retired: "
+                    "only a departed referenced file can be retired: "
                     "crates/chelis-ir/src/dag.rs",
                 ):
                     oracle.regenerate(retired_files=("crates/chelis-ir/src/dag.rs",))
@@ -114,7 +115,88 @@ class SourceUniverseTests(unittest.TestCase):
             with self.assertRaises(oracle.OracleFailure) as caught:
                 oracle.validate_baseline(baseline, rows)
         self.assertEqual(caught.exception.code, oracle.DEPARTED_ROOT_FAILURE.code)
-        self.assertIn("crates/chelis-backend-metal/src", str(caught.exception))
+        self.assertEqual(
+            str(caught.exception),
+            f"{oracle.DEPARTED_ROOT_FAILURE.reason_prefix}: "
+            "crates/chelis-backend-metal, crates/chelis-backend-metal/runtime, "
+            "crates/chelis-backend-metal/src",
+        )
+
+    def test_an_untracked_or_ignored_directory_is_not_a_root_directory(self) -> None:
+        leftover = REPO_ROOT / "crates/chelis-backend-leftover-probe"
+        ignored = REPO_ROOT / "crates/chelis-backend-ignored-probe"
+        self.assertFalse(leftover.exists() or ignored.exists())
+        baseline = oracle.load_baseline()
+        rows = oracle.inventory_rows(REPO_ROOT)
+        try:
+            (leftover / "src").mkdir(parents=True)
+            (ignored / "src").mkdir(parents=True)
+            (ignored / ".gitignore").write_text("*\n", encoding="utf-8")
+            (ignored / "src/lib.rs").write_text("pub fn ignored() {}\n", encoding="utf-8")
+            self.assertEqual(oracle.root_directories(REPO_ROOT), baseline["source_inventory"]["roots"])
+            oracle.validate_baseline(baseline, rows)
+        finally:
+            shutil.rmtree(leftover, ignore_errors=True)
+            shutil.rmtree(ignored, ignore_errors=True)
+            oracle._invalidate_inventory_cache()
+
+    def test_a_final_form_file_leaving_the_roots_fails(self) -> None:
+        source = "crates/chelis-backend-c/src/fp_env.rs"
+        baseline = oracle.load_baseline()
+        self.assertIn(source, oracle._owner_module_final_forms_manifest())
+        self.assertFalse(
+            any(f"|path={source}|" in row["identity"] for row in baseline["active_debt"])
+        )
+        with moved(REPO_ROOT / source, REPO_ROOT / "crates/chelis-departed-probe/fp_env.rs"):
+            with self.assertRaises(oracle.OracleFailure) as caught:
+                oracle.validate_baseline(baseline, oracle.inventory_rows(REPO_ROOT))
+        self.assertEqual(caught.exception.code, oracle.DEPARTED_FILE_FAILURE.code)
+        self.assertEqual(
+            str(caught.exception),
+            f"{oracle.DEPARTED_FILE_FAILURE.reason_prefix}: {source}",
+        )
+
+    def test_a_retired_identity_file_leaving_the_roots_fails(self) -> None:
+        # eval.rs holds only retired foundation identities; the reappearance
+        # check needs it scanned.
+        source = "crates/chelis-ir/src/eval.rs"
+        baseline = oracle.load_baseline()
+        self.assertTrue(
+            any(f"|path={source}|" in row["identity"] for row in baseline["foundation_rows"])
+        )
+        self.assertFalse(
+            any(f"|path={source}|" in row["identity"] for row in baseline["active_debt"])
+        )
+        with moved(REPO_ROOT / source, REPO_ROOT / "crates/chelis-departed-probe/eval.rs"):
+            with self.assertRaises(oracle.OracleFailure) as caught:
+                oracle.validate_baseline(baseline, oracle.inventory_rows(REPO_ROOT))
+        self.assertEqual(caught.exception.code, oracle.DEPARTED_FILE_FAILURE.code)
+        self.assertEqual(
+            str(caught.exception),
+            f"{oracle.DEPARTED_FILE_FAILURE.reason_prefix}: {source}",
+        )
+
+    def test_a_recorded_departure_stays_departed(self) -> None:
+        # random_observer.rs was deleted; its retired identities stay in the
+        # foundation, and the baseline records the departure.
+        source = "crates/chelis-backend-c/src/random_observer.rs"
+        baseline = oracle.load_baseline()
+        rows = oracle.inventory_rows(REPO_ROOT)
+        self.assertEqual(baseline["retired_files"], [source])
+        unrecorded = json.loads(json.dumps(baseline))
+        unrecorded["retired_files"] = []
+        with self.assertRaises(oracle.OracleFailure) as caught:
+            oracle.validate_baseline(unrecorded, rows)
+        self.assertEqual(caught.exception.code, oracle.DEPARTED_FILE_FAILURE.code)
+        self.assertIn(source, str(caught.exception))
+        with oracle.temporary_mutation(
+            REPO_ROOT / source, lambda _: "pub fn returned() {}\n", creates_file=True
+        ):
+            with self.assertRaisesRegex(
+                oracle.OracleFailure,
+                f"a retired file is back in the inventory universe: {source}",
+            ):
+                oracle.validate_baseline(baseline, oracle.inventory_rows(REPO_ROOT))
 
     def test_a_missing_mutation_target_fails_rather_than_being_planted(self) -> None:
         target = "crates/chelis-ir/src/dag.rs"
@@ -138,7 +220,10 @@ class SourceUniverseTests(unittest.TestCase):
             with self.assertRaises(oracle.OracleFailure) as caught:
                 oracle.validate_baseline(baseline, rows)
         self.assertEqual(caught.exception.code, oracle.DEPARTED_FILE_FAILURE.code)
-        self.assertIn(target, str(caught.exception))
+        self.assertEqual(
+            str(caught.exception),
+            f"{oracle.DEPARTED_FILE_FAILURE.reason_prefix}: {target}",
+        )
 
     def test_a_symlinked_directory_under_a_root_is_not_traversed(self) -> None:
         link = REPO_ROOT / "crates/chelis-ir/src/runtime_representation_linkdir_probe"
