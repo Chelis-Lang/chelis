@@ -24946,12 +24946,12 @@ mod tests {
         )
         .expect("metadata match parses")
         .remove(0);
-        let Expr::Node(metadata_carrier, _) = metadata_carrier else {
+        let Expr::Node(node, _) = &metadata_carrier else {
             panic!("metadata carrier is a stamped node");
         };
         let metadata_decoy = Expr::MetaExpr(
             chelis_deep::MetaExpr {
-                metadata: metadata_carrier.meta().clone(),
+                metadata: node.meta().clone(),
                 expr: Box::new(Expr::node(
                     DeepTag::PatWild,
                     Metadata::default(),
