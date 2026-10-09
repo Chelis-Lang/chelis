@@ -3137,6 +3137,10 @@ static void __chelis_check_host_result_claims(const __chelis_host_result_claim *
 "#.to_string());
 }
 
+#[cfg(test)]
+#[path = "host_emit/claim_stack_tests.rs"]
+mod claim_stack_tests;
+
 /// A signature entry's checks, in signature order: every observation's null,
 /// dtype and rank checks, then the ordered extent comparisons.
 ///
