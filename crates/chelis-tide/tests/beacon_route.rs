@@ -50,3 +50,27 @@ fn malformed_beacon_budget_is_rejected_instead_of_defaulting() {
         );
     }
 }
+
+#[test]
+fn tide_never_reports_a_green_scalar_beacon_property_from_an_ill_typed_module() {
+    let property = "@property bounded forall(x: f64) where x >= -1.0f64, x <= 1.0f64:\n  affine(x) <= 2.0f64\n";
+    for (signature, valid) in [("f64", true), ("bool", false)] {
+        let source = format!(
+            "sig affine: f64 -> {signature}\ndef affine(x: f64) -> f64 = x + 1.0f64\n{property}"
+        );
+        let response = handle_message(&json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"chelis_prove","arguments":{"source_kind":"surf","tier":"beacon-only","source":source}}})).unwrap();
+        let payload = &response["result"]["structuredContent"];
+        assert_eq!(
+            payload["properties"][0]["proof_tier"], "beacon",
+            "{payload}"
+        );
+        if valid {
+            assert_ne!(payload["properties"][0]["status"], "error", "{payload}");
+        } else {
+            assert_eq!(payload["properties"][0]["status"], "error", "{payload}");
+            assert_eq!(payload["ok"], false, "{payload}");
+        }
+        assert_eq!(payload["properties"][0]["samples"], 0, "{payload}");
+    }
+}

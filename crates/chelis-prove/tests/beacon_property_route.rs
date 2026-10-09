@@ -43,6 +43,35 @@ fn beacon_tier_rejects_missing_box_bounds_without_smt_or_fuzz_fallback() {
 }
 
 #[test]
+fn scalar_beacon_rejects_a_mismatched_signature_before_dispatch() {
+    crate::support::isolate();
+    let options = PropertyRunOptions {
+        tier: "beacon-only".into(),
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
+    };
+    let property = "@property bounded forall(x: f64) where x >= -1.0f64, x <= 1.0f64:\n  affine(x) <= 2.0f64\n";
+    let valid =
+        format!("sig affine: f64 -> f64\ndef affine(x: f64) -> f64 = x + 1.0f64\n{property}");
+    let invalid = valid.replace("sig affine: f64 -> f64", "sig affine: f64 -> bool");
+    let PropertyRunResult::Ran(valid_outcomes) =
+        run_surf_source_properties(&valid, &options).unwrap();
+    assert_eq!(valid_outcomes.len(), 1);
+    assert_eq!(valid_outcomes[0].proof_tier, PropertyTier::Beacon);
+    assert_ne!(valid_outcomes[0].status, PropertyStatus::Error);
+    let PropertyRunResult::Ran(invalid_outcomes) =
+        run_surf_source_properties(&invalid, &options).unwrap();
+    assert_eq!(invalid_outcomes.len(), 1);
+    assert_eq!(invalid_outcomes[0].proof_tier, PropertyTier::Beacon);
+    assert_eq!(
+        invalid_outcomes[0].status,
+        PropertyStatus::Error,
+        "{invalid_outcomes:?}"
+    );
+    assert_eq!(invalid_outcomes[0].samples, 0);
+    assert!(invalid_outcomes[0].engine_evidence.is_none());
+}
+
+#[test]
 fn beacon_scalar_bridge_requires_explicit_f64_bounds_and_unshadowed_identity() {
     crate::support::isolate();
     let options = PropertyRunOptions {

@@ -347,12 +347,61 @@ fn upper_expression(
     Ok((expression, threshold))
 }
 
+/// A scalar proof graph bypasses the ordinary runtime lowerer, so it must
+/// perform the compiler's whole-program check before extracting any graph.
+/// Check the linked declarations themselves: printing and reparsing them
+/// would lose the declaration identities the proof is about.
+pub(super) fn check_scalar_source(decls: &[Decl]) -> Result<(), String> {
+    let deep = chelis_surf::desugar::desugar_program(decls)
+        .map_err(|error| format!("Beacon scalar source desugar failed: {error}"))?;
+    let _linked = chelis_types::install_linked_program_guard();
+    chelis_types::check_typed_program(&deep).map_err(|infer| {
+        let diagnostics = infer
+            .errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "Beacon scalar source failed type checking: {}",
+            if diagnostics.is_empty() {
+                "compiler returned no diagnostics"
+            } else {
+                &diagnostics
+            }
+        )
+    })?;
+    Ok(())
+}
+
+pub(super) fn is_scalar_property(property: &Property) -> bool {
+    property
+        .params
+        .iter()
+        .all(|param| matches!(&param.ty, Some(TypeExpr::Named(_, _))))
+}
+
 pub(super) fn prove(
     decls: &[Decl],
     property: &Property,
     options: &PropertyRunOptions,
+    scalar_check: &Result<(), String>,
 ) -> PropertyOutcome {
     let seed = options.effective_seed(property.seed);
+    let scalar = is_scalar_property(property);
+    if scalar && let Err(reason) = scalar_check {
+        return PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Error,
+            PropertyTier::Beacon,
+            0,
+            seed,
+            None,
+            Some(reason.clone()),
+            false,
+            Vec::new(),
+        );
+    }
     let fail = |reason: String| {
         PropertyOutcome::new(
             property.name.clone(),
@@ -373,10 +422,6 @@ pub(super) fn prove(
         if decls.iter().any(|decl| matches!(decl, Decl::Import { .. })) {
             return Err("Beacon scalar lane requires self-contained source without imports".into());
         }
-        let scalar = property
-            .params
-            .iter()
-            .all(|param| matches!(&param.ty, Some(TypeExpr::Named(_, _))));
         if !scalar && (property.params.iter().any(|param| param.name == "tensor_to_scalar") ||
             decls.iter().any(|decl| matches!(decl, Decl::FunDef { name, .. } | Decl::LetDef { name, .. } | Decl::MacroDef { name, .. } | Decl::Sig { name, .. } if name == "tensor_to_scalar"))) {
             return Err("Beacon scalar bridge must not be shadowed".into());

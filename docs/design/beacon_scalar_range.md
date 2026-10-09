@@ -11,6 +11,8 @@ finite, closed `where` bounds and an `output_expression <= upper_f64_literal`
 body. It extracts a proof-only rank-zero graph from the checked linked source
 declarations, including imported pure f64 functions. The original scalar
 functions keep their ordinary host classification. This scalar extractor
+checks the linked declaration set before a property can receive a Beacon
+result, including when the shared runner is called directly or through Tide. It
 accepts finite typed f64 literals, variables, unary negation, addition,
 subtraction, multiplication, division, and direct calls in a pure f64
 closure; other expressions report unsupported.
