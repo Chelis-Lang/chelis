@@ -266,6 +266,13 @@ def f(g: G[tensor[3, f32]]) -> i64 = 1i64
 out = f(None)
 "#;
 
+const LET_BOUND_RESULT: &str = r#"def ident3(size: i64) -> Box[3] = {
+  b = make(size)
+  b
+}
+out = width(ident3(size_from("PATH")))
+"#;
+
 /// Run `case` after the shared declarations with `size` read from a file.
 fn run(case: &str, size: usize, native: bool) -> (bool, String) {
     let inputs = tempfile::tempdir().expect("runtime inputs");
@@ -813,7 +820,8 @@ fn non_closing_alias_recursion_terminates_on_both_lanes() {
 /// member it initializes, and the runtime rejects a value whose unused
 /// payload bytes are not zero, so every borrowed value a walk builds must be
 /// zeroed whole. `program` builds on the C target and its host source is
-/// compiled, linked and run as C++.
+/// compiled, linked and run as C++, unoptimized: an optimizer can zero the
+/// unused bytes by accident and hide a partial value.
 fn host_as_cxx(program: &str) -> String {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cxxhost.ch");
@@ -831,7 +839,7 @@ fn host_as_cxx(program: &str) -> String {
     let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".to_string());
     let compiled = std::process::Command::new(&compiler)
         .current_dir(&out_dir)
-        .args(["-x", "c++", "-O1", "-c", "cxxhost.c", "-o", "host.o"])
+        .args(["-x", "c++", "-O0", "-c", "cxxhost.c", "-o", "host.o"])
         .output()
         .expect("C++ compiler runs");
     assert!(
@@ -877,7 +885,9 @@ fn agreeing_claim_walks_run_when_the_host_is_cxx() {
     let input = tempfile::tempdir().expect("size input");
     let size = input.path().join("size.txt");
     fs::write(&size, "xxx").expect("size");
-    for case in [DIRECT, FORMAL, BOX_BINDER] {
+    // LET_BOUND_RESULT reaches the result-value walk, the others the entry
+    // walk and the producer-owned result check.
+    for case in [DIRECT, FORMAL, BOX_BINDER, LET_BOUND_RESULT] {
         let program = format!("{PRELUDE}{case}").replace("PATH", &size.display().to_string());
         let output = host_as_cxx(&program);
         assert!(output.contains("out = 3"), "{case}\n{output}");
