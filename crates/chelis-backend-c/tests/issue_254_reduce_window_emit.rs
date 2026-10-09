@@ -63,7 +63,8 @@ fn issue254_emit_reduce_window_max_selects_first_nan_without_fmaxf() {
     );
     assert!(src.contains("chelis_window_count("));
     assert!(src.contains("for (int64_t leaf = 0; leaf < t1_window_count;"));
-    assert!(src.contains("chelis_window_index("));
+    assert!(src.contains("chelis_window_term("));
+    assert!(!src.contains("chelis_window_index("));
     assert!(!src.contains("full_indices[") && !src.contains("out_indices["));
 }
 
@@ -146,7 +147,11 @@ fn issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic() {
         .find(|line| line.contains("= chelis_tensor_window_plan("))
         .unwrap();
     assert!(plan.contains("(chelis_scalar[]){chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(2)), chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(2))}"));
-    assert!(src.contains("chelis_window_index("));
+    // The plan's checked group scale carries the stride; no per-element call.
+    assert!(src.contains(
+        "chelis_window_term(t1_window, CHELIS_PROJECTION_GROUP, CHELIS_PROJECTION_SCALE"
+    ));
+    assert!(!src.contains("chelis_window_index("));
 }
 
 #[test]

@@ -2097,10 +2097,6 @@
       "sample": "const uint8_t* restrict __count_in_{id} = (const uint8_t*)t{a}_data;"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_expand",
-      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_extrema_adjoint",
       "sample": "uint16_t* restrict __out_{id} = (uint16_t*)t{id}_data;"
     },
@@ -2127,10 +2123,6 @@
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_pad",
       "sample": "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t){}));"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_permute",
-      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_preplanned",
@@ -2175,14 +2167,6 @@
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shape",
       "sample": "const int64_t {extent} = chelis_tensor_shape(t{a}, {axis});"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shrink",
-      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_stride",
-      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_tensor_snapshot",

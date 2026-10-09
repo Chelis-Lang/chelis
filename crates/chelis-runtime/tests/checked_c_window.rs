@@ -57,6 +57,25 @@ fn window_plans_keep_shapes_indices_and_lifetime_independent_of_payload() {
                 assert_eq!(chelis_window_extent(plan, CHELIS_WINDOW_RESULT, int(-1)), 2);
                 assert_eq!(chelis_window_count(plan), 6);
                 assert_eq!(chelis_window_index(plan, int(7), int(5)), 52);
+                // Each term is (divisor, modulus, scale): the group runs over
+                // the result and the leaf over the window.
+                for (part, terms) in [
+                    (
+                        CHELIS_PROJECTION_GROUP,
+                        &[(4, 2, 30), (2, 2, 12), (1, 2, 2)][..],
+                    ),
+                    (CHELIS_PROJECTION_LEAF, &[(3, 2, 6), (1, 3, 1)][..]),
+                ] {
+                    for (k, &(divisor, modulus, scale)) in terms.iter().enumerate() {
+                        for (field, value) in [
+                            (CHELIS_PROJECTION_DIVISOR, divisor),
+                            (CHELIS_PROJECTION_MODULUS, modulus),
+                            (CHELIS_PROJECTION_SCALE, scale),
+                        ] {
+                            assert_eq!(chelis_window_term(plan, part, field, int(k as i64)), value);
+                        }
+                    }
+                }
                 chelis_window_plan_release(plan);
             }
         }
@@ -104,6 +123,15 @@ fn invalid_window_child() {
             "scalar" => {
                 chelis_window_index(p, chelis_scalar_from_bits(CHELIS_DTYPE_F32, 0), int(0));
             }
+            "term-part" => {
+                chelis_window_term(p, -1, CHELIS_PROJECTION_SCALE, int(0));
+            }
+            "term-field" => {
+                chelis_window_term(p, CHELIS_PROJECTION_GROUP, 7, int(0));
+            }
+            "term-range" => {
+                chelis_window_term(p, CHELIS_PROJECTION_LEAF, CHELIS_PROJECTION_SCALE, int(1));
+            }
             "shape" => {
                 chelis_window_check_target(
                     p,
@@ -138,6 +166,9 @@ fn invalid_window_metadata_retains_selected_canonical_diagnostics() {
         "leaf",
         "negative",
         "scalar",
+        "term-part",
+        "term-field",
+        "term-range",
         "shape",
         "dtype",
         "tensor-shape",

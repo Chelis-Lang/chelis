@@ -60,6 +60,8 @@ fn movement_plans_reject_bad_geometry_and_preserve_rank_zero_empty_and_int64() {
     for axes in [vec![0], vec![0, 0], vec![0, 2], vec![-3, 1]] {
         assert!(MovementMetadata::permuted(&input, &axes).is_err());
     }
+    // A repeated unit axis stays inside its target; only the bijection rejects it.
+    assert!(MovementMetadata::permuted(&shape(&[1, 1]), &[0, 0]).is_err());
     for (axis, size, insert) in [(0, 3, false), (2, 3, false), (3, 3, true), (0, -1, true)] {
         assert!(MovementMetadata::expanded(&input, axis, size, insert).is_err());
     }

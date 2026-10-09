@@ -35,7 +35,7 @@ fn validate(source: &str) -> Result<(), String> {
                 return Err(format!("{name}: raw affine coordinate authority"));
             }
         }
-        if !body.contains("chelis_movement_index(") || !body.contains("chelis_movement_count(") {
+        if !body.contains(".emit_movement_loop(") || body.contains("chelis_movement_index(") {
             return Err(format!("{name}: missing checked affine coordinates"));
         }
     }
@@ -61,8 +61,7 @@ fn validate(source: &str) -> Result<(), String> {
             }
         }
         for checked in [
-            "chelis_movement_index(",
-            "chelis_movement_count(",
+            "self.emit_movement_loop(",
             "chelis_movement_check_target(",
             "chelis_movement_plan_release(",
         ] {
@@ -139,8 +138,8 @@ fn movement_control_rejects_removed_checks_and_raw_index_helpers() {
             "missing movement validation",
         ),
         (
-            "chelis_movement_index(t{id}_movement,",
-            "chelis_indices_to_flat(in_indices, t{a}_strides, t{a}_rank); chelis_movement_index(t{id}_movement,",
+            "self.emit_movement_loop(",
+            "self.line(\"chelis_indices_to_flat(in_indices, t{a}_strides, t{a}_rank);\"); self.emit_movement_loop(",
             "coordinate authority",
         ),
         (

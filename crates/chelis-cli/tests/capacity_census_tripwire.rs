@@ -192,6 +192,19 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
         "chelis_runtime.h: typedef enum { CHELIS_MOVEMENT_SOURCE = 0 , CHELIS_MOVEMENT_RESULT = 1 } chelis_movement_side",
         &[],
     ),
+    // Closed projection part/field identities select a term, not a number.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_PROJECTION_GROUP = 0 , CHELIS_PROJECTION_LEAF = 1 } chelis_projection_part",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_PROJECTION_DIVISOR = 0 , CHELIS_PROJECTION_MODULUS = 1 , CHELIS_PROJECTION_SCALE = 2 } chelis_projection_field",
+        &[],
+    ),
     // Closed window operation/side identities select a contract, not a number.
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
@@ -3983,6 +3996,26 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
+            "chelis_runtime.h: int64_t chelis_movement_term ( const chelis_movement_plan * plan , chelis_projection_field field , chelis_scalar term ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_movement_base ( const chelis_movement_plan * plan ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
             "chelis_runtime.h: void chelis_movement_check_target ( const chelis_movement_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
             &[],
         ),
@@ -4034,6 +4067,16 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             PRIMARY_CENSUS_FAMILY,
             "header-export",
             "chelis_runtime.h: int64_t chelis_window_index ( const chelis_window_plan * plan , chelis_scalar group , chelis_scalar leaf ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_window_plan` snapshots the complete input and valid-padding",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_window_term ( const chelis_window_plan * plan , chelis_projection_part part , chelis_projection_field field , chelis_scalar term ) ;",
             &["numeric-op"],
         ),
         atom: "[05-OP-33]",
@@ -4284,6 +4327,16 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             PRIMARY_CENSUS_FAMILY,
             "header-export",
             "chelis_runtime.h: int64_t chelis_reduction_index ( const chelis_reduction_plan * plan , chelis_scalar outer , chelis_scalar leaf ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_reduction_term ( const chelis_reduction_plan * plan , chelis_projection_part part , chelis_projection_field field , chelis_scalar term ) ;",
             &["numeric-op"],
         ),
         atom: "[05-OP-33]",

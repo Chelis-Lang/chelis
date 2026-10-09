@@ -6,9 +6,9 @@ mod metadata;
 
 use chelis_vocab::RuntimeDType;
 use metadata::{
-    ByteCount, ElementCount, IterationSpace, MatmulDimension, MatmulMetadata, MatmulPart,
-    MetadataError, MovementMetadata, MovementOp, ReductionMetadata, ShapeMetadata, SparseMetadata,
-    WindowMetadata,
+    AffineProjection, ByteCount, ElementCount, IterationSpace, MatmulDimension, MatmulMetadata,
+    MatmulPart, MetadataError, MovementMetadata, MovementOp, ProjectionPart, ReductionMetadata,
+    ShapeMetadata, SparseMetadata, WindowMetadata,
 };
 
 #[test]
@@ -64,6 +64,8 @@ fn movement_plans_reject_bad_geometry_and_preserve_rank_zero_empty_and_int64() {
     for axes in [vec![0], vec![0, 0], vec![0, 2], vec![-3, 1]] {
         assert!(MovementMetadata::permuted(&input, &axes).is_err());
     }
+    // A repeated unit axis stays inside its target; only the bijection rejects it.
+    assert!(MovementMetadata::permuted(&shape(&[1, 1]), &[0, 0]).is_err());
     for (axis, size, insert) in [(0, 3, false), (2, 3, false), (3, 3, true), (0, -1, true)] {
         assert!(MovementMetadata::expanded(&input, axis, size, insert).is_err());
     }
@@ -744,4 +746,355 @@ fn affine_metadata_checks_exact_extents_and_offsets_without_storage() {
     assert!(empty.affine_index_by(|_| (0, 0, 1)).is_err());
     let wide = ShapeMetadata::contiguous(&[1], RuntimeDType::F64).unwrap();
     assert!(wide.padded(&[0], &[i64::MAX / 8]).is_err());
+}
+
+// [05-OP-33] projection terms. Generated C indexes through a plan's
+// projection with plain arithmetic, so every reachable position's term sum
+// must equal the checked index, computed here from each operation's own
+// coordinate rule rather than from the projection.
+
+fn row_major(shape: &[i64]) -> Vec<Vec<i64>> {
+    let count: i64 = shape.iter().product();
+    (0..count)
+        .map(|mut linear| {
+            let mut coordinate = vec![0; shape.len()];
+            for axis in (0..shape.len()).rev() {
+                coordinate[axis] = linear % shape[axis];
+                linear /= shape[axis];
+            }
+            coordinate
+        })
+        .collect()
+}
+
+fn flatten(shape: &[i64], coordinate: &[i64]) -> i64 {
+    coordinate
+        .iter()
+        .zip(shape)
+        .fold(0, |flat, (&c, &extent)| flat * extent + c)
+}
+
+/// The generated C expression for one projection: the outermost term needs
+/// no modulus and the innermost has divisor one. Checked arithmetic makes an
+/// overflow that C would silently commit fail the test.
+fn c_projection(projection: &AffineProjection, position: i64) -> i64 {
+    let terms = projection.terms();
+    terms
+        .iter()
+        .enumerate()
+        .fold(projection.base(), |sum, (k, term)| {
+            let coordinate = match (k == 0, k + 1 == terms.len()) {
+                (true, true) => position,
+                (true, false) => position / term.divisor,
+                (false, true) => position % term.modulus,
+                (false, false) => position / term.divisor % term.modulus,
+            };
+            coordinate
+                .checked_mul(term.scale)
+                .and_then(|n| sum.checked_add(n))
+                .expect("projection term overflows")
+        })
+}
+
+/// The generated C movement loop: nested loops over each term's modulus
+/// accumulate one scaled step per axis.
+fn c_odometer(projection: &AffineProjection) -> Vec<i64> {
+    let terms = projection.terms();
+    let shape: Vec<i64> = terms.iter().map(|term| term.modulus).collect();
+    row_major(&shape)
+        .into_iter()
+        .map(|coordinate| {
+            coordinate
+                .iter()
+                .zip(terms)
+                .fold(projection.base(), |offset, (&c, term)| {
+                    offset + c * term.scale
+                })
+        })
+        .collect()
+}
+
+fn require_domain_terms(projection: &AffineProjection, domain: &[i64]) {
+    let terms = projection.terms();
+    assert_eq!(terms.len(), domain.len());
+    for (term, &extent) in terms.iter().zip(domain) {
+        assert_eq!(term.modulus, extent);
+    }
+    if domain.contains(&0) {
+        assert_eq!(projection.base(), 0);
+        assert!(terms
+            .iter()
+            .all(|term| term.divisor == 1 && term.scale == 0));
+    } else {
+        for (k, term) in terms.iter().enumerate() {
+            assert_eq!(term.divisor, domain[k + 1..].iter().product::<i64>());
+        }
+    }
+}
+
+fn shapes(rank: usize) -> Vec<Vec<i64>> {
+    row_major(&vec![4; rank])
+}
+
+#[test]
+fn movement_projection_terms_reproduce_every_checked_index() {
+    let f = RuntimeDType::F32;
+    let mut checked = 0;
+    for rank in 0..=3 {
+        for input in shapes(rank) {
+            let source = ShapeMetadata::contiguous(&input, f).unwrap();
+            // Padding counts its source; every other movement counts its result.
+            type Oracle = Box<dyn Fn(&[i64]) -> i64>;
+            let mut plans: Vec<(MovementMetadata, bool, Oracle)> = Vec::new();
+            let rotated: Vec<i64> = (0..rank as i64).map(|a| (a + 1) % rank as i64).collect();
+            let axes = rotated.clone();
+            let shape = input.clone();
+            plans.push((
+                MovementMetadata::permuted(&source, &rotated).unwrap(),
+                false,
+                Box::new(move |c: &[i64]| {
+                    let mut s = vec![0; c.len()];
+                    for (out, &axis) in axes.iter().enumerate() {
+                        s[axis as usize] = c[out];
+                    }
+                    flatten(&shape, &s)
+                }),
+            ));
+            for axis in 0..=rank {
+                let shape = input.clone();
+                plans.push((
+                    MovementMetadata::expanded(&source, axis as i64, 3, true).unwrap(),
+                    false,
+                    Box::new(move |c: &[i64]| {
+                        let mut s = c.to_vec();
+                        s.remove(axis);
+                        flatten(&shape, &s)
+                    }),
+                ));
+                if axis < rank && input[axis] == 1 {
+                    let shape = input.clone();
+                    plans.push((
+                        MovementMetadata::expanded(&source, axis as i64, 3, false).unwrap(),
+                        false,
+                        Box::new(move |c: &[i64]| {
+                            let mut s = c.to_vec();
+                            s[axis] = 0;
+                            flatten(&shape, &s)
+                        }),
+                    ));
+                }
+            }
+            let before: Vec<i64> = (0..rank as i64).map(|a| a % 2).collect();
+            let after: Vec<i64> = (0..rank as i64).map(|a| (a + 1) % 3).collect();
+            let pad = MovementMetadata::affine(&source, &before, &after, MovementOp::Pad).unwrap();
+            let padded = pad.result().shape().to_vec();
+            let low = before.clone();
+            plans.push((
+                pad,
+                true,
+                Box::new(move |c: &[i64]| {
+                    let s: Vec<i64> = c.iter().zip(&low).map(|(c, b)| c + b).collect();
+                    flatten(&padded, &s)
+                }),
+            ));
+            let start: Vec<i64> = input.iter().map(|&n| i64::from(n >= 2)).collect();
+            let end: Vec<i64> = input
+                .iter()
+                .map(|&n| if n >= 3 { n - 1 } else { n })
+                .collect();
+            let shape = input.clone();
+            let first = start.clone();
+            plans.push((
+                MovementMetadata::affine(&source, &start, &end, MovementOp::Shrink).unwrap(),
+                false,
+                Box::new(move |c: &[i64]| {
+                    let s: Vec<i64> = c.iter().zip(&first).map(|(c, a)| c + a).collect();
+                    flatten(&shape, &s)
+                }),
+            ));
+            let steps: Vec<i64> = (0..rank as i64).map(|a| a % 3 + 1).collect();
+            let shape = input.clone();
+            let step = steps.clone();
+            plans.push((
+                MovementMetadata::affine(&source, &steps, &[], MovementOp::Stride).unwrap(),
+                false,
+                Box::new(move |c: &[i64]| {
+                    let s: Vec<i64> = c.iter().zip(&step).map(|(c, k)| c * k).collect();
+                    flatten(&shape, &s)
+                }),
+            ));
+            for (plan, source_domain, oracle) in plans {
+                let domain = if source_domain {
+                    plan.input().shape().to_vec()
+                } else {
+                    plan.result().shape().to_vec()
+                };
+                let projection = plan.projection();
+                require_domain_terms(projection, &domain);
+                let odometer = c_odometer(projection);
+                assert_eq!(odometer.len() as i64, plan.count().get());
+                for (position, coordinate) in row_major(&domain).iter().enumerate() {
+                    let position = position as i64;
+                    let expected = oracle(coordinate);
+                    assert_eq!(plan.index(position).unwrap(), expected, "{input:?}");
+                    assert_eq!(c_projection(projection, position), expected, "{input:?}");
+                    assert_eq!(odometer[position as usize], expected, "{input:?}");
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 3_000, "{checked}");
+}
+
+#[test]
+fn reduction_and_window_projection_terms_reproduce_every_checked_index() {
+    let f = RuntimeDType::F32;
+    let mut checked = 0;
+    for rank in 1..=3 {
+        for input in shapes(rank) {
+            // Every strictly descending nonempty axis set.
+            for mask in 1..(1_u32 << rank) {
+                let axes: Vec<i64> = (0..rank as i64)
+                    .rev()
+                    .filter(|&a| mask & (1 << a) != 0)
+                    .collect();
+                let plan = ReductionMetadata::new(&input, &axes, f).unwrap();
+                let selected = |axis: usize| mask & (1 << axis) != 0;
+                let group_shape: Vec<i64> = (0..rank)
+                    .filter(|&a| !selected(a))
+                    .map(|a| input[a])
+                    .collect();
+                let leaf_shape: Vec<i64> = (0..rank)
+                    .filter(|&a| selected(a))
+                    .map(|a| input[a])
+                    .collect();
+                let reachable = !input.contains(&0);
+                for (part, domain) in [
+                    (ProjectionPart::Group, &group_shape),
+                    (ProjectionPart::Leaf, &leaf_shape),
+                ] {
+                    let projection = plan.projection(part);
+                    if reachable {
+                        require_domain_terms(projection, domain);
+                    } else {
+                        assert_eq!(projection.base(), 0);
+                        assert!(projection
+                            .terms()
+                            .iter()
+                            .all(|t| t.divisor == 1 && t.scale == 0));
+                    }
+                }
+                if !reachable {
+                    assert_eq!(plan.leaves().get() * plan.result().elements().get(), 0);
+                    continue;
+                }
+                for (outer, group) in row_major(&group_shape).iter().enumerate() {
+                    for (leaf, within) in row_major(&leaf_shape).iter().enumerate() {
+                        let (mut g, mut l) = (group.iter(), within.iter());
+                        let source: Vec<i64> = (0..rank)
+                            .map(|a| *if selected(a) { l.next() } else { g.next() }.unwrap())
+                            .collect();
+                        let expected = flatten(&input, &source);
+                        let (outer, leaf) = (outer as i64, leaf as i64);
+                        assert_eq!(plan.index(outer, leaf).unwrap(), expected);
+                        let c = c_projection(plan.projection(ProjectionPart::Group), outer)
+                            + c_projection(plan.projection(ProjectionPart::Leaf), leaf);
+                        assert_eq!(c, expected, "{input:?} {axes:?}");
+                        checked += 1;
+                    }
+                }
+            }
+            // Every window and step of extent one to two on the trailing axes.
+            for count in 1..=rank {
+                let leading = rank - count;
+                for window in row_major(&vec![2; count]) {
+                    let window: Vec<i64> = window.iter().map(|w| w + 1).collect();
+                    let steps: Vec<i64> = window.iter().rev().cloned().collect();
+                    let source = ShapeMetadata::contiguous(&input, f).unwrap();
+                    let Ok(plan) = WindowMetadata::new(&source, &window, &steps) else {
+                        assert!(input[leading..].iter().zip(&window).any(|(n, w)| w > n));
+                        continue;
+                    };
+                    let result = plan.result().shape().to_vec();
+                    for part in [ProjectionPart::Group, ProjectionPart::Leaf] {
+                        let domain = if part == ProjectionPart::Group {
+                            &result
+                        } else {
+                            &window
+                        };
+                        if plan.result().elements().get() != 0 {
+                            require_domain_terms(plan.projection(part), domain);
+                        }
+                    }
+                    for (outer, group) in row_major(&result).iter().enumerate() {
+                        for (leaf, offset) in row_major(&window).iter().enumerate() {
+                            let source: Vec<i64> = (0..rank)
+                                .map(|a| {
+                                    if a < leading {
+                                        group[a]
+                                    } else {
+                                        group[a] * steps[a - leading] + offset[a - leading]
+                                    }
+                                })
+                                .collect();
+                            let expected = flatten(&input, &source);
+                            let (outer, leaf) = (outer as i64, leaf as i64);
+                            assert_eq!(plan.index(outer, leaf).unwrap(), expected);
+                            let c = c_projection(plan.projection(ProjectionPart::Group), outer)
+                                + c_projection(plan.projection(ProjectionPart::Leaf), leaf);
+                            assert_eq!(c, expected, "{input:?} {window:?}");
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 3_000, "{checked}");
+}
+
+#[test]
+fn projections_of_extreme_valid_plans_stay_representable() {
+    let i8 = RuntimeDType::I8;
+    let huge = ShapeMetadata::contiguous(&[i64::MAX], i8).unwrap();
+    let stride = MovementMetadata::affine(&huge, &[2], &[], MovementOp::Stride).unwrap();
+    let last = stride.count().get() - 1;
+    assert_eq!(c_projection(stride.projection(), last), i64::MAX - 1);
+    // A step larger than its axis leaves one coordinate; its product with the
+    // axis stride is unobservable and must not be evaluated.
+    let wide = ShapeMetadata::contiguous(&[3, i64::MAX / 4], i8).unwrap();
+    let sparse = MovementMetadata::affine(&wide, &[i64::MAX, 1], &[], MovementOp::Stride).unwrap();
+    assert_eq!(sparse.result().shape(), &[1, i64::MAX / 4]);
+    assert_eq!(sparse.projection().terms()[0].scale, 0);
+    let whole = WindowMetadata::new(&huge, &[i64::MAX], &[1]).unwrap();
+    assert_eq!(
+        c_projection(whole.projection(ProjectionPart::Leaf), i64::MAX - 1),
+        i64::MAX - 1
+    );
+    let reduction = ReductionMetadata::new(&[i64::MAX], &[0], RuntimeDType::I64).unwrap();
+    assert_eq!(
+        c_projection(reduction.projection(ProjectionPart::Leaf), i64::MAX - 1),
+        i64::MAX - 1
+    );
+    // Empty domains never form a stride product.
+    let empty =
+        ReductionMetadata::new(&[0, i64::MAX, i64::MAX], &[2, 1], RuntimeDType::I64).unwrap();
+    for part in [ProjectionPart::Group, ProjectionPart::Leaf] {
+        assert!(empty
+            .projection(part)
+            .terms()
+            .iter()
+            .all(|t| t.divisor == 1 && t.scale == 0));
+    }
+    let empty_window = WindowMetadata::new(
+        &ShapeMetadata::contiguous(&[0, i64::MAX], i8).unwrap(),
+        &[i64::MAX],
+        &[1],
+    )
+    .unwrap();
+    assert_eq!(
+        empty_window.projection(ProjectionPart::Leaf).terms()[0].modulus,
+        i64::MAX
+    );
 }

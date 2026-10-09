@@ -1331,6 +1331,9 @@ fn checked_c_reduction_nontrailing_kernels_execute_under_sanitizers() {
         let output = dag.add_node(decl, op, vec![input], ty(&[2, 2], precision), None);
         dag.add_root(output);
         let generated = codegen(&dag, "checked_reduce").unwrap();
+        // The plan's checked projection is read once; no element calls back.
+        assert!(generated.c_source.contains("chelis_reduction_term("));
+        assert!(!generated.c_source.contains("chelis_reduction_index("));
         let native = if precision == Prim::Int64 {
             "int64_t"
         } else {
@@ -1566,7 +1569,9 @@ fn checked_c_movement_permute_and_expand_preserve_bits_under_sanitizers() {
                 format!("CHECKED MOVEMENT PASS {case_index}")
             };
             let generated = codegen(&dag, &function_name).unwrap();
-            assert!(generated.c_source.contains("chelis_movement_index("));
+            // The plan's checked projection is read once; no element calls back.
+            assert!(generated.c_source.contains("chelis_movement_base("));
+            assert!(!generated.c_source.contains("chelis_movement_index("));
             assert!(generated.c_source.contains("chelis_movement_plan_release("));
             let spell = |values: &[usize]| {
                 if values.is_empty() {
@@ -1687,11 +1692,12 @@ void {function_name}(chelis_tensor **, int, chelis_tensor **, int);
                 );
             }
             if prim == Prim::Int64 && input_shape == &[2, 3] {
-                let anchor = "chelis_movement_index(t1_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i))";
+                let anchor = "const int64_t src = t1_o1;";
                 assert!(generated.c_source.contains(anchor));
-                let mutant = generated
-                    .c_source
-                    .replace(anchor, "0 /* unchecked coordinate bypass */");
+                let mutant = generated.c_source.replace(
+                    anchor,
+                    "const int64_t src = 0; /* unchecked coordinate bypass */",
+                );
                 let run = checked_indexing_run(&mutant, &harness);
                 assert_eq!(
                     run.status.code(),

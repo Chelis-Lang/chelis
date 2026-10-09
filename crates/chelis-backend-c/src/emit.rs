@@ -116,6 +116,9 @@ pub struct CEmitter {
     /// nothing, so each operand element it reads takes a value its checks
     /// accept ([`chelis_ir::dag::DagNode::inactive_operand`]).
     gate: Option<ActivationGate>,
+    /// Per reduction or window node, the group and leaf ranks of the plan
+    /// projection whose terms [`CEmitter::emit_projection_terms`] declared.
+    projection_ranks: BTreeMap<usize, (usize, usize)>,
 }
 
 /// A claim-sized node emitted inside its activation's branch
@@ -511,6 +514,7 @@ impl CEmitter {
                 })
                 .collect(),
             claimed_extents,
+            projection_ranks: BTreeMap::new(),
             inactive_zeros: None,
             literal_result_witness_requirements: dag
                 .nodes()
@@ -6150,13 +6154,15 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for ({index} t{id}_batch = 0; t{id}_batch < t{id}_batch_count; ++t{id}_batch) {{"
         ));
         self.indent += 1;
+        // Each batch's matrix is one contiguous row-major run: the checked
+        // index of its first element locates every element.
         for (name, source, part) in [("af", a, "LEFT"), ("bf", b, "RIGHT")] {
+            self.line(&format!("{index} t{id}_{name}_offset = chelis_matmul_index(t{id}_matmul, CHELIS_MATMUL_{part}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_batch), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));"));
             self.line(&format!(
                 "for ({index} t{id}_i = 0; t{id}_i < t{id}_{name}_count; ++t{id}_i) {{"
             ));
             self.indent += 1;
-            self.line(&format!("{index} t{id}_source = chelis_matmul_index(t{id}_matmul, CHELIS_MATMUL_{part}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_batch), chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i));"));
-            self.line(&format!("t{id}_{name}[t{id}_i] = {to_f32}(((const {operand}*)t{source}_data)[t{id}_source]);"));
+            self.line(&format!("t{id}_{name}[t{id}_i] = {to_f32}(((const {operand}*)t{source}_data)[t{id}_{name}_offset + t{id}_i]);"));
             self.indent -= 1;
             self.line("}");
         }
@@ -6169,13 +6175,13 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, (chelis_blas_integer)t{id}_m, (chelis_blas_integer)t{id}_n, (chelis_blas_integer)t{id}_k, 1.0f, t{id}_af, (chelis_blas_integer)t{id}_k, t{id}_bf, (chelis_blas_integer)t{id}_n, 0.0f, {output}, (chelis_blas_integer)t{id}_n);"));
         if output_reduced {
             let from_f32 = Self::f32_to_reduced_fn(ty.precision);
+            self.line(&format!("{index} t{id}_out_offset = chelis_matmul_index(t{id}_matmul, CHELIS_MATMUL_RESULT, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_batch), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));"));
             self.line(&format!(
                 "for ({index} t{id}_i = 0; t{id}_i < t{id}_cf_count; ++t{id}_i) {{"
             ));
             self.indent += 1;
-            self.line(&format!("{index} t{id}_destination = chelis_matmul_index(t{id}_matmul, CHELIS_MATMUL_RESULT, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_batch), chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i));"));
             self.line(&format!(
-                "(({element}*)t{id}_data)[t{id}_destination] = {from_f32}(t{id}_cf[t{id}_i]);"
+                "(({element}*)t{id}_data)[t{id}_out_offset + t{id}_i] = {from_f32}(t{id}_cf[t{id}_i]);"
             ));
             self.indent -= 1;
             self.line("}");
@@ -6443,6 +6449,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!(
             "{index_type} t{id}_leaf_count = chelis_reduction_count(t{id}_reduction);"
         ));
+        self.emit_projection_terms(
+            id,
+            &format!("chelis_reduction_term(t{id}_reduction, "),
+            output_ty.dims.len(),
+            axes.len(),
+        );
         if scratch {
             self.line(&format!(
                 "chelis_reduction_check_scratch(t{id}_reduction, {exemplar});"
@@ -6504,7 +6516,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for (int64_t __r_{id} = 0; __r_{id} < __count_n_{id}; __r_{id}++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t __src_{id} = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__r_{id}));"));
+        self.line(&format!(
+            "int64_t __src_{id} = {};",
+            self.projection_index(id, "outer", &format!("__r_{id}"))
+        ));
         self.line(&format!(
             "uint8_t __bit_{id} = __count_in_{id}[__src_{id}];"
         ));
@@ -6909,7 +6924,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for (int64_t __reduce_i = 0; __reduce_i < __sum_n_{id}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
+        self.line(&format!(
+            "int64_t src_idx = {};",
+            self.projection_index(id, "outer", "__reduce_i")
+        ));
         let native = format!("((const {operand_et}*)t{a}_data)[src_idx]");
         let load = if matches!(input_ty.precision, Prim::Bf16 | Prim::F16) {
             format!("{}({native})", Self::reduced_to_f32_fn(input_ty.precision))
@@ -7047,7 +7065,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for (int64_t __reduce_i = 0; __reduce_i < t{id}_leaf_count; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
+        self.line(&format!(
+            "int64_t src_idx = {};",
+            self.projection_index(id, "outer", "__reduce_i")
+        ));
         self.line(&format!("{arithmetic_et} candidate = {};", load("src_idx")));
         let replace = if prim.is_float() {
             format!(
@@ -7168,7 +7189,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
+        self.line(&format!(
+            "int64_t src_idx = {};",
+            self.projection_index(id, "outer", "__reduce_i")
+        ));
         let update = update_tmpl.replace("{a}", &a.to_string());
         self.line(&update);
         self.indent -= 1;
@@ -7249,6 +7273,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!(
             "{index} t{id}_window_count = chelis_window_count(t{id}_window);"
         ));
+        self.emit_projection_terms(
+            id,
+            &format!("chelis_window_term(t{id}_window, "),
+            rank,
+            count,
+        );
         Ok(())
     }
 
@@ -7413,7 +7443,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
             ));
             self.indent += 1;
-            self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+            self.line(&format!(
+                "int64_t src_idx = {};",
+                self.projection_index(id, "outer", "leaf")
+            ));
             self.line(&format!("{arithmetic_et} candidate = {};", load("src_idx")));
             let replace = if prim.is_float() {
                 format!(
@@ -7448,7 +7481,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
             ));
             self.indent += 1;
-            self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+            self.line(&format!(
+                "int64_t src_idx = {};",
+                self.projection_index(id, "outer", "leaf")
+            ));
             self.line(&format!(
                 "level[leaf] = ({arithmetic_et})({});",
                 load("src_idx")
@@ -7620,7 +7656,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+        self.line(&format!(
+            "int64_t src_idx = {};",
+            self.projection_index(id, "outer", "leaf")
+        ));
         self.line("if (src_idx == dst_idx) in_window = 1;");
         self.indent -= 1;
         self.line("}");
@@ -7646,7 +7685,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
                 ));
                 self.indent += 1;
-                self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+                self.line(&format!(
+                    "int64_t src_idx = {};",
+                    self.projection_index(id, "outer", "leaf")
+                ));
                 self.line(&format!(
                     "{arithmetic_et} candidate = {};",
                     load_x("src_idx")
@@ -7676,7 +7718,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
                 ));
                 self.indent += 1;
-                self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+                self.line(&format!(
+                    "int64_t src_idx = {};",
+                    self.projection_index(id, "outer", "leaf")
+                ));
                 self.line(&format!(
                     "if ({} == best_value) tie_count++;",
                     load_x("src_idx")
@@ -7800,7 +7845,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for (int64_t __reduce_i = 0; __reduce_i < t{id}_leaf_count; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
+        self.line(&format!(
+            "int64_t src_idx = {};",
+            self.projection_index(id, "outer", "__reduce_i")
+        ));
         self.line(&format!("{arithmetic_et} candidate = {};", load("src_idx")));
         let replace = if prim.is_float() {
             format!(
@@ -7945,7 +7993,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t source_index = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
+        self.line(&format!(
+            "int64_t source_index = {};",
+            self.projection_index(id, "outer", "__reduce_i")
+        ));
         for (ext_idx, ext_node) in ext_inputs.iter().enumerate() {
             let ext_id = ext_node.0;
             self.line(&format!(
@@ -8173,16 +8224,13 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_tensor_permute_plan(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), t{id}_axes);", axes.len()));
         self.line(&format!("chelis_movement_check_target(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {});", Self::ndim(ty), Self::tagged_shape_literal(ty)));
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!(
-            "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!("int64_t src = chelis_movement_index(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i));"));
-        self.line(&format!(
-            "(({elem_type}*)t{id}_data)[i] = ((const {elem_type}*)t{a}_data)[src];"
-        ));
-        self.indent -= 1;
-        self.line("}");
+        let rank = ty.dims.len();
+        self.emit_movement_loop(
+            id,
+            rank,
+            "src",
+            &format!("(({elem_type}*)t{id}_data)[i] = ((const {elem_type}*)t{a}_data)[src];"),
+        );
         self.line(&format!("chelis_movement_plan_release(t{id}_movement);"));
     }
 
@@ -8234,16 +8282,13 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_tensor_expand_plan(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, ({extent})), {operation});"));
         self.line(&format!("chelis_movement_check_target(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {});", Self::ndim(ty), Self::tagged_shape_literal(ty)));
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!(
-            "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!("int64_t src = chelis_movement_index(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i));"));
-        self.line(&format!(
-            "(({elem_type}*)t{id}_data)[i] = ((const {elem_type}*)t{a}_data)[src];"
-        ));
-        self.indent -= 1;
-        self.line("}");
+        let rank = ty.dims.len();
+        self.emit_movement_loop(
+            id,
+            rank,
+            "src",
+            &format!("(({elem_type}*)t{id}_data)[i] = ((const {elem_type}*)t{a}_data)[src];"),
+        );
         self.line(&format!("chelis_movement_plan_release(t{id}_movement);"));
     }
 
@@ -8660,6 +8705,117 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         ));
     }
 
+    /// [05-OP-33] Visit a movement plan's counted domain in row-major order,
+    /// binding position `i` and its projected index `index` for `body`. The
+    /// plan's projection is read once: construction proved every reachable
+    /// projected index inside the other side, so the nested loops carry plain
+    /// affine offsets and make no per-element runtime call.
+    fn emit_movement_loop(&mut self, id: usize, rank: usize, index: &str, body: &str) {
+        let index_type = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        let term = |field: &str, axis: usize| {
+            format!(
+                "chelis_movement_term(t{id}_movement, CHELIS_PROJECTION_{field}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))"
+            )
+        };
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!(
+            "const {index_type} t{id}_base = chelis_movement_base(t{id}_movement);"
+        ));
+        for axis in 0..rank {
+            self.line(&format!(
+                "const {index_type} t{id}_extent{axis} = {};",
+                term("MODULUS", axis)
+            ));
+            self.line(&format!(
+                "const {index_type} t{id}_scale{axis} = {};",
+                term("SCALE", axis)
+            ));
+        }
+        self.line(&format!("{index_type} i = 0;"));
+        let mut offset = format!("t{id}_base");
+        for axis in 0..rank {
+            self.line(&format!(
+                "for ({index_type} t{id}_c{axis} = 0; t{id}_c{axis} < t{id}_extent{axis}; t{id}_c{axis}++) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "const {index_type} t{id}_o{axis} = {offset} + t{id}_c{axis} * t{id}_scale{axis};"
+            ));
+            offset = format!("t{id}_o{axis}");
+        }
+        self.line(&format!("const {index_type} {index} = {offset};"));
+        self.line(body);
+        self.line("i++;");
+        for _ in 0..rank {
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// [05-OP-33] Read a reduction or window plan's checked group and leaf
+    /// projection terms once, before its loops. `term` is the accessor call
+    /// up to its part argument. Construction proved every reachable offset
+    /// inside the source, so the loops index it through
+    /// [`Self::projection_index`] with no per-element runtime call.
+    fn emit_projection_terms(&mut self, id: usize, term: &str, group: usize, leaf: usize) {
+        let index_type = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        for (part, prefix, rank) in [("GROUP", "g", group), ("LEAF", "l", leaf)] {
+            for k in 0..rank {
+                // The outermost coordinate needs no modulus and the innermost
+                // has divisor one ([`Self::projection_index`]).
+                let mut fields = vec![("scale", "SCALE")];
+                if k + 1 < rank {
+                    fields.push(("divisor", "DIVISOR"));
+                }
+                if k > 0 {
+                    fields.push(("modulus", "MODULUS"));
+                }
+                for (name, field) in fields {
+                    self.line(&format!("const {index_type} t{id}_{prefix}{k}_{name} = {term}CHELIS_PROJECTION_{part}, CHELIS_PROJECTION_{field}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {k}));"));
+                }
+            }
+        }
+        self.projection_ranks.insert(id, (group, leaf));
+    }
+
+    /// The source index of reachable result group `group` and leaf `leaf`
+    /// from the terms [`Self::emit_projection_terms`] declared: each term
+    /// adds its row-major coordinate times its scale.
+    fn projection_index(&self, id: usize, group: &str, leaf: &str) -> String {
+        let (group_rank, leaf_rank) = self.projection_ranks[&id];
+        let part = |prefix: &str, rank: usize, position: &str| {
+            (0..rank)
+                .map(|k| {
+                    let name = format!("t{id}_{prefix}{k}");
+                    let coordinate = match (k == 0, k + 1 == rank) {
+                        (true, true) => position.to_string(),
+                        (true, false) => format!("({position} / {name}_divisor)"),
+                        (false, true) => format!("({position} % {name}_modulus)"),
+                        (false, false) => {
+                            format!("(({position} / {name}_divisor) % {name}_modulus)")
+                        }
+                    };
+                    format!("{coordinate} * {name}_scale")
+                })
+                .collect::<Vec<_>>()
+        };
+        let terms = [part("g", group_rank, group), part("l", leaf_rank, leaf)].concat();
+        if terms.is_empty() {
+            "0".into()
+        } else {
+            terms.join(" + ")
+        }
+    }
+
     /// Materialize canonical bound scalars before allocation can repurpose a source.
     fn emit_affine_bounds(&mut self, name: &str, expressions: &[String]) {
         let values = expressions
@@ -8850,18 +9006,16 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits({dtype}, {literal}));"
             )
         };
+        // Padding counts its source, which has the result's rank.
+        let rank = ty.dims.len();
         self.emit_movement_copy(id, |emitter| {
             emitter.line(&fill);
-            emitter.line(&format!(
-                "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
-            ));
-            emitter.indent += 1;
-            emitter.line(&format!("int64_t dst = chelis_movement_index(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i));"));
-            emitter.line(&format!(
-                "(({et}*)t{id}_data)[dst] = ((const {et}*)t{a}_data)[i];"
-            ));
-            emitter.indent -= 1;
-            emitter.line("}");
+            emitter.emit_movement_loop(
+                id,
+                rank,
+                "dst",
+                &format!("(({et}*)t{id}_data)[dst] = ((const {et}*)t{a}_data)[i];"),
+            );
         });
     }
 
@@ -8913,17 +9067,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // errors: equal endpoints select an empty axis (chelis#1795), and the
         // plan above traps an inverted or overshooting range.
         self.emit_slot_wrapper(id, ty);
+        let rank = ty.dims.len();
         self.emit_movement_copy(id, |emitter| {
-            emitter.line(&format!(
-                "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
-            ));
-            emitter.indent += 1;
-            emitter.line(&format!("int64_t src = chelis_movement_index(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i));"));
-            emitter.line(&format!(
-                "(({et}*)t{id}_data)[i] = ((const {et}*)t{a}_data)[src];"
-            ));
-            emitter.indent -= 1;
-            emitter.line("}");
+            emitter.emit_movement_loop(
+                id,
+                rank,
+                "src",
+                &format!("(({et}*)t{id}_data)[i] = ((const {et}*)t{a}_data)[src];"),
+            );
         });
     }
 
@@ -8945,17 +9096,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.emit_affine_bounds(&format!("t{id}_steps"), &steps);
         self.emit_affine_plan(id, a, ty, "stride", &format!("t{id}_steps, NULL"));
         self.emit_slot_wrapper(id, ty);
+        let rank = ty.dims.len();
         self.emit_movement_copy(id, |emitter| {
-            emitter.line(&format!(
-                "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
-            ));
-            emitter.indent += 1;
-            emitter.line(&format!("int64_t src = chelis_movement_index(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i));"));
-            emitter.line(&format!(
-                "(({et}*)t{id}_data)[i] = ((const {et}*)t{a}_data)[src];"
-            ));
-            emitter.indent -= 1;
-            emitter.line("}");
+            emitter.emit_movement_loop(
+                id,
+                rank,
+                "src",
+                &format!("(({et}*)t{id}_data)[i] = ((const {et}*)t{a}_data)[src];"),
+            );
         });
     }
 
@@ -10226,7 +10374,8 @@ mod tests {
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_tensor_permute_plan(t0,"));
-        assert!(c.contains("chelis_movement_index(t1_movement,"));
+        assert!(c.contains("chelis_movement_term(t1_movement, CHELIS_PROJECTION_SCALE"));
+        assert!(!c.contains("chelis_movement_index("));
         assert!(c.contains("t1_axes[2] = { chelis_scalar_from_bits(CHELIS_DTYPE_I64, (1)), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (0)) }"));
         assert!(!c.contains("t1->strides[0] ="));
     }
@@ -10255,7 +10404,8 @@ mod tests {
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_tensor_expand_plan(t0,"));
         assert!(c.contains("CHELIS_MOVEMENT_EXPAND"));
-        assert!(c.contains("chelis_movement_index(t1_movement,"));
+        assert!(c.contains("chelis_movement_term(t1_movement, CHELIS_PROJECTION_SCALE"));
+        assert!(!c.contains("chelis_movement_index("));
         assert!(!c.contains("t1->strides[0] ="));
     }
 
@@ -10647,7 +10797,8 @@ mod tests {
         assert!(c.contains(
             "chelis_fill_scalar(t1_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F32,"
         ));
-        assert!(c.contains("chelis_movement_index(t1_movement,"));
+        assert!(c.contains("chelis_movement_term(t1_movement, CHELIS_PROJECTION_SCALE"));
+        assert!(!c.contains("chelis_movement_index("));
     }
 
     #[test]
@@ -10671,7 +10822,8 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_movement_index(t1_movement,"));
+        assert!(c.contains("chelis_movement_term(t1_movement, CHELIS_PROJECTION_SCALE"));
+        assert!(!c.contains("chelis_movement_index("));
     }
 
     /// chelis#368: the `SHRINK_TO_END` full-axis sentinel is an eval-lane
@@ -10724,7 +10876,8 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_movement_index(t1_movement,"));
+        assert!(c.contains("chelis_movement_term(t1_movement, CHELIS_PROJECTION_SCALE"));
+        assert!(!c.contains("chelis_movement_index("));
         assert!(!c.contains("t1->strides[0] ="));
     }
 

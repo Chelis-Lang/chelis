@@ -193,13 +193,136 @@ pub struct IterationSpace {
     elements: ElementCount,
 }
 
-/// One checked row-major axis projection; no tensor data or per-index scratch.
-struct AxisProjection {
-    divisor: i64,
-    modulus: i64,
-    offset: i64,
-    step: i64,
-    stride: i64,
+/// One row-major term of an [`AffineProjection`]: a domain position `p`
+/// contributes `((p / divisor) % modulus) * scale`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProjectionTerm {
+    pub divisor: i64,
+    pub modulus: i64,
+    pub scale: i64,
+}
+
+/// The two iteration domains of a grouped plan: the result group and the
+/// leaf within it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectionPart {
+    Group,
+    Leaf,
+}
+
+/// The checked affine map from a row-major iteration domain to a target
+/// index, with one term per domain axis: `base + sum(term contributions)`.
+/// Every modulus is its axis extent. Construction proves that every
+/// reachable position's index, and every partial sum of it, lies in
+/// `[0, span]`, so a caller that visits only reachable positions needs no
+/// per-position check. An empty domain has no reachable position; its terms
+/// have divisor one and scale zero, and its base is zero.
+#[derive(Clone, Debug)]
+pub struct AffineProjection {
+    base: i64,
+    terms: Box<[ProjectionTerm]>,
+}
+
+impl AffineProjection {
+    /// `extents` is the domain shape. `scale(axis)` is the target offset of
+    /// one step along a non-unit axis and `base()` the offset of position
+    /// zero; neither is evaluated for an empty domain.
+    fn new(
+        extents: &[i64],
+        reachable: bool,
+        mut scale: impl FnMut(usize) -> Result<i64, MetadataError>,
+        base: impl FnOnce() -> Result<i64, MetadataError>,
+    ) -> Result<Self, MetadataError> {
+        let count = ElementCount::scratch_entries(extents.len(), 0)?;
+        let mut terms = Vec::with_capacity(count.scratch_len::<ProjectionTerm>()?);
+        if !reachable {
+            terms.extend(extents.iter().map(|&modulus| ProjectionTerm {
+                divisor: 1,
+                modulus,
+                scale: 0,
+            }));
+            return Ok(Self {
+                base: 0,
+                terms: terms.into(),
+            });
+        }
+        let mut divisor = 1_i64;
+        for axis in (0..extents.len()).rev() {
+            // A unit axis has only coordinate zero, so its step is unobservable.
+            let step = if extents[axis] > 1 { scale(axis)? } else { 0 };
+            if step < 0 {
+                return Err(MetadataError::Domain("negative projection scale".into()));
+            }
+            terms.push(ProjectionTerm {
+                divisor,
+                modulus: extents[axis],
+                scale: step,
+            });
+            divisor = divisor
+                .checked_mul(extents[axis])
+                .ok_or(MetadataError::Overflow("projection divisor exceeds i64"))?;
+        }
+        terms.reverse();
+        let base = base()?;
+        if base < 0 {
+            return Err(MetadataError::Domain("negative projection base".into()));
+        }
+        let projection = Self {
+            base,
+            terms: terms.into(),
+        };
+        projection.span()?;
+        Ok(projection)
+    }
+    /// The largest index any position reaches. Every term is nonnegative, so
+    /// this also bounds every partial sum.
+    pub fn span(&self) -> Result<i64, MetadataError> {
+        self.terms.iter().try_fold(self.base, |sum, term| {
+            (term.modulus - 1)
+                .checked_mul(term.scale)
+                .and_then(|part| sum.checked_add(part))
+                .ok_or(MetadataError::Overflow("projection span exceeds i64"))
+        })
+    }
+    pub fn base(&self) -> i64 {
+        self.base
+    }
+    pub fn terms(&self) -> &[ProjectionTerm] {
+        &self.terms
+    }
+    /// The index of a position its owner has checked is reachable.
+    fn apply(&self, position: i64) -> Result<i64, MetadataError> {
+        self.terms.iter().try_fold(self.base, |sum, term| {
+            position
+                .checked_div(term.divisor)
+                .and_then(|n| n.checked_rem(term.modulus))
+                .and_then(|n| n.checked_mul(term.scale))
+                .and_then(|n| sum.checked_add(n))
+                .ok_or(MetadataError::Overflow("projection index exceeds i64"))
+        })
+    }
+}
+
+/// Require the summed projections of a reachable domain to stay inside a
+/// target of `elements` positions.
+fn require_within(
+    projections: &[&AffineProjection],
+    elements: ElementCount,
+    reachable: bool,
+) -> Result<(), MetadataError> {
+    if !reachable {
+        return Ok(());
+    }
+    let span = projections.iter().try_fold(0_i64, |sum, projection| {
+        sum.checked_add(projection.span()?)
+            .ok_or(MetadataError::Overflow("projection span exceeds i64"))
+    })?;
+    if span >= elements.get() {
+        return Err(MetadataError::Domain(
+            "projection reaches outside its target".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -212,10 +335,13 @@ pub enum MovementOp {
 pub struct MovementMetadata {
     input: ShapeMetadata,
     result: ShapeMetadata,
-    projection: Box<[AxisProjection]>,
+    projection: AffineProjection,
     source_domain: bool,
 }
 impl MovementMetadata {
+    /// Each `(domain_axis, target_axis, offset, step)` maps a domain
+    /// coordinate `c` to target coordinate `c * step + offset`; a domain axis
+    /// with no entry is broadcast and moves no target coordinate.
     fn build(
         input: &ShapeMetadata,
         result: ShapeMetadata,
@@ -228,30 +354,49 @@ impl MovementMetadata {
         } else {
             (&result, input)
         };
-        let count = ElementCount::scratch_entries(domain.shape().len(), 0)?;
-        let mut projection = Vec::with_capacity(count.scratch_len::<AxisProjection>()?);
+        let rank = domain.shape().len();
+        let count = ElementCount::scratch_entries(rank, 0)?;
+        let mut entries: Vec<Option<(i64, i64, i64)>> =
+            Vec::with_capacity(count.scratch_len::<Option<(i64, i64, i64)>>()?);
+        entries.resize(rank, None);
         for (domain_axis, target_axis, offset, step) in axes {
-            if projection.len() >= domain.shape().len()
-                || domain_axis >= domain.shape().len()
+            if domain_axis >= rank
                 || target_axis >= target.shape().len()
+                || entries[domain_axis].is_some()
             {
                 return Err(MetadataError::Domain(
                     "movement projection rank mismatch".into(),
                 ));
             }
-            // The checked capacity cannot grow through this construction path.
-            projection.push(AxisProjection {
-                divisor: domain.strides()[domain_axis],
-                modulus: domain.shape()[domain_axis],
-                offset,
-                step,
-                stride: target.strides()[target_axis],
-            });
+            entries[domain_axis] = Some((offset, step, target.strides()[target_axis]));
         }
+        let reachable = domain.elements().get() != 0;
+        let projection = AffineProjection::new(
+            domain.shape(),
+            reachable,
+            |axis| {
+                entries[axis].map_or(Ok(0), |(_, step, stride)| {
+                    step.checked_mul(stride)
+                        .ok_or(MetadataError::Overflow("movement projection exceeds i64"))
+                })
+            },
+            || {
+                entries
+                    .iter()
+                    .flatten()
+                    .try_fold(0_i64, |base, &(offset, _, stride)| {
+                        offset
+                            .checked_mul(stride)
+                            .and_then(|n| base.checked_add(n))
+                            .ok_or(MetadataError::Overflow("movement projection exceeds i64"))
+                    })
+            },
+        )?;
+        require_within(&[&projection], target.elements(), reachable)?;
         Ok(Self {
             input: input.clone(),
             result,
-            projection: projection.into(),
+            projection,
             source_domain,
         })
     }
@@ -357,20 +502,14 @@ impl MovementMetadata {
             (&self.result, &self.input)
         };
         domain.require_index(linear)?;
-        let mut flat = 0_i64;
-        for axis in &self.projection {
-            let coordinate = linear
-                .checked_div(axis.divisor)
-                .and_then(|n| n.checked_rem(axis.modulus))
-                .and_then(|n| n.checked_mul(axis.step))
-                .and_then(|n| n.checked_add(axis.offset))
-                .and_then(|n| n.checked_mul(axis.stride))
-                .and_then(|n| flat.checked_add(n))
-                .ok_or(MetadataError::Overflow("movement projection exceeds i64"))?;
-            flat = coordinate;
-        }
+        let flat = self.projection.apply(linear)?;
         target.require_index(flat)?;
         Ok(flat)
+    }
+    /// The checked projection over the counted domain, which construction
+    /// proved stays inside the other side.
+    pub fn projection(&self) -> &AffineProjection {
+        &self.projection
     }
 }
 
@@ -378,10 +517,9 @@ impl MovementMetadata {
 pub struct WindowMetadata {
     input: ShapeMetadata,
     result: ShapeMetadata,
-    window: Box<[i64]>,
-    steps: Box<[i64]>,
-    leading: usize,
     count: ElementCount,
+    group: AffineProjection,
+    leaf: AffineProjection,
 }
 
 impl WindowMetadata {
@@ -413,18 +551,51 @@ impl WindowMetadata {
         }
         let result = ShapeMetadata::contiguous(&shape, input.dtype())?;
         result.bytes().allocation()?;
-        let count = ElementCount::from_extents(if result.elements().get() == 0 {
-            &[0]
-        } else {
-            window
-        })?;
+        let reachable = result.elements().get() != 0;
+        let count = ElementCount::from_extents(if reachable { window } else { &[0] })?;
+        if reachable {
+            for (i, (&w, &advance)) in window.iter().zip(steps).enumerate() {
+                let axis = leading + i;
+                // The last window's last coordinate stays on its own source axis.
+                let last = (result.shape()[axis] - 1)
+                    .checked_mul(advance)
+                    .and_then(|n| n.checked_add(w - 1))
+                    .ok_or(MetadataError::Overflow("window coordinate exceeds i64"))?;
+                if last >= input.shape()[axis] {
+                    return Err(MetadataError::Domain(
+                        "window coordinate outside source".into(),
+                    ));
+                }
+            }
+        }
+        let stride = |axis: usize| input.strides()[axis];
+        let group = AffineProjection::new(
+            result.shape(),
+            reachable,
+            |axis| {
+                if axis < leading {
+                    Ok(stride(axis))
+                } else {
+                    steps[axis - leading]
+                        .checked_mul(stride(axis))
+                        .ok_or(MetadataError::Overflow("window index exceeds i64"))
+                }
+            },
+            || Ok(0),
+        )?;
+        let leaf = AffineProjection::new(
+            window,
+            reachable,
+            |axis| Ok(stride(leading + axis)),
+            || Ok(0),
+        )?;
+        require_within(&[&group, &leaf], input.elements(), reachable)?;
         Ok(Self {
             input: input.clone(),
             result,
-            window: window.into(),
-            steps: steps.into(),
-            leading,
             count,
+            group,
+            leaf,
         })
     }
     pub fn input(&self) -> &ShapeMetadata {
@@ -443,35 +614,21 @@ impl WindowMetadata {
                 "window leaf outside iteration domain".into(),
             ));
         }
-        let mut group_remaining = group;
-        let mut leaf_remaining = leaf;
-        let mut source_index = 0_i64;
-        for axis in (0..self.input.shape().len()).rev() {
-            let coordinate = group_remaining % self.result.shape()[axis];
-            group_remaining /= self.result.shape()[axis];
-            let coordinate = if axis < self.leading {
-                coordinate
-            } else {
-                let window_axis = axis - self.leading;
-                let offset = leaf_remaining % self.window[window_axis];
-                leaf_remaining /= self.window[window_axis];
-                coordinate
-                    .checked_mul(self.steps[window_axis])
-                    .and_then(|n| n.checked_add(offset))
-                    .ok_or(MetadataError::Overflow("window coordinate exceeds i64"))?
-            };
-            if coordinate >= self.input.shape()[axis] {
-                return Err(MetadataError::Domain(
-                    "window coordinate outside source".into(),
-                ));
-            }
-            source_index = coordinate
-                .checked_mul(self.input.strides()[axis])
-                .and_then(|n| source_index.checked_add(n))
-                .ok_or(MetadataError::Overflow("window index exceeds i64"))?;
-        }
+        let source_index = self
+            .group
+            .apply(group)?
+            .checked_add(self.leaf.apply(leaf)?)
+            .ok_or(MetadataError::Overflow("window index exceeds i64"))?;
         self.input.require_index(source_index)?;
         Ok(source_index)
+    }
+    /// The checked result-group and window-leaf projections whose sum indexes
+    /// the source; construction proved every reachable sum inside it.
+    pub fn projection(&self, part: ProjectionPart) -> &AffineProjection {
+        match part {
+            ProjectionPart::Group => &self.group,
+            ProjectionPart::Leaf => &self.leaf,
+        }
     }
 }
 
@@ -757,10 +914,10 @@ impl SparseMetadata {
 
 /// Checked reduction grouping, independent of input payload storage and lifetime.
 pub struct ReductionMetadata {
-    input: IterationSpace,
-    selected: Box<[bool]>,
     result: ShapeMetadata,
     leaves: ElementCount,
+    group: AffineProjection,
+    leaf: AffineProjection,
 }
 
 impl ReductionMetadata {
@@ -803,21 +960,47 @@ impl ReductionMetadata {
         let result = ShapeMetadata::contiguous(&output, dtype)?;
         result.bytes().allocation()?;
         // No output group can observe the selected domain when the result is empty.
+        let extents: Vec<_> = shape
+            .iter()
+            .zip(&selected)
+            .filter_map(|(&n, &selected)| selected.then_some(n))
+            .collect();
         let leaves = if result.elements().get() == 0 {
             ElementCount::from_extents(&[0])?
         } else {
-            let extents: Vec<_> = shape
-                .iter()
-                .zip(&selected)
-                .filter_map(|(&n, &selected)| selected.then_some(n))
-                .collect();
             ElementCount::from_extents(&extents)?
         };
+        // A reachable position exists only when both domains are nonempty; the
+        // input count is then their nonzero product, so every suffix stride fits.
+        let reachable = leaves.get() != 0;
+        let mut strides = vec![0_i64; shape.len()];
+        if reachable {
+            let mut stride = 1_i64;
+            for (slot, &extent) in strides.iter_mut().zip(shape).rev() {
+                *slot = stride;
+                stride = stride
+                    .checked_mul(extent)
+                    .ok_or(MetadataError::Overflow("reduction stride exceeds i64"))?;
+            }
+        }
+        let part = |keep: bool| -> Vec<i64> {
+            strides
+                .iter()
+                .zip(&selected)
+                .filter_map(|(&stride, &selected)| (selected != keep).then_some(stride))
+                .collect()
+        };
+        let (group_strides, leaf_strides) = (part(true), part(false));
+        let group =
+            AffineProjection::new(&output, reachable, |axis| Ok(group_strides[axis]), || Ok(0))?;
+        let leaf =
+            AffineProjection::new(&extents, reachable, |axis| Ok(leaf_strides[axis]), || Ok(0))?;
+        require_within(&[&group, &leaf], input.elements(), reachable)?;
         Ok(Self {
-            input,
-            selected: selected.into(),
             result,
             leaves,
+            group,
+            leaf,
         })
     }
     pub fn result(&self) -> &ShapeMetadata {
@@ -829,7 +1012,7 @@ impl ReductionMetadata {
     pub fn extent(&self, axis: i64) -> Result<i64, MetadataError> {
         Ok(self.result.shape()[self.result.normalize_axis(axis)?])
     }
-    pub fn index(&self, mut outer: i64, mut leaf: i64) -> Result<i64, MetadataError> {
+    pub fn index(&self, outer: i64, leaf: i64) -> Result<i64, MetadataError> {
         if outer < 0
             || outer >= self.result.elements().get()
             || leaf < 0
@@ -839,21 +1022,19 @@ impl ReductionMetadata {
                 "reduction index outside group or leaf domain".into(),
             ));
         }
-        let mut index = 0_i64;
-        let mut stride = 1_i64;
-        for (&extent, &selected) in self.input.shape.iter().zip(self.selected.iter()).rev() {
-            let remaining = if selected { &mut leaf } else { &mut outer };
-            let coordinate = *remaining % extent;
-            *remaining /= extent;
-            index = coordinate
-                .checked_mul(stride)
-                .and_then(|n| index.checked_add(n))
-                .ok_or(MetadataError::Overflow("reduction offset exceeds i64"))?;
-            stride = stride
-                .checked_mul(extent)
-                .ok_or(MetadataError::Overflow("reduction stride exceeds i64"))?;
+        self.group
+            .apply(outer)?
+            .checked_add(self.leaf.apply(leaf)?)
+            .ok_or(MetadataError::Overflow("reduction offset exceeds i64"))
+    }
+    /// The checked result-group and selected-leaf projections whose sum is
+    /// the row-major input index; construction proved every reachable sum
+    /// inside the input.
+    pub fn projection(&self, part: ProjectionPart) -> &AffineProjection {
+        match part {
+            ProjectionPart::Group => &self.group,
+            ProjectionPart::Leaf => &self.leaf,
         }
-        Ok(index)
     }
 }
 

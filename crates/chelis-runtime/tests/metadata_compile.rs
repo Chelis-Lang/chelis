@@ -143,14 +143,24 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
     ));
     for (from, to, witness) in [
         (
-            ".checked_mul(axis.step)",
-            ".checked_mul(0)",
+            "step.checked_mul(stride)",
+            "0_i64.checked_mul(stride)",
             "movement_plans_project_checked_domains_without_coordinate_scratch",
         ),
         (
-            ".checked_add(axis.offset)",
-            ".checked_add(0)",
+            ".and_then(|n| base.checked_add(n))",
+            ".map(|_| base)",
             "movement_plans_project_checked_domains_without_coordinate_scratch",
+        ),
+        (
+            ".and_then(|n| n.checked_rem(term.modulus))",
+            ".and_then(|n| n.checked_rem(i64::MAX))",
+            "movement_plans_project_checked_domains_without_coordinate_scratch",
+        ),
+        (
+            "let step = if extents[axis] > 1 { scale(axis)? } else { 0 };",
+            "let step = scale(axis)?;",
+            "projections_of_extreme_valid_plans_stay_representable",
         ),
         (
             "input.require_permutation(&result, axes)?;",
@@ -158,8 +168,8 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "movement_plans_reject_bad_geometry_and_preserve_rank_zero_empty_and_int64",
         ),
         (
-            ".checked_mul(self.steps[window_axis])",
-            ".checked_mul(0)",
+            "steps[axis - leading]",
+            "1_i64",
             "window_metadata_binds_valid_padding_and_row_major_source_indices",
         ),
         (
@@ -193,8 +203,8 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "reduction_metadata_binds_grouping_to_checked_input_and_result_domains",
         ),
         (
-            "            index = coordinate\n",
-            "            index = 0_i64\n",
+            "(selected != keep)",
+            "(selected == keep)",
             "reduction_metadata_binds_grouping_to_checked_input_and_result_domains",
         ),
         (

@@ -1014,6 +1014,13 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_movement_base ( const chelis_movement_plan * plan ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_movement_count ( const chelis_movement_plan * plan ) ;",
       "flags": [
         "numeric-op"
@@ -1035,6 +1042,13 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_movement_term ( const chelis_movement_plan * plan , chelis_projection_field field , chelis_scalar term ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_reduction_count ( const chelis_reduction_plan * plan ) ;",
       "flags": [
         "numeric-op"
@@ -1050,6 +1064,13 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_reduction_index ( const chelis_reduction_plan * plan , chelis_scalar outer , chelis_scalar leaf ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_reduction_term ( const chelis_reduction_plan * plan , chelis_projection_part part , chelis_projection_field field , chelis_scalar term ) ;",
       "flags": [
         "numeric-op"
       ]
@@ -1169,6 +1190,13 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_window_index ( const chelis_window_plan * plan , chelis_scalar group , chelis_scalar leaf ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_window_term ( const chelis_window_plan * plan , chelis_projection_part part , chelis_projection_field field , chelis_scalar term ) ;",
       "flags": [
         "numeric-op"
       ]
@@ -1500,6 +1528,16 @@
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef enum { CHELIS_MOVEMENT_SOURCE = 0 , CHELIS_MOVEMENT_RESULT = 1 } chelis_movement_side",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef enum { CHELIS_PROJECTION_DIVISOR = 0 , CHELIS_PROJECTION_MODULUS = 1 , CHELIS_PROJECTION_SCALE = 2 } chelis_projection_field",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef enum { CHELIS_PROJECTION_GROUP = 0 , CHELIS_PROJECTION_LEAF = 1 } chelis_projection_part",
       "flags": []
     },
     {

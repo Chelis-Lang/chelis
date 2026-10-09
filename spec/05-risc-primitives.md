@@ -2429,7 +2429,15 @@ exact ADT identity by [05-OP-34].
 > evaluating an irrelevant selected-axis product. An empty selected domain with a
 > nonempty result has zero leaves. `chelis_reduction_index` maps checked result-group
 > and leaf positions to the original row-major input index; either empty domain
-> admits no index. `chelis_reduction_check_target` requires exact result shape,
+> admits no index. `chelis_reduction_term` observes one term of the checked
+> projection selected by the closed `chelis_projection_part`: `GROUP` has one
+> term per result axis and `LEAF` one per selected axis in ascending axis order.
+> Its term and field selection and term values follow `chelis_movement_term`,
+> with base zero: `chelis_reduction_index` of `outer` and `leaf` is the group
+> projection of `outer` plus the leaf projection of `leaf`, and construction
+> checks that every reachable sum, and each partial sum, lies in the input's
+> index range. When either domain is empty, both projections have divisor one
+> and scale zero. `chelis_reduction_check_target` requires exact result shape,
 > including every axis of an empty result. `chelis_reduction_check_scratch` checks
 > leaf-count bytes and target projection at its exact tagged exemplar's dtype before
 > scratch or result allocation. `chelis_reduction_plan_release` consumes the plan.
@@ -2557,7 +2565,18 @@ exact ADT identity by [05-OP-34].
 > `chelis_movement_index` maps an in-range tagged i64 position in that domain
 > to the padded destination index or other forms' source index. Each projection
 > uses checked exact coordinate/stride arithmetic without per-index scratch;
-> empty domains admit no index. `chelis_movement_check_target` requires a complete
+> empty domains admit no index. `chelis_movement_term` observes one term of the
+> plan's checked projection of that domain: the exact tagged i64 term selects a
+> domain axis in `[0, rank)` without normalization, and the closed
+> `chelis_projection_field` selects `DIVISOR`, `MODULUS`, or `SCALE`.
+> `chelis_movement_base` observes the projection's base. Every modulus is its
+> axis extent. In a nonempty domain each divisor is the product of the later
+> extents, each scale is the index distance of one step along its axis (zero on
+> a unit or broadcast axis), and `chelis_movement_index` of position `p` equals
+> the base plus the sum over terms of `((p / divisor) % modulus) * scale`;
+> construction checks that every such sum, and each partial sum, lies in the
+> other side's index range. An empty domain's terms have divisor one and scale
+> zero, and its base is zero. `chelis_movement_check_target` requires a complete
 > tagged result rank and shape to match the plan before allocation or reuse.
 > `chelis_movement_plan_release` consumes the live plan exactly once. The plan
 > retains no tensor payload or ownership, remains valid during source writes and
@@ -2584,6 +2603,11 @@ exact ADT identity by [05-OP-34].
 > evaluating an unused window product. `chelis_window_index` maps an in-range
 > result position and window leaf to the original input index, using checked
 > coordinate/stride arithmetic; either empty domain admits no index.
+> `chelis_window_term` observes one term of the checked `GROUP` projection, one
+> term per result axis, or `LEAF` projection, one term per window axis, under
+> `chelis_reduction_term`'s selection, value, sum, and empty-domain rules;
+> construction also checks that each window's last coordinate lies on its own
+> source axis.
 > `chelis_window_check_tensor` requires a tensor's exact shape and dtype to match
 > the selected side. `chelis_window_check_target` requires a submitted rank and
 > complete shape, transported as canonical tagged i64 scalars, to match that

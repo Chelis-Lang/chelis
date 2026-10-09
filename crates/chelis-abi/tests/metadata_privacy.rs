@@ -155,9 +155,10 @@ impl Probe {
 #[test]
 fn transferred_plan_fields_remain_private_to_the_checked_owner() {
     let probe = Probe::new();
-    let imports = "use chelis_abi::metadata::{ShapeMetadata,MovementMetadata,WindowMetadata,MatmulMetadata}; use chelis_vocab::RuntimeDType;";
+    let imports = "use chelis_abi::metadata::{ShapeMetadata,MovementMetadata,WindowMetadata,MatmulMetadata,ReductionMetadata,AffineProjection,ProjectionPart}; use chelis_vocab::RuntimeDType;";
+    // Consumers may read a checked projection's terms, never forge or alter one.
     let positive = probe.compile(&format!(
-        "{imports} fn valid() {{ let m=ShapeMetadata::contiguous(&[2,2],RuntimeDType::F32).unwrap(); let _=MovementMetadata::permuted(&m,&[1,0]).unwrap().index(0).unwrap(); let _=WindowMetadata::new(&m,&[1],&[1]).unwrap().index(0,0).unwrap(); let _=MatmulMetadata::new(&m,&m,RuntimeDType::F32).unwrap().batches().get(); }}"
+        "{imports} fn valid() {{ let m=ShapeMetadata::contiguous(&[2,2],RuntimeDType::F32).unwrap(); let p=MovementMetadata::permuted(&m,&[1,0]).unwrap(); let _=p.index(0).unwrap(); let q:&AffineProjection=p.projection(); let _:i64=q.base(); let _:i64=q.terms()[0].scale; let _=WindowMetadata::new(&m,&[1],&[1]).unwrap().index(0,0).unwrap(); let _=MatmulMetadata::new(&m,&m,RuntimeDType::F32).unwrap().batches().get(); let _=ReductionMetadata::new(&[2,2],&[1],RuntimeDType::F32).unwrap().projection(ProjectionPart::Leaf).base(); }}"
     ));
     assert!(
         positive.status.success(),
@@ -171,8 +172,13 @@ fn transferred_plan_fields_remain_private_to_the_checked_owner() {
         ),
         (
             "WindowMetadata",
-            &["input", "result", "window", "steps", "leading", "count"][..],
+            &["input", "result", "count", "group", "leaf"][..],
         ),
+        (
+            "ReductionMetadata",
+            &["result", "leaves", "group", "leaf"][..],
+        ),
+        ("AffineProjection", &["base", "terms"][..]),
         (
             "MatmulMetadata",
             &["result", "dimensions", "matrices", "totals", "batches"][..],
@@ -189,12 +195,25 @@ fn transferred_plan_fields_remain_private_to_the_checked_owner() {
             );
         }
     }
-    let result = probe.compile("use chelis_abi::metadata::AxisProjection;");
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(
-        !result.status.success() && stderr.contains("E0603") && stderr.contains("AxisProjection"),
-        "projection owner must remain private: {stderr}"
-    );
+    for (body, code, witness) in [
+        (
+            "fn bad() -> AffineProjection { AffineProjection { base: 0, terms: Box::new([]) } }",
+            "E0451",
+            "base",
+        ),
+        (
+            "fn bad() { let _=AffineProjection::new(&[1], true, |_| Ok(0), || Ok(0)); }",
+            "E0624",
+            "new",
+        ),
+    ] {
+        let result = probe.compile(&format!("{imports} {body}"));
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            !result.status.success() && stderr.contains(code) && stderr.contains(witness),
+            "projection construction must remain private to its checked owner: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -204,13 +223,13 @@ fn weakened_transferred_plan_validation_fails_the_optimized_contract() {
     let probe = Probe::new();
     let controls = [
         (
-            ".checked_mul(axis.step)",
-            ".checked_mul(0)",
+            "step.checked_mul(stride)",
+            "0_i64.checked_mul(stride)",
             "movement_plans_project_checked_domains_without_coordinate_scratch",
         ),
         (
-            ".checked_add(axis.offset)",
-            ".checked_add(0)",
+            ".and_then(|n| base.checked_add(n))",
+            ".map(|_| base)",
             "movement_plans_project_checked_domains_without_coordinate_scratch",
         ),
         (
@@ -219,8 +238,8 @@ fn weakened_transferred_plan_validation_fails_the_optimized_contract() {
             "movement_plans_reject_bad_geometry_and_preserve_rank_zero_empty_and_int64",
         ),
         (
-            ".checked_mul(self.steps[window_axis])",
-            ".checked_mul(0)",
+            "steps[axis - leading]",
+            "1_i64",
             "window_metadata_binds_valid_padding_and_row_major_source_indices",
         ),
         (
