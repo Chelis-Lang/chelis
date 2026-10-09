@@ -9,12 +9,8 @@
 //! the cotangent with the other operand in forward output-then-reduction
 //! order, and the diagonal adjoint is the scattered literal. The printed
 //! values are shortest round-trip spellings, so equal text is equal bits.
-//!
-//! The `es6`/`es7` and `fesw`/`fesw7` cases pin einsum's reduction order over
-//! two reduction labels: `es6` squares the contraction so its forward value
-//! reaches the gradient, and the `7` operands cancel `2048 * 8192` against
-//! its negation around a unit product, so reducing the labels in another
-//! order changes the result even at f16 and bf16.
+//! einsum's reduction order is pinned separately by a deterministic
+//! generator over label structures (`order_equations`).
 #[path = "common/mod.rs"]
 mod common;
 use assert_cmd::Command;
@@ -29,11 +25,6 @@ def es1(a: tensor[2, 3, P], b: tensor[3, 2, P], w: tensor[2, 2, P]) -> tensor[P]
 def es2(a: tensor[2, 3, P], b: tensor[2, 4, P], w: tensor[2, 4, P]) -> tensor[P] = sum(sum(mul(einsum("ij,kl->il", a, b), w), 1i32), 0i32)
 def es3(a: tensor[3, 3, P], b: tensor[3, P], w: tensor[3, P]) -> tensor[P] = sum(mul(einsum("ii,i->i", a, b), w), 0i32)
 def es4(a: tensor[2, 3, P], b: tensor[3, P]) -> tensor[P] = einsum("ij,j->", a, b)
-def es6(a: tensor[2, 2, 3, P], b: tensor[2, 3, P]) -> tensor[P] = {
-    y = einsum("ijk,jk->i", a, b)
-    sum(mul(y, y), 0i32)
-}
-def esw(a: tensor[2, 3, P], b: tensor[2, 3, P]) -> tensor[P] = einsum("jk,jk->", a, b)
 def es5(a: tensor[2, 3, P], b: tensor[3, 2, P]) -> tensor[P] = cast(sum(sum(einsum("ij,jk->ik", a, b, accumulator=f64), 1i32), 0i32), P)
 def dgv(x: tensor[3, 4, P]) -> tensor[3, P] = diagonal(x, 1i32, 0i32)
 def csv(x: tensor[7, P]) -> tensor[7, P] = cumsum(x, 0i32)
@@ -104,22 +95,6 @@ a_tr1 = grad(tr1, wrt=x)(x234, to_tensor([0.5P, -1.5P, 2.5P]))
 e_tr1 = to_tensor([[[0.5P, 0.0P, 0.0P, 0.0P], [-1.5P, 0.0P, 0.0P, 0.0P], [2.5P, 0.0P, 0.0P, 0.0P]], [[0.0P, 0.5P, 0.0P, 0.0P], [0.0P, -1.5P, 0.0P, 0.0P], [0.0P, 2.5P, 0.0P, 0.0P]]])
 a_ftr = vmap(trv)(x234)
 e_ftr = trace(x234, 2i32, 1i32)
-a223 = to_tensor([[[1000.5P, -0.0137P, 3.3P], [-999.25P, 0.71P, 1.0E-3P]], [[0.333P, 517.0P, -2.7P], [-516.75P, 0.0441P, 7.1P]]])
-b23 = to_tensor([[1.1P, 0.97P, -1.3P], [1.07P, 2.9P, 0.61P]])
-y6 = einsum("ijk,jk->i", a223, b23)
-a_es6 = grad(es6, wrt=a)(a223, b23)
-e_es6 = einsum("i,jk->ijk", add(y6, y6), b23)
-c223 = to_tensor([[[1.1P, 0.97P, -1.3P], [1.07P, 2.9P, 0.61P]], [[0.83P, -1.9P, 1.17P], [2.3P, 0.59P, -0.77P]]])
-a_fesw = vmap(esw)(a223, c223)
-e_fesw = einsum("zjk,zjk->z", a223, c223)
-a7 = to_tensor([[[2048.0P, 1.0P, 0.0P], [-2048.0P, 0.0P, 0.0P]], [[2048.0P, 1.0P, 0.0P], [-2048.0P, 0.0P, 0.0P]]])
-b7 = to_tensor([[8192.0P, 1.0P, 0.0P], [8192.0P, 0.0P, 0.0P]])
-c7 = to_tensor([[[8192.0P, 1.0P, 0.0P], [8192.0P, 0.0P, 0.0P]], [[8192.0P, 1.0P, 0.0P], [8192.0P, 0.0P, 0.0P]]])
-y7 = einsum("ijk,jk->i", a7, b7)
-a_es7 = grad(es6, wrt=a)(a7, b7)
-e_es7 = einsum("i,jk->ijk", add(y7, y7), b7)
-a_fesw7 = vmap(esw)(a7, c7)
-e_fesw7 = einsum("zjk,zjk->z", a7, c7)
 "#;
 
 fn eval_text(reef: &std::path::Path, app: &std::path::Path) -> std::process::Output {
@@ -165,7 +140,7 @@ fn ordered_adjoints_match_the_atoms_in_eval_and_c_at_every_float_width() {
         let pairs = root_pairs(&evaluated);
         assert_eq!(
             pairs.len(),
-            23,
+            19,
             "{dtype}: every case is present\n{evaluated}"
         );
         for (case, actual, expected) in &pairs {
@@ -418,4 +393,243 @@ fn runtime_extents_inside_a_differentiated_body_cite_their_issue() {
     assert!(!output.status.success(), "{stderr}");
     assert!(stderr.contains("chelis#3378"), "{stderr}");
     assert!(!stderr.contains("has no numeric IR lowering"), "{stderr}");
+}
+
+/// Extents of the generated einsum labels: `j` and `l` have extent 2 so
+/// either can carry the cancelling sign, `k` has extent 3.
+fn label_extent(label: char) -> usize {
+    match label {
+        'k' => 3,
+        _ => 2,
+    }
+}
+
+/// Deterministic einsum equations enumerating the label structures that fix
+/// [05-OP-33]'s reduction order: every relative order of two and three
+/// reduction labels across the operands with the output label at each
+/// position, labels owned by one operand, repeated labels, and output labels
+/// interleaved with reductions. The left operand always holds `j` or `l`.
+fn order_equations() -> Vec<String> {
+    let mut equations = Vec::new();
+    for a_order in ["jk", "kj"] {
+        for b_order in ["jk", "kj"] {
+            for at in 0..=a_order.len() {
+                let mut a = a_order.to_string();
+                a.insert(at, 'i');
+                equations.push(format!("{a},{b_order}->i"));
+            }
+        }
+    }
+    let permutations = ["jkl", "jlk", "kjl", "klj", "ljk", "lkj"];
+    for (n, a_order) in permutations.iter().enumerate() {
+        for b_order in permutations {
+            let mut a = a_order.to_string();
+            a.insert(n % 4, 'i');
+            equations.push(format!("{a},{b_order}->i"));
+        }
+    }
+    equations.extend(
+        [
+            // Labels owned by one operand.
+            "ijk,j->i",
+            "ikj,j->i",
+            "ij,jk->i",
+            "ij,kj->i",
+            "jik,kl->i",
+            "lij,jk->i",
+            // A repeated label within one operand.
+            "ijj,j->i",
+            "jij,jk->i",
+            "ijk,kjk->i",
+            "jjik,k->i",
+            // Output labels interleaved with reductions.
+            "jik,kmj->im",
+            "kmj,jik->mi",
+            "ijmk,kj->mi",
+            "jkim,kj->im",
+            "mjk,ikj->im",
+        ]
+        .map(String::from),
+    );
+    equations
+}
+
+fn mix(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+/// A batched operand literal (batch extent 2) for `labels`, valued so that
+/// the reduction order is visible in the finalized bits at every width.
+///
+/// The left operand's (`negates`) large cells negate across the reduction
+/// label `sign` while its small cells repeat, and the right operand ignores
+/// `sign`, so the
+/// near-2^24 products cancel pairwise and leave a small total whose low
+/// bits depend on which small terms each rounded large partial sum
+/// absorbed. `tiny` scales the small cells below the rounding of those
+/// partial sums at the operand's accumulator: 2^-6 for the f32 accumulator,
+/// 2^-31 for f64. Every value is exact at its width.
+fn order_operand(seed: u64, labels: &[char], sign: char, negates: bool, tiny: f64) -> String {
+    fn nest(
+        seed: u64,
+        labels: &[char],
+        (sign, negates, tiny): (char, bool, f64),
+        coords: &mut Vec<(char, usize)>,
+        depth: usize,
+    ) -> String {
+        if depth == labels.len() {
+            let coord = |label: char| {
+                coords
+                    .iter()
+                    .find(|(l, _)| *l == label)
+                    .map(|(_, c)| *c)
+                    .expect("label coordinate")
+            };
+            let key = mix(coords.iter().fold(seed, |acc, (label, c)| {
+                if *label == sign {
+                    acc
+                } else {
+                    mix(acc ^ ((*label as u64) << 8) ^ *c as u64)
+                }
+            }));
+            let value = if !negates {
+                [4096.0, -4096.0, 2048.0, -2048.0, 1.0, -1.0, 0.5][(key % 7) as usize]
+            } else if key.is_multiple_of(2) {
+                let big = [1024.0, 1536.0, 2048.0, 3072.0][(key / 2 % 4) as usize]
+                    * if (key / 8).is_multiple_of(2) {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                if coord(sign) == 0 { big } else { -big }
+            } else {
+                [tiny, -2.0 * tiny, 4.0 * tiny][(key / 2 % 3) as usize]
+            };
+            return format!("{value:?}P").replace('e', "E");
+        }
+        let label = labels[depth];
+        let extent = if label == 'z' { 2 } else { label_extent(label) };
+        // A repeated label reads the coordinate of its first occurrence.
+        let repeated = coords.iter().any(|(l, _)| *l == label);
+        let cells: Vec<String> = (0..extent)
+            .map(|c| {
+                if !repeated {
+                    coords.push((label, c));
+                }
+                let cell = nest(seed, labels, (sign, negates, tiny), coords, depth + 1);
+                if !repeated {
+                    coords.pop();
+                }
+                cell
+            })
+            .collect();
+        format!("[{}]", cells.join(", "))
+    }
+    let mut batched = vec!['z'];
+    batched.extend_from_slice(labels);
+    nest(seed, &batched, (sign, negates, tiny), &mut Vec::new(), 0)
+}
+
+/// One equation's batched roots at a small-cell scale.
+type RootsAtScale = Box<dyn Fn(f64) -> String>;
+
+/// [05-OP-33]'s einsum reduction order over enumerated label structures:
+/// each generated contraction runs under `vmap`, which lowers it to the
+/// transform graph, and must equal the host contraction of the batched
+/// equation bit for bit in eval at every float width, and compiled C
+/// agrees with eval on one equation per family at f16.
+#[test]
+fn einsum_reduction_order_matches_the_host_over_enumerated_label_structures() {
+    let equations = order_equations();
+    // (def, roots at a small-cell scale) per equation, so the C slice can
+    // take a subset.
+    let mut programs: Vec<(String, RootsAtScale)> = Vec::new();
+    for (n, equation) in equations.iter().enumerate() {
+        let (inputs, output) = equation.split_once("->").unwrap();
+        let (lhs, rhs) = inputs.split_once(',').unwrap();
+        let lhs: Vec<char> = lhs.chars().collect();
+        let rhs: Vec<char> = rhs.chars().collect();
+        let shape = |labels: &[char]| {
+            labels
+                .iter()
+                .map(|&l| label_extent(l).to_string())
+                .chain(["P".to_string()])
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let out: Vec<char> = output.chars().collect();
+        let sign = lhs
+            .iter()
+            .copied()
+            .find(|l| !out.contains(l) && label_extent(*l) == 2)
+            .expect("the left operand holds a two-extent reduction label");
+        let def = format!(
+            "def e{n}(a: tensor[{}], b: tensor[{}]) -> tensor[{}] = einsum(\"{equation}\", a, b)\n",
+            shape(&lhs),
+            shape(&rhs),
+            shape(&out),
+        );
+        let output = output.to_string();
+        let roots = move |tiny: f64| {
+            format!(
+                "a{n} = to_tensor({})\nb{n} = to_tensor({})\na_o{n} = vmap(e{n})(a{n}, b{n})\ne_o{n} = einsum(\"z{}z{}->z{output}\", a{n}, b{n})\n",
+                order_operand(2 * n as u64, &lhs, sign, true, tiny),
+                order_operand(2 * n as u64 + 1, &rhs, sign, false, tiny),
+                lhs.iter().collect::<String>() + ",",
+                rhs.iter().collect::<String>(),
+            )
+        };
+        programs.push((def, Box::new(roots)));
+    }
+    let program = |indices: &mut dyn Iterator<Item = usize>, dtype: &str| {
+        let tiny = if dtype == "f64" {
+            2f64.powi(-31)
+        } else {
+            2f64.powi(-6)
+        };
+        let (defs, roots): (String, String) = indices
+            .map(|n| (programs[n].0.clone(), (programs[n].1)(tiny)))
+            .unzip();
+        format!("module Demo.Main\n{defs}{roots}").replace('P', dtype)
+    };
+    let mut mismatches = Vec::new();
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        let (_dir, reef, app) = common::make_app("issue-3362-einsum-order");
+        let source = program(&mut (0..equations.len()), dtype);
+        common::write_file(&app.join("src/main.ch"), &source);
+        let output = eval_text(&reef, &app);
+        assert!(output.status.success(), "{dtype}: {output:?}");
+        let evaluated = String::from_utf8(output.stdout).unwrap();
+        let pairs = root_pairs(&evaluated);
+        assert_eq!(
+            pairs.len(),
+            equations.len(),
+            "{dtype}: every equation is present"
+        );
+        for (case, actual, expected) in &pairs {
+            if actual != expected {
+                let n: usize = case.trim_start_matches('o').parse().unwrap();
+                mismatches.push(format!(
+                    "eval {dtype} `{}`: {actual} != {expected}",
+                    equations[n]
+                ));
+            }
+        }
+    }
+    // Compiled C lowers the same transform graph; one equation per family
+    // at f16 checks the lane agrees without emitting all of them.
+    let (_dir, reef, app) = common::make_app("issue-3362-einsum-order-c");
+    let slice = [0, 12, 30, 48, 50, 54, 58, 62];
+    let source = program(&mut slice.into_iter(), "f16");
+    common::write_file(&app.join("src/main.ch"), &source);
+    let output = eval_text(&reef, &app);
+    assert!(output.status.success(), "C slice: {output:?}");
+    let evaluated = String::from_utf8(output.stdout).unwrap();
+    if common::build_and_run_app(&reef, &app, "main") != evaluated {
+        mismatches.push("f16: compiled C disagrees with eval on the family slice".to_string());
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
