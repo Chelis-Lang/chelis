@@ -784,18 +784,19 @@ fn inject_probe_into_defining_module(
     type_name: &str,
     body: Expr,
 ) -> (Vec<Expr>, String) {
-    match chelis_types::linked_binding_in_module_of(type_name, "chelis_prop_probe") {
-        Some(linked) => {
-            let probe = fresh_root_name(exprs, &linked);
-            let mut program = exprs.to_vec();
-            program.push(node("def", vec![sym(&probe), body]));
-            (program, probe)
-        }
-        None => {
-            let probe = fresh_root_name(exprs, "__chelis_prop_probe");
-            let def = node("def", vec![sym(&probe), body]);
-            (inject_into_module(exprs, type_name, def), probe)
-        }
+    let (probe, linked) = crate::smt_names::fresh_module_probe_name(
+        exprs,
+        type_name,
+        "chelis_prop_probe",
+        "__chelis_prop_probe",
+    );
+    if linked {
+        let mut program = exprs.to_vec();
+        program.push(node("def", vec![sym(&probe), body]));
+        (program, probe)
+    } else {
+        let def = node("def", vec![sym(&probe), body]);
+        (inject_into_module(exprs, type_name, def), probe)
     }
 }
 

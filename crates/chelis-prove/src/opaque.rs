@@ -1613,7 +1613,12 @@ fn read_produced_field(
     // cannot turn every proposal into a duplicate definition (chelis#3267).
     let exprs = chelis_deep::parser::parse_and_stamp_file(module_source)
         .map_err(|error| format!("its module does not re-parse: {error}"))?;
-    let probe = crate::smt_names::fresh_root_name(&exprs, "__chelis_gen_probe");
+    let (probe, linked) = crate::smt_names::fresh_module_probe_name(
+        &exprs,
+        type_name,
+        "chelis_gen_probe",
+        "__chelis_gen_probe",
+    );
     let call = {
         let mut app = vec![var_node(&producer.name)];
         app.extend(arg_exprs.iter().cloned());
@@ -1630,7 +1635,16 @@ fn read_produced_field(
         let_block("__r", call, access)
     };
     let probe_def = node_def(&probe, body);
-    let program = inject_into_module_with_source(&exprs, type_name, probe_def);
+    let program = if linked {
+        let mut program = exprs
+            .iter()
+            .map(strip_invariant_metadata)
+            .collect::<Vec<_>>();
+        program.push(probe_def);
+        program
+    } else {
+        inject_into_module_with_source(&exprs, type_name, probe_def)
+    };
     let source = chelis_deep::printer::print_canonical(&program);
     let result = chelis_compiler_api::compiler::eval_selected(
         chelis_compiler_api::schema::EvalRequest {
