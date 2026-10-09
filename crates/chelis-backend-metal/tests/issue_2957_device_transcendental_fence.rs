@@ -120,3 +120,38 @@ fn sqrt_inside_a_fused_chain_is_rejected() {
     let error = codegen(&fused, "fused_sqrt").expect_err("fused sqrt");
     assert!(error.to_string().contains("`sqrt`"), "{error}");
 }
+
+/// [05-OP-79]: `pow(add(a, b), b)`, directly and as a fused chain, is fenced
+/// with its own atom, never computed with a vendor `powf`.
+#[test]
+fn pow_is_rejected_directly_and_inside_a_fused_chain() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let a = dag.add_node(decl, RiscOp::Load { name: "a".into() }, vec![], f32_vec(), None);
+    let b = dag.add_node(decl, RiscOp::Load { name: "b".into() }, vec![], f32_vec(), None);
+    let sum = dag.add_node(decl, RiscOp::Add, vec![a, b], f32_vec(), None);
+    let applied = dag.add_node(decl, RiscOp::Pow, vec![sum, b], f32_vec(), None);
+    let stored = dag.add_node(
+        decl,
+        RiscOp::Store { name: "out".into() },
+        vec![applied],
+        f32_vec(),
+        None,
+    );
+    dag.add_root(stored);
+    let fused = chelis_ir::fuse::fuse(&dag);
+    assert!(
+        fused
+            .nodes()
+            .iter()
+            .any(|node| matches!(&node.op, RiscOp::FusedElem { .. }))
+            && !fused.nodes().iter().any(|node| matches!(node.op, RiscOp::Pow)),
+        "the fused witness must carry pow as a fused step"
+    );
+    for (witness, name) in [(&dag, "pow"), (&fused, "fused_pow")] {
+        let rendered = codegen(witness, name).expect_err(name).to_string();
+        assert!(rendered.contains("[05-OP-79]"), "{name}: {rendered}");
+        assert!(rendered.contains("codegen:metal"), "{name}: {rendered}");
+        assert!(rendered.contains("`pow`"), "{name}: {rendered}");
+    }
+}

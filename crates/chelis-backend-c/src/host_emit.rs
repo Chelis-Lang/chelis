@@ -76,6 +76,7 @@ enum CExpressionBuiltin {
     Tanh,
     Erf,
     Erfc,
+    Pow,
     Relu,
     Sigmoid,
     Silu,
@@ -96,7 +97,7 @@ enum CExpressionBuiltin {
 impl CExpressionBuiltin {
     /// Every builtin name the host scalar lane decodes, and so every
     /// expression it can emit.
-    const NAMES: [(&'static str, Self); 68] = [
+    const NAMES: [(&'static str, Self); 69] = [
         ("add", Self::Add),
         ("sub", Self::Sub),
         ("mul", Self::Mul),
@@ -150,6 +151,7 @@ impl CExpressionBuiltin {
         ("tanh", Self::Tanh),
         ("erf", Self::Erf),
         ("erfc", Self::Erfc),
+        ("pow", Self::Pow),
         ("relu", Self::Relu),
         ("sigmoid", Self::Sigmoid),
         ("silu", Self::Silu),
@@ -209,6 +211,7 @@ impl CExpressionBuiltin {
             | Self::Tanh
             | Self::Erf
             | Self::Erfc
+            | Self::Pow
             | Self::Sigmoid
             | Self::Silu
             | Self::Gelu
@@ -8235,6 +8238,7 @@ impl<'a> HostEmitter<'a> {
             "tanh",
             "erf",
             "erfc",
+            "pow",
             "floor",
             "ceil",
             "round",
@@ -8795,6 +8799,13 @@ impl<'a> HostEmitter<'a> {
                 CExpressionBuiltin::Atan => EmittedExpr::call(
                     float_math_function(ty, "chelis_cr_atan", "chelis_cr_atanf"),
                     [numeric_arg(0)],
+                ),
+                // [05-OP-79]: the carried correctly rounded kernel. An f16 or
+                // bf16 operand widens exactly (a signaling NaN stays signaling),
+                // so the kernel decides the signaling-NaN case at its own dtype.
+                CExpressionBuiltin::Pow => EmittedExpr::call(
+                    float_math_function(ty, "chelis_cr_pow", "chelis_cr_powf"),
+                    [numeric_arg(0), numeric_arg(1)],
                 ),
                 CExpressionBuiltin::Relu
                 | CExpressionBuiltin::Sigmoid
