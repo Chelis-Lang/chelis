@@ -64,8 +64,8 @@ fn eval_source(source: &str) -> Result<BTreeMap<String, TensorValue>, String> {
     .map_err(|err| format!("{err:?}"))?;
     Ok(std::mem::take(&mut result.roots)
         .into_iter()
-        .filter_map(|root| match (root.name, root.value) {
-            (Some(name), ExecutionValue::Tensor { value }) => Some((name, value)),
+        .filter_map(|root| match (root.name, &root.value) {
+            (Some(name), ExecutionValue::Tensor { value }) => Some((name, value.clone())),
             _ => None,
         })
         .collect())
