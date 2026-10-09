@@ -818,6 +818,40 @@ class StageUnionTests(unittest.TestCase):
         nightly = (REPO_ROOT / ".github/workflows/smt-full-prove.yml").read_text()
         self.assertIn("cargo test -p chelis-clarabel-provider --features solver --test solver", nightly)
 
+    def test_clarabel_smt_activates_verified_cvc5_before_compiling(self):
+        worker = _ci_job_block("clarabel-provider")
+        hosted_activation = (
+            "- name: Activate prebuilt cvc5 (link instead of rebuild)\n"
+            "        if: runner.environment == 'github-hosted'"
+        )
+
+        def check_prebuilt_path(block):
+            ordered = [
+                "ci_cvc5_cache.py key --namespace linux-x86_64",
+                "ci_cvc5_cache.py fetch --namespace linux-x86_64",
+                "actions/cache/restore@v4",
+                "ci_cvc5_cache.py activate --dir",
+                "Lint native Clarabel ideal proofs",
+            ]
+            for step in ordered:
+                self.assertIn(step, block)
+            self.assertEqual([block.index(step) for step in ordered],
+                             sorted(block.index(step) for step in ordered))
+            self.assertIn("steps.cvc5fetch.outputs.warm != 'true'", block)
+            self.assertIn("continue-on-error: true", block)
+            self.assertIn(hosted_activation, block)
+
+        check_prebuilt_path(worker)
+        with self.assertRaises(AssertionError):
+            check_prebuilt_path(worker.replace("ci_cvc5_cache.py activate --dir", "skip activation"))
+        with self.assertRaises(AssertionError):
+            check_prebuilt_path(
+                worker.replace(
+                    hosted_activation,
+                    hosted_activation.replace("github-hosted", "self-hosted"),
+                )
+            )
+
     def test_default_workspace_does_not_select_native_clarabel_dependency(self):
         manifest = tomllib.loads(
             (REPO_ROOT / "crates/chelis-clarabel-provider/Cargo.toml").read_text()
