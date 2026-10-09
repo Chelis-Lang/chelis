@@ -105,13 +105,33 @@ const COMPUTATIONS: [(&str, &str, bool); 15] = [
     ("abs", "abs(sub(s, w))", true),
     ("max_elem", "max_elem(s, w)", true),
     ("min_elem", "min_elem(s, w)", true),
-    ("floor_div", "floor_div(sub(s, w), to_tensor([2i64, 2i64]))", true),
-    ("trunc_div", "trunc_div(sub(s, w), to_tensor([2i64, 2i64]))", true),
+    (
+        "floor_div",
+        "floor_div(sub(s, w), to_tensor([2i64, 2i64]))",
+        true,
+    ),
+    (
+        "trunc_div",
+        "trunc_div(sub(s, w), to_tensor([2i64, 2i64]))",
+        true,
+    ),
     ("mod", "mod(sub(s, w), to_tensor([3i64, 3i64]))", true),
     ("sum", "insert(sum(sub(s, w), 0i32), 0i32, 2i64)", true),
-    ("max_reduce", "insert(max_reduce(sub(s, w), 0i32), 0i32, 2i64)", true),
-    ("min_reduce", "insert(min_reduce(sub(s, w), 0i32), 0i32, 2i64)", false),
-    ("prod_reduce", "insert(prod_reduce(sub(s, w), 0i32), 0i32, 2i64)", false),
+    (
+        "max_reduce",
+        "insert(max_reduce(sub(s, w), 0i32), 0i32, 2i64)",
+        true,
+    ),
+    (
+        "min_reduce",
+        "insert(min_reduce(sub(s, w), 0i32), 0i32, 2i64)",
+        false,
+    ),
+    (
+        "prod_reduce",
+        "insert(prod_reduce(sub(s, w), 0i32), 0i32, 2i64)",
+        false,
+    ),
     ("count", "insert(count(lt(s, w), 0i32), 0i32, 2i64)", true),
 ];
 

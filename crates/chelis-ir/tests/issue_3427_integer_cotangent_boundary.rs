@@ -17,9 +17,21 @@ fn scalar_at(precision: Prim) -> TensorType {
 }
 
 const BINARY: [(RiscOp, &str, AdRejectionReason); 8] = [
-    (RiscOp::Add, "add", AdRejectionReason::IntegerArithmeticOutput),
-    (RiscOp::Sub, "sub", AdRejectionReason::IntegerArithmeticOutput),
-    (RiscOp::Mul, "mul", AdRejectionReason::IntegerArithmeticOutput),
+    (
+        RiscOp::Add,
+        "add",
+        AdRejectionReason::IntegerArithmeticOutput,
+    ),
+    (
+        RiscOp::Sub,
+        "sub",
+        AdRejectionReason::IntegerArithmeticOutput,
+    ),
+    (
+        RiscOp::Mul,
+        "mul",
+        AdRejectionReason::IntegerArithmeticOutput,
+    ),
     (
         RiscOp::MaxElem,
         "max_elem",
@@ -40,11 +52,7 @@ const BINARY: [(RiscOp, &str, AdRejectionReason); 8] = [
         "trunc_div",
         AdRejectionReason::PiecewiseConstant,
     ),
-    (
-        RiscOp::Mod,
-        "mod",
-        AdRejectionReason::TruncatedQuotientJump,
-    ),
+    (RiscOp::Mod, "mod", AdRejectionReason::TruncatedQuotientJump),
 ];
 
 /// `x * cast(op(left, right), f64)`, returning `(dag, x, left, output)`.
