@@ -245,9 +245,10 @@ fn grad_dag_checked_impl(
     // INDEX MATH, not data. They carry no cotangent, so their input edges are a
     // stop-gradient boundary and must not pull their producers -- which may be
     // intentionally non-differentiable integer arithmetic -- into this check.
-    // The edge selection here mirrors `compute_adjoints`: movement ops and
-    // `Gather` route only to their values input, while `ScatterAdd` routes to
-    // target and updates but not indices. A control scalar that is ALSO reached
+    // The edge selection here mirrors `compute_adjoints`: movement ops
+    // (`expand`, whose size is an `insert` extent, among them; [05-MOV-1],
+    // chelis#3382) and `Gather` route only to their values input, while
+    // `ScatterAdd` routes to target and updates but not indices. A control scalar that is ALSO reached
     // through a genuine data edge stays live through that edge and is checked.
     let reach = cotangent_reach(forward, output);
     let live = reach.iter().map(|&state| state != 0).collect::<Vec<_>>();
@@ -320,6 +321,7 @@ fn selected_data_reach(forward: &Dag, wrt: &[NodeId]) -> Vec<bool> {
                 | RiscOp::Stride { .. }
                 | RiscOp::Pad { .. }
                 | RiscOp::Reshape { .. }
+                | RiscOp::Expand { .. }
                 | RiscOp::Gather { .. }
                 | RiscOp::Dropout
                 | RiscOp::DropoutReplay => slot == 0,
@@ -356,6 +358,7 @@ fn cotangent_reach(forward: &Dag, output: NodeId) -> Vec<u8> {
                 | RiscOp::Stride { .. }
                 | RiscOp::Pad { .. }
                 | RiscOp::Reshape { .. }
+                | RiscOp::Expand { .. }
                 | RiscOp::Gather { .. } => {
                     if let Some(values) = node.inputs.first() {
                         mark(*values, current);
@@ -644,6 +647,7 @@ fn reject_random_selection_parameters(
             | RiscOp::Stride { .. }
             | RiscOp::Pad { .. }
             | RiscOp::Reshape { .. }
+            | RiscOp::Expand { .. }
             | RiscOp::Gather { .. }
             | RiscOp::Dropout
             | RiscOp::DropoutReplay => &node.inputs[..node.inputs.len().min(1)],

@@ -376,14 +376,34 @@ fn lower_comparison(
         dims,
         precision: Prim::Bool,
     };
-    add_synth(
+    let id = add_synth(
         owner,
         dag,
         RiscOp::Compare(kind),
         vec![a, b],
         bool_ty,
         parent_span,
-    )
+    );
+    record_operand_extent_authority(dag, id, a)
+}
+
+/// A same-shape predicate whose type spells an anonymous extent takes that
+/// extent from its operand `a` at runtime. Record `a` as the result's extent
+/// authority, the shape dependency the verifier requires of an anonymous
+/// comparison or logical result, so a DAG built from a `range`-sized or
+/// wildcard operand verifies wherever it is checked, `grad` included
+/// (chelis#3391). Vectorization records the same edge for a batched axis.
+fn record_operand_extent_authority(dag: &mut Dag, id: NodeId, a: NodeId) -> NodeId {
+    let anonymous = dag.get(id).is_some_and(|node| {
+        node.output_type
+            .dims
+            .iter()
+            .any(|dim| matches!(dim, DimInfo::Named(name, None) if name.is_empty() || name == "*"))
+    });
+    if anonymous {
+        dag.add_shape_dep(id, a);
+    }
+    id
 }
 
 pub fn lower_cmplt(
@@ -494,14 +514,15 @@ pub fn lower_and(
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    add_synth(
+    let id = add_synth(
         owner,
         dag,
         RiscOp::Logical(LogicalKind::And),
         vec![a, b],
         bool_ty,
         parent_span,
-    )
+    );
+    record_operand_extent_authority(dag, id, a)
 }
 
 pub fn lower_or(
@@ -516,14 +537,15 @@ pub fn lower_or(
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    add_synth(
+    let id = add_synth(
         owner,
         dag,
         RiscOp::Logical(LogicalKind::Or),
         vec![a, b],
         bool_ty,
         parent_span,
-    )
+    );
+    record_operand_extent_authority(dag, id, a)
 }
 
 pub fn lower_not(
@@ -537,14 +559,15 @@ pub fn lower_not(
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    add_synth(
+    let id = add_synth(
         owner,
         dag,
         RiscOp::Logical(LogicalKind::Not),
         vec![a],
         bool_ty,
         parent_span,
-    )
+    );
+    record_operand_extent_authority(dag, id, a)
 }
 
 // ---------------------------------------------------------------------------
@@ -2012,6 +2035,46 @@ mod tests {
         let node = dag.get(result).unwrap();
         assert_eq!(node.op, RiscOp::Logical(LogicalKind::Not));
         assert_eq!(node.output_type.precision, Prim::Bool);
+    }
+
+    /// chelis#3391: a predicate over an anonymous extent names its operand as
+    /// the extent authority, so the verifier accepts it; a predicate over a
+    /// literal extent records no such edge.
+    #[test]
+    fn anonymous_predicates_record_their_operand_as_extent_authority() {
+        let shape_errors = |dag: &Dag| {
+            verify::verify(dag)
+                .into_iter()
+                .filter(|error| error.contains("output shape must match its operands"))
+                .collect::<Vec<_>>()
+        };
+        for dim in [DimInfo::Named("*".into(), None), DimInfo::Lit(3)] {
+            let anonymous = matches!(dim, DimInfo::Named(..));
+            let mut dag = Dag::new();
+            let owner = Owner::from(dag.declare("test"));
+            let ty = |precision| TensorType {
+                dims: vec![dim.clone()],
+                precision,
+            };
+            let x = dag.add_node(owner, RiscOp::Iota, vec![], ty(Prim::Int64), None);
+            let y = dag.add_node(owner, RiscOp::Iota, vec![], ty(Prim::Int64), None);
+            let gt = lower_gt(owner, &mut dag, x, y, &ty(Prim::Int64), None);
+            let lt = lower_lt(owner, &mut dag, x, y, &ty(Prim::Int64), None);
+            let and = lower_and(owner, &mut dag, gt, lt, &ty(Prim::Bool), None);
+            let or = lower_or(owner, &mut dag, gt, lt, &ty(Prim::Bool), None);
+            let not = lower_not(owner, &mut dag, and, &ty(Prim::Bool), None);
+            for (id, operand) in [(gt, x), (lt, x), (and, gt), (or, gt), (not, and)] {
+                let expected = if anonymous { vec![operand] } else { vec![] };
+                assert_eq!(dag.get(id).unwrap().shape_deps, expected, "{dim:?}");
+            }
+            assert_eq!(shape_errors(&dag), Vec::<String>::new(), "{dim:?}");
+            if anonymous {
+                // The verifier still refuses an anonymous predicate that
+                // names no operand authority.
+                dag.node_mut(gt).unwrap().shape_deps.clear();
+                assert_eq!(shape_errors(&dag).len(), 1, "{:?}", shape_errors(&dag));
+            }
+        }
     }
 
     // --- Higher-level decompositions ---
