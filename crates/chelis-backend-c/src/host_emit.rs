@@ -2946,7 +2946,11 @@ pub(super) fn claim_pattern_table_lines(
                     })
                     .collect::<Vec<_>>();
                 let axes = table("axes", index, entries, "int64_t");
-                let rank = tensor.rank.map_or(-1, |rank| rank as i64);
+                // The C table spells a rank spread's open rank as -1.
+                let rank = match tensor.rank {
+                    Some(rank) => rank as i64,
+                    None => -1,
+                };
                 (
                     0,
                     rank,
