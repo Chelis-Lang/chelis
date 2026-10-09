@@ -3318,6 +3318,37 @@ fn checked_fn_type_expr(fn_expr: &Expr) -> Option<&Expr> {
     }
 }
 
+/// The checker's dimension variables in the checked types of `body`'s
+/// nodes. A nested function's are not collected: its own activation
+/// instantiates them, and a variable it shares with this body is one this
+/// body's types name too.
+fn collect_body_dimension_variables(body: &Expr, variables: &mut UnordSet<String>) {
+    match body.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Fn, _, _) => {}
+        ExprCarrier::DecodedNode(_, metadata, children)
+        | ExprCarrier::UndecodableHead(_, metadata, children) => {
+            if let Some(ty) = metadata.ty() {
+                collect_dimension_binders(ty.expression(), variables);
+            }
+            for child in children {
+                collect_body_dimension_variables(child, variables);
+            }
+        }
+        ExprCarrier::StructuralList(children) => {
+            for child in children {
+                collect_body_dimension_variables(child, variables);
+            }
+        }
+        ExprCarrier::MetadataExpression(meta) => {
+            if let Some(ty) = meta.metadata.ty() {
+                collect_dimension_binders(ty.expression(), variables);
+            }
+            collect_body_dimension_variables(&meta.expr, variables);
+        }
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {}
+    }
+}
+
 fn collect_dimension_binders(expr: &Expr, binders: &mut UnordSet<String>) {
     match expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::DVar, _, children) => {
@@ -8198,13 +8229,14 @@ struct LowerCtx<'program> {
     /// adding a node is a lowering defect.
     decl: Option<DeclId>,
     dim_substitutions: UnordMap<String, DimInfo>,
-    /// The checked dimension binders of the activations being inlined,
-    /// mapped to this call's actual axes (runtime_extents.md C2.2). The
-    /// checker generalizes each definition over its own `d-var`
-    /// identities and records them on every body node, so a body node's
-    /// type names the callee's binder until this map instantiates it.
-    /// Scoped like `dim_substitutions`: one activation's bindings never
-    /// reach a sibling call.
+    /// The checked dimension variables of the activations being inlined,
+    /// mapped to this call's actual axes or to a fresh identity
+    /// (runtime_extents.md C2.2). The checker generalizes each definition
+    /// over its own `d-var` identities and records them on every body node,
+    /// so a body node's type names the callee's binder, or a variable local
+    /// to its body, until this map instantiates it. Scoped like
+    /// `dim_substitutions`: one activation's bindings never reach a sibling
+    /// call.
     checked_dim_substitutions: UnordMap<String, DimInfo>,
     /// The serial of the next activation that instantiates a binder without
     /// evidence. Shared with every sub-context whose nodes are spliced into
@@ -13557,6 +13589,7 @@ impl<'program> LowerCtx<'program> {
             .merge(tensor_dim_substitutions(&formal_types, &actual_types));
         self.instantiate_checked_dimensions(
             fn_expr,
+            body,
             &actual_positions,
             &actual_types,
             expected_return_ty,
@@ -13792,88 +13825,98 @@ impl<'program> LowerCtx<'program> {
         result
     }
 
-    /// Instantiate the callee's checked dimension binders for this
-    /// activation (runtime_extents.md C2.2). The evidence is each tensor
-    /// actual at its checked formal's axis, then this call's checked result
-    /// for a binder no tensor actual supplies, such as one that occurs only
-    /// inside a record formal. A binder keeps its first binding, equal sizes
-    /// never merge two binders, and an unknown axis is no evidence. The
-    /// enclosing activation's bindings stay in force for the caller
-    /// expressions and callables substituted into this body.
+    /// Instantiate the callee's checked dimension variables for this
+    /// activation (runtime_extents.md C2.2). The evidence for a signature
+    /// binder is each tensor actual at its checked formal's axis, then this
+    /// call's checked result for a binder no tensor actual supplies, such as
+    /// one that occurs only inside a record formal. A binder keeps its first
+    /// binding, equal sizes never merge two binders, and an unknown axis is no
+    /// evidence. The enclosing activation's bindings stay in force for the
+    /// caller expressions and callables substituted into this body.
+    ///
+    /// Every other variable the checker left in `body`'s types, such as the
+    /// extent of a `conv` result that no binder constrains, is as private to
+    /// this activation as an unbound binder, so it is instantiated the same
+    /// way.
     fn instantiate_checked_dimensions(
         &mut self,
         fn_expr: &Expr,
+        body: &Expr,
         actual_positions: &[usize],
         actual_types: &[TensorType],
         expected_return_ty: &TensorType,
     ) {
-        let Some(checked_type) = checked_fn_type_expr(fn_expr) else {
-            return;
-        };
         let mut binders = UnordSet::new();
-        collect_dimension_binders(checked_type, &mut binders);
-        if binders.is_empty() {
-            return;
+        if let Some(checked_type) = checked_fn_type_expr(fn_expr) {
+            collect_dimension_binders(checked_type, &mut binders);
         }
-        let Some(checked_formals) = fn_type_arg_exprs(fn_expr) else {
-            return;
-        };
-        let mut evidence = Vec::new();
-        for (position, actual) in actual_positions.iter().zip(actual_types) {
-            if let Some(formal) = checked_formals.get(*position) {
+        if !binders.is_empty()
+            && let Some(checked_formals) = fn_type_arg_exprs(fn_expr)
+        {
+            let mut evidence = Vec::new();
+            for (position, actual) in actual_positions.iter().zip(actual_types) {
+                if let Some(formal) = checked_formals.get(*position) {
+                    evidence.push((
+                        Self::formal_param_type_for_call(
+                            formal,
+                            &self.prec_substitutions,
+                            &self.rank_substitutions,
+                        ),
+                        actual.clone(),
+                    ));
+                }
+            }
+            if let Some(result) = extract_fn_return_type(fn_expr)
+                && expected_return_ty != &Self::default_type()
+            {
                 evidence.push((
                     Self::formal_param_type_for_call(
-                        formal,
+                        result,
                         &self.prec_substitutions,
                         &self.rank_substitutions,
                     ),
-                    actual.clone(),
+                    expected_return_ty.clone(),
                 ));
             }
-        }
-        if let Some(result) = extract_fn_return_type(fn_expr)
-            && expected_return_ty != &Self::default_type()
-        {
-            evidence.push((
-                Self::formal_param_type_for_call(
-                    result,
-                    &self.prec_substitutions,
-                    &self.rank_substitutions,
-                ),
-                expected_return_ty.clone(),
-            ));
-        }
-        for (checked, actual) in evidence {
-            if checked.dims.len() != actual.dims.len() {
-                continue;
-            }
-            for (checked, actual) in checked.dims.iter().zip(&actual.dims) {
-                let DimInfo::Named(name, None) = checked else {
+            for (checked, actual) in evidence {
+                if checked.dims.len() != actual.dims.len() {
                     continue;
-                };
-                let unknown =
-                    matches!(actual, DimInfo::Named(axis, None) if axis.is_empty() || axis == "*");
-                if binders.contains(name) && !unknown && actual != checked {
-                    self.checked_dim_substitutions
-                        .entry(name.clone())
-                        .or_insert_with(|| actual.clone());
+                }
+                for (checked, actual) in checked.dims.iter().zip(&actual.dims) {
+                    let DimInfo::Named(name, None) = checked else {
+                        continue;
+                    };
+                    let unknown = matches!(actual, DimInfo::Named(axis, None) if axis.is_empty() || axis == "*");
+                    if binders.contains(name) && !unknown && actual != checked {
+                        self.checked_dim_substitutions
+                            .entry(name.clone())
+                            .or_insert_with(|| actual.clone());
+                    }
                 }
             }
         }
-        // A binder with no evidence, such as one whose actual axis has only a
-        // run-time extent, still names this activation's axis and no other:
-        // it gets a fresh identity, never the callee-private name, which a
-        // sibling activation of the same body would share.
-        let unbound = binders
+        // A variable with no evidence, such as a binder whose actual axis has
+        // only a run-time extent, still names this activation's axis and no
+        // other: it gets a fresh identity, never the callee-private name,
+        // which a sibling activation of the same body would share.
+        let mut private = binders;
+        collect_body_dimension_variables(body, &mut private);
+        let unbound = private
             .into_sorted()
             .into_iter()
-            .filter(|binder| !self.checked_dim_substitutions.contains_key(binder))
+            .filter(|variable| !self.checked_dim_substitutions.contains_key(variable))
             .collect::<Vec<_>>();
         if !unbound.is_empty() {
             let serial = self.activation_serial.fetch_add(1, Ordering::Relaxed);
-            for binder in unbound {
-                let fresh = DimInfo::Named(format!("_act_dim_{serial}_{binder}"), None);
-                self.checked_dim_substitutions.insert(binder, fresh);
+            for variable in unbound {
+                let fresh = DimInfo::Named(
+                    format!(
+                        "{}{serial}_{variable}",
+                        crate::axis_sources::ACTIVATION_DIM_PREFIX
+                    ),
+                    None,
+                );
+                self.checked_dim_substitutions.insert(variable, fresh);
             }
         }
     }
@@ -13892,6 +13935,7 @@ impl<'program> LowerCtx<'program> {
         let saved_activation = self.activation_witnesses.clone();
         let saved_authored = self.signature_is_authored;
         let saved_rank_substitutions = self.rank_substitutions.clone();
+        let saved_checked_dim_substitutions = self.checked_dim_substitutions.clone();
         let saved_dim_axis_positions = self.dim_axis_positions.clone();
         let saved_local_ascription_tokens = self.local_ascription_tokens.clone();
         self.local_ascription_tokens.clear();
@@ -13945,6 +13989,29 @@ impl<'program> LowerCtx<'program> {
             &bound_actual_types,
             &self.dim_axis_positions,
         ));
+        // This boundary is an activation of `function` like any call, so its
+        // checked dimension variables are instantiated from the parameters
+        // it bound (runtime_extents.md C2.2). It has no checked call result.
+        let (bound_positions, bound_tensor_types): (Vec<_>, Vec<_>) = params
+            .iter()
+            .enumerate()
+            .filter_map(|(position, name)| {
+                let actual = self
+                    .bindings
+                    .get(name)
+                    .and_then(LoweredValue::as_single_node)
+                    .and_then(|id| self.dag.get(id))
+                    .map(|node| node.output_type.clone())?;
+                Some((position, actual))
+            })
+            .unzip();
+        self.instantiate_checked_dimensions(
+            function,
+            body,
+            &bound_positions,
+            &bound_tensor_types,
+            &Self::default_type(),
+        );
         let formal_types = params
             .iter()
             .zip(authored_formal_type_exprs.iter())
@@ -14011,6 +14078,7 @@ impl<'program> LowerCtx<'program> {
         self.activation_witnesses = saved_activation;
         self.signature_is_authored = saved_authored;
         self.rank_substitutions = saved_rank_substitutions;
+        self.checked_dim_substitutions = saved_checked_dim_substitutions;
         self.dim_axis_positions = saved_dim_axis_positions;
         self.local_ascription_tokens = saved_local_ascription_tokens;
         result
@@ -20577,9 +20645,17 @@ impl<'program> LowerCtx<'program> {
     }
 
     /// A checked call type refines a produced result only when this exact
-    /// axis gained a concrete, non-wildcard name. A known extent attached to
-    /// the same name is not a new name. Literals stay solely in the authored
-    /// result path, where their runtime obligations originate.
+    /// axis gained a concrete name a signature spelled. A known extent
+    /// attached to the same name is not a new name. Literals stay solely in
+    /// the authored result path, where their runtime obligations originate.
+    ///
+    /// A compiler-minted name is never transported. An activation's identity
+    /// for a callee variable no actual binds, or a checker variable no
+    /// activation instantiated, names nothing the caller can query; stamped
+    /// on a graph type it would join every axis spelled the same into one
+    /// extent class nobody claimed, a sibling activation's included
+    /// ([04-ADT-2]), and contradict an operation that derives the axis from an
+    /// operand, such as `gather`.
     ///
     /// The comparison is with the label the produced axis carries, never with
     /// the callee's authored result: the checked name belongs to the caller's
@@ -20593,8 +20669,7 @@ impl<'program> LowerCtx<'program> {
         let DimInfo::Named(checked_binder, _) = checked else {
             return false;
         };
-        !checked_binder.is_empty()
-            && checked_binder != "*"
+        !crate::axis_sources::is_synthesized_dim_name(checked_binder)
             && !matches!(
                 produced.dims.get(axis),
                 Some(DimInfo::Named(produced_label, _)) if produced_label == checked_binder

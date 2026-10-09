@@ -2078,6 +2078,7 @@ fn synthesized_dim_names_are_told_apart_from_user_spelled_ones() {
         "_rt_shrink_dim_7_0",
         "_rt_dim_3_1",
         "_anon_dim_2_1",
+        "_act_dim_4_d57",
         "d0",
         "d17",
     ] {
