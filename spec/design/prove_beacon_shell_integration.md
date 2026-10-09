@@ -97,14 +97,16 @@ recognize opaque invariants. This closes the qualified and nested cases in
 [#2267](https://github.com/Chelis-Lang/chelis/issues/2267).
 
 For each opaque type that needs construction or invariant observation, the
-prover emits fresh private helpers in that type's defining module. Those
-helpers call its producers and project representation fields only for the
-generator and invariant checks; they return the typed observation needed by
-the proof harness. The authored predicate is checked with ordinary opacity
-rules and cannot call a helper. The property probe assembles observations
-from type-local helpers, so one property can use opaque types from several
-modules without placing all protected field reads inside an arbitrary first
-module. Lexical insertion and `linked_binding_in_module_of` implement the two
+prover emits fresh helpers in that type's defining module. Generator helpers
+call its producers and project representation fields only for the generator
+and invariant checks. Assembly helpers construct sampled opaque records in
+their defining modules and return typed values to the property probe. The
+authored predicate is checked with ordinary opacity rules and cannot call a
+helper. An ephemeral export lets the generated probe reference a helper in
+another module; it does not change the authored package's exports. One
+property can thus use opaque types from several modules without placing all
+protected field reads inside an arbitrary first module. Lexical insertion and
+`linked_binding_in_module_of` implement the two
 module encodings permitted by §2.5; the latter uses the canonical private
 linker format, and the checker validates the generated declaration. This
 addresses [#3298](https://github.com/Chelis-Lang/chelis/issues/3298) and

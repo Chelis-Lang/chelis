@@ -160,8 +160,8 @@ pub(super) fn prove_with_injection(
         }
     };
 
-    // The probe is declared in the module that defines the first opaque
-    // binder's type, since the sampled binder values construct that type.
+    // Keep the property probe in the first opaque binder's module. Each
+    // opaque value is constructed by a separate helper in its own module.
     let home_type = binders
         .iter()
         .find_map(|binder| match binder {
@@ -185,12 +185,12 @@ pub(super) fn prove_with_injection(
         // Sample each binder. Opaque binders are generated invariant-valid
         // (the injected assumption); on starvation, report. Each binding
         // carries its Deep value expr and a JSON repr for counterexamples.
-        let mut bindings: Vec<(String, Expr, serde_json::Value)> = Vec::new();
+        let mut bindings = Vec::new();
         for b in &binders {
             match b {
                 Binder::Scalar { name, prim } => {
                     let v = sample_scalar(prim, &mut rng);
-                    bindings.push((name.clone(), scalar_lit(prim, v), scalar_json(v)));
+                    bindings.push(EvalBinding::new(name, scalar_lit(prim, v), scalar_json(v)));
                 }
                 Binder::Tensor {
                     name,
@@ -201,8 +201,8 @@ pub(super) fn prove_with_injection(
                     let values = (0..count)
                         .map(|_| sample_scalar(precision, &mut rng))
                         .collect::<Vec<_>>();
-                    bindings.push((
-                        name.clone(),
+                    bindings.push(EvalBinding::new(
+                        name,
                         crate::opaque::tensor_value_expr_typed(dims, precision, &values),
                         crate::opaque::scalar_values_json(&values),
                     ));
@@ -225,7 +225,12 @@ pub(super) fn prove_with_injection(
                     ) {
                         Ok(generated) => {
                             let json = crate::opaque::generated_env_json(&generated.env);
-                            bindings.push((name.clone(), generated.value_expr, json));
+                            bindings.push(EvalBinding {
+                                name: name.clone(),
+                                value: generated.value_expr,
+                                json,
+                                opaque_type: Some(inv.type_name.clone()),
+                            });
                         }
                         Err(crate::opaque::GenerationFailure::ProbeRejected(reason)) => {
                             return outcome_error(property_name, seed, reason);
@@ -382,6 +387,24 @@ enum Binder {
     },
 }
 
+struct EvalBinding {
+    name: String,
+    value: Expr,
+    json: serde_json::Value,
+    opaque_type: Option<String>,
+}
+
+impl EvalBinding {
+    fn new(name: &str, value: Expr, json: serde_json::Value) -> Self {
+        Self {
+            name: name.to_string(),
+            value,
+            json,
+            opaque_type: None,
+        }
+    }
+}
+
 fn injection_assumptions(
     property_name: &str,
     binders: &[Binder],
@@ -477,28 +500,35 @@ fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> 
     }
 }
 
-/// Evaluate a boolean Deep expr with the given binder value bindings,
-/// inside the module that defines `home_type` (so constructing and
-/// inspecting the binder's opaque values is legal), with the invariant
-/// metadata stripped (so a `sum`-bearing invariant does not block IR lowering
-/// of the bound module).
+/// Evaluate a boolean Deep expr with the given binder value bindings. Every
+/// opaque value is constructed in its defining module before the property
+/// probe binds it. Invariant metadata is stripped so a `sum`-bearing
+/// invariant does not block IR lowering of the bound module.
 fn eval_bool_in_module(
     exprs: &[Expr],
     home_type: &str,
-    bindings: &[(String, Expr, serde_json::Value)],
+    bindings: &[EvalBinding],
     body: &Expr,
 ) -> Result<bool, String> {
     use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
+    let mut program: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
     // Bind all binders via a let-chain around the body.
     let mut wrapped = body.clone();
-    for (name, value, _) in bindings.iter().rev() {
+    for binding in bindings.iter().rev() {
+        let value = if let Some(type_name) = &binding.opaque_type {
+            let (with_helper, helper) =
+                inject_owned_value_helper(&program, type_name, binding.value.clone());
+            program = with_helper;
+            var_node(&helper)
+        } else {
+            binding.value.clone()
+        };
         wrapped = node(
             "let",
-            vec![node("bind", vec![sym(name), value.clone()]), wrapped],
+            vec![node("bind", vec![sym(&binding.name), value]), wrapped],
         );
     }
-    let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
-    let (program, probe) = inject_probe_into_defining_module(&stripped, home_type, wrapped);
+    let (program, probe) = inject_probe_into_defining_module(&program, home_type, wrapped);
     let source = chelis_deep::printer::print_canonical(&program);
     let result = chelis_compiler_api::compiler::eval_selected(
         EvalRequest {
@@ -596,10 +626,10 @@ fn generation_producers(
     crate::obligation_engine::generation_producers_for(exprs, input_inv)
 }
 
-fn counterexample(bindings: &[(String, Expr, serde_json::Value)]) -> serde_json::Value {
+fn counterexample(bindings: &[EvalBinding]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    for (name, _, json) in bindings {
-        map.insert(name.clone(), json.clone());
+    for binding in bindings {
+        map.insert(binding.name.clone(), binding.json.clone());
     }
     serde_json::Value::Object(map)
 }
@@ -797,6 +827,31 @@ fn inject_probe_into_defining_module(
     } else {
         let def = node("def", vec![sym(&probe), body]);
         (inject_into_module(exprs, type_name, def), probe)
+    }
+}
+
+/// A generated opaque record literal is checked under the same module owner
+/// as its type. The property probe calls this nullary helper to obtain the
+/// value, so a property can bind opaque types from different modules.
+fn inject_owned_value_helper(exprs: &[Expr], type_name: &str, value: Expr) -> (Vec<Expr>, String) {
+    let (helper, linked) = crate::smt_names::fresh_module_probe_name(
+        exprs,
+        type_name,
+        "chelis_value_probe",
+        "__chelis_value_probe",
+    );
+    let def = node("def", vec![sym(&helper), value]);
+    if linked {
+        let mut program = exprs.to_vec();
+        program.push(def);
+        program.push(node("export", vec![sym(&helper)]));
+        (program, helper)
+    } else {
+        let program = inject_into_module(exprs, type_name, def);
+        (
+            inject_into_module(&program, type_name, node("export", vec![sym(&helper)])),
+            helper,
+        )
     }
 }
 
