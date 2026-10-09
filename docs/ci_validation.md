@@ -196,7 +196,9 @@ requires only the complete prior-to-current synthetic-candidate delta to be
 documentation-only; the PR itself may contain code. It runs the contract
 preflight, PR acknowledgements, changelog policy, Docs, and inexpensive metadata
 paths. A code-bearing delta is classified into exact packages and reviewed owner
-jobs. Package seeds expand through reverse workspace dependencies. The targeted
+jobs. A path a required-package rule matches also seeds that rule's packages,
+so the frontier holds every package the planner selects for the same delta.
+Package seeds expand through reverse workspace dependencies. The targeted
 lane runs package-scoped Clippy, formatting, default-feature library/binary
 units and existing doctest owners for that package frontier, every eligible
 integration target in it, and only the additional Python/script, SMT, backend,
@@ -286,6 +288,14 @@ integration target in that package frontier required change-owned coverage.
 The plan deliberately reuses no standing coverage receipt: its selected shards
 execute and report the affected targets on the current synthetic candidate
 before the required integration context passes.
+After a force-push no branch or tag reaches the prior synthetic candidate, so
+the planner, whose checkout fetches only branches, tags and the current
+candidate, fetches it by SHA. If the remote no longer has it, the planner
+plans the pull request's own change from the current target base instead, with
+the same trusted package frontier. Because that frontier already holds every
+package the exact delta selects, the substitute plan covers at least the exact
+one, and a rerun after the old commit is collected neither fails nor narrows
+coverage.
 
 On a push to `main`, `Integration Tests (Linux)` instead requires only the fixed `ci-fast` standing receipt. The planner, change-owned workers, and their report are skipped. This makes every default-branch commit answer the same standing acceptance question: a merge cannot make `main` red merely because its file diff happens to select known nightly residuals, and a later unrelated merge cannot make `main` green by selecting a different target set. Full workspace and hardware-sensitive residual work remains owned by the scheduled suites and its tracking issues.
 

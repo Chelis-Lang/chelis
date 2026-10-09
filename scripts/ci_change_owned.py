@@ -754,6 +754,16 @@ def targeted_rebase_frontier(
     unsafe_paths: set[str] = set()
 
     for path in paths:
+        # The planner requires these packages for the same path. Seeding them
+        # here keeps the frontier a superset of every package the exact delta
+        # selects, which the planner's current-base fallback relies on.
+        for rule in config.required_package_rules:
+            if not rule.matches(path):
+                continue
+            if set(rule.packages) <= candidate_names:
+                seeds.update(rule.packages)
+            else:
+                unsafe_paths.add(path)
         targets = {
             identity
             for identity in (
@@ -2864,6 +2874,54 @@ def resolve_pr_commits(
     return base, parts[0]
 
 
+def _has_commit(repo: Path, value: str) -> bool:
+    return subprocess.run(
+        ["git", "cat-file", "-e", f"{value}^{{commit}}"],
+        cwd=repo,
+        capture_output=True,
+        check=False,
+    ).returncode == 0
+
+
+def targeted_rebase_validation_base(
+    repo: Path, before: str, current_base: str
+) -> str:
+    """Return the prior synthetic candidate, or the current base without it.
+
+    The trusted verifier hands over the prior receipt's synthetic candidate.
+    After a force-push no branch or tag reaches that merge commit, so a
+    checkout of the current candidate lacks it and must fetch it by SHA. The
+    remote eventually collects it. The current target base then stands in:
+    the trusted package frontier already seeds every package the exact delta
+    selects, so planning the PR's own change on top of it only adds coverage.
+    """
+    if not SHA.fullmatch(before):
+        raise ValueError(
+            "targeted_rebase planning requires --before to be a full "
+            f"lowercase commit SHA, got {before!r}"
+        )
+    if _has_commit(repo, before):
+        return before
+    fetched = subprocess.run(
+        ["git", "fetch", "--quiet", "--no-tags", "origin", before],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if fetched.returncode == 0 and _has_commit(repo, before):
+        return before
+    print(
+        f"CHANGE-OWNED CI: targeted rebase validation base {before} is "
+        "unavailable; planning from the current target base "
+        f"{current_base} with the trusted package frontier",
+        file=sys.stderr,
+    )
+    detail = " ".join(fetched.stderr.split()) or "fetched object is not a commit"
+    print(f"CHANGE-OWNED CI: git fetch: {detail}", file=sys.stderr)
+    return current_base
+
+
 def _metadata_in(repo: Path) -> dict[str, Any]:
     return json.loads(
         subprocess.run(
@@ -2960,8 +3018,10 @@ def generate_plan(
                 "and --targeted-packages"
             )
         pr_head = _commit(repo, pr_head)
-        _, candidate = resolve_pr_commits(repo, head, pr_head)
-        base = _commit(repo, before)
+        current_base, candidate = resolve_pr_commits(repo, head, pr_head)
+        base = _commit(
+            repo, targeted_rebase_validation_base(repo, before, current_base)
+        )
         mode = "targeted_rebase"
         event_pr_head = pr_head
     elif event_name == "push":
