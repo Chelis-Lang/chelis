@@ -277,20 +277,114 @@ const ACTIVE_COTANGENT: u8 = 1;
 const ZERO_COTANGENT: u8 = 2;
 
 fn is_zero_exempt_integer_arithmetic(node: &DagNode, rejection: &AdError) -> bool {
-    matches!(
-        node.op,
-        RiscOp::Sub
-            | RiscOp::MaxElem
-            | RiscOp::MinElem
-            | RiscOp::MaxReduce { .. }
-            | RiscOp::MinReduce { .. }
-    ) && matches!(
-        rejection,
-        AdError::NotSupported {
-            reason: AdRejectionReason::IntegerArithmeticOutput,
-            ..
-        }
-    )
+    is_integer_arithmetic(node)
+        && matches!(
+            rejection,
+            AdError::NotSupported {
+                reason: AdRejectionReason::IntegerArithmeticOutput,
+                ..
+            }
+        )
+}
+
+/// [05-OP-64] and spec/06 §2.1 (chelis#3427): a signed-integer value carries
+/// no cotangent, so every arithmetic operation producing one has a single
+/// structural disposition, decided by its output dtype: it rejects `grad` when
+/// its value derives from a selected parameter and an active cotangent
+/// reaches it, and is an exact forward coefficient otherwise. The match is
+/// exhaustive so a new operation is classified when it is added. Operations
+/// whose atoms name another reason (`floor_div`, `trunc_div`, `mod`, the
+/// roundings, bitwise, the index and count reductions, and the casts) keep
+/// it; sources, movement, selection, and ownership operations carry integer
+/// values without computing new ones.
+fn is_integer_arithmetic(node: &DagNode) -> bool {
+    if !node.output_type.precision.is_integer() {
+        return false;
+    }
+    match &node.op {
+        RiscOp::Add
+        | RiscOp::Sub
+        | RiscOp::Mul
+        | RiscOp::Div
+        | RiscOp::Pow
+        | RiscOp::MaxElem
+        | RiscOp::MinElem
+        | RiscOp::ExtremaAdjoint { .. }
+        | RiscOp::Relu
+        | RiscOp::Softmax { .. }
+        | RiscOp::ReluAdjoint
+        | RiscOp::Neg
+        | RiscOp::Recip
+        | RiscOp::Exp
+        | RiscOp::Log
+        | RiscOp::Sin
+        | RiscOp::Sqrt
+        | RiscOp::Cos
+        | RiscOp::Tan
+        | RiscOp::Atan
+        | RiscOp::Tanh
+        | RiscOp::Erf
+        | RiscOp::Erfc
+        | RiscOp::Abs
+        | RiscOp::Sum { .. }
+        | RiscOp::MaxReduce { .. }
+        | RiscOp::MinReduce { .. }
+        | RiscOp::ProdReduce { .. }
+        | RiscOp::ReduceWindow { .. }
+        | RiscOp::ReduceWindowGrad { .. }
+        | RiscOp::OrderedAdjointSum { .. }
+        | RiscOp::FusedElem { .. }
+        | RiscOp::BlasMatmul { .. } => true,
+        RiscOp::FloorDiv
+        | RiscOp::TruncDiv
+        | RiscOp::Mod
+        | RiscOp::Floor
+        | RiscOp::Ceil
+        | RiscOp::Round
+        | RiscOp::Bitwise(_)
+        | RiscOp::Count { .. }
+        | RiscOp::Argmax { .. }
+        | RiscOp::Argmin { .. }
+        | RiscOp::Cast { .. }
+        | RiscOp::NamedCast { .. }
+        | RiscOp::Compare(_)
+        | RiscOp::Logical(_)
+        | RiscOp::Iota
+        | RiscOp::ListMapCapture { .. }
+        | RiscOp::Where
+        | RiscOp::GuardedFail { .. }
+        | RiscOp::UniformLike
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay
+        | RiscOp::UniformBoundAdjoint { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn
+        | RiscOp::SplitN { .. }
+        | RiscOp::KeySelect
+        | RiscOp::Reshape { .. }
+        | RiscOp::Permute { .. }
+        | RiscOp::Expand { .. }
+        | RiscOp::OneHot { .. }
+        | RiscOp::Pad { .. }
+        | RiscOp::Shrink { .. }
+        | RiscOp::Stride { .. }
+        | RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
+        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedUnitAxis { .. }
+        | RiscOp::Const { .. }
+        | RiscOp::ConstTensor { .. }
+        | RiscOp::Load { .. }
+        | RiscOp::Store { .. }
+        | RiscOp::Copy
+        | RiscOp::Drop
+        | RiscOp::Realize
+        | RiscOp::Gather { .. }
+        | RiscOp::ScatterAdd { .. }
+        | RiscOp::Scatter { .. }
+        | RiscOp::ScatterElements { .. } => false,
+    }
 }
 
 /// Track whether a forward value is derived from a selected parameter.
@@ -460,8 +554,9 @@ impl From<String> for BackwardFailure {
 /// The atom-owned structural AD disposition for a forward node. Both the
 /// live-node precheck and the actual backward walk use this table. A
 /// piecewise-constant conversion reached through exact zero retains its
-/// named reason; signed-integer arithmetic reached only through exact zero
-/// has no requested adjoint and passes that zero to its producers.
+/// named reason; signed-integer arithmetic derived from a selected parameter
+/// rejects, and when reached only through exact zero it has no requested
+/// adjoint and passes that zero to its producers.
 fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> Option<AdError> {
     match &node.op {
         RiscOp::Bitwise(kind) if selected_data => {
@@ -476,17 +571,7 @@ fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> O
                 reason: AdRejectionReason::LogicalOperation,
             });
         }
-        RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem
-            if node.output_type.precision.is_integer() =>
-        {
-            return Some(AdError::NotSupported {
-                op: risc_op_name(&node.op),
-                reason: AdRejectionReason::IntegerArithmeticOutput,
-            });
-        }
-        RiscOp::MaxReduce { .. } | RiscOp::MinReduce { .. }
-            if node.output_type.precision.is_integer() =>
-        {
+        _ if selected_data && is_integer_arithmetic(node) => {
             return Some(AdError::NotSupported {
                 op: risc_op_name(&node.op),
                 reason: AdRejectionReason::IntegerArithmeticOutput,
