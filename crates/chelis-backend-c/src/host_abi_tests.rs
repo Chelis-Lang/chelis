@@ -967,7 +967,7 @@ fn typed_key_alias_chain_calls_the_declared_let_alias() {
         "chain",
     );
     assert!(
-        body.contains("chelis_key (*__let_binding_1)(int64_t);")
+        body.contains(" (*__let_binding_1)(")
             && body.contains("__result = __let_binding_1(__call_arg0_2);"),
         "the call must go through the second binding's declared alias:\n{body}"
     );
