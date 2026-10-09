@@ -170,6 +170,23 @@ pub fn fresh_root_name(program: &[DeepExpr], stem: &str) -> String {
     NameSupply::for_deep_program(program).fresh(stem)
 }
 
+/// Pick a fresh private probe name in the module that owns `type_name`.
+/// Reef-linked programs encode module ownership in each declaration name;
+/// lexical programs encode it in a `module` wrapper. The caller inserts the
+/// returned definition using the matching representation.
+pub(crate) fn fresh_module_probe_name(
+    program: &[DeepExpr],
+    type_name: &str,
+    linked_terminal: &str,
+    lexical_stem: &str,
+) -> (String, bool) {
+    if let Some(linked) = chelis_types::linked_binding_in_module_of(type_name, linked_terminal) {
+        (fresh_root_name(program, &linked), true)
+    } else {
+        (fresh_root_name(program, lexical_stem), false)
+    }
+}
+
 /// The first name `variables` declares more than once, if any.
 pub fn first_duplicate_variable(variables: &[(String, SmtSort)]) -> Option<&str> {
     let mut seen: BTreeSet<&str> = BTreeSet::new();
