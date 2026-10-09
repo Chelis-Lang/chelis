@@ -2,7 +2,8 @@
 //!
 //! `spec/04-type-system.md` section 4.5.3 admits a builtin in a
 //! rank-polymorphic body exactly when it is name-trackable: shape-identity,
-//! named-axis, ordered-prefix, or inert (it produces no new tensor). `fail`,
+//! named-axis, ordered-prefix, or inert (it returns unit, returns its
+//! operand unchanged, or never returns). `fail`,
 //! `drop`, `dropout`, and `layer_norm` meet that test but were rejected as
 //! "shape-rewriting" because the class was a hand-kept allowlist whose
 //! default was rejection. Each positive row runs on eval and on compiled C;
@@ -180,7 +181,7 @@ fn an_untracked_builtin_is_still_rejected_and_named_by_the_property() {
         let source = format!("def bad[r](x: tensor[..r, f32]) -> tensor[..r, f32] = {call}\n");
         let messages = assert_rejected_with(
             &source,
-            &format!("may not call builtin `{op}`: it is not name-trackable at symbolic rank"),
+            &format!("may not call builtin `{op}`: it is not name-trackable"),
             op,
         );
         assert!(
@@ -190,11 +191,25 @@ fn an_untracked_builtin_is_still_rejected_and_named_by_the_property() {
             "{op}: the rejection names the property, not a shape claim: {messages:?}"
         );
     }
-    assert_rejected_with(
-        "def bad[r](x: tensor[..r, f32]) -> i64 = string_len(\"abc\")\n",
-        "may not call builtin `string_len`: it is not name-trackable",
-        "string_len",
-    );
+    // A builtin that returns a value holding no tensor is not inert: Inert is
+    // exactly a unit result, the operand returned, or no return. Its
+    // rejection states that rule and makes no transposition claim.
+    for (call, op, result) in [
+        ("string_len(\"abc\")", "string_len", "i64"),
+        ("to_string(1i64)", "to_string", "string"),
+    ] {
+        let messages = assert_rejected_with(
+            &format!("def bad[r](x: tensor[..r, f32]) -> {result} = {call}\n"),
+            &format!("may not call builtin `{op}`: it is not name-trackable"),
+            op,
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| !message.contains("transposition")),
+            "{op}: a value-returning builtin's rejection makes no shape claim: {messages:?}"
+        );
+    }
 }
 
 #[test]

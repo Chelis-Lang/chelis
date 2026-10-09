@@ -661,10 +661,10 @@ of the oracle is manual; it joins the default `scripts/gate.py` run.
 ## Risks / Open Questions
 
 - **Body Discipline completeness.** The classification table must cover every
-  builtin; a missed shape-rewriting op = a silent §4.2 hole. Mitigation: drive
-  the table from a single source and assert exhaustiveness (every builtin is
-  classified identity/erasing/rewriting, closed-set test like the `Prim`
-  enumeration lock in `types.rs:484`).
+  builtin; a missed shape-rewriting op = a silent §4.2 hole. Mitigation: the
+  `BUILTINS` row is the single source, each row declares one of the spec/04
+  §4.5.3 kinds (identity, named-axis, ordered-prefix, inert) or untracked, and
+  the check matches every class with no default.
 - **§4.5.1 consistency.** Tier 2 must not let `List[tensor[..r, f32]]` become
   expressible (would reopen the deferred shape-vector variable). Enforced by
   "no `R` inside ADT/List elements" (scope-out + negative test).

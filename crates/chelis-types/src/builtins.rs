@@ -2612,17 +2612,17 @@ pub enum ShapeClass {
     /// possibly appending trailing axes. Checked operation relations own
     /// the exact output surface, including tuples of same-shaped tensors.
     OrderedPrefix,
-    /// The call produces no new tensor: its result is unit, its operand
-    /// returned unchanged, or it never returns. It states no shape a
-    /// transposition could hide in, so it is admitted inside a rank-poly body;
-    /// its operands are still checked by unification against their rows.
+    /// The call's result is exactly one of three cases: unit, its operand
+    /// returned unchanged, or none because the call never returns. It states
+    /// no shape a transposition could hide in, so it is admitted inside a
+    /// rank-poly body; its operands are still checked by unification against
+    /// their rows. A builtin returning any other value is not inert.
     Inert,
-    /// The checker does not state this op's result at symbolic rank without
-    /// resolving a position: positional shape rewriters (`permute`,
-    /// `reshape`, `matmul`, positional `gather`), axis-indexed ops, and
-    /// value-producing host ops. Forbidden inside a rank-poly body: against an
-    /// opaque spread there are no named axes left to catch a
-    /// transposition/reshape.
+    /// Not one of the admitted kinds, so forbidden inside a rank-poly body:
+    /// positional shape rewriters (`permute`, `reshape`, `matmul`, positional
+    /// `gather`) and axis-indexed ops, whose result could hide a transposition
+    /// against an opaque spread, and builtins that return another value, such
+    /// as a string or a scalar, which no admitted kind covers.
     Untracked,
 }
 

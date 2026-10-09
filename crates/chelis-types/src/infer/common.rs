@@ -1678,7 +1678,7 @@ pub(super) fn check_rank_body_discipline(
             // class, so a new class cannot be admitted or rejected by omission
             // (spec/04-type-system.md section 4.5.3).
             Some(name) => match builtins::shape_class(name) {
-                // Identity (elementwise), Inert (no new tensor), and
+                // Identity (elementwise), Inert (unit, operand, or no return), and
                 // OrderedPrefix (key derivations retain every operand axis
                 // and may only append trailing ones) state their result
                 // at symbolic rank. For a NameTracked op the procedural
@@ -1701,12 +1701,10 @@ pub(super) fn check_rank_body_discipline(
                         CheckErrorKind::DimensionMismatch,
                         format!(
                             "rank-polymorphic def `{def_name}` may not call builtin `{name}`: \
-                                 it is not name-trackable at symbolic rank, so against a spread \
-                                 `..r` there are no named axes left to catch a transposition or \
-                                 reshape (spec/04-type-system.md \u{00a7}4.5.3). A `..r` body may \
-                                 call shape-identity operations, named-axis operations, \
-                                 ordered-prefix key derivations, and operations that return unit, \
-                                 return their operand unchanged, or never return."
+                                 it is not name-trackable. A `..r` body admits only shape-identity, \
+                                 named-axis, ordered-prefix, and inert builtins, where an inert \
+                                 builtin returns unit, returns its operand unchanged, or never \
+                                 returns (spec/04-type-system.md \u{00a7}4.5.3)."
                         ),
                         vec![format!(
                             "remove the `{name}` call from the rank-polymorphic body, or use \
