@@ -576,3 +576,30 @@ def short_loss(x: tensor[1, 1, 1, 2, f32], k: tensor[1, 1, 2, 2, f32]) -> f32 = 
         }
     }
 }
+
+/// A stride larger than its padded extent on an outer spatial axis gives
+/// that axis one output coordinate. Every final window index fits in i64, so
+/// the runtime index arithmetic must not form a larger partial product
+/// (`stride * row length`) than the literal path does: both forms return
+/// the same value in both lanes instead of trapping on overflow.
+#[test]
+fn huge_runtime_stride_on_an_outer_axis_matches_the_literal_path() {
+    let source = "\
+def cv[n, c, h, w, o, kh, kw](x: tensor[n, c, h, w, f32], k: tensor[o, c, kh, kw, f32], s0: i64, s1: i64) -> tensor[n, o, *, *, f32] = conv(x, k, [s0, s1], [(0i64, 0i64), (0i64, 0i64)])
+def xs() -> tensor[1, 1, 2, 2, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), [1i64, 1i64, 2i64, 2i64])
+def ks() -> tensor[1, 1, 2, 2, f32] = reshape(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]), [1i64, 1i64, 2i64, 2i64])
+runtime_max = reshape(cv(xs(), ks(), 9223372036854775807i64, 1i64), [1i64])
+runtime_half = reshape(cv(xs(), ks(), 4611686018427387904i64, 1i64), [1i64])
+literal_max = reshape(conv(xs(), ks(), [9223372036854775807i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]), [1i64])
+";
+    let interpreted = evaluate_ok(source);
+    let compiled = build_and_run(source, "conv_huge_runtime_stride");
+    for name in ["runtime_max", "runtime_half", "literal_max"] {
+        assert_eq!(
+            result_line(&interpreted, name),
+            result_line(&compiled, name),
+            "eval and C disagree on {name}"
+        );
+        assert_eq!(parse_tensor_data(&interpreted, name), [10.0], "{name}");
+    }
+}

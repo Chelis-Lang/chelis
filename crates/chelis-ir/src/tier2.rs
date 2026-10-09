@@ -1903,7 +1903,11 @@ pub fn lower_conv_runtime(
     // The same separable index as `lower_conv`: window row `r` (input
     // channel, kernel offsets) contributes `ch*channel_stride + sum_a
     // k_a*spatial_strides[a]`, and column `c` (batch, output coordinates)
-    // contributes `b*batch_stride + sum_a o_a*steps[a]*spatial_strides[a]`.
+    // contributes `b*batch_stride + sum_a (o_a*steps[a])*spatial_strides[a]`.
+    // Every partial product and partial sum is bounded by a product checked
+    // above (`padded_len`, or `channel_stride` when a zero channel or batch
+    // extent empties the input), so a valid conv never traps here on an
+    // intermediate.
     let rows = graph.range(contracted);
     let row_channel = graph.with_scalar(RiscOp::FloorDiv, rows, kernel_volume);
     let mut row_term = graph.with_scalar(RiscOp::Mul, row_channel, channel_stride);
@@ -1921,8 +1925,12 @@ pub fn lower_conv_runtime(
     for axis in (0..rank).rev() {
         let coordinate = graph.with_scalar(RiscOp::Mod, output_position, outputs[axis]);
         output_position = graph.with_scalar(RiscOp::FloorDiv, output_position, outputs[axis]);
-        let step = graph.scalar(RiscOp::Mul, steps[axis], spatial_strides[axis]);
-        let term = graph.with_scalar(RiscOp::Mul, coordinate, step);
+        // `coordinate * stride` is at most the padded extent, so its product
+        // with the row length is at most `channel_stride`. Forming
+        // `stride * row length` first could overflow for a stride larger
+        // than its padded extent, which is still valid.
+        let offset = graph.with_scalar(RiscOp::Mul, coordinate, steps[axis]);
+        let term = graph.with_scalar(RiscOp::Mul, offset, spatial_strides[axis]);
         column_term = graph.vector(RiscOp::Add, column_term, term);
     }
     let matrix_ty = |precision| TensorType {
