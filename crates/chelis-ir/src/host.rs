@@ -13503,9 +13503,22 @@ fn actualize_retained_host_contract(
     // A binder that only the result mentions (a dtype binder stated by a
     // body's dtype argument, [05-OP-79]) is bound by the call's checked
     // result type. Arguments bind first; the result only fills what they
-    // leave open.
-    if let Some(checked_term) = decode_expanded_host_type_expr(program, &checked_result) {
-        solve_host_type_vars(&checked_term, call_result, &mut checked_substitution);
+    // leave open. Inside a generic caller the result still names the
+    // caller's own binders, so it is read through the active caller
+    // substitution first; that is what lets a binder solved at any call depth
+    // reach this one.
+    let call_result = apply_host_type_subst(call_result, &active_substitution);
+    let call_result = &call_result;
+    // The application's own checked type is the same evidence, spelled in the
+    // caller's namespace (an ascription in a generic caller's body keeps the
+    // caller's authored binder name), and is read the same way.
+    let stamped_result = checked_type_expr(expr)
+        .and_then(|stamped| decode_expanded_host_type_expr(program, stamped))
+        .map(|stamped| apply_host_type_subst(&stamped, &active_substitution));
+    for result in std::iter::once(call_result).chain(stamped_result.as_ref()) {
+        if let Some(checked_term) = decode_expanded_host_type_expr(program, &checked_result) {
+            solve_host_type_vars(&checked_term, result, &mut checked_substitution);
+        }
     }
     let mut body_substitution = active_substitution.clone();
     for (name, term) in checked_substitution.to_sorted() {
@@ -13561,7 +13574,35 @@ fn actualize_retained_host_contract(
         }
     }
     if let Some(authored_term) = decode_expanded_host_type_expr(program, &authored_result) {
-        solve_host_type_vars(&authored_term, call_result, &mut authored_substitution);
+        for result in std::iter::once(call_result).chain(stamped_result.as_ref()) {
+            solve_host_type_vars(&authored_term, result, &mut authored_substitution);
+        }
+    }
+    // The callee's body spells its binders by their authored names wherever
+    // an ascription keeps the written name, so the body namespace binds them
+    // as well. Inside the body an authored name means only this callee's
+    // binder: each one replaces any same-spelled entry inherited from a
+    // caller, and one this call leaves unsolved is removed rather than
+    // inherited. That is how a binder solved at one call depth reaches the
+    // calls the body makes at the next.
+    let mut authored_binders = UnordSet::new();
+    for authored in authored_formals
+        .iter()
+        .chain(std::iter::once(&authored_result))
+    {
+        if let Some(term) = decode_expanded_host_type_expr(program, authored) {
+            collect_host_type_variable_names(&term, &mut authored_binders);
+        }
+    }
+    for name in authored_binders.to_sorted() {
+        match authored_substitution.get(name) {
+            Some(term) if !term.is_unresolved() => {
+                body_substitution.insert(name.clone(), term.clone());
+            }
+            _ => {
+                body_substitution.remove(name);
+            }
+        }
     }
     let mut params = signature
         .params
@@ -20128,6 +20169,46 @@ fn substitute_host_dimension_terms(
             HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape })
         }
         other => other,
+    }
+}
+
+/// Every precision or type variable name a host type term mentions.
+fn collect_host_type_variable_names(term: &HostTypeTerm, out: &mut UnordSet<String>) {
+    match term {
+        HostTypeTerm::Scalar(HostPrecisionTerm::Variable(name))
+        | HostTypeTerm::TypeVariable(name)
+        | HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+            precision: HostPrecisionTerm::Variable(name),
+            ..
+        }) => {
+            out.insert(name.clone());
+        }
+        HostTypeTerm::Fn(params, ret) => {
+            for param in params {
+                collect_host_type_variable_names(param, out);
+            }
+            collect_host_type_variable_names(ret, out);
+        }
+        HostTypeTerm::Adt(_, items) | HostTypeTerm::Tuple(items) => {
+            for item in items {
+                collect_host_type_variable_names(item, out);
+            }
+        }
+        HostTypeTerm::List(item) | HostTypeTerm::Option(item) => {
+            collect_host_type_variable_names(item, out);
+        }
+        HostTypeTerm::Dict(key, value) => {
+            collect_host_type_variable_names(key, out);
+            collect_host_type_variable_names(value, out);
+        }
+        HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(_))
+        | HostTypeTerm::PolymorphicTensor(_)
+        | HostTypeTerm::KeyBuiltinCallable(_)
+        | HostTypeTerm::Tensor(_)
+        | HostTypeTerm::MappedFile
+        | HostTypeTerm::Unit
+        | HostTypeTerm::InferenceVariable(_)
+        | HostTypeTerm::Never => {}
     }
 }
 

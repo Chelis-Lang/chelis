@@ -762,13 +762,6 @@ macro_rules! final_numeric_row {
 
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
-        "std-def-numeric",
-        "io/tensors::archive_entries: (t-fn {} (t-adt {} TensorArchive) (t-adt {} List (t-adt {} TensorEntry)))",
-        &[],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
         "header-export",
         "chelis_runtime.h: chelis_string chelis_mmap_sha256 ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
         &["numeric-op"],

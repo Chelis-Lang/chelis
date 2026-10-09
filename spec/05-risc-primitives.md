@@ -2968,10 +2968,13 @@ exact ADT identity by [05-OP-34].
 > access, owner flag, or free-style path; it has no accumulator and is outside
 > AD.
 >
-> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the twenty
+> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the nineteen
 > exported stdlib ADT identities enumerated in the normative registry
 > `spec/registry/stdlib_adt_identities.md`, which this atom incorporates by
-> reference, and no structurally similar successor.
+> reference, together with the unexported `io/tensors::TensorEntry`, which
+> the registry also enumerates because the exported
+> `io/tensors::TensorArchive` holds it in a field, and no structurally
+> similar successor.
 >
 > Every field crosses at its declared dtype and stored bits, without
 > arithmetic, conversion, or float funnel. An ordinary public ADT constructor
@@ -3011,7 +3014,7 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the two hundred ninety-four final exported stdlib numeric definitions enumerated in the
+> the two hundred ninety-three final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
@@ -4712,14 +4715,12 @@ path even though bare `round` under `grad` remains a structural
 
 > **[05-OP-81]** `tensor_archive(arguments...) -> result` governs exactly the
 > `io/tensors::*` identities: the opaque archive `TensorArchive`, its
-> entry record `TensorEntry`, `archive_entries(archive)->List[TensorEntry]`
-> (the entries in manifest order),
+> entry record `TensorEntry`,
 > `open_hnw(path:string)->TensorArchive!{IO}`, and, for each active data
 > element dtype `T`, the reader
 > `read_T(archive:TensorArchive,name:string,dims:List[i64])->tensor[n,T]`
 > (`read_f64`, `read_f32`, `read_f16`, `read_bf16`, `read_i64`,
-> `read_i32`, `read_i16`, `read_i8`, `read_bool`). `archive_entries` and the
-> readers are pure.
+> `read_i32`, `read_i16`, `read_i8`, `read_bool`). The readers are pure.
 >
 > Domain: `open_hnw` reads the hydronnx weight archive layout of format
 > major version 1: the eight magic bytes `HNXWGT`, 0, 1; a little-endian

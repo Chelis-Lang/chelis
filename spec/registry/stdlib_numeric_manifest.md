@@ -286,7 +286,6 @@ typing rule, not an unconstrained output type variable.
 | `io/json::try_to_json` | `(Json)->Option[string]` |
 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
-| `io/tensors::archive_entries` | `(TensorArchive)->List[TensorEntry]` |
 | `io/tensors::open_hnw` | `(string)->TensorArchive!{IO}` |
 | `io/tensors::read_bf16` | `(TensorArchive,string,List[i64])->tensor[*,bf16]` |
 | `io/tensors::read_bool` | `(TensorArchive,string,List[i64])->tensor[*,bool]` |
