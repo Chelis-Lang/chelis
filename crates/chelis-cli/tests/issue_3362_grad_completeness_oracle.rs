@@ -27,10 +27,17 @@ enum Contract {
     /// The atom states a float adjoint; the application takes one parameter
     /// `x` of the given type (`P` is the float dtype).
     Adjoint(&'static str, &'static str),
-    /// The atom's verbatim statement that no float adjoint exists.
+    /// The atom's verbatim statement that no float adjoint exists, in a
+    /// sentence that names the identity, or in an atom all of whose surface
+    /// identities lack a float adjoint (so a family sentence is unambiguous).
     NoFloatAdjoint(&'static str),
+    /// As [`NoFloatAdjoint`], in a mixed atom whose statement designates the
+    /// identity by this family noun rather than by name. The oracle cannot
+    /// verify that a noun covers an identity, so only the identities in
+    /// [`FAMILY_DESIGNATED`] may use it.
+    NoFloatFamily(&'static str, &'static str),
 }
-use Contract::{Adjoint, NoFloatAdjoint};
+use Contract::{Adjoint, NoFloatAdjoint, NoFloatFamily};
 
 const CONTRACTS: &[(&str, Contract)] = &[
     (
@@ -149,7 +156,10 @@ const CONTRACTS: &[(&str, Contract)] = &[
     ),
     (
         "floor_div",
-        NoFloatAdjoint("structurally reject differentiation"),
+        NoFloatFamily(
+            "structurally reject differentiation",
+            "floor and truncation operations",
+        ),
     ),
     ("fold_in", NoFloatAdjoint("carries no cotangent")),
     (
@@ -243,7 +253,10 @@ const CONTRACTS: &[(&str, Contract)] = &[
     ("not", NoFloatAdjoint("non-differentiable")),
     (
         "numel",
-        NoFloatAdjoint("Shape observations have zero cotangent"),
+        NoFloatFamily(
+            "Shape observations have zero cotangent",
+            "Shape observations",
+        ),
     ),
     (
         "or",
@@ -269,7 +282,10 @@ const CONTRACTS: &[(&str, Contract)] = &[
     ),
     (
         "rank",
-        NoFloatAdjoint("Shape observations have zero cotangent"),
+        NoFloatFamily(
+            "Shape observations have zero cotangent",
+            "Shape observations",
+        ),
     ),
     (
         "recip",
@@ -417,7 +433,10 @@ const CONTRACTS: &[(&str, Contract)] = &[
     ("trace", Adjoint("tensor[2, 2, P]", "trace(x, 0i32, 1i32)")),
     (
         "trunc_div",
-        NoFloatAdjoint("structurally reject differentiation"),
+        NoFloatFamily(
+            "structurally reject differentiation",
+            "floor and truncation operations",
+        ),
     ),
     (
         "uniform_like",
@@ -435,21 +454,27 @@ const CONTRACTS: &[(&str, Contract)] = &[
     ),
 ];
 
-/// Float adjoints whose `grad` still reaches the fallback. Each is a residual
-/// member of chelis#3362 and must keep failing with the fallback diagnostic;
-/// once its lowering lands this oracle fails until the entry is removed.
-const FALLBACK_GAPS: &[&str] = &["clamp", "scatter", "sort"];
+/// Float adjoints whose `grad` still reaches the fallback, each with the
+/// chelis#3362 sub-issue that owns its lowering. Each must keep failing with
+/// the fallback diagnostic; once its lowering lands this oracle fails until
+/// the entry is removed.
+const FALLBACK_GAPS: &[(&str, u32)] = &[("clamp", 3374), ("scatter", 3376), ("sort", 3375)];
 
 /// C emission rejections owned by another class: the C reduce kernels for
-/// these identities emit only f32 (chelis#729). Each must keep failing at the
-/// non-f32 widths with exactly this diagnostic.
-const C_WIDTH_GAPS: &[(&str, &str)] = &[
-    ("prod_reduce", "unimplemented chelis#729"),
-    ("reduce_window_max", "on f32 tensors only"),
-    ("reduce_window_mean", "on f32 tensors only"),
-    ("reduce_window_min", "on f32 tensors only"),
-    ("reduce_window_sum", "on f32 tensors only"),
+/// these identities emit only f32 (chelis#174 T5-d). Each must keep failing at
+/// the non-f32 widths with exactly this diagnostic.
+const C_WIDTH_GAPS: &[(&str, u32, &str)] = &[
+    ("prod_reduce", 174, "unimplemented chelis#729"),
+    ("reduce_window_max", 174, "on f32 tensors only"),
+    ("reduce_window_mean", 174, "on f32 tensors only"),
+    ("reduce_window_min", 174, "on f32 tensors only"),
+    ("reduce_window_sum", 174, "on f32 tensors only"),
 ];
+
+/// The reviewed identities whose atom states their missing float adjoint
+/// only through a family noun: [05-OP-64]'s "floor and truncation
+/// operations" and [05-OP-50]'s "Shape observations".
+const FAMILY_DESIGNATED: [&str; 4] = ["floor_div", "numel", "rank", "trunc_div"];
 
 const FALLBACK: &str = "has no numeric IR lowering";
 const FLOATS: [&str; 4] = ["f16", "bf16", "f32", "f64"];
@@ -498,6 +523,89 @@ fn atom_text(spec: &str, atom: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Sentences of collapsed atom text, split after `.`, `;` or `:` followed by
+/// whitespace.
+fn sentences(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    for i in 0..bytes.len().saturating_sub(1) {
+        if matches!(bytes[i], b'.' | b';' | b':') && bytes[i + 1] == b' ' {
+            out.push(text[start..=i].trim());
+            start = i + 1;
+        }
+    }
+    out.push(text[start..].trim());
+    out.retain(|sentence| !sentence.is_empty());
+    out
+}
+
+/// Whether every `_`-separated token of `identity` is a word of `text`,
+/// ignoring connective tokens such as `to` when the identity has others.
+fn names_identity(text: &str, identity: &str) -> bool {
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let tokens: Vec<&str> = identity.split('_').collect();
+    let significant: Vec<&str> = tokens
+        .iter()
+        .copied()
+        .filter(|token| token.len() > 2)
+        .collect();
+    let tokens = if significant.is_empty() {
+        tokens
+    } else {
+        significant
+    };
+    tokens
+        .iter()
+        .all(|token| words.iter().any(|word| word == token))
+}
+
+/// Clauses of the atom that state a differentiation rule without a rejection
+/// or zero marker: the clauses of its `Adjoint:` paragraph, and any clause
+/// mentioning an adjoint or a cotangent. In an atom governing several identities only the
+/// clauses naming `identity` count; an atom's sole identity owns them all.
+fn float_adjoint_clauses(text: &str, identity: Option<&str>) -> Vec<String> {
+    const MARKERS: [&str; 15] = [
+        "neither carries",
+        "no row carries",
+        "reject",
+        "non-differentiab",
+        "forward-only",
+        "no cotangent",
+        "zero cotangent",
+        "zero-cotangent",
+        "carries no",
+        "carry no",
+        "carries none",
+        "receives no",
+        "receives none",
+        "receives zero",
+        "no adjoint",
+    ];
+    let adjoint_paragraph = text
+        .split_once("Adjoint:")
+        .map(|(_, rest)| rest.split(" Accumulator:").next().unwrap_or(rest))
+        .unwrap_or("");
+    let mut clauses: Vec<&str> = adjoint_paragraph.split([',', ';', '.']).collect();
+    clauses.extend(text.split([',', ';', '.']).filter(|clause| {
+        let lower = clause.to_ascii_lowercase();
+        lower.contains("adjoint") || lower.contains("cotangent")
+    }));
+    clauses
+        .into_iter()
+        .filter(|clause| clause.chars().any(char::is_alphanumeric))
+        .filter(|clause| identity.is_none_or(|identity| names_identity(clause, identity)))
+        .filter(|clause| {
+            let lower = clause.to_ascii_lowercase();
+            !MARKERS.iter().any(|marker| lower.contains(marker))
+        })
+        .map(|clause| clause.trim().to_string())
+        .collect()
 }
 
 fn input_literal(ty: &str) -> &'static str {
@@ -611,17 +719,59 @@ fn every_numeric_identity_is_classified_against_its_atom() {
         "registry Numeric identities without a contract row: {unclassified:?}; rows without a registry identity: {stale:?}"
     );
     for (name, atom) in &registry {
-        let Some((_, NoFloatAdjoint(phrase))) = CONTRACTS.iter().find(|(n, _)| n == name) else {
-            continue;
+        let (phrase, family) = match CONTRACTS.iter().find(|(n, _)| n == name) {
+            Some((_, NoFloatAdjoint(phrase))) => (*phrase, None),
+            Some((_, NoFloatFamily(phrase, family))) => {
+                assert!(
+                    FAMILY_DESIGNATED.contains(&name.as_str()),
+                    "`{name}` uses a family designation outside the reviewed FAMILY_DESIGNATED set"
+                );
+                (*phrase, Some(*family))
+            }
+            _ => continue,
         };
+        let text = atom_text(&spec, atom);
+        let statements: Vec<&str> = sentences(&text)
+            .into_iter()
+            .filter(|sentence| sentence.contains(phrase))
+            .collect();
         assert!(
-            atom_text(&spec, atom).contains(phrase),
+            !statements.is_empty(),
             "`{name}` is classified without a float adjoint, but its atom [{atom}] does not state `{phrase}`"
+        );
+        let homogeneous = registry
+            .iter()
+            .filter(|(other, other_atom)| other_atom == atom && surface.contains(other.as_str()))
+            .all(|(other, _)| {
+                !matches!(
+                    CONTRACTS.iter().find(|(n, _)| n == other),
+                    Some((_, Adjoint(..)))
+                )
+            });
+        let designated = statements.iter().any(|sentence| match family {
+            None => homogeneous || names_identity(sentence, name),
+            Some(family) => sentence.contains(family),
+        });
+        assert!(
+            designated,
+            "`{name}`: no sentence of [{atom}] stating `{phrase}` designates it{}",
+            family.map_or(String::new(), |family| format!(" as `{family}`"))
+        );
+        let sole = registry
+            .iter()
+            .filter(|(other, other_atom)| other_atom == atom && surface.contains(other.as_str()))
+            .count()
+            == 1;
+        let adjoint_clauses = float_adjoint_clauses(&text, (!sole).then_some(name.as_str()));
+        assert!(
+            adjoint_clauses.is_empty(),
+            "`{name}` is classified without a float adjoint, but [{atom}] states one: {adjoint_clauses:?}"
         );
     }
     for gap in FALLBACK_GAPS
         .iter()
-        .chain(C_WIDTH_GAPS.iter().map(|(name, _)| name))
+        .map(|(name, _)| name)
+        .chain(C_WIDTH_GAPS.iter().map(|(name, _, _)| name))
     {
         assert!(
             matches!(
@@ -636,7 +786,9 @@ fn every_numeric_identity_is_classified_against_its_atom() {
 fn adjoint_rows() -> Vec<&'static str> {
     CONTRACTS
         .iter()
-        .filter(|(name, contract)| matches!(contract, Adjoint(..)) && !FALLBACK_GAPS.contains(name))
+        .filter(|(name, contract)| {
+            matches!(contract, Adjoint(..)) && !FALLBACK_GAPS.iter().any(|(gap, _)| gap == name)
+        })
         .map(|(name, _)| *name)
         .collect()
 }
@@ -654,7 +806,7 @@ fn grad_of_every_float_adjoint_lowers_in_c_emission_at_every_float_width() {
     for dtype in FLOATS {
         let names: Vec<&str> = adjoint_rows()
             .into_iter()
-            .filter(|name| dtype == "f32" || !C_WIDTH_GAPS.iter().any(|(gap, _)| gap == name))
+            .filter(|name| dtype == "f32" || !C_WIDTH_GAPS.iter().any(|(gap, _, _)| gap == name))
             .collect();
         assert_batch_lowers(&names, dtype, true);
     }
@@ -662,21 +814,21 @@ fn grad_of_every_float_adjoint_lowers_in_c_emission_at_every_float_width() {
 
 #[test]
 fn recorded_gaps_still_fail_exactly_as_recorded() {
-    for name in FALLBACK_GAPS {
+    for (name, issue) in FALLBACK_GAPS {
         for emit_c in [false, true] {
-            let stderr = lower(&[name], "f32", emit_c)
-                .err()
-                .unwrap_or_else(|| panic!("`{name}` now lowers; remove it from FALLBACK_GAPS"));
+            let stderr = lower(&[name], "f32", emit_c).err().unwrap_or_else(|| {
+                panic!("`{name}` now lowers; remove it from FALLBACK_GAPS (chelis#{issue})")
+            });
             assert!(
                 stderr.contains(FALLBACK),
                 "`{name}` fails differently: {stderr}"
             );
         }
     }
-    for (name, diagnostic) in C_WIDTH_GAPS {
-        let stderr = lower(&[name], "f64", true)
-            .err()
-            .unwrap_or_else(|| panic!("`{name}` now emits C at f64; remove it from C_WIDTH_GAPS"));
+    for (name, issue, diagnostic) in C_WIDTH_GAPS {
+        let stderr = lower(&[name], "f64", true).err().unwrap_or_else(|| {
+            panic!("`{name}` now emits C at f64; remove it from C_WIDTH_GAPS (chelis#{issue})")
+        });
         assert!(
             stderr.contains(diagnostic) && !stderr.contains(FALLBACK),
             "`{name}` fails differently at f64: {stderr}"

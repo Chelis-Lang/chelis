@@ -1464,9 +1464,11 @@ impl RuntimeDimClass {
     /// class instead constrains each produced axis, so its ownership must
     /// agree with an explicit literal-result token on the same axis (§4.7).
     pub fn placement(&self, dag: &Dag) -> GuardPlacement {
+        let witnesses = CallerWitnesses::new(dag);
         if self.members.iter().all(|member| match self.claim {
             DimClaim::Literal(_) => {
-                literal_result_interface_observation(dag, member.node, member.axis).is_some()
+                literal_result_interface_observation(dag, &witnesses, member.node, member.axis)
+                    .is_some()
             }
             DimClaim::Name(_) => member_is_interface(dag, member),
         }) {
@@ -1956,12 +1958,22 @@ fn split_by_scope(
                 // carries the axis, so this no longer decides anything on its
                 // own, and it is kept order-preserving because the next tie to
                 // be introduced would silently inherit the reversal.
+                //
+                // The first absorbed bucket is extended in place: rebuilding
+                // the merge into a fresh vector copied the whole bucket for
+                // every entry, quadratic in a large class.
+                // A bucket always holds a member, so an empty `merged` has
+                // absorbed nothing yet.
                 let mut merged: Vec<OrderedMember> = Vec::new();
                 let mut merged_mask = mask;
                 buckets.retain_mut(|(bucket_mask, bucket)| {
                     if *bucket_mask & merged_mask != 0 {
                         merged_mask |= *bucket_mask;
-                        merged.append(bucket);
+                        if merged.is_empty() {
+                            merged = std::mem::take(bucket);
+                        } else {
+                            merged.append(bucket);
+                        }
                         false
                     } else {
                         true
@@ -2096,12 +2108,16 @@ impl OrderedMember {
         }
     }
 
-    fn literal_guard_key(&self, dag: &Dag) -> OrderKey {
+    fn literal_guard_key(&self, dag: &Dag, witnesses: &CallerWitnesses) -> OrderKey {
         // A literal result claim follows its output owner, even when the
         // extent's value can be read from an earlier interface witness.
-        let input_axis =
-            literal_result_interface_observation(dag, self.member.node, self.member.axis)
-                .and_then(|observation| observation.entry_axis(dag));
+        let input_axis = literal_result_interface_observation(
+            dag,
+            witnesses,
+            self.member.node,
+            self.member.axis,
+        )
+        .and_then(|observation| observation.entry_axis(dag));
         let slot =
             input_axis.and_then(|(load, axis)| abi_input_slot(dag, load).map(|slot| (slot, axis)));
         (slot.is_none(), slot, self.node, self.member.axis)
@@ -2146,13 +2162,14 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
         }
     }
 
+    let witnesses = CallerWitnesses::new(dag);
     let mut classes: Vec<(OrderKey, RuntimeDimClass)> = Vec::new();
     for (claim, mut members) in split_by_scope(dag, grouped) {
         let order_key = |member: &OrderedMember| match claim {
-            DimClaim::Literal(_) => member.literal_guard_key(dag),
+            DimClaim::Literal(_) => member.literal_guard_key(dag, &witnesses),
             DimClaim::Name(_) => member.key(),
         };
-        members.sort_by_key(order_key);
+        members.sort_by_cached_key(order_key);
         // A `Name` class needs two witnesses: one has nothing to disagree
         // with. A `Literal` class needs one, because C2.4 makes the literal
         // the canonical VALUE rather than a first member, so a single
@@ -2622,25 +2639,27 @@ pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
             }
         }
     }
+    let witnesses = CallerWitnesses::new(dag);
     for class in derive_runtime_dim_classes(dag) {
         let DimClaim::Literal(required) = class.claim else {
             continue;
         };
         for member in &class.members {
-            let observed = literal_result_interface_observation(dag, member.node, member.axis)
-                .and_then(|observation| observation.entry_axis(dag))
-                .or_else(|| {
-                    // A body result cannot invent an input obligation. Keep
-                    // the independent input check only when that input's own
-                    // declaration already states this exact literal.
-                    let (load, axis) = member_load_axis(dag, member)?;
-                    let declared = dag.get(load)?.output_type.dims.get(axis)?;
-                    matches!(declared,
-                        DimInfo::Lit(value) | DimInfo::Named(_, Some(value))
-                            if *value == required
-                    )
-                    .then_some((load, axis))
-                });
+            let observed =
+                literal_result_interface_observation(dag, &witnesses, member.node, member.axis)
+                    .and_then(|observation| observation.entry_axis(dag))
+                    .or_else(|| {
+                        // A body result cannot invent an input obligation. Keep
+                        // the independent input check only when that input's own
+                        // declaration already states this exact literal.
+                        let (load, axis) = member_load_axis(dag, member)?;
+                        let declared = dag.get(load)?.output_type.dims.get(axis)?;
+                        matches!(declared,
+                            DimInfo::Lit(value) | DimInfo::Named(_, Some(value))
+                                if *value == required
+                        )
+                        .then_some((load, axis))
+                    });
             if let Some(observed) = observed {
                 guards.push(EntryExtentGuard::Literal { required, observed });
             }
@@ -3568,25 +3587,39 @@ pub(crate) fn directly_owns_literal_result_claim(dag: &Dag, owner: NodeId) -> bo
 /// Such a downstream witness observes the same physical quantity but does not
 /// own the earlier result claim, so the upper bound is part of the identity.
 fn caller_witness_for_axis(
-    dag: &Dag,
+    witnesses: &CallerWitnesses,
     tensor: NodeId,
     axis: usize,
     not_after: NodeId,
 ) -> Option<NodeId> {
-    dag.nodes().iter().rev().find_map(|node| {
-        let RiscOp::ExtentWitness {
-            site: crate::dag::ExtentWitnessSite::Caller,
-            axis: RtAxis::Lit(observed),
-            ..
-        } = node.op
-        else {
-            return None;
-        };
-        (node.id.0 <= not_after.0
-            && usize::try_from(observed).ok() == Some(axis)
-            && node.inputs.first() == Some(&tensor))
-        .then_some(node.id)
-    })
+    let ids = witnesses.0.get(&(tensor, axis))?;
+    let end = ids.partition_point(|id| *id <= not_after);
+    end.checked_sub(1).map(|last| ids[last])
+}
+
+/// Every caller [`RiscOp::ExtentWitness`] of one graph, keyed by observed
+/// `(tensor, axis)` with ids ascending. A pass builds it once and answers each
+/// [`caller_witness_for_axis`] query by binary search: a whole-graph scan per
+/// query made the literal-result derivations quadratic in graph size, which
+/// a long unrolled chain (a `cumsum` adjoint) turns into minutes.
+pub(crate) struct CallerWitnesses(std::collections::BTreeMap<(NodeId, usize), Vec<NodeId>>);
+
+impl CallerWitnesses {
+    pub(crate) fn new(dag: &Dag) -> Self {
+        let mut index = std::collections::BTreeMap::<_, Vec<NodeId>>::new();
+        for node in dag.nodes() {
+            if let RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                axis: RtAxis::Lit(observed),
+                ..
+            } = node.op
+                && let (Ok(axis), Some(tensor)) = (usize::try_from(observed), node.inputs.first())
+            {
+                index.entry((*tensor, axis)).or_default().push(node.id);
+            }
+        }
+        Self(index)
+    }
 }
 
 /// Whether `owner`'s `axis` is an ABI input axis read through administrative
@@ -3600,7 +3633,7 @@ pub(crate) fn result_axis_is_unwitnessed_input_axis(dag: &Dag, owner: NodeId, ax
     let Some(LiteralResultInterfaceObservation::InputAxis {
         load,
         axis: input_axis,
-    }) = literal_result_interface_observation(dag, owner, axis)
+    }) = literal_result_interface_observation(dag, &CallerWitnesses::new(dag), owner, axis)
     else {
         return false;
     };
@@ -3656,11 +3689,13 @@ impl LiteralResultInterfaceObservation {
 /// read from parameter metadata before that operation runs (spec/04 §4.7).
 fn literal_result_interface_observation(
     dag: &Dag,
+    witnesses: &CallerWitnesses,
     owner: NodeId,
     axis: usize,
 ) -> Option<LiteralResultInterfaceObservation> {
     fn walk(
         dag: &Dag,
+        witnesses: &CallerWitnesses,
         node_id: NodeId,
         axis: usize,
         not_after: NodeId,
@@ -3669,13 +3704,13 @@ fn literal_result_interface_observation(
         if remaining == 0 {
             return None;
         }
-        if let Some(witness) = caller_witness_for_axis(dag, node_id, axis, not_after) {
+        if let Some(witness) = caller_witness_for_axis(witnesses, node_id, axis, not_after) {
             return Some(LiteralResultInterfaceObservation::Witness(witness));
         }
         let node = dag.get(node_id)?;
         match output_axis_sources(dag, node_id).get(axis)? {
             AxisSource::ExternalAxis { load, axis } => {
-                caller_witness_for_axis(dag, *load, *axis, not_after)
+                caller_witness_for_axis(witnesses, *load, *axis, not_after)
                     .map(LiteralResultInterfaceObservation::Witness)
                     .or(Some(LiteralResultInterfaceObservation::InputAxis {
                         load: *load,
@@ -3692,6 +3727,7 @@ fn literal_result_interface_observation(
             {
                 walk(
                     dag,
+                    witnesses,
                     *node.inputs.get(*input)?,
                     usize::try_from(*read).ok()?,
                     not_after,
@@ -3705,7 +3741,7 @@ fn literal_result_interface_observation(
         }
     }
 
-    walk(dag, owner, axis, owner, dag.len())
+    walk(dag, witnesses, owner, axis, owner, dag.len())
 }
 
 fn interface_witness_axis(dag: &Dag, witness: NodeId) -> Option<(NodeId, usize)> {
@@ -3761,6 +3797,7 @@ fn literal_result_interface_claims(
     LiteralResultInterfaceObservation,
     chelis_types::ScalarValue,
 )> {
+    let witnesses = CallerWitnesses::new(dag);
     let mut claims = Vec::new();
     for owner in dag.nodes() {
         for token in owner.shape_deps.iter().chain(&owner.result_claim_deps) {
@@ -3778,7 +3815,7 @@ fn literal_result_interface_claims(
                 continue;
             };
             let Some(observed) =
-                literal_result_interface_observation(dag, owner.id, *axis as usize)
+                literal_result_interface_observation(dag, &witnesses, owner.id, *axis as usize)
             else {
                 continue;
             };
@@ -3842,6 +3879,7 @@ pub fn literal_result_witness_requirements(
 /// disagree with the first, and the point of deriving it here is that it
 /// cannot.
 pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuardClaim)>, String> {
+    let witnesses = CallerWitnesses::new(dag);
     let mut sites = Vec::new();
     // Explicit result obligations have graph identity, independently of any
     // labels the checked caller retains on its result. Their producer owns
@@ -3909,7 +3947,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
             {
                 let axis = usize::try_from(*axis)
                     .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
-                if literal_result_interface_observation(dag, node.id, axis).is_some() {
+                if literal_result_interface_observation(dag, &witnesses, node.id, axis).is_some() {
                     // This exact token is an entry obligation or a proven
                     // named restatement, never a second local producer guard.
                     continue;

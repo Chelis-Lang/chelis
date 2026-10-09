@@ -5,26 +5,43 @@
 //! Each lowering composes existing Tier 1 movement and arithmetic nodes so
 //! that the operation's adjoint follows from the IR graph; no backend
 //! supplies an adjoint (spec/05 §5). Every graph here is built only from
-//! statically known extents. A runtime extent returns `Err` with the reason,
-//! and the caller keeps the operation's host execution ([05-HOST-1]).
+//! statically known extents; a runtime extent is an [`OrderedGap`] the caller
+//! rejects (chelis#3378).
 //!
 //! Float forms only for `trace`, `cumsum`, and `einsum`: their integer forms are
 //! forward-only and check overflow at every arithmetic step in the atom's
-//! order, which an elementwise IR graph does not reproduce trap for trap.
+//! order, which an elementwise IR graph does not reproduce trap for trap
+//! (chelis#3377).
 
 use chelis_types::types::Prim;
 
 use crate::dag::{Dag, DimInfo, NodeId, Owner, RiscOp, RtDim, TensorType};
 use crate::tier2::add_synth;
 
-fn static_dims(ty: &TensorType, op: &str) -> Result<Vec<usize>, String> {
+/// Why an ordered lowering produced no graph.
+pub enum OrderedGap {
+    /// An integer form, forward-only and kept on its checked host kernel.
+    IntegerForm(String),
+    /// An operand axis whose extent is known only at run time.
+    RuntimeExtent(String),
+    /// Arguments the checker should have rejected.
+    Malformed(String),
+}
+
+impl From<String> for OrderedGap {
+    fn from(reason: String) -> Self {
+        Self::Malformed(reason)
+    }
+}
+
+fn static_dims(ty: &TensorType, op: &str) -> Result<Vec<usize>, OrderedGap> {
     ty.dims
         .iter()
         .map(|dim| match dim {
             DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => Ok(*n),
-            DimInfo::Named(name, None) => Err(format!(
-                "`{op}` lowers to the IR graph only over static extents; axis `{name}` is a runtime extent"
-            )),
+            DimInfo::Named(name, None) => Err(OrderedGap::RuntimeExtent(format!(
+                "`{op}` operand axis `{name}` is a runtime extent"
+            ))),
         })
         .collect()
 }
@@ -165,13 +182,14 @@ pub fn lower_diagonal(
     axis1: usize,
     axis2: usize,
     span: Option<&str>,
-) -> Result<NodeId, String> {
+) -> Result<NodeId, OrderedGap> {
     let dims = static_dims(x_ty, "diagonal")?;
     let rank = dims.len();
     if axis1 == axis2 || axis1 >= rank || axis2 >= rank {
         return Err(format!(
             "`diagonal` axes ({axis1}, {axis2}) are not two distinct axes of a rank-{rank} operand"
-        ));
+        )
+        .into());
     }
     let precision = x_ty.precision;
     let mut b = Builder { owner, dag, span };
@@ -222,13 +240,13 @@ pub fn lower_trace(
     axis1: usize,
     axis2: usize,
     span: Option<&str>,
-) -> Result<NodeId, String> {
+) -> Result<NodeId, OrderedGap> {
     let precision = x_ty.precision;
     if !precision.is_float() {
-        return Err(format!(
-            "`trace` over `{}` is forward-only and keeps its checked host reduction",
+        return Err(OrderedGap::IntegerForm(format!(
+            "`trace` over `{}` is forward-only",
             precision.name()
-        ));
+        )));
     }
     let diag = lower_diagonal(owner, dag, x, x_ty, axis1, axis2, span)?;
     let mut diag_dims = static_dims(x_ty, "trace")?;
@@ -272,20 +290,21 @@ pub fn lower_cumsum(
     x_ty: &TensorType,
     axis: usize,
     span: Option<&str>,
-) -> Result<NodeId, String> {
+) -> Result<NodeId, OrderedGap> {
     let precision = x_ty.precision;
     if !precision.is_float() {
-        return Err(format!(
-            "`cumsum` over `{}` is forward-only and keeps its checked host scan",
+        return Err(OrderedGap::IntegerForm(format!(
+            "`cumsum` over `{}` is forward-only",
             precision.name()
-        ));
+        )));
     }
     let dims = static_dims(x_ty, "cumsum")?;
     if axis >= dims.len() {
         return Err(format!(
             "`cumsum` axis {axis} is out of range for rank {}",
             dims.len()
-        ));
+        )
+        .into());
     }
     let accumulator = precision.default_reduce_sum_accumulator()?;
     let result = precision.sum_result_precision(accumulator);
@@ -307,7 +326,11 @@ pub fn lower_cumsum(
     );
     let mut prefixes = Vec::with_capacity(n);
     for slab in slabs {
-        running = b.node(RiscOp::Add, vec![running, slab], &slab_dims, accumulator);
+        // Addition commutes exactly. The slab is the left operand so an axis
+        // query reads its extent through the O(log n) slab cut instead of
+        // walking the whole running chain, which made extent resolution over
+        // every prefix quadratic in n.
+        running = b.node(RiscOp::Add, vec![slab, running], &slab_dims, accumulator);
         prefixes.push(running);
     }
     let joined = join_slabs(&mut b, &prefixes, &slab_dims, axis, accumulator);
@@ -387,16 +410,16 @@ pub fn lower_einsum(
     operands: [(NodeId, &TensorType); 2],
     accumulator: Option<Prim>,
     span: Option<&str>,
-) -> Result<NodeId, String> {
+) -> Result<NodeId, OrderedGap> {
     let precision = operands[0].1.precision;
     if operands[1].1.precision != precision {
-        return Err("`einsum` operands must share one dtype".to_string());
+        return Err("`einsum` operands must share one dtype".to_string().into());
     }
     if !precision.is_float() {
-        return Err(format!(
-            "`einsum` over `{}` is forward-only and keeps its checked host contraction",
+        return Err(OrderedGap::IntegerForm(format!(
+            "`einsum` over `{}` is forward-only",
             precision.name()
-        ));
+        )));
     }
     let accumulator = match accumulator {
         Some(accumulator) => accumulator,
@@ -417,9 +440,9 @@ pub fn lower_einsum(
     for ((_, ty), labels) in operands.iter().zip(&labels) {
         let dims = static_dims(ty, "einsum")?;
         if dims.len() != labels.len() {
-            return Err(format!(
-                "`einsum` equation `{equation}` does not match operand ranks"
-            ));
+            return Err(
+                format!("`einsum` equation `{equation}` does not match operand ranks").into(),
+            );
         }
         for (&label, &n) in labels.iter().zip(&dims) {
             match extent[usize::from(label)] {
@@ -427,7 +450,8 @@ pub fn lower_einsum(
                     return Err(format!(
                         "`einsum` label `{}` has inconsistent extents",
                         char::from(label)
-                    ));
+                    )
+                    .into());
                 }
                 _ => extent[usize::from(label)] = Some(n),
             }
@@ -445,7 +469,8 @@ pub fn lower_einsum(
             return Err(format!(
                 "`einsum` output label `{}` occurs in no operand",
                 char::from(label)
-            ));
+            )
+            .into());
         }
     }
     let size = |label: u8| extent[usize::from(label)].expect("every label has an extent");

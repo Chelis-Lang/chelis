@@ -17322,18 +17322,53 @@ impl<'program> LowerCtx<'program> {
                                 span.as_deref(),
                             )
                         }
-                        None => Err("its equation is not a string literal".to_string()),
+                        None => Err(tier2_ordered::OrderedGap::Malformed(
+                            "its equation is not a string literal".to_string(),
+                        )),
                     },
                 };
-                lowered.unwrap_or_else(|reason| {
-                    self.reject_lowering_at(
+                let (detail, authority) = match lowered {
+                    Ok(node) => return node,
+                    Err(tier2_ordered::OrderedGap::IntegerForm(detail)) => (
+                        detail,
+                        chelis_types::unimplemented_rejection!(
+                            3377,
+                            "an integer form inside a differentiated or batched body keeps its \
+                             checked host kernel, which a transform cannot consume"
+                        ),
+                    ),
+                    Err(tier2_ordered::OrderedGap::RuntimeExtent(detail)) => (
+                        detail,
+                        chelis_types::unimplemented_rejection!(
+                            3378,
+                            "the transform graph for this operation requires static extents"
+                        ),
+                    ),
+                    Err(tier2_ordered::OrderedGap::Malformed(reason)) => self.reject_lowering_at(
                         (Some(app_span), self.current_span_id.clone()),
                         format!(
                             "application of `{func_name}` has no numeric IR lowering ({reason}); \
                              preserve its host execution (spec/05-risc-primitives.md [05-HOST-1])"
                         ),
+                    ),
+                };
+                if unrepresentable_panic_suppressed() {
+                    std::panic::panic_any(UnrepresentableDag);
+                }
+                let unsupported = Unsupported::new(
+                    UnsupportedKind::Op(func_name.to_string()),
+                    format!("numeric IR lowering inside a transform: {detail}"),
+                    Stage::Lowering,
+                    authority,
+                );
+                raise_lowering_diagnostic(
+                    LowerDiagnostic::from_unsupported(
+                        unsupported,
+                        Some(app_span),
+                        self.current_span_id.clone(),
                     )
-                })
+                    .fatal(),
+                )
             }
 
             // Exact argument values do not implement the operation. A fake

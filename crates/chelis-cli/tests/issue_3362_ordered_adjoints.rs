@@ -304,3 +304,72 @@ fn integer_and_bool_forms_receive_no_adjoint() {
         vec![0.0; 4]
     );
 }
+
+/// An integer form inside a differentiated body keeps its checked host
+/// kernel, which the transform cannot consume; the rejection names the
+/// issue that owns the missing integer graph rather than the generic
+/// fallback.
+#[test]
+fn integer_forms_inside_a_differentiated_body_cite_their_issue() {
+    let (_dir, reef, app) = common::make_app("issue-3362-int-body");
+    common::write_file(
+        &app.join("src/main.ch"),
+        "module Demo.Main\ndef f(x: tensor[3, f32], k: tensor[3, i32]) -> tensor[f32] = sum(mul(x, cast(cumsum(k, 0i32), f32)), 0i32)\ng = grad(f, wrt=x)(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([1i32, 2i32, 3i32]))\n",
+    );
+    let output = eval_text(&reef, &app);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("chelis#3377"), "{stderr}");
+    assert!(!stderr.contains("has no numeric IR lowering"), "{stderr}");
+}
+
+/// CPU seconds consumed by this process's waited-for children.
+fn children_cpu_seconds() -> f64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: `getrusage` fills the struct it is handed and reports failure
+    // through its return value, which is checked before the read.
+    let usage = unsafe {
+        assert_eq!(
+            libc::getrusage(libc::RUSAGE_CHILDREN, usage.as_mut_ptr()),
+            0
+        );
+        usage.assume_init()
+    };
+    let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
+    seconds(usage.ru_utime) + seconds(usage.ru_stime)
+}
+
+/// The cumsum graph is O(n) nodes, so lowering its adjoint must stay
+/// near-linear in n. Every axis-source query once scanned the whole graph,
+/// which made `grad` over a 1024-step cumsum take minutes (CPU grew about
+/// 32-fold from n = 256 to n = 1024). Child CPU time, not wall time, so load
+/// on the machine does not move the ratio.
+#[test]
+fn cumsum_adjoint_lowering_scales_near_linearly() {
+    let mut cpu = Vec::new();
+    for n in [256, 1024] {
+        let (_dir, reef, app) = common::make_app("issue-3362-scale");
+        common::write_file(
+            &app.join("src/main.ch"),
+            &format!(
+                "module Demo.Main\ndef f(x: tensor[{n}, f32]) -> tensor[f32] = sum(cumsum(x, 0i32), 0i32)\ng = sum(grad(f)(insert(scalar_to_tensor(1.0f32), 0i32, {n}i64)), 0i32)\n"
+            ),
+        );
+        let before = children_cpu_seconds();
+        let output = eval_text(&reef, &app);
+        cpu.push(children_cpu_seconds() - before);
+        assert!(output.status.success(), "n={n}: {output:?}");
+        let expected = n * (n + 1) / 2;
+        assert_eq!(
+            scalar_root(&String::from_utf8(output.stdout).unwrap(), "g"),
+            expected as f64,
+            "n={n}"
+        );
+    }
+    assert!(
+        cpu[1] < 10.0 * cpu[0],
+        "4x the cumsum length took {:.2}s of CPU against {:.2}s: superlinear lowering",
+        cpu[1],
+        cpu[0]
+    );
+}
