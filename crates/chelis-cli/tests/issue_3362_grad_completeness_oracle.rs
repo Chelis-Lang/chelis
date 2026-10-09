@@ -27,17 +27,60 @@ enum Contract {
     /// The atom states a float adjoint; the application takes one parameter
     /// `x` of the given type (`P` is the float dtype).
     Adjoint(&'static str, &'static str),
-    /// The atom's verbatim statement that no float adjoint exists, in a
-    /// sentence that names the identity, or in an atom all of whose surface
-    /// identities lack a float adjoint (so a family sentence is unambiguous).
-    NoFloatAdjoint(&'static str),
-    /// As [`NoFloatAdjoint`], in a mixed atom whose statement designates the
-    /// identity by this family noun rather than by name. The oracle cannot
-    /// verify that a noun covers an identity, so only the identities in
-    /// [`FAMILY_DESIGNATED`] may use it.
-    NoFloatFamily(&'static str, &'static str),
+    /// The atom states that no float adjoint exists, with this marker, in a
+    /// sentence that designates the identity (see [`classification_error`]).
+    NoFloatAdjoint(Marker),
 }
-use Contract::{Adjoint, NoFloatAdjoint, NoFloatFamily};
+use Contract::{Adjoint, NoFloatAdjoint};
+
+/// The closed vocabulary of no-float-adjoint statements. A classification
+/// cites one of these exact spellings, never free atom text, so a phrase that
+/// merely occurs near an identity cannot classify it.
+#[derive(Clone, Copy, Debug)]
+enum Marker {
+    GradRejects,
+    NonDifferentiable,
+    StructurallyReject,
+    ZeroCotangent,
+    ZeroCotangentAdjoint,
+    ReceivesNoCotangent,
+    CarriesNoCotangent,
+    NeitherCarriesACotangent,
+    NoRowCarriesACotangent,
+    /// Adopts another atom's differentiation contract; that atom's surface
+    /// identities must all be classified without a float adjoint.
+    DifferentiationContractOf,
+}
+
+impl Marker {
+    const ALL: [Marker; 10] = [
+        Marker::GradRejects,
+        Marker::NonDifferentiable,
+        Marker::StructurallyReject,
+        Marker::ZeroCotangent,
+        Marker::ZeroCotangentAdjoint,
+        Marker::ReceivesNoCotangent,
+        Marker::CarriesNoCotangent,
+        Marker::NeitherCarriesACotangent,
+        Marker::NoRowCarriesACotangent,
+        Marker::DifferentiationContractOf,
+    ];
+
+    fn spelling(self) -> &'static str {
+        match self {
+            Marker::GradRejects => "`grad` rejects",
+            Marker::NonDifferentiable => "non-differentiab",
+            Marker::StructurallyReject => "structurally reject",
+            Marker::ZeroCotangent => "zero cotangent",
+            Marker::ZeroCotangentAdjoint => "zero-cotangent adjoint",
+            Marker::ReceivesNoCotangent => "receives no cotangent",
+            Marker::CarriesNoCotangent => "carries no cotangent",
+            Marker::NeitherCarriesACotangent => "neither carries a cotangent",
+            Marker::NoRowCarriesACotangent => "No row carries a cotangent",
+            Marker::DifferentiationContractOf => "differentiation contract of [",
+        }
+    }
+}
 
 const CONTRACTS: &[(&str, Contract)] = &[
     (
@@ -48,25 +91,16 @@ const CONTRACTS: &[(&str, Contract)] = &[
         "add",
         Adjoint("tensor[2, 2, P]", "sum(sum(add(x, x), 1i32), 0i32)"),
     ),
-    ("and", NoFloatAdjoint("`grad` rejects it")),
-    ("argmax_reduce", NoFloatAdjoint("`grad` rejects it")),
-    ("argmin_reduce", NoFloatAdjoint("non-differentiability")),
+    ("and", NoFloatAdjoint(Marker::GradRejects)),
+    ("argmax_reduce", NoFloatAdjoint(Marker::GradRejects)),
+    ("argmin_reduce", NoFloatAdjoint(Marker::NonDifferentiable)),
     (
         "atan",
         Adjoint("tensor[2, 2, P]", "sum(sum(atan(x), 1i32), 0i32)"),
     ),
-    (
-        "bitand",
-        NoFloatAdjoint("structurally reject differentiation"),
-    ),
-    (
-        "bitor",
-        NoFloatAdjoint("structurally reject differentiation"),
-    ),
-    (
-        "bitxor",
-        NoFloatAdjoint("structurally reject differentiation"),
-    ),
+    ("bitand", NoFloatAdjoint(Marker::StructurallyReject)),
+    ("bitor", NoFloatAdjoint(Marker::StructurallyReject)),
+    ("bitxor", NoFloatAdjoint(Marker::StructurallyReject)),
     (
         "cast",
         Adjoint(
@@ -74,13 +108,10 @@ const CONTRACTS: &[(&str, Contract)] = &[
             "sum(sum(cast(cast(x, f64), P), 1i32), 0i32)",
         ),
     ),
-    ("cast_saturate", NoFloatAdjoint("`grad` rejects it")),
-    ("cast_trunc", NoFloatAdjoint("non-differentiable")),
-    ("cast_wrap", NoFloatAdjoint("`grad` rejects it")),
-    (
-        "ceil",
-        NoFloatAdjoint("float floor/ceil/round structurally reject"),
-    ),
+    ("cast_saturate", NoFloatAdjoint(Marker::GradRejects)),
+    ("cast_trunc", NoFloatAdjoint(Marker::NonDifferentiable)),
+    ("cast_wrap", NoFloatAdjoint(Marker::GradRejects)),
+    ("ceil", NoFloatAdjoint(Marker::StructurallyReject)),
     (
         "clamp",
         Adjoint(
@@ -88,7 +119,7 @@ const CONTRACTS: &[(&str, Contract)] = &[
             "sum(sum(clamp(x, scalar_to_tensor(-0.5P), scalar_to_tensor(0.5P)), 1i32), 0i32)",
         ),
     ),
-    ("cmplt", NoFloatAdjoint("zero cotangent")),
+    ("cmplt", NoFloatAdjoint(Marker::ZeroCotangent)),
     (
         "conv",
         Adjoint(
@@ -100,10 +131,7 @@ const CONTRACTS: &[(&str, Contract)] = &[
         "cos",
         Adjoint("tensor[2, 2, P]", "sum(sum(cos(x), 1i32), 0i32)"),
     ),
-    (
-        "count",
-        NoFloatAdjoint("AdRejectionReason::IntegerReductionOutput"),
-    ),
+    ("count", NoFloatAdjoint(Marker::StructurallyReject)),
     (
         "cumsum",
         Adjoint("tensor[2, 2, P]", "sum(sum(cumsum(x, 1i32), 1i32), 0i32)"),
@@ -130,7 +158,7 @@ const CONTRACTS: &[(&str, Contract)] = &[
         "einsum",
         Adjoint("tensor[2, 2, P]", "einsum(\"ij,ij->\", x, x)"),
     ),
-    ("eq", NoFloatAdjoint("zero cotangent")),
+    ("eq", NoFloatAdjoint(Marker::ZeroCotangent)),
     (
         "erf",
         Adjoint("tensor[2, 2, P]", "sum(sum(erf(x), 1i32), 0i32)"),
@@ -150,18 +178,9 @@ const CONTRACTS: &[(&str, Contract)] = &[
             "sum(sum(expand(shrink(x, [[0i64, 2i64], [0i64, 1i64]]), 1i32, 3i64), 1i32), 0i32)",
         ),
     ),
-    (
-        "floor",
-        NoFloatAdjoint("float floor/ceil/round structurally reject"),
-    ),
-    (
-        "floor_div",
-        NoFloatFamily(
-            "structurally reject differentiation",
-            "floor and truncation operations",
-        ),
-    ),
-    ("fold_in", NoFloatAdjoint("carries no cotangent")),
+    ("floor", NoFloatAdjoint(Marker::StructurallyReject)),
+    ("floor_div", NoFloatAdjoint(Marker::StructurallyReject)),
+    ("fold_in", NoFloatAdjoint(Marker::CarriesNoCotangent)),
     (
         "gather",
         Adjoint(
@@ -177,8 +196,8 @@ const CONTRACTS: &[(&str, Contract)] = &[
         "gelu_tanh",
         Adjoint("tensor[2, 2, P]", "sum(sum(gelu_tanh(x), 1i32), 0i32)"),
     ),
-    ("gt", NoFloatAdjoint("zero cotangent")),
-    ("gte", NoFloatAdjoint("zero cotangent")),
+    ("gt", NoFloatAdjoint(Marker::ZeroCotangent)),
+    ("gte", NoFloatAdjoint(Marker::ZeroCotangent)),
     (
         "guarded_fail",
         Adjoint(
@@ -193,10 +212,7 @@ const CONTRACTS: &[(&str, Contract)] = &[
             "sum(sum(insert(x, 1i32, 3i64), 1i32), 0i32)",
         ),
     ),
-    (
-        "key_from_seed",
-        NoFloatAdjoint("the seed receives no cotangent"),
-    ),
+    ("key_from_seed", NoFloatAdjoint(Marker::ReceivesNoCotangent)),
     (
         "layer_norm",
         Adjoint(
@@ -208,8 +224,8 @@ const CONTRACTS: &[(&str, Contract)] = &[
         "log",
         Adjoint("tensor[2, 2, P]", "sum(sum(log(mul(x, x)), 1i32), 0i32)"),
     ),
-    ("lt", NoFloatAdjoint("zero cotangent")),
-    ("lte", NoFloatAdjoint("zero cotangent")),
+    ("lt", NoFloatAdjoint(Marker::ZeroCotangent)),
+    ("lte", NoFloatAdjoint(Marker::ZeroCotangent)),
     (
         "matmul",
         Adjoint("tensor[2, 2, P]", "sum(sum(matmul(x, x), 1i32), 0i32)"),
@@ -240,7 +256,7 @@ const CONTRACTS: &[(&str, Contract)] = &[
         "min_reduce",
         Adjoint("tensor[2, 2, P]", "sum(min_reduce(x, 1i32), 0i32)"),
     ),
-    ("mod", NoFloatAdjoint("structurally reject differentiation")),
+    ("mod", NoFloatAdjoint(Marker::StructurallyReject)),
     (
         "mul",
         Adjoint("tensor[2, 2, P]", "sum(sum(mul(x, x), 1i32), 0i32)"),
@@ -249,19 +265,10 @@ const CONTRACTS: &[(&str, Contract)] = &[
         "neg",
         Adjoint("tensor[2, 2, P]", "sum(sum(neg(x), 1i32), 0i32)"),
     ),
-    ("neq", NoFloatAdjoint("zero cotangent")),
-    ("not", NoFloatAdjoint("non-differentiable")),
-    (
-        "numel",
-        NoFloatFamily(
-            "Shape observations have zero cotangent",
-            "Shape observations",
-        ),
-    ),
-    (
-        "or",
-        NoFloatAdjoint("differentiation contract of [05-OP-26]"),
-    ),
+    ("neq", NoFloatAdjoint(Marker::ZeroCotangent)),
+    ("not", NoFloatAdjoint(Marker::NonDifferentiable)),
+    ("numel", NoFloatAdjoint(Marker::ZeroCotangent)),
+    ("or", NoFloatAdjoint(Marker::DifferentiationContractOf)),
     (
         "pad",
         Adjoint(
@@ -280,13 +287,7 @@ const CONTRACTS: &[(&str, Contract)] = &[
         "prod_reduce",
         Adjoint("tensor[2, 2, P]", "sum(prod_reduce(x, 1i32), 0i32)"),
     ),
-    (
-        "rank",
-        NoFloatFamily(
-            "Shape observations have zero cotangent",
-            "Shape observations",
-        ),
-    ),
+    ("rank", NoFloatAdjoint(Marker::ZeroCotangent)),
     (
         "recip",
         Adjoint("tensor[2, 2, P]", "sum(sum(recip(x), 1i32), 0i32)"),
@@ -327,11 +328,8 @@ const CONTRACTS: &[(&str, Contract)] = &[
         "reshape",
         Adjoint("tensor[2, 2, P]", "sum(reshape(x, [4i64]), 0i32)"),
     ),
-    (
-        "round",
-        NoFloatAdjoint("float floor/ceil/round structurally reject"),
-    ),
-    ("round_to", NoFloatAdjoint("structurally rejected")),
+    ("round", NoFloatAdjoint(Marker::StructurallyReject)),
+    ("round_to", NoFloatAdjoint(Marker::StructurallyReject)),
     (
         "scalar_to_tensor",
         Adjoint(
@@ -348,15 +346,15 @@ const CONTRACTS: &[(&str, Contract)] = &[
     ),
     (
         "scatter_elements",
-        NoFloatAdjoint("structurally reject differentiation"),
+        NoFloatAdjoint(Marker::StructurallyReject),
     ),
     (
         "scatter_replace",
-        NoFloatAdjoint("structurally reject differentiation"),
+        NoFloatAdjoint(Marker::StructurallyReject),
     ),
-    ("shape", NoFloatAdjoint("zero-cotangent adjoint")),
-    ("shl", NoFloatAdjoint("structurally reject differentiation")),
-    ("shr", NoFloatAdjoint("structurally reject differentiation")),
+    ("shape", NoFloatAdjoint(Marker::ZeroCotangentAdjoint)),
+    ("shl", NoFloatAdjoint(Marker::StructurallyReject)),
+    ("shr", NoFloatAdjoint(Marker::StructurallyReject)),
     (
         "shrink",
         Adjoint(
@@ -390,8 +388,11 @@ const CONTRACTS: &[(&str, Contract)] = &[
             "sum(sum(mul(sort(x, 1i32).0, x), 1i32), 0i32)",
         ),
     ),
-    ("split_key", NoFloatAdjoint("neither carries a cotangent")),
-    ("split_keys", NoFloatAdjoint("No row carries a cotangent")),
+    (
+        "split_key",
+        NoFloatAdjoint(Marker::NeitherCarriesACotangent),
+    ),
+    ("split_keys", NoFloatAdjoint(Marker::NoRowCarriesACotangent)),
     (
         "sqrt",
         Adjoint("tensor[2, 2, P]", "sum(sum(sqrt(mul(x, x)), 1i32), 0i32)"),
@@ -431,13 +432,7 @@ const CONTRACTS: &[(&str, Contract)] = &[
         ),
     ),
     ("trace", Adjoint("tensor[2, 2, P]", "trace(x, 0i32, 1i32)")),
-    (
-        "trunc_div",
-        NoFloatFamily(
-            "structurally reject differentiation",
-            "floor and truncation operations",
-        ),
-    ),
+    ("trunc_div", NoFloatAdjoint(Marker::StructurallyReject)),
     (
         "uniform_like",
         Adjoint(
@@ -471,10 +466,28 @@ const C_WIDTH_GAPS: &[(&str, u32, &str)] = &[
     ("reduce_window_sum", 174, "on f32 tensors only"),
 ];
 
-/// The reviewed identities whose atom states their missing float adjoint
-/// only through a family noun: [05-OP-64]'s "floor and truncation
-/// operations" and [05-OP-50]'s "Shape observations".
-const FAMILY_DESIGNATED: [&str; 4] = ["floor_div", "numel", "rank", "trunc_div"];
+/// Reviewed family nouns: an atom governing several identities that states
+/// their missing float adjoint through this noun rather than by name. The
+/// oracle cannot verify that a noun covers an identity, so it accepts a
+/// family designation only from this table.
+const FAMILY_DESIGNATED: &[(&str, &str)] = &[
+    ("bitand", "These discrete operations"),
+    ("bitor", "These discrete operations"),
+    ("bitxor", "These discrete operations"),
+    ("cmplt", "The family"),
+    ("eq", "The family"),
+    ("floor_div", "floor and truncation operations"),
+    ("gt", "The family"),
+    ("gte", "The family"),
+    ("lt", "The family"),
+    ("lte", "The family"),
+    ("neq", "The family"),
+    ("numel", "Shape observations"),
+    ("rank", "Shape observations"),
+    ("shl", "These discrete operations"),
+    ("shr", "These discrete operations"),
+    ("trunc_div", "floor and truncation operations"),
+];
 
 const FALLBACK: &str = "has no numeric IR lowering";
 const FLOATS: [&str; 4] = ["f16", "bf16", "f32", "f64"];
@@ -719,54 +732,11 @@ fn every_numeric_identity_is_classified_against_its_atom() {
         "registry Numeric identities without a contract row: {unclassified:?}; rows without a registry identity: {stale:?}"
     );
     for (name, atom) in &registry {
-        let (phrase, family) = match CONTRACTS.iter().find(|(n, _)| n == name) {
-            Some((_, NoFloatAdjoint(phrase))) => (*phrase, None),
-            Some((_, NoFloatFamily(phrase, family))) => {
-                assert!(
-                    FAMILY_DESIGNATED.contains(&name.as_str()),
-                    "`{name}` uses a family designation outside the reviewed FAMILY_DESIGNATED set"
-                );
-                (*phrase, Some(*family))
-            }
-            _ => continue,
-        };
-        let text = atom_text(&spec, atom);
-        let statements: Vec<&str> = sentences(&text)
-            .into_iter()
-            .filter(|sentence| sentence.contains(phrase))
-            .collect();
-        assert!(
-            !statements.is_empty(),
-            "`{name}` is classified without a float adjoint, but its atom [{atom}] does not state `{phrase}`"
-        );
-        let homogeneous = registry
-            .iter()
-            .filter(|(other, other_atom)| other_atom == atom && surface.contains(other.as_str()))
-            .all(|(other, _)| {
-                !matches!(
-                    CONTRACTS.iter().find(|(n, _)| n == other),
-                    Some((_, Adjoint(..)))
-                )
-            });
-        let designated = statements.iter().any(|sentence| match family {
-            None => homogeneous || names_identity(sentence, name),
-            Some(family) => sentence.contains(family),
-        });
-        assert!(
-            designated,
-            "`{name}`: no sentence of [{atom}] stating `{phrase}` designates it{}",
-            family.map_or(String::new(), |family| format!(" as `{family}`"))
-        );
-        let sole = registry
-            .iter()
-            .filter(|(other, other_atom)| other_atom == atom && surface.contains(other.as_str()))
-            .count()
-            == 1;
-        let adjoint_clauses = float_adjoint_clauses(&text, (!sole).then_some(name.as_str()));
-        assert!(
-            adjoint_clauses.is_empty(),
-            "`{name}` is classified without a float adjoint, but [{atom}] states one: {adjoint_clauses:?}"
-        );
+        if let Some((_, NoFloatAdjoint(marker))) = CONTRACTS.iter().find(|(n, _)| n == name)
+            && let Some(error) = classification_error(&spec, &registry, name, atom, *marker)
+        {
+            panic!("{error}");
+        }
     }
     for gap in FALLBACK_GAPS
         .iter()
@@ -781,6 +751,114 @@ fn every_numeric_identity_is_classified_against_its_atom() {
             "gap `{gap}` is not a float-adjoint row"
         );
     }
+}
+
+/// Why classifying `name` (governed by `atom`) as having no float adjoint,
+/// with `marker`, is not supported by the atom, or `None` when it is.
+///
+/// 1. A sentence of the atom contains the marker's exact spelling.
+/// 2. That sentence designates the identity: it names it, the atom governs
+///    no other surface identity, or it contains the identity's reviewed
+///    [`FAMILY_DESIGNATED`] noun.
+/// 3. No clause of the atom states a float adjoint or cotangent for it.
+/// 4. A [`Marker::DifferentiationContractOf`] reference names an atom whose
+///    surface identities are all classified without a float adjoint.
+fn classification_error(
+    spec: &str,
+    registry: &[(String, String)],
+    name: &str,
+    atom: &str,
+    marker: Marker,
+) -> Option<String> {
+    let governed: Vec<&str> = registry
+        .iter()
+        .filter(|(other, other_atom)| {
+            other_atom == atom && other.starts_with(|c: char| c.is_ascii_lowercase())
+        })
+        .map(|(other, _)| other.as_str())
+        .collect();
+    let sole = governed == [name];
+    let family = FAMILY_DESIGNATED
+        .iter()
+        .find(|(identity, _)| *identity == name)
+        .map(|(_, noun)| *noun);
+    let text = atom_text(spec, atom);
+    let statements: Vec<&str> = sentences(&text)
+        .into_iter()
+        .filter(|sentence| sentence.contains(marker.spelling()))
+        .collect();
+    if statements.is_empty() {
+        return Some(format!(
+            "`{name}`: its atom [{atom}] never states `{}`",
+            marker.spelling()
+        ));
+    }
+    let designating: Vec<&str> = statements
+        .into_iter()
+        .filter(|sentence| {
+            sole || names_identity(sentence, name)
+                || family.is_some_and(|noun| sentence.contains(noun))
+        })
+        .collect();
+    if designating.is_empty() {
+        return Some(format!(
+            "`{name}`: no sentence of [{atom}] stating `{}` designates it",
+            marker.spelling()
+        ));
+    }
+    let adjoint_clauses = float_adjoint_clauses(&text, (!sole).then_some(name));
+    if !adjoint_clauses.is_empty() {
+        return Some(format!(
+            "`{name}` is classified without a float adjoint, but [{atom}] states one: {adjoint_clauses:?}"
+        ));
+    }
+    if let Marker::DifferentiationContractOf = marker {
+        let referenced = designating.iter().find_map(|sentence| {
+            let rest = sentence.split_once(marker.spelling())?.1;
+            Some(rest.split_once(']')?.0.to_string())
+        })?;
+        let adjoint = registry.iter().find(|(other, other_atom)| {
+            *other_atom == referenced
+                && matches!(
+                    CONTRACTS.iter().find(|(n, _)| n == other),
+                    Some((_, Adjoint(..)))
+                )
+        });
+        if let Some((other, _)) = adjoint {
+            return Some(format!(
+                "`{name}` adopts [{referenced}]'s differentiation contract, which states a float adjoint for `{other}`"
+            ));
+        }
+    }
+    None
+}
+
+/// Negative control: no float-adjoint identity may be reclassified with any
+/// marker of the closed vocabulary. Any phrase a row can cite is one of
+/// these, so this covers every no-float reclassification of these rows.
+#[test]
+fn no_float_adjoint_identity_can_be_reclassified_with_any_marker() {
+    let spec =
+        std::fs::read_to_string(repo_root().join("spec/05-risc-primitives.md")).expect("spec/05");
+    let registry = registry_rows();
+    let mut accepted = Vec::new();
+    for (name, contract) in CONTRACTS {
+        let Adjoint(..) = contract else { continue };
+        let atom = &registry
+            .iter()
+            .find(|(identity, _)| identity == name)
+            .expect("every row is a registry identity")
+            .1;
+        for marker in Marker::ALL {
+            if classification_error(&spec, &registry, name, atom, marker).is_none() {
+                accepted.push(format!("{name} as {marker:?}"));
+            }
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "float-adjoint identities that a marker would reclassify: {accepted:?}"
+    );
 }
 
 fn adjoint_rows() -> Vec<&'static str> {
