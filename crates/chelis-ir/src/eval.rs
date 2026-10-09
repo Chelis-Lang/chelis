@@ -15,7 +15,7 @@
 //! index groups into the same closed typed-kernel boundary; this module
 //! does not own numeric accumulation or comparison.
 
-use chelis_abi::metadata::{MetadataError, ShapeMetadata};
+use chelis_abi::metadata::{AllocationBytes, MetadataError, ShapeMetadata};
 use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -237,15 +237,29 @@ pub const TENSOR_ALLOCATION_FAILED: &str = "Domain: chelis_alloc tensor allocati
 ///
 /// Returns the admitted element count.
 pub fn admit_result(op: &'static str, shape: &[usize], prim: Prim) -> Result<usize, String> {
+    admit_metadata(op, shape, prim).map(|(len, _)| len)
+}
+
+/// [`admit_result`]'s checks, returning the admitted element count and the
+/// storage's allocation size as the metadata computes it.
+fn admit_metadata(
+    op: &'static str,
+    shape: &[usize],
+    prim: Prim,
+) -> Result<(usize, AllocationBytes), String> {
     let dtype = prim.runtime_dtype().map_err(|error| error.to_string())?;
-    let metadata = i64_extents(shape)
+    let (metadata, storage) = i64_extents(shape)
         .and_then(|extents| ShapeMetadata::contiguous(&extents, dtype))
-        .and_then(|metadata| metadata.bytes().allocation().map(|_| metadata))
+        .and_then(|metadata| {
+            let storage = metadata.bytes().allocation()?;
+            Ok((metadata, storage))
+        })
         .map_err(|error| admission_trap(op, &error))?;
-    metadata
+    let len = metadata
         .elements()
         .scratch_len::<Vec<usize>>()
-        .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())
+        .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())?;
+    Ok((len, storage))
 }
 
 /// A result [`admit_tensor`] admitted. The host evaluator's own sizing sites
@@ -300,16 +314,9 @@ pub fn admit_tensor(
     shape: &[usize],
     prim: Prim,
 ) -> Result<AdmittedResult, String> {
-    let len = admit_result(op, shape, prim)?;
-    let width = prim
-        .runtime_dtype()
-        .map_err(|error| error.to_string())?
-        .byte_width();
-    let bytes = len
-        .checked_mul(width)
-        .ok_or_else(|| TENSOR_ALLOCATION_FAILED.to_string())?;
+    let (len, storage) = admit_metadata(op, shape, prim)?;
     Vec::<u8>::new()
-        .try_reserve_exact(bytes)
+        .try_reserve_exact(storage.get())
         .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())?;
     Ok(AdmittedResult { len })
 }
