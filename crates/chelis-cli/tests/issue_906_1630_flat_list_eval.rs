@@ -69,6 +69,17 @@ fn a_flat_tensor_input_beyond_the_reported_abort_threshold_evaluates() {
 }
 
 #[test]
+fn a_cons_spine_may_finish_in_an_evaluated_list_tail() {
+    let result = eval("module Probe.DynamicTail\ntail = [2i64, 3i64]\nresult = Cons(1i64, tail)\n");
+    let items = result["roots"][1]["value"]["value"]
+        .as_array()
+        .expect("list values");
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0]["value"]["value"], 1);
+    assert_eq!(items[2]["value"]["value"], 3);
+}
+
+#[test]
 fn a_cons_with_a_non_list_tail_is_rejected() {
     let dir = tempdir().expect("tempdir");
     let file = dir.path().join("bad-tail.ch");

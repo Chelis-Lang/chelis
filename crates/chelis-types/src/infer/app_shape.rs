@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
 
 /// chelis#339 Part 2: infer a variadic named-axis reduction
 /// `sum(x, seq, head)` (spec/04-type-system.md §4.5.3). The reduction HM
@@ -1725,68 +1726,32 @@ pub(super) enum PairListShape {
 pub(super) fn cons_chain_int_pairs(expr: &deep::Expr) -> PairListShape {
     let mut pairs: Vec<Option<(i64, i64)>> = Vec::new();
     let mut any_non_literal = false;
-    let mut cursor = expr;
-    let mut axis = 0usize;
-    loop {
-        // chelis#1107 amendment: carrier-preserving read. A `List`-only
-        // destructure classified every stamped pad/crop pair-list as
-        // `Unknown`, so the bounds check never ran on the typed ingress.
-        let (outer_tag, outer_kids) = match stamped_parts(cursor) {
-            Some((tag, _, kids)) => (Some(tag), kids),
-            None => return PairListShape::Unknown,
-        };
-        match outer_tag {
-            Some(DeepTag::Var) => {
-                let name = match outer_kids.first().and_then(symbol_name) {
-                    Some(name) => name,
-                    None => return PairListShape::Unknown,
-                };
-                if name == "Nil" {
-                    if any_non_literal {
-                        return PairListShape::Mixed(pairs);
-                    }
-                    return PairListShape::Literal(
-                        pairs
-                            .into_iter()
-                            .map(|pair| pair.expect("all literal"))
-                            .collect(),
-                    );
-                }
-                return PairListShape::Unknown;
+    let mut spine = ConsSpine::new(expr);
+    for (axis, cell) in spine.by_ref().enumerate() {
+        match cons_chain_two_ints(cell.head, axis) {
+            InnerPairShape::Literal(pair) => pairs.push(Some(pair)),
+            InnerPairShape::NonLiteral => {
+                any_non_literal = true;
+                pairs.push(None);
             }
-            Some(DeepTag::App) => {
-                let app_children = outer_kids;
-                let func = match app_children.first() {
-                    Some(func) => func,
-                    None => return PairListShape::Unknown,
-                };
-                if !is_builtin_var(func, "Cons") {
-                    return PairListShape::Unknown;
-                }
-                let pair_expr = match app_children.get(1) {
-                    Some(p) => p,
-                    None => return PairListShape::Unknown,
-                };
-                let tail = match app_children.get(2) {
-                    Some(t) => t,
-                    None => return PairListShape::Unknown,
-                };
-                match cons_chain_two_ints(pair_expr, axis) {
-                    InnerPairShape::Literal(pair) => pairs.push(Some(pair)),
-                    InnerPairShape::NonLiteral => {
-                        any_non_literal = true;
-                        pairs.push(None);
-                    }
-                    InnerPairShape::Malformed { reason } => {
-                        return PairListShape::Malformed { axis, reason };
-                    }
-                    InnerPairShape::Unknown => return PairListShape::Unknown,
-                }
-                cursor = tail;
-                axis += 1;
+            InnerPairShape::Malformed { reason } => {
+                return PairListShape::Malformed { axis, reason };
             }
-            _ => return PairListShape::Unknown,
+            InnerPairShape::Unknown => return PairListShape::Unknown,
         }
+    }
+    if spine.require_nil().is_err() {
+        return PairListShape::Unknown;
+    }
+    if any_non_literal {
+        PairListShape::Mixed(pairs)
+    } else {
+        PairListShape::Literal(
+            pairs
+                .into_iter()
+                .map(|pair| pair.expect("all literal"))
+                .collect(),
+        )
     }
 }
 
@@ -1818,99 +1783,42 @@ pub(super) enum InnerPairShape {
 /// silently falling back to `NonLiteral` (red team round 2 finding
 /// R2-L1; mirrors how reshape extracts dim literals).
 pub(super) fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairShape {
-    // chelis#1107 amendment: carrier-preserving read.
-    let (outer_tag, outer_kids) = match stamped_parts(expr) {
-        Some((tag, _, kids)) => (Some(tag), kids),
-        None => return InnerPairShape::Unknown,
-    };
-    if outer_tag != Some(DeepTag::App) {
-        // Inner element is not a Cons-chain. The `Nil` case (zero-element
-        // list literal) is malformed; any other `var` is an opaque
-        // `List[Int32]` reference whose contents the runtime will check.
-        if matches!(outer_tag, Some(DeepTag::Var)) {
-            let is_nil = outer_kids
-                .first()
-                .and_then(symbol_name)
-                .map(|name| name == "Nil")
-                .unwrap_or(false);
-            if is_nil {
-                return InnerPairShape::Malformed {
-                    reason: "expects a pair [start, end] of two int literals, got 0-element list"
-                        .to_string(),
-                };
+    let mut spine = ConsSpine::new(expr);
+    let Some(first) = spine.next() else {
+        return match spine.tail() {
+            Some(ConsSpineTail::Nil(_)) => InnerPairShape::Malformed {
+                reason: "expects a pair [start, end] of two int literals, got 0-element list"
+                    .to_string(),
+            },
+            Some(ConsSpineTail::Other(tail))
+                if matches!(stamped_parts(tail), Some((DeepTag::Var, _, _))) =>
+            {
+                InnerPairShape::NonLiteral
             }
-            return InnerPairShape::NonLiteral;
-        }
+            _ => InnerPairShape::Unknown,
+        };
+    };
+    // Count every head so a malformed pair reports its actual arity.
+    let mut head_values: Vec<Option<i64>> = Vec::new();
+    head_values.push(extract_int_for_dim(first.head));
+    for cell in spine.by_ref() {
+        head_values.push(extract_int_for_dim(cell.head));
+    }
+    if spine.require_nil().is_err() {
         return InnerPairShape::Unknown;
     }
-    // Count the elements in the inner list so we can give a precise
-    // "got N-element list" diagnostic. Walk the chain element-by-element.
-    let mut elements_seen = 0usize;
-    let mut head_values: Vec<Option<i64>> = Vec::new();
-    let mut inner_cursor: &deep::Expr = expr;
-    loop {
-        // chelis#1107 amendment: carrier-preserving read.
-        let (inner_tag, inner_kids) = match stamped_parts(inner_cursor) {
-            Some((tag, _, kids)) => (Some(tag), kids),
-            None => return InnerPairShape::Unknown,
+    if head_values.len() != 2 {
+        return InnerPairShape::Malformed {
+            reason: format!(
+                "expects a pair [start, end] of two int literals, got {}-element list",
+                head_values.len()
+            ),
         };
-        match inner_tag {
-            Some(DeepTag::Var) => {
-                let name = match inner_kids.first().and_then(symbol_name) {
-                    Some(n) => n,
-                    None => return InnerPairShape::Unknown,
-                };
-                if name != "Nil" {
-                    return InnerPairShape::Unknown;
-                }
-                if elements_seen != 2 {
-                    return InnerPairShape::Malformed {
-                        reason: format!(
-                            "expects a pair [start, end] of two int literals, got {}-element list",
-                            elements_seen
-                        ),
-                    };
-                }
-                let start = match head_values[0] {
-                    Some(v) => v,
-                    None => return InnerPairShape::NonLiteral,
-                };
-                let end = match head_values[1] {
-                    Some(v) => v,
-                    None => return InnerPairShape::NonLiteral,
-                };
-                return InnerPairShape::Literal((start, end));
-            }
-            Some(DeepTag::App) => {
-                let app_children = inner_kids;
-                let func = match app_children.first() {
-                    Some(f) => f,
-                    None => return InnerPairShape::Unknown,
-                };
-                if !is_builtin_var(func, "Cons") {
-                    return InnerPairShape::Unknown;
-                }
-                let head_expr = match app_children.get(1) {
-                    Some(h) => h,
-                    None => return InnerPairShape::Unknown,
-                };
-                let tail = match app_children.get(2) {
-                    Some(t) => t,
-                    None => return InnerPairShape::Unknown,
-                };
-                head_values.push(extract_int_for_dim(head_expr));
-                elements_seen += 1;
-                inner_cursor = tail;
-                // Guard against extra trailing elements: if we already
-                // saw a [start, end] pair but the chain continues past
-                // `Nil`, report malformed. The Nil arm above catches the
-                // n==2 happy path before we get here on subsequent
-                // iterations, so just keep walking and the count check
-                // at Nil-time will catch it.
-            }
-            _ => return InnerPairShape::Unknown,
-        }
     }
+    let (Some(start), Some(end)) = (head_values[0], head_values[1]) else {
+        return InnerPairShape::NonLiteral;
+    };
+    InnerPairShape::Literal((start, end))
 }
 
 pub(super) fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
@@ -2035,35 +1943,10 @@ pub(super) fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep
     // `infer_expr`'s `UnknownForm` arm fires on it. Deriving a shape for a
     // form already ruled invalid would not be an improvement, so the
     // `UnknownForm` spelling falls back to the wildcard shape below.
-    let mut elems = Vec::new();
-    let mut cursor = expr;
-    loop {
-        // chelis#1107 amendment (the red team's confirmed member): a
-        // `List`-only destructure gave up on every stamped Cons chain, so
-        // `reshape_output_dims` collapsed to a rank-1 wildcard on the typed
-        // ingress while the normalizing ingress read the literal shape --
-        // bidirectionally divergent, and user-reachable through `chelis
-        // prove`.
-        let (tag, _, kids) = stamped_parts(cursor)?;
-        match tag {
-            DeepTag::Var => {
-                let name = kids.first().and_then(symbol_name)?;
-                if name == "Nil" {
-                    return Some(elems);
-                }
-                return None;
-            }
-            DeepTag::App => {
-                let func = kids.first()?;
-                if !is_builtin_var(func, "Cons") {
-                    return None;
-                }
-                elems.push(kids.get(1)?);
-                cursor = kids.get(2)?;
-            }
-            _ => return None,
-        }
-    }
+    let mut spine = ConsSpine::new(expr);
+    let elems = spine.by_ref().map(|cell| cell.head).collect();
+    spine.require_nil().ok()?;
+    Some(elems)
 }
 
 /// If `expr` has one of the spec/04 §4.7.3 recognized forms

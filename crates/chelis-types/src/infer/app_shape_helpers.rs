@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use chelis_deep::cons_spine::ConsSpine;
 
 /// Extract the static shape of a `to_tensor` argument when the
 /// argument is a nested Cons-chain literal whose every leaf is a
@@ -112,34 +113,10 @@ pub(super) fn static_to_tensor_shape_status(expr: &deep::Expr) -> Result<Option<
 /// chain-walking shape but returns the heads themselves so the
 /// caller can recurse.
 pub(super) fn collect_cons_chain_for_shape(expr: &deep::Expr) -> Option<Vec<&deep::Expr>> {
-    let mut out = Vec::new();
-    let mut cursor = expr;
-    loop {
-        // chelis#1107: carrier-preserving read. A `List`-only destructure gave
-        // up on every stamped node, so no cons chain was ever recognized on
-        // `check_typed_program`.
-        let (tag, _, kids) = stamped_parts(cursor)?;
-        match tag {
-            DeepTag::Var => {
-                let name = kids.first().and_then(symbol_name)?;
-                if name == "Nil" {
-                    return Some(out);
-                }
-                return None;
-            }
-            DeepTag::App => {
-                let func = kids.first()?;
-                if !is_builtin_var(func, "Cons") {
-                    return None;
-                }
-                let head = kids.get(1)?;
-                let tail = kids.get(2)?;
-                out.push(head);
-                cursor = tail;
-            }
-            _ => return None,
-        }
-    }
+    let mut spine = ConsSpine::new(expr);
+    let out = spine.by_ref().map(|cell| cell.head).collect();
+    spine.require_nil().ok()?;
+    Some(out)
 }
 
 /// True iff `expr` is a numeric leaf (Int/Float/Bool atom, `lit` of
