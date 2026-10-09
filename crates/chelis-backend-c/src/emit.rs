@@ -7382,7 +7382,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     format!("the C DAG emitter (node {id})"),
                     Stage::Codegen("c"),
                     chelis_types::unimplemented_rejection!(
-                        600,
+                        1277,
                         "the windowed output extent floor((d - window) / stride) + 1 is \
                          not statically representable; bind the axis to a concrete size \
                          (spec/05-risc-primitives.md section 2.3.1)"

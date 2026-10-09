@@ -241,7 +241,7 @@ fn runtime_symbolic_window_extent_names_dynamic_shape_owner() {
         error.to_string(),
         "unsupported: a `reduce_window_*` windowed axis 2 with a runtime-only \
          symbolic extent on the C DAG emitter (node 1) (codegen:c); unimplemented \
-         chelis#600: the windowed output extent floor((d - window) / stride) + 1 is \
+         chelis#1277: the windowed output extent floor((d - window) / stride) + 1 is \
          not statically representable; bind the axis to a concrete size \
          (spec/05-risc-primitives.md section 2.3.1)"
     );

@@ -1548,7 +1548,7 @@ impl HipEmitter {
                     "runtime integer range generation",
                     Stage::Codegen("hip"),
                     chelis_types::unimplemented_rejection!(
-                        570,
+                        3410,
                         "HIP runtime range source is not implemented"
                     ),
                 ));
@@ -2455,7 +2455,7 @@ impl HipEmitter {
                     "runtime integer range generation",
                     Stage::Codegen("hip"),
                     chelis_types::unimplemented_rejection!(
-                        570,
+                        3410,
                         "HIP runtime range source is not implemented"
                     ),
                 ));
@@ -5347,7 +5347,7 @@ impl HipEmitter {
             format!("the HIP kernel set (node {})", node.id.0),
             Stage::Codegen("hip"),
             chelis_types::unimplemented_rejection!(
-                759,
+                3411,
                 "the HIP cast kernels emit an unguarded device-side conversion, \
                  so the named cast traps have no device implementation; the C \
                  target is canonical for the named cast ladder"

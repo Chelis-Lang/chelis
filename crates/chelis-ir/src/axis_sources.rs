@@ -860,7 +860,7 @@ pub fn check_rendered_dim_origins(dag: &Dag, stage: Stage) -> Result<(), Unsuppo
 fn receipt(what: String, node: &DagNode, stage: Stage, sourceless: bool) -> Unsupported {
     let authority = if sourceless {
         unimplemented_rejection!(
-            1482,
+            1277,
             "give the axis a real extent source: size the consuming operation's output from the operand that declares the extent, or declare the extent on the producing node"
         )
     } else {
