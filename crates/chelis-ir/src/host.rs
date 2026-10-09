@@ -4509,10 +4509,10 @@ pub fn nested_claim_pattern(
 
 /// The nested claim of each formal, from its authored type, aligned with
 /// `params`, or no claims when no formal nests one (runtime_extents.md C6.5).
-/// A tensor or List-of-tensor formal keeps its established entry pattern,
-/// and a tensor at a fixed tuple position is already an ordinary signature
-/// observation of the entry plan; the nested pattern owns every other
-/// carrier. Named declarations and inline lambdas share this derivation.
+/// A tensor or List-of-tensor formal keeps its established entry pattern;
+/// the nested pattern owns every other carrier, a tuple of tensors included,
+/// which no signature entry observes. Named declarations and inline lambdas
+/// share this derivation.
 fn formal_nested_claims<'a>(
     program: &HostLoweringSession<'_>,
     authored: impl Iterator<Item = Option<&'a Expr>>,
@@ -4530,16 +4530,7 @@ fn formal_nested_claims<'a>(
             {
                 return Ok(None);
             }
-            let pattern = nested_claim_pattern(program, formal)?;
-            Ok(pattern.filter(|pattern| {
-                !pattern.nodes().iter().all(|node| {
-                    matches!(
-                        node,
-                        crate::claim_pattern::ClaimNode::Tuple(_)
-                            | crate::claim_pattern::ClaimNode::Tensor(_)
-                    )
-                })
-            }))
+            nested_claim_pattern(program, formal)
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(
@@ -6189,8 +6180,29 @@ fn lower_host_function(
         entry_claims,
         ..
     } = signature;
+    // A compiled function's own entry walk already observes a tensor at a
+    // fixed tuple position of its ABI type; only a retained invocation,
+    // whose signature entry observes no tuple, walks such a pattern.
     let entry_claims = entry_claims
-        .map_err(|error| claim_pattern_refusal(body, format!("`{name}` formal: {error}")))?;
+        .map_err(|error| claim_pattern_refusal(body, format!("`{name}` formal: {error}")))?
+        .into_iter()
+        .map(|claim| {
+            claim.filter(|pattern| {
+                !pattern.nodes().iter().all(|node| {
+                    matches!(
+                        node,
+                        crate::claim_pattern::ClaimNode::Tuple(_)
+                            | crate::claim_pattern::ClaimNode::Tensor(_)
+                    )
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let entry_claims = if entry_claims.iter().any(Option::is_some) {
+        entry_claims
+    } else {
+        Vec::new()
+    };
     let result_claim = result_claim
         .map_err(|error| claim_pattern_refusal(body, format!("`{name}` result: {error}")))?;
     let entry_contract = EntryContract::from_params(&params);
