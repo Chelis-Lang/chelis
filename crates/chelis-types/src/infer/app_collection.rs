@@ -403,12 +403,12 @@ pub(crate) fn decide_collection_constraint(
                 expected: Type::Tuple(vec![expected, key]),
             }))
         }
-        CollectionConstraint::Len { operand, .. } => match operand {
-            Type::Var(_) => Ok(None),
+        CollectionConstraint::Len { operand, .. } => match queried_container(operand) {
+            Type::Var(_) | Type::Error(_) => Ok(None),
             Type::Adt(name, _) if name == "List" || name == "Dict" => {
                 Ok(joined(vec![Type::Prim(Prim::Int64)]))
             }
-            other => Err(format!("len expects List or Dict input, got {other}")),
+            _ => Err(format!("len expects List or Dict input, got {operand}")),
         },
         CollectionConstraint::Index { list, index, .. } => {
             match index {
@@ -416,12 +416,12 @@ pub(crate) fn decide_collection_constraint(
                 Type::Prim(Prim::Int64) => {}
                 other => return Err(format!("index expects i64 index, got {other}")),
             }
-            match list {
-                Type::Var(_) => Ok(None),
+            match queried_container(list) {
+                Type::Var(_) | Type::Error(_) => Ok(None),
                 Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                     Ok(joined(vec![args[0].clone()]))
                 }
-                other => Err(format!("index expects List input, got {other}")),
+                _ => Err(format!("index expects List input, got {list}")),
             }
         }
         CollectionConstraint::Append { list, value, .. } => builtins::AggregateRule::Append
@@ -463,6 +463,73 @@ pub(crate) fn decide_collection_constraint(
                 "concat expects matching List inputs, got {lhs} and {rhs}"
             )),
         },
+    }
+}
+
+/// The container a read-only query decides on: `len` and `index` only read
+/// their container (spec/05 section 1.3.1), so one reached through a borrow,
+/// such as a `&List[T]` or `&Dict[K, V]` parameter, is decided on its
+/// referent. The explicit `len(&xs)` / `index(&xs, i)` spelling is refused
+/// from the call's source operand by [`explicit_container_borrow_refusal`],
+/// never by this type, because a borrow expression and a borrowed variable
+/// have the same type.
+pub(super) fn queried_container(ty: &Type) -> &Type {
+    match ty {
+        Type::Ref(referent) => referent,
+        other => other,
+    }
+}
+
+/// spec/05 section 1.3.1: `len` and `index` take their container only by
+/// auto-borrow, so the explicit borrow expression `len(&xs)` /
+/// `index(&xs, i)` is not a supported spelling. This is the one place that
+/// rule is decided, from the call's source operand. A borrow expression and a
+/// borrowed variable have the same type, so no typing arm can tell them apart,
+/// and every arm decides a borrowed container on its referent
+/// ([`queried_container`]). The borrow node's own typing cannot decide it
+/// either, because `&xs` is an ordinary argument everywhere else, and Deep
+/// input never passes through the Surf desugarer. Returns the refusal message.
+pub(super) fn explicit_container_borrow_refusal(
+    callee: Option<&str>,
+    kids: &[deep::Expr],
+    arg_tys: &[Type],
+    subst: &Subst,
+) -> Option<String> {
+    let (container, form, refused) = match callee? {
+        "len" => ("List/Dict", "len(xs)", "len(&xs)"),
+        "index" => ("List", "index(xs, i)", "index(&xs, i)"),
+        _ => return None,
+    };
+    if !is_borrow_expression(kids.get(1)?) {
+        return None;
+    }
+    let operand = subst.apply(arg_tys.first()?);
+    match queried_container(&operand) {
+        // Decided once the referent settles: the query's own arm suspends the
+        // call on an unresolved container, and the replay re-enters here.
+        Type::Var(_) => return None,
+        // The operand's own diagnostic is already reported upstream.
+        Type::Error(_) => return None,
+        _ => {}
+    }
+    let query = callee?;
+    Some(format!(
+        "{query} auto-borrows its {container} argument, so an explicit `&` is not a supported \
+         surface form: write `{form}`, not `{refused}` (got {operand})"
+    ))
+}
+
+/// Whether `expr` is the borrow expression `&e`, through metadata wrappers.
+fn is_borrow_expression(mut expr: &deep::Expr) -> bool {
+    loop {
+        match expr.carrier() {
+            deep::ExprCarrier::DecodedNode(tag, _, _) => return tag == DeepTag::Borrow,
+            deep::ExprCarrier::MetadataExpression(meta) => expr = &meta.expr,
+            deep::ExprCarrier::StructuralList(_)
+            | deep::ExprCarrier::UndecodableHead(_, _, _)
+            | deep::ExprCarrier::Atom(_)
+            | deep::ExprCarrier::MetadataMap(_) => return false,
+        }
     }
 }
 
