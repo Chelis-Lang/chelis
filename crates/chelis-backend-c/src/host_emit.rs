@@ -3508,6 +3508,20 @@ fn emit_function(
         ownership_sites,
     );
     emitter.entry_group = entry_groups.get(&function.name).copied();
+    // A scalar result has no result-axis claim. Without a delegated entry
+    // receipt, restarting at the private body's entry can re-run every entry
+    // check in this same C frame without carrying a pointer to frame-local
+    // receipt storage across the back edge.
+    if is_scalar_abi(&function.ret_ty) && !entry_work.extent_at_body {
+        emitter.tail_loop = Some(TailLoopPlan {
+            function: function.name.clone(),
+            formals: function
+                .params
+                .iter()
+                .map(|param| c_ident(&param.name).into_owned())
+                .collect(),
+        });
+    }
     emitter.recursive_functions = recursive_functions.clone();
     emitter.entry_groups = entry_groups.clone();
     if entry_work.extent_at_body {
@@ -3704,6 +3718,25 @@ fn emit_function(
         result_origin_name("__result")
     ));
     emitter.finish_expression_sites()?;
+    if emitter.tail_loop_used {
+        let plan = emitter.tail_loop.as_ref().ok_or_else(|| {
+            invalid_abi_shape(
+                "self-tail loop used without a parameter plan".to_string(),
+                "verified C host tail emission",
+            )
+        })?;
+        let mut entry = Vec::with_capacity(plan.formals.len() + 1);
+        for (index, formal) in plan.formals.iter().enumerate() {
+            // `__chelis_global_` is escaped for authored names by c_ident.
+            // Capture the actual C formal before any block-local shadow can
+            // hide it at the tail-call site.
+            entry.push(format!(
+                "    void *const __chelis_global_tail_slot_{index} = (void *)&{formal};"
+            ));
+        }
+        entry.push("    __chelis_tail_loop_entry: ;".to_string());
+        emitter.lines.splice(0..0, entry);
+    }
     out.extend(emitter.lines);
     out.push("    return __result;".to_string());
     out.push("}".to_string());
@@ -4329,6 +4362,13 @@ struct CallReporting<'a> {
     span: Option<&'a str>,
 }
 
+/// A private C body may reuse its frame only for a verified direct self-tail
+/// call. Formal names are C identifiers because the back edge assigns them.
+struct TailLoopPlan {
+    function: String,
+    formals: Vec<String>,
+}
+
 struct HostEmitter<'a> {
     lines: Vec<String>,
     /// [04-NUM-2]: the NaN finalization of the tensor builtin whose
@@ -4365,6 +4405,8 @@ struct HostEmitter<'a> {
     /// The mutable claim frames of the output-inferred binders the function's
     /// sites name ([`FirstSiteFrames`]); `None` outside a function body.
     first_site_frames: Option<FirstSiteFrames>,
+    tail_loop: Option<TailLoopPlan>,
+    tail_loop_used: bool,
 }
 
 /// The claim frame of one output-inferred binder of the function being
@@ -4725,6 +4767,8 @@ impl<'a> HostEmitter<'a> {
             result_claims: None,
             claim_on_spine: false,
             first_site_frames: None,
+            tail_loop: None,
+            tail_loop_used: false,
         }
     }
 
@@ -10551,6 +10595,38 @@ impl<'a> HostEmitter<'a> {
             ));
         }
         self.emit_pre_call_actions(site)?;
+        let call_index = verified_call_action_index(site)?;
+        let verified_tail = matches!(
+            site.directives.get(call_index),
+            Some(VerifiedHostAction::Operation(
+                VerifiedHostOperation::Apply {
+                    kind: VerifiedApplyKind::DirectCall { tail: true, .. },
+                    ..
+                }
+            ))
+        );
+        let use_tail_loop = self.tail_loop.as_ref().is_some_and(|plan| {
+            verified_tail
+                && target == "__result"
+                && plan.function == function
+                && plan.formals.len() == arg_vars.len()
+        });
+        if use_tail_loop {
+            // Every argument and the verifier's pre-call ownership actions
+            // have completed. The temporaries keep their values independent
+            // of the formal assignments. Stable slots refer to the actual
+            // formals even when a block-local binding shadows their names.
+            for (index, arg) in arg_vars.iter().enumerate() {
+                self.lines.push(format!(
+                    "{}memcpy(__chelis_global_tail_slot_{index}, &{arg}, sizeof({arg}));",
+                    self.indent
+                ));
+            }
+            self.lines
+                .push(format!("{}goto __chelis_tail_loop_entry;", self.indent));
+            self.tail_loop_used = true;
+            return Ok(());
+        }
         let guarded_recursive_call = self.emit_recursive_call_guard(function, call_span);
         // Calls to declared functions use private bodies and inherit this
         // invocation. Callback parameters retain their authored C signature.

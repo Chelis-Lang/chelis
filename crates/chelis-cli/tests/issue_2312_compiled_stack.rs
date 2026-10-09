@@ -5,6 +5,7 @@ use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
+use std::time::Duration;
 use tempfile::tempdir;
 
 fn source(elements: usize, preceding_effect: bool) -> String {
@@ -16,12 +17,44 @@ fn source(elements: usize, preceding_effect: bool) -> String {
     let raw = format!(
         "module Probe.StackBudget\n\
          def lsum(xs: List[f32], i: i64, n: i64, acc: f64) -> f64 = \
-         if gte(i, n) then acc else lsum(xs, add(i, 1i64), n, \
-         add(acc, cast(index(xs, i), f64)))\n\
+         if gte(i, n) then acc else add(lsum(xs, add(i, 1i64), n, \
+         add(acc, cast(index(xs, i), f64))), 1.0f64)\n\
          {effect}result = lsum(map(fn (i: i64) -> cast(i, f32), \
          range(0i64, {elements}i64)), 0i64, {elements}i64, 0.0f64)\n"
     );
     chelis_surf::format::format_source(&raw).expect("format recursive fixture")
+}
+
+fn tail_source(elements: usize) -> String {
+    let raw = format!(
+        "module Probe.TailLoop\n\
+         def lsum(xs: List[f32], i: i64, n: i64, acc: f64) -> f64 = \
+         if gte(i, n) then acc else lsum(xs, add(i, 1i64), n, \
+         add(acc, cast(index(xs, i), f64)))\n\
+         result = lsum(map(fn (i: i64) -> cast(i, f32), \
+         range(0i64, {elements}i64)), 0i64, {elements}i64, 0.0f64)\n"
+    );
+    chelis_surf::format::format_source(&raw).expect("format tail-recursive fixture")
+}
+
+fn swapping_tail_source(iterations: usize) -> String {
+    let raw = format!(
+        "module Probe.TailSwap\n\
+         def swap(a: i64, b: i64, n: i64) -> i64 = \
+         if eq(n, 0i64) then a else swap(b, a, sub(n, 1i64))\n\
+         result = swap(7i64, 11i64, {iterations}i64)\n"
+    );
+    chelis_surf::format::format_source(&raw).expect("format swapping tail fixture")
+}
+
+fn shadowing_tail_source() -> String {
+    let raw = "module Probe.TailShadow\n\
+               def step(n: i64) -> i64 = {\n\
+                 n = sub(n, 1i64)\n\
+                 if eq(n, 0i64) then 0i64 else step(n)\n\
+               }\n\
+               result = step(3i64)\n";
+    chelis_surf::format::format_source(raw).expect("format shadowing tail fixture")
 }
 
 fn build(source: &str, output_dir: &Path) -> PathBuf {
@@ -83,8 +116,63 @@ fn compiled_recursion_succeeds_with_stack_to_spare() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "result = 499500.0\n"
+        "result = 500500.0\n"
     );
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn compiled_self_tail_recursion_reuses_the_c_frame() {
+    let dir = tempdir().expect("tempdir");
+    let binary = build(&tail_source(120_000), &dir.path().join("tail_loop"));
+    let emitted = emit_c(&tail_source(8), &dir.path().join("tail_loop_c"));
+    let c = fs::read_to_string(emitted).expect("read generated C");
+    assert!(c.contains("goto __chelis_tail_loop_entry;"), "{c}");
+    let output = Process::new("/bin/sh")
+        .args(["-c", "ulimit -s 2048; exec \"$1\"", "sh"])
+        .arg(&binary)
+        .output()
+        .expect("run tail recursion with 2 MiB stack");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "result = 7199940000.0\n"
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn self_tail_loop_preserves_simultaneous_argument_updates() {
+    let dir = tempdir().expect("tempdir");
+    let binary = build(
+        &swapping_tail_source(120_000),
+        &dir.path().join("tail_swap"),
+    );
+    let output = Process::new("/bin/sh")
+        .args(["-c", "ulimit -s 2048; exec \"$1\"", "sh"])
+        .arg(&binary)
+        .output()
+        .expect("run swapping recursion with 2 MiB stack");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "result = 7\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn self_tail_loop_updates_the_formal_under_a_shadowing_local() {
+    let dir = tempdir().expect("tempdir");
+    let binary = build(&shadowing_tail_source(), &dir.path().join("tail_shadow"));
+    let output = Command::new("/bin/sh")
+        .args(["-c", "ulimit -s 2048; exec \"$1\"", "sh"])
+        .arg(&binary)
+        .timeout(Duration::from_secs(3))
+        .output()
+        .expect("run shadowing recursion with 2 MiB stack");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "result = 0\n");
     assert!(output.stderr.is_empty(), "{output:?}");
 }
 
