@@ -669,6 +669,7 @@ dependencies = [
  "bincode",
  "chelis-vocab",
  "miette",
+ "proc-macro2",
  "proptest",
  "serde",
  "serde_json",

@@ -2173,6 +2173,15 @@ inventory. This item does not own user-authored recursive programs ([#257]) or
 general lowering/cost-model recursion ([#409]); those are different recursion
 classes with different oracles.
 
+The inventory fixes a reviewed boundary around production `Cons` recognition
+sites and direct access to the `ConsSpineNode` cell adapter. It reads Rust
+macro tokens as well as ordinary syntax, and includes nested functions, so
+moving recognition into a new helper cannot hide it from review. A new
+constructor or builtin-dispatch site must be classified in that boundary.
+Direct cell access outside the shared iterator is rejected. Generic
+whole-expression walkers that stop on `Cons` are classified separately from
+canonical-spine traversal.
+
 ### LU4 - compositional host-ABI capability ([#955])
 
 Host lowering resolves a checked host-type term by recursively composing the
