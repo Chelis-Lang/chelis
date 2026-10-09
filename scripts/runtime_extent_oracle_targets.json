@@ -1495,7 +1495,8 @@
         "eval_unclaimed_generic_call_checks_nothing",
         "literal_visible_generic_call_never_succeeds",
         "non_regular_recursion_claim_is_refused_on_both_lanes",
-        "static_literal_field_is_a_checker_rejection_on_both_lanes"
+        "static_literal_field_is_a_checker_rejection_on_both_lanes",
+        "tensor_free_recursive_alias_owes_no_claim"
       ],
       "note": "#3347/#2644 (runtime_extents.md C6.5): claims on tensors nested in tuple, Option, record and nominal values, including nominal dimension arguments, on Eval and compiled C with file-supplied extents: producer-owned result and local-ascription guards through construction and generic calls, recursive patterns, named witnesses, entry walks with nested binder witnesses, absent variants, effect order, unclaimed calls, the static checker verdict and the non-regular refusal."
     }

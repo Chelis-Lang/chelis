@@ -237,6 +237,20 @@ def total(ws: List[Wrap[V3]]) -> i64 =
 out = total([Wrap { x: produce(3i64) }, Wrap { x: produce(size_from("PATH")) }])
 "#;
 
+const RECURSIVE_ALIAS: &str = r#"type Wrap[a] =
+  | Wrap { x: a }
+type R = Wrap[R]
+def f(r: R) -> i64 = 1i64
+out = 1i64
+"#;
+
+const RECURSIVE_ALIAS_OPTION: &str = r#"type Duo[a, b] =
+  | Duo { l: a, r: b }
+type S = Option[Duo[S, S]]
+def g(s: S) -> i64 = 2i64
+out = g(None)
+"#;
+
 /// Run `case` after the shared declarations with `size` read from a file.
 fn run(case: &str, size: usize, native: bool) -> (bool, String) {
     let inputs = tempfile::tempdir().expect("runtime inputs");
@@ -665,4 +679,33 @@ fn eval_alias_type_argument_claims_like_its_expansion() {
 #[test]
 fn c_alias_type_argument_claims_like_its_expansion() {
     alias_argument(true);
+}
+
+/// The checker admits a recursive alias. One that can hold no tensor owes no
+/// claim, so mentioning it in a signature refuses nothing: Eval runs the
+/// program, and compiled C stops only at its established entry-layout
+/// refusal for such a formal, never at a claim refusal.
+#[test]
+fn tensor_free_recursive_alias_owes_no_claim() {
+    for (case, value) in [
+        (RECURSIVE_ALIAS, "out = 1"),
+        (RECURSIVE_ALIAS_OPTION, "out = 2"),
+    ] {
+        let (ok, output) = run(case, 3, false);
+        assert!(ok && output.contains(value), "Eval\n{output}");
+        let dir = tempfile::tempdir().expect("source dir");
+        let path = dir.path().join("completion.ch");
+        fs::write(&path, format!("{PRELUDE}{case}")).expect("fixture");
+        let built = assert_cmd::Command::cargo_bin("chelis")
+            .expect("chelis")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["build", "--emit-c", "--allow-style-violations"])
+            .arg(&path)
+            .args(["--target", "c", "-o"])
+            .arg(dir.path().join("c"))
+            .output()
+            .expect("build");
+        let text = String::from_utf8_lossy(&built.stderr);
+        assert!(!text.contains("extent claim"), "compiled C\n{text}");
+    }
 }

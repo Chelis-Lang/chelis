@@ -133,6 +133,11 @@ pub enum ClaimPatternError {
     UnresolvedNominal {
         nominal: String,
     },
+    /// The claim passes through a recursive type alias that can hold a
+    /// tensor.
+    RecursiveAlias {
+        alias: String,
+    },
     Malformed(String),
 }
 
@@ -148,6 +153,11 @@ impl fmt::Display for ClaimPatternError {
                 f,
                 "an extent claim passes through `{nominal}`, which has no declaration to \
                  instantiate"
+            ),
+            Self::RecursiveAlias { alias } => write!(
+                f,
+                "an extent claim passes through the recursive alias `{alias}`, which can hold a \
+                 tensor, so the claim has no finite pattern to check"
             ),
             Self::Malformed(detail) => write!(f, "malformed claimed type: {detail}"),
         }
@@ -165,7 +175,7 @@ impl ClaimPattern {
             memo: BTreeMap::new(),
             analysis: std::cell::OnceCell::new(),
         };
-        let authored = expand_aliases(authored, registry, 0)?;
+        let authored = expand_aliases(authored, registry)?;
         let root = builder.node(&authored)?;
         Ok(builder.finish(root))
     }
@@ -344,11 +354,23 @@ impl Builder<'_> {
             return Ok(Some(*id));
         }
         let Some(definition) = self.registry.lookup(name) else {
-            // The walk sees only alias-free types; see `expand_aliases`.
-            if self.registry.resolve_alias(name).is_some() {
-                return Err(ClaimPatternError::Malformed(format!(
-                    "alias `{name}` reached the claim walk unexpanded"
-                )));
+            // Only a recursive alias reaches the walk unexpanded (see
+            // `expand_aliases`). Its unfolding owes nothing unless it can hold
+            // a tensor; one that can has no finite pattern and is refused.
+            if let Some(alias) = self.registry.resolve_alias(name) {
+                let substitution = parameter_substitution(name, &alias.param_args, args)?;
+                let body = expand_aliases_on(
+                    &substitute(&type_to_deep_expr(&alias.body), &substitution),
+                    self.registry,
+                    &mut vec![name.to_string()],
+                )?;
+                return if self.may_carry(&body) {
+                    Err(ClaimPatternError::RecursiveAlias {
+                        alias: name.to_string(),
+                    })
+                } else {
+                    Ok(None)
+                };
             }
             // A name nothing declares cannot be shown to owe nothing.
             return Err(ClaimPatternError::UnresolvedNominal {
@@ -374,7 +396,6 @@ impl Builder<'_> {
                 let field_ty = expand_aliases(
                     &substitute(&type_to_deep_expr(field_ty), &substitution),
                     self.registry,
-                    0,
                 )?;
                 fields.push(ClaimField {
                     name: field_name.clone(),
@@ -557,37 +578,42 @@ fn tensor_claim(ty: &Expr, children: &[Expr]) -> Result<Option<ClaimTensor>, Cla
 
 /// Expand every type alias in `ty`, including inside type arguments at any
 /// depth and an alias whose body is itself an alias, substituting the alias
-/// arguments (nominal dimensions included). Every type the claim walk,
-/// `may_carry` and the memo keys see is alias-free, so an alias spelling
-/// derives exactly the pattern its expansion does.
-pub fn expand_aliases(
+/// arguments (nominal dimensions included). The checker admits a recursive
+/// alias (`type R = Wrap[R]`): an application of an alias already being
+/// expanded on this path stays unexpanded, as the checker's own alias
+/// expansion leaves it, and the walk decides it (see `Builder::nominal`).
+/// Every other type the walk, `may_carry` and the memo keys see is
+/// alias-free, so an alias spelling derives exactly the pattern its
+/// expansion does.
+pub fn expand_aliases(ty: &Expr, registry: &AdtRegistry) -> Result<Expr, ClaimPatternError> {
+    expand_aliases_on(ty, registry, &mut Vec::new())
+}
+
+fn expand_aliases_on(
     ty: &Expr,
     registry: &AdtRegistry,
-    depth: usize,
+    expanding: &mut Vec<String>,
 ) -> Result<Expr, ClaimPatternError> {
-    // The checker rejects cyclic aliases; this bound only keeps a malformed
-    // registry from recursing without end.
-    if depth > 256 {
-        return Err(ClaimPatternError::Malformed(
-            "type alias expansion does not terminate".into(),
-        ));
-    }
     let Some((tag, children)) = type_parts(ty) else {
         return Ok(ty.clone());
     };
     let expanded = children
         .iter()
-        .map(|child| expand_aliases(child, registry, depth))
+        .map(|child| expand_aliases_on(child, registry, expanding))
         .collect::<Result<Vec<_>, _>>()?;
     if tag == DeepTag::TAdt
         && let Some((name, args)) = expanded.split_first()
         && let Some(name) = symbol(name)
         && registry.lookup(name).is_none()
+        && !expanding.iter().any(|seen| seen == name)
         && let Some(alias) = registry.resolve_alias(name)
     {
         let substitution = parameter_substitution(name, &alias.param_args, args)?;
         let body = substitute(&type_to_deep_expr(&alias.body), &substitution);
-        return expand_aliases(&body, registry, depth + 1);
+        expanding.push(name.to_string());
+        let result = expand_aliases_on(&body, registry, expanding);
+        expanding.pop();
+        return result;
     }
     Ok(Expr::node(tag, Metadata::default(), expanded, ty.span()))
 }
@@ -1149,5 +1175,36 @@ mod tests {
                 "{aliased} against {expanded}"
             );
         }
+    }
+
+    /// The checker admits a recursive alias. One that cannot hold a tensor
+    /// owes nothing; one that can unfolds once per nominal application, and
+    /// the memo closes it into a finite graph.
+    #[test]
+    fn recursive_alias_owes_nothing_unless_it_can_hold_a_tensor() {
+        let registry = registry(
+            "type Wrap[a] =\n  | Wrap { x: a }\n\
+             type Two[a, b] =\n  | Two { l: a, r: b }\n\
+             type R = Wrap[R]\n\
+             type S = Option[Two[S, S]]\n\
+             type T = Two[tensor[3, f32], T]\n",
+        );
+        for plain in [
+            "(t-adt {} R)",
+            "(t-adt {} S)",
+            "(t-adt {} List (t-adt {} R))",
+        ] {
+            assert!(
+                ClaimPattern::derive(&ty(plain), &registry)
+                    .unwrap()
+                    .is_empty(),
+                "{plain}"
+            );
+        }
+        let pattern = ClaimPattern::derive(&ty("(t-adt {} T)"), &registry).unwrap();
+        let root = pattern.root().expect("T owes its tensor field");
+        assert_eq!(field(&pattern, root, "Two", 1), root);
+        let l = field(&pattern, root, "Two", 0);
+        assert_eq!(tensor(&pattern, l).axes[0].claim, ClaimDim::Literal(3));
     }
 }
