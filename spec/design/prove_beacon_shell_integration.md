@@ -197,6 +197,14 @@ Mixed dtypes, narrowing, side effects, recursion without a certified
 unfolding, data-dependent shape, and calls outside the extracted closure are
 unsupported.
 
+The proof-only graph uses the existing rank-zero f64 WireDag carrier. For an
+f32 source closure, extraction converts each checked f32 input endpoint and
+literal to its exact stored real value in that carrier before graph emission.
+The emitted arithmetic is interpreted over reals; it does not model rounding
+at each f32 operation. A lower obligation adds negation of the original output
+as a separate graph root, so the upper-bound shim folds it into
+`lower - output` while retaining the original output root in the request.
+
 Lowering and dispatch preserve the scalar seam's exact graph hash, output
 root, folded goal, input box, budget, engine hash, hull, split tree, and
 confirmed-witness rules. One-sided goals retain their one-sided form; no

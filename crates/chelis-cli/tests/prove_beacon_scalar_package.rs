@@ -68,6 +68,181 @@ fn imported_f64_scalar_function_reaches_beacon_after_proof_only_extraction() {
 }
 
 #[test]
+fn imported_f64_lower_and_two_sided_goals_reach_beacon() {
+    let (_dir, root) = package(
+        "module BeaconPkg.Model\nexport (affine)\ndef affine(x: f64) -> f64 = x + 1.0f64\n",
+    );
+    for body in [
+        "affine(x) >= -1.0f64",
+        "(affine(x) >= -1.0f64) && (affine(x) <= 3.0f64)",
+    ] {
+        let record = prove(
+            &root,
+            &format!(
+                "module BeaconPkg.Main\nimport BeaconPkg.Model (affine)\n@property bounded forall(x: f64) where x >= -1.0f64, x <= 1.0f64:\n  {body}\n"
+            ),
+        );
+        assert_eq!(record["proof_tier"], "beacon", "{record}");
+        assert_eq!(record["samples"], 0, "{record}");
+        assert_eq!(
+            record["reason"], "CHELIS_BEACON_BIN is not configured",
+            "{record}"
+        );
+    }
+}
+
+#[test]
+fn imported_f32_scalar_goal_preserves_typed_source_at_dispatch() {
+    let (_dir, root) = package(
+        "module BeaconPkg.Model\nexport (affine)\ndef affine(x: f32) -> f32 = x + 0.1f32\n",
+    );
+    let record = prove(
+        &root,
+        "module BeaconPkg.Main\nimport BeaconPkg.Model (affine)\n@property bounded forall(x: f32) where x >= 0.1f32, x <= 0.2f32:\n  affine(x) <= 1.0f32\n",
+    );
+    assert_eq!(record["proof_tier"], "beacon", "{record}");
+    assert_eq!(record["samples"], 0, "{record}");
+    assert_eq!(
+        record["reason"], "CHELIS_BEACON_BIN is not configured",
+        "{record}"
+    );
+}
+
+#[test]
+fn mixed_float_dtypes_do_not_enter_beacon_proof_graph() {
+    let (_dir, root) = package(
+        "module BeaconPkg.Model\nexport (affine)\ndef affine(x: f32) -> f32 = x + 0.1f32\n",
+    );
+    fs::write(root.join("src/main.ch"), "module BeaconPkg.Main\nimport BeaconPkg.Model (affine)\n@property mixed forall(x: f32) where x >= 0.1f32, x <= 0.2f32:\n  affine(x) <= 1.0f64\n")
+        .expect("property");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(root)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env_remove("CHELIS_BEACON_BIN")
+        .args(["prove", "src/main.ch", "--tier", "beacon-only", "--json"])
+        .output()
+        .expect("prove");
+    assert!(
+        !output.status.success(),
+        "mixed dtype property unexpectedly succeeded"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("\"status\":\"passed\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn imported_f32_request_uses_exact_stored_values_in_its_real_graph() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_dir, root) = package(
+        "module BeaconPkg.Model\nexport (affine)\ndef affine(x: f32) -> f32 = x + 0.1f32\n",
+    );
+    fs::write(
+        root.join("src/main.ch"),
+        "module BeaconPkg.Main\nimport BeaconPkg.Model (affine)\n@property bounded forall(x: f32) where x >= 0.1f32, x <= 0.2f32:\n  affine(x) <= 1.0f32\n",
+    ).expect("property");
+    let beacon = root.join("capture-beacon");
+    fs::write(
+        &beacon,
+        "#!/bin/sh\ncp \"$3\" \"$CAPTURE_REQUEST\"\nexit 3\n",
+    )
+    .expect("capture binary");
+    fs::set_permissions(&beacon, fs::Permissions::from_mode(0o755)).expect("executable");
+    let capture = root.join("captured-request.json");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&root)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_BEACON_BIN", &beacon)
+        .env("CAPTURE_REQUEST", &capture)
+        .args(["prove", "src/main.ch", "--tier", "beacon-only", "--json"])
+        .output()
+        .expect("prove");
+    let record: Value = String::from_utf8(output.stdout)
+        .expect("utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("NDJSON"))
+        .find(|record| record["kind"] == "property")
+        .expect("property record");
+    assert_ne!(record["status"], "passed", "{record}");
+    assert_eq!(record["samples"], 0, "{record}");
+    assert_eq!(record["engine_evidence"]["source_dtype"], "f32");
+    assert_eq!(record["engine_evidence"]["proof_graph_dtype"], "f64");
+    let request: Value =
+        serde_json::from_slice(&fs::read(capture).expect("request")).expect("request JSON");
+    assert_eq!(request["inputs"]["x"]["lo"], f64::from(0.1_f32));
+    assert_eq!(request["inputs"]["x"]["hi"], f64::from(0.2_f32));
+    let exact_bits = format!("{:016x}", f64::from(0.1_f32).to_bits());
+    assert!(
+        request["dag"]["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .any(|node| {
+                node["op"]["kind"] == "const"
+                    && node["op"]["value"]["dtype"] == "f64"
+                    && node["op"]["value"]["bits"] == exact_bits
+            }),
+        "{request}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn two_sided_property_cannot_hide_an_unknown_upper_side() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_dir, root) = package(
+        "module BeaconPkg.Model\nexport (affine)\ndef affine(x: f64) -> f64 = x + 1.0f64\n",
+    );
+    fs::write(
+        root.join("src/main.ch"),
+        "module BeaconPkg.Main\nimport BeaconPkg.Model (affine)\n@property bounded forall(x: f64) where x >= -1.0f64, x <= 1.0f64:\n  (affine(x) >= -1.0f64) && (affine(x) <= 3.0f64)\n",
+    ).expect("property");
+    let beacon = root.join("mock-beacon");
+    fs::write(&beacon, concat!(
+        "#!/bin/sh\n",
+        "if [ -f \"$MOCK_SECOND_CALL\" ]; then\n",
+        "  printf '%s' '{\"schema_version\":\"beacon.relu_search.v1\",\"semantics_note\":\"real-valued semantics; no floating-point roundoff soundness claim\",\"verdict\":\"unknown\",\"tree\":[],\"reason\":\"forced unknown\"}'\n",
+        "else\n",
+        "  touch \"$MOCK_SECOND_CALL\"\n",
+        "  printf '%s' '{\"schema_version\":\"beacon.relu_search.v1\",\"semantics_note\":\"real-valued semantics; no floating-point roundoff soundness claim\",\"verdict\":\"certified\",\"tree\":[],\"final_bound\":[{\"lo\":0.0,\"hi\":1.0},{\"lo\":-2.0,\"hi\":-1.0}]}'\n",
+        "fi\n",
+    )).expect("mock binary");
+    fs::set_permissions(&beacon, fs::Permissions::from_mode(0o755)).expect("executable");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&root)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_BEACON_BIN", &beacon)
+        .env("MOCK_SECOND_CALL", root.join("second-call"))
+        .args(["prove", "src/main.ch", "--tier", "beacon-only", "--json"])
+        .output()
+        .expect("prove");
+    let record: Value = String::from_utf8(output.stdout)
+        .expect("utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("NDJSON"))
+        .find(|record| record["kind"] == "property")
+        .expect("property record");
+    assert_eq!(record["status"], "unsupported", "{record}");
+    assert_eq!(record["samples"], 0);
+    assert_eq!(
+        record["engine_evidence"]["bounds"]["lower"]["result"],
+        "proved"
+    );
+    assert_eq!(
+        record["engine_evidence"]["bounds"]["upper"]["result"],
+        "unknown"
+    );
+    assert_eq!(
+        record["engine_evidence"]["bounds"]["lower"]["engine_evidence"]["output_root"],
+        record["engine_evidence"]["bounds"]["upper"]["engine_evidence"]["output_root"]
+    );
+}
+
+#[test]
 fn explicit_tensor_bridge_control_for_imported_scalar_call() {
     let (_dir, root) = package(
         "module BeaconPkg.Model\nexport (affine)\ndef affine(x: f64) -> f64 = x + 1.0f64\n",

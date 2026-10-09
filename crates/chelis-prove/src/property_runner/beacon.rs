@@ -210,28 +210,59 @@ fn source_binding(
     }))
 }
 
-fn literal(expr: &Expr) -> Result<f64, String> {
+fn literal(expr: &Expr, dtype: Prim) -> Result<f64, String> {
     let value = match expr {
-        Expr::Lit(Literal::TypedFloat(value, LiteralSuffix::F64), _) => *value,
-        Expr::Unary(UnaryOp::Neg, value, _) => -literal(value)?,
-        _ => return Err("Beacon bounds require explicit f64 literals".into()),
+        Expr::Lit(Literal::TypedFloat(value, suffix), _)
+            if matches!(
+                (dtype, suffix),
+                (Prim::F32, LiteralSuffix::F32) | (Prim::F64, LiteralSuffix::F64)
+            ) =>
+        {
+            *value
+        }
+        Expr::Unary(UnaryOp::Neg, value, _) => -literal(value, dtype)?,
+        _ => {
+            return Err(format!(
+                "Beacon bounds require explicit {} literals",
+                dtype.name()
+            ));
+        }
     };
     if !value.is_finite() {
         return Err("Beacon bound must be finite".into());
     }
-    Ok(value)
+    let stored =
+        scalar_from_f64("Beacon source bound", dtype, value).map_err(|error| error.to_string())?;
+    if !stored.as_f64_lossy().is_finite() {
+        return Err("Beacon bound must be finite at its source dtype".into());
+    }
+    Ok(stored.as_f64_lossy())
 }
 
-fn scalar_box(property: &Property, scalar: bool) -> Result<IntervalBox, String> {
+fn scalar_dtype(property: &Property, scalar: bool) -> Result<Prim, String> {
+    if !scalar {
+        return Ok(Prim::F64);
+    }
+    let Some(first) = property.params.first() else {
+        return Err("Beacon scalar goal requires a named input".into());
+    };
+    match &first.ty {
+        Some(TypeExpr::Named(name, _)) if name == "f32" => Ok(Prim::F32),
+        Some(TypeExpr::Named(name, _)) if name == "f64" => Ok(Prim::F64),
+        _ => Err("Beacon scalar goal requires f32 or f64 inputs".into()),
+    }
+}
+
+fn scalar_box(property: &Property, scalar: bool, dtype: Prim) -> Result<IntervalBox, String> {
     let mut bounds = BTreeMap::new();
     for param in &property.params {
         let admitted = if scalar {
-            matches!(&param.ty, Some(TypeExpr::Named(dtype, _)) if dtype == "f64")
+            matches!(&param.ty, Some(TypeExpr::Named(name, _)) if name == dtype.name())
         } else {
             matches!(&param.ty, Some(TypeExpr::Tensor(dims, precision, _)) if dims.is_empty() && precision == "f64")
         };
         if !admitted || bounds.insert(param.name.clone(), (None, None)).is_some() {
-            return Err("Beacon bounds require distinct named f64 scalar or rank-zero tensor[f64] parameters".into());
+            return Err("Beacon bounds require distinct same-dtype f32/f64 scalar or rank-zero tensor[f64] parameters".into());
         }
     }
     let mut pending: Vec<_> = property.preconditions.iter().collect();
@@ -247,8 +278,8 @@ fn scalar_box(property: &Property, scalar: bool) -> Result<IntervalBox, String> 
             scalar_input_name(left, scalar),
             scalar_input_name(right, scalar),
         ) {
-            (Some(name), None) => (name, literal(right)?, *op == BinOp::Ge),
-            (None, Some(name)) => (name, literal(left)?, *op == BinOp::Le),
+            (Some(name), None) => (name, literal(right, dtype)?, *op == BinOp::Ge),
+            (None, Some(name)) => (name, literal(left, dtype)?, *op == BinOp::Le),
             _ => return Err("Beacon input bounds must compare a parameter with a literal".into()),
         };
         let entry = bounds.get_mut(name).ok_or("bound names a non-parameter")?;
@@ -324,27 +355,96 @@ fn tensor_operand(expr: &Expr) -> Option<Cow<'_, Expr>> {
     }
 }
 
-fn upper_expression(
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum BoundSide {
+    Lower,
+    Upper,
+}
+
+impl BoundSide {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Lower => "lower",
+            Self::Upper => "upper",
+        }
+    }
+}
+
+fn bound_expressions(
     property: &Property,
     scalar: bool,
-) -> Result<(Cow<'_, Expr>, ScalarValue), String> {
-    let Expr::Binary(op @ (BinOp::Le | BinOp::Ge), left, right, _) = &property.body else {
-        return Err("Beacon property body must be a non-strict scalar upper bound".into());
-    };
-    let (expression, threshold) = if *op == BinOp::Le {
-        (left.as_ref(), right.as_ref())
-    } else {
-        (right.as_ref(), left.as_ref())
-    };
-    let threshold = scalar_from_f64("Beacon threshold transport", Prim::F64, literal(threshold)?)
-        .map_err(|error| format!("invalid threshold: {error}"))?;
-    let expression = if scalar {
-        Cow::Borrowed(expression)
-    } else {
-        tensor_operand(expression)
-            .ok_or("Beacon output must use tensor_to_scalar on its scalar graph output")?
-    };
-    Ok((expression, threshold))
+    dtype: Prim,
+) -> Result<(Expr, Vec<(BoundSide, ScalarValue)>), String> {
+    let mut pending = vec![&property.body];
+    let mut expression: Option<Expr> = None;
+    let mut text: Option<String> = None;
+    let mut bounds = std::collections::BTreeMap::new();
+    while let Some(body) = pending.pop() {
+        if let Expr::Binary(BinOp::And, left, right, _) = body {
+            pending.extend([left.as_ref(), right.as_ref()]);
+            continue;
+        }
+        let Expr::Binary(op @ (BinOp::Le | BinOp::Ge), left, right, _) = body else {
+            return Err(
+                "Beacon property body must contain one or two non-strict scalar bounds".into(),
+            );
+        };
+        let (side, raw_expression, threshold) = match (literal(left, dtype), literal(right, dtype))
+        {
+            (Err(_), Ok(threshold)) => (
+                if *op == BinOp::Le {
+                    BoundSide::Upper
+                } else {
+                    BoundSide::Lower
+                },
+                left.as_ref(),
+                threshold,
+            ),
+            (Ok(threshold), Err(_)) => (
+                if *op == BinOp::Le {
+                    BoundSide::Lower
+                } else {
+                    BoundSide::Upper
+                },
+                right.as_ref(),
+                threshold,
+            ),
+            _ => {
+                return Err(format!(
+                    "Beacon output bound must compare one expression with an explicit {} literal",
+                    dtype.name()
+                ));
+            }
+        };
+        let candidate = if scalar {
+            raw_expression.clone()
+        } else {
+            tensor_operand(raw_expression)
+                .ok_or("Beacon output must use tensor_to_scalar on its scalar graph output")?
+                .into_owned()
+        };
+        let candidate_text = chelis_surf::format::format_expression(&candidate);
+        if text
+            .as_ref()
+            .is_some_and(|previous| previous != &candidate_text)
+        {
+            return Err("two-sided Beacon bounds must name the same output expression".into());
+        }
+        text = Some(candidate_text);
+        expression = Some(candidate);
+        let bound = scalar_from_f64("Beacon threshold transport", Prim::F64, threshold)
+            .map_err(|error| format!("invalid threshold: {error}"))?;
+        if bounds.insert(side, bound).is_some() {
+            return Err(format!("duplicate Beacon {} output bound", side.name()));
+        }
+    }
+    if bounds.is_empty() {
+        return Err("Beacon property body has no scalar bound".into());
+    }
+    Ok((
+        expression.expect("nonempty bounds have an expression"),
+        bounds.into_iter().collect(),
+    ))
 }
 
 /// A scalar proof graph bypasses the ordinary runtime lowerer, so it must
@@ -426,20 +526,19 @@ pub(super) fn prove(
             decls.iter().any(|decl| matches!(decl, Decl::FunDef { name, .. } | Decl::LetDef { name, .. } | Decl::MacroDef { name, .. } | Decl::Sig { name, .. } if name == "tensor_to_scalar"))) {
             return Err("Beacon scalar bridge must not be shadowed".into());
         }
-        let mut inputs = scalar_box(property, scalar)?;
-        let (expression, upper) = upper_expression(property, scalar)?;
+        let dtype = scalar_dtype(property, scalar)?;
+        let mut inputs = scalar_box(property, scalar, dtype)?;
+        let (expression, bounds) = bound_expressions(property, scalar, dtype)?;
         let source_binding = source_binding(decls, property, &expression)?;
-        Goal::scalar_upper_bound(inputs.clone(), upper).map_err(|e| e.to_string())?;
         let body = chelis_surf::format::format_expression(&expression);
-        let (dag, root, goal, input_bindings) = if scalar {
+        let (dag, root, input_bindings) = if scalar {
             let (dag, root) = super::beacon_scalar::lower(decls, property, &expression)?;
-            let goal = Goal::scalar_upper_bound(inputs, upper).map_err(|e| e.to_string())?;
             let input_bindings = property
                 .params
                 .iter()
                 .map(|param| (param.name.clone(), param.name.clone()))
                 .collect();
-            (dag, root, goal, input_bindings)
+            (dag, root, input_bindings)
         } else {
             // The goal graph is lowered from the declarations the property was
             // checked against plus generated declarations, never from a printed
@@ -479,7 +578,7 @@ pub(super) fn prove(
                     .collect(),
                 ret_ty: Some(tensor_f64()),
                 effects: None,
-                body: expression.clone().into_owned(),
+                body: expression.clone(),
                 span,
             });
             let mut arguments = Vec::new();
@@ -511,7 +610,6 @@ pub(super) fn prove(
                 value: Expr::Apply(Box::new(Expr::Var(function, span)), arguments, span),
                 span,
             });
-            let goal = Goal::scalar_upper_bound(inputs, upper).map_err(|e| e.to_string())?;
             let lowered = compiler::lower_decls(&program, Some(&entry))
                 .map_err(|error| format!("Beacon graph lowering failed: {error:?}"))?;
             lowered
@@ -541,59 +639,126 @@ pub(super) fn prove(
                 root = node.inputs[0];
             }
             let (dag, root) = crate::graph_extract::scalar_root_closure(&lowered.dag, root)?;
-            (dag, root, goal, input_bindings)
+            (dag, root, input_bindings)
         };
-        let bytes = serde_json::to_vec(&dag).map_err(|e| e.to_string())?;
-        let hash = format!("{:x}", Sha256::digest(&bytes));
+        if dag.roots.first() != Some(&root) {
+            return Err("Beacon proof graph lost its original output root".into());
+        }
         let store = WireDagByteStore::new();
-        store.insert(hash.clone(), bytes);
         let binary =
             std::env::var_os(crate::BEACON_BIN_ENV).ok_or("CHELIS_BEACON_BIN is not configured")?;
-        let shim = BeaconShim::new(std::path::PathBuf::from(binary), store)
+        let shim = BeaconShim::new(std::path::PathBuf::from(binary), store.clone())
             .with_oracle_mode(BeaconOracleMode::ReluLinear);
-        let budget = options
-            .beacon_deadline
-            .map(|deadline| {
-                options.beacon_budget.min(
-                    deadline
-                        .saturating_duration_since(std::time::Instant::now())
-                        .saturating_sub(std::time::Duration::from_secs(5)),
-                )
-            })
-            .unwrap_or(options.beacon_budget);
-        let timeout = u64::try_from(budget.as_millis())
-            .ok()
-            .and_then(|value| value.checked_add(5000))
-            .ok_or("Beacon budget exceeds supported duration")?;
-        let result = shim.discharge(&goal.with_ir(IrHandle::from_wire_dag(hash, root)), timeout);
-        Ok((
-            result,
-            format!("({body}) - ({:?}f64) <= 0.0f64", upper.as_f64_lossy()),
-            input_bindings,
-            source_binding,
-        ))
+        let mut results = Vec::new();
+        for (side, bound) in bounds {
+            let mut side_dag = dag.clone();
+            let (selected_root, upper, folded_goal) = match side {
+                BoundSide::Upper => (
+                    root,
+                    bound,
+                    format!("({body}) - ({:?}f64) <= 0.0f64", bound.as_f64_lossy()),
+                ),
+                BoundSide::Lower => {
+                    let original = side_dag
+                        .nodes
+                        .get(root as usize)
+                        .ok_or("Beacon original output root is outside the graph")?
+                        .clone();
+                    let negated_root = side_dag.nodes.len() as u64;
+                    side_dag
+                        .nodes
+                        .push(chelis_compiler_api::schema::WireDagNode {
+                            id: negated_root,
+                            op: chelis_compiler_api::schema::WireRiscOp::Neg,
+                            inputs: vec![root],
+                            output_type: original.output_type,
+                            shape_deps: Vec::new(),
+                            span_id: original.span_id,
+                            merged_spans: original.merged_spans,
+                            declaration: original.declaration,
+                            activation: original.activation,
+                        });
+                    side_dag.roots.push(negated_root);
+                    let upper = scalar_from_f64(
+                        "Beacon negated lower bound",
+                        Prim::F64,
+                        -bound.as_f64_lossy(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    (
+                        negated_root,
+                        upper,
+                        format!("({:?}f64) - ({body}) <= 0.0f64", bound.as_f64_lossy()),
+                    )
+                }
+            };
+            side_dag
+                .validate_wire_contract()
+                .map_err(|error| error.to_string())?;
+            let goal = Goal::scalar_upper_bound(inputs.clone(), upper)
+                .map_err(|error| error.to_string())?;
+            let bytes = serde_json::to_vec(&side_dag).map_err(|error| error.to_string())?;
+            let hash = format!("{:x}", Sha256::digest(&bytes));
+            store.insert(hash.clone(), bytes);
+            let budget = options
+                .beacon_deadline
+                .map(|deadline| {
+                    options.beacon_budget.min(
+                        deadline
+                            .saturating_duration_since(std::time::Instant::now())
+                            .saturating_sub(std::time::Duration::from_secs(5)),
+                    )
+                })
+                .unwrap_or(options.beacon_budget);
+            let timeout = u64::try_from(budget.as_millis())
+                .ok()
+                .and_then(|value| value.checked_add(5000))
+                .ok_or("Beacon budget exceeds supported duration")?;
+            let discharge = shim.discharge(
+                &goal.with_ir(IrHandle::from_wire_dag(hash, selected_root)),
+                timeout,
+            );
+            results.push((side, bound, discharge, folded_goal));
+        }
+        Ok((results, input_bindings, source_binding, dtype))
     })();
-    let (discharge, folded_goal, input_bindings, source_binding) = match prepared {
+    let (results, input_bindings, source_binding, dtype) = match prepared {
         Ok(value) => value,
         Err(reason) => return fail(reason),
     };
     use crate::tier_b::TierBResult;
-    let (status, witness, reason) = match discharge.result() {
-        TierBResult::Proved => (PropertyStatus::Passed, None, None),
-        TierBResult::Disproved(witness) => (PropertyStatus::Failed, Some(witness.clone()), None),
-        TierBResult::Unknown | TierBResult::Timeout => (
-            PropertyStatus::Unsupported,
-            None,
-            Some(
-                discharge.evidence()["semantic_reason"]
+    let mut status = PropertyStatus::Passed;
+    let mut witness = None;
+    let mut reason = None;
+    let mut soundness = crate::discharge::Soundness::Exact;
+    let mut qualifiers = crate::discharge::QualifierSet::new();
+    for (side, _, discharge, _) in &results {
+        match discharge.result() {
+            TierBResult::Proved => {
+                soundness = soundness.min(discharge.soundness());
+                qualifiers = qualifiers.union(discharge.qualifier_set());
+            }
+            TierBResult::Disproved(model) => {
+                status = PropertyStatus::Failed;
+                witness = Some(model.clone());
+                reason = Some(format!("{} Beacon bound was refuted", side.name()));
+            }
+            TierBResult::Error(error) if status != PropertyStatus::Failed => {
+                status = PropertyStatus::Error;
+                reason = Some(format!("{} Beacon bound: {error}", side.name()));
+            }
+            TierBResult::Unknown | TierBResult::Timeout if status == PropertyStatus::Passed => {
+                status = PropertyStatus::Unsupported;
+                let detail = discharge.evidence()["semantic_reason"]
                     .as_str()
                     .or_else(|| discharge.evidence()["beacon_evidence"]["reason"].as_str())
-                    .unwrap_or("Beacon returned unknown")
-                    .into(),
-            ),
-        ),
-        TierBResult::Error(reason) => (PropertyStatus::Error, None, Some(reason.clone())),
-    };
+                    .unwrap_or("Beacon returned unknown");
+                reason = Some(format!("{} Beacon bound: {detail}", side.name()));
+            }
+            _ => {}
+        }
+    }
+    let base_discharge = (status == PropertyStatus::Passed).then_some((soundness, qualifiers));
     let mut outcome = PropertyOutcome::with_base_discharge(
         property.name.clone(),
         status,
@@ -604,12 +769,41 @@ pub(super) fn prove(
         reason,
         false,
         Vec::new(),
-        Some((discharge.soundness(), discharge.qualifier_set().clone())),
+        base_discharge,
     );
-    let mut evidence = discharge.evidence().clone();
-    evidence["folded_goal"] = serde_json::json!(folded_goal);
+    let mut evidence = if results.len() == 1 {
+        let (side, bound, discharge, folded_goal) = &results[0];
+        let mut evidence = discharge.evidence().clone();
+        evidence["folded_goal"] = serde_json::json!(folded_goal);
+        evidence["bound_side"] = serde_json::json!(side.name());
+        evidence["source_bound"] = serde_json::json!(bound);
+        evidence
+    } else {
+        let mut sides = serde_json::Map::new();
+        for (side, bound, discharge, folded_goal) in &results {
+            let result = match discharge.result() {
+                TierBResult::Proved => "proved",
+                TierBResult::Disproved(_) => "disproved",
+                TierBResult::Unknown => "unknown",
+                TierBResult::Timeout => "timeout",
+                TierBResult::Error(_) => "error",
+            };
+            sides.insert(
+                side.name().into(),
+                serde_json::json!({
+                    "source_bound": bound,
+                    "folded_goal": folded_goal,
+                    "engine_evidence": discharge.evidence(),
+                    "result": result,
+                }),
+            );
+        }
+        serde_json::json!({"bounds": sides})
+    };
     evidence["input_bindings"] = serde_json::json!(input_bindings);
     evidence["source_binding"] = source_binding;
+    evidence["source_dtype"] = serde_json::json!(dtype.name());
+    evidence["proof_graph_dtype"] = serde_json::json!("f64");
     outcome.engine_evidence = Some(evidence);
     outcome
 }

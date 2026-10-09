@@ -4,25 +4,28 @@
 The self-contained tensor route uses a rank-zero `tensor[f64]` carrier so its
 operations enter the compiler graph lane. Its property parameters have finite,
 closed intervals from explicit f64 literal `where` inequalities on
-`tensor_to_scalar(x)`. Its body is
-`tensor_to_scalar(output_expression) <= upper_f64_literal`.
-The package scalar route admits named `f64` scalar parameters with direct
-finite, closed `where` bounds and an `output_expression <= upper_f64_literal`
-body. It extracts a proof-only rank-zero graph from the checked linked source
-declarations, including imported pure f64 functions. The original scalar
+`tensor_to_scalar(x)`. Its body compares `tensor_to_scalar(output_expression)`
+with one or two finite f64 bounds.
+The package scalar route admits named `f32` or `f64` scalar parameters with
+direct finite, closed `where` bounds. Its body states a lower bound, an upper
+bound, or both comparisons joined by `&&` over the same output expression.
+It extracts a proof-only rank-zero graph from the checked linked source
+declarations, including imported pure scalar functions. The original scalar
 functions keep their ordinary host classification. This scalar extractor
 checks the linked declaration set before a property can receive a Beacon
 result, including when the shared runner is called directly or through Tide. It
-accepts finite typed f64 literals, variables, unary negation, addition,
-subtraction, multiplication, division, and direct calls in a pure f64
-closure; other expressions report unsupported.
+accepts finite typed scalar literals, variables, unary negation, addition,
+subtraction, multiplication, division, and direct calls in a pure same-dtype
+closure; other expressions report unsupported. Typed `f32` values are lifted
+exactly to the f64 proof graph; operations in that graph have real-arithmetic
+semantics rather than f32 execution semantics.
 Missing, duplicate or unrecognized constraints are rejected;
 there is no SMT or fuzz fallback in this explicit lane.
 
 For a standalone in-memory source, the source must be self-contained. The
 tensor route also rejects shadowing of the `tensor_to_scalar` bridge. The
 CLI's file path may resolve a Reef package first; imported rank-zero tensor
-or pure f64 scalar functions then lower from the checked linked declarations.
+or pure scalar functions then lower from the checked linked declarations.
 The graph inlines those functions, so the property result records the selected
 linked source declarations and a digest of the exact authored output
 expression. These are provenance for the compiler's source-to-graph step.
@@ -32,18 +35,22 @@ The gallery build generates its network source before dispatch.
 [The tensor example](../../examples/beacon_scalar_range.ch) is run
 with `CHELIS_BEACON_BIN=/absolute/path/to/chelis-beacon chelis prove
 examples/beacon_scalar_range.ch --tier beacon-only --beacon-budget 2000 --json`.
-[The scalar example](../../examples/beacon_scalar_host.ch) exercises the
-proof-only f64 host extraction with the same explicit tier.
+[The scalar example](../../examples/beacon_scalar_host.ch) exercises f64 and
+f32 two-sided host properties with the same explicit tier.
 
 The shared property runner lowers the expression's reachable source closure.
 `GoalShape::ScalarUpperBound` carries the named input box and a tagged f64
-`ScalarValue` threshold. Its `IntervalBox` endpoints and the separate
-`BoxRange` output endpoints also use tagged `ScalarValue`. A one-sided bound
-does not acquire a fictitious finite lower limit.
+`ScalarValue` threshold. An f32 source endpoint or threshold is represented by
+its exact stored value in that tagged proof carrier. Its `IntervalBox` endpoints
+and the separate `BoxRange` output endpoints also use tagged `ScalarValue`.
+A one-sided bound does not acquire a fictitious finite lower limit.
 The exact WireDag bytes are addressed by SHA256 and a node ID. The shim verifies
 that binding, names and scalar types before adding the folded expression
-`output - threshold`. Its request keeps both output and folded roots, and the
-unsafe clause references only the folded root.
+`output - upper` or `lower - output`. Its request keeps both the original output
+and folded roots, and the unsafe clause references only the folded root. A
+two-sided property dispatches both obligations and passes only when both prove;
+evidence records each side separately. A confirmed violation refutes the range,
+while an unknown or unsupported side cannot be masked by the other side.
 
 Beacon's directed-rounded relaxation must exclude the folded nonnegative
 region to certify. This is a sufficient, deliberately strict check for a
@@ -52,7 +59,7 @@ non-strict upper bound; equality can remain unknown. The returned proof has
 arithmetic on stored weights, not float32 or float64 execution.
 
 Unknown preserves reason, accumulated hull and the whole split tree. A
-confirmed witness strictly above the upper bound maps to refuted with its
+confirmed witness strictly beyond a stated bound maps to refuted with its
 real-arithmetic qualification. A witness exactly on the boundary cannot refute
 the non-strict property.
 Unrecognized reports, unconfirmed witnesses, mismatched source bindings and

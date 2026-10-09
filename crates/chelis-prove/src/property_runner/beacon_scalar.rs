@@ -16,8 +16,14 @@ pub(super) fn lower(
     if property.params.is_empty() {
         return Err("Beacon scalar goal requires a named input".into());
     }
+    let source_dtype = match &property.params[0].ty {
+        Some(TypeExpr::Named(name, _)) if name == "f32" => Prim::F32,
+        Some(TypeExpr::Named(name, _)) if name == "f64" => Prim::F64,
+        _ => return Err("Beacon scalar goal requires f32 or f64 inputs".into()),
+    };
     let mut graph = ScalarGraph {
         decls,
+        source_dtype,
         dag: WireDag {
             schema_version: WIRE_DAG_SCHEMA_VERSION,
             declarations: vec!["beacon_goal_output".into()],
@@ -28,10 +34,10 @@ pub(super) fn lower(
     };
     let mut bindings = BTreeMap::new();
     for param in &property.params {
-        if !matches!(&param.ty, Some(TypeExpr::Named(name, _)) if name == "f64")
+        if !matches!(&param.ty, Some(TypeExpr::Named(name, _)) if name == source_dtype.name())
             || bindings.contains_key(&param.name)
         {
-            return Err("Beacon scalar goal requires distinct named f64 inputs".into());
+            return Err("Beacon scalar goal requires distinct same-dtype f32 or f64 inputs".into());
         }
         let id = graph.node(
             0,
@@ -53,6 +59,7 @@ pub(super) fn lower(
 
 struct ScalarGraph<'a> {
     decls: &'a [Decl],
+    source_dtype: Prim,
     dag: WireDag,
     active_calls: Vec<String>,
 }
@@ -103,9 +110,24 @@ impl ScalarGraph<'_> {
                 .get(name)
                 .copied()
                 .ok_or_else(|| format!("Beacon scalar graph has unsupported free value `{name}`")),
-            Expr::Lit(Literal::TypedFloat(value, LiteralSuffix::F64), _) if value.is_finite() => {
-                let value = scalar_from_f64("Beacon scalar constant", Prim::F64, *value)
-                    .map_err(|error| error.to_string())?;
+            Expr::Lit(Literal::TypedFloat(value, suffix), _)
+                if value.is_finite()
+                    && matches!(
+                        (self.source_dtype, suffix),
+                        (Prim::F32, LiteralSuffix::F32) | (Prim::F64, LiteralSuffix::F64)
+                    ) =>
+            {
+                // The proof graph is an f64 carrier for exact real arithmetic.
+                // Every finite f32 stored value widens to f64 without loss.
+                let stored =
+                    scalar_from_f64("Beacon source scalar constant", self.source_dtype, *value)
+                        .map_err(|error| error.to_string())?;
+                let value = scalar_from_f64(
+                    "Beacon scalar graph constant",
+                    Prim::F64,
+                    stored.as_f64_lossy(),
+                )
+                .map_err(|error| error.to_string())?;
                 Ok(self.node(declaration, WireRiscOp::Const { value }, vec![]))
             }
             Expr::Unary(UnaryOp::Neg, value, _) => {
@@ -163,11 +185,11 @@ impl ScalarGraph<'_> {
                 };
                 if !type_binders.is_empty()
                     || effects.as_ref().is_some_and(|effects| !effects.is_empty())
-                    || !matches!(ret_ty, Some(TypeExpr::Named(dtype, _)) if dtype == "f64")
+                    || !matches!(ret_ty, Some(TypeExpr::Named(dtype, _)) if dtype == self.source_dtype.name())
                     || params.len() != args.len()
-                    || params.iter().any(|param| !matches!(&param.ty, Some(TypeExpr::Named(dtype, _)) if dtype == "f64"))
+                    || params.iter().any(|param| !matches!(&param.ty, Some(TypeExpr::Named(dtype, _)) if dtype == self.source_dtype.name()))
                 {
-                    return Err(format!("Beacon scalar graph requires a pure f64 signature for `{name}`"));
+                    return Err(format!("Beacon scalar graph requires a pure same-dtype f32 or f64 signature for `{name}`"));
                 }
                 if self.active_calls.contains(name) {
                     return Err(format!(

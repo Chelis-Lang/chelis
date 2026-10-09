@@ -80,6 +80,13 @@ impl BeaconShim {
         }
         let wire: WireDag = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         wire.validate_wire_contract().map_err(|e| e.to_string())?;
+        let original_root = *wire
+            .roots
+            .first()
+            .ok_or("scalar graph has no original output root")?;
+        if !wire.roots.contains(&root) {
+            return Err("selected scalar root is not a graph root".into());
+        }
         let loads: BTreeSet<_> = wire
             .nodes
             .iter()
@@ -128,7 +135,7 @@ impl BeaconShim {
             json!({"kind":"add"}),
             vec![root_index, constant],
         ));
-        dag["roots"] = json!([root_index, folded]);
+        dag["roots"] = json!([original_root, folded]);
         let inputs: BTreeMap<_, _> = inputs
             .dims
             .iter()
