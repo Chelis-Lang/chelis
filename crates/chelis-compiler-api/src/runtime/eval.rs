@@ -1654,6 +1654,7 @@ impl<'a> EvalContext<'a> {
                 checked_function: Box::new(node.expr.clone()),
                 params,
                 param_types: if param_types.is_empty() {
+                    // bounded: the constructor arity
                     vec![None; arity]
                 } else {
                     param_types
@@ -1773,6 +1774,7 @@ impl<'a> EvalContext<'a> {
         match tail_producer {
             Some(ResultProducer::Aggregate(children)) => producers.extend(children),
             Some(uniform @ ResultProducer::Uniform(_)) => {
+                // bounded: an existing List
                 producers.extend(vec![Some(uniform); tail_len]);
             }
             _ => producers.extend((0..tail_len).map(|_| None)),
@@ -4485,6 +4487,7 @@ impl<'a> EvalContext<'a> {
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 } else {
+                    // bounded: the List nesting depth
                     vec![None; list_depth]
                 };
                 let (shape, data) =
@@ -5189,6 +5192,7 @@ impl<'a> EvalContext<'a> {
                         args.len().saturating_sub(1)
                     ));
                 }
+                // bounded: the input rank
                 let mut axes: Vec<usize> = Vec::with_capacity(rank);
                 for i in 0..rank {
                     let raw = expect_int_arg(args, i + 1)?;

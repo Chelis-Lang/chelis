@@ -327,3 +327,66 @@ fn largest_representable_literal_sizes_pass_check() {
         assert!(report.contains("\"errors\": []"), "{name}:\n{report}");
     }
 }
+
+/// An einsum whose output count fits i64 but whose byte size does not: k = 0,
+/// i = j = 2^31, so the output holds 2^62 `f32` elements. The host lane used
+/// to size the output from the count alone and panic; both lanes now report
+/// the einsum plan's byte-size overflow, in the C runtime's words.
+#[test]
+fn einsum_output_byte_size_overflow_matches_c() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let source = "def zero() -> i64 = tensor_to_scalar(sum(expand(to_tensor([0i64]), 0i32, 2i64), 0i32))\ndef big() -> i64 = tensor_to_scalar(sum(expand(to_tensor([1073741824i64]), 0i32, 2i64), 0i32))\ndef main() -> i64 ! { IO } = {\n  _ = print(\"before\")\n  x = insert(expand(to_tensor([1.0f32]), 0i32, zero()), 1i32, big())\n  y = einsum(\"ki,kj->ij\", x, x)\n  shape(y, 1i32)\n}\nout = main()\n";
+    let lanes = run_lanes("einsum_bytes", source);
+    assert_both_lanes_fail_with(
+        &lanes,
+        "Overflow: einsum output byte size exceeds i64",
+        None,
+    );
+}
+
+/// A zero-element reshape target whose suffix strides do not fit i64,
+/// `[0, 2^62, 4]` at run time: an empty target still owes representable
+/// strides (spec/05, `chelis_tensor_check_reshape`). The host lane used to
+/// accept it. Both lanes now refuse with the stride overflow; C renders it
+/// under its runtime symbol, the evaluators under `reshape`'s trap line.
+#[test]
+fn zero_element_reshape_with_unrepresentable_strides_traps_in_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let source = "def zero() -> i64 = tensor_to_scalar(sum(expand(to_tensor([0i64]), 0i32, 2i64), 0i32))\ndef big() -> i64 = tensor_to_scalar(sum(expand(to_tensor([2305843009213693952i64]), 0i32, 2i64), 0i32))\ndef main() -> i64 ! { IO } = {\n  _ = print(\"before\")\n  x = expand(to_tensor([1.0f32]), 0i32, zero())\n  y = reshape(x, [zero(), big(), 4i64])\n  shape(y, 1i32)\n}\nout = main()\n";
+    let lanes = run_lanes("reshape_strides", source);
+    assert!(lanes.build.status.success(), "{}", text(&lanes.build));
+    let c = lanes.c.as_ref().expect("built binary ran");
+    for (lane, output) in [("eval", &lanes.eval), ("c", c)] {
+        let all = text(output);
+        assert!(!output.status.success(), "{lane} must fail:\n{all}");
+        assert!(!all.contains("panicked"), "{lane}:\n{all}");
+        assert!(
+            all.contains("stride product exceeds i64"),
+            "{lane} must report the stride overflow:\n{all}"
+        );
+    }
+    let eval = text(&lanes.eval);
+    assert!(
+        eval.contains("numeric trap: overflow in reshape at i64"),
+        "{eval}"
+    );
+}
+
+/// 2^50 `i8` elements: representable, admitted, and far past any 64-bit
+/// address space, so the allocator refuses at once and nothing is touched.
+/// The evaluator used to abort the process from Rust's allocator; both lanes
+/// now fail as the C runtime's allocation failure ([05-OP-33]).
+#[test]
+fn admitted_but_ungranted_size_fails_allocation_in_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let helper = "def huge() -> i64 = tensor_to_scalar(sum(expand(to_tensor([562949953421312i64]), 0i32, 2i64), 0i32))\n";
+    let lanes = run_lanes(
+        "expand_ungranted",
+        &program(helper, "expand(to_tensor([1i8]), 0i32, huge())"),
+    );
+    assert_both_lanes_fail_with(
+        &lanes,
+        "Domain: chelis_alloc tensor allocation failed",
+        None,
+    );
+}

@@ -206,7 +206,7 @@ fn numel(shape: &[usize]) -> usize {
 
 /// The C runtime's report when a tensor's storage cannot be allocated
 /// (`allocate_tensor` in `crates/chelis-runtime/src/lib.rs`), verbatim.
-const TENSOR_ALLOCATION_FAILED: &str = "Domain: chelis_alloc tensor allocation failed";
+pub const TENSOR_ALLOCATION_FAILED: &str = "Domain: chelis_alloc tensor allocation failed";
 
 /// [05-OP-33]'s checked admission of a result before allocation: the one
 /// gate every evaluator path that sizes a new tensor from its extents passes
@@ -246,6 +246,71 @@ pub fn admit_result(op: &'static str, shape: &[usize], prim: Prim) -> Result<usi
         .elements()
         .scratch_len::<Vec<usize>>()
         .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())
+}
+
+/// A result [`admit_tensor`] admitted. Its buffers are the only
+/// output-sized allocations a host-evaluator operation makes, and each is
+/// reserved fallibly, so an allocator refusal is the C runtime's allocation
+/// failure rather than a process abort (chelis#3418). The type carries no
+/// public constructor: a buffer sized by a result's extents can only come
+/// from an admission.
+#[derive(Clone, Copy, Debug)]
+pub struct AdmittedResult {
+    len: usize,
+}
+
+impl AdmittedResult {
+    /// The admitted element count.
+    pub fn len(self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// An empty buffer with room for one entry per result element.
+    pub fn buffer<T>(self) -> Result<Vec<T>, String> {
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(self.len)
+            .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())?;
+        Ok(buffer)
+    }
+
+    /// One `value` per result element.
+    pub fn filled<T: Clone>(self, value: T) -> Result<Vec<T>, String> {
+        let mut buffer = self.buffer()?;
+        buffer.resize(self.len, value);
+        Ok(buffer)
+    }
+}
+
+/// [`admit_result`], then the allocator's grant for the result's storage.
+///
+/// [`admit_result`] refuses a result whose scratch exceeds Rust's allocation
+/// domain, but a smaller one can still exceed what the machine grants, which
+/// for an infallible `Vec` allocation is a process abort. The storage request
+/// is probed here and every output-sized buffer comes from the returned
+/// [`AdmittedResult`], so a refusal anywhere in that band is
+/// `Domain: chelis_alloc tensor allocation failed`, as compiled C reports it.
+pub fn admit_tensor(
+    op: &'static str,
+    shape: &[usize],
+    prim: Prim,
+) -> Result<AdmittedResult, String> {
+    let len = admit_result(op, shape, prim)?;
+    let width = prim
+        .runtime_dtype()
+        .map_err(|error| error.to_string())?
+        .byte_width();
+    let bytes = len
+        .checked_mul(width)
+        .ok_or_else(|| TENSOR_ALLOCATION_FAILED.to_string())?;
+    Vec::<u8>::new()
+        .try_reserve_exact(bytes)
+        .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())?;
+    Ok(AdmittedResult { len })
 }
 
 /// Host extents as the metadata's i64 extents.

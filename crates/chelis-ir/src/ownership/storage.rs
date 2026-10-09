@@ -1148,19 +1148,24 @@ fn physical_live_byte_bound(slots: &[StorageSlotPlan]) -> LiveByteBound {
     // unless explicitly dropped. Count every distinct slot once, including dead
     // gaps. This is a concrete upper bound, conservative for early C Drops, not
     // a claim that every lane necessarily observes the same exact peak.
-    let mut total = 0u64;
+    // `Unbounded` dominates `Unknown`, as in the verifier's composition, so
+    // the answer does not depend on slot order.
+    let mut total = Some(0u64);
+    let mut unknown = false;
     for slot in slots {
         let Some(bytes) = slot.capacity.allocation_bytes else {
-            return LiveByteBound::Unknown;
+            unknown = true;
+            continue;
         };
         // A total beyond u64 has no finite representable bound; each slot's
         // allocation keeps its own checked admission (chelis#3418).
-        let Some(sum) = total.checked_add(bytes) else {
-            return LiveByteBound::Unbounded;
-        };
-        total = sum;
+        total = total.and_then(|total| total.checked_add(bytes));
     }
-    LiveByteBound::Exact(total)
+    match (total, unknown) {
+        (None, _) => LiveByteBound::Unbounded,
+        (Some(_), true) => LiveByteBound::Unknown,
+        (Some(total), false) => LiveByteBound::Exact(total),
+    }
 }
 
 #[cfg(test)]

@@ -8,6 +8,9 @@ checker accepted it, `chelis eval` panicked with `capacity overflow`, and
 `chelis build` failed with an internal live-byte bound error. A size
 computed at run time traps `numeric trap: overflow in <op> at i64` before
 allocation in `chelis eval`, as compiled C already did, and a representable
-size the machine cannot allocate fails with C's allocation failure in both.
+size the machine cannot allocate fails with C's allocation failure in both,
+where `chelis eval` used to abort. `einsum` reports an output byte size past
+`i64` as C does, and `reshape` refuses an empty target whose strides do not
+fit `i64`.
 A program whose tensors each fit but whose total live bytes exceed 64 bits
 now builds. See [#3418](https://github.com/Chelis-Lang/chelis/issues/3418).
