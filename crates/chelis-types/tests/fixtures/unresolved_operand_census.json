@@ -207,6 +207,14 @@
     },
     {
       "file": "app_hostio.rs",
+      "function": "infer_mmap_tensor_app",
+      "ordinal": 1,
+      "pattern": "(Type::Var(tv) , Some((DeepTag::TVar , _ , _)))",
+      "disposition": "constrains_the_variable",
+      "reason": "the variable is the authored dtype binder the `t-var` dtype argument names, not an unresolved operand; it is kept deliberately symbolic as the result precision under its [04-DTYPE-2] bound, and the callee is unified with the resulting signature"
+    },
+    {
+      "file": "app_hostio.rs",
       "function": "loose_integer_host_slot",
       "ordinal": 1,
       "pattern": "Type::Var(_)",

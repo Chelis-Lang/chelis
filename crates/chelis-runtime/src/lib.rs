@@ -8519,8 +8519,7 @@ pub unsafe extern "C" fn chelis_mmap_tensor(
         "chelis_mmap_tensor dtype",
     );
     let mapped = &*mapped;
-    let width = dtype.byte_width();
-    let range = chelis_abi::mapped::mapped_tensor_range(offset, count, width, mapped.mmap.len())
+    let range = chelis_abi::mapped::mapped_tensor_range(offset, count, dtype, mapped.mmap.len())
         .unwrap_or_else(|message| runtime_fail!("{message}"));
     let payload = &mapped.mmap[range];
     if dtype == RuntimeDType::Bool {
@@ -8531,32 +8530,17 @@ pub unsafe extern "C" fn chelis_mmap_tensor(
     if payload.is_empty() {
         return out;
     }
-    let data = tensor_data(out);
-    // Storage is native-endian at the dtype's width, so each element is
-    // decoded from its little-endian bytes rather than copied wholesale.
-    match width {
-        1 => std::ptr::copy_nonoverlapping(payload.as_ptr(), data, payload.len()),
-        2 => {
-            for (index, chunk) in payload.as_chunks::<2>().0.iter().enumerate() {
-                data.cast::<u16>()
-                    .add(index)
-                    .write_unaligned(u16::from_le_bytes(*chunk));
-            }
-        }
-        4 => {
-            for (index, chunk) in payload.as_chunks::<4>().0.iter().enumerate() {
-                data.cast::<u32>()
-                    .add(index)
-                    .write_unaligned(u32::from_le_bytes(*chunk));
-            }
-        }
-        _ => {
-            for (index, chunk) in payload.as_chunks::<8>().0.iter().enumerate() {
-                data.cast::<u64>()
-                    .add(index)
-                    .write_unaligned(u64::from_le_bytes(*chunk));
-            }
-        }
+    // Each element's little-endian bytes become one scalar's bits, stored
+    // through the typed scalar write, so storage stays native-endian.
+    let element_bytes = payload.len() / count as usize;
+    for (index, element) in payload.chunks_exact(element_bytes).enumerate() {
+        let mut bits = [0u8; 8];
+        bits[..element.len()].copy_from_slice(element);
+        write_scalar_bits(
+            out,
+            index,
+            chelis_scalar_from_bits(dtype.id() as chelis_dtype, u64::from_le_bytes(bits)),
+        );
     }
     out
 }

@@ -11,7 +11,10 @@ use std::ops::Range;
 
 use sha2::{Digest, Sha256};
 
+use chelis_vocab::RuntimeDType;
+
 use crate::failure::{NumericTrapKind, NumericTrapLine};
+use crate::metadata::ElementCount;
 
 fn trap(kind: NumericTrapKind, op: &str, prim: &str, context: &str) -> String {
     let line = NumericTrapLine {
@@ -32,53 +35,70 @@ pub fn mapped_range(
     length: i64,
     mapped_len: usize,
 ) -> Result<Range<usize>, String> {
+    checked_range(op, offset, None, length, mapped_len)
+}
+
+/// Every failure names the offset, the element count when there is one, the
+/// byte length, and the mapping length ([05-OP-79], [05-OP-80]).
+fn checked_range(
+    op: &str,
+    offset: i64,
+    count: Option<i64>,
+    length: i64,
+    mapped_len: usize,
+) -> Result<Range<usize>, String> {
+    let count_part = count
+        .map(|count| format!(", count {count}"))
+        .unwrap_or_default();
+    let fail = |kind, reason: &str| {
+        let context = format!(
+            "{op} offset {offset}{count_part}, byte length {length}, mapping length \
+             {mapped_len}: {reason}"
+        );
+        Err(trap(kind, op, "i64", &context))
+    };
     if offset < 0 {
-        let context = format!("{op} offset is negative: {offset}");
-        return Err(trap(NumericTrapKind::Domain, op, "i64", &context));
+        return fail(NumericTrapKind::Domain, "the offset is negative");
     }
     if length < 0 {
-        let context = format!("{op} length is negative: {length}");
-        return Err(trap(NumericTrapKind::Domain, op, "i64", &context));
+        return fail(NumericTrapKind::Domain, "the byte length is negative");
     }
     let Some(end) = offset.checked_add(length) else {
-        let context = format!("{op} range end overflows i64: offset {offset}, length {length}");
-        return Err(trap(NumericTrapKind::Overflow, op, "i64", &context));
+        return fail(NumericTrapKind::Overflow, "the range end overflows i64");
     };
     match usize::try_from(end) {
         Ok(end) if end <= mapped_len => Ok(offset as usize..end),
-        _ => {
-            let context = format!(
-                "{op} range of {length} bytes at offset {offset} ends past the mapping of \
-                 {mapped_len} bytes"
-            );
-            Err(trap(NumericTrapKind::Domain, op, "i64", &context))
-        }
+        _ => fail(NumericTrapKind::Domain, "the range ends past the mapping"),
     }
 }
 
-/// The payload range of `mmap_tensor(mapped, offset, count, T)` whose
-/// element width is `width` bytes ([05-OP-79]). A negative count traps
-/// `Domain`; a byte length `count * width` outside i64 traps `Overflow`;
-/// the byte range then follows [`mapped_range`].
+/// The payload range of `mmap_tensor(mapped, offset, count, T)` at the
+/// runtime dtype of `T` ([05-OP-79]). The byte length comes from the
+/// checked element-count metadata, the one owner of element widths. A
+/// negative count traps `Domain`; a byte length outside i64 traps
+/// `Overflow`; the byte range then follows [`mapped_range`].
 pub fn mapped_tensor_range(
     offset: i64,
     count: i64,
-    width: usize,
+    dtype: RuntimeDType,
     mapped_len: usize,
 ) -> Result<Range<usize>, String> {
     const OP: &str = "mmap_tensor";
-    if count < 0 {
-        let context = format!("{OP} count is negative: {count}");
-        return Err(trap(NumericTrapKind::Domain, OP, "i64", &context));
-    }
-    let Some(length) = i64::try_from(width)
-        .ok()
-        .and_then(|width| count.checked_mul(width))
-    else {
-        let context = format!("{OP} byte length overflows i64: count {count}, width {width}");
-        return Err(trap(NumericTrapKind::Overflow, OP, "i64", &context));
+    let fail = |kind, reason: &str| {
+        let context =
+            format!("{OP} offset {offset}, count {count}, mapping length {mapped_len}: {reason}");
+        Err(trap(kind, OP, "i64", &context))
     };
-    mapped_range(OP, offset, length, mapped_len)
+    if count < 0 {
+        return fail(NumericTrapKind::Domain, "the count is negative");
+    }
+    let Ok(length) =
+        ElementCount::from_extents(&[count]).and_then(|elements| elements.bytes(dtype))
+    else {
+        let reason = format!("the byte length at {} overflows i64", dtype.name());
+        return fail(NumericTrapKind::Overflow, &reason);
+    };
+    checked_range(OP, offset, Some(count), length.get(), mapped_len)
 }
 
 /// A `bool` payload holds only the bytes 0 and 1 ([05-OP-79]); any other
@@ -129,46 +149,69 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use chelis_vocab::RuntimeDType;
+
     use super::{check_bool_payload, mapped_range, mapped_tensor_range, mapped_text, sha256_hex};
 
     #[test]
     fn ranges_inside_the_mapping_are_selected_exactly() {
         assert_eq!(mapped_range("mmap_read", 2, 3, 5), Ok(2..5));
         assert_eq!(mapped_range("mmap_read", 5, 0, 5), Ok(5..5));
-        assert_eq!(mapped_tensor_range(1, 2, 4, 9), Ok(1..9));
+        assert_eq!(mapped_tensor_range(1, 2, RuntimeDType::F32, 9), Ok(1..9));
+        assert_eq!(mapped_tensor_range(0, 3, RuntimeDType::Bf16, 6), Ok(0..6));
     }
 
     #[test]
-    fn ranges_outside_the_mapping_trap() {
-        let past = mapped_range("mmap_read", 3, 3, 5).unwrap_err();
-        assert!(
-            past.ends_with("\nnumeric trap: domain in mmap_read at i64"),
-            "{past}"
+    fn ranges_outside_the_mapping_trap_with_every_value() {
+        assert_eq!(
+            mapped_range("mmap_read", 3, 3, 5),
+            Err(
+                "mmap_read offset 3, byte length 3, mapping length 5: the range ends past the \
+                 mapping\nnumeric trap: domain in mmap_read at i64"
+                    .to_string()
+            )
         );
         let at_end = mapped_range("mmap_read", 6, 0, 5).unwrap_err();
         assert!(
             at_end.ends_with("numeric trap: domain in mmap_read at i64"),
             "{at_end}"
         );
-        let negative = mapped_range("mmap_text", -1, 0, 5).unwrap_err();
-        assert!(
-            negative.starts_with("mmap_text offset is negative: -1\n"),
-            "{negative}"
+        assert_eq!(
+            mapped_range("mmap_text", -1, 0, 5),
+            Err(
+                "mmap_text offset -1, byte length 0, mapping length 5: the offset is \
+                 negative\nnumeric trap: domain in mmap_text at i64"
+                    .to_string()
+            )
         );
         let overflow = mapped_range("mmap_sha256", i64::MAX, 1, 5).unwrap_err();
         assert!(
             overflow.ends_with("numeric trap: overflow in mmap_sha256 at i64"),
             "{overflow}"
         );
-        let count = mapped_tensor_range(0, -1, 4, 5).unwrap_err();
-        assert!(
-            count.starts_with("mmap_tensor count is negative: -1\n"),
-            "{count}"
+        assert_eq!(
+            mapped_tensor_range(0, -1, RuntimeDType::F32, 5),
+            Err(
+                "mmap_tensor offset 0, count -1, mapping length 5: the count is \
+                 negative\nnumeric trap: domain in mmap_tensor at i64"
+                    .to_string()
+            )
         );
-        let product = mapped_tensor_range(0, i64::MAX / 2, 4, 5).unwrap_err();
-        assert!(
-            product.ends_with("numeric trap: overflow in mmap_tensor at i64"),
-            "{product}"
+        assert_eq!(
+            mapped_tensor_range(0, i64::MAX / 2, RuntimeDType::F32, 5),
+            Err(format!(
+                "mmap_tensor offset 0, count {}, mapping length 5: the byte length at f32 \
+                 overflows i64\nnumeric trap: overflow in mmap_tensor at i64",
+                i64::MAX / 2
+            ))
+        );
+        assert_eq!(
+            mapped_tensor_range(4, 2, RuntimeDType::I32, 8),
+            Err(
+                "mmap_tensor offset 4, count 2, byte length 8, mapping length 8: the range \
+                 ends past the mapping\nnumeric trap: domain in mmap_tensor at i64"
+                    .to_string()
+            )
         );
     }
 

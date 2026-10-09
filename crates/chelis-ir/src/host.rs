@@ -13500,6 +13500,13 @@ fn actualize_retained_host_contract(
             solve_host_type_vars(&checked_term, actual, &mut checked_substitution);
         }
     }
+    // A binder that only the result mentions (a dtype binder stated by a
+    // body's dtype argument, [05-OP-79]) is bound by the call's checked
+    // result type. Arguments bind first; the result only fills what they
+    // leave open.
+    if let Some(checked_term) = decode_expanded_host_type_expr(program, &checked_result) {
+        solve_host_type_vars(&checked_term, call_result, &mut checked_substitution);
+    }
     let mut body_substitution = active_substitution.clone();
     for (name, term) in checked_substitution.to_sorted() {
         // Active caller identities remain authoritative for substituted
@@ -13552,6 +13559,9 @@ fn actualize_retained_host_contract(
         if let Some(authored_term) = decode_expanded_host_type_expr(program, authored) {
             solve_host_type_vars(&authored_term, actual_term, &mut authored_substitution);
         }
+    }
+    if let Some(authored_term) = decode_expanded_host_type_expr(program, &authored_result) {
+        solve_host_type_vars(&authored_term, call_result, &mut authored_substitution);
     }
     let mut params = signature
         .params

@@ -633,6 +633,7 @@ EXPECTED_OP_MANIFESTS = {
 | `io/json::try_to_json` | `(Json)->Option[string]` |
 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
+| `io/tensors::archive_entries` | `(TensorArchive)->List[TensorEntry]` |
 | `io/tensors::open_hnw` | `(string)->TensorArchive!{IO}` |
 | `io/tensors::read_bf16` | `(TensorArchive,string,List[i64])->tensor[*,bf16]` |
 | `io/tensors::read_bool` | `(TensorArchive,string,List[i64])->tensor[*,bool]` |
@@ -985,10 +986,10 @@ def validate_op_manifests(
         re.MULTILINE,
     )
     identities = [identity for identity, _signature in stdlib_rows]
-    if len(identities) != 293 or len(set(identities)) != 293:
+    if len(identities) != 294 or len(set(identities)) != 294:
         violations.append(
             "[05-OP-35] stdlib numeric manifest must have exactly two hundred "
-            "ninety-three unique identities"
+            "ninety-four unique identities"
         )
 
 
@@ -2566,7 +2567,7 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the two hundred ninety-three final exported stdlib numeric definitions",
+            "exactly the two hundred ninety-four final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`tensor/construct::linspace` | "

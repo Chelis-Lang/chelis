@@ -283,6 +283,42 @@ fn a_declared_extent_guards_a_computed_count() {
     }
 }
 
+/// [05-OP-79]: a dtype binder that only the result mentions is a dtype
+/// argument in both lanes, directly and through a `cast`.
+#[test]
+fn a_result_only_dtype_binder_reads_in_both_lanes() {
+    let dir = tempdir().expect("tempdir");
+    let data = dir.path().join("payload.bin");
+    fs::write(
+        &data,
+        [1.5f32, -2.0, 4.0]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect::<Vec<_>>(),
+    )
+    .expect("write payload");
+    let direct = format!(
+        "def load[p: Float](m: MappedFile, n: i64) -> tensor[*, p] = mmap_tensor(m, 0i64, n, p)\n{}",
+        program(&data, "  a: tensor[*, f32] = load(m, 3i64)\n  print(a)")
+    );
+    assert_lanes_print(
+        &dir,
+        "binder_direct",
+        &direct,
+        "tensor(shape=[3], data=[1.5, -2.0, 4.0])\nrun = ()\n",
+    );
+    let cast = format!(
+        "def load[p: Float](m: MappedFile, n: i64) -> tensor[*, p] = cast(mmap_tensor(m, 0i64, n, f32), p)\n{}",
+        program(&data, "  a: tensor[*, f64] = load(m, 3i64)\n  print(a)")
+    );
+    assert_lanes_print(
+        &dir,
+        "binder_cast",
+        &cast,
+        "tensor(shape=[3], data=[1.5, -2.0, 4.0])\nrun = ()\n",
+    );
+}
+
 /// [05-OP-79]: a range outside the mapping, a negative or overflowing count,
 /// and a `bool` byte other than 0 or 1 trap identically in both lanes. The
 /// overflowing count is computed, so the trap is the run-time one.
@@ -296,7 +332,7 @@ fn invalid_tensor_reads_trap_in_both_lanes() {
             "past_end",
             "mmap_tensor(m, 4i64, 2i64, i32)",
             &[
-                "mmap_tensor range of 8 bytes at offset 4 ends past the mapping of 8 bytes",
+                "mmap_tensor offset 4, count 2, byte length 8, mapping length 8: the range ends past the mapping",
                 "numeric trap: domain in mmap_tensor at i64",
             ],
         ),
@@ -304,7 +340,7 @@ fn invalid_tensor_reads_trap_in_both_lanes() {
             "negative_offset",
             "mmap_tensor(m, -1i64, 1i64, i8)",
             &[
-                "mmap_tensor offset is negative: -1",
+                "mmap_tensor offset -1, count 1, byte length 1, mapping length 8: the offset is negative",
                 "numeric trap: domain in mmap_tensor at i64",
             ],
         ),
@@ -312,7 +348,7 @@ fn invalid_tensor_reads_trap_in_both_lanes() {
             "negative_count",
             "mmap_tensor(m, 0i64, -1i64, i8)",
             &[
-                "mmap_tensor count is negative: -1",
+                "mmap_tensor offset 0, count -1, mapping length 8: the count is negative",
                 "numeric trap: domain in mmap_tensor at i64",
             ],
         ),
@@ -320,7 +356,7 @@ fn invalid_tensor_reads_trap_in_both_lanes() {
             "overflowing_count",
             "mmap_tensor(m, 0i64, mul(mmap_len(m), 576460752303423488i64), f32)",
             &[
-                "mmap_tensor byte length overflows i64: count 4611686018427387904, width 4",
+                "mmap_tensor offset 0, count 4611686018427387904, mapping length 8: the byte length at f32 overflows i64",
                 "numeric trap: overflow in mmap_tensor at i64",
             ],
         ),
@@ -361,7 +397,7 @@ fn a_byte_read_past_the_mapping_traps() {
         "byte_read_past",
         &program(&data, "  print(mmap_read(m, 1i64, 3i64))"),
         &[
-            "mmap_read range of 3 bytes at offset 1 ends past the mapping of 3 bytes",
+            "mmap_read offset 1, byte length 3, mapping length 3: the range ends past the mapping",
             "numeric trap: domain in mmap_read at i64",
         ],
     );
@@ -409,7 +445,7 @@ fn text_and_digests_of_a_range() {
         "digest_past_end",
         &program(&data, "  print(mmap_sha256(m, 8i64, 4i64))"),
         &[
-            "mmap_sha256 range of 4 bytes at offset 8 ends past the mapping of 11 bytes",
+            "mmap_sha256 offset 8, byte length 4, mapping length 11: the range ends past the mapping",
             "numeric trap: domain in mmap_sha256 at i64",
         ],
     );
@@ -512,6 +548,12 @@ fn hex(bytes: &[u8]) -> String {
 /// A hydronnx `.hnw` archive (format 1.0) with a canonical manifest:
 /// sorted keys, no insignificant whitespace, 64-byte aligned payloads.
 fn hnw(tensors: &[ArchiveTensor]) -> Vec<u8> {
+    hnw_edited(tensors, |manifest| manifest)
+}
+
+/// [`hnw`] with `edit` applied to the manifest text before its digest is
+/// recorded, so the archive is intact but its metadata says something else.
+fn hnw_edited(tensors: &[ArchiveTensor], edit: impl Fn(String) -> String) -> Vec<u8> {
     let mut payload = Vec::new();
     let mut entries = Vec::new();
     for (id, dtype, shape, data) in tensors {
@@ -538,6 +580,7 @@ fn hnw(tensors: &[ArchiveTensor]) -> Vec<u8> {
         hex(&Sha256::digest(&payload)),
         entries.join(",")
     );
+    let manifest = edit(manifest);
     let mut archive = b"HNXWGT\x00\x01".to_vec();
     archive.extend_from_slice(&80u32.to_le_bytes());
     archive.extend_from_slice(&u32::try_from(manifest.len()).unwrap().to_le_bytes());
@@ -685,6 +728,78 @@ fn archive_mismatches_fail_with_a_named_reason() {
         assert_lanes_fail(
             &dir,
             name,
+            &archive_program(&path, body),
+            &[expected.as_str()],
+        );
+    }
+}
+
+/// [05-OP-81]: `open_hnw` refuses metadata it does not support or that cannot
+/// describe a payload, and a reader refuses a byte length its shape
+/// disagrees with, each with its named reason.
+#[test]
+fn archive_metadata_is_validated() {
+    let dir = tempdir().expect("tempdir");
+    let tensors: Vec<ArchiveTensor> =
+        vec![("w", "f32", vec![2], le(&[1.0f32, 2.0], f32::to_le_bytes))];
+    let cases: [(&str, &str, &str, &str); 7] = [
+        (
+            "\"layout\":\"onnx-row-major\"",
+            "\"layout\":\"nchw\"",
+            "  ()",
+            "tensor w has unsupported layout nchw",
+        ),
+        (
+            "\"encoding\":\"raw-le\"",
+            "\"encoding\":\"zstd\"",
+            "  ()",
+            "tensor w has unsupported encoding zstd",
+        ),
+        (
+            "\"name\":\"hydronnx-weights\"",
+            "\"name\":\"other-weights\"",
+            "  ()",
+            "not a hydronnx-weights archive",
+        ),
+        (
+            "\"major\":1",
+            "\"major\":2",
+            "  ()",
+            "unsupported major version",
+        ),
+        (
+            "\"shape\":[2]",
+            "\"shape\":[-1,-2]",
+            "  ()",
+            "tensor w has a negative extent",
+        ),
+        (
+            "\"offset\":0",
+            "\"offset\":-64",
+            "  ()",
+            "tensor w has a negative offset",
+        ),
+        (
+            "{\"byte_len\":8,\"consumer\"",
+            "{\"byte_len\":4,\"consumer\"",
+            "  print(read_f32(a, \"w\", [2i64]))",
+            "tensor w has byte length 4, its shape needs 8",
+        ),
+    ];
+    for (index, (from, to, body, detail)) in cases.into_iter().enumerate() {
+        let path = dir.path().join(format!("edited{index}.hnw"));
+        fs::write(
+            &path,
+            hnw_edited(&tensors, |manifest| {
+                assert!(manifest.contains(from), "{from} not in {manifest}");
+                manifest.replacen(from, to, 1)
+            }),
+        )
+        .expect("write archive");
+        let expected = format!("Std.Io.Tensors: {}: {detail}", path.to_str().unwrap());
+        assert_lanes_fail(
+            &dir,
+            &format!("edited{index}"),
             &archive_program(&path, body),
             &[expected.as_str()],
         );

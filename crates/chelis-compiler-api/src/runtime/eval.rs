@@ -4774,19 +4774,18 @@ impl<'a> EvalContext<'a> {
                     .and_then(|(_, children)| children.last())
                     .and_then(|ty| checked_precision_leaf(ty, &self.precision_bindings))
                     .ok_or("mmap_tensor requires a resolved checked element dtype [05-OP-79]")?;
-                let width = precision
+                let dtype = precision
                     .runtime_dtype()
-                    .map_err(|error| format!("mmap_tensor dtype: {error}"))?
-                    .byte_width();
+                    .map_err(|error| format!("mmap_tensor dtype: {error}"))?;
                 let range =
-                    chelis_abi::mapped::mapped_tensor_range(offset, count, width, bytes.len())?;
+                    chelis_abi::mapped::mapped_tensor_range(offset, count, dtype, bytes.len())?;
                 let payload = &bytes[range];
                 if precision == Prim::Bool {
                     chelis_abi::mapped::check_bool_payload(payload)?;
                 }
                 let storage = chelis_types::tensor_from_le_payload(precision, payload)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
-                    IrTensorValue::from_storage(vec![payload.len() / width], storage),
+                    IrTensorValue::from_storage(vec![count as usize], storage),
                 )))
             }
             // [05-OP-80].

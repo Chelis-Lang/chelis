@@ -1,5 +1,5 @@
 module Std.Io.Tensors
-export (TensorArchive, open_hnw, read_f64, read_f32, read_f16, read_bf16, read_i64, read_i32, read_i16, read_i8, read_bool)
+export (TensorEntry, TensorArchive, open_hnw, archive_entries, read_f64, read_f32, read_f16, read_bf16, read_i64, read_i32, read_i16, read_i8, read_bool)
 import Std.Io.Json (Json, parse_json, json_get, json_string, json_int, json_array)
 import Std.Text (join)
 -- One stored tensor: its name, its dtype spelled as a Chelis primitive, its
@@ -33,7 +33,13 @@ def hnw_entry(path: string, payload_start: i64, item: Json) -> TensorEntry = {
   encoding = required(path, "tensors[].encoding", json_string(json_get(item, "encoding")))
   _ = require(path, eq(layout, "onnx-row-major"), join(["tensor ", name, " has unsupported layout ", layout], ""))
   _ = require(path, eq(encoding, "raw-le"), join(["tensor ", name, " has unsupported encoding ", encoding], ""))
-  TensorEntry { name, dtype: required(path, "tensors[].dtype", json_string(json_get(item, "dtype"))), shape: json_i64s(path, "tensors[].shape", required(path, "tensors[].shape", json_array(json_get(item, "shape")))), offset: add(payload_start, required(path, "tensors[].offset", json_int(json_get(item, "offset")))), byte_len: required(path, "tensors[].byte_len", json_int(json_get(item, "byte_len"))), sha256: required(path, "tensors[].sha256", json_string(json_get(item, "sha256"))) }
+  shape = json_i64s(path, "tensors[].shape", required(path, "tensors[].shape", json_array(json_get(item, "shape"))))
+  offset = required(path, "tensors[].offset", json_int(json_get(item, "offset")))
+  byte_len = required(path, "tensors[].byte_len", json_int(json_get(item, "byte_len")))
+  _ = require(path, eq(len(filter(fn (d: i64) -> lt(d, 0i64), shape)), 0i64), join(["tensor ", name, " has a negative extent"], ""))
+  _ = require(path, gte(offset, 0i64), join(["tensor ", name, " has a negative offset"], ""))
+  _ = require(path, gte(byte_len, 0i64), join(["tensor ", name, " has a negative byte length"], ""))
+  TensorEntry { name, dtype: required(path, "tensors[].dtype", json_string(json_get(item, "dtype"))), shape, offset: add(payload_start, offset), byte_len, sha256: required(path, "tensors[].sha256", json_string(json_get(item, "sha256"))) }
 }
 -- Open a hydronnx `.hnw` weight archive (format major 1). The manifest is
 -- checked against its header checksum before it is read; each tensor's own
@@ -55,6 +61,9 @@ def open_hnw(path: string) -> TensorArchive ! { IO } = {
   items = required(path, "tensors", json_array(json_get(manifest, "tensors")))
   TensorArchive { path, mapped: m, entries: map(fn (item: Json) -> hnw_entry(path, payload_start, item), items) }
 }
+-- The archive's entries in manifest order, so a program can list what it
+-- stores before reading.
+def archive_entries(archive: TensorArchive) -> List[TensorEntry] = archive.entries
 def find_entry(archive: TensorArchive, name: string) -> TensorEntry = {
   found = filter(fn (entry: TensorEntry) -> eq(entry.name, name), archive.entries)
   if eq(len(found), 0i64) then archive_fail(archive.path, string_concat("no tensor named ", name)) else index(found, 0i64)

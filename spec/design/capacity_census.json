@@ -3313,6 +3313,11 @@
     },
     {
       "kind": "std-def-numeric",
+      "id": "io/tensors::archive_entries: (t-fn {} (t-adt {} TensorArchive) (t-adt {} List (t-adt {} TensorEntry)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
       "id": "io/tensors::open_hnw: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} TensorArchive))",
       "flags": []
     },

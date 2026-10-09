@@ -3011,7 +3011,7 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the two hundred ninety-three final exported stdlib numeric definitions enumerated in the
+> the two hundred ninety-four final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
@@ -4712,12 +4712,14 @@ path even though bare `round` under `grad` remains a structural
 
 > **[05-OP-81]** `tensor_archive(arguments...) -> result` governs exactly the
 > `io/tensors::*` identities: the opaque archive `TensorArchive`, its
-> entry record `TensorEntry`,
+> entry record `TensorEntry`, `archive_entries(archive)->List[TensorEntry]`
+> (the entries in manifest order),
 > `open_hnw(path:string)->TensorArchive!{IO}`, and, for each active data
 > element dtype `T`, the reader
 > `read_T(archive:TensorArchive,name:string,dims:List[i64])->tensor[n,T]`
 > (`read_f64`, `read_f32`, `read_f16`, `read_bf16`, `read_i64`,
-> `read_i32`, `read_i16`, `read_i8`, `read_bool`). The readers are pure.
+> `read_i32`, `read_i16`, `read_i8`, `read_bool`). `archive_entries` and the
+> readers are pure.
 >
 > Domain: `open_hnw` reads the hydronnx weight archive layout of format
 > major version 1: the eight magic bytes `HNXWGT`, 0, 1; a little-endian
@@ -4733,7 +4735,8 @@ path even though bare `round` under `grad` remains a structural
 > hexadecimal `sha256` of the tensor's payload bytes.
 >
 > Result: `open_hnw` maps the file once and returns an archive whose
-> entries are the manifest's tensors in manifest order. `read_T(archive,
+> entries are the manifest's tensors in manifest order, each with its
+> `offset` made absolute in the file. `read_T(archive,
 > name, dims)` selects the first entry whose `id` is `name` and returns
 > [05-OP-79]'s `mmap_tensor` of its payload at `T`, with `count` the
 > checked i64 product of `dims`: the stored elements in row-major order
@@ -4741,11 +4744,12 @@ path even though bare `round` under `grad` remains a structural
 > result by `dims` gives it the declared shape.
 >
 > Failure: Every check below completes before any element is read, and
-> each failure is [05-OP-60]'s `fail` with the message
+> each failure fails through [05-OP-60] with the message
 > `Std.Io.Tensors: <path>: <detail>`. `open_hnw` fails for a file shorter
 > than 80 bytes, other magic bytes, a major version other than 1, a header
 > length below 80, a manifest whose digest differs from the recorded one,
-> a missing or malformed manifest field, another format name or major
+> a missing or malformed manifest field, a negative extent, offset, or byte
+> length, another format name or major
 > version, and a layout or encoding other than the ones above. A reader
 > fails when no entry has the name, when the stored dtype is not `T`, when
 > the stored shape is not exactly `dims`, when the stored byte length is
