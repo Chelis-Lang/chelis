@@ -1378,15 +1378,24 @@ foundation identity, active or retired, since the reappearance check needs it
 scanned; an owner-module final form's file; and the target of a mutation that
 edits an existing file. Such a file leaving the universe fails the oracle.
 Regeneration records it in `retired_files`, and drops its active debt, only
-when the file is named with `--retire-departed-file`; a recorded file that
-returns to the universe fails until regeneration drops the stale record. A
-file that no registration names is not reported when it leaves the universe;
-after it leaves, it sits outside the roots like any other file there. A
-mutation targets a file that must exist, except a declared new-file witness,
-whose file must not; a missing target fails instead of being planted afresh.
-A root directory counts while it exists and the git index holds a file under
-it, so a leftover or git-ignored directory is neither a new nor a departed
-root directory.
+when the file is named with `--retire-departed-file`. A tree cannot tell a
+deleted file from one moved outside the roots, so both fail until retired,
+and retiring asserts that the file and its identities are gone: a file moved
+outside the roots is never retired, but moved back or brought in by a root
+change. A recorded file that returns to the universe, or that nothing
+references, fails until regeneration drops the stale record. A file that no
+registration names is not reported when it leaves the universe, unlike a file
+in a hand-kept list; after it leaves, it sits outside the roots like any
+other file there. A mutation targets a file that must exist, except a
+declared new-file witness, whose file must not; a missing target fails
+instead of being planted afresh.
+
+A file is visible when it is on disk and not git-ignored; git never ignores a
+tracked file. The scan reads every visible file under a root, and a root
+directory counts while it holds a visible file. An untracked crate with
+sources is therefore a new root directory at once, a frozen directory whose
+files remain on disk stays present even when untracked, and a leftover empty
+or git-ignored directory is neither a new nor a departed root directory.
 
 The oracle reads the filesystem rather than the git index because cargo
 compiles what is on disk, so an untracked file is in the universe and a

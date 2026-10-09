@@ -658,48 +658,64 @@ def _root_directory(pattern: str) -> str:
     return "/".join(parts)
 
 
-def _tracked_directories(root: Path) -> set[str]:
-    """Every directory that holds at least one file in the git index."""
+def _visible_directories(root: Path, directories: Sequence[str]) -> set[str]:
+    """Every directory that holds a visible file under `directories`.
 
+    A file is visible when it is on disk and not git-ignored, the rule the
+    scan applies to files: git never ignores a tracked file, and lists an
+    untracked one unless an ignore rule matches it.
+    """
+
+    if not directories:
+        return set()
     completed = subprocess.run(
-        ("git", "ls-files", "-z"),
+        (
+            "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+            "--", *sorted(set(directories)),
+        ),
         cwd=root,
         check=False,
         capture_output=True,
         text=True,
     )
     if completed.returncode != 0:
-        raise OracleFailure("could not list the tracked inventory directories")
+        raise OracleFailure("could not list the visible inventory directories")
     return {
         parent.as_posix()
         for path in completed.stdout.split("\0")
-        if path
+        if path and (root / path).exists()
         for parent in Path(path).parents
         if parent != Path(".")
     }
 
 
 def root_directories(root: Path) -> list[dict[str, object]]:
-    """Each root with the tracked directories its directory part matches.
+    """Each root with the directories its directory part matches.
 
     The baseline freezes this expansion, so a crate that leaves a glob such
     as `crates/chelis-backend-*` fails even while other crates still match.
-    A directory counts only while it exists and the git index holds a file
-    under it, so a leftover or git-ignored directory is not a new root.
+    A directory counts while it holds a visible file, the rule the scan
+    applies to files: an untracked crate with sources is a new directory at
+    once, and a leftover empty or git-ignored directory is not one.
     """
 
-    tracked = _tracked_directories(root)
+    candidates = {
+        pattern: sorted(
+            path.relative_to(root).as_posix()
+            for path in root.glob(_root_directory(pattern))
+            if path.is_dir()
+        )
+        for pattern in INVENTORY_ROOTS
+    }
+    visible = _visible_directories(
+        root, [path for paths in candidates.values() for path in paths]
+    )
     return [
         {
             "pattern": pattern,
-            "directories": sorted(
-                relative
-                for path in root.glob(_root_directory(pattern))
-                if path.is_dir()
-                and (relative := path.relative_to(root).as_posix()) in tracked
-            ),
+            "directories": [path for path in paths if path in visible],
         }
-        for pattern in INVENTORY_ROOTS
+        for pattern, paths in candidates.items()
     ]
 
 
@@ -1022,11 +1038,12 @@ def _validate_referenced_files(
 
     Returns the retired-file record regeneration writes: the recorded
     retirements plus `retiring`, without any file that is back in the
-    universe. Validation fails on such a returned file instead, because a
-    stale record would let the file depart again unnoticed.
+    universe or that nothing references. Validation fails on such a stale
+    entry instead, because it would let a file depart unnoticed later.
     """
 
     universe = set(inventory_sources(root))
+    referenced = referenced_files(baseline)
     recorded = set(baseline["retired_files"])
     returned = sorted(recorded & universe)
     if returned and not regenerating:
@@ -1035,7 +1052,14 @@ def _validate_referenced_files(
             + ", ".join(returned)
             + "; regenerate to drop it from retired_files"
         )
-    departed = referenced_files(baseline) - universe - recorded
+    unreferenced = sorted(recorded - referenced)
+    if unreferenced and not regenerating:
+        raise OracleFailure(
+            "retired_files names a file nothing references: "
+            + ", ".join(unreferenced)
+            + "; regenerate to drop it from retired_files"
+        )
+    departed = referenced - universe - recorded
     stray = sorted(set(retiring) - departed)
     if stray:
         raise OracleFailure(
@@ -1047,7 +1071,7 @@ def _validate_referenced_files(
             f"{DEPARTED_FILE_FAILURE.reason_prefix}: " + ", ".join(unretired),
             code=DEPARTED_FILE_FAILURE.code,
         )
-    return sorted((recorded | set(retiring)) - universe)
+    return sorted(((recorded | set(retiring)) & referenced) - universe)
 
 
 def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
