@@ -2,7 +2,10 @@ use chelis_unord::UnordMap;
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_ir::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
-use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
+use chelis_ir::eval::{
+    AdmittedResult, TENSOR_ALLOCATION_FAILED, TensorValue as IrTensorValue, admit_padded_shape,
+    admit_result, admit_tensor, eval_tensor_roots_with,
+};
 use chelis_ir::tier2;
 use chelis_types::{
     ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
@@ -1179,7 +1182,8 @@ pub(super) fn pad_sequences_value(
     let (pad_precision, rows, lens) = pad_sequences_rows(sequences, pad, "pad_sequences")?;
     let width = lens.iter().copied().fold(0usize, usize::max);
     let batch = lens.len();
-    let data = pad_rows(rows, &lens, width, pad, batch)?;
+    let admitted = admit_tensor("pad_sequences", &[batch, width], pad_precision)?;
+    let data = pad_rows(rows, &lens, width, pad, admitted)?;
     Ok((pad_precision, data, batch, width))
 }
 
@@ -1198,7 +1202,8 @@ pub(super) fn pad_sequences_to_value(
     let (pad_precision, rows, lens) = pad_sequences_rows(sequences, pad, "pad_sequences_to")?;
     let width = width as usize;
     let batch = lens.len();
-    let data = pad_rows(rows, &lens, width, pad, batch)?;
+    let admitted = admit_tensor("pad_sequences_to", &[batch, width], pad_precision)?;
+    let data = pad_rows(rows, &lens, width, pad, admitted)?;
     Ok((pad_precision, data, batch))
 }
 
@@ -1209,7 +1214,7 @@ fn pad_rows(
     lens: &[usize],
     width: usize,
     pad: &RuntimeValue,
-    batch: usize,
+    admitted: AdmittedResult,
 ) -> Result<ListTensorData, String> {
     match rows {
         ListTensorData::Int(flat) => {
@@ -1222,7 +1227,7 @@ fn pad_rows(
                     ));
                 }
             };
-            let mut out = Vec::with_capacity(batch * width);
+            let mut out = admitted.buffer()?;
             let mut offset = 0usize;
             for &len in lens {
                 let used = len.min(width);
@@ -1237,7 +1242,7 @@ fn pad_rows(
                 return Err("pad_sequences expects a float pad value for float rows".into());
             };
             let pad_value = payload.value();
-            let mut out = Vec::with_capacity(batch * width);
+            let mut out = admitted.buffer()?;
             let mut offset = 0usize;
             for &len in lens {
                 let used = len.min(width);
@@ -1248,26 +1253,6 @@ fn pad_rows(
             Ok(ListTensorData::Float(out))
         }
     }
-}
-
-/// Element count for a host shape.
-///
-/// A zero extent means zero elements ([05-OP-33]), and the answer does not
-/// depend on where the zero sits, so it short-circuits rather than folding
-/// past it: `[2^32, 2^32, 0]` reaches `2^64` before it reaches the zero.
-/// `chelis-ir`'s `numel` holds the same contract.
-///
-/// The `.max(1)` this replaces read as the rank-zero convention, but
-/// `[].iter().product()` is already one, so the clamp only ever fired on a
-/// zero-containing shape, where it fabricated an element that does not exist.
-/// Callers use the count as a `0..n` bound over an output buffer, so that
-/// phantom element drove `linear_to_indices` into `linear % 0`, or produced a
-/// `picks` vector one longer than the storage its shape declares.
-fn tensor_numel(shape: &[usize]) -> usize {
-    if shape.contains(&0) {
-        return 0;
-    }
-    shape.iter().product()
 }
 
 fn linear_to_indices(mut linear: usize, shape: &[usize]) -> Vec<usize> {
@@ -1336,6 +1321,28 @@ pub(super) enum ReduceOp {
     Argmin,
 }
 
+impl ReduceOp {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sum => "sum",
+            Self::Min => "min",
+            Self::Max => "max",
+            Self::Prod => "prod",
+            Self::Argmax => "argmax",
+            Self::Argmin => "argmin",
+        }
+    }
+
+    /// The result dtype admission sizes: an index for the arg-extrema, the
+    /// operand dtype otherwise.
+    fn result_prim(self, operand: Prim) -> Prim {
+        match self {
+            Self::Argmax | Self::Argmin => Prim::Int64,
+            Self::Sum | Self::Min | Self::Max | Self::Prod => operand,
+        }
+    }
+}
+
 /// Reducer selector for the host-runtime `reduce_window_*` family.
 /// Mirrors `chelis_ir::dag::ReduceWindowKind` so host-runtime eval and
 /// IR-evaluator paths agree on the operational meaning of each builtin
@@ -1361,12 +1368,15 @@ pub(super) fn tensor_reduce_host(
     // none, traps `Domain` in its lowered primitive ([04-NUM-9]), as compiled
     // C does.
     let axis_len = out_shape.remove(axis);
-    let out_numel = tensor_numel(&out_shape);
-    let mut groups = Vec::with_capacity(out_numel);
+    let admitted = admit_tensor(op.name(), &out_shape, op.result_prim(tensor.precision))?;
+    let out_numel = admitted.len();
+    let mut groups = admitted.buffer()?;
     for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
+        // bounded: one reduced axis of the input
         let mut group = Vec::with_capacity(axis_len);
         for k in 0..axis_len {
+            // bounded: the input rank
             let mut in_indices = Vec::with_capacity(rank);
             let mut oi = 0;
             for dim in 0..rank {
@@ -1437,6 +1447,7 @@ pub(super) fn tensor_permute_host(
             axes.len()
         ));
     }
+    // bounded: the input rank
     let mut seen = vec![false; rank];
     for &axis in axes {
         if axis >= rank {
@@ -1449,8 +1460,8 @@ pub(super) fn tensor_permute_host(
     }
     let in_shape = tensor.value.shape.clone();
     let out_shape: Vec<usize> = axes.iter().map(|&a| in_shape[a]).collect();
-    let out_numel = tensor_numel(&out_shape);
-    let mut picks = vec![0usize; out_numel];
+    let admitted = admit_tensor("permute", &out_shape, tensor.precision)?;
+    let mut picks = admitted.filled(0usize)?;
     for in_linear in 0..tensor.value.len() {
         let in_indices = linear_to_indices(in_linear, &in_shape);
         let out_indices: Vec<usize> = axes.iter().map(|&a| in_indices[a]).collect();
@@ -1599,13 +1610,15 @@ pub(super) fn tensor_insert_host(
     }
 
     // INSERT: create a new axis of size `count` at position `axis`.
+    // bounded: the input rank plus one
     let mut out_shape = Vec::with_capacity(in_rank + 1);
     out_shape.extend_from_slice(&in_shape[..axis]);
     out_shape.push(count);
     out_shape.extend_from_slice(&in_shape[axis..]);
 
-    let out_numel = tensor_numel(&out_shape);
-    let mut picks = Vec::with_capacity(out_numel);
+    let admitted = admit_tensor("insert", &out_shape, tensor.precision)?;
+    let out_numel = admitted.len();
+    let mut picks = admitted.buffer()?;
     for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
         // Drop the inserted axis to recover the input index.
@@ -1670,8 +1683,9 @@ pub(super) fn tensor_expand_host(
     let mut out_shape = in_shape.clone();
     out_shape[axis] = count;
 
-    let out_numel = tensor_numel(&out_shape);
-    let mut picks = Vec::with_capacity(out_numel);
+    let admitted = admit_tensor("expand", &out_shape, tensor.precision)?;
+    let out_numel = admitted.len();
+    let mut picks = admitted.buffer()?;
     for out_linear in 0..out_numel {
         let mut in_indices = linear_to_indices(out_linear, &out_shape);
         in_indices[axis] = 0;
@@ -1694,7 +1708,7 @@ pub(super) fn tensor_reduce_window_host(
     window_shape: &[usize],
     strides: &[usize],
     reducer: ReduceWindowOp,
-    op_name: &str,
+    op_name: &'static str,
 ) -> Result<RuntimeTensorValue, String> {
     if window_shape.len() != strides.len() {
         return Err(chelis_abi::failure::domain_guard(
@@ -1753,11 +1767,14 @@ pub(super) fn tensor_reduce_window_host(
         out_shape.push((in_dim - w) / s + 1);
     }
 
-    let out_numel = tensor_numel(&out_shape);
-    let mut groups = Vec::with_capacity(out_numel);
+    let admitted = admit_tensor(op_name, &out_shape, tensor.precision)?;
+    let out_numel = admitted.len();
+    let mut groups = admitted.buffer()?;
     for out_flat in 0..out_numel {
         let out_indices = linear_to_indices(out_flat, &out_shape);
+        // bounded: a window the input already contains
         let mut group = Vec::with_capacity(window_shape.iter().product());
+        // bounded: the window rank
         let mut window_pos = vec![0usize; n];
         loop {
             let mut src_indices = vec![0usize; in_shape.len()];
@@ -1818,14 +1835,10 @@ pub(super) fn tensor_pad_host(
             padding.len()
         ));
     }
-    let out_shape: Vec<usize> = padding
-        .iter()
-        .zip(in_shape.iter())
-        .map(|((lo, hi), in_dim)| in_dim + lo + hi)
-        .collect();
-    let out_numel = tensor_numel(&out_shape);
-    let mut map: Vec<Option<usize>> = vec![None; out_numel];
-    let in_numel = tensor_numel(in_shape);
+    let out_shape = admit_padded_shape(in_shape, padding, tensor.precision)?;
+    let admitted = admit_tensor("pad", &out_shape, tensor.precision)?;
+    let mut map: Vec<Option<usize>> = admitted.filled(None)?;
+    let in_numel = tensor.value.len();
     for in_linear in 0..in_numel {
         let in_indices = linear_to_indices(in_linear, in_shape);
         let out_indices: Vec<usize> = in_indices
@@ -1883,8 +1896,9 @@ pub(super) fn tensor_shrink_host(
         }
         out_shape.push(end - start);
     }
-    let out_numel = tensor_numel(&out_shape);
-    let mut picks = Vec::with_capacity(out_numel);
+    let admitted = admit_tensor("shrink", &out_shape, tensor.precision)?;
+    let out_numel = admitted.len();
+    let mut picks = admitted.buffer()?;
     for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
         let in_indices: Vec<usize> = out_indices
@@ -1928,8 +1942,9 @@ pub(super) fn tensor_stride_host(
         }
         out_shape.push(in_dim.div_ceil(*step));
     }
-    let out_numel = tensor_numel(&out_shape);
-    let mut picks = Vec::with_capacity(out_numel);
+    let admitted = admit_tensor("stride", &out_shape, tensor.precision)?;
+    let out_numel = admitted.len();
+    let mut picks = admitted.buffer()?;
     for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
         let in_indices: Vec<usize> = out_indices
@@ -2306,13 +2321,13 @@ pub(super) fn tensor_concat_value(
     // reuse_* contract: concat moves existing elements only (section C3,
     // element-preserving). Seed a zero-filled buffer at the shared dtype,
     // then overwrite every slot from its owning part.
-    let out_numel = tensor_numel(&out_shape);
+    let admitted = admit_tensor("concat", &out_shape, first.precision)?;
     let zero = chelis_types::scalar_from_i64("concat", first.precision, 0)
         .map_err(|trap| trap.to_string())?;
     let seed = first
         .value
         .storage()
-        .reuse_fill_gather(&zero, &vec![None; out_numel]);
+        .reuse_fill_gather(&zero, &admitted.filled(None)?);
     let mut out = IrTensorValue::from_storage(out_shape.clone(), seed);
     let mut axis_offset = 0usize;
     for tensor in &tensors {
@@ -2386,10 +2401,11 @@ pub(super) fn tensor_reshape_value(
         }
     }
     let new_shape = expect_int_list(shape, "reshape")?;
-    let expected = new_shape
-        .iter()
-        .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
-        .ok_or_else(|| "reshape target shape overflows usize".to_string())?;
+    // The target's metadata is admitted as the DAG evaluator admits it: an
+    // empty target still owes representable suffix strides (spec/05,
+    // `chelis_tensor_check_reshape`), and a count past i64 traps rather than
+    // depending on where a zero sits (chelis#3418). Reshape allocates nothing.
+    let expected = admit_result("reshape", &new_shape, tensor.precision)?;
     if expected != tensor.value.len() {
         return Err(chelis_abi::failure::reshape_element_count_disagreement(
             u64::try_from(expected).unwrap_or(u64::MAX),
@@ -2425,8 +2441,9 @@ pub(super) fn tensor_split_value(
     for size in sizes {
         let mut shape = tensor.value.shape.clone();
         shape[axis] = size;
-        let numel = tensor_numel(&shape);
-        let mut picks = Vec::with_capacity(numel);
+        let admitted = admit_tensor("split", &shape, tensor.precision)?;
+        let numel = admitted.len();
+        let mut picks = admitted.buffer()?;
         for linear in 0..numel {
             let mut index = linear_to_indices(linear, &shape);
             index[axis] += offset;
@@ -2458,8 +2475,9 @@ pub(super) fn tensor_gather_value(
         .storage()
         .to_i64_exact_vec()
         .expect("integer tensor storage reads exactly");
-    let out_numel = tensor_numel(&out_shape);
-    let mut picks = Vec::with_capacity(out_numel);
+    let admitted = admit_tensor("gather", &out_shape, tensor.precision)?;
+    let out_numel = admitted.len();
+    let mut picks = admitted.buffer()?;
     for linear in 0..out_numel {
         let out_index = linear_to_indices(linear, &out_shape);
         let mut src_index = Vec::with_capacity(tensor.value.shape.len());
@@ -2862,8 +2880,9 @@ pub(super) fn tensor_diagonal_value(
     // storage pick whenever that coordinate's range exceeds the diagonal
     // extent).
     let diag_out_axis = if axis2 < axis1 { axis1 - 1 } else { axis1 };
-    let out_numel = tensor_numel(&out_shape);
-    let mut picks = Vec::with_capacity(out_numel);
+    let admitted = admit_tensor("diagonal", &out_shape, tensor.precision)?;
+    let out_numel = admitted.len();
+    let mut picks = admitted.buffer()?;
     for linear in 0..out_numel {
         let out_index = linear_to_indices(linear, &out_shape);
         let mut src_index = Vec::with_capacity(tensor.value.shape.len());
@@ -2987,12 +3006,15 @@ pub(super) fn tensor_trace_value(
     let axis = if axis2 < axis1 { axis1 - 1 } else { axis1 };
     let mut out_shape = diagonal.value.shape.clone();
     let axis_len = out_shape.remove(axis);
-    let out_numel = tensor_numel(&out_shape);
-    let mut groups = Vec::with_capacity(out_numel);
+    let admitted = admit_tensor("trace", &out_shape, tensor.precision)?;
+    let out_numel = admitted.len();
+    let mut groups = admitted.buffer()?;
     for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
+        // bounded: one diagonal of the input
         let mut group = Vec::with_capacity(axis_len);
         for axis_index in 0..axis_len {
+            // bounded: the input rank
             let mut input_indices = Vec::with_capacity(rank);
             let mut output_position = 0;
             for dimension in 0..rank {
@@ -3212,6 +3234,22 @@ pub(super) fn tensor_einsum_value(
     // [05-OP-33]'s canonical tree.
     let accumulator = lhs.precision.default_reduce_sum_accumulator()?;
     let result = lhs.precision.default_reduce_sum_result_precision()?;
+    // The C runtime's einsum plan checks the output's byte size after its
+    // count and reports both in its own words, without a trap line; this
+    // lane reports the byte size the same way. The admission behind it can
+    // then refuse only an allocation the machine does not grant (chelis#3418).
+    let width = i64::try_from(
+        result
+            .runtime_dtype()
+            .map_err(|error| error.to_string())?
+            .byte_width(),
+    )
+    .map_err(|_| "Overflow: einsum output byte size exceeds i64".to_string())?;
+    i64::try_from(output_total)
+        .ok()
+        .and_then(|count| count.checked_mul(width))
+        .ok_or_else(|| "Overflow: einsum output byte size exceeds i64".to_string())?;
+    let admitted = admit_tensor("einsum", &out_shape, result)?;
     let widen = |tensor: &RuntimeTensorValue, index: usize| {
         cast_scalar(
             "einsum",
@@ -3220,14 +3258,20 @@ pub(super) fn tensor_einsum_value(
         )
         .map_err(|error| error.to_string())
     };
-    let mut out = Vec::with_capacity(output_total);
+    let mut out = admitted.buffer()?;
     for out_linear in 0..output_total {
         let out_index = linear_to_indices(out_linear, &out_shape);
         let mut label_values = chelis_unord::UnordMap::<char, usize>::new();
         for (label, value) in out_labels.iter().zip(out_index.iter()) {
             label_values.insert(*label, *value);
         }
-        let mut products = Vec::with_capacity(reduction_total);
+        // The reduction's extents multiply across operands, so its scratch is
+        // not bounded by any one of them: reserve it fallibly, refusing as
+        // the C runtime's allocation failure (chelis#3418).
+        let mut products = Vec::new();
+        products
+            .try_reserve_exact(reduction_total)
+            .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())?;
         for reduction_linear in 0..reduction_total {
             let reduction_index = linear_to_indices(reduction_linear, &reduction_shape);
             for (label, value) in reduction_labels.iter().zip(reduction_index.iter()) {

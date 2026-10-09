@@ -726,6 +726,7 @@ pub(super) fn infer_program_with_product_in_session(
         &semantic_type_env,
         &top_level_references,
         &SelectorCallableContext::default(),
+        &product,
         errors,
     );
     if cancellation_gate(errors) {
@@ -813,6 +814,7 @@ pub(crate) fn build_type_env_from_library_in_session(
         &library_ir,
         &product.top_level_references,
         &SelectorCallableContext::default(),
+        &product,
         errors,
     );
     log_sub("validate_semantic_program", &mut sub_t);
@@ -955,6 +957,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         &library_ir,
         &product.top_level_references,
         &SelectorCallableContext::default(),
+        &product,
         errors,
     );
     validate_tensor_precisions_in_program(library_exprs, errors);
@@ -1119,6 +1122,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         &combined_ir,
         &product.top_level_references,
         &base.inner().selector_callables,
+        &product,
         errors,
     );
     validate_tensor_precisions_in_program(library_exprs, errors);
@@ -1316,6 +1320,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
         &combined_ir,
         &product.top_level_references,
         &context.inner().selector_callables,
+        &product,
         errors,
     );
     log_sub("validate_semantic_program", &mut sub_t);
@@ -1460,6 +1465,7 @@ pub(crate) fn infer_ir_program_in_session(
         &type_env,
         &product.top_level_references,
         &SelectorCallableContext::default(),
+        &product,
         errors,
     );
     if cancellation_gate(errors) {

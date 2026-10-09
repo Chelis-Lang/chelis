@@ -598,7 +598,7 @@ fn build_storage_plan(
         &requirements,
         &destructively_dropped,
     )?;
-    let max_live_bytes = physical_live_byte_bound(&slots)?;
+    let max_live_bytes = physical_live_byte_bound(&slots);
     Ok((
         placements.into_boxed_slice(),
         slots.into_boxed_slice(),
@@ -1165,22 +1165,35 @@ fn exact_shape_equal(
         }))
 }
 
-fn physical_live_byte_bound(slots: &[StorageSlotPlan]) -> Result<LiveByteBound, OwnershipError> {
+fn physical_live_byte_bound(slots: &[StorageSlotPlan]) -> LiveByteBound {
     // Logical death permits reuse; it does not release physical storage. HIP
     // retains its entire slot pool through cleanup, and C retains descriptors
     // unless explicitly dropped. Count every distinct slot once, including dead
     // gaps. This is a concrete upper bound, conservative for early C Drops, not
     // a claim that every lane necessarily observes the same exact peak.
+    exact_physical_live_bytes(slots).unwrap_or_else(|bound| bound)
+}
+
+/// The exact physical total, or the non-exact bound that replaces it. A total
+/// beyond u64 has no finite representable bound and is `Unbounded`, never an
+/// error: each slot's allocation keeps its own checked admission
+/// (chelis#3418). `Unbounded` dominates `Unknown`, as in the verifier's
+/// composition, so the answer does not depend on slot order.
+fn exact_physical_live_bytes(slots: &[StorageSlotPlan]) -> Result<LiveByteBound, LiveByteBound> {
     let mut total = 0u64;
+    let mut unknown = false;
     for slot in slots {
         let Some(bytes) = slot.capacity.allocation_bytes else {
-            return Ok(LiveByteBound::Unknown);
+            unknown = true;
+            continue;
         };
         total = total
             .checked_add(bytes)
-            .ok_or_else(|| OwnershipError::LiveByteBoundOverflow {
-                context: "summing distinct physical DAG slots".to_string(),
-            })?;
+            // Past u64 no finite bound is representable.
+            .ok_or(LiveByteBound::Unbounded)?;
+    }
+    if unknown {
+        return Err(LiveByteBound::Unknown);
     }
     Ok(LiveByteBound::Exact(total))
 }

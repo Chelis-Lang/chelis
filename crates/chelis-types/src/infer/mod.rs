@@ -135,6 +135,7 @@ mod operand_deferral;
 mod program;
 mod program_schedule;
 pub(crate) mod recursion;
+mod representable_extent;
 mod rigid;
 mod shape_honesty;
 mod slot;

@@ -1100,13 +1100,7 @@ fn verify_unit(
                     local_max_live_bytes = local_max_live_bytes.maximum(add_live_byte_bounds(
                         live_byte_cost(unit, &live)?,
                         owner_byte_cost(unit, dest)?,
-                        || {
-                            format!(
-                                "accounting for `{}` operation o{} result",
-                                unit.name, operation.id.0
-                            )
-                        },
-                    )?);
+                    ));
                 }
             }
             verify_op(
@@ -1306,32 +1300,24 @@ fn live_heap_count(unit: &Unit, live: &BTreeSet<OwnerId>) -> usize {
         .count()
 }
 
-/// Sum two live-byte bounds, reporting `context` only when the addition
-/// overflows.
-///
-/// `context` is a closure rather than a `String` because the call inside
-/// [`live_byte_cost`] runs once per live owner per operation, and
-/// `live_byte_cost` itself runs two to four times per operation: an eagerly
-/// formatted diagnostic put roughly 39% of that function's samples in
-/// `alloc::fmt::format::format_inner` at N=640 on the chelis#1205 corpus, for
-/// a string the success path discards. The diagnostic text is unchanged
-/// (chelis#2331).
+/// Sum two live-byte bounds. A sum beyond u64 has no finite representable
+/// bound and is [`super::LiveByteBound::Unbounded`]: the summary is an
+/// analysis result, never a reason to refuse a program whose allocations each
+/// carry their own checked admission (chelis#3418).
 fn add_live_byte_bounds(
     lhs: super::LiveByteBound,
     rhs: super::LiveByteBound,
-    context: impl FnOnce() -> String,
-) -> Result<super::LiveByteBound, OwnershipError> {
+) -> super::LiveByteBound {
     match (lhs, rhs) {
         (super::LiveByteBound::Unbounded, _) | (_, super::LiveByteBound::Unbounded) => {
-            Ok(super::LiveByteBound::Unbounded)
+            super::LiveByteBound::Unbounded
         }
         (super::LiveByteBound::Unknown, _) | (_, super::LiveByteBound::Unknown) => {
-            Ok(super::LiveByteBound::Unknown)
+            super::LiveByteBound::Unknown
         }
         (super::LiveByteBound::Exact(lhs), super::LiveByteBound::Exact(rhs)) => lhs
             .checked_add(rhs)
-            .map(super::LiveByteBound::Exact)
-            .ok_or_else(|| OwnershipError::LiveByteBoundOverflow { context: context() }),
+            .map_or(super::LiveByteBound::Unbounded, super::LiveByteBound::Exact),
     }
 }
 
@@ -1359,45 +1345,30 @@ fn owner_byte_cost(unit: &Unit, owner: OwnerId) -> Result<super::LiveByteBound, 
                 owner: owner.0,
                 dtype: tensor.precision.name(),
             })?;
-    let width =
-        u64::try_from(dtype.byte_width()).map_err(|_| OwnershipError::LiveByteBoundOverflow {
-            context: format!(
-                "converting `{}` owner %{} runtime dtype width",
-                unit.name, owner.0
-            ),
-        })?;
+    // A width or extent beyond u64 has no finite representable bound, like
+    // the products below.
+    let Ok(width) = u64::try_from(dtype.byte_width()) else {
+        return Ok(super::LiveByteBound::Unbounded);
+    };
     let mut elements = 1u64;
     for dim in &tensor.dims {
         let value = match dim {
             crate::dag::DimInfo::Lit(value) | crate::dag::DimInfo::Named(_, Some(value)) => {
-                u64::try_from(*value).map_err(|_| OwnershipError::LiveByteBoundOverflow {
-                    context: format!(
-                        "converting `{}` owner %{} tensor dimension {value}",
-                        unit.name, owner.0
-                    ),
-                })?
+                let Ok(value) = u64::try_from(*value) else {
+                    return Ok(super::LiveByteBound::Unbounded);
+                };
+                value
             }
             crate::dag::DimInfo::Named(_, None) => return Ok(super::LiveByteBound::Unknown),
         };
-        elements =
-            elements
-                .checked_mul(value)
-                .ok_or_else(|| OwnershipError::LiveByteBoundOverflow {
-                    context: format!(
-                        "multiplying `{}` owner %{} tensor dimensions",
-                        unit.name, owner.0
-                    ),
-                })?;
+        let Some(product) = elements.checked_mul(value) else {
+            return Ok(super::LiveByteBound::Unbounded);
+        };
+        elements = product;
     }
-    elements
+    Ok(elements
         .checked_mul(width)
-        .map(super::LiveByteBound::Exact)
-        .ok_or_else(|| OwnershipError::LiveByteBoundOverflow {
-            context: format!(
-                "multiplying `{}` owner %{} tensor elements by dtype width",
-                unit.name, owner.0
-            ),
-        })
+        .map_or(super::LiveByteBound::Unbounded, super::LiveByteBound::Exact))
 }
 
 fn live_byte_cost(
@@ -1413,9 +1384,7 @@ fn live_byte_cost(
         if info.origin != OwnerOrigin::Owned || !info.class.is_heap() {
             continue;
         }
-        result = add_live_byte_bounds(result, owner_byte_cost(unit, *owner)?, || {
-            format!("summing live owners in `{}`", unit.name)
-        })?;
+        result = add_live_byte_bounds(result, owner_byte_cost(unit, *owner)?);
     }
     Ok(result)
 }
@@ -1515,9 +1484,7 @@ fn compose_live_byte_bound(
         let mut bound = facts[index].local;
         for (callee, carry) in &facts[index].outgoing {
             let callee = component_bound(*callee, facts, memo, visiting)?;
-            bound = bound.maximum(add_live_byte_bounds(*carry, callee, || {
-                "composing caller carry with callee peak".to_string()
-            })?);
+            bound = bound.maximum(add_live_byte_bounds(*carry, callee));
         }
         visiting.remove(&index);
         memo[index] = Some(bound);

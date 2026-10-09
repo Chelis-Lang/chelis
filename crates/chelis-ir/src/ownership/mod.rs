@@ -1387,6 +1387,9 @@ pub enum PayloadKind {
 ///
 /// Verification composes local owner costs through the direct-call graph and
 /// classifies runtime-dependent or positively recursive storage explicitly.
+/// `Unbounded` also covers a statically known total beyond u64: no finite
+/// bound is representable, and each allocation keeps its own checked
+/// admission, so an oversized summary never refuses a program.
 /// The oracle handoff remains an integration step with the reuse proof because
 /// physical reused-slot capacity can exceed a tensor's logical shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

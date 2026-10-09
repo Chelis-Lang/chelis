@@ -345,6 +345,12 @@ pub(super) struct FinalOwnerType {
     ty: Type,
 }
 
+impl FinalOwnerType {
+    pub(super) fn ty(&self) -> &Type {
+        &self.ty
+    }
+}
+
 impl InferenceProduct {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn record_local_tensor_ascription(

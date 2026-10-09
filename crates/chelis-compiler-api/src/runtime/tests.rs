@@ -3215,11 +3215,7 @@ fn host_runtime_zero_extent_operands_return_empty_results_rather_than_panicking(
     // asks for the count of an output whose remaining extents would reach
     // 2^64 before reaching the trailing zero.
     const BIG: usize = 1 << 32;
-    for shape in [
-        vec![BIG, BIG, BIG, 0],
-        vec![BIG, BIG, 0, BIG],
-        vec![0, BIG, BIG, BIG],
-    ] {
+    for shape in [vec![BIG, BIG, BIG, 0], vec![BIG, BIG, 0, BIG]] {
         let out = tensor_diagonal_value(&empty(shape.clone()), 0, 1)
             .unwrap_or_else(|error| panic!("diagonal over a huge empty shape: {error}"));
         assert_eq!(out.value.len(), 0);
@@ -3228,6 +3224,18 @@ fn host_runtime_zero_extent_operands_return_empty_results_rather_than_panicking(
             "an empty operand owes an empty result"
         );
     }
+    // An empty result still requires representable suffix strides
+    // (spec/05-risc-primitives.md, `chelis_tensor_check_reshape`'s metadata
+    // rule, which every result admission shares): `[0, 2^32, 2^32]` needs the
+    // stride 2^64, so it traps `Overflow` in `diagonal` (chelis#3418).
+    // Compiled C cannot be compared here: it hangs while building such an
+    // input (chelis#3437).
+    let error = tensor_diagonal_value(&empty(vec![0, BIG, BIG, BIG]), 0, 1)
+        .expect_err("an unrepresentable stride traps even with zero elements");
+    assert_eq!(
+        error,
+        "Overflow: stride product exceeds i64\nnumeric trap: overflow in diagonal at i64"
+    );
 }
 
 #[test]

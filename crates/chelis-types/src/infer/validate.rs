@@ -56,9 +56,11 @@ pub(super) fn validate_semantic_program(
     type_env: &IrTypeEnv,
     top_level_references: &TopLevelReferenceGraph,
     selector_context: &SelectorCallableContext,
+    product: &InferenceProduct,
     errors: &mut DiagnosticSink<'_>,
 ) {
     top_level_references.report_initialization_errors(errors);
+    super::representable_extent::validate_representable_tensor_types(exprs, product, errors);
     validate_core_transform_fragment(exprs, errors);
     validate_grad_selector_identity(exprs, selector_context, errors);
     validate_vmap_extent_dependencies(exprs, type_env, errors);

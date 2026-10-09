@@ -15,7 +15,7 @@
 //! index groups into the same closed typed-kernel boundary; this module
 //! does not own numeric accumulation or comparison.
 
-use chelis_abi::metadata::{MetadataError, ShapeMetadata};
+use chelis_abi::metadata::{AllocationBytes, MetadataError, ShapeMetadata};
 use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -206,7 +206,7 @@ fn numel(shape: &[usize]) -> usize {
 
 /// The C runtime's report when a tensor's storage cannot be allocated
 /// (`allocate_tensor` in `crates/chelis-runtime/src/lib.rs`), verbatim.
-const TENSOR_ALLOCATION_FAILED: &str = "Domain: chelis_alloc tensor allocation failed";
+pub const TENSOR_ALLOCATION_FAILED: &str = "Domain: chelis_alloc tensor allocation failed";
 
 /// [05-OP-33]'s checked admission of a result before allocation: the one
 /// gate every evaluator path that sizes a new tensor from its extents passes
@@ -231,17 +231,94 @@ const TENSOR_ALLOCATION_FAILED: &str = "Domain: chelis_alloc tensor allocation f
 /// request is then at least 2^58 bytes, more than any current 64-bit virtual
 /// address space holds.
 ///
+/// The host evaluator's own sizing sites (`host_ops`) admit through this
+/// same function, so both evaluators refuse an unrepresentable result at the
+/// same sizes (chelis#3418).
+///
 /// Returns the admitted element count.
-fn admit_result(op: &'static str, shape: &[usize], prim: Prim) -> Result<usize, String> {
+pub fn admit_result(op: &'static str, shape: &[usize], prim: Prim) -> Result<usize, String> {
+    admit_metadata(op, shape, prim).map(|(len, _)| len)
+}
+
+/// [`admit_result`]'s checks, returning the admitted element count and the
+/// storage's allocation size as the metadata computes it.
+fn admit_metadata(
+    op: &'static str,
+    shape: &[usize],
+    prim: Prim,
+) -> Result<(usize, AllocationBytes), String> {
     let dtype = prim.runtime_dtype().map_err(|error| error.to_string())?;
-    let metadata = i64_extents(shape)
+    let (metadata, storage) = i64_extents(shape)
         .and_then(|extents| ShapeMetadata::contiguous(&extents, dtype))
-        .and_then(|metadata| metadata.bytes().allocation().map(|_| metadata))
+        .and_then(|metadata| {
+            let storage = metadata.bytes().allocation()?;
+            Ok((metadata, storage))
+        })
         .map_err(|error| admission_trap(op, &error))?;
-    metadata
+    let len = metadata
         .elements()
         .scratch_len::<Vec<usize>>()
-        .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())
+        .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())?;
+    Ok((len, storage))
+}
+
+/// A result [`admit_tensor`] admitted. The host evaluator's own sizing sites
+/// (`host_ops`) take their output-sized buffers from it, each reserved
+/// fallibly, so there an allocator refusal is the C runtime's allocation
+/// failure rather than a process abort (chelis#3418). The type carries no
+/// public constructor. This evaluator's own sites, and the host paths that
+/// delegate to it or to `RandomKey::split_n`, still allocate infallibly
+/// (chelis#3435).
+#[derive(Clone, Copy, Debug)]
+pub struct AdmittedResult {
+    len: usize,
+}
+
+impl AdmittedResult {
+    /// The admitted element count.
+    pub fn len(self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// An empty buffer with room for one entry per result element.
+    pub fn buffer<T>(self) -> Result<Vec<T>, String> {
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(self.len)
+            .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())?;
+        Ok(buffer)
+    }
+
+    /// One `value` per result element.
+    pub fn filled<T: Clone>(self, value: T) -> Result<Vec<T>, String> {
+        let mut buffer = self.buffer()?;
+        buffer.resize(self.len, value);
+        Ok(buffer)
+    }
+}
+
+/// [`admit_result`], then the allocator's grant for the result's storage.
+///
+/// [`admit_result`] refuses a result whose scratch exceeds Rust's allocation
+/// domain, but a smaller one can still exceed what the machine grants, which
+/// for an infallible `Vec` allocation is a process abort. The storage request
+/// is probed here, and a caller that takes its output-sized buffers from the
+/// returned [`AdmittedResult`] turns a refusal anywhere in that band into
+/// `Domain: chelis_alloc tensor allocation failed`, as compiled C reports it.
+pub fn admit_tensor(
+    op: &'static str,
+    shape: &[usize],
+    prim: Prim,
+) -> Result<AdmittedResult, String> {
+    let (len, storage) = admit_metadata(op, shape, prim)?;
+    Vec::<u8>::new()
+        .try_reserve_exact(storage.get())
+        .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())?;
+    Ok(AdmittedResult { len })
 }
 
 /// Host extents as the metadata's i64 extents.
@@ -2470,28 +2547,34 @@ fn resolve_eval_strides(
         .collect()
 }
 
+/// `pad`'s result extents, as the C runtime's `ShapeMetadata::padded`
+/// computes them, so an extent past i64 is its `Overflow` before anything is
+/// allocated. The host evaluator pads through this too (chelis#3418).
+pub fn admit_padded_shape(
+    shape: &[usize],
+    padding: &[(usize, usize)],
+    prim: Prim,
+) -> Result<Vec<usize>, String> {
+    let (before, after): (Vec<usize>, Vec<usize>) = padding.iter().copied().unzip();
+    let dtype = prim.runtime_dtype().map_err(|error| error.to_string())?;
+    let padded = i64_extents(shape)
+        .and_then(|extents| ShapeMetadata::contiguous(&extents, dtype))
+        .and_then(|metadata| metadata.padded(&i64_extents(&before)?, &i64_extents(&after)?))
+        .map_err(|error| admission_trap("pad", &error))?;
+    Ok(padded
+        .shape()
+        .iter()
+        .map(|&extent| usize::try_from(extent).map_err(|_| "padded extent exceeds usize"))
+        .collect::<Result<_, _>>()?)
+}
+
 fn pad(
     input: &TensorValue,
     padding: &[(usize, usize)],
     fill: chelis_types::ScalarValue,
 ) -> Result<TensorValue, String> {
     assert_eq!(padding.len(), input.shape.len());
-    // The padded extents are the C runtime's `ShapeMetadata::padded`, so an
-    // extent past i64 is its `Overflow`, before anything is allocated.
-    let (before, after): (Vec<usize>, Vec<usize>) = padding.iter().copied().unzip();
-    let dtype = input
-        .prim()
-        .runtime_dtype()
-        .map_err(|error| error.to_string())?;
-    let padded = i64_extents(&input.shape)
-        .and_then(|extents| ShapeMetadata::contiguous(&extents, dtype))
-        .and_then(|metadata| metadata.padded(&i64_extents(&before)?, &i64_extents(&after)?))
-        .map_err(|error| admission_trap("pad", &error))?;
-    let out_shape: Vec<usize> = padded
-        .shape()
-        .iter()
-        .map(|&extent| usize::try_from(extent).map_err(|_| "padded extent exceeds usize"))
-        .collect::<Result<_, _>>()?;
+    let out_shape = admit_padded_shape(&input.shape, padding, input.prim())?;
     let mut map: Vec<Option<usize>> = vec![None; admit_result("pad", &out_shape, input.prim())?];
     for flat_idx in 0..input.len() {
         let in_index = linear_to_index(flat_idx, &input.shape);

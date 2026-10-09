@@ -1,0 +1,446 @@
+//! #3418: a tensor whose element count or byte size does not fit i64 is
+//! refused alike in every lane (spec/04-type-system.md section 4.7,
+//! [05-MOV-1], [05-OP-33]): a literal-proven size is a type error, and a
+//! run-time size traps `Overflow` under the owning operation before
+//! allocation, in `chelis eval` and in compiled C. For the operations
+//! exercised here (`expand`, `insert`, `pad`, `einsum`), a representable
+//! size the machine cannot hold fails as the C runtime's allocation failure
+//! in both; other `chelis eval` paths can still abort on one (#3435).
+
+mod common;
+
+use common::{gcc_available, write_file};
+use std::process::{Command as StdCommand, Output};
+use tempfile::tempdir;
+
+use assert_cmd::Command;
+
+/// 2^61 as a run-time value: the sum of two literal halves, so no stage sees
+/// the size as a literal.
+const RUNTIME_2_61: &str = "def huge() -> i64 = tensor_to_scalar(sum(expand(to_tensor([1152921504606846976i64]), 0i32, 2i64), 0i32))\n";
+
+/// 2^62 as a run-time value.
+const RUNTIME_2_62: &str = "def huge() -> i64 = tensor_to_scalar(sum(expand(to_tensor([2305843009213693952i64]), 0i32, 2i64), 0i32))\n";
+
+fn program(helper: &str, body: &str) -> String {
+    format!(
+        "{helper}def main() -> i64 ! {{ IO }} = {{\n  _ = print(\"before\")\n  x = {body}\n  shape(x, 0i32)\n}}\nout = main()\n"
+    )
+}
+
+struct Lanes {
+    eval: Output,
+    build: Output,
+    c: Option<Output>,
+}
+
+fn run_lanes(name: &str, source: &str) -> Lanes {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    write_file(&path, source);
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--timeout", "120", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("eval");
+    let build = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("build");
+    let c = build.status.success().then(|| {
+        StdCommand::new(out_dir.join(name))
+            .output()
+            .expect("compiled binary should run")
+    });
+    Lanes { eval, build, c }
+}
+
+fn text(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// Both lanes build or run, print the effect that precedes the operation,
+/// fail, and report exactly `report` and `trap` on their own lines with no
+/// panic.
+fn assert_both_lanes_fail_with(lanes: &Lanes, report: &str, trap: Option<&str>) {
+    assert!(
+        lanes.build.status.success(),
+        "the C build must accept the program; the failure belongs to run time:\n{}",
+        text(&lanes.build)
+    );
+    let c = lanes.c.as_ref().expect("built binary ran");
+    for (lane, output) in [("eval", &lanes.eval), ("c", c)] {
+        let all = text(output);
+        assert!(!output.status.success(), "{lane} must fail:\n{all}");
+        assert!(!all.contains("panicked"), "{lane} must not panic:\n{all}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).starts_with("before"),
+            "{lane} runs the earlier effect first:\n{all}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr
+                .lines()
+                .any(|line| line.trim_start_matches("error: ") == report),
+            "{lane} must report `{report}`:\n{all}"
+        );
+        let traps = all
+            .lines()
+            .filter(|line| line.contains("numeric trap:"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            traps,
+            trap.into_iter().collect::<Vec<_>>(),
+            "{lane}:\n{all}"
+        );
+    }
+}
+
+#[test]
+fn runtime_byte_size_overflow_traps_in_expand_in_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let lanes = run_lanes(
+        "expand_bytes",
+        &program(RUNTIME_2_62, "expand(to_tensor([1.0f32]), 0i32, huge())"),
+    );
+    assert_both_lanes_fail_with(
+        &lanes,
+        "Overflow: byte size exceeds i64",
+        Some("numeric trap: overflow in expand at i64"),
+    );
+}
+
+#[test]
+fn runtime_element_count_overflow_traps_in_insert_in_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let lanes = run_lanes(
+        "insert_count",
+        &program(
+            RUNTIME_2_62,
+            "insert(expand(to_tensor([1.0f32]), 0i32, 4i64), 0i32, huge())",
+        ),
+    );
+    assert_both_lanes_fail_with(
+        &lanes,
+        "Overflow: extent product exceeds i64",
+        Some("numeric trap: overflow in insert at i64"),
+    );
+}
+
+#[test]
+fn runtime_padded_extent_overflow_traps_in_pad_in_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let lanes = run_lanes(
+        "pad_extent",
+        &program(
+            RUNTIME_2_62,
+            "pad(to_tensor([1i8]), [[huge(), 9223372036854775807i64]], 0i8)",
+        ),
+    );
+    assert_both_lanes_fail_with(
+        &lanes,
+        "Overflow: padded extent exceeds i64",
+        Some("numeric trap: overflow in pad at i64"),
+    );
+}
+
+/// 2^61 f32 elements is 2^63 bytes, one past i64: the byte size, not the
+/// count, overflows.
+#[test]
+fn runtime_byte_size_one_past_i64_traps_in_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let lanes = run_lanes(
+        "expand_bytes_boundary",
+        &program(RUNTIME_2_61, "expand(to_tensor([1.0f32]), 0i32, huge())"),
+    );
+    assert_both_lanes_fail_with(
+        &lanes,
+        "Overflow: byte size exceeds i64",
+        Some("numeric trap: overflow in expand at i64"),
+    );
+}
+
+/// Negative parity: 2^61 i8 elements is 2^61 bytes, representable, so no
+/// lane reports an overflow; neither machine can hold it, so both fail as
+/// the C runtime's allocation failure ([05-OP-33]), without a panic.
+#[test]
+fn representable_but_unallocatable_size_fails_allocation_in_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let lanes = run_lanes(
+        "expand_alloc",
+        &program(RUNTIME_2_61, "expand(to_tensor([1i8]), 0i32, huge())"),
+    );
+    assert_both_lanes_fail_with(
+        &lanes,
+        "Domain: chelis_alloc tensor allocation failed",
+        None,
+    );
+}
+
+/// Five live tensors of 2^60 f32 elements: each byte size is representable,
+/// their sum is not. The C build used to refuse with an internal live-byte
+/// bound overflow; the program is valid, and each allocation fails at run
+/// time as the machine's capacity dictates.
+#[test]
+fn live_byte_sum_past_u64_still_builds() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let source = "def main() -> i64 ! { IO } = {\n  _ = print(\"before\")\n  a = expand(to_tensor([1.0f32]), 0i32, 1152921504606846976i64)\n  b = expand(to_tensor([2.0f32]), 0i32, 1152921504606846976i64)\n  c = expand(to_tensor([3.0f32]), 0i32, 1152921504606846976i64)\n  d = expand(to_tensor([4.0f32]), 0i32, 1152921504606846976i64)\n  e = expand(to_tensor([5.0f32]), 0i32, 1152921504606846976i64)\n  shape(a, 0i32) + shape(b, 0i32) + shape(c, 0i32) + shape(d, 0i32) + shape(e, 0i32)\n}\nout = main()\n";
+    let lanes = run_lanes("live_sum", source);
+    assert_both_lanes_fail_with(
+        &lanes,
+        "Domain: chelis_alloc tensor allocation failed",
+        None,
+    );
+}
+
+/// Positive control: a small run-time extent still evaluates in both lanes.
+#[test]
+fn small_runtime_extent_still_evaluates_in_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let helper =
+        "def small() -> i64 = tensor_to_scalar(sum(expand(to_tensor([3i64]), 0i32, 2i64), 0i32))\n";
+    let source = format!(
+        "{helper}def main() -> i64 ! {{ IO }} = {{\n  _ = print(\"before\")\n  x = expand(to_tensor([1.0f32]), 0i32, small())\n  shape(x, 0i32)\n}}\nout = main()\n"
+    );
+    let lanes = run_lanes("small", &source);
+    assert!(lanes.eval.status.success(), "{}", text(&lanes.eval));
+    assert!(text(&lanes.eval).contains('6'), "{}", text(&lanes.eval));
+    let c = lanes.c.as_ref().expect("built binary ran");
+    assert!(c.status.success(), "{}", text(c));
+}
+
+fn check_output(name: &str, source: &str) -> Output {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    write_file(&path, source);
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("check")
+}
+
+/// A size proven unrepresentable from literals is a type error (spec/04
+/// section 4.7, "A violation proven from literals is a type error"): `check`
+/// reports a `DimensionMismatch` naming the overflowing quantity, and
+/// neither eval nor build runs anything, the earlier effect included.
+#[test]
+fn literal_unrepresentable_sizes_are_type_errors_in_every_lane() {
+    for (name, source, quantity) in [
+        (
+            "literal_expand_bytes",
+            program("", "expand(to_tensor([1.0f32]), 0i32, 4611686018427387904i64)"),
+            "byte size",
+        ),
+        (
+            "literal_insert_bytes",
+            program("", "insert(to_tensor([1.0f32]), 0i32, 4611686018427387904i64)"),
+            "byte size",
+        ),
+        (
+            "literal_insert_count",
+            program(
+                "",
+                "insert(expand(to_tensor([1.0f32]), 0i32, 4i64), 0i32, 4611686018427387904i64)",
+            ),
+            "element count",
+        ),
+        (
+            "literal_bytes_one_past_i64",
+            program("", "expand(to_tensor([1.0f32]), 0i32, 2305843009213693952i64)"),
+            "byte size",
+        ),
+        (
+            "declared_parameter",
+            "def big(x: tensor[4611686018427387904, f32]) -> f32 = tensor_to_scalar(sum(x, 0i32))\nout = 1i64\n"
+                .to_string(),
+            "byte size",
+        ),
+    ] {
+        let check = check_output(name, &source);
+        let report = text(&check);
+        assert!(!check.status.success(), "{name}: check must fail:\n{report}");
+        assert!(
+            report.contains("\"kind\":\"DimensionMismatch\""),
+            "{name}: check must report DimensionMismatch:\n{report}"
+        );
+        assert!(
+            report.contains(&format!("{quantity} ")) && report.contains("exceeds i64"),
+            "{name}: the message must name the overflowing {quantity}:\n{report}"
+        );
+
+        let lanes = run_lanes(name, &source);
+        for (lane, output) in [("eval", &lanes.eval), ("build", &lanes.build)] {
+            let all = text(output);
+            assert!(!output.status.success(), "{name}: {lane} must reject:\n{all}");
+            assert!(
+                all.contains("DimensionMismatch") && all.contains("exceeds i64"),
+                "{name}: {lane} must reject with the type error:\n{all}"
+            );
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("before"),
+                "{name}: {lane} must run nothing:\n{all}"
+            );
+            assert!(!all.contains("panicked"), "{name}: {lane}:\n{all}");
+        }
+        assert!(lanes.c.is_none(), "{name}: no binary is produced");
+    }
+}
+
+/// Negative parity: the largest f32 extent whose byte size fits i64,
+/// 2^61 - 1 elements, and a declared parameter of that type, pass `check`.
+#[test]
+fn largest_representable_literal_sizes_pass_check() {
+    for (name, source) in [
+        (
+            "largest_expand",
+            "x = expand(to_tensor([1.0f32]), 0i32, 2305843009213693951i64)\n".to_string(),
+        ),
+        (
+            "largest_parameter",
+            "def big(x: tensor[2305843009213693951, f32]) -> f32 = tensor_to_scalar(sum(x, 0i32))\nout = 1i64\n"
+                .to_string(),
+        ),
+        (
+            "empty_with_huge_extent",
+            "empty: List[f64] = []\nx = reshape(to_tensor(empty), [4611686018427387904i64, 0i64])\n"
+                .to_string(),
+        ),
+    ] {
+        let check = check_output(name, &source);
+        let report = text(&check);
+        assert!(check.status.success(), "{name}: check must pass:\n{report}");
+        assert!(report.contains("\"errors\": []"), "{name}:\n{report}");
+    }
+}
+
+/// An einsum whose output count fits i64 but whose byte size does not: k = 0,
+/// i = j = 2^31, so the output holds 2^62 `f32` elements. The host lane used
+/// to size the output from the count alone and panic; both lanes now report
+/// the einsum plan's byte-size overflow, in the C runtime's words.
+#[test]
+fn einsum_output_byte_size_overflow_matches_c() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let source = "def zero() -> i64 = tensor_to_scalar(sum(expand(to_tensor([0i64]), 0i32, 2i64), 0i32))\ndef big() -> i64 = tensor_to_scalar(sum(expand(to_tensor([1073741824i64]), 0i32, 2i64), 0i32))\ndef main() -> i64 ! { IO } = {\n  _ = print(\"before\")\n  x = insert(expand(to_tensor([1.0f32]), 0i32, zero()), 1i32, big())\n  y = einsum(\"ki,kj->ij\", x, x)\n  shape(y, 1i32)\n}\nout = main()\n";
+    let lanes = run_lanes("einsum_bytes", source);
+    assert_both_lanes_fail_with(
+        &lanes,
+        "Overflow: einsum output byte size exceeds i64",
+        None,
+    );
+}
+
+/// A zero-element reshape target whose suffix strides do not fit i64,
+/// `[0, 2^62, 4]` at run time: an empty target still owes representable
+/// strides (spec/05, `chelis_tensor_check_reshape`). The host lane used to
+/// accept it. Both lanes now refuse with the stride overflow; C renders it
+/// under its runtime symbol, the evaluators under `reshape`'s trap line.
+#[test]
+fn zero_element_reshape_with_unrepresentable_strides_traps_in_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let source = "def zero() -> i64 = tensor_to_scalar(sum(expand(to_tensor([0i64]), 0i32, 2i64), 0i32))\ndef big() -> i64 = tensor_to_scalar(sum(expand(to_tensor([2305843009213693952i64]), 0i32, 2i64), 0i32))\ndef main() -> i64 ! { IO } = {\n  _ = print(\"before\")\n  x = expand(to_tensor([1.0f32]), 0i32, zero())\n  y = reshape(x, [zero(), big(), 4i64])\n  shape(y, 1i32)\n}\nout = main()\n";
+    let lanes = run_lanes("reshape_strides", source);
+    assert!(lanes.build.status.success(), "{}", text(&lanes.build));
+    let c = lanes.c.as_ref().expect("built binary ran");
+    for (lane, output) in [("eval", &lanes.eval), ("c", c)] {
+        let all = text(output);
+        assert!(!output.status.success(), "{lane} must fail:\n{all}");
+        assert!(!all.contains("panicked"), "{lane}:\n{all}");
+        assert!(
+            all.contains("stride product exceeds i64"),
+            "{lane} must report the stride overflow:\n{all}"
+        );
+    }
+    let eval = text(&lanes.eval);
+    assert!(
+        eval.contains("numeric trap: overflow in reshape at i64"),
+        "{eval}"
+    );
+}
+
+/// 2^50 `i8` elements: representable, admitted, and far past any 64-bit
+/// address space, so the allocator refuses at once and nothing is touched.
+/// The evaluator used to abort the process from Rust's allocator; both lanes
+/// now fail as the C runtime's allocation failure ([05-OP-33]).
+#[test]
+fn admitted_but_ungranted_size_fails_allocation_in_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let helper = "def huge() -> i64 = tensor_to_scalar(sum(expand(to_tensor([562949953421312i64]), 0i32, 2i64), 0i32))\n";
+    let lanes = run_lanes(
+        "expand_ungranted",
+        &program(helper, "expand(to_tensor([1i8]), 0i32, huge())"),
+    );
+    assert_both_lanes_fail_with(
+        &lanes,
+        "Domain: chelis_alloc tensor allocation failed",
+        None,
+    );
+}
+
+/// Reductions and `trace` over an empty operand with huge extents: dropping
+/// the zero axis leaves a result with no representable count or strides.
+/// Before admission the evaluator multiplied the extents unchecked: a debug
+/// build panicked with "attempt to multiply with overflow" and a release
+/// build returned a result whose element count wrapped. Eval only, because
+/// compiled C hangs building such an operand (#3437).
+#[test]
+fn reductions_over_huge_empty_operands_trap_in_eval() {
+    let helpers = "def zero() -> i64 = tensor_to_scalar(sum(expand(to_tensor([0i64]), 0i32, 2i64), 0i32))\ndef h32() -> i64 = tensor_to_scalar(sum(expand(to_tensor([2147483648i64]), 0i32, 2i64), 0i32))\n";
+    for (name, operand, result, report, trap) in [
+        (
+            "nested_sum",
+            "insert(insert(insert(expand(to_tensor([1.0f32]), 0i32, zero()), 1i32, h32()), 0i32, h32()), 0i32, h32())",
+            "sum(sum(x, 2i32), 1i32)",
+            "Overflow: extent product exceeds i64",
+            "numeric trap: overflow in sum at i64",
+        ),
+        (
+            "trace",
+            "insert(insert(insert(expand(to_tensor([1.0f32]), 0i32, zero()), 1i32, h32()), 0i32, h32()), 0i32, h32())",
+            "trace(x, 0i32, 2i32)",
+            "Overflow: stride product exceeds i64",
+            "numeric trap: overflow in diagonal at i64",
+        ),
+    ] {
+        let source = format!(
+            "{helpers}def main() -> i64 ! {{ IO }} = {{\n  _ = print(\"before\")\n  x = {operand}\n  y = {result}\n  shape(y, 0i32)\n}}\nout = main()\n"
+        );
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(format!("{name}.ch"));
+        write_file(&path, &source);
+        let eval = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--timeout", "120", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("eval");
+        let all = text(&eval);
+        assert!(!eval.status.success(), "{name}: eval must trap:\n{all}");
+        assert!(!all.contains("panicked"), "{name}:\n{all}");
+        let lines = all
+            .lines()
+            .map(|line| line.trim_start_matches("error: "))
+            .collect::<Vec<_>>();
+        assert!(
+            lines.contains(&report),
+            "{name}: expected `{report}`:\n{all}"
+        );
+        assert!(lines.contains(&trap), "{name}: expected `{trap}`:\n{all}");
+    }
+}
