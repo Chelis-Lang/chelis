@@ -817,7 +817,7 @@ pub fn host_elementwise_loop_admits(builtin: &str, precision: Prim) -> Option<bo
 /// host-evaluated operands without changing what it computes or where its
 /// randomness is drawn (chelis#2734, chelis#2318).
 fn elementwise_function_of_operands(builtin: &str) -> bool {
-    chelis_types::shape_class(builtin) == chelis_types::ShapeClass::Identity
+    chelis_types::shape_class(builtin) == Some(chelis_types::ShapeClass::Identity)
         && chelis_types::key_admission::KeyPrimitive::of_builtin(builtin).is_none()
         && !chelis_types::COMPARISON_OPS.contains(&builtin)
 }
@@ -4908,11 +4908,7 @@ impl UncarriableWalk<'_> {
         {
             return ConcatInputFact::Tensor(output);
         }
-        if !matches!(
-            chelis_types::builtin_decl(name).map(|decl| decl.shape_class),
-            Some(chelis_types::ShapeClass::Identity)
-        ) || chelis_types::shape_class(name) != chelis_types::ShapeClass::Identity
-        {
+        if chelis_types::shape_class(name) != Some(chelis_types::ShapeClass::Identity) {
             return ConcatInputFact::Unknown;
         }
         // Shape-identity is an operation contract, but its source geometry

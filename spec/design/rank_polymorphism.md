@@ -20,12 +20,12 @@ What landed vs. the plan below, with two deliberate divergences:
 - **Identity tier is shipped and sound.** `..r` lexer/parser (Tier-3 adjacency
   rejected at parse time), `(d-rank {} r)` deep node, `Dim::Rank` + `Scheme.rvars`
   + a unitary rank-unification arm, the `Dim::Rank`-free monomorphization
-  assertion at IR lowering, and the Body-Discipline check (an explicit
-  shape-class allowlist over every builtin). The current classes follow
-  spec/04 §4.5.3: shape identity, named-axis operations, and ordered-prefix
-  key derivations. The latter retain each operand axis in order and let
-  `split_keys` append its count axis; their checked operation relations own
-  the result shapes. Calling a user-defined function from a rank-poly body
+  assertion at IR lowering, and the Body-Discipline check (each builtin's
+  `BuiltinDecl` row declares its shape class, with no default). The classes
+  follow spec/04 §4.5.3: shape identity, named-axis operations,
+  ordered-prefix key derivations, and inert operations. Ordered-prefix
+  derivations retain each operand axis in order and let `split_keys` append
+  its count axis; their checked operation relations own the result shapes. Calling a user-defined function from a rank-poly body
   remains conservatively rejected.
 - **Erasure tier is deferred.** `&tensor[..r, p] -> tensor[p]` requires a
   genuine order-invariant *all-reduce-to-scalar* primitive; Chelis's `sum`/`mean`

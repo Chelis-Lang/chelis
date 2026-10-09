@@ -408,10 +408,9 @@ lowers once with its complete named-axis vector because its result is `i64`,
 not `bool`. The reduced axis must be a **named** anchor present
 exactly once in the operand — a fully-literal or differently-named operand is
 rejected (the Name↔Lit boundary, §4.5.3). A `def` whose signature mentions `..r`
-is restricted by the §4.2 Body-Discipline check to *name-trackable* operations:
-shape-identity (elementwise) ops and named-axis reductions only — never a
-positional shape-rewriter like `permute`/`reshape` (meaningless at symbolic
-rank).
+is restricted by the Body-Discipline check to the *name-trackable* operations
+that spec/04 §4.5.3 defines — never a positional shape-rewriter like
+`permute`/`reshape` (meaningless at symbolic rank).
 
 ### P4: Type Signatures
 
