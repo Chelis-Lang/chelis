@@ -174,6 +174,15 @@ fn structural_decode(
     payload: &ExecutionValue,
     field_types: &UnordMap<String, Vec<DecodeField>>,
 ) -> Result<RuntimeValue, DecodeError> {
+    stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+        structural_decode_inner(payload, field_types)
+    })
+}
+
+fn structural_decode_inner(
+    payload: &ExecutionValue,
+    field_types: &UnordMap<String, Vec<DecodeField>>,
+) -> Result<RuntimeValue, DecodeError> {
     match payload {
         ExecutionValue::Adt { ctor, fields } => decode_adt(ctor, fields, field_types),
         ExecutionValue::Scalar { value } => Ok(RuntimeValue::from_scalar_value(value.get())),
@@ -217,6 +226,16 @@ fn structural_decode(
 }
 
 fn decode_adt(
+    ctor: &str,
+    payload_fields: &[ExecutionValue],
+    field_types: &UnordMap<String, Vec<DecodeField>>,
+) -> Result<RuntimeValue, DecodeError> {
+    stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+        decode_adt_inner(ctor, payload_fields, field_types)
+    })
+}
+
+fn decode_adt_inner(
     ctor: &str,
     payload_fields: &[ExecutionValue],
     field_types: &UnordMap<String, Vec<DecodeField>>,

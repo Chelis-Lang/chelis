@@ -629,90 +629,101 @@ fn render_value_for_diagnostic(value: &RuntimeValue) -> String {
     render_value(value)
 }
 
-/// Recursively reject any NaN or non-finite scalar/tensor element inside a
-/// value (RFC H1 representation-sanity pre-check). `path` accumulates a
-/// human-readable field path for the diagnostic.
-fn check_representation_finite(
-    value: &RuntimeValue,
-    type_name: &str,
-    ctor: &str,
-    invariants: &UnordMap<String, InvariantEntry>,
-    adt_fields: &UnordMap<String, Vec<String>>,
+enum RepresentationStep<'a> {
+    Visit {
+        value: &'a RuntimeValue,
+        type_name: &'a str,
+        field_label: Option<String>,
+    },
+    LeaveField,
+}
+
+/// Reject any non-finite scalar/tensor element inside a value (RFC H1).
+/// Keep both the traversal and the field path on the heap: an opaque record
+/// may contain an arbitrarily deep, otherwise valid recursive ADT.
+fn check_representation_finite<'a>(
+    value: &'a RuntimeValue,
+    type_name: &'a str,
+    invariants: &'a UnordMap<String, InvariantEntry>,
+    adt_fields: &'a UnordMap<String, Vec<String>>,
     path: &str,
 ) -> Result<(), InvariantViolation> {
-    match value {
-        RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-            let v = payload.as_f64_lossy();
-            if !v.is_finite() {
-                return Err(InvariantViolation::NonFiniteRepresentation {
-                    type_name: type_name.to_string(),
-                    field_path: path.to_string(),
-                    detail: describe_non_finite(v),
-                });
-            }
-            Ok(())
+    let mut pending = vec![RepresentationStep::Visit {
+        value,
+        type_name,
+        field_label: None,
+    }];
+    let mut path_parts = if path.is_empty() {
+        Vec::new()
+    } else {
+        vec![path.to_string()]
+    };
+    while let Some(step) = pending.pop() {
+        let RepresentationStep::Visit {
+            value,
+            type_name,
+            field_label,
+        } = step
+        else {
+            path_parts.pop();
+            continue;
+        };
+        if let Some(label) = field_label {
+            path_parts.push(label);
+            pending.push(RepresentationStep::LeaveField);
         }
-        RuntimeValue::Tensor(tensor) => {
-            for (index, elem) in tensor.value.to_f64_lossy_vec().into_iter().enumerate() {
-                if !elem.is_finite() {
+        match value {
+            RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
+                let v = payload.as_f64_lossy();
+                if !v.is_finite() {
                     return Err(InvariantViolation::NonFiniteRepresentation {
                         type_name: type_name.to_string(),
-                        field_path: format!("{path}[{index}]"),
-                        detail: describe_non_finite(elem),
+                        field_path: path_parts.join("."),
+                        detail: describe_non_finite(v),
                     });
                 }
             }
-            Ok(())
-        }
-        RuntimeValue::Adt {
-            ctor: inner_ctor,
-            fields,
-            field_names,
-            ..
-        } => {
-            // The type/ctor naming the violation is the OUTERMOST opaque
-            // type when we recursed from one; a nested record field that
-            // is itself an invariant-carrying opaque type names ITSELF.
-            // Both entry shapes carry the inner type name (a malformed
-            // invariant still names its declaring type), so either one
-            // re-targets the diagnostic to the inner type.
-            let (name_for_field, ctor_for_field) = match invariants.get(inner_ctor) {
-                Some(InvariantEntry::Predicate(inner)) => {
-                    (inner.type_name.as_str(), inner_ctor.as_str())
+            RuntimeValue::Tensor(tensor) => {
+                for (index, elem) in tensor.value.to_f64_lossy_vec().into_iter().enumerate() {
+                    if !elem.is_finite() {
+                        return Err(InvariantViolation::NonFiniteRepresentation {
+                            type_name: type_name.to_string(),
+                            field_path: format!("{}[{index}]", path_parts.join(".")),
+                            detail: describe_non_finite(elem),
+                        });
+                    }
                 }
-                Some(InvariantEntry::Malformed { type_name: inner }) => {
-                    (inner.as_str(), inner_ctor.as_str())
-                }
-                None => (type_name, ctor),
-            };
-            let declared = adt_fields
-                .get(inner_ctor)
-                .cloned()
-                .or_else(|| field_names.clone());
-            for (index, field) in fields.iter().enumerate() {
-                let field_label = declared
-                    .as_ref()
-                    .and_then(|names| names.get(index))
-                    .cloned()
-                    .unwrap_or_else(|| index.to_string());
-                let next_path = if path.is_empty() {
-                    field_label
-                } else {
-                    format!("{path}.{field_label}")
-                };
-                check_representation_finite(
-                    field,
-                    name_for_field,
-                    ctor_for_field,
-                    invariants,
-                    adt_fields,
-                    &next_path,
-                )?;
             }
-            Ok(())
+            RuntimeValue::Adt {
+                ctor: inner_ctor,
+                fields,
+                field_names,
+                ..
+            } => {
+                // An inner opaque type owns its own representation error;
+                // otherwise the enclosing opaque type keeps the attribution.
+                let name_for_field = match invariants.get(inner_ctor) {
+                    Some(InvariantEntry::Predicate(inner)) => inner.type_name.as_str(),
+                    Some(InvariantEntry::Malformed { type_name }) => type_name.as_str(),
+                    None => type_name,
+                };
+                let declared = adt_fields.get(inner_ctor).or(field_names.as_ref());
+                for (index, field) in fields.iter().enumerate().rev() {
+                    let field_label = declared
+                        .and_then(|names| names.get(index))
+                        .cloned()
+                        .unwrap_or_else(|| index.to_string());
+                    pending.push(RepresentationStep::Visit {
+                        value: field,
+                        type_name: name_for_field,
+                        field_label: Some(field_label),
+                    });
+                }
+            }
+            _ => {}
         }
-        _ => Ok(()),
     }
+    Ok(())
 }
 
 /// Spell a non-finite value for a diagnostic. Routes through
@@ -748,6 +759,17 @@ fn describe_non_finite(v: f64) -> String {
 /// they are registered as `top_level_defs` in the predicate eval context.
 /// See [`collect_zero_arg_constants`].
 pub(crate) fn revalidate_adt_value(
+    value: &RuntimeValue,
+    invariants: &UnordMap<String, InvariantEntry>,
+    adt_fields: &UnordMap<String, Vec<String>>,
+    module_constants: &UnordMap<String, Expr>,
+) -> Result<(), InvariantViolation> {
+    stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+        revalidate_adt_value_inner(value, invariants, adt_fields, module_constants)
+    })
+}
+
+fn revalidate_adt_value_inner(
     value: &RuntimeValue,
     invariants: &UnordMap<String, InvariantEntry>,
     adt_fields: &UnordMap<String, Vec<String>>,
@@ -802,7 +824,7 @@ pub(crate) fn revalidate_adt_value(
     // (1) Representation sanity pre-check (RFC H1). Walk the WHOLE value
     // (including nested record fields of this opaque type) and reject any
     // non-finite numeric component before evaluating the predicate.
-    check_representation_finite(value, &pred.type_name, ctor, invariants, adt_fields, "")?;
+    check_representation_finite(value, &pred.type_name, invariants, adt_fields, "")?;
 
     // (2) Predicate evaluation through the interpreter's own eval_expr.
     // In-module zero-argument constants (CR-3) are registered as
