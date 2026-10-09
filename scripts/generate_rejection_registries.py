@@ -11,6 +11,10 @@ Run with the uv-managed interpreter:
 
     .venv/bin/python scripts/generate_rejection_registries.py --check
     .venv/bin/python scripts/generate_rejection_registries.py --write
+    .venv/bin/python scripts/generate_rejection_registries.py --write --structural-only
+
+The structural write is for the local pre-push gate. The always-running PR
+Docs oracle uses --check and independently verifies the rustc-read closure.
 """
 
 from __future__ import annotations
@@ -810,12 +814,15 @@ def render_registry(atoms: list[str], issues: list[int]) -> str:
     return "\n".join(lines)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--write", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument("--structural-only", action="store_true")
+    args = parser.parse_args(argv)
+    if args.structural_only and not args.write:
+        parser.error("--structural-only requires --write")
 
     root = Path(__file__).resolve().parent.parent
     workspace = discover_production_workspace(root)
@@ -829,9 +836,12 @@ def main() -> int:
     if args.write:
         manifest.write_text(rendered_manifest)
         output.write_text(rendered_registry)
-        verify_compiler_source_closure(root, sources, workspace)
+        if not args.structural_only:
+            verify_compiler_source_closure(root, sources, workspace)
         print(f"wrote {manifest.relative_to(root)}")
         print(f"wrote {output.relative_to(root)}")
+        if args.structural_only:
+            print("compiler-read source closure deferred to the PR Docs oracle")
         return 0
     verify_compiler_source_closure(root, sources, workspace)
     manifest_issues = load_issue_manifest(manifest)

@@ -49,7 +49,7 @@ uncommitted work). The derived crate list is always printed so nothing is
 silently skipped.
 
 `--fast` is the pre-push gate, run before every push. It fixes in place
-(`regen_all.py --tier 0`, then `cargo fmt --all`), then runs `chelis lint
+(`regen_all.py --tier 0 --local-fast`, then `cargo fmt --all`), then runs `chelis lint
 --check .`, the std-bundle tracking guard, `cargo clippy -p <crate>
 --all-targets -- -D warnings` for each changed crate, one nextest run over the drift tripwires,
 and, when a chelis-std path changed, the bundle crate's own tests. Every writer
@@ -678,13 +678,14 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
 
 # The `--fast` inner-loop pass. Fix-in-place commands first, so the tree the
 # read-only checks see is already normalized: regenerate the tier-0 artifacts
-# (Python only, sub-second), then `cargo fmt --all` in write mode. The lint row
+# (parser-confirmed registry, without the full rustc-read closure), then
+# `cargo fmt --all` in write mode. The lint row
 # is shared with `--validation` and is also the `chelis` builder the tripwire
 # nextest reuses. Per-crate clippy and the tripwire run are appended by
 # `fast_command_list`.
 FMT_WRITE: list[str] = ["cargo", "fmt", "--all"]
 REGEN_TIER0_WRITE: list[str] = [
-    MANAGED_PYTHON, "scripts/regen_all.py", "--tier", "0",
+    MANAGED_PYTHON, "scripts/regen_all.py", "--tier", "0", "--local-fast",
 ]
 
 
@@ -754,7 +755,7 @@ CI_OWNED_ANNOTATION = "ci-owned"
 FULL_GATE_SPLIT_ANNOTATION = "full gate; CI coverage split"
 FAST_DYNAMIC_NOTE = (
     "# --fast runs, fixing in place: <managed-python> scripts/regen_all.py "
-    "--tier 0; cargo fmt --all; the chelis lint, eval-system guard, and "
+    "--tier 0 --local-fast; cargo fmt --all; the chelis lint, eval-system guard, and "
     "std-bundle tracking rows above; cargo clippy -p <crate> --all-targets -- "
     "-D warnings per changed crate; one nextest run over the drift tripwires; "
     "and when a std path changed, cargo nextest run -p chelis-std-bundle --lib"
@@ -2830,7 +2831,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--fast",
         action="store_true",
         help=(
-            "Run the pre-push gate before every push: regen_all.py --tier 0 "
+            "Run the pre-push gate before every push: regen_all.py --tier 0 --local-fast "
             "and cargo fmt --all fix in place, then classify-paths, chelis "
             "lint --check ., eval_system_guard.py, cargo clippy -p <crate> "
             "--all-targets per changed crate, and one nextest run over the drift "
@@ -2899,7 +2900,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "are already supervised by the workflow"
         )
     if args.detach and args.fast:
-        # --fast fixes in place (regen_all.py --tier 0, cargo fmt --all). A
+        # --fast fixes in place (regen_all.py --tier 0 --local-fast, cargo fmt --all). A
         # writer running unattended against a tree the agent is still editing
         # is the collision chelis#1568 documents, and --fast is fast enough
         # that no foreground limit is at stake.

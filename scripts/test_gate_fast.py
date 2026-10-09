@@ -123,7 +123,7 @@ class FastCommandListTests(unittest.TestCase):
         )
         self.assertEqual(
             gate.render(gate.REGEN_TIER0_WRITE),
-            "<managed-python> scripts/regen_all.py --tier 0",
+            "<managed-python> scripts/regen_all.py --tier 0 --local-fast",
         )
         self.assertEqual(gate.render(gate.FMT_WRITE), "cargo fmt --all")
         self.assertNotIn("--check", gate.FMT_WRITE)
