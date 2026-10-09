@@ -10,6 +10,7 @@ use chelis_deep::annotations::{
     BindingTypeOrigin, EffectMember, LiteralStyle, MetadataKey as K, MetadataValue as M, TypeSyntax,
 };
 use chelis_deep::ast::{Atom, Expr as DeepExpr, Metadata};
+use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
 use chelis_deep::{DeepTag, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
 use chelis_unord::{UnordMap, UnordSet};
 use chelis_vocab::EffectKind;
@@ -131,6 +132,7 @@ pub enum ResugarError {
 
 #[derive(Clone, Copy)]
 struct NodeRef<'a> {
+    expr: &'a DeepExpr,
     tag: DeepTag,
     meta: &'a Metadata,
     children: &'a [DeepExpr],
@@ -2785,6 +2787,7 @@ fn is_reserved_word(name: &str) -> bool {
 fn node_ref(expr: &DeepExpr) -> Result<NodeRef<'_>, ResugarError> {
     let node = match expr {
         DeepExpr::Node(node, span) => NodeRef {
+            expr,
             tag: node.tag(),
             meta: node.meta(),
             children: node.children_slice(),
@@ -2835,7 +2838,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                     node.span,
                 ));
             }
-            if let Some(items) = resugar_finite_list(&node)? {
+            if let Some(items) = resugar_finite_list(node.expr)? {
                 return Ok(Expr::List(items, node.span));
             }
             if let Some(operator) = resugar_operator_application(&node)? {
@@ -3885,24 +3888,22 @@ fn is_tensor_type(ty: &DeepExpr) -> bool {
 /// spelling.
 fn untyped_chain_items(expr: &DeepExpr, outer_typed: bool) -> Option<Vec<&DeepExpr>> {
     let mut items = Vec::new();
-    let mut tail = expr;
-    loop {
-        let node = node_ref(tail).ok()?;
-        if node.meta.ty().is_some() && !(outer_typed && std::ptr::eq(tail, expr)) {
+    let mut spine = ConsSpine::new(expr);
+    for cell in spine.by_ref() {
+        let node = node_ref(cell.node).ok()?;
+        if node.meta.ty().is_some() && !(outer_typed && std::ptr::eq(cell.node, expr)) {
             return None;
         }
-        if variable_name(tail) == Some("Nil") {
-            return Some(items);
-        }
-        if node.tag != DeepTag::App
-            || node.children.len() != 3
-            || variable_name(&node.children[0]) != Some("Cons")
-        {
-            return None;
-        }
-        items.push(&node.children[1]);
-        tail = &node.children[2];
+        items.push(cell.head);
     }
+    let Some(ConsSpineTail::Nil(tail)) = spine.tail() else {
+        return None;
+    };
+    let node = node_ref(tail).ok()?;
+    if node.meta.ty().is_some() && !(outer_typed && std::ptr::eq(tail, expr)) {
+        return None;
+    }
+    Some(items)
 }
 
 /// Resugars the items of a tensor value's element chain for the explicit
@@ -4005,32 +4006,20 @@ fn resugar_declared_value(expr: &DeepExpr, declares_tensor: bool) -> Result<Expr
     }
 }
 
-fn resugar_finite_list(node: &NodeRef<'_>) -> Result<Option<Vec<Expr>>, ResugarError> {
-    let Some("Cons") = variable_name(node.children.first().expect("app has a callee")) else {
+fn resugar_finite_list(expr: &DeepExpr) -> Result<Option<Vec<Expr>>, ResugarError> {
+    let mut spine = ConsSpine::new(expr);
+    let Some(first) = spine.next() else {
         return Ok(None);
     };
-    if node.children.len() != 3 {
+
+    let mut items = vec![resugar_expression_inner(first.head)?];
+    for cell in spine.by_ref() {
+        items.push(resugar_expression_inner(cell.head)?);
+    }
+    if spine.require_nil().is_err() {
         return Ok(None);
     }
-
-    let mut items = vec![resugar_expression_inner(&node.children[1])?];
-    let mut tail = &node.children[2];
-    loop {
-        if variable_name(tail) == Some("Nil") {
-            return Ok(Some(items));
-        }
-        let Ok(cons) = node_ref(tail) else {
-            return Ok(None);
-        };
-        if cons.tag != DeepTag::App
-            || cons.children.len() != 3
-            || variable_name(&cons.children[0]) != Some("Cons")
-        {
-            return Ok(None);
-        }
-        items.push(resugar_expression_inner(&cons.children[1])?);
-        tail = &cons.children[2];
-    }
+    Ok(Some(items))
 }
 
 fn resugar_operator_application(node: &NodeRef<'_>) -> Result<Option<Expr>, ResugarError> {

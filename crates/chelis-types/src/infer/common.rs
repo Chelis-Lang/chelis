@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
 
 /// Observe a decoded vocabulary node's tag, metadata and children.
 ///
@@ -187,20 +188,16 @@ pub(super) fn is_bracket_literal(expr: &deep::Expr) -> bool {
         matches!(stamped_parts(expr), Some((DeepTag::Var, meta, [atom]))
             if meta.ty().is_none() && symbol_name(atom) == Some(name))
     };
-    let mut tail = expr;
-    loop {
-        if is_variable(tail, "Nil") {
-            return true;
-        }
-        match stamped_parts(tail) {
-            Some((DeepTag::App, meta, [cons, _, rest]))
-                if meta.ty().is_none() && is_variable(cons, "Cons") =>
-            {
-                tail = rest;
-            }
-            _ => return false,
+    let mut spine = ConsSpine::new(expr);
+    for cell in spine.by_ref() {
+        let Some((DeepTag::App, meta, [cons, _, _])) = stamped_parts(cell.node) else {
+            return false;
+        };
+        if meta.ty().is_some() || !is_variable(cons, "Cons") {
+            return false;
         }
     }
+    matches!(spine.tail(), Some(ConsSpineTail::Nil(tail)) if is_variable(tail, "Nil"))
 }
 
 /// Extract a symbol name from an Expr.

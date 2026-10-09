@@ -2,6 +2,7 @@ mod signature_entry;
 pub mod staged;
 pub use signature_entry::{EntryContract, EntryPattern, SignatureEntryPlan};
 
+use chelis_deep::cons_spine::ConsSpine;
 use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
@@ -11400,25 +11401,10 @@ impl GradPackPlan {
 }
 
 fn static_list_spine_items(expr: &Expr) -> Option<Vec<Expr>> {
-    let mut items = Vec::new();
-    let mut cursor = expr;
-    loop {
-        let (node_tag, _, kids) = stamped_parts(cursor)?;
-        match node_tag {
-            DeepTag::Var if kids.first().and_then(symbol_name) == Some("Nil") => {
-                return Some(items);
-            }
-            DeepTag::App => {
-                let callee = kids.first().and_then(direct_var_name)?;
-                if terminal_name(callee) != "Cons" {
-                    return None;
-                }
-                items.push(kids.get(1)?.clone());
-                cursor = kids.get(2)?;
-            }
-            _ => return None,
-        }
-    }
+    let mut spine = ConsSpine::with_terminal_names(expr);
+    let items = spine.by_ref().map(|cell| cell.head.clone()).collect();
+    spine.require_nil().ok()?;
+    Some(items)
 }
 
 /// Resolve only the finite recursive shape of a List actual. A top-level
@@ -17072,37 +17058,15 @@ fn lower_list_literal_items(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<Vec<HostExpr>>, crate::lower::LowerDiagnostic> {
-    match expr {
-        Expr::MetaExpr(meta, _) => {
-            lower_list_literal_items(&meta.expr, program, scope, tensor_helpers)
-        }
-        Expr::Node(list, _) if list.tag() == DeepTag::Var => {
-            Ok((list.children_slice().first().and_then(symbol_name) == Some("Nil")).then(Vec::new))
-        }
-        Expr::Node(list, _) if list.tag() == DeepTag::App => {
-            let kids = list.children_slice();
-            if kids.len() != 3 {
-                return Ok(None);
-            }
-            let func_name = kids
-                .first()
-                .and_then(as_node)
-                .and_then(|inner| (inner.tag() == DeepTag::Var).then_some(inner))
-                .and_then(|inner| inner.children_slice().first().and_then(symbol_name));
-            if func_name != Some("Cons") {
-                return Ok(None);
-            }
-            let head = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
-            let Some(mut tail) =
-                lower_list_literal_items(&kids[2], program, scope, tensor_helpers)?
-            else {
-                return Ok(None);
-            };
-            tail.insert(0, head);
-            Ok(Some(tail))
-        }
-        _ => Ok(None),
+    let mut spine = ConsSpine::with_metadata_wrappers(expr);
+    let mut items = Vec::new();
+    for cell in spine.by_ref() {
+        items.push(lower_host_expr(cell.head, program, scope, tensor_helpers)?);
     }
+    if spine.require_nil().is_err() {
+        return Ok(None);
+    }
+    Ok(Some(items))
 }
 
 /// The host values a tensor helper's inputs read, one per input `Load`, each

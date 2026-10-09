@@ -6,6 +6,7 @@
 
 pub mod ast;
 pub mod authoring;
+pub mod cons_spine;
 pub mod dtype_bounds;
 pub mod effect_kind;
 mod extension_data;

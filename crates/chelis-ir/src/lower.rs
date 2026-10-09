@@ -754,6 +754,7 @@ pub fn install_chelis_panic_hook() {
 }
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier, Metadata};
+use chelis_deep::cons_spine::{ConsSpine, ConsSpineNode};
 use chelis_deep::{
     DeepTag, Span, decode_dtype_bounds, decode_effect_kind, exact_type_variable_name,
 };
@@ -6080,40 +6081,13 @@ fn cons_two_int_pair(expr: &Expr) -> Option<(usize, usize)> {
 /// `pair_i` via [`cons_two_int_pair`]. Returns `None` if the chain or any
 /// pair is malformed (so callers can fall back to a non-Cons-form parser).
 fn cons_chain_pair_list(expr: &Expr) -> Option<Vec<(usize, usize)>> {
-    let mut pairs = Vec::new();
-    let mut cursor = expr;
-    loop {
-        let (tag, kids) = match cursor.carrier() {
-            ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
-            ExprCarrier::StructuralList(_)
-            | ExprCarrier::UndecodableHead(_, _, _)
-            | ExprCarrier::Atom(_)
-            | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_) => return None,
-        };
-        match tag {
-            DeepTag::Var => {
-                let name = match kids.first() {
-                    Some(Expr::Atom(Atom::Name(s), _)) => s.as_str(),
-                    _ => return None,
-                };
-                if name == "Nil" {
-                    return Some(pairs);
-                }
-                return None;
-            }
-            DeepTag::App => {
-                let func = kids.first()?;
-                if !is_app_of_builtin(func, "Cons") {
-                    return None;
-                }
-                let pair = cons_two_int_pair(kids.get(1)?)?;
-                pairs.push(pair);
-                cursor = kids.get(2)?;
-            }
-            _ => return None,
-        }
-    }
+    let mut spine = ConsSpine::new(expr);
+    let pairs = spine
+        .by_ref()
+        .map(|cell| cons_two_int_pair(cell.head))
+        .collect::<Option<Vec<_>>>()?;
+    spine.require_nil().ok()?;
+    Some(pairs)
 }
 
 /// Walk a `Cons(head_0, Cons(head_1, ..., Nil))` chain and collect the
@@ -6122,40 +6096,26 @@ fn cons_chain_pair_list(expr: &Expr) -> Option<Vec<(usize, usize)>> {
 /// [`LowerCtx::extract_dim_list`] to recognize Surf-desugared list
 /// literals (issue Chelis-Lang/chelis#220).
 pub(crate) fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
-    let mut out = Vec::new();
-    let mut cursor = expr;
-    loop {
-        let (tag, kids) = match cursor.carrier() {
-            ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
-            ExprCarrier::StructuralList(_)
-            | ExprCarrier::UndecodableHead(_, _, _)
-            | ExprCarrier::Atom(_)
-            | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_) => return None,
-        };
-        match tag {
-            DeepTag::Var => {
-                let name = match kids.first() {
-                    Some(Expr::Atom(Atom::Name(s), _)) => s.as_str(),
-                    _ => return None,
-                };
-                if name == "Nil" {
-                    return Some(out);
-                }
-                return None;
+    let mut spine = ConsSpine::new(expr);
+    let out = spine.by_ref().map(|cell| cell.head).collect();
+    spine.require_nil().ok()?;
+    Some(out)
+}
+
+impl ConsSpineNode for LoweredValue {
+    type Head = LoweredValue;
+
+    fn cons_parts(&self) -> Option<(&Self::Head, &Self)> {
+        match self {
+            Self::Adt { ctor, fields, .. } if ctor == "Cons" && fields.len() == 2 => {
+                Some((&fields[0], &fields[1]))
             }
-            DeepTag::App => {
-                let func = kids.first()?;
-                if !is_app_of_builtin(func, "Cons") {
-                    return None;
-                }
-                let head = kids.get(1)?;
-                let tail = kids.get(2)?;
-                out.push(head);
-                cursor = tail;
-            }
-            _ => return None,
+            _ => None,
         }
+    }
+
+    fn is_nil(&self) -> bool {
+        matches!(self, Self::Adt { ctor, fields, .. } if ctor == "Nil" && fields.is_empty())
     }
 }
 
@@ -6167,20 +6127,10 @@ pub(crate) fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
 /// var; by then the list exists as a `LoweredValue::Adt` constructor
 /// chain. Returns `None` for anything that is not a closed chain.
 fn adt_cons_chain_values(value: &LoweredValue) -> Option<Vec<LoweredValue>> {
-    let mut out = Vec::new();
-    let mut cursor = value;
-    loop {
-        match cursor {
-            LoweredValue::Adt { ctor, fields, .. } if ctor == "Cons" && fields.len() == 2 => {
-                out.push(fields[0].clone());
-                cursor = &fields[1];
-            }
-            LoweredValue::Adt { ctor, fields, .. } if ctor == "Nil" && fields.is_empty() => {
-                return Some(out);
-            }
-            _ => return None,
-        }
-    }
+    let mut spine = ConsSpine::new(value);
+    let out = spine.by_ref().map(|cell| cell.head.clone()).collect();
+    spine.require_nil().ok()?;
+    Some(out)
 }
 
 // A runtime scalar list represented by its tensor storage. Keeping a VALUE,

@@ -520,38 +520,27 @@ pub(super) fn to_tensor_dtype_child<'a>(
 /// Returns the first such element of a literal `Cons` chain, recursively
 /// through nested chains.
 pub(super) fn untyped_to_tensor_element(argument: &deep::Expr) -> Option<&deep::Expr> {
-    stack_guard!("untyped_to_tensor_element", argument, None);
-    let mut tail = argument;
-    loop {
-        let (DeepTag::App, _, parts) = stamped_parts(tail)? else {
-            return None;
+    let mut spines = vec![chelis_deep::cons_spine::ConsSpine::new(argument)];
+    while let Some(spine) = spines.last_mut() {
+        let Some(cell) = spine.next() else {
+            spines.pop();
+            continue;
         };
-        let [cons, head, rest] = parts else {
-            return None;
-        };
-        let (DeepTag::Var, _, callee) = stamped_parts(cons)? else {
-            return None;
-        };
-        if callee.first().and_then(symbol_name) != Some("Cons") {
-            return None;
-        }
-        match stamped_parts(head) {
+        match stamped_parts(cell.head) {
             Some((
                 DeepTag::Lit,
                 meta,
                 [deep::Expr::Atom(deep::Atom::Int(_) | deep::Atom::Float(_), _)],
             )) if meta.ty().is_none() => {
-                return Some(head);
+                return Some(cell.head);
             }
             Some((DeepTag::App, _, _)) => {
-                if let Some(element) = untyped_to_tensor_element(head) {
-                    return Some(element);
-                }
+                spines.push(chelis_deep::cons_spine::ConsSpine::new(cell.head));
             }
             _ => {}
         }
-        tail = rest;
     }
+    None
 }
 
 /// The diagnostic for an untyped Deep literal element of `to_tensor`.

@@ -4,6 +4,7 @@ use chelis_unord::UnordMap;
 use std::path::Path;
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
+use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::host::{EntryPattern, HostDefKernel, host_def_kernel};
@@ -1747,14 +1748,13 @@ impl<'a> EvalContext<'a> {
     /// the usual typed improper-tail error.
     fn eval_cons_spine(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
         let mut heads = Vec::new();
-        let mut tail = expr;
-        while let ExprCarrier::DecodedNode(DeepTag::App, _, [func, head, rest]) = tail.carrier() {
-            if var_name(func) != Some("Cons") {
-                break;
-            }
-            heads.push(head);
-            tail = rest;
+        let mut spine = ConsSpine::new(expr);
+        for cell in spine.by_ref() {
+            heads.push(cell.head);
         }
+        let tail = match spine.tail().expect("iterated spine has a terminal") {
+            ConsSpineTail::Nil(tail) | ConsSpineTail::Other(tail) => tail,
+        };
 
         let mut values = Vec::with_capacity(heads.len());
         let mut producers = Vec::with_capacity(heads.len());
