@@ -179,7 +179,10 @@ fn a_bounded_dtype_binder_is_a_dtype_argument() {
 fn an_unbounded_binder_is_not_a_dtype_argument() {
     rejects_with(
         "def bad[t](m: MappedFile, n: i64) -> tensor[*, t] = mmap_tensor(m, 0i64, n, t)",
-        &["mmap_tensor's dtype argument must be an active data element dtype"],
+        &[
+            "mmap_tensor's dtype argument must be an active data element dtype",
+            "not the unbounded binder `t`",
+        ],
     );
     rejects_with(
         "def load[t](m: MappedFile, n: i64) -> tensor[*, t] = mmap_tensor(m, 0i64, n, t)\n\

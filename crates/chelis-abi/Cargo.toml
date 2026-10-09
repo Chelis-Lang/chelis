@@ -8,8 +8,6 @@ repository.workspace = true
 
 [dependencies]
 chelis-vocab.workspace = true
-# [05-OP-80]: `mmap_sha256`'s one digest definition, shared by every lane.
-sha2 = "0.10"
 
 [lints]
 workspace = true

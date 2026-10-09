@@ -360,13 +360,20 @@ pub(super) fn infer_mmap_tensor_app(
             TensorPrec::Var(*tv)
         }
         _ => {
+            // A binder is named as written, not by its inference variable.
+            let written = match stamped_parts(dtype_child) {
+                Some((DeepTag::TVar, _, [name])) => symbol_name(name)
+                    .map(|name| format!("the unbounded binder `{name}`"))
+                    .unwrap_or_else(|| dtype.to_string()),
+                _ => dtype.to_string(),
+            };
             return report_at_check_site(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     format!(
                         "mmap_tensor's dtype argument must be an active data element dtype or \
-                         a dtype binder bounded by a dtype family or set, not {dtype} ([05-OP-79])"
+                         a dtype binder bounded by a dtype family or set, not {written} ([05-OP-79])"
                     ),
                     vec![],
                 ),

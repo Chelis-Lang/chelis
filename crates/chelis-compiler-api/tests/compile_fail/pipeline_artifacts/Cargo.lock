@@ -136,7 +136,6 @@ name = "chelis-abi"
 version = "0.19.1"
 dependencies = [
  "chelis-vocab",
- "sha2",
 ]
 
 [[package]]
