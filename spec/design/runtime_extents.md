@@ -2038,17 +2038,28 @@ parameter, a named argument becomes a named claim, a binder argument becomes
 a claim on that binder in the enclosing signature's scope, and `*` becomes
 none. The introducing site is the authored type position, and the field path
 (`Box.v`, `.0`) is diagnostic text, never a lookup key. Pattern nodes are
-memoized by nominal type and substituted argument tuple. Dimension arguments
-come from the finite set of authored dimensions in scope, so a recursive type
-such as `Tree[n] = Leaf { v: tensor[n, f32] } | Node { l: Tree[n], r: Tree[n] }`
-yields a finite pattern graph, and execution walks the runtime value along it
-with no depth limit. A pattern with no obligation anywhere is empty, and its
-claim source emits nothing.
+memoized by nominal type and substituted argument tuple. For regular
+recursion, where every recursive occurrence repeats the header's own
+arguments, such as
+`Tree[n] = Leaf { v: tensor[n, f32] } | Node { l: Tree[n], r: Tree[n] }`,
+the keys are finite, the pattern is a finite graph, and execution walks the
+runtime value along it with no depth limit. Non-regular recursion, such as
+`Nest[a] = Done { h: a } | More { t: Nest[List[a]] }`, grows its type
+arguments at each occurrence and has no finite pattern. This section does not
+select a mechanism for it: a lane refuses a claim whose pattern passes through
+non-regular recursion with a typed diagnostic, and never skips the claim. A
+pattern with no obligation anywhere is empty, and its claim source emits
+nothing.
 
-Static reasoning is unchanged. An independent fact proving equality removes
-the guard (C2.3). Contradictory literals, such as a five-element literal tensor
-field under a declared `Box[3]`, remain the checker's `DimensionMismatch`
-under [04-ADT-4]. The checker needs no new phase for the runtime cases.
+Static reasoning applies to nested axes exactly as to top-level ones. An
+independent fact proving equality removes the guard (C2.3). Contradictory
+literals, such as a five-element literal tensor field under a declared
+`Box[3]`, remain the checker's `DimensionMismatch` under [04-ADT-4]. A
+contradiction that becomes visible only when lowering fixes the claimed axis,
+such as `make(5i64)` inlined under `Box[3]`, is rejected before execution on
+every lane, as spec/04 §4.7 requires and as B2c already does for a top-level
+tensor. That rejection is a consumer of the pattern too. The checker needs no
+new phase for the runtime cases.
 
 **Placement follows C1.3 and C6.2.** The pattern decides which obligations
 exist; the existing rules decide where each one executes.
@@ -2058,7 +2069,10 @@ exist; the existing rules decide where each one executes.
   field order, then axis order. A binder's first observation may be nested, so
   a tuple-nested witness defines a binder for a later direct formal, and every
   later witness is compared with it, as for List elements. Only the
-  constructor a value carries is walked; an absent variant owes nothing.
+  constructor a value carries is walked; an absent variant owes nothing. A
+  result binder whose only witnesses lie under variants absent at run time is
+  the same unbound-binder case as the only-empty-List witness, and follows
+  the decision #2805 owns.
 - *Results and local ascriptions.* When the nested tensor's producer is in
   the activation, the obligation is producer-owned. The #1771 origin
   transport carries it through construction, aliases, selected branches and
@@ -2077,7 +2091,8 @@ exist; the existing rules decide where each one executes.
 pattern; neither rebuilds it from runtime values, host ABI types or backend
 layouts. The entry contract's tensor-or-List pattern, the tensor-only result
 plans of both lanes and the tensor-only local ascription claim migrate to the
-shared pattern in one change, for the reason C2.6 gives for B2b-1: dropping
+shared pattern in one change, together with B2c's lowering-time rejection,
+for the reason C2.6 gives for B2b-1: dropping
 the pattern at any one boundary loses the same obligation. The #2506 walk
 keeps its null, dtype and rank admission. Its extent checks become consumers
 of the pattern, which supplies the nominal arguments the host ABI type lacks.
@@ -2085,20 +2100,24 @@ If a pattern crosses a serialized artifact, it follows C2.6: a versioned
 field, deterministic order, and no missing-field default.
 
 **Exit.** These cells run on Eval and compiled, linked and executed C, each
-with the matching-extent control (`3i64`) executing unchanged:
+with the matching-extent control (`3i64`) executing unchanged. In every row
+`size` reaches the program as an opaque input (an exported entry argument or
+an external binding), so no literal becomes visible through inlining:
 
 | Leaf | Program shape | Required result for runtime extent 5 |
 |---|---|---|
 | #3347 | nongeneric `def three(size: i64) -> Box[3] = Box { v: insert(.., size) }` | Domain trap at `insert` |
-| #3347 | generic `make[n](size: i64) -> Box[n]` called as `def three() -> Box[3] = make(5i64)` | Domain trap at `insert` inside `make` |
-| #3347 | local ascription `b: Box[3] = Box { v: insert(.., size) }` followed by a `match` on `b` | Domain trap at `insert`, before the `match` runs |
-| #3347 | formal `width(b: Box[3])` called with `make(5i64)` | Domain trap at entry of `width` |
+| #3347 | generic `make[n](size: i64) -> Box[n]` called as `def three(size: i64) -> Box[3] = make(size)` | Domain trap at `insert` inside `make` |
+| #3347 | local ascription `b: Box[3] = Box { v: insert(.., size) }` followed by a `match` on `b` | Domain trap at `insert`, at the initializer |
+| #3347 | formal `width(b: Box[3])` called with `make(size)` | Domain trap at entry of `width` |
 | #3347 | recursive `Node { l: leaf(3i64), r: leaf(size) }` under a declared `Pair[3]` | Domain trap at the `r` leaf's `insert`; the `l` leaf completes first |
 | #3347 | `Box[k]` result with `k` witnessed by a formal `x: tensor[k, f32]` | named-claim Domain trap naming `k` and `x` |
 | #2644 | tensor inside a tuple, `Option` or record result, with literal and named claims | Domain trap at the nested tensor's producer |
 | #2644 | binder witnessed only by a tuple-nested formal | entry Domain trap against the later witness |
 
-The discriminating negatives are an untaken constructor or `None` whose
+The same generic program with `make(5i64)` written literally is rejected
+before execution on every lane, matching the top-level tensor control. The
+discriminating negatives are an untaken constructor or `None` whose
 absent field would disagree (no trap), a static five-element literal field
 (checker rejection, unchanged), effects before and after the producer, and a
 call of the generic `make` whose result meets no claim (no guard emitted). HIP and Metal follow the platform interlocks below.
