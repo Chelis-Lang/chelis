@@ -1608,8 +1608,13 @@ fn compute_adjoints(
             let ratio = dag.add_node(node.owner, RiscOp::Div, vec![node.id, x], ty.clone(), None);
             let slope_ratio =
                 dag.add_node(node.owner, RiscOp::Mul, vec![y, ratio], ty.clone(), None);
-            let g_slope_ratio =
-                dag.add_node(node.owner, RiscOp::Mul, vec![g, slope_ratio], ty.clone(), None);
+            let g_slope_ratio = dag.add_node(
+                node.owner,
+                RiscOp::Mul,
+                vec![g, slope_ratio],
+                ty.clone(),
+                None,
+            );
             let nonzero_exponent = dag.add_node(
                 node.owner,
                 RiscOp::Where,
@@ -4141,8 +4146,9 @@ mod tests {
         let (_, yn) = load(&mut dag, "y");
         let out = dag.add_node(owner, RiscOp::Pow, vec![xn, yn], narrow.clone(), None);
         let grad = grad_dag(&dag, out, &[x]).unwrap();
-        let inputs: UnordMap<String, f64> =
-            [("x".to_string(), x0), ("y".to_string(), y0)].into_iter().collect();
+        let inputs: UnordMap<String, f64> = [("x".to_string(), x0), ("y".to_string(), y0)]
+            .into_iter()
+            .collect();
         eval_scalar(&grad.dag, &inputs)[&grad.grad_nodes[&x]]
     }
 
@@ -4153,7 +4159,12 @@ mod tests {
     fn grad_pow_keeps_the_odd_power_sign_where_y_minus_one_rounds() {
         for (precision, x0, y0, tolerance) in [
             (Prim::F32, -1.000_000_119_209_289_6, 16_777_218.0, 1e-5),
-            (Prim::F64, -(1.0 + f64::EPSILON), 9_007_199_254_740_994.0, 1e-12),
+            (
+                Prim::F64,
+                -(1.0 + f64::EPSILON),
+                9_007_199_254_740_994.0,
+                1e-12,
+            ),
             (Prim::Bf16, -1.007_812_5, 258.0, 2e-2),
             (Prim::Bf16, -1.007_812_5, 512.0, 2e-2),
             (Prim::F16, -1.000_976_562_5, 2050.0, 4e-3),
@@ -4174,8 +4185,14 @@ mod tests {
     #[test]
     fn grad_pow_base_cotangent_survives_forward_overflow_and_underflow() {
         assert_eq!(pow_base_grad_at(Prim::F16, 300.0, 2.0), 600.0);
-        assert_eq!(pow_base_grad_at(Prim::F32, 0.5, 150.0), 150.0 * 2f64.powi(-149));
-        assert_eq!(pow_base_grad_at(Prim::F64, 0.5, 1075.0), 1075.0 * f64::from_bits(1));
+        assert_eq!(
+            pow_base_grad_at(Prim::F32, 0.5, 150.0),
+            150.0 * 2f64.powi(-149)
+        );
+        assert_eq!(
+            pow_base_grad_at(Prim::F64, 0.5, 1075.0),
+            1075.0 * f64::from_bits(1)
+        );
         assert_eq!(pow_base_grad_at(Prim::F64, -2.0, 3.0), 12.0);
     }
 
