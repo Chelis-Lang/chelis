@@ -101,6 +101,17 @@ const POSITIVE: &[Case] = &[
         body: "def borrowed_adt(seed: i64) -> tensor[2, f32] = {\n  p = Lin { w: to_tensor([1.0f32, 2.0f32]) }\n  q = copy(&p)\n  add(weight(q), weight(p))\n}\nresult = to_list(borrowed_adt(0i64))\n",
         eval: "result = [2.0, 4.0]\n",
     },
+    // A copied borrow feeds `grad` directly and through a top-level binding.
+    Case {
+        name: "copied_borrow_into_grad",
+        body: "ws = [to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32])]\ng = grad(pair_loss)(copy(&ws))\np = Lin { w: to_tensor([1.0f32, 2.0f32]) }\nx = to_tensor([3.0f32, 4.0f32])\nh = grad(loss, wrt=p)(copy(&p), copy(x))\n",
+        eval: "ws = [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[3.0, 4.0])]\ng = [tensor(shape=[2], data=[3.0, 4.0]), tensor(shape=[2], data=[1.0, 2.0])]\np.w = tensor(shape=[2], data=[1.0, 2.0])\nx = tensor(shape=[2], data=[3.0, 4.0])\nh = Lin(tensor(shape=[2], data=[3.0, 4.0]))\n",
+    },
+    Case {
+        name: "copied_borrow_binding_into_grad",
+        body: "ws = [to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32])]\nws2 = copy(&ws)\ng = grad(pair_loss)(ws2)\n",
+        eval: "ws = [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[3.0, 4.0])]\nws2 = [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[3.0, 4.0])]\ng = [tensor(shape=[2], data=[3.0, 4.0]), tensor(shape=[2], data=[1.0, 2.0])]\n",
+    },
     // The copy of a function value is that value: a closure capturing a
     // tensor, a declaration, and a copied function as a transform target.
     Case {

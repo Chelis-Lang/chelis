@@ -8698,18 +8698,14 @@ fn lower_host_expr_kind(
             // arm the `copy` tag silently fell through to `HostExpr::new(HostExprKind::Unit)`,
             // which caused tensor-if bodies in folds to collapse to
             // `int new_t; new_t = 0;` (Nautilus P2 tensor-if-in-fold).
-            // spec/04 section 8.2: `copy(&x)` copies the referent, so the
-            // operand's borrow is erased here, as every backend erases
-            // source borrow syntax; the copy itself only reads its operand.
-            let operand = list
-                .children_slice()
-                .first()
-                .ok_or_else(|| host_expr_lowering_error(expr, "a `copy` node has no operand"))?;
-            let operand = match stamped_parts(operand) {
-                Some((DeepTag::Borrow, _, [referent])) => referent,
-                _ => operand,
-            };
-            let inner = lower_host_expr(operand, program, scope, tensor_helpers)?;
+            let inner = lower_host_expr(
+                list.children_slice().first().ok_or_else(|| {
+                    host_expr_lowering_error(expr, "a `copy` node has no operand")
+                })?,
+                program,
+                scope,
+                tensor_helpers,
+            )?;
             let inner_ty = host_expr_type(&inner);
             let explicit = expr_host_type(expr, program, scope);
             let ty = if explicit.is_unresolved() {
