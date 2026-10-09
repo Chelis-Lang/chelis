@@ -85,7 +85,11 @@ fn build_c(path: &Path, out_dir: &Path, name: &str) -> Output {
         .args(["--target", "c", "--output"])
         .arg(out_dir);
     let built = bounded(command, "chelis build");
-    assert!(built.status.success(), "{name}: build failed\n{}", text(&built));
+    assert!(
+        built.status.success(),
+        "{name}: build failed\n{}",
+        text(&built)
+    );
     bounded(StdCommand::new(out_dir.join(name)), name)
 }
 
@@ -122,7 +126,11 @@ fn trap_lines(output: &Output) -> Vec<String> {
 fn empty_movement_results_finish_and_agree() {
     for (name, body, expected) in [
         ("insert_empty", "y = x", "out = 4294967296"),
-        ("permute_empty", "y = permute(x, 1i32, 0i32, 2i32)", "out = 4294967296"),
+        (
+            "permute_empty",
+            "y = permute(x, 1i32, 0i32, 2i32)",
+            "out = 4294967296",
+        ),
         (
             "shrink_empty",
             "y = shrink(x, [[1i64, 3i64], [0i64, h32()], [0i64, 0i64]])",
@@ -133,8 +141,16 @@ fn empty_movement_results_finish_and_agree() {
             "y = pad(x, [[1i64, 0i64], [0i64, 1i64], [0i64, 0i64]], 0.0f32)",
             "out = 4294967297",
         ),
-        ("stride_empty", "y = stride(x, 2i64, 1i64, 1i64)", "out = 2147483648"),
-        ("concat_empty", "y = concat([x, x], 0i32)", "out = 8589934592"),
+        (
+            "stride_empty",
+            "y = stride(x, 2i64, 1i64, 1i64)",
+            "out = 2147483648",
+        ),
+        (
+            "concat_empty",
+            "y = concat([x, x], 0i32)",
+            "out = 8589934592",
+        ),
     ] {
         let (eval, c) = lanes(body, name);
         assert!(eval.status.success(), "{name}: eval\n{}", text(&eval));
