@@ -63,7 +63,13 @@ fn pow_matches_mpfr_on_upstream_worst_cases() {
             chelis_crmath::pow_f64(f64::from_bits(row.x), f64::from_bits(row.y)).to_bits()
         };
         let sign = 1u64 << (row.width - 1);
-        if row.expected == if row.width == 32 { 0x7fc0_0000 } else { 0x7ff8_0000_0000_0000 } {
+        if row.expected
+            == if row.width == 32 {
+                0x7fc0_0000
+            } else {
+                0x7ff8_0000_0000_0000
+            }
+        {
             nan_rows += 1;
         } else if row.expected & sign != 0 {
             negative_rows += 1;
@@ -75,11 +81,22 @@ fn pow_matches_mpfr_on_upstream_worst_cases() {
             ));
         }
     }
-    assert!(bad.is_empty(), "{} rows differ:\n{}", bad.len(), bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "{} rows differ:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
     // The sample is not vacuous at either width, and it reaches both the invalid
     // negative-base case and a negative signed power.
-    assert!(f32_rows >= 150 && f64_rows >= 150, "{f32_rows} f32 and {f64_rows} f64 rows");
-    assert!(nan_rows > 0 && negative_rows > 0, "{nan_rows} NaN and {negative_rows} negative rows");
+    assert!(
+        f32_rows >= 150 && f64_rows >= 150,
+        "{f32_rows} f32 and {f64_rows} f64 rows"
+    );
+    assert!(
+        nan_rows > 0 && negative_rows > 0,
+        "{nan_rows} NaN and {negative_rows} negative rows"
+    );
 }
 
 /// f16 and bf16 widen both operands exactly to f32, take the correctly rounded f32
@@ -108,8 +125,14 @@ fn half_widths_compose_through_the_f32_power() {
         let got_bf = chelis_crmath::pow_bf16(bx, by);
         assert_eq!(got_bf.to_bits(), expect_bf.to_bits(), "bf16 pow({x}, {y})");
     }
-    assert_eq!(chelis_crmath::pow_f16(f16::from_f32(-3.0), f16::from_f32(3.0)).to_f32(), -27.0);
-    assert_eq!(chelis_crmath::pow_f16(f16::from_f32(2.0), f16::from_f32(20.0)), f16::INFINITY);
+    assert_eq!(
+        chelis_crmath::pow_f16(f16::from_f32(-3.0), f16::from_f32(3.0)).to_f32(),
+        -27.0
+    );
+    assert_eq!(
+        chelis_crmath::pow_f16(f16::from_f32(2.0), f16::from_f32(20.0)),
+        f16::INFINITY
+    );
     assert!(chelis_crmath::pow_bf16(bf16::from_f32(-2.0), bf16::from_f32(0.5)).is_nan());
 }
 
@@ -130,10 +153,22 @@ fn signaling_nan_is_invalid_at_every_dtype() {
         assert_eq!(chelis_crmath::pow_f16(f16::ONE, snan16).to_bits(), 0x7e00);
     }
     for snan_bf in [bf16::from_bits(0x7f81), bf16::from_bits(0xffa0)] {
-        assert_eq!(chelis_crmath::pow_bf16(snan_bf, bf16::ZERO).to_bits(), 0x7fc0);
-        assert_eq!(chelis_crmath::pow_bf16(bf16::ONE, snan_bf).to_bits(), 0x7fc0);
+        assert_eq!(
+            chelis_crmath::pow_bf16(snan_bf, bf16::ZERO).to_bits(),
+            0x7fc0
+        );
+        assert_eq!(
+            chelis_crmath::pow_bf16(bf16::ONE, snan_bf).to_bits(),
+            0x7fc0
+        );
     }
     // The quiet rule still applies to a quiet NaN of either half width.
-    assert_eq!(chelis_crmath::pow_f16(f16::from_bits(0x7e12), f16::ZERO), f16::ONE);
-    assert_eq!(chelis_crmath::pow_bf16(bf16::ONE, bf16::from_bits(0xffc5)), bf16::ONE);
+    assert_eq!(
+        chelis_crmath::pow_f16(f16::from_bits(0x7e12), f16::ZERO),
+        f16::ONE
+    );
+    assert_eq!(
+        chelis_crmath::pow_bf16(bf16::ONE, bf16::from_bits(0xffc5)),
+        bf16::ONE
+    );
 }

@@ -1553,7 +1553,8 @@ fn compute_adjoints(
                 None,
             );
             let slope_x = dag.add_node(node.owner, RiscOp::Mul, vec![y, lowered], ty.clone(), None);
-            let g_slope_x = dag.add_node(node.owner, RiscOp::Mul, vec![g, slope_x], ty.clone(), None);
+            let g_slope_x =
+                dag.add_node(node.owner, RiscOp::Mul, vec![g, slope_x], ty.clone(), None);
             let y_is_zero = dag.add_node(
                 node.owner,
                 RiscOp::Compare(ComparisonKind::Eq),
@@ -1576,7 +1577,8 @@ fn compute_adjoints(
                 ty.clone(),
                 None,
             );
-            let g_slope_y = dag.add_node(node.owner, RiscOp::Mul, vec![g, slope_y], ty.clone(), None);
+            let g_slope_y =
+                dag.add_node(node.owner, RiscOp::Mul, vec![g, slope_y], ty.clone(), None);
             let x_is_zero = dag.add_node(
                 node.owner,
                 RiscOp::Compare(ComparisonKind::Eq),
@@ -3993,8 +3995,9 @@ mod tests {
     fn pow_grads(x0: f64, y0: f64) -> (f64, f64) {
         let (dag, x, y, out) = pow_dag();
         let grad = grad_dag(&dag, out, &[x, y]).unwrap();
-        let inputs: UnordMap<String, f64> =
-            [("x".to_string(), x0), ("y".to_string(), y0)].into_iter().collect();
+        let inputs: UnordMap<String, f64> = [("x".to_string(), x0), ("y".to_string(), y0)]
+            .into_iter()
+            .collect();
         let vals = eval_scalar(&grad.dag, &inputs);
         (vals[&grad.grad_nodes[&x]], vals[&grad.grad_nodes[&y]])
     }
@@ -4004,14 +4007,23 @@ mod tests {
     #[test]
     fn grad_pow_matches_finite_differences() {
         let (dag, x, y, out) = pow_dag();
-        for (x0, y0) in [(2.0, 3.0), (-1.5, 3.0), (-1.5, 2.0), (0.7, 2.5), (1.3, -0.5)] {
+        for (x0, y0) in [
+            (2.0, 3.0),
+            (-1.5, 3.0),
+            (-1.5, 2.0),
+            (0.7, 2.5),
+            (1.3, -0.5),
+        ] {
             let (a, n) = finite_diff(&dag, out, x, "x", &[("y", y0)], x0, 1e-6);
             assert!(
                 (a - n).abs() < 1e-4 * a.abs().max(1.0),
                 "d pow/dx at ({x0}, {y0}): analytical {a}, numerical {n}"
             );
             let expected = y0 * x0.powf(y0 - 1.0);
-            assert!((a - expected).abs() < 1e-9 * expected.abs().max(1.0), "{a} vs {expected}");
+            assert!(
+                (a - expected).abs() < 1e-9 * expected.abs().max(1.0),
+                "{a} vs {expected}"
+            );
         }
         for (x0, y0) in [(2.0, 3.0), (0.7, 2.5), (1.3, -0.5)] {
             let (a, n) = finite_diff(&dag, out, y, "y", &[("x", x0)], y0, 1e-6);

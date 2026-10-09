@@ -69,8 +69,11 @@ fn bits(operand: Operand, precision: Prim) -> u64 {
         #[allow(clippy::cast_possible_truncation)]
         (Value(v), Prim::F32) => u64::from((v as f32).to_bits()),
         (Value(v), Prim::F64) => v.to_bits(),
-        (Value(v), Prim::F16) => u64::from(f16::from_f64(v).to_bits()),
-        (Value(v), Prim::Bf16) => u64::from(bf16::from_f64(v).to_bits()),
+        // Every pair value is exact at f32, so narrowing through f32 rounds once.
+        #[allow(clippy::cast_possible_truncation)]
+        (Value(v), Prim::F16) => u64::from(f16::from_f32(v as f32).to_bits()),
+        #[allow(clippy::cast_possible_truncation)]
+        (Value(v), Prim::Bf16) => u64::from(bf16::from_f32(v as f32).to_bits()),
         (_, other) => unreachable!("pow dtype {other:?}"),
     }
 }
@@ -132,7 +135,13 @@ fn route_dag(precision: Prim) -> Dag {
     let mx = load(&mut dag, "mx", ty(&[k, 2], precision));
     let my = load(&mut dag, "my", ty(&[k, 2], precision));
     let store = |dag: &mut Dag, name: &str, value, t: TensorType| {
-        dag.add_node(decl, RiscOp::Store { name: name.into() }, vec![value], t, None);
+        dag.add_node(
+            decl,
+            RiscOp::Store { name: name.into() },
+            vec![value],
+            t,
+            None,
+        );
     };
     let direct = dag.add_node(decl, RiscOp::Pow, vec![x, y], vector.clone(), None);
     store(&mut dag, "direct", direct, vector.clone());
@@ -146,7 +155,13 @@ fn route_dag(precision: Prim) -> Dag {
         )
     };
     let (px, py) = (permute(&mut dag, mx), permute(&mut dag, my));
-    let strided = dag.add_node(decl, RiscOp::Pow, vec![px, py], ty(&[2, k], precision), None);
+    let strided = dag.add_node(
+        decl,
+        RiscOp::Pow,
+        vec![px, py],
+        ty(&[2, k], precision),
+        None,
+    );
     store(&mut dag, "strided", strided, ty(&[2, k], precision));
     if fuses(precision) {
         let once = dag.add_node(decl, RiscOp::Neg, vec![x], vector.clone(), None);
@@ -169,7 +184,12 @@ fn storage(precision: Prim) -> (&'static str, &'static str, &'static str, usize)
 
 /// A `main` that binds each input label to its stored bits, runs the kernel, and
 /// prints `label index bits` for every output element.
-fn harness(entry: &str, precision: Prim, input_labels: &[String], output_labels: &[String]) -> String {
+fn harness(
+    entry: &str,
+    precision: Prim,
+    input_labels: &[String],
+    output_labels: &[String],
+) -> String {
     let (word, dtype, format, _) = storage(precision);
     let xs: Vec<u64> = PAIRS.iter().map(|(x, _)| bits(*x, precision)).collect();
     let ys: Vec<u64> = PAIRS.iter().map(|(_, y)| bits(*y, precision)).collect();
@@ -188,7 +208,11 @@ fn harness(entry: &str, precision: Prim, input_labels: &[String], output_labels:
             .map(|b| format!("0x{b:x}u"))
             .collect::<Vec<_>>()
             .join(", ");
-        let dims = shape.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+        let dims = shape
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         writeln!(
             body,
             "    static {word} in{slot}[{len}] = {{{data}}};\n    int64_t shape{slot}[{rank}] = {{{dims}}};\n    inputs[{slot}] = chelis_tensor_entry_borrow({rank}, shape{slot}, {dtype}, in{slot}, sizeof in{slot});",
@@ -225,7 +249,11 @@ int main(void) {{
 "#,
         n_in = input_labels.len(),
         n_out = output_labels.len(),
-        cast = if word == "uint64_t" { "unsigned long long" } else { "unsigned" },
+        cast = if word == "uint64_t" {
+            "unsigned long long"
+        } else {
+            "unsigned"
+        },
     )
 }
 
@@ -283,7 +311,12 @@ fn assert_routes_are_correctly_rounded(precision: Prim) {
         result.c_source.contains("chelis_cr_powf(") || result.c_source.contains("chelis_cr_pow("),
         "the unit must call the carried pow kernel"
     );
-    let main = harness(&entry, precision, &result.input_labels, &result.output_labels);
+    let main = harness(
+        &entry,
+        precision,
+        &result.input_labels,
+        &result.output_labels,
+    );
     let stdout = compile_and_run(&entry, &result.c_source, &main);
     let mut routes = vec!["direct", "strided"];
     if fuses(precision) {
@@ -316,7 +349,10 @@ fn assert_routes_are_correctly_rounded(precision: Prim) {
             }
         }
     }
-    assert!(checked >= PAIRS.len() * 3, "only {checked} elements checked");
+    assert!(
+        checked >= PAIRS.len() * 3,
+        "only {checked} elements checked"
+    );
     assert!(
         mismatches.is_empty(),
         "{} {} results differ:\n{}",
@@ -337,7 +373,13 @@ fn pow_is_correctly_rounded_on_every_c_route_at_every_float_dtype() {
 /// wrong, the signed results of a negative base, and the signaling-NaN rule.
 #[test]
 fn pow_route_oracle_covers_the_decided_cases() {
-    let at = |x: f64, y: f64| expected(bits(Value(x), Prim::F64), bits(Value(y), Prim::F64), Prim::F64);
+    let at = |x: f64, y: f64| {
+        expected(
+            bits(Value(x), Prim::F64),
+            bits(Value(y), Prim::F64),
+            Prim::F64,
+        )
+    };
     assert_eq!(f64::from_bits(at(-3.0, 3.0)), -27.0);
     assert_eq!(f64::from_bits(at(0.0, 0.0)), 1.0);
     assert_eq!(at(-0.0, -3.0), f64::NEG_INFINITY.to_bits());
@@ -348,6 +390,11 @@ fn pow_route_oracle_covers_the_decided_cases() {
         let one = bits(Value(1.0), precision);
         let quiet = bits(Value(f64::NAN), precision);
         assert_ne!(expected(snan, zero, precision), one, "{}", precision.name());
-        assert_eq!(expected(quiet, zero, precision), one, "{}", precision.name());
+        assert_eq!(
+            expected(quiet, zero, precision),
+            one,
+            "{}",
+            precision.name()
+        );
     }
 }

@@ -127,8 +127,20 @@ fn sqrt_inside_a_fused_chain_is_rejected() {
 fn pow_is_rejected_directly_and_inside_a_fused_chain() {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
-    let a = dag.add_node(decl, RiscOp::Load { name: "a".into() }, vec![], f32_vec(), None);
-    let b = dag.add_node(decl, RiscOp::Load { name: "b".into() }, vec![], f32_vec(), None);
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        f32_vec(),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        f32_vec(),
+        None,
+    );
     let sum = dag.add_node(decl, RiscOp::Add, vec![a, b], f32_vec(), None);
     let applied = dag.add_node(decl, RiscOp::Pow, vec![sum, b], f32_vec(), None);
     let stored = dag.add_node(
@@ -145,7 +157,10 @@ fn pow_is_rejected_directly_and_inside_a_fused_chain() {
             .nodes()
             .iter()
             .any(|node| matches!(&node.op, RiscOp::FusedElem { .. }))
-            && !fused.nodes().iter().any(|node| matches!(node.op, RiscOp::Pow)),
+            && !fused
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Pow)),
         "the fused witness must carry pow as a fused step"
     );
     for (witness, name) in [(&dag, "pow"), (&fused, "fused_pow")] {

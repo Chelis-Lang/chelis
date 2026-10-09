@@ -1641,7 +1641,9 @@ impl HipEmitter {
             // [05-OP-79]: fenced before emission
             // (`reject_device_correctly_rounded_ops`); never a vendor `powf`.
             RiscOp::Pow => {
-                return Err(chelis_ir::dag::device_correctly_rounded_rejection("pow", "hip"));
+                return Err(chelis_ir::dag::device_correctly_rounded_rejection(
+                    "pow", "hip",
+                ));
             }
             RiscOp::Abs => Some(format!(
                 "kernel_abs{}",
@@ -2651,7 +2653,9 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::Pow => {
-                return Err(chelis_ir::dag::device_correctly_rounded_rejection("pow", "hip"));
+                return Err(chelis_ir::dag::device_correctly_rounded_rejection(
+                    "pow", "hip",
+                ));
             }
             RiscOp::Abs => {
                 let trap = node.output_type.precision.is_integer().then(|| {

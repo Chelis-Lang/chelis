@@ -1573,7 +1573,9 @@ impl CEmitter {
                 }
                 self.emit_binary(id, "/", &node.inputs, &node.output_type);
             }
-            RiscOp::Pow => self.emit_binary_kernel(id, "chelis_cr_powf", &node.inputs, &node.output_type),
+            RiscOp::Pow => {
+                self.emit_binary_kernel(id, "chelis_cr_powf", &node.inputs, &node.output_type)
+            }
             // chelis#178: `trunc_div` is the C integer `/` quotient (round
             // toward zero) — `emit_binary` already wraps the divisor in the
             // portable zero-divisor guard for integer dtypes. `trunc_div`

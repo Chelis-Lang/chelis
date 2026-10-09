@@ -203,11 +203,17 @@ fn every_pow_nan_result_is_canonical() {
     assert_eq!(pow_f64(-2.0, 0.5).to_bits(), CANONICAL_F64);
     for bits in [0xfe00_u16, 0x7e12, 0x7c01] {
         let got = pow_f16(f16::from_bits(bits), f16::from_f32(3.0)).to_bits();
-        assert_eq!(got, CANONICAL_F16, "pow_f16({bits:#06x}, 3) gave {got:#06x}");
+        assert_eq!(
+            got, CANONICAL_F16,
+            "pow_f16({bits:#06x}, 3) gave {got:#06x}"
+        );
     }
     for bits in [0xffc0_u16, 0x7fc5, 0x7f81] {
         let got = pow_bf16(bf16::from_f32(3.0), bf16::from_bits(bits)).to_bits();
-        assert_eq!(got, CANONICAL_BF16, "pow_bf16(3, {bits:#06x}) gave {got:#06x}");
+        assert_eq!(
+            got, CANONICAL_BF16,
+            "pow_bf16(3, {bits:#06x}) gave {got:#06x}"
+        );
     }
 }
 
