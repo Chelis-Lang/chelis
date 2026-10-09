@@ -14,11 +14,13 @@
 //!
 //! The emitted spans retain Surf byte ranges through fusion. C contractions
 //! retain their primitive arithmetic, so this fixture has no vendor GEMM
-//! substitutions and keeps the dense product intermediates.
+//! substitutions; each of its eight contractions computes its products inside
+//! its canonical sum (chelis#3370), so no dense product intermediate is stored.
 //!
-//! The inspected ownership plan produces 74 tensors with 32 physical owned
-//! allocations and 42 descriptor repurposes. Those physical tensor buffers
-//! occupy `1028 + 3357720 * seq + 780 * seq^2` bytes. This measures the retained
+//! The inspected ownership plan produces 74 tensors: 23 physical owned
+//! allocations, 27 descriptor repurposes, and the 24 expansions and products
+//! of the eight inlined contractions, which take no storage. The physical
+//! tensor buffers occupy `1028 + 15384 * seq + 12 * seq^2` bytes. This measures the retained
 //! tensor storage only: inputs, runtime metadata, and temporary reduction-tree
 //! scratch are outside the polynomial. It is not a whole-process peak estimate.
 //! Any future optimization must preserve the decided arithmetic and update
@@ -177,6 +179,12 @@ fn transformer_block_traceability_state_is_locked() {
     let storage_repurposes = source.matches("chelis_tensor_repurpose(").count();
     let slot_allocations = source.matches("chelis_tensor *chelis_slot").count();
     let legacy_view_allocations = source.matches("chelis_alloc_view").count();
+    // chelis#3370: each contraction computes its products inside its sum, so
+    // its two expansions and their product are produced but never stored.
+    let inlined_products = source
+        .lines()
+        .filter(|line| line.contains(" __lhs_") && line.contains("_base;"))
+        .count();
     let blas_calls = source.matches("cblas_sgemm").count()
         + source.matches("chelis_blas_matmul").count()
         + source.matches("chelis_blas_sgemm").count();
@@ -202,22 +210,32 @@ fn transformer_block_traceability_state_is_locked() {
         "expected at least 10 fused parallel-for-simd kernels for a 4-head \
          MHA+FFN block; got {fused_kernels}"
     );
+    // These counts and the polynomial below were read from the emitted
+    // `transformer_block.c` by this test's own tallies after chelis#3370:
+    // eight `__lhs_` placements, 23 `tN = chelis_alloc` lines and 27
+    // `chelis_tensor_repurpose(` calls.
     assert_eq!(
-        owned_allocations, 32,
-        "expected the verified plan to map 74 produced tensors to \
-         32 physical owned tN allocations; got \
+        inlined_products, 8,
+        "expected all eight contractions to compute their products inside \
+         their sums; got {inlined_products}"
+    );
+    assert_eq!(
+        owned_allocations, 23,
+        "expected the verified plan to map the stored produced tensors to \
+         23 physical owned tN allocations; got \
          {owned_allocations}"
     );
     assert_eq!(
-        storage_repurposes, 42,
-        "expected the verified Phase 3 plan to repurpose exactly 42 physical \
-         slots for the remaining produced tensors; got {storage_repurposes}"
+        storage_repurposes, 27,
+        "expected the verified Phase 3 plan to repurpose exactly 27 physical \
+         slots for the remaining stored tensors; got {storage_repurposes}"
     );
     assert_eq!(
-        owned_allocations + storage_repurposes,
+        owned_allocations + storage_repurposes + 3 * inlined_products,
         74,
-        "every transformer result must be accounted for by either a fresh \
-         physical allocation or a proof-authorized descriptor repurpose"
+        "every transformer result must be accounted for by a fresh physical \
+         allocation, a proof-authorized descriptor repurpose, or one of an \
+         inlined contraction's two expansions and product"
     );
     assert_eq!(
         (slot_allocations, legacy_view_allocations),
@@ -235,8 +253,8 @@ fn transformer_block_traceability_state_is_locked() {
         "(int64_t[]){ seq, 256, 1024 }",
     ] {
         assert!(
-            source.contains(dense_product_shape),
-            "the retained primitive graph includes this product buffer: {dense_product_shape}"
+            !source.contains(dense_product_shape),
+            "an inlined contraction stores no product buffer: {dense_product_shape}"
         );
     }
 
@@ -269,7 +287,7 @@ fn transformer_block_traceability_state_is_locked() {
     );
     assert_eq!(
         (alloc_count, c0, c1, c2),
-        (32, 1028, 3_357_720, 780),
+        (23, 1028, 15_384, 12),
         "unexpected transformer_block Phase 3 physical working-set polynomial; \
          update the locked cost profile only after inspecting the emitted C and \
          its proof-authorized descriptor repurposes"
