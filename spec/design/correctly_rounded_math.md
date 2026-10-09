@@ -765,8 +765,9 @@ NaN inventory oracle in `crates/chelis-cli/tests/native_build.rs`.
 ### 13.4 Gradients and device lanes
 
 The adjoint is [05-OP-79]'s: `g*(y*pow(x, y-1))` for the base, switching to
-`g*(y*(r/x))` where `x != 0` and `abs(y) >= 2^p`, and `where(x == 0, 0, g*(r*log(x)))` for
-the exponent. The switch exists because from `2^p` on every exponent is an even integer
+`g*(y*s)` where `x != 0` and `abs(y) >= 2^p`, with `s = r/x` for a finite base and `r`
+carrying the sign of an infinite one (where `r/x` would be `inf/inf`), and
+`g*(r*log(x))` for the exponent, exactly zero where `x` is `0` or `+inf`. The switch exists because from `2^p` on every exponent is an even integer
 whose `y - 1` rounds to an even integer: `pow(x, y-1)` then has the wrong sign for a
 negative base (`x = -1.0000001f32`, `y = 16777218` gave `+1.2397e8` where the derivative
 is `-1.2397e8`; the same at bf16 from `y = 258` and at f16 from `y = 2050`). The ratio is
@@ -777,7 +778,9 @@ ratio of `0` where the derivative is `150 * 2^-149`. From `2^p` on, a finite non
 needs `|x|` within about `1/|y|` of one, so the ratio has no such loss there. The
 selections at `y == 0` and `x == 0` replace the `0 * inf` and `inf * log(0)` products
 with the exact zero of a function that is constant there, and a zero base keeps
-`pow(x, y-1)`. A negative base gives the exponent a NaN cotangent.
+`pow(x, y-1)`. A `+inf` base is constant in the exponent on each side of `y = 0` too, so
+its exponent cotangent is the same exact zero rather than `0*log(+inf)` or
+`inf*log(+inf)`. A negative base gives the exponent a NaN cotangent.
 `pow` has no verifier bound transformer, so `is_verifier_targetable` excludes it. The
 HIP and Metal lanes reject `pow`, directly or as a fused step, through §4.3's fence
 with [05-OP-79] as its authority.
