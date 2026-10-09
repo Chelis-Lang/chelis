@@ -111,6 +111,23 @@ pub struct Node {
 }
 
 impl Node {
+    pub(crate) fn take_parts(&mut self) -> (DeepTag, Metadata, Vec<Expr>) {
+        (
+            self.tag,
+            std::mem::take(&mut self.meta),
+            std::mem::take(&mut self.children),
+        )
+    }
+
+    pub(crate) fn take_owned_children_for_drop(
+        &mut self,
+        expressions: &mut Vec<Expr>,
+        metadata: &mut Vec<Metadata>,
+    ) {
+        expressions.extend(std::mem::take(&mut self.children).into_iter().rev());
+        metadata.push(std::mem::take(&mut self.meta));
+    }
+
     /// Consume a node for atomic rebuilding of coupled metadata and children.
     pub fn into_parts(self) -> (DeepTag, Metadata, Vec<Expr>) {
         (self.tag, self.meta, self.children)

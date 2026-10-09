@@ -363,7 +363,8 @@ mod tests {
         }
     }
     fn metadata(source: &str) -> Metadata {
-        let Expr::Node(node, _) = crate::parser::parse_str(source).unwrap().remove(0) else {
+        let expr = crate::parser::parse_str(source).unwrap().remove(0);
+        let Expr::Node(node, _) = &expr else {
             panic!("node")
         };
         node.meta().clone()

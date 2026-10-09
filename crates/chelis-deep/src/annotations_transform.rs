@@ -12,10 +12,9 @@ pub(crate) fn parts(
     key: &str,
 ) -> Result<(Container, Vec<Expr>), MetadataError> {
     let span = expr.span();
-    let (actual, metadata, children) = match expr {
-        Expr::Node(node, _) => node.into_parts(),
-        _ => return Err(invalid(key, span, "the declared structural node")),
-    };
+    let (actual, metadata, children, _) = expr
+        .into_node_parts()
+        .map_err(|_| invalid(key, span, "the declared structural node"))?;
     if actual != tag {
         return Err(invalid(key, span, "the declared structural node"));
     }
@@ -37,8 +36,11 @@ impl VariableRef {
     }
     pub fn try_from_expression(expr: Expr) -> Result<Self, MetadataError> {
         let (container, children) = parts(expr, DeepTag::Var, "wrt")?;
-        let [Expr::Atom(Atom::Name(name), name_span)]: [Expr; 1] = children
+        let [name]: [Expr; 1] = children
             .try_into()
+            .map_err(|_| invalid("wrt", container.span, "one variable name"))?;
+        let (Atom::Name(name), name_span) = name
+            .into_atom()
             .map_err(|_| invalid("wrt", container.span, "one variable name"))?
         else {
             return Err(invalid("wrt", container.span, "one variable name"));
@@ -69,28 +71,32 @@ impl PropertyBinder {
     }
     pub fn try_from_expression(expr: Expr) -> Result<Self, MetadataError> {
         let span = expr.span();
-        let (name, metadata, spelling, metadata_span) = match expr {
-            name @ Expr::Atom(Atom::Name(_), _) => {
-                (name, Metadata::default(), BinderSpelling::Name, span)
-            }
-            Expr::MetaExpr(meta, _) => (*meta.expr, meta.metadata, BinderSpelling::Prefix, span),
-            Expr::BareList(items, _) => {
-                let [name, Expr::Map(metadata, metadata_span)]: [Expr; 2] =
-                    items.try_into().map_err(|_| {
-                        invalid("property_quantifiers", span, "a name and annotation map")
-                    })?
-                else {
-                    return Err(invalid(
-                        "property_quantifiers",
-                        span,
-                        "a name and annotation map",
-                    ));
-                };
+        let (name, metadata, spelling, metadata_span) =
+            if matches!(&expr, Expr::Atom(Atom::Name(_), _)) {
+                (expr, Metadata::default(), BinderSpelling::Name, span)
+            } else if matches!(&expr, Expr::MetaExpr(..)) {
+                let (metadata, name, _) = expr
+                    .into_metadata_expression()
+                    .unwrap_or_else(|_| unreachable!("matched wrapper"));
+                (name, metadata, BinderSpelling::Prefix, span)
+            } else if matches!(&expr, Expr::BareList(..)) {
+                let (items, _) = expr
+                    .into_bare_list()
+                    .unwrap_or_else(|_| unreachable!("matched bare list"));
+                let [name, map]: [Expr; 2] = items.try_into().map_err(|_| {
+                    invalid("property_quantifiers", span, "a name and annotation map")
+                })?;
+                let (metadata, metadata_span) = map.into_metadata_map().map_err(|_| {
+                    invalid("property_quantifiers", span, "a name and annotation map")
+                })?;
                 (name, metadata, BinderSpelling::Pair, metadata_span)
-            }
-            _ => return Err(invalid("property_quantifiers", span, "a binder")),
-        };
-        let Expr::Atom(Atom::Name(name), name_span) = name else {
+            } else {
+                return Err(invalid("property_quantifiers", span, "a binder"));
+            };
+        let (Atom::Name(name), name_span) = name
+            .into_atom()
+            .map_err(|_| invalid("property_quantifiers", span, "a binder name"))?
+        else {
             return Err(invalid("property_quantifiers", span, "a binder name"));
         };
         let mut result = Self::new(Spanned::new(name, name_span), metadata, span)?;

@@ -112,13 +112,10 @@ fn flat_top_level_form_prunes_without_a_module_wrapper() {
         expand("module M\ndef a[n](v: tensor[n, f32]) -> tensor[n, f32] = mul(v, v)\n")
             .into_iter()
             .next()
-            .and_then(|m| match m {
-                DeepExpr::Node(node, _) => node
-                    .into_parts()
-                    .2
-                    .into_iter()
-                    .find(|e| deep_def_name(e) == Some("a")),
-                _ => None,
+            .and_then(|m| {
+                m.into_node_parts().ok().and_then(|(_, _, children, _)| {
+                    children.into_iter().find(|e| deep_def_name(e) == Some("a"))
+                })
             })
             .expect("a def `a`"),
     ];

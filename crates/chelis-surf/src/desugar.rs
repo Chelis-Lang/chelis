@@ -1550,15 +1550,12 @@ fn numeric_literal_meta(ty: deep::Expr, style: LiteralStyle) -> deep::Expr {
     ])
 }
 fn with_metadata_value(expr: deep::Expr, value: M) -> deep::Expr {
-    match expr {
-        deep::Expr::Node(mut node, span) => {
-            let mut meta = node.meta().clone();
+    match expr.into_node_parts() {
+        Ok((tag, mut meta, children, span)) => {
             meta.replace(value);
-            node.try_replace_meta(meta)
-                .expect("desugared annotation has an admissible owner");
-            deep::Expr::Node(node, span)
+            deep::Expr::node(tag, meta, children, span)
         }
-        other => other,
+        Err(other) => other,
     }
 }
 fn has_type_metadata(expr: &deep::Expr) -> bool {
@@ -1617,27 +1614,24 @@ fn with_dtype_bounds(expr: deep::Expr, binders: &[TypeBinder]) -> deep::Expr {
     if bounds.is_empty() {
         return expr;
     }
-    let deep::Expr::Node(mut node, span) = expr else {
-        panic!("dtype bounds attach to a stamped declaration node");
-    };
-    let mut meta = node.meta().clone();
+    let (tag, mut meta, children, span) = expr
+        .into_node_parts()
+        .unwrap_or_else(|_| panic!("dtype bounds attach to a stamped declaration node"));
     meta.insert(M::DtypeBounds(
         encode_dtype_bounds(&bounds, sp()).expect("distinct dtype binder names"),
     ))
     .expect("bounds attached once");
-    node.try_replace_meta(meta)
-        .expect("dtype-bound metadata preserves the stamped Node invariant");
-    deep::Expr::Node(node, span)
+    deep::Expr::node(tag, meta, children, span)
 }
 
 /// Build a stamped Deep node with custom metadata. The `meta` argument
 /// must be an `Expr::Map(Metadata { .. }, _)` — the Metadata is extracted
 /// and passed to `Node::new`.
 fn node_meta(tag: DeepTag, meta: deep::Expr, children: Vec<deep::Expr>) -> deep::Expr {
-    let meta_map = match meta {
-        deep::Expr::Map(m, _) => m,
-        _ => panic!("node_meta: expected Expr::Map for metadata, got {meta:?}"),
-    };
+    let meta_map = meta
+        .into_metadata_map()
+        .unwrap_or_else(|other| panic!("node_meta: expected Expr::Map for metadata, got {other:?}"))
+        .0;
     deep::Expr::Node(
         Box::new(chelis_deep::node::Node::new(tag, meta_map, children)),
         sp(),
@@ -1648,18 +1642,7 @@ fn node_meta(tag: DeepTag, meta: deep::Expr, children: Vec<deep::Expr>) -> deep:
 /// without changing canonical Deep metadata or printer output. Type-resolution
 /// diagnostics use this when no external `span` metadata is present.
 fn with_structural_span(expr: deep::Expr, span: Span) -> deep::Expr {
-    match expr {
-        deep::Expr::Atom(atom, _) => deep::Expr::Atom(atom, span),
-        deep::Expr::Map(map, _) => deep::Expr::Map(map, span),
-        deep::Expr::MetaExpr(meta, _) => deep::Expr::MetaExpr(meta, span),
-        deep::Expr::Node(node, _) => deep::Expr::Node(node, span),
-        deep::Expr::BareList(elems, _) => deep::Expr::BareList(elems, span),
-        deep::Expr::UnknownForm(data) => {
-            let mut d = *data;
-            d.span = span;
-            deep::Expr::UnknownForm(Box::new(d))
-        }
-    }
+    expr.with_span(span)
 }
 
 fn type_expr_span(ty: &TypeExpr) -> Span {
@@ -1869,21 +1852,18 @@ fn desugar_effect_set(effects: &[EffectExpr]) -> AstEffectSet {
 }
 
 fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>) -> deep::Expr {
-    match (effects, ty_expr) {
-        // An explicit `! { ... }` clause — even the empty `! {}` — must be preserved in
-        // the Deep AST so the effect checker can distinguish "declared empty" from
-        // "no annotation" when validating declared vs inferred effects.
-        (Some(effects), deep::Expr::Node(mut node, span)) => {
-            if node.tag() == DeepTag::TFn {
-                let mut meta = node.meta().clone();
-                meta.replace(M::Eff(desugar_effect_set(effects)));
-                node.try_replace_meta(meta)
-                    .expect("effect annotation must preserve the stamped Node invariant");
-            }
-            deep::Expr::Node(node, span)
-        }
-        (_, other) => other,
+    let Some(effects) = effects else {
+        return ty_expr;
+    };
+    if !matches!(&ty_expr, deep::Expr::Node(node, _) if node.tag() == DeepTag::TFn) {
+        return ty_expr;
     }
+    // An explicit `! { ... }` clause, including `! {}`, must remain visible.
+    let (tag, mut meta, children, span) = ty_expr
+        .into_node_parts()
+        .unwrap_or_else(|_| unreachable!("matched function type"));
+    meta.replace(M::Eff(desugar_effect_set(effects)));
+    deep::Expr::node(tag, meta, children, span)
 }
 
 fn expr_mentions_name(expr: &Expr, name: &str) -> bool {

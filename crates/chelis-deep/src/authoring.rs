@@ -1123,10 +1123,9 @@ fn edit_node_parts<R>(
         return None;
     }
     let detached = std::mem::replace(expr, Expr::Atom(Atom::Bool(false), Span::new(0, 0)));
-    let Expr::Node(node, span) = detached else {
-        unreachable!("checked that `expr` is a node");
-    };
-    let (tag, mut meta, mut children) = node.into_parts();
+    let (tag, mut meta, mut children, span) = detached
+        .into_node_parts()
+        .unwrap_or_else(|_| unreachable!("checked that `expr` is a node"));
     let result = edit(tag, &mut meta, &mut children);
     *expr = Expr::node(tag, meta, children, span);
     Some(result)

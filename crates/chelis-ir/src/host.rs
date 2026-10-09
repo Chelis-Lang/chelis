@@ -16124,10 +16124,10 @@ fn is_inlinable_callable_binding_value(expr: &Expr) -> bool {
 /// use site, so its binding origin stays behind
 /// ([`crate::lower::without_binding_origin`]).
 fn without_binding_origin(value: Expr) -> Expr {
-    let Expr::Node(node, span) = value else {
-        return value;
+    let (tag, meta, children, span) = match value.into_node_parts() {
+        Ok(parts) => parts,
+        Err(other) => return other,
     };
-    let (tag, meta, children) = node.into_parts();
     Expr::node(
         tag,
         crate::lower::without_binding_origin(&meta),

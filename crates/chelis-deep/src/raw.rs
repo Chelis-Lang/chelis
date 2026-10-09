@@ -50,3 +50,21 @@ impl RawExpr {
         }
     }
 }
+
+/// Release raw source arguments held by typed annotation storage without
+/// recursing through a deeply nested list or legacy metadata wrapper.
+pub(crate) fn drain_owned_source_arguments(mut pending: Vec<RawExpr>) {
+    while let Some(expression) = pending.pop() {
+        match expression {
+            RawExpr::ExtensionData(_) | RawExpr::Atom(..) => {}
+            RawExpr::List(children, _) => pending.extend(children.into_iter().rev()),
+            RawExpr::Map(entries, _) => {
+                pending.extend(entries.into_iter().rev().map(|(_, value)| value));
+            }
+            RawExpr::MetaExpr { entries, expr, .. } => {
+                pending.push(*expr);
+                pending.extend(entries.into_iter().rev().map(|(_, value)| value));
+            }
+        }
+    }
+}

@@ -80,23 +80,21 @@ fn prune_entry(exprs: Vec<DeepExpr>, entry: &str, scope: ReferenceScope) -> Vec<
     // branch, found no `def` there either, and returned the program UNPRUNED.
     match exprs.as_slice() {
         [DeepExpr::Node(node, _)] if node.tag() == DeepTag::Module => {
-            let DeepExpr::Node(mut module, span) = exprs.into_iter().next().expect("len-1 slice")
-            else {
-                unreachable!("matched Node above");
-            };
+            let (tag, metadata, mut children, span) = exprs
+                .into_iter()
+                .next()
+                .expect("len-1 slice")
+                .into_node_parts()
+                .unwrap_or_else(|_| unreachable!("matched Node above"));
             // The module-name atom is child 0 and the declarations follow.
             // `import` / `export` live after the name atom but are non-decl
             // elements, so the tail pruner keeps them via its keep-non-decl
             // filter. The split is clamped to the child count so a
             // header-only module (no decls) is a no-op.
-            let mut children = module.children_slice().to_vec();
             let split = MODULE_DECL_OFFSET.min(children.len());
             let decls = children.split_off(split);
             children.extend(prune_top_level_entry(decls, entry, scope));
-            module
-                .try_replace_children(children)
-                .expect("pruning a module drops whole declarations, never its name binder");
-            vec![DeepExpr::Node(module, span)]
+            vec![DeepExpr::node(tag, metadata, children, span)]
         }
         _ => prune_top_level_entry(exprs, entry, scope),
     }

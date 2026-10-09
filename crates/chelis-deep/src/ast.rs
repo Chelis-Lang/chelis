@@ -61,6 +61,93 @@ pub enum ExprCarrier<'a> {
 }
 
 impl Expr {
+    /// Consume an atom while allowing every other carrier to retain ownership.
+    pub fn into_atom(mut self) -> Result<(Atom, Span), Self> {
+        if let Expr::Atom(atom, span) = &mut self {
+            Ok((std::mem::replace(atom, Atom::Bool(false)), *span))
+        } else {
+            Err(self)
+        }
+    }
+
+    /// Consume a stamped node without moving fields out of a type with Drop.
+    pub fn into_node_parts(mut self) -> Result<(DeepTag, Metadata, Vec<Expr>, Span), Self> {
+        if let Expr::Node(node, span) = &mut self {
+            let (tag, metadata, children) = node.take_parts();
+            Ok((tag, metadata, children, *span))
+        } else {
+            Err(self)
+        }
+    }
+
+    pub fn into_bare_list(mut self) -> Result<(Vec<Expr>, Span), Self> {
+        if let Expr::BareList(items, span) = &mut self {
+            Ok((std::mem::take(items), *span))
+        } else {
+            Err(self)
+        }
+    }
+
+    pub fn into_metadata_map(mut self) -> Result<(Metadata, Span), Self> {
+        if let Expr::Map(map, span) = &mut self {
+            Ok((std::mem::take(map), *span))
+        } else {
+            Err(self)
+        }
+    }
+
+    pub fn into_metadata_expression(mut self) -> Result<(Metadata, Expr, Span), Self> {
+        if let Expr::MetaExpr(wrapper, span) = &mut self {
+            let metadata = std::mem::take(&mut wrapper.metadata);
+            let expression = std::mem::replace(
+                wrapper.expr.as_mut(),
+                Expr::Atom(Atom::Bool(false), Span::new(0, 0)),
+            );
+            Ok((metadata, expression, *span))
+        } else {
+            Err(self)
+        }
+    }
+
+    /// Replace the structural source span without rebuilding the carrier.
+    pub fn with_span(mut self, span: Span) -> Self {
+        match &mut self {
+            Expr::Atom(_, old)
+            | Expr::Map(_, old)
+            | Expr::MetaExpr(_, old)
+            | Expr::Node(_, old)
+            | Expr::BareList(_, old) => *old = span,
+            Expr::UnknownForm(data) => data.span = span,
+        }
+        self
+    }
+
+    fn take_owned_children_for_drop(
+        &mut self,
+        expressions: &mut Vec<Expr>,
+        metadata: &mut Vec<Metadata>,
+    ) {
+        match self {
+            Expr::Atom(..) => {}
+            Expr::Map(map, _) => metadata.push(std::mem::take(map)),
+            Expr::MetaExpr(wrapper, _) => {
+                metadata.push(std::mem::take(&mut wrapper.metadata));
+                expressions.push(std::mem::replace(
+                    wrapper.expr.as_mut(),
+                    Expr::Atom(Atom::Bool(false), Span::new(0, 0)),
+                ));
+            }
+            Expr::Node(node, _) => node.take_owned_children_for_drop(expressions, metadata),
+            Expr::BareList(children, _) => {
+                expressions.extend(std::mem::take(children).into_iter().rev());
+            }
+            Expr::UnknownForm(data) => {
+                expressions.extend(std::mem::take(&mut data.children).into_iter().rev());
+                metadata.push(std::mem::take(&mut data.meta));
+            }
+        }
+    }
+
     /// Construct a canonical tagged node `(tag {meta} children...)` with a
     /// decoded tag. This is the typed producer entry point (decode-once,
     /// chelis#731 Phase 3): programmatic Deep construction goes through
@@ -138,6 +225,28 @@ impl Expr {
             _ => return None,
         };
         meta.span_id().map(|v| v.value())
+    }
+}
+
+/// Drain owned expression and annotation edges before Rust releases each node.
+/// The queue handles all admitted carriers, including diagnostic trees and
+/// expression-valued metadata, without depending on the native call stack.
+pub(crate) fn drain_owned_for_drop(mut expressions: Vec<Expr>, mut metadata: Vec<Metadata>) {
+    while !expressions.is_empty() || !metadata.is_empty() {
+        if let Some(mut expression) = expressions.pop() {
+            expression.take_owned_children_for_drop(&mut expressions, &mut metadata);
+        } else if let Some(mut map) = metadata.pop() {
+            map.take_owned_children_for_drop(&mut expressions, &mut metadata);
+        }
+    }
+}
+
+impl Drop for Expr {
+    fn drop(&mut self) {
+        let mut expressions = Vec::new();
+        let mut metadata = Vec::new();
+        self.take_owned_children_for_drop(&mut expressions, &mut metadata);
+        drain_owned_for_drop(expressions, metadata);
     }
 }
 

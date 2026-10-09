@@ -627,11 +627,103 @@ impl Clone for Storage {
 }
 
 impl Storage {
+    fn take_owned_children_for_drop(
+        &mut self,
+        expressions: &mut Vec<Expr>,
+        metadata: &mut Vec<Metadata>,
+    ) {
+        let mut take_expression = |expression: &mut Expr| {
+            expressions.push(std::mem::replace(
+                expression,
+                Expr::Atom(Atom::Bool(false), Span::new(0, 0)),
+            ));
+        };
+        for mut value in std::mem::take(&mut self.core) {
+            match &mut value {
+                MetadataValue::Type(value) => take_expression(&mut value.0),
+                MetadataValue::Accumulator(value) => take_expression(&mut value.0),
+                MetadataValue::PropertyTolerance(value)
+                | MetadataValue::PropertySeed(value)
+                | MetadataValue::PropertySamples(value) => take_expression(&mut value.0),
+                MetadataValue::Eff(value) | MetadataValue::Effects(value) => {
+                    metadata.push(std::mem::take(&mut value.container.metadata));
+                    for member in &mut value.values {
+                        if let EffectMember::Resource(resource) = member {
+                            metadata.push(std::mem::take(&mut resource.container.metadata));
+                        }
+                    }
+                }
+                MetadataValue::Wrt(value) => match value {
+                    WrtTargets::Variable(variable) => {
+                        metadata.push(std::mem::take(&mut variable.container.metadata));
+                    }
+                    WrtTargets::Tuple(tuple) => {
+                        metadata.push(std::mem::take(&mut tuple.container.metadata));
+                        metadata.push(std::mem::take(&mut tuple.first.container.metadata));
+                        for variable in &mut tuple.rest {
+                            metadata.push(std::mem::take(&mut variable.container.metadata));
+                        }
+                    }
+                },
+                MetadataValue::PropertyQuantifiers(value) => {
+                    metadata.push(std::mem::take(&mut value.container.metadata));
+                    for binder in &mut value.values {
+                        metadata.push(std::mem::take(&mut binder.container.metadata));
+                    }
+                }
+                MetadataValue::PropertyPreconditions(value) => {
+                    metadata.push(std::mem::take(&mut value.container.metadata));
+                    for condition in &mut value.values {
+                        take_expression(&mut condition.0);
+                    }
+                }
+                MetadataValue::PropertyContracts(value) => {
+                    metadata.push(std::mem::take(&mut value.container.metadata));
+                }
+                MetadataValue::Invariant(value) => {
+                    metadata.push(std::mem::take(&mut value.container.metadata));
+                    metadata.push(std::mem::take(&mut value.params.metadata));
+                    metadata.push(std::mem::take(&mut value.binder.container.metadata));
+                    take_expression(&mut value.body.0);
+                }
+                MetadataValue::Source(value) => {
+                    crate::raw::drain_owned_source_arguments(std::mem::take(&mut value.arguments));
+                }
+                MetadataValue::DtypeBounds(_)
+                | MetadataValue::Loc(_)
+                | MetadataValue::Span(_)
+                | MetadataValue::ChelisRole(_)
+                | MetadataValue::PropertySourceKind(_)
+                | MetadataValue::PropertySourceId(_)
+                | MetadataValue::Opaque(_)
+                | MetadataValue::InvariantAmenability(_)
+                | MetadataValue::SurfPath(_)
+                | MetadataValue::SurfDimGroupSize(_)
+                | MetadataValue::SurfLiteralStyle(_)
+                | MetadataValue::SurfBindingType(_)
+                | MetadataValue::Lin(_)
+                | MetadataValue::Doc(_)
+                | MetadataValue::Effect(_)
+                | MetadataValue::LiteralSource(_)
+                | MetadataValue::Destructure(_) => {}
+            }
+        }
+    }
+
     fn locate(&self, key: MetadataKey) -> Result<usize, usize> {
         self.core.binary_search_by(|value| value.key().cmp(&key))
     }
     fn get(&self, key: MetadataKey) -> Option<&MetadataValue> {
         self.locate(key).ok().map(|index| &self.core[index])
+    }
+}
+
+impl Drop for Storage {
+    fn drop(&mut self) {
+        let mut expressions = Vec::new();
+        let mut metadata = Vec::new();
+        self.take_owned_children_for_drop(&mut expressions, &mut metadata);
+        crate::ast::drain_owned_for_drop(expressions, metadata);
     }
 }
 
@@ -692,6 +784,21 @@ impl From<MetadataValue> for Metadata {
     }
 }
 impl Metadata {
+    /// Move children from uniquely held storage into an existing work queue.
+    /// The storage destructor handles the last release on another thread.
+    pub(crate) fn take_owned_children_for_drop(
+        &mut self,
+        expressions: &mut Vec<Expr>,
+        metadata: &mut Vec<Metadata>,
+    ) {
+        let Some(storage) = self.storage.take() else {
+            return;
+        };
+        if let Some(mut storage) = std::sync::Arc::into_inner(storage) {
+            storage.take_owned_children_for_drop(expressions, metadata);
+        }
+    }
+
     pub fn try_from_values(
         values: impl IntoIterator<Item = MetadataValue>,
     ) -> Result<Self, MetadataError> {

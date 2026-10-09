@@ -28,7 +28,7 @@ mod tests {
             .into_iter()
             .next()
             .expect("one expression");
-        match expr {
+        match &expr {
             Expr::Node(node, _) => node.meta().clone(),
             other => panic!("expected Node, got {:?}", other),
         }

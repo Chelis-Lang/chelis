@@ -597,13 +597,12 @@ fn decode_wire_value(key: MetadataKey, value: WireExpr) -> Result<MetadataValue,
             let (container, values) = parts(expr, DeepTag::Tuple, spelling)?;
             let values = values
                 .into_iter()
-                .map(|value| match value {
-                    Expr::Atom(Atom::Str(value), span) => Ok(Spanned::new(value, span)),
-                    other => Err(invalid(
-                        spelling,
-                        other.span(),
-                        "a string contract identifier",
-                    )),
+                .map(|value| {
+                    let span = value.span();
+                    match value.into_atom() {
+                        Ok((Atom::Str(value), span)) => Ok(Spanned::new(value, span)),
+                        _ => Err(invalid(spelling, span, "a string contract identifier")),
+                    }
                 })
                 .collect::<Result<_, _>>()?;
             V::PropertyContracts(PropertyContracts { container, values })
@@ -613,24 +612,30 @@ fn decode_wire_value(key: MetadataKey, value: WireExpr) -> Result<MetadataValue,
             let values = values
                 .into_iter()
                 .map(|value| {
-                    Ok(match value {
-                        Expr::Atom(Atom::Name(name), span) => {
-                            EffectMember::Name(Spanned::new(name, span))
-                        }
-                        value => {
-                            let (container, children) = parts(value, DeepTag::Resource, spelling)?;
-                            let [Expr::Atom(Atom::Str(name), name_span)]: [Expr; 1] = children
-                                .try_into()
-                                .map_err(|_| invalid(spelling, span, "one resource string"))?
-                            else {
-                                return Err(invalid(spelling, span, "one resource string"));
-                            };
-                            EffectMember::Resource(ResourceEffect {
-                                container,
-                                name: Spanned::new(name, name_span),
-                            })
-                        }
-                    })
+                    if matches!(&value, Expr::Atom(Atom::Name(_), _)) {
+                        let (Atom::Name(name), span) = value
+                            .into_atom()
+                            .unwrap_or_else(|_| unreachable!("matched name"))
+                        else {
+                            unreachable!();
+                        };
+                        return Ok(EffectMember::Name(Spanned::new(name, span)));
+                    }
+                    let span = value.span();
+                    let (container, children) = parts(value, DeepTag::Resource, spelling)?;
+                    let [name]: [Expr; 1] = children
+                        .try_into()
+                        .map_err(|_| invalid(spelling, span, "one resource string"))?;
+                    let (Atom::Str(name), name_span) = name
+                        .into_atom()
+                        .map_err(|_| invalid(spelling, span, "one resource string"))?
+                    else {
+                        return Err(invalid(spelling, span, "one resource string"));
+                    };
+                    Ok(EffectMember::Resource(ResourceEffect {
+                        container,
+                        name: Spanned::new(name, name_span),
+                    }))
                 })
                 .collect::<Result<_, MetadataError>>()?;
             let effects = EffectSet { container, values };
