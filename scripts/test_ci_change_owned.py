@@ -3306,34 +3306,40 @@ packages = ["chelis-cli", "chelis-e2e"]
 
     def test_make_plan_selects_packages_only_through_select_change(self) -> None:
         # The fallback's guarantee needs every selection mechanism inside
-        # select_change, which the trusted verifier also runs.
+        # select_change, which the trusted verifier also runs. make_plan may
+        # populate the selection sets only from select_change, by expanding
+        # required packages to their targets, and by the targeted closure.
         tree = ast.parse(textwrap.dedent(inspect.getsource(owned.make_plan)))
-        calls = {
-            node.func.attr
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "selected_packages"
-        }
-        assignments = [
-            ast.unparse(node.value)
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign))
-            and any(
-                isinstance(target, ast.Name) and target.id == "selected_packages"
-                for target in (
-                    node.targets if isinstance(node, ast.Assign) else [node.target]
-                )
-            )
-        ]
-        self.assertEqual(calls, set())
+        names = {"selected_packages", "required_packages", "change_owned"}
+        writes = []
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in names
+            ):
+                writes.append((node.lineno, ast.unparse(node)))
+            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if any(
+                    isinstance(target, ast.Name) and target.id in names
+                    for target in targets
+                ):
+                    writes.append((node.lineno, ast.unparse(node)))
         self.assertEqual(
-            assignments,
+            [text for _line, text in sorted(writes)],
             [
-                "set(trusted_targeted_packages) | selection.selected_packages",
-                "workspace_reverse_dependency_closure(candidate_metadata, "
-                "selected_packages)",
+                "selected_packages = set(trusted_targeted_packages) | "
+                "selection.selected_packages",
+                "required_packages = set(selection.required_packages)",
+                "change_owned = set(selection.change_owned)",
+                "change_owned.update((identity for identity in candidate_eligible "
+                "if identity.package in required_packages and identity not in "
+                "config.target_exclusions))",
+                "selected_packages = workspace_reverse_dependency_closure("
+                "candidate_metadata, selected_packages)",
+                "change_owned |= expansion",
             ],
         )
 
