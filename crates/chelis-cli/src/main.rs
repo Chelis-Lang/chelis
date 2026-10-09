@@ -2574,7 +2574,7 @@ fn entry_copy_repairs(
 ) -> Result<Vec<chelis_types::CopyRepair>, Box<dyn std::error::Error>> {
     let mut entry_names = BTreeSet::new();
     collect_declaration_names(entry_exprs, &mut entry_names);
-    let repairs = chelis_types::copy_repairs(checked).map_err(|errors| {
+    let repairs = chelis_types::copy_repairs(checked, Some(&entry_names)).map_err(|errors| {
         format!(
             "Check errors: {}",
             errors
@@ -2790,6 +2790,7 @@ fn copy_repair_use_label(kind: chelis_types::CopyRepairUseKind) -> &'static str 
         chelis_types::CopyRepairUseKind::Borrow => "borrow",
         chelis_types::CopyRepairUseKind::Capture => "capture",
         chelis_types::CopyRepairUseKind::Drop => "drop",
+        chelis_types::CopyRepairUseKind::Root => "root",
     }
 }
 

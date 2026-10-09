@@ -283,8 +283,9 @@ from `total_bytes_copied`; the human output prints the symbolic byte formula whe
 available.
 
 The report also carries `copy_repairs`, always present and possibly empty: one entry per
-copy the linearity checker inserts to repair ordinary consuming fan-out in the entry
-program's declarations (spec/04 section 8.3).
+copy that consuming fan-out (spec/04 section 8.3) inserts in the entry program's
+declarations. Root observation takes part in that copy insertion ([04-LIN-6]), so the
+copies it forces are listed too.
 
 ```json
 "copy_repairs": [
@@ -299,21 +300,32 @@ program's declarations (spec/04 section 8.3).
 ```
 
 `copy_at` is the span identity of the earlier ordinary consume that receives the copy,
-the same identity a linearity diagnostic prints. `forced_by` lists every later use that
-needs the binding after that consume, in source order, each with its span identity and
-its `kind`: `consume`, `borrow`, `capture` or `drop`. When a later use is itself an
-ordinary consume, it becomes the next copy site, so a chain of consumes reports one entry
-per earlier consume. Entries are ordered by declaration name and then by source
-position; the report comes from the same walk `chelis check` runs, so it is a function of
-the program text. The human output prints one `copy_repair` line per entry.
+the same identity a linearity diagnostic prints, or of the root binding whose
+observation receives it. `binding` is the name the source spells, or the projection path
+(`p.w`) when the consume is of a component a projection moves out ([04-LIN-11]).
+`forced_by` lists every later use that needs the value after that consume, in source
+order, each with its span identity and its `kind`: `consume`, `borrow`, `capture`,
+`drop` or `root`. A use the desugarer synthesized, such as the component reads of a
+destructuring `let`, has no source location and is not listed; the source use it
+belongs to is.
+
+A later ordinary consume becomes the next copy site, so a chain of consumes reports one
+entry per earlier consume. Across a branch join the latest ordinary consume of every path
+receives a copy when a use follows the join ([04-LIN-5]), so each branch's consume is
+listed. Root observations happen in manifest order after every initializer: a root
+whose value an initializer consumed copies at that consume, and of two roots denoting
+one value the earlier observation copies. Entries are ordered by declaration name and
+then by source position; the report comes from the same walk `chelis check` runs, so it
+is a function of the program text. The human output prints one `copy_repair` line per
+entry.
 
 `copy_repairs` and `copy_count` answer different questions. A repair is a copy the
 language semantics place at a source consume. `copy_count` counts the `RiscOp::Copy`
 nodes of the lowered tensor DAG, where a call that never consumes its input in the
-lowered program pays nothing for the repair, so the two counts can differ. Copies the
-compiler inserts for reasons other than fan-out, at branch joins ([04-LIN-5]), root
-observation ([04-LIN-6]) and entry arguments ([04-LIN-7]), are not repairs and are not
-listed.
+lowered program pays nothing for the repair, so the two counts can differ. The copies
+[04-LIN-7] requires before an externally supplied entry argument crosses an internal
+owned-parameter edge are not listed: which declarations are artifact entries depends on
+what a build exports, not on the program text this report reads.
 
 ## Migration And Linting
 

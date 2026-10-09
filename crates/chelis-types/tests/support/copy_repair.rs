@@ -19,7 +19,7 @@ pub fn copy_repairs_of(source: &str) -> Vec<CopyRepair> {
     let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .unwrap_or_else(|error| panic!("type check should succeed: {:?}", error.errors));
-    copy_repairs(&checked)
+    copy_repairs(&checked, None)
         .unwrap_or_else(|errors| panic!("expected the fan-out to be copy-repaired; got {errors:?}"))
 }
 

@@ -100,12 +100,43 @@ struct ConsumeSite {
     /// insertion ([04-LIN-11]; chelis#3177).
     terminal: bool,
     /// Where the consume is written; `None` for a consume with no source
-    /// node of its own, such as a root observation. A copy repair reports
-    /// this as the site that receives the inserted copy.
+    /// node of its own, such as a root observation.
     at: Option<SiteLocation>,
+    /// The ordinary consumes that each receive an inserted copy when a later
+    /// use follows this state: the latest ordinary consume on every path
+    /// into it. A straight-line consume holds its own site; a branch join
+    /// holds every branch's (spec/04 section 8.3, [04-LIN-5]).
+    copy_sites: Vec<CopySite>,
+}
+
+/// A consume that receives an inserted copy when a later use follows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CopySite {
+    at: SiteLocation,
+    /// The binding or projection the copy duplicates, as the source spells
+    /// it: `x`, or `p.w` for a component a projection moves out
+    /// ([04-LIN-11]).
+    binding: String,
+    consumed_by: String,
 }
 
 impl ConsumeSite {
+    /// How strongly a joined state must keep this consume, so a join's
+    /// verdict does not depend on branch order: a `drop` ends the owner, any
+    /// other non-ordinary consume rejects every later use, an ordinary one
+    /// is repaired by copies, and an aliasing bind destroys nothing.
+    fn join_rank(&self) -> u8 {
+        if self.terminal {
+            3
+        } else if matches!(self.kind, ConsumeKind::Aliasing) {
+            0
+        } else if self.is_ordinary() {
+            1
+        } else {
+            2
+        }
+    }
+
     /// spec/04 section 8.3: an *ordinary consume* is every consuming use
     /// except a `drop`, a match scrutinee, a consuming closure capture, and a
     /// consume of a key-carrying value or of a destructured component. A
@@ -142,9 +173,11 @@ pub struct CopyRepair {
     /// The top-level declaration whose body holds the copy, or `None` for
     /// a bare top-level expression.
     pub declaration: Option<String>,
-    /// The binding the copy duplicates, as the source spells it.
+    /// What the copy duplicates, as the source spells it at `copy_at`: a
+    /// binding, or a projection path such as `p.w` ([04-LIN-11]).
     pub binding: String,
-    /// The earlier ordinary consume that receives the copy.
+    /// The earlier ordinary consume that receives the copy, or the root
+    /// binding whose observation does ([04-LIN-6]).
     pub copy_at: String,
     /// What that consume is, for example ``call to `eats` ``.
     pub consumed_by: String,
@@ -173,6 +206,8 @@ pub enum CopyRepairUseKind {
     Capture,
     /// An explicit `drop`, which takes the original owner.
     Drop,
+    /// The observation of a top-level root ([04-LIN-6]).
+    Root,
 }
 
 /// Copy repairs keyed by their copy site, so a site the checker walks more
@@ -584,6 +619,13 @@ struct Checker {
     /// The top-level declaration whose body the walk is in, for
     /// [`CopyRepair::declaration`].
     current_def: Option<String>,
+    /// The top-level value bindings that are roots of the program under
+    /// check, for the [04-LIN-6] copies; `None` makes every one a root.
+    roots: Option<BTreeSet<String>>,
+    /// While the walk is inside a projection chain, the chain as the source
+    /// spells it (`p.w`) and its location: a consume of the chain's root is
+    /// a consume of that component ([04-LIN-11]).
+    projection_use: Option<(String, Option<SiteLocation>)>,
     /// Every consuming fan-out the walk accepted on the strength of an
     /// inserted copy.
     repairs: CopyRepairs,
@@ -599,28 +641,43 @@ impl Checker {
         self.errors.push(error);
     }
 
-    /// Record that the ordinary consume `earlier` of `name` receives an
-    /// inserted copy because of the later use `later`.
+    /// Record that each copy site of the ordinary consume `earlier` receives
+    /// an inserted copy because of a later use at `later`. A later use with no
+    /// source location of its own, a node the desugarer synthesized, still
+    /// forces the copy but is not listed as a use.
     fn record_copy_repair(
         &mut self,
-        name: &str,
         earlier: &ConsumeSite,
-        later: &Expr,
+        later: Option<SiteLocation>,
         kind: CopyRepairUseKind,
     ) {
-        let Some(copy_at) = earlier.at.clone() else {
-            return;
-        };
-        let consumed_by = earlier
-            .description
-            .strip_suffix(&format!(" at {}", copy_at.id))
-            .unwrap_or(&earlier.description)
-            .to_string();
-        self.repairs
-            .entry(copy_at)
-            .or_insert_with(|| (name.to_string(), consumed_by, BTreeSet::new()))
-            .2
-            .insert((site_location(later), kind));
+        for copy in &earlier.copy_sites {
+            let uses = &mut self
+                .repairs
+                .entry(copy.at.clone())
+                .or_insert_with(|| {
+                    (
+                        copy.binding.clone(),
+                        copy.consumed_by.clone(),
+                        BTreeSet::new(),
+                    )
+                })
+                .2;
+            if let Some(later) = &later {
+                uses.insert((later.clone(), kind));
+            }
+        }
+    }
+
+    /// Where a later use is written, for [`CopyRepairUse::at`]. Inside a
+    /// projection chain the use is the projection, not its root variable;
+    /// a node with neither a span identity nor an extent was synthesized by
+    /// the desugarer and has no source location.
+    fn later_use_location(&self, expr: &Expr) -> Option<SiteLocation> {
+        match &self.projection_use {
+            Some((_, at)) => at.clone(),
+            None => source_location(expr),
+        }
     }
 
     fn into_copy_repairs(self) -> Vec<CopyRepair> {
@@ -676,7 +733,7 @@ fn pre_declare_one(expr: &Expr, type_env: &BTreeMap<String, Expr>, scope: &mut L
 }
 
 pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<CheckError>> {
-    let checker = walk_linearity(program);
+    let checker = walk_linearity(program, None);
     if checker.errors.is_empty() {
         Ok(program.clone().with_linearity(checker.info))
     } else {
@@ -685,12 +742,18 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
 }
 
 /// The compiler-inserted copies that repair consuming fan-out in `program`
-/// (spec/04 section 8.3), ordered by declaration and then by copy site.
+/// (spec/04 section 8.3), including the fan-out of root observation
+/// ([04-LIN-6]), ordered by declaration and then by copy site. `roots` names
+/// the top-level value bindings that are the program's roots; `None` makes
+/// every top-level value binding one ([05-OBS-7]).
 ///
 /// This runs the same walk as [`check_linearity`], so it reports exactly the
 /// fan-out that check accepts, and it fails with the same diagnostics.
-pub fn copy_repairs(program: &CheckedProgram) -> Result<Vec<CopyRepair>, Vec<CheckError>> {
-    let checker = walk_linearity(program);
+pub fn copy_repairs(
+    program: &CheckedProgram,
+    roots: Option<&BTreeSet<String>>,
+) -> Result<Vec<CopyRepair>, Vec<CheckError>> {
+    let checker = walk_linearity(program, roots.cloned());
     if checker.errors.is_empty() {
         Ok(checker.into_copy_repairs())
     } else {
@@ -698,7 +761,7 @@ pub fn copy_repairs(program: &CheckedProgram) -> Result<Vec<CopyRepair>, Vec<Che
     }
 }
 
-fn walk_linearity(program: &CheckedProgram) -> Checker {
+fn walk_linearity(program: &CheckedProgram, roots: Option<BTreeSet<String>>) -> Checker {
     let tensor_carrying_adts = compute_tensor_carrying_adts(program.annotated_exprs());
     let key_carrying_adts = compute_key_carrying_adts(program.annotated_exprs());
     let mut checker = Checker {
@@ -711,6 +774,8 @@ fn walk_linearity(program: &CheckedProgram) -> Checker {
         type_headers: program.type_headers().clone(),
         projection_root: None,
         current_def: None,
+        roots,
+        projection_use: None,
         repairs: CopyRepairs::new(),
         declaration_free_reads: false,
     };
@@ -838,6 +903,8 @@ pub fn check_linearity_with_context(
         type_headers: merged_type_headers,
         projection_root: None,
         current_def: None,
+        roots: None,
+        projection_use: None,
         repairs: CopyRepairs::new(),
         declaration_free_reads: false,
     };
@@ -909,6 +976,90 @@ impl Checker {
         for expr in exprs {
             self.observe_top_level_key_roots(expr, scope);
         }
+        let mut observed = BTreeMap::new();
+        for expr in exprs {
+            self.report_root_observation_copies(expr, scope, &mut observed);
+        }
+    }
+
+    /// [04-LIN-6]: each root observation is, in manifest order, a terminal
+    /// consuming use that takes part in the same copy insertion as authored
+    /// fan-out. A root whose owner an initializer consumed ordinarily, or an
+    /// earlier root already observed, forces a copy there; the final
+    /// observation takes the original. This records those copies and leaves
+    /// the ownership state, and so every verdict, unchanged. `observed` maps
+    /// each owner to the root observation that last took it.
+    fn report_root_observation_copies(
+        &mut self,
+        expr: &Expr,
+        scope: &LinearScope,
+        observed: &mut BTreeMap<BindingId, ConsumeSite>,
+    ) {
+        let children = match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
+                for child in children.iter().skip(1) {
+                    self.report_root_observation_copies(child, scope, observed);
+                }
+                return;
+            }
+            ExprCarrier::DecodedNode(DeepTag::Def, _, children) => children,
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => return,
+        };
+        let Some(name) = children.first().and_then(symbol_name) else {
+            return;
+        };
+        if function_declaration_body(children).is_some()
+            || self
+                .roots
+                .as_ref()
+                .is_some_and(|roots| !roots.contains(name))
+        {
+            return;
+        }
+        let Some(id) = scope.top_id(name) else {
+            return;
+        };
+        let Some(ty) = scope.record(id).and_then(|record| record.ty.as_ref()) else {
+            return;
+        };
+        if !type_expr_is_owned_linear(ty, &self.tensor_carrying_adts) || self.type_holds_key(ty) {
+            return;
+        }
+        let owner = scope.resolve_alias_chain(id).unwrap_or(id);
+        let earlier = observed
+            .get(&owner)
+            .cloned()
+            .or_else(|| match scope.state(owner) {
+                Some(BindingState::Consumed(site)) if site.is_ordinary() => Some(site.clone()),
+                _ => None,
+            });
+        let at = SiteLocation {
+            declaration: Some(name.to_string()),
+            ..site_location(expr)
+        };
+        if let Some(earlier) = earlier {
+            self.record_copy_repair(&earlier, Some(at.clone()), CopyRepairUseKind::Root);
+        }
+        let description = format!("the root observation of `{name}`");
+        observed.insert(
+            owner,
+            ConsumeSite {
+                description: description.clone(),
+                kind: ConsumeKind::Structural,
+                terminal: false,
+                at: Some(at.clone()),
+                copy_sites: vec![CopySite {
+                    at,
+                    binding: name.to_string(),
+                    consumed_by: description,
+                }],
+            },
+        );
     }
 
     /// [04-LIN-6] and [04-LIN-9]: every top-level value binding is a root
@@ -979,6 +1130,7 @@ impl Checker {
                 kind: ConsumeKind::Structural,
                 terminal: false,
                 at: None,
+                copy_sites: Vec::new(),
             },
         );
     }
@@ -1085,6 +1237,7 @@ impl Checker {
                     kind: ConsumeKind::Structural,
                     terminal: false,
                     at: Some(site_location(body)),
+                    copy_sites: Vec::new(),
                 },
             );
         } else if is_var_expr(body) && self.expr_is_owned_linear(body, scope) {
@@ -1105,6 +1258,7 @@ impl Checker {
                     kind: ConsumeKind::Aliasing,
                     terminal: false,
                     at: Some(site_location(body)),
+                    copy_sites: Vec::new(),
                 },
             );
             if let Some((alias_id, source_id)) = alias_link {
@@ -1165,6 +1319,10 @@ impl Checker {
                 let entered_projection = matches!(tag, DeepTag::TupleGet | DeepTag::Access)
                     && self.projection_root.is_none()
                     && self.check_projection_use(expr, scope);
+                if entered_projection {
+                    self.projection_use =
+                        projection_label(expr).map(|label| (label, source_location(expr)));
+                }
                 match tag {
                     DeepTag::Var => self.consume_var_expr(expr, scope, generic_site(expr)),
                     DeepTag::Copy => self.check_copy(children, scope),
@@ -1193,6 +1351,7 @@ impl Checker {
                 }
                 if entered_projection {
                     self.projection_root = None;
+                    self.projection_use = None;
                 }
             }
             ExprCarrier::StructuralList(elements) => {
@@ -1574,6 +1733,7 @@ impl Checker {
                             kind: ConsumeKind::Structural,
                             terminal: false,
                             at: Some(site_location(value)),
+                            copy_sites: Vec::new(),
                         },
                     );
                 } else if is_var_expr(value) && self.expr_is_owned_linear(value, scope) {
@@ -1596,6 +1756,7 @@ impl Checker {
                             kind: ConsumeKind::Aliasing,
                             terminal: false,
                             at: Some(site_location(value)),
+                            copy_sites: Vec::new(),
                         },
                     );
                 } else if matches!(get_tag_expr(value), Some(DeepTag::Borrow)) {
@@ -1761,6 +1922,7 @@ impl Checker {
                             kind: ConsumeKind::Structural,
                             terminal: false,
                             at: Some(site_location(expr)),
+                            copy_sites: Vec::new(),
                         },
                     );
                 }
@@ -1858,6 +2020,7 @@ impl Checker {
                     kind: ConsumeKind::Structural,
                     terminal: false,
                     at: Some(site_location(&children[0])),
+                    copy_sites: Vec::new(),
                 },
             );
         } else {
@@ -1950,6 +2113,7 @@ impl Checker {
             kind: ConsumeKind::Structural,
             terminal: false,
             at: site.at.clone(),
+            copy_sites: site.copy_sites.clone(),
         };
         for id in visible_ids {
             let Some(record) = arm_scope.record(*id) else {
@@ -1992,6 +2156,7 @@ impl Checker {
                         kind: ConsumeKind::Structural,
                         terminal: false,
                         at: None,
+                        copy_sites: Vec::new(),
                     },
                 ));
             }
@@ -2140,28 +2305,40 @@ impl Checker {
             // over an `Aliasing` record from another branch: an alias bind
             // does not destroy anything, and letting it win would report the
             // wrong site. A terminal consume ends the owner on its path, so
-            // it outranks an ordinary one (chelis#3177).
-            let consumed_site = branches
+            // it outranks every other (chelis#3177), and a non-ordinary
+            // consume, after which every use is rejected, outranks an ordinary
+            // one, which copies repair (spec/04 section 8.3). Ranking rather
+            // than taking the first branch keeps the verdict independent of
+            // branch order. When the joined consume is ordinary, a later use
+            // copies at the latest ordinary consume of every path, so the
+            // joined state carries every branch's copy sites.
+            let branch_sites = branches
                 .iter()
-                .find_map(|branch| match branch.state(*id) {
-                    Some(BindingState::Consumed(site)) if site.terminal => Some(site.clone()),
+                .filter_map(|branch| match branch.state(*id) {
+                    Some(BindingState::Consumed(site)) => Some(site),
                     _ => None,
                 })
-                .or_else(|| {
-                    branches.iter().find_map(|branch| match branch.state(*id) {
-                        Some(BindingState::Consumed(site))
-                            if matches!(site.kind, ConsumeKind::Structural) =>
-                        {
-                            Some(site.clone())
+                .collect::<Vec<_>>();
+            let consumed_site = branch_sites
+                .iter()
+                .map(|site| site.join_rank())
+                .max()
+                .and_then(|rank| {
+                    let mut joined =
+                        (*branch_sites.iter().find(|site| site.join_rank() == rank)?).clone();
+                    if rank == 1 {
+                        for site in &branch_sites {
+                            if site.join_rank() != rank {
+                                continue;
+                            }
+                            for copy in &site.copy_sites {
+                                if !joined.copy_sites.contains(copy) {
+                                    joined.copy_sites.push(copy.clone());
+                                }
+                            }
                         }
-                        _ => None,
-                    })
-                })
-                .or_else(|| {
-                    branches.iter().find_map(|branch| match branch.state(*id) {
-                        Some(BindingState::Consumed(site)) => Some(site.clone()),
-                        _ => None,
-                    })
+                    }
+                    Some(joined)
                 });
             let Some(site) = consumed_site else {
                 continue;
@@ -2209,6 +2386,11 @@ impl Checker {
                 Some(BindingState::Live { .. }) => true,
                 Some(BindingState::Consumed(outer)) => {
                     (site.terminal && !outer.terminal)
+                        // A structural outer consume is replaced by the
+                        // joined one when that ranks at least as high: a
+                        // branch's later consume is the latest on its path.
+                        || (matches!(outer.kind, ConsumeKind::Structural)
+                            && site.join_rank() >= outer.join_rank())
                         || (matches!(outer.kind, ConsumeKind::Aliasing)
                             && matches!(site.kind, ConsumeKind::Structural)
                             && scope.is_component_id(*id))
@@ -2353,12 +2535,29 @@ impl Checker {
     }
 
     fn consume_var_expr(&mut self, expr: &Expr, scope: &mut LinearScope, mut site: ConsumeSite) {
-        if let Some(at) = site.at.as_mut() {
-            at.declaration = self.current_def.clone();
-        }
         let Some(name) = var_name(expr) else {
             return;
         };
+        if let Some(at) = &site.at {
+            let consumed_by = site
+                .description
+                .strip_suffix(&format!(" at {}", at.id))
+                .unwrap_or(&site.description)
+                .to_string();
+            let (binding, at) = match &self.projection_use {
+                Some((path, Some(projection))) => (path.clone(), projection.clone()),
+                Some((path, None)) => (path.clone(), at.clone()),
+                None => (name.to_string(), at.clone()),
+            };
+            site.copy_sites = vec![CopySite {
+                at: SiteLocation {
+                    declaration: self.current_def.clone(),
+                    ..at
+                },
+                binding,
+                consumed_by,
+            }];
+        }
         if !self.expr_is_owned_linear(expr, scope) {
             return;
         }
@@ -2535,18 +2734,21 @@ impl Checker {
             Some(BindingState::Consumed(earlier)) if site.terminal => {
                 if earlier.is_ordinary() {
                     let earlier = earlier.clone();
-                    self.record_copy_repair(name, &earlier, expr, CopyRepairUseKind::Drop);
+                    let later = self.later_use_location(expr);
+                    self.record_copy_repair(&earlier, later, CopyRepairUseKind::Drop);
                 }
                 scope.consume_id(target, site)
             }
             // Consuming fan-out: the implicit-linearity pass inserts a Copy at
-            // the earlier consume (spec/04 section 8.3). When this use is itself
-            // an ordinary consume, it becomes the latest one, so a still later
-            // use copies here.
+            // the earlier consume (spec/04 section 8.3), and this consume
+            // becomes the binding's state. A later ordinary consume is then the
+            // site a still later use copies at; a later match scrutinee makes
+            // every still later use a use-after-consume.
             Some(BindingState::Consumed(earlier)) if earlier.is_ordinary() => {
                 let earlier = earlier.clone();
-                self.record_copy_repair(name, &earlier, expr, CopyRepairUseKind::Consume);
-                if site.is_ordinary() {
+                let later = self.later_use_location(expr);
+                self.record_copy_repair(&earlier, later, CopyRepairUseKind::Consume);
+                if matches!(site.kind, ConsumeKind::Structural) {
                     scope.consume_id(target, site);
                 }
             }
@@ -2619,7 +2821,8 @@ impl Checker {
             && site.is_ordinary()
             && !scope.is_destructured_id(resolved)
         {
-            self.record_copy_repair(name, site, expr, kind);
+            let later = self.later_use_location(expr);
+            self.record_copy_repair(site, later, kind);
             return;
         }
         let message = with_macro_provenance(
@@ -3938,6 +4141,13 @@ fn diag_site(expr: &Expr) -> String {
     format!("at {}", site_location(expr).id)
 }
 
+/// [`site_location`] for a node the source wrote, or `None` for one the
+/// desugarer synthesized, which carries neither a span identity nor an
+/// extent.
+fn source_location(expr: &Expr) -> Option<SiteLocation> {
+    (span_metadata_id(expr).is_some() || expr.span().len > 0).then(|| site_location(expr))
+}
+
 /// The location [`diag_site`] prints, with the start offset that orders it.
 fn site_location(expr: &Expr) -> SiteLocation {
     match span_metadata_id(expr) {
@@ -4338,6 +4548,19 @@ fn projection_chain(expr: &Expr) -> Option<(&Expr, Vec<ProjectionStep>)> {
     Some((root, path))
 }
 
+/// A projection chain as the source spells it, `p.w` or `t.0.1`.
+fn projection_label(expr: &Expr) -> Option<String> {
+    let (root, path) = projection_chain(expr)?;
+    let mut label = var_name(root)?.to_string();
+    for step in path {
+        match step {
+            ProjectionStep::Index(index) => label.push_str(&format!(".{index}")),
+            ProjectionStep::Field(field) => label.push_str(&format!(".{field}")),
+        }
+    }
+    Some(label)
+}
+
 /// Two projection paths overlap when one is a prefix of the other: the empty
 /// path, the owner whole, overlaps every component.
 fn projection_paths_overlap(lhs: &[ProjectionStep], rhs: &[ProjectionStep]) -> bool {
@@ -4582,6 +4805,7 @@ fn app_site(expr: &Expr, children: &[Expr], builtin_callee: Option<&str>) -> Con
         kind: ConsumeKind::Structural,
         terminal: builtin_callee == Some("drop"),
         at: Some(site_location(expr)),
+        copy_sites: Vec::new(),
     }
 }
 
@@ -4591,6 +4815,7 @@ fn generic_site(expr: &Expr) -> ConsumeSite {
         kind: ConsumeKind::Structural,
         terminal: false,
         at: Some(site_location(expr)),
+        copy_sites: Vec::new(),
     }
 }
 
@@ -4600,6 +4825,7 @@ fn realize_site(expr: &Expr) -> ConsumeSite {
         kind: ConsumeKind::Structural,
         terminal: false,
         at: Some(site_location(expr)),
+        copy_sites: Vec::new(),
     }
 }
 

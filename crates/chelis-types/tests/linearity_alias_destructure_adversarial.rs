@@ -37,7 +37,9 @@ fn assert_linearity_clean(source: &str) {
 #[test]
 fn alias_chain_three_levels_propagates_consume() {
     // The consume through three alias links lands on `x`, so the later borrow
-    // of `x` is fan-out repaired at that consume (spec/04 section 8.3).
+    // of `x` is fan-out repaired at that consume (spec/04 section 8.3). Had it
+    // not landed, `x` would be live and nothing would be copied. The repair
+    // names the alias the consume spells.
     assert_copy_repaired(
         r#"
 def f(x: tensor[4, f32]) -> tensor[4, f32] =
@@ -48,7 +50,7 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
     add(x, r)
   }
 "#,
-        "x",
+        "z",
         "realize",
         CopyRepairUseKind::Borrow,
     );
@@ -69,7 +71,7 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
     add(x, r)
   }
 "#,
-        "x",
+        "d",
         "realize",
         CopyRepairUseKind::Borrow,
     );
@@ -116,7 +118,7 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
     add(x, r)
   }
 "#,
-        "x",
+        "y",
         "realize",
         CopyRepairUseKind::Borrow,
     );
@@ -135,7 +137,7 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
     add(x, r)
   }
 "#,
-        "x",
+        "y",
         "realize",
         CopyRepairUseKind::Borrow,
     );

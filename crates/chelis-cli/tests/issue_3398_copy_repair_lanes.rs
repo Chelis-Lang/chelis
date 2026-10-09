@@ -232,7 +232,8 @@ fn cost_json_publishes_each_copy_repair() {
                 "{later}"
             );
             assert!(
-                ["consume", "borrow", "capture", "drop"].contains(&later["kind"].as_str().unwrap()),
+                ["consume", "borrow", "capture", "drop", "root"]
+                    .contains(&later["kind"].as_str().unwrap()),
                 "{later}"
             );
         }

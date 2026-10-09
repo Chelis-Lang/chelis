@@ -33,7 +33,7 @@ fn repairs(source: &str) -> Result<Vec<CopyRepair>, Vec<CheckError>> {
     let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .unwrap_or_else(|error| panic!("type check should succeed: {:?}", error.errors));
-    copy_repairs(&checked)
+    copy_repairs(&checked, None)
 }
 
 #[track_caller]
@@ -308,4 +308,172 @@ fn the_report_is_deterministic() {
         let again = serde_json::to_string(&accepted(source)).expect("serialize");
         assert_eq!(first, again);
     }
+}
+
+fn repairs_with_roots(source: &str, roots: &std::collections::BTreeSet<String>) -> Vec<CopyRepair> {
+    let decls = parse_str(&format!("{PRELUDE}{source}")).expect("surf parse should succeed");
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
+    let checked = check_typed_program(&deep)
+        .unwrap_or_else(|error| panic!("type check should succeed: {:?}", error.errors));
+    copy_repairs(&checked, Some(roots)).expect("linearity should pass")
+}
+
+/// The source text a `surf:a..b` span identity names, in a fixture that
+/// follows the prelude.
+fn span_text(source: &str, id: &str) -> String {
+    let text = format!("{PRELUDE}{source}");
+    let (start, end) = id
+        .strip_prefix("surf:")
+        .and_then(|range| range.split_once(".."))
+        .unwrap_or_else(|| panic!("`{id}` is not a Surf span identity"));
+    text[start.parse::<usize>().unwrap()..end.parse::<usize>().unwrap()].to_string()
+}
+
+/// A match scrutinee after an ordinary consume takes the original, so every
+/// still later use is rejected, borrow or consume (spec/04 section 8.3).
+#[test]
+fn a_use_after_an_owned_call_then_a_match_scrutinee_is_rejected() {
+    for later in ["look(x)", "eats(x)"] {
+        rejected(
+            &format!(
+                "def f(x: tensor[2, f32]) -> f32 = {{\n  u = eats(x)\n  v = match x with {{\n    | y => eats(y)\n  }}\n  add(add(u, v), {later})\n}}\n"
+            ),
+            "match scrutinee",
+        );
+    }
+}
+
+/// A join keeps the strongest consume of any branch, so a branch that hands
+/// the value to a match scrutinee or a consuming capture rejects a later use
+/// whichever side of the `if` it is on.
+#[test]
+fn a_join_rejects_after_a_non_ordinary_branch_in_either_order() {
+    let scrutinee = "match x with {\n    | y => eats(y)\n  }";
+    let capture = "{\n    g = fn (k: f32) -> add(k, eats(x))\n    g(1.0f32)\n  }";
+    for (other, consumed_by) in [(scrutinee, "match scrutinee"), (capture, "closure capture")] {
+        for (then_branch, else_branch) in [("eats(x)", other), (other, "eats(x)")] {
+            rejected(
+                &format!(
+                    "def f(x: tensor[2, f32], c: bool) -> f32 = {{\n  u = if c then {then_branch} else {else_branch}\n  add(u, look(x))\n}}\n"
+                ),
+                consumed_by,
+            );
+        }
+    }
+}
+
+/// Every path's latest ordinary consume receives a copy when a use follows
+/// the join ([04-LIN-5]): both branches are listed, each forced by the use.
+#[test]
+fn a_join_copies_at_the_consume_of_every_branch() {
+    let if_source = "def f(x: tensor[2, f32], c: bool) -> f32 = {\n  u = if c then eats(x) else add(eats(x), 1.0f32)\n  add(u, look(x))\n}\n";
+    let match_source = "def f(x: tensor[2, f32], c: bool) -> f32 = {\n  u = match c with {\n    | true => eats(x)\n    | false => add(eats(x), 1.0f32)\n  }\n  add(u, eats(x))\n}\n";
+    for (source, later) in [
+        (if_source, CopyRepairUseKind::Borrow),
+        (match_source, CopyRepairUseKind::Consume),
+    ] {
+        let repairs = accepted(source);
+        assert_eq!(repairs.len(), 2, "{repairs:#?}");
+        for repair in &repairs {
+            assert_eq!(span_text(source, &repair.copy_at), "eats(x)");
+            assert_eq!(repair.forced_by.len(), 1, "{repair:#?}");
+            assert_eq!(repair.forced_by[0].kind, later);
+            assert_eq!(repair.forced_by[0].at, repairs[0].forced_by[0].at);
+        }
+        assert_ne!(repairs[0].copy_at, repairs[1].copy_at);
+    }
+}
+
+/// A branch that does not touch the value leaves the earlier consume as the
+/// latest on its path, so that consume and the other branch's both copy.
+#[test]
+fn a_join_keeps_the_earlier_consume_of_an_untouched_branch() {
+    let source = "def f(x: tensor[2, f32], c: bool) -> f32 = {\n  a = eats(x)\n  u = if c then eats(x) else 1.0f32\n  add(add(a, u), look(x))\n}\n";
+    let repairs = accepted(source);
+    assert_eq!(repairs.len(), 2, "{repairs:#?}");
+    let kinds = repairs
+        .iter()
+        .map(|repair| {
+            repair
+                .forced_by
+                .iter()
+                .map(|later| later.kind)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            vec![CopyRepairUseKind::Consume, CopyRepairUseKind::Borrow],
+            vec![CopyRepairUseKind::Borrow]
+        ]
+    );
+}
+
+/// The reads a destructuring `let` desugars to are not source uses: the
+/// destructure is listed once, at the value it destructures.
+#[test]
+fn a_destructure_after_a_consume_lists_only_source_uses() {
+    let source = "def eatp(p: (tensor[2, f32], tensor[2, f32])) -> f32 = tensor_to_scalar(sum(p.0, 0i32))\n\
+                  def f(p: (tensor[2, f32], tensor[2, f32])) -> f32 = {\n  u = eatp(p)\n  (a, b) = p\n  add(u, add(eats(a), look(b)))\n}\n";
+    let repairs = accepted(source)
+        .into_iter()
+        .filter(|repair| repair.declaration.as_deref() == Some("f"))
+        .collect::<Vec<_>>();
+    assert_eq!(repairs.len(), 1, "{repairs:#?}");
+    assert_eq!(span_text(source, &repairs[0].copy_at), "eatp(p)");
+    assert_eq!(repairs[0].forced_by.len(), 1, "{repairs:#?}");
+    assert_eq!(span_text(source, &repairs[0].forced_by[0].at), "p");
+}
+
+/// A projection moves its component out ([04-LIN-11]), so its fan-out copies
+/// the component, named by its path.
+#[test]
+fn a_projection_repair_names_the_component() {
+    let source = "type Lin[i] =\n  | Lin { w: tensor[i, f32] }\n\
+                  def loss(p: Lin[2]) -> f32 = tensor_to_scalar(sum(mul(p.w, p.w), 0i32))\n";
+    let repairs = accepted(source);
+    assert_eq!(repairs.len(), 1, "{repairs:#?}");
+    assert_eq!(repairs[0].binding, "p.w");
+    assert_eq!(span_text(source, &repairs[0].copy_at), "p.w");
+    assert_eq!(span_text(source, &repairs[0].forced_by[0].at), "p.w");
+}
+
+/// [04-LIN-6]: a root observation is a terminal consuming use in the same
+/// copy insertion, so the last initializer that consumed a root copies, and
+/// of two roots on one value the first copies. A binding that is not a root
+/// forces nothing.
+#[test]
+fn root_observation_forces_copies() {
+    let source = "def bump(x: tensor[2, f32]) -> tensor[2, f32] = realize(x)\n\
+                  x = to_tensor([1.0f32, 2.0f32])\nu = eats(x)\ny = bump(x)\n";
+    let all = accepted(source);
+    let root_forced = all
+        .iter()
+        .filter(|repair| {
+            repair
+                .forced_by
+                .iter()
+                .any(|later| later.kind == CopyRepairUseKind::Root)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(root_forced.len(), 1, "{all:#?}");
+    assert_eq!(root_forced[0].declaration.as_deref(), Some("y"));
+    assert_eq!(span_text(source, &root_forced[0].copy_at), "bump(x)");
+
+    let roots = ["u", "y"].map(String::from).into();
+    let without_x = repairs_with_roots(source, &roots);
+    assert!(
+        without_x.iter().all(|repair| repair
+            .forced_by
+            .iter()
+            .all(|later| later.kind != CopyRepairUseKind::Root)),
+        "{without_x:#?}"
+    );
+
+    let aliased = accepted("x = to_tensor([1.0f32, 2.0f32])\ny = x\n");
+    assert_eq!(aliased.len(), 1, "{aliased:#?}");
+    assert_eq!(aliased[0].declaration.as_deref(), Some("x"));
+    assert_eq!(aliased[0].consumed_by, "the root observation of `x`");
+    assert_eq!(aliased[0].forced_by[0].kind, CopyRepairUseKind::Root);
 }

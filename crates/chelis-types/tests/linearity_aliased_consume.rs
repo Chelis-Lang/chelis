@@ -25,7 +25,8 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
 #[test]
 fn aliased_consume_lands_on_the_source() {
     // The consume through alias `y` lands on `w`, so the later borrow of `w`
-    // is fan-out repaired at that consume (spec/04 section 8.3).
+    // is fan-out repaired at that consume (spec/04 section 8.3), which the
+    // repair names by the alias it spells.
     assert_copy_repaired(
         r#"
 def f(w: tensor[4, f32]) -> tensor[4, f32] =
@@ -35,7 +36,7 @@ def f(w: tensor[4, f32]) -> tensor[4, f32] =
     add(w, z)
   }
 "#,
-        "w",
+        "y",
         "realize",
         CopyRepairUseKind::Borrow,
     );
