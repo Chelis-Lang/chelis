@@ -392,3 +392,55 @@ fn admitted_but_ungranted_size_fails_allocation_in_both_lanes() {
         None,
     );
 }
+
+/// Reductions and `trace` over an empty operand with huge extents: dropping
+/// the zero axis leaves a result with no representable count or strides.
+/// Before admission the evaluator multiplied the extents unchecked: a debug
+/// build panicked with "attempt to multiply with overflow" and a release
+/// build returned a result whose element count wrapped. Eval only, because
+/// compiled C hangs building such an operand (#3437).
+#[test]
+fn reductions_over_huge_empty_operands_trap_in_eval() {
+    let helpers = "def zero() -> i64 = tensor_to_scalar(sum(expand(to_tensor([0i64]), 0i32, 2i64), 0i32))\ndef h32() -> i64 = tensor_to_scalar(sum(expand(to_tensor([2147483648i64]), 0i32, 2i64), 0i32))\n";
+    for (name, operand, result, report, trap) in [
+        (
+            "nested_sum",
+            "insert(insert(insert(expand(to_tensor([1.0f32]), 0i32, zero()), 1i32, h32()), 0i32, h32()), 0i32, h32())",
+            "sum(sum(x, 2i32), 1i32)",
+            "Overflow: extent product exceeds i64",
+            "numeric trap: overflow in sum at i64",
+        ),
+        (
+            "trace",
+            "insert(insert(insert(expand(to_tensor([1.0f32]), 0i32, zero()), 1i32, h32()), 0i32, h32()), 0i32, h32())",
+            "trace(x, 0i32, 2i32)",
+            "Overflow: stride product exceeds i64",
+            "numeric trap: overflow in diagonal at i64",
+        ),
+    ] {
+        let source = format!(
+            "{helpers}def main() -> i64 ! {{ IO }} = {{\n  _ = print(\"before\")\n  x = {operand}\n  y = {result}\n  shape(y, 0i32)\n}}\nout = main()\n"
+        );
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(format!("{name}.ch"));
+        write_file(&path, &source);
+        let eval = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--timeout", "120", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("eval");
+        let all = text(&eval);
+        assert!(!eval.status.success(), "{name}: eval must trap:\n{all}");
+        assert!(!all.contains("panicked"), "{name}:\n{all}");
+        let lines = all
+            .lines()
+            .map(|line| line.trim_start_matches("error: "))
+            .collect::<Vec<_>>();
+        assert!(
+            lines.contains(&report),
+            "{name}: expected `{report}`:\n{all}"
+        );
+        assert!(lines.contains(&trap), "{name}: expected `{trap}`:\n{all}");
+    }
+}
