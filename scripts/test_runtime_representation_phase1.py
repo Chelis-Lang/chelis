@@ -442,6 +442,38 @@ class ReceiptTests(unittest.TestCase):
                 'MutationContractTests.'
                 'test_mutation_body_change_moves_the_freeze_digest',
             ),
+            (
+                'scripts.test_runtime_representation_oracle.'
+                'SourceUniverseTests.'
+                'test_the_universe_is_every_file_under_the_frozen_roots',
+                'scripts.test_runtime_representation_oracle.'
+                'SourceUniverseTests.'
+                'test_the_frozen_source_list_equals_its_roots',
+            ),
+            (
+                'scripts.test_runtime_representation_oracle.'
+                'SourceUniverseTests.'
+                'test_a_new_file_under_a_root_is_scanned_without_registration',
+                'scripts.test_runtime_representation_oracle.'
+                'SourceUniverseTests.'
+                'test_an_unregistered_file_under_a_root_fails_closed',
+            ),
+            (
+                'scripts.test_runtime_representation_oracle.'
+                'SourceUniverseTests.'
+                'test_a_root_whose_directory_departed_fails_closed',
+                'scripts.test_runtime_representation_oracle.'
+                'SourceUniverseTests.'
+                'test_a_departed_registered_file_fails_closed',
+            ),
+            (
+                'scripts.test_runtime_representation_oracle.'
+                'SourceUniverseTests.'
+                'test_a_changed_root_moves_the_freeze',
+                'scripts.test_runtime_representation_oracle.'
+                'RedTeamRegressionTests.'
+                'test_the_docstring_source_counts_match_the_frozen_list',
+            ),
         )
         for current, stale in replacements:
             with self.subTest(stale=stale):
