@@ -932,6 +932,10 @@ fn agreeing_claim_walks_run_when_the_host_is_cxx() {
 
 /// Run `command` to completion and return its stdout and peak resident set
 /// size, in the platform's `ru_maxrss` unit (only compared as a ratio).
+#[expect(
+    clippy::zombie_processes,
+    reason = "the child is reaped by `wait4`, which also reports its peak memory"
+)]
 fn peak_resident(mut command: std::process::Command) -> (String, i64) {
     let child = command
         .stdout(std::process::Stdio::piped())
