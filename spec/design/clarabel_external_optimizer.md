@@ -280,9 +280,11 @@ argument parser and direct-wrapper substitution with the typed call/value
 representation; add fixed-shape symbolic scalarization, PSD derivation and
 explicit-premise binding, goal-directed optimality instantiation, and
 downstream helper lowering. Preserve the existing literal proofs as regression
-witnesses. The optional provider/SMT tests and feature-specific Clippy remain
-owned by Clarabel paths, with broader coverage in the scheduled run; unrelated
-PRs do not acquire a new serial Clarabel check.
+witnesses. The path-owned route for optional provider/SMT tests and
+feature-specific Clippy is specified in
+[Feature validation dependencies for shared source changes](feature_validation_dependency_routing.md);
+broader coverage remains in the scheduled run. Unrelated PRs do not acquire a
+new serial Clarabel check.
 
 The positive oracle runs `chelis prove --tier smt-only --json` on the
 algorithm property and requires `status: "passed"`, zero samples, a
