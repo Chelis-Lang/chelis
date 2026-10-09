@@ -72,6 +72,46 @@ fn scalar_beacon_rejects_a_mismatched_signature_before_dispatch() {
 }
 
 #[test]
+fn two_sided_beacon_requires_one_bound_per_side_on_the_same_expression() {
+    crate::support::isolate();
+    let options = PropertyRunOptions {
+        tier: "beacon-only".into(),
+        ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
+    };
+    for (body, expected) in [
+        (
+            "(affine(x) >= -1.0f64) && (affine(x) >= -2.0f64)",
+            "duplicate Beacon lower",
+        ),
+        (
+            "(affine(x) >= -1.0f64) && (x <= 2.0f64)",
+            "same output expression",
+        ),
+        (
+            "(affine(x) > -1.0f64) && (affine(x) <= 2.0f64)",
+            "non-strict",
+        ),
+    ] {
+        let source = format!(
+            "def affine(x: f64) -> f64 = x + 1.0f64\n@property bounded forall(x: f64) where x >= -1.0f64, x <= 1.0f64:\n  {body}\n"
+        );
+        let PropertyRunResult::Ran(outcomes) =
+            run_surf_source_properties(&source, &options).unwrap();
+        assert_eq!(
+            outcomes[0].status,
+            PropertyStatus::Unsupported,
+            "{outcomes:?}"
+        );
+        assert_eq!(outcomes[0].samples, 0);
+        assert!(outcomes[0].engine_evidence.is_none());
+        assert!(
+            outcomes[0].reason.as_deref().unwrap().contains(expected),
+            "{outcomes:?}"
+        );
+    }
+}
+
+#[test]
 fn beacon_scalar_bridge_requires_explicit_f64_bounds_and_unshadowed_identity() {
     crate::support::isolate();
     let options = PropertyRunOptions {
