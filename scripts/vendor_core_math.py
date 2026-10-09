@@ -235,6 +235,8 @@ _DIRECTIVE = re.compile(r"^[ \t]*#[ \t]*(if|ifdef|ifndef|elif|else|endif)\b")
 # which is the same 128-bit unsigned arithmetic as the `unsigned __int128` arm.
 _PORTABLE_ARM_CONDITIONALS = (
     "#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14 && __BITINT_MAXWIDTH__ && __BITINT_MAXWIDTH__ >= 128)",
+    # binary64 `pow`'s `qint.h` spells the same `_BitInt(128)` test without the width clause.
+    "#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14)",
     "#if defined(__x86_64__)",
     "#ifdef __x86_64__",
     "#ifdef CORE_MATH_SUPPORT_ERRNO",

@@ -3983,6 +3983,75 @@ mod tests {
         );
     }
 
+    fn pow_dag() -> (Dag, NodeId, NodeId, NodeId) {
+        build_binary_dag(|dag, owner, a, b, ty| {
+            dag.add_node(owner, RiscOp::Pow, vec![a, b], ty.clone(), None)
+        })
+    }
+
+    /// Both [05-OP-79] cotangents at one point, from the gradient DAG.
+    fn pow_grads(x0: f64, y0: f64) -> (f64, f64) {
+        let (dag, x, y, out) = pow_dag();
+        let grad = grad_dag(&dag, out, &[x, y]).unwrap();
+        let inputs: UnordMap<String, f64> =
+            [("x".to_string(), x0), ("y".to_string(), y0)].into_iter().collect();
+        let vals = eval_scalar(&grad.dag, &inputs);
+        (vals[&grad.grad_nodes[&x]], vals[&grad.grad_nodes[&y]])
+    }
+
+    /// [05-OP-79]: both cotangents agree with central differences, including a
+    /// negative base with an integer exponent and a negative exponent.
+    #[test]
+    fn grad_pow_matches_finite_differences() {
+        let (dag, x, y, out) = pow_dag();
+        for (x0, y0) in [(2.0, 3.0), (-1.5, 3.0), (-1.5, 2.0), (0.7, 2.5), (1.3, -0.5)] {
+            let (a, n) = finite_diff(&dag, out, x, "x", &[("y", y0)], x0, 1e-6);
+            assert!(
+                (a - n).abs() < 1e-4 * a.abs().max(1.0),
+                "d pow/dx at ({x0}, {y0}): analytical {a}, numerical {n}"
+            );
+            let expected = y0 * x0.powf(y0 - 1.0);
+            assert!((a - expected).abs() < 1e-9 * expected.abs().max(1.0), "{a} vs {expected}");
+        }
+        for (x0, y0) in [(2.0, 3.0), (0.7, 2.5), (1.3, -0.5)] {
+            let (a, n) = finite_diff(&dag, out, y, "y", &[("x", x0)], y0, 1e-6);
+            assert!(
+                (a - n).abs() < 1e-4 * a.abs().max(1.0),
+                "d pow/dy at ({x0}, {y0}): analytical {a}, numerical {n}"
+            );
+        }
+    }
+
+    /// [05-OP-79]: a zero exponent gives the base an exact zero cotangent and a
+    /// zero base gives the exponent one, where the unguarded products are
+    /// `0 * inf` and `inf * log(0)`.
+    #[test]
+    fn grad_pow_selects_exact_zeros_at_zero_exponent_and_zero_base() {
+        let (dx, dy) = pow_grads(0.0, 0.0);
+        assert_eq!(dx.to_bits(), 0.0_f64.to_bits(), "d pow/dx at (0, 0)");
+        assert_eq!(dy.to_bits(), 0.0_f64.to_bits(), "d pow/dy at (0, 0)");
+        let (dx, _) = pow_grads(3.0, 0.0);
+        assert_eq!(dx, 0.0);
+        let (dx, dy) = pow_grads(-0.0, 2.0);
+        assert_eq!(dx, 0.0, "d pow/dx at (-0, 2) is 2 * (-0)^1");
+        assert_eq!(dy.to_bits(), 0.0_f64.to_bits(), "d pow/dy at (-0, 2)");
+        // The base cotangent at x = 0 is the real derivative where it exists.
+        let (dx, _) = pow_grads(0.0, 1.0);
+        assert_eq!(dx, 1.0);
+        let (dx, _) = pow_grads(0.0, 0.5);
+        assert_eq!(dx, f64::INFINITY);
+    }
+
+    /// Negative partner: a negative base has no real exponent derivative, so its
+    /// exponent cotangent is NaN through `log`, while its base cotangent stays
+    /// the signed integer-power derivative.
+    #[test]
+    fn grad_pow_negative_base_exponent_cotangent_is_nan() {
+        let (dx, dy) = pow_grads(-2.0, 3.0);
+        assert_eq!(dx, 12.0);
+        assert!(dy.is_nan(), "d pow/dy at (-2, 3) should be NaN, got {dy}");
+    }
+
     #[test]
     fn grad_div_rhs() {
         let (dag, _x, y, out) = build_binary_dag(|dag, owner, a, b, ty| {

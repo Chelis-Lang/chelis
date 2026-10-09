@@ -13046,11 +13046,7 @@ SOFTWARE.
 #ifndef chelis_cr_pow__UINT128_T
 #define chelis_cr_pow__UINT128_T
 
-#if (defined(__clang__) && __clang_major__ >= 14) || (defined(__GNUC__) && __GNUC__ >= 14)
-typedef unsigned _BitInt(128) chelis_cr_pow__u128;
-#else
 typedef unsigned __int128 chelis_cr_pow__u128;
-#endif
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 typedef union {
