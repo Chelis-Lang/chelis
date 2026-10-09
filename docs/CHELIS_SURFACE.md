@@ -434,7 +434,7 @@ and `load` are `RiscOp` memory nodes produced during lowering. Both are document
 `cast_saturate`, `cast_wrap`, `copy`, `grad`, `vmap`, `jit`, and `realize`.
 
 ```
-Tier-1 DAG:   add sub mul div pow floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan erf erfc sqrt
+Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan erf erfc sqrt pow
               abs floor ceil round sum count max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
               reduce_window_mean reshape permute expand insert pad shrink stride
