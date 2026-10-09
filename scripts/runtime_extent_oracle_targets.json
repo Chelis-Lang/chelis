@@ -285,6 +285,7 @@
         "named_result_claim_traps_after_fusion_and_dce",
         "named_result_claim_traps_after_specialization_and_dce",
         "rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation",
+        "unary_same_shape_result_over_rank0_operand_is_a_verifier_error",
         "unclaimed_blas_region_still_specializes_and_executes",
         "unclaimed_dense_gather_region_still_specializes_and_executes"
       ],

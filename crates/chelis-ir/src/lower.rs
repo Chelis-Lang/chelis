@@ -12111,6 +12111,15 @@ impl<'program> LowerCtx<'program> {
             {
                 return value;
             }
+            if self.allow_host_list_ad_rewrites
+                && matches!(func_name.as_str(), "fold" | "scan")
+                && kids.len() == 4
+                && let Some(value) = self.try_lower_staged_list_recurrence(
+                    func_name, &kids[1], &kids[2], &kids[3], app_span,
+                )
+            {
+                return value;
+            }
             if self.allow_host_list_ad_rewrites && func_name == "Cons" && kids.len() == 3 {
                 return LoweredValue::Adt {
                     host: None,
@@ -18199,6 +18208,70 @@ impl<'program> LowerCtx<'program> {
             }
             _ => None,
         }
+    }
+
+    /// [05-OP-55] `fold`/`scan` over a staged List inside a `grad` or `vmap`
+    /// body: unroll the recurrence over the exact staged items so ordinary
+    /// tensor AD reverses it. The accumulator keeps the callback's own
+    /// lowered value (tensor, tuple or ADT), never a scalar funnel.
+    ///
+    /// chelis#3343: a List-typed `grad` parameter is a `Cons`/`Nil` spine of
+    /// tensor leaves, which the scalar `to_list(tensor)` fold path cannot
+    /// read; it fell through to a rank-0 placeholder that downstream reduce
+    /// and AD verification then rejected. A direct `to_list(tensor)` source
+    /// keeps that existing path. Returns `None` only for a callback this
+    /// lowering cannot inline; a resolved callback over a List that cannot be
+    /// staged is a loud rejection, never a placeholder.
+    fn try_lower_staged_list_recurrence(
+        &mut self,
+        name: &str,
+        callback: &Expr,
+        init: &Expr,
+        list_expr: &Expr,
+        app_span: Span,
+    ) -> Option<LoweredValue> {
+        if name == "fold" && to_list_source_expr(&self.resolved_list_expr(list_expr)).is_some() {
+            return None;
+        }
+        let CallableExpr::Plain(callback) = self.resolve_callable_expr(callback)? else {
+            return None;
+        };
+        let list = self.lower_expr(list_expr);
+        let items = if let Some(source) = tensor_list_source(&list) {
+            self.staged_tensor_list(source)
+                .and_then(|staged| adt_cons_chain_values(&staged))
+        } else {
+            adt_cons_chain_values(&list)
+        };
+        let Some(items) = items else {
+            let unsupported = Unsupported::new(
+                UnsupportedKind::Construct(format!(
+                    "`{name}` over a List that is not staged as known items"
+                )),
+                "the List staging of a `grad` or `vmap` body",
+                Stage::Lowering,
+                chelis_types::unimplemented_rejection!(
+                    3366,
+                    "the staged recurrence unrolls only a List staged as known items; \
+                     a `range` source or a List whose length is runtime data needs a \
+                     runtime trip count, which is not implemented"
+                ),
+            );
+            raise_fatal_unsupported(unsupported, Some(app_span), self.current_span_id.clone())
+        };
+        let mut acc = self.lower_expr(init);
+        let mut states = Vec::with_capacity(items.len());
+        for item in items {
+            acc = self.lower_plain_callable_with_values(&callback, &[acc, item]);
+            if name == "scan" {
+                states.push(acc.clone());
+            }
+        }
+        Some(if name == "scan" {
+            rebuild_cons_chain(states)
+        } else {
+            acc
+        })
     }
 
     fn staged_tensor_list(&mut self, source: NodeId) -> Option<LoweredValue> {
