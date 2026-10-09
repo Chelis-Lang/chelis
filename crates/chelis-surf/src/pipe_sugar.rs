@@ -205,35 +205,44 @@ pub(crate) fn normalize(expr: &mut Expr) {
     let mut carried = *std::mem::replace(seed, Box::new(Expr::Tuple(vec![], Span::new(0, 0))));
     for stage in std::mem::take(stages) {
         let span = crate::parser::expression_span(&stage.expression);
-        carried = match (stage.syntax, stage.expression) {
-            (PipeStageSyntax::CallFirst, Expr::Apply(callee, mut arguments, _)) => {
-                arguments.insert(0, carried);
-                Expr::Apply(callee, arguments, span)
-            }
-            (PipeStageSyntax::CallFirst, Expr::Accumulate(call, precision, _)) => {
-                let Expr::Apply(callee, mut arguments, _) = *call else {
-                    unreachable!("parser-validated accumulator call stage")
+        let mut stage_expr = stage.expression;
+        carried = match stage.syntax {
+            PipeStageSyntax::CallFirst => match &mut stage_expr {
+                Expr::Apply(callee, arguments, _) => {
+                    let callee =
+                        std::mem::replace(callee, Box::new(Expr::Tuple(vec![], Span::new(0, 0))));
+                    let mut arguments = std::mem::take(arguments);
+                    arguments.insert(0, carried);
+                    Expr::Apply(callee, arguments, span)
+                }
+                Expr::Accumulate(call, precision, _) => {
+                    let Expr::Apply(callee, arguments, _) = call.as_mut() else {
+                        unreachable!("parser-validated accumulator call stage")
+                    };
+                    let callee =
+                        std::mem::replace(callee, Box::new(Expr::Tuple(vec![], Span::new(0, 0))));
+                    let mut arguments = std::mem::take(arguments);
+                    arguments.insert(0, carried);
+                    Expr::Accumulate(
+                        Box::new(Expr::Apply(callee, arguments, span)),
+                        std::mem::take(precision),
+                        span,
+                    )
+                }
+                _ => unreachable!("parser-validated call stage"),
+            },
+            PipeStageSyntax::Cast(mode) => {
+                let Expr::Apply(_, arguments, _) = &stage_expr else {
+                    unreachable!("parser-validated cast stage")
                 };
-                arguments.insert(0, carried);
-                Expr::Accumulate(
-                    Box::new(Expr::Apply(callee, arguments, span)),
-                    precision,
-                    span,
-                )
-            }
-            (PipeStageSyntax::Cast(mode), Expr::Apply(_, arguments, _)) => {
                 let [Expr::Var(dtype, _)] = arguments.as_slice() else {
-                    unreachable!("parser-validated cast stage");
+                    unreachable!("parser-validated cast stage")
                 };
                 Expr::Cast(Box::new(carried), dtype.clone(), mode, span)
             }
-            (PipeStageSyntax::Copy, _) => Expr::Copy(Box::new(carried), span),
-            (PipeStageSyntax::Realize, _) => Expr::Realize(Box::new(carried), span),
-            (PipeStageSyntax::Callable, callable) => {
-                Expr::Apply(Box::new(callable), vec![carried], span)
-            }
-            (PipeStageSyntax::CallFirst, _) => unreachable!("parser-validated call stage"),
-            (PipeStageSyntax::Cast(_), _) => unreachable!("parser-validated cast stage"),
+            PipeStageSyntax::Copy => Expr::Copy(Box::new(carried), span),
+            PipeStageSyntax::Realize => Expr::Realize(Box::new(carried), span),
+            PipeStageSyntax::Callable => Expr::Apply(Box::new(stage_expr), vec![carried], span),
         };
     }
     *expr = carried;

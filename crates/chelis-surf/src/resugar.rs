@@ -3371,13 +3371,13 @@ fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             },
         });
     }
-    let body = resugar_expression_inner(&node.children[1])?;
-    match body {
-        Expr::Block(body_bindings, body, span) => {
-            bindings.extend(body_bindings);
-            Ok(Expr::Block(bindings, body, node.span.merge(span)))
-        }
-        body => Ok(Expr::Block(bindings, Box::new(body), node.span)),
+    let mut body = resugar_expression_inner(&node.children[1])?;
+    if let Expr::Block(body_bindings, result, span) = &mut body {
+        bindings.extend(std::mem::take(body_bindings));
+        let result = std::mem::replace(result, Box::new(Expr::Tuple(vec![], *span)));
+        Ok(Expr::Block(bindings, result, node.span.merge(*span)))
+    } else {
+        Ok(Expr::Block(bindings, Box::new(body), node.span))
     }
 }
 
@@ -3454,14 +3454,17 @@ fn try_resugar_destructuring_let(node: &NodeRef<'_>) -> Result<Option<Expr>, Res
         ty: None,
         value: resugar_expression_inner(&root_bind.children[1])?,
     };
-    let body = resugar_expression_inner(current)?;
-    Ok(Some(match body {
-        Expr::Block(mut bindings, body, span) => {
+    let mut body = resugar_expression_inner(current)?;
+    Ok(Some(
+        if let Expr::Block(bindings, result, span) = &mut body {
+            let mut bindings = std::mem::take(bindings);
             bindings.insert(0, binding);
-            Expr::Block(bindings, body, node.span.merge(span))
-        }
-        body => Expr::Block(vec![binding], Box::new(body), node.span),
-    }))
+            let result = std::mem::replace(result, Box::new(Expr::Tuple(vec![], *span)));
+            Expr::Block(bindings, result, node.span.merge(*span))
+        } else {
+            Expr::Block(vec![binding], Box::new(body), node.span)
+        },
+    ))
 }
 
 fn build_destructuring_pattern(
