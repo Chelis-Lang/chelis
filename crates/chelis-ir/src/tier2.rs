@@ -1445,49 +1445,108 @@ pub fn lower_conv(
     let contracted = product(&[input_shape[1], kernel_volume]);
     let output_volume = product(&output_shape[2..]);
     let columns = product(&[input_shape[0], output_volume]);
-    let index_count = product(&[contracted, columns]);
-    let mut indices = Vec::with_capacity(index_count);
-    for contraction in 0..contracted {
-        let channel = contraction / kernel_volume;
-        let mut kernel_position = contraction % kernel_volume;
-        let mut offsets = vec![0; rank];
-        for axis in (0..rank).rev() {
-            offsets[axis] = kernel_position % kernel_shape[axis + 2];
-            kernel_position /= kernel_shape[axis + 2];
-        }
-        for column in 0..columns {
-            let batch = column / output_volume;
-            let mut output_position = column % output_volume;
-            let mut coordinates = vec![0; rank];
-            for axis in (0..rank).rev() {
-                coordinates[axis] = output_position % output_shape[axis + 2];
-                output_position /= output_shape[axis + 2];
-            }
-            let mut index = checked(product(&[batch, input_shape[1]]).checked_add(channel));
-            for axis in 0..rank {
-                let coordinate = checked(
-                    product(&[coordinates[axis], strides[axis]]).checked_add(offsets[axis]),
-                );
-                index = checked(product(&[index, padded_shape[axis + 2]]).checked_add(coordinate));
-            }
-            indices.push(
+    let matrix_shape = [contracted, columns];
+    // The flat padded-input index of window row `r` (input channel, kernel
+    // offsets) and column `c` (batch, output coordinates) is affine in both and
+    // separates as `row_term[r] + column_term[c]`:
+    //   ((b*C + ch)*P0 + o0*s0 + k0)*P1 + o1*s1 + k1 ...
+    //     = (b*C*P0*P1.. + sum_a o_a*s_a*Q_a) + (ch*P0*P1.. + sum_a k_a*Q_a)
+    // where Q_a is the row-major stride of padded spatial axis a. Only the two
+    // vectors are constants; `expand` + `add` form the full matrix, so the
+    // compile-time constant has rows + columns elements rather than their
+    // product (chelis#3352). Every term is bounded by the padded input's
+    // element count, which `product` already checked.
+    let spatial_stride = |axis: usize| product(&padded_shape[axis + 3..]);
+    let channel_stride = product(&padded_shape[2..]);
+    let to_scalars = |values: Vec<usize>| -> Vec<_> {
+        values
+            .into_iter()
+            .map(|value| {
                 chelis_types::scalar_from_i64(
                     "conv index",
                     Prim::Int64,
-                    i64::try_from(index).expect("checked index"),
+                    i64::try_from(value).expect("checked index"),
                 )
-                .expect("i64 index"),
-            );
-        }
-    }
-    let matrix_shape = [contracted, columns];
-    let index_node = add_synth(
+                .expect("i64 index")
+            })
+            .collect()
+    };
+    let row_terms = (0..contracted)
+        .map(|contraction| {
+            let mut term = product(&[contraction / kernel_volume, channel_stride]);
+            let mut kernel_position = contraction % kernel_volume;
+            for axis in (0..rank).rev() {
+                let offset = kernel_position % kernel_shape[axis + 2];
+                kernel_position /= kernel_shape[axis + 2];
+                term = checked(term.checked_add(product(&[offset, spatial_stride(axis)])));
+            }
+            term
+        })
+        .collect::<Vec<_>>();
+    let column_terms = (0..columns)
+        .map(|column| {
+            let batch = column / output_volume;
+            let mut term = product(&[batch, input_shape[1], channel_stride]);
+            let mut output_position = column % output_volume;
+            for axis in (0..rank).rev() {
+                let coordinate = output_position % output_shape[axis + 2];
+                output_position /= output_shape[axis + 2];
+                term = checked(term.checked_add(product(&[
+                    coordinate,
+                    strides[axis],
+                    spatial_stride(axis),
+                ])));
+            }
+            term
+        })
+        .collect::<Vec<_>>();
+    let row_node = add_synth(
         owner,
         dag,
         RiscOp::ConstTensor {
-            data: chelis_types::tensor_from_scalars(Prim::Int64, &indices),
+            data: chelis_types::tensor_from_scalars(Prim::Int64, &to_scalars(row_terms)),
         },
         vec![],
+        ty(&[contracted], Prim::Int64),
+        parent_span,
+    );
+    let row_matrix = add_synth(
+        owner,
+        dag,
+        RiscOp::Expand {
+            axis: 1,
+            size: RtDim::Lit(columns),
+        },
+        vec![row_node],
+        ty(&matrix_shape, Prim::Int64),
+        parent_span,
+    );
+    let column_node = add_synth(
+        owner,
+        dag,
+        RiscOp::ConstTensor {
+            data: chelis_types::tensor_from_scalars(Prim::Int64, &to_scalars(column_terms)),
+        },
+        vec![],
+        ty(&[columns], Prim::Int64),
+        parent_span,
+    );
+    let column_matrix = add_synth(
+        owner,
+        dag,
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(contracted),
+        },
+        vec![column_node],
+        ty(&matrix_shape, Prim::Int64),
+        parent_span,
+    );
+    let index_node = add_synth(
+        owner,
+        dag,
+        RiscOp::Add,
+        vec![row_matrix, column_matrix],
         ty(&matrix_shape, Prim::Int64),
         parent_span,
     );

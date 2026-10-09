@@ -1100,3 +1100,48 @@ fn entry_scoped_extraction_is_deterministic_within_run() {
     assert_eq!(a.wire_dag_bytes, b.wire_dag_bytes);
     assert_eq!(a.dag_hash, b.dag_hash);
 }
+
+#[test]
+fn convolution_window_indices_extract_as_finite_integer_payloads() {
+    // chelis#3352: conv's window gather takes its index matrix from two small
+    // i64 constants combined by `expand` + `add`. The lowered wire DAG must
+    // pass the proof boundary's wire-contract and finite-payload checks and
+    // carry only those two integer vectors, not a rows-by-columns table.
+    let lowered = compiler::lower(LowerRequest {
+        source_kind: SourceKind::Surf,
+        source: "x = (x : tensor[1, 1, 4, 4, f32])\n\
+                 k = (k : tensor[1, 1, 2, 2, f32])\n\
+                 out = (conv(x, k, [2i64, 1i64], [(1i64, 0i64), (0i64, 1i64)]) : tensor[1, 1, 2, 4, f32])\n"
+            .into(),
+        entry: Some("out".into()),
+    })
+    .expect("a conv-bearing source lowers");
+    assert!(
+        lowered.named_roots.contains_key("out"),
+        "{:?}",
+        lowered.named_roots
+    );
+    lowered
+        .dag
+        .validate_wire_contract()
+        .expect("the conv DAG satisfies the wire contract");
+    check_finite_floats(&lowered.dag).expect("conv payloads are finite");
+    let gathers = lowered
+        .dag
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.op, WireRiscOp::Gather { .. }))
+        .count();
+    assert_eq!(gathers, 1, "the window gather survives lowering");
+    let integer_constant_elements: usize = lowered
+        .dag
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.op {
+            WireRiscOp::ConstTensor { data } if !data.prim().is_float() => Some(data.len()),
+            _ => None,
+        })
+        .sum();
+    // Window rows: 1 channel * 2 * 2 = 4; output columns: 2 * 4 = 8.
+    assert_eq!(integer_constant_elements, 4 + 8);
+}
