@@ -231,8 +231,12 @@ const TENSOR_ALLOCATION_FAILED: &str = "Domain: chelis_alloc tensor allocation f
 /// request is then at least 2^58 bytes, more than any current 64-bit virtual
 /// address space holds.
 ///
+/// The host evaluator behind `chelis eval` sizes every result through this
+/// same function, so both evaluators admit and refuse at the same sizes
+/// (chelis#3418).
+///
 /// Returns the admitted element count.
-fn admit_result(op: &'static str, shape: &[usize], prim: Prim) -> Result<usize, String> {
+pub fn admit_result(op: &'static str, shape: &[usize], prim: Prim) -> Result<usize, String> {
     let dtype = prim.runtime_dtype().map_err(|error| error.to_string())?;
     let metadata = i64_extents(shape)
         .and_then(|extents| ShapeMetadata::contiguous(&extents, dtype))
@@ -2470,28 +2474,34 @@ fn resolve_eval_strides(
         .collect()
 }
 
+/// `pad`'s result extents, as the C runtime's `ShapeMetadata::padded`
+/// computes them, so an extent past i64 is its `Overflow` before anything is
+/// allocated. The host evaluator pads through this too (chelis#3418).
+pub fn admit_padded_shape(
+    shape: &[usize],
+    padding: &[(usize, usize)],
+    prim: Prim,
+) -> Result<Vec<usize>, String> {
+    let (before, after): (Vec<usize>, Vec<usize>) = padding.iter().copied().unzip();
+    let dtype = prim.runtime_dtype().map_err(|error| error.to_string())?;
+    let padded = i64_extents(shape)
+        .and_then(|extents| ShapeMetadata::contiguous(&extents, dtype))
+        .and_then(|metadata| metadata.padded(&i64_extents(&before)?, &i64_extents(&after)?))
+        .map_err(|error| admission_trap("pad", &error))?;
+    Ok(padded
+        .shape()
+        .iter()
+        .map(|&extent| usize::try_from(extent).map_err(|_| "padded extent exceeds usize"))
+        .collect::<Result<_, _>>()?)
+}
+
 fn pad(
     input: &TensorValue,
     padding: &[(usize, usize)],
     fill: chelis_types::ScalarValue,
 ) -> Result<TensorValue, String> {
     assert_eq!(padding.len(), input.shape.len());
-    // The padded extents are the C runtime's `ShapeMetadata::padded`, so an
-    // extent past i64 is its `Overflow`, before anything is allocated.
-    let (before, after): (Vec<usize>, Vec<usize>) = padding.iter().copied().unzip();
-    let dtype = input
-        .prim()
-        .runtime_dtype()
-        .map_err(|error| error.to_string())?;
-    let padded = i64_extents(&input.shape)
-        .and_then(|extents| ShapeMetadata::contiguous(&extents, dtype))
-        .and_then(|metadata| metadata.padded(&i64_extents(&before)?, &i64_extents(&after)?))
-        .map_err(|error| admission_trap("pad", &error))?;
-    let out_shape: Vec<usize> = padded
-        .shape()
-        .iter()
-        .map(|&extent| usize::try_from(extent).map_err(|_| "padded extent exceeds usize"))
-        .collect::<Result<_, _>>()?;
+    let out_shape = admit_padded_shape(&input.shape, padding, input.prim())?;
     let mut map: Vec<Option<usize>> = vec![None; admit_result("pad", &out_shape, input.prim())?];
     for flat_idx in 0..input.len() {
         let in_index = linear_to_index(flat_idx, &input.shape);
