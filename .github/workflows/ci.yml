@@ -1523,6 +1523,34 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
+      # This job enables chelis-cli/smt for the native ideal-proof checks.
+      # Link the same verified cvc5 prebuilt as smt-build before Clippy or
+      # nextest can trigger cvc5-sys's from-source dependency downloads.
+      - name: Compute cvc5 cache key
+        id: cvc5key
+        if: runner.environment == 'github-hosted'
+        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-x86_64
+
+      - name: Fetch durable prebuilt cvc5 (Release asset)
+        id: cvc5fetch
+        if: runner.environment == 'github-hosted'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-x86_64 --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Restore prebuilt cvc5 (Actions cache fallback)
+        id: cvc5restore
+        if: runner.environment == 'github-hosted' && steps.cvc5fetch.outputs.warm != 'true'
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
+
+      - name: Activate prebuilt cvc5 (link instead of rebuild)
+        if: runner.environment == 'github-hosted'
+        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
+
       - name: Lint native Clarabel provider
         run: cargo clippy --workspace --all-targets --features chelis-cli/clarabel-provider -- -D warnings
 
