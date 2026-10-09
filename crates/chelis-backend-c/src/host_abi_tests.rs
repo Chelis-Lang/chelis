@@ -1079,3 +1079,23 @@ fn unshadowed_def_callees_call_the_private_body() {
         "{mapped}"
     );
 }
+
+/// A def's function-typed parameter shadows a def of the same spelling, so
+/// the exported higher-order body calls its callback parameter, whatever
+/// any one caller passes.
+#[test]
+fn callback_parameter_shadowing_a_def_is_the_exported_callee() {
+    let body = emitted_owned_body(
+        "def inc(x: i64) -> i64 = x + 1i64\n\
+         def twice(x: i64) -> i64 = x * 2i64\n\
+         def apply_all(inc: i64 -> i64, xs: List[i64]) -> List[i64] = map(inc, xs)\n\
+         out = apply_all(twice, [1i64, 2i64])\n",
+        "apply_all",
+    );
+    assert!(
+        body.contains("__map_result_3 = inc(__map_item_4);"),
+        "the callback must be the parameter:\n{body}"
+    );
+    let def = format!("{}__chelis_owned_body", authored_function_symbol("inc"));
+    assert!(!calls_c_identifier(&body, &def), "{body}");
+}
