@@ -120,18 +120,31 @@ pub fn pow_f64(x: f64, y: f64) -> f64 {
 }
 
 /// The f16 `pow`: both operands widen exactly to f32, the power is correctly rounded at
-/// f32, and the result is finalized to f16 once ([05-OP-79]).
+/// f32, and the result is finalized to f16 once ([05-OP-79]). A signaling-NaN operand
+/// gives NaN at its own dtype; `half`'s widening would quiet it first, and the quiet
+/// NaN's `pow(x, 0) = 1` exception would then apply.
 #[inline]
 #[must_use]
 pub fn pow_f16(x: f16, y: f16) -> f16 {
+    const QUIET: u16 = 0x0200;
+    let signaling = |v: f16| v.is_nan() && v.to_bits() & QUIET == 0;
+    if signaling(x) || signaling(y) {
+        return f16::from_bits(0x7e00);
+    }
     f16::from_f32(pow_f32(x.to_f32(), y.to_f32()))
 }
 
 /// The bf16 `pow`: both operands widen exactly to f32, the power is correctly rounded
-/// at f32, and the result is finalized to bf16 once ([05-OP-79]).
+/// at f32, and the result is finalized to bf16 once ([05-OP-79]). A signaling-NaN
+/// operand gives NaN at its own dtype, as in [`pow_f16`].
 #[inline]
 #[must_use]
 pub fn pow_bf16(x: bf16, y: bf16) -> bf16 {
+    const QUIET: u16 = 0x0040;
+    let signaling = |v: bf16| v.is_nan() && v.to_bits() & QUIET == 0;
+    if signaling(x) || signaling(y) {
+        return bf16::from_bits(0x7fc0);
+    }
     bf16::from_f32(pow_f32(x.to_f32(), y.to_f32()))
 }
 

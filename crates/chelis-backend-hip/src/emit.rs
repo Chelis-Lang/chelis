@@ -1638,6 +1638,11 @@ impl HipEmitter {
             RiscOp::Tanh => Some(format!("kernel_tanh_{}", kind_for_node(node)?.suffix())),
             RiscOp::Erf => Some(format!("kernel_erf_{}", kind_for_node(node)?.suffix())),
             RiscOp::Erfc => Some(format!("kernel_erfc_{}", kind_for_node(node)?.suffix())),
+            // [05-OP-79]: fenced before emission
+            // (`reject_device_correctly_rounded_ops`); never a vendor `powf`.
+            RiscOp::Pow => {
+                return Err(chelis_ir::dag::device_correctly_rounded_rejection("pow", "hip"));
+            }
             RiscOp::Abs => Some(format!(
                 "kernel_abs{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -2645,6 +2650,9 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
+            RiscOp::Pow => {
+                return Err(chelis_ir::dag::device_correctly_rounded_rejection("pow", "hip"));
+            }
             RiscOp::Abs => {
                 let trap = node.output_type.precision.is_integer().then(|| {
                     chelis_types::dtype_semantics::NumericTrap::Overflow {
@@ -5366,6 +5374,7 @@ impl HipEmitter {
             | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
+            | RiscOp::Pow
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod

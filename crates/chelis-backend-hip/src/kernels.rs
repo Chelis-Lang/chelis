@@ -2143,6 +2143,9 @@ fn fused_step_lines(
                 let f = kind.func("erfcf");
                 format!("{f}({a})")
             }
+            FusedStepOp::Pow => unreachable!(
+                "[05-OP-79] pow is fenced by reject_device_correctly_rounded_ops before HIP emission"
+            ),
             FusedStepOp::Abs => {
                 let a = resolve_fused_input(&step.input_indices[0]);
                 let f = kind.func("fabsf");

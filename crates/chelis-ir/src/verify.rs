@@ -1247,6 +1247,7 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         | RiscOp::Sub
         | RiscOp::Mul
         | RiscOp::Div
+        | RiscOp::Pow
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
         | RiscOp::Mod
@@ -2390,6 +2391,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
+            | RiscOp::Pow
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod

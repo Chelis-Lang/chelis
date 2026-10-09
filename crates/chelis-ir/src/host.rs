@@ -17771,6 +17771,7 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Sub
             | crate::dag::RiscOp::Mul
             | crate::dag::RiscOp::Div
+            | crate::dag::RiscOp::Pow
             | crate::dag::RiscOp::FloorDiv
             | crate::dag::RiscOp::TruncDiv
             | crate::dag::RiscOp::MaxElem
@@ -20785,6 +20786,7 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         | "sub"
         | "mul"
         | "div"
+        | "pow"
         | "floor_div"
         | "trunc_div"
         | "neg"

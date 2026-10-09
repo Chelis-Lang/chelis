@@ -131,16 +131,18 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         // Version 27: the [05-OP-46] Tier 1 error functions.
         "erf",
         "erfc",
+        // Version 28: the [05-OP-79] Tier 1 power.
+        "pow",
     ];
     // Version 26 (chelis#759): `cast_trunc` became the `trunc` rung of the
     // tagged `named_cast` operation, so the count is unchanged.
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 27,
+        WIRE_DAG_SCHEMA_VERSION, 28,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 81);
+    assert_eq!(actual.len(), 82);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"

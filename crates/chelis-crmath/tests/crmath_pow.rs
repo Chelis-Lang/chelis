@@ -113,10 +113,10 @@ fn half_widths_compose_through_the_f32_power() {
     assert!(chelis_crmath::pow_bf16(bf16::from_f32(-2.0), bf16::from_f32(0.5)).is_nan());
 }
 
-/// A signaling NaN is invalid at f32 and f64 even where a quiet NaN gives 1, while an
-/// f16 or bf16 signaling NaN is quieted by its widening and so takes the quiet rule.
+/// A signaling NaN is invalid at every dtype even where a quiet NaN gives 1. At f16 and
+/// bf16 the rule is decided at the operand's own dtype, before the f32 widening.
 #[test]
-fn signaling_nan_exceptions_follow_the_operand_width() {
+fn signaling_nan_is_invalid_at_every_dtype() {
     let snan32 = f32::from_bits(0x7f80_0001);
     let snan64 = f64::from_bits(0x7ff0_0000_0000_0001);
     assert!(chelis_crmath::pow_f32(snan32, 0.0).is_nan());
@@ -125,10 +125,15 @@ fn signaling_nan_exceptions_follow_the_operand_width() {
     assert!(chelis_crmath::pow_f64(1.0, snan64).is_nan());
     assert_eq!(chelis_crmath::pow_f32(f32::NAN, 0.0), 1.0);
     assert_eq!(chelis_crmath::pow_f64(1.0, f64::NAN), 1.0);
-    let snan16 = f16::from_bits(0x7c01);
-    let snan_bf = bf16::from_bits(0x7f81);
-    assert_eq!(chelis_crmath::pow_f16(snan16, f16::ZERO), f16::ONE);
-    assert_eq!(chelis_crmath::pow_f16(f16::ONE, snan16), f16::ONE);
-    assert_eq!(chelis_crmath::pow_bf16(snan_bf, bf16::ZERO), bf16::ONE);
-    assert_eq!(chelis_crmath::pow_bf16(bf16::ONE, snan_bf), bf16::ONE);
+    for snan16 in [f16::from_bits(0x7c01), f16::from_bits(0xfd00)] {
+        assert_eq!(chelis_crmath::pow_f16(snan16, f16::ZERO).to_bits(), 0x7e00);
+        assert_eq!(chelis_crmath::pow_f16(f16::ONE, snan16).to_bits(), 0x7e00);
+    }
+    for snan_bf in [bf16::from_bits(0x7f81), bf16::from_bits(0xffa0)] {
+        assert_eq!(chelis_crmath::pow_bf16(snan_bf, bf16::ZERO).to_bits(), 0x7fc0);
+        assert_eq!(chelis_crmath::pow_bf16(bf16::ONE, snan_bf).to_bits(), 0x7fc0);
+    }
+    // The quiet rule still applies to a quiet NaN of either half width.
+    assert_eq!(chelis_crmath::pow_f16(f16::from_bits(0x7e12), f16::ZERO), f16::ONE);
+    assert_eq!(chelis_crmath::pow_bf16(bf16::ONE, bf16::from_bits(0xffc5)), bf16::ONE);
 }

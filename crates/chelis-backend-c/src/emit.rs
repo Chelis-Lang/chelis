@@ -1573,6 +1573,7 @@ impl CEmitter {
                 }
                 self.emit_binary(id, "/", &node.inputs, &node.output_type);
             }
+            RiscOp::Pow => self.emit_binary_kernel(id, "chelis_cr_powf", &node.inputs, &node.output_type),
             // chelis#178: `trunc_div` is the C integer `/` quotient (round
             // toward zero) — `emit_binary` already wraps the divisor in the
             // portable zero-divisor guard for integer dtypes. `trunc_div`
@@ -2982,6 +2983,7 @@ impl CEmitter {
     fn double_math_fn(scalar_f: &str) -> &str {
         match scalar_f {
             "chelis_cr_expf" => "chelis_cr_exp",
+            "chelis_cr_powf" => "chelis_cr_pow",
             "chelis_cr_logf" => "chelis_cr_log",
             "chelis_cr_sinf" => "chelis_cr_sin",
             "sqrtf" => "sqrt",
@@ -3763,6 +3765,83 @@ impl CEmitter {
             Self::extrema_select_expr(
                 ty,
                 func,
+                format!("(({et}*)t{a}_data)[idx_a]"),
+                format!("(({et}*)t{b}_data)[idx_b]")
+            )
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// A two-operand correctly rounded kernel ([05-OP-79]'s `pow`), elementwise.
+    /// `func` names the binary32 entry; f64 calls its binary64 twin, and f16 and
+    /// bf16 widen both stored operands exactly to `float` (a signaling NaN stays
+    /// signaling), call the binary32 entry, and finalize the result to storage
+    /// once.
+    fn emit_binary_kernel(&mut self, id: usize, func: &str, inputs: &[NodeId], ty: &TensorType) {
+        assert!(
+            !Self::is_host_math_transcendental(func),
+            "`{func}` is a host math library function; [05-OP-79] requires the \
+             correctly rounded `chelis_cr_*` kernel"
+        );
+        let a = inputs[0].0;
+        let b = inputs[1].0;
+        let reduced = Self::is_reduced_float(ty);
+        let et = if reduced {
+            "uint16_t"
+        } else {
+            Self::elem_type(ty)
+        };
+        let nan = self.nan_finalization;
+        let elem_expr = |lhs: String, rhs: String| -> String {
+            if reduced {
+                let load = Self::reduced_to_f32_fn(ty.precision);
+                let store = Self::f32_to_reduced_fn(ty.precision);
+                format!("{store}({func}({load}({lhs}), {load}({rhs})))")
+            } else {
+                let f = if Self::is_f64(ty) {
+                    Self::double_math_fn(func)
+                } else {
+                    func
+                };
+                finalize_elem(nan, format!("{f}({lhs}, {rhs})"), ty)
+            }
+        };
+        let identity = self.emit_elementwise_index_steps(id, inputs, ty);
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "if (chelis_is_contiguous(t{a}) && ({identity}) && chelis_is_contiguous(t{b}) && t{a}_size == t{id}_size && t{b}_size == t{id}_size) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("{et}* restrict __out_{id} = ({et}*)t{id}_data;"));
+        self.line(&format!(
+            "const {et}* restrict __in_a_{id} = (const {et}*)t{a}_data;"
+        ));
+        self.line(&format!(
+            "const {et}* restrict __in_b_{id} = (const {et}*)t{b}_data;"
+        ));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "__out_{id}[i] = {};",
+            elem_expr(format!("__in_a_{id}[i]"), format!("__in_b_{id}[i]"))
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("int64_t idx_a = i * t{id}_input{a}_step;"));
+        self.line(&format!("int64_t idx_b = i * t{id}_input{b}_step;"));
+        self.line(&format!(
+            "(({et}*)t{id}_data)[i] = {};",
+            elem_expr(
                 format!("(({et}*)t{a}_data)[idx_a]"),
                 format!("(({et}*)t{b}_data)[idx_b]")
             )
@@ -5673,6 +5752,12 @@ impl CEmitter {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
                 format!("{a} / {b}")
+            }
+            FusedStepOp::Pow => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                let f = mf("chelis_cr_powf");
+                format!("{f}({a}, {b})")
             }
             // chelis#178: the fused path carries float operands only
             // (`emit_fused_elem` admits f32 and f64; `emit_fused_reduce`
@@ -7985,6 +8070,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     let a = resolve(&step.input_indices[0]);
                     let b = resolve(&step.input_indices[1]);
                     format!("{a} / {b}")
+                }
+                FusedStepOp::Pow => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("chelis_cr_powf({a}, {b})")
                 }
                 // chelis#178: f32-only fused path — only float `floor_div`
                 // reaches here; `trunc_div` is integer-only.

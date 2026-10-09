@@ -180,8 +180,9 @@ at the explicit `floor_div` / `trunc_div` integer primitives below.
 > `pow(+inf, y)` is `+inf` for `y > 0` and `+0` for `y < 0`; `pow(-inf, y)` is
 > `-inf` for `y` a positive odd integer, `+inf` for any other positive `y`,
 > `-0` for `y` a negative odd integer, and `+0` for any other negative `y`.
-> An `f16` or `bf16` signaling NaN reaches the `f32` power as [04-NUM-2]'s
-> canonical quiet NaN, because widening it is a conversion that produces a NaN.
+> The signaling-NaN case is decided at the operand's own dtype: an `f16` or
+> `bf16` signaling NaN gives NaN even though its exact `f32` widening is
+> computed at `f32`.
 > Every NaN result finalizes to [04-NUM-2]'s canonical quiet NaN. `pow` is a
 > primitive because no composition of the other primitives computes it: the
 > rewrite `exp(y * log(x))` is NaN for every `x < 0` and for `pow(0, 0)`, and

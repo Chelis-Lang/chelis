@@ -38,6 +38,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "cmplt",
     "sub",
     "div",
+    "pow",
     "floor_div",
     "trunc_div",
     "mod",
@@ -1037,6 +1038,16 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "div",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "pow",
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::GenericAccepted {
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
@@ -2621,6 +2632,7 @@ pub fn shape_class(name: &str) -> ShapeClass {
         | "mul"
         | "sub"
         | "div"
+        | "pow"
         | "floor_div"
         | "trunc_div"
         | "mod"
@@ -2705,6 +2717,7 @@ pub(crate) fn operand_dtype_family(name: &str) -> Option<TypeVarRestriction> {
         "mean"
         | "softmax"
         | "div"
+        | "pow"
         | "matmul"
         | "layer_norm"
         | "exp"
@@ -3394,6 +3407,8 @@ pub fn builtin_env() -> (Env, VarGen) {
     // precision restrictions (div float-only, trunc_div int-only,
     // floor_div both) are enforced in `infer.rs`.
     tensor_binop("div", &mut env, &mut vg);
+    // [05-OP-79]: float-only like `div`, enforced by the same operand family.
+    tensor_binop("pow", &mut env, &mut vg);
     tensor_binop("floor_div", &mut env, &mut vg);
     tensor_binop("trunc_div", &mut env, &mut vg);
     tensor_binop("max_elem", &mut env, &mut vg);
@@ -4127,6 +4142,7 @@ mod tests {
             "mul",
             "sub",
             "div",
+            "pow",
             "floor_div",
             "trunc_div",
             "mod",

@@ -689,6 +689,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Sub => "sub",
         RiscOp::Mul => "mul",
         RiscOp::Div => "div",
+        RiscOp::Pow => "pow",
         RiscOp::FloorDiv => "floor_div",
         RiscOp::TruncDiv => "trunc_div",
         RiscOp::Mod => "mod",
@@ -1513,6 +1514,84 @@ fn compute_adjoints(
             );
             let db = dag.add_node(node.owner, RiscOp::Neg, vec![g_y_over_b], ty, None);
             Some(vec![(a, da), (b, db)])
+        }
+        RiscOp::Pow => {
+            // [05-OP-79], with r = pow(x, y) the forward result:
+            //   dL/dx = where(y == 0, 0, g * (y * pow(x, y - 1)))
+            //   dL/dy = where(x == 0, 0, g * (r * log(x)))
+            // A zero exponent is constant in the base and a zero base is
+            // constant in the exponent on each side of y = 0, so each
+            // selection gives an exact zero where the product would read
+            // `0 * inf` or `inf * log(0)`.
+            let x = node.inputs[0];
+            let y = node.inputs[1];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let bool_ty = TensorType {
+                dims: ty.dims.clone(),
+                precision: Prim::Bool,
+            };
+            let zero = dag.add_node(
+                node.owner,
+                RiscOp::synth_const(ty.precision, 0.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let one = dag.add_node(
+                node.owner,
+                RiscOp::synth_const(ty.precision, 1.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let y_minus_one = tier2::lower_sub(node.owner, dag, y, one, &ty, None);
+            let lowered = dag.add_node(
+                node.owner,
+                RiscOp::Pow,
+                vec![x, y_minus_one],
+                ty.clone(),
+                None,
+            );
+            let slope_x = dag.add_node(node.owner, RiscOp::Mul, vec![y, lowered], ty.clone(), None);
+            let g_slope_x = dag.add_node(node.owner, RiscOp::Mul, vec![g, slope_x], ty.clone(), None);
+            let y_is_zero = dag.add_node(
+                node.owner,
+                RiscOp::Compare(ComparisonKind::Eq),
+                vec![y, zero],
+                bool_ty.clone(),
+                None,
+            );
+            let dx = dag.add_node(
+                node.owner,
+                RiscOp::Where,
+                vec![y_is_zero, zero, g_slope_x],
+                ty.clone(),
+                None,
+            );
+            let log_x = dag.add_node(node.owner, RiscOp::Log, vec![x], ty.clone(), None);
+            let slope_y = dag.add_node(
+                node.owner,
+                RiscOp::Mul,
+                vec![node.id, log_x],
+                ty.clone(),
+                None,
+            );
+            let g_slope_y = dag.add_node(node.owner, RiscOp::Mul, vec![g, slope_y], ty.clone(), None);
+            let x_is_zero = dag.add_node(
+                node.owner,
+                RiscOp::Compare(ComparisonKind::Eq),
+                vec![x, zero],
+                bool_ty,
+                None,
+            );
+            let dy = dag.add_node(
+                node.owner,
+                RiscOp::Where,
+                vec![x_is_zero, zero, g_slope_y],
+                ty,
+                None,
+            );
+            Some(vec![(x, dx), (y, dy)])
         }
         RiscOp::Compare(_) => {
             let a = node.inputs[0];

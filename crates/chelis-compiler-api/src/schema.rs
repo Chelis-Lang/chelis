@@ -2295,7 +2295,9 @@ pub struct WireRecordPatternField {
 ///   reader does not know that operation.
 /// - `27`: `Erf` and `Erfc` and their fused steps are [05-OP-46] Tier 1
 ///   primitives; a version-26 reader does not know the operations.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 27;
+/// - `28`: `Pow` and its fused step are the [05-OP-79] Tier 1 primitive; a
+///   version-27 reader does not know the operation.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 28;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -3627,6 +3629,7 @@ fn wire_axis_origin(
         | WireRiscOp::Sub
         | WireRiscOp::Mul
         | WireRiscOp::Div
+        | WireRiscOp::Pow
         | WireRiscOp::FloorDiv
         | WireRiscOp::TruncDiv
         | WireRiscOp::Mod
@@ -4027,6 +4030,7 @@ pub enum WireFusedStepOp {
     Sub,
     Mul,
     Div,
+    Pow,
     FloorDiv,
     TruncDiv,
     MaxElem,
@@ -4180,6 +4184,7 @@ pub enum WireRiscOp {
     Sub,
     Mul,
     Div,
+    Pow,
     FloorDiv,
     TruncDiv,
     Mod,

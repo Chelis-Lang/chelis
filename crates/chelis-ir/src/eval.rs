@@ -1050,6 +1050,7 @@ enum ElementwiseBinOp {
     Sub,
     Mul,
     Div,
+    Pow,
     FloorDiv,
     TruncDiv,
     Mod,
@@ -1064,6 +1065,7 @@ impl ElementwiseBinOp {
             Self::Sub => "sub",
             Self::Mul => "mul",
             Self::Div => "div",
+            Self::Pow => "pow",
             Self::FloorDiv => "floor_div",
             Self::TruncDiv => "trunc_div",
             Self::Mod => "mod",
@@ -1082,7 +1084,7 @@ impl ElementwiseBinOp {
             Self::Mod => Some(IntBinOp::Rem),
             Self::Max => Some(IntBinOp::Max),
             Self::Min => Some(IntBinOp::Min),
-            Self::Div => None,
+            Self::Div | Self::Pow => None,
         }
     }
 
@@ -1092,6 +1094,7 @@ impl ElementwiseBinOp {
             Self::Sub => Some(FloatBinOp::Sub),
             Self::Mul => Some(FloatBinOp::Mul),
             Self::Div => Some(FloatBinOp::Div),
+            Self::Pow => Some(FloatBinOp::Pow),
             Self::FloorDiv => Some(FloatBinOp::FloorDiv),
             Self::Max => Some(FloatBinOp::Max),
             Self::Min => Some(FloatBinOp::Min),
@@ -4226,6 +4229,12 @@ where
                     &values[&node.inputs[1]],
                 )?
             }
+            // [05-OP-79]: correctly rounded through `chelis-crmath`.
+            RiscOp::Pow => binary_elementwise(
+                ElementwiseBinOp::Pow,
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+            )?,
             // chelis#178: floor division rounds the quotient toward -inf.
             // For integer-valued operands `(a / b).floor()` yields the
             // integer floored quotient, and for float operands it is
@@ -4822,6 +4831,11 @@ where
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
                         )?,
+                        FusedStepOp::Pow => binary_elementwise(
+                            ElementwiseBinOp::Pow,
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                        )?,
                         // chelis#178/#550: floor/truncating division shares
                         // the standalone typed-kernel path, including exact
                         // per-dtype integer zero-divisor and overflow traps.
@@ -5093,6 +5107,7 @@ fn inactive_disagreeing_elementwise(
             | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
+            | RiscOp::Pow
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::Mod

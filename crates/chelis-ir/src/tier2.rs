@@ -296,6 +296,21 @@ pub fn lower_div(
     add_synth(owner, dag, RiscOp::Div, vec![a, b], ty.clone(), parent_span)
 }
 
+/// `pow(x, y)`: the correctly rounded elementwise power ([05-OP-79]).
+///
+/// Lowers directly to `RiscOp::Pow`. The rewrite `exp(mul(y, log(x)))` is
+/// NaN for every `x < 0` and for `pow(0, 0)`, and rounds more than once.
+pub fn lower_pow(
+    owner: Owner,
+    dag: &mut Dag,
+    x: NodeId,
+    y: NodeId,
+    ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    add_synth(owner, dag, RiscOp::Pow, vec![x, y], ty.clone(), parent_span)
+}
+
 /// `floor_div(a, b)` — floor division (round quotient toward −∞).
 ///
 /// Lowers directly to [`RiscOp::FloorDiv`] (chelis#178). Integer
