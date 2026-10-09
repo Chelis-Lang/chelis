@@ -1516,9 +1516,15 @@ fn compute_adjoints(
             Some(vec![(a, da), (b, db)])
         }
         RiscOp::Pow => {
-            // [05-OP-79], with r = pow(x, y) the forward result:
-            //   dL/dx = where(y == 0, 0, g * (y * pow(x, y - 1)))
+            // [05-OP-79], with r = pow(x, y) the forward result and m = 2^p
+            // for the dtype's significand precision p:
+            //   dL/dx = where(y == 0, 0, where(c, g * (y * (r / x)),
+            //               g * (y * pow(x, y - 1))))
+            //   with c = (x != 0) and (abs(y) >= m)
             //   dL/dy = where(x == 0, 0, g * (r * log(x)))
+            // From m on, y - 1 rounds an even exponent to an even one and
+            // loses a negative base's odd-power sign, which r / x keeps;
+            // below m, pow(x, y - 1) stays finite where r alone overflows.
             // A zero exponent is constant in the base and a zero base is
             // constant in the exponent on each side of y = 0, so each
             // selection gives an exact zero where the product would read
@@ -1562,10 +1568,59 @@ fn compute_adjoints(
                 bool_ty.clone(),
                 None,
             );
+            // The magnitude from which an integer exponent's `y - 1` rounds.
+            let significand = match ty.precision {
+                Prim::F16 => 11,
+                Prim::Bf16 => 8,
+                Prim::F32 => 24,
+                Prim::F64 => 53,
+                other => unreachable!("[05-OP-79] admits float operands only, got {other:?}"),
+            };
+            let parity_limit = dag.add_node(
+                node.owner,
+                RiscOp::synth_const(ty.precision, f64::from(2u32).powi(significand)),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let abs_y = dag.add_node(node.owner, RiscOp::Abs, vec![y], ty.clone(), None);
+            let y_beyond_parity = dag.add_node(
+                node.owner,
+                RiscOp::Compare(ComparisonKind::Gte),
+                vec![abs_y, parity_limit],
+                bool_ty.clone(),
+                None,
+            );
+            let x_is_nonzero = dag.add_node(
+                node.owner,
+                RiscOp::Compare(ComparisonKind::Neq),
+                vec![x, zero],
+                bool_ty.clone(),
+                None,
+            );
+            let use_ratio = dag.add_node(
+                node.owner,
+                RiscOp::Logical(LogicalKind::And),
+                vec![x_is_nonzero, y_beyond_parity],
+                bool_ty.clone(),
+                None,
+            );
+            let ratio = dag.add_node(node.owner, RiscOp::Div, vec![node.id, x], ty.clone(), None);
+            let slope_ratio =
+                dag.add_node(node.owner, RiscOp::Mul, vec![y, ratio], ty.clone(), None);
+            let g_slope_ratio =
+                dag.add_node(node.owner, RiscOp::Mul, vec![g, slope_ratio], ty.clone(), None);
+            let nonzero_exponent = dag.add_node(
+                node.owner,
+                RiscOp::Where,
+                vec![use_ratio, g_slope_ratio, g_slope_x],
+                ty.clone(),
+                None,
+            );
             let dx = dag.add_node(
                 node.owner,
                 RiscOp::Where,
-                vec![y_is_zero, zero, g_slope_x],
+                vec![y_is_zero, zero, nonzero_exponent],
                 ty.clone(),
                 None,
             );
@@ -4052,6 +4107,101 @@ mod tests {
         assert_eq!(dx, 1.0);
         let (dx, _) = pow_grads(0.0, 0.5);
         assert_eq!(dx, f64::INFINITY);
+    }
+
+    /// The base cotangent of `pow(x, y)` at dtype `precision`, with `x` and `y`
+    /// loaded at f64 and cast to `precision` (each witness is exact there).
+    fn pow_base_grad_at(precision: Prim, x0: f64, y0: f64) -> f64 {
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("test"));
+        let narrow = TensorType {
+            dims: vec![],
+            precision,
+        };
+        let load = |dag: &mut Dag, name: &str| {
+            let wide = dag.add_node(
+                owner,
+                RiscOp::Load { name: name.into() },
+                vec![],
+                scalar_f64(),
+                None,
+            );
+            let cast = dag.add_node(
+                owner,
+                RiscOp::Cast {
+                    new_precision: precision,
+                },
+                vec![wide],
+                narrow.clone(),
+                None,
+            );
+            (wide, cast)
+        };
+        let (x, xn) = load(&mut dag, "x");
+        let (_, yn) = load(&mut dag, "y");
+        let out = dag.add_node(owner, RiscOp::Pow, vec![xn, yn], narrow.clone(), None);
+        let grad = grad_dag(&dag, out, &[x]).unwrap();
+        let inputs: UnordMap<String, f64> =
+            [("x".to_string(), x0), ("y".to_string(), y0)].into_iter().collect();
+        eval_scalar(&grad.dag, &inputs)[&grad.grad_nodes[&x]]
+    }
+
+    /// [05-OP-79]: from `2^p` on, `y - 1` rounds an even exponent to an even
+    /// one; the base cotangent still has the odd power's sign, through `r / x`,
+    /// and its magnitude `y * |x|^(y-1)` (the reviewer's witnesses).
+    #[test]
+    fn grad_pow_keeps_the_odd_power_sign_where_y_minus_one_rounds() {
+        for (precision, x0, y0, tolerance) in [
+            (Prim::F32, -1.000_000_119_209_289_6, 16_777_218.0, 1e-5),
+            (Prim::F64, -(1.0 + f64::EPSILON), 9_007_199_254_740_994.0, 1e-12),
+            (Prim::Bf16, -1.007_812_5, 258.0, 2e-2),
+            (Prim::Bf16, -1.007_812_5, 512.0, 2e-2),
+            (Prim::F16, -1.000_976_562_5, 2050.0, 4e-3),
+            (Prim::F16, -1.000_976_562_5, 3000.0, 4e-3),
+        ] {
+            let dx = pow_base_grad_at(precision, x0, y0);
+            let exact = -y0 * (-x0).powf(y0 - 1.0);
+            assert!(
+                dx < 0.0 && ((dx - exact) / exact).abs() < tolerance,
+                "{precision:?} d pow/dx at ({x0}, {y0}): got {dx}, derivative {exact}"
+            );
+        }
+    }
+
+    /// Below `2^p` the base cotangent stays `y * pow(x, y - 1)`, which is finite
+    /// and nonzero where the forward result alone overflows or underflows (a
+    /// ratio `r / x` would give `inf` and `0` here).
+    #[test]
+    fn grad_pow_base_cotangent_survives_forward_overflow_and_underflow() {
+        assert_eq!(pow_base_grad_at(Prim::F16, 300.0, 2.0), 600.0);
+        assert_eq!(pow_base_grad_at(Prim::F32, 0.5, 150.0), 150.0 * 2f64.powi(-149));
+        assert_eq!(pow_base_grad_at(Prim::F64, 0.5, 1075.0), 1075.0 * f64::from_bits(1));
+        assert_eq!(pow_base_grad_at(Prim::F64, -2.0, 3.0), 12.0);
+    }
+
+    /// Central differences across the normal range, at f64: integer exponents
+    /// for either sign of base, non-integer ones for a positive base.
+    #[test]
+    fn grad_pow_base_matches_finite_differences_across_normal_ranges() {
+        let (dag, x, _y, out) = pow_dag();
+        let bases = [-3.0, -1.7, -0.9, -0.25, 0.25, 0.9, 1.7, 3.0];
+        let exponents = [-4.0, -1.0, 1.0, 2.0, 5.0, 12.0, -2.5, 0.5, 3.75];
+        let mut checked = 0;
+        for x0 in bases {
+            for y0 in exponents {
+                if x0 < 0.0 && y0 != f64::round(y0) {
+                    continue;
+                }
+                let h = 1e-6 * f64::abs(x0);
+                let (a, n) = finite_diff(&dag, out, x, "x", &[("y", y0)], x0, h);
+                assert!(
+                    (a - n).abs() <= 1e-5 * a.abs().max(1.0),
+                    "d pow/dx at ({x0}, {y0}): analytical {a}, numerical {n}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 60, "{checked}");
     }
 
     /// Negative partner: a negative base has no real exponent derivative, so its

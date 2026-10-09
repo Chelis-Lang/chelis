@@ -76,7 +76,7 @@ are specified separately.
 | `sub` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g, -g)` on floats; signed-integer forms are forward-only |
 | `mul` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g*y, g*x)` |
 | `div` | `(&tensor[D,p_float], &tensor[D,p_float]) -> tensor[D,p_float]` | `(g/b, -g*y/b)`; IEEE-754, **float operands only** |
-| `pow` | `(&tensor[D,p_float], &tensor[D,p_float]) -> tensor[D,p_float]` | `(where(y == 0, 0, g*y*pow(x, y-1)), where(x == 0, 0, g*r*log(x)))` with `r = pow(x, y)`; correctly rounded with the IEEE-754 `pow` special cases, **float operands only** ([05-OP-79]) |
+| `pow` | `(&tensor[D,p_float], &tensor[D,p_float]) -> tensor[D,p_float]` | base `g*y*pow(x, y-1)`, or `g*y*(r/x)` where `x != 0` and `abs(y) >= 2^p`, exactly zero at `y == 0`; exponent `where(x == 0, 0, g*r*log(x))`; `r = pow(x, y)`; correctly rounded with the IEEE-754 `pow` special cases, **float operands only** ([05-OP-79]) |
 | `floor_div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | **non-differentiable** — `grad` rejects; round quotient toward −∞ (Python `//`); ints and floats |
 | `trunc_div` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | **non-differentiable** — `grad` rejects; round toward zero (C `/`); **integer operands only** |
 | `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | complete `g` to the exact operand selected by [05-OP-40], including its stored-bit tie rule; integer forms are forward-only |

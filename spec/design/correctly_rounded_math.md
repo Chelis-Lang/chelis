@@ -764,10 +764,20 @@ NaN inventory oracle in `crates/chelis-cli/tests/native_build.rs`.
 
 ### 13.4 Gradients and device lanes
 
-The adjoint is [05-OP-79]'s: `where(y == 0, 0, g*(y*pow(x, y-1)))` for the base and
-`where(x == 0, 0, g*(r*log(x)))` for the exponent. The selections replace the `0 * inf`
-and `inf * log(0)` products at a zero exponent and a zero base with the exact zero of a
-function that is constant there. A negative base gives the exponent a NaN cotangent.
+The adjoint is [05-OP-79]'s: `g*(y*pow(x, y-1))` for the base, switching to
+`g*(y*(r/x))` where `x != 0` and `abs(y) >= 2^p`, and `where(x == 0, 0, g*(r*log(x)))` for
+the exponent. The switch exists because from `2^p` on every exponent is an even integer
+whose `y - 1` rounds to an even integer: `pow(x, y-1)` then has the wrong sign for a
+negative base (`x = -1.0000001f32`, `y = 16777218` gave `+1.2397e8` where the derivative
+is `-1.2397e8`; the same at bf16 from `y = 258` and at f16 from `y = 2050`). The ratio is
+not used everywhere because it is worse conditioned wherever `r` overflows or
+underflows but `x^(y-1)` does not: at f16, `x = 300`, `y = 2` gives `r = inf` and a ratio
+of `inf` where the derivative is `600`; at f32, `x = 0.5`, `y = 150` gives `r = 0` and a
+ratio of `0` where the derivative is `150 * 2^-149`. From `2^p` on, a finite nonzero `r`
+needs `|x|` within about `1/|y|` of one, so the ratio has no such loss there. The
+selections at `y == 0` and `x == 0` replace the `0 * inf` and `inf * log(0)` products
+with the exact zero of a function that is constant there, and a zero base keeps
+`pow(x, y-1)`. A negative base gives the exponent a NaN cotangent.
 `pow` has no verifier bound transformer, so `is_verifier_targetable` excludes it. The
 HIP and Metal lanes reject `pow`, directly or as a fused step, through §4.3's fence
 with [05-OP-79] as its authority.

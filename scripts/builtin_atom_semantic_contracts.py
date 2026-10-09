@@ -40,7 +40,7 @@ CLAUSES = {
     41: ("exact mathematical difference", "It never lowers through `neg`", "`(g, neg(g))`"),
     43: ("positive zero otherwise", "including at `x = 0`", "Non-float operands are type errors"),
     79: ("There is no integer power", "`pow(x, +-0)` is `1` for every other `x`, a quiet NaN included",
-         "negative exactly when `y` is an odd integer", "where(y == 0, 0, g * (y * pow(x, y - 1)))",
+         "negative exactly when `y` is an odd integer", "where(c, g * (y * (r / x)), g * (y * pow(x, y - 1)))",
          "where(x == 0, 0, g * (r * log(x)))"),
     64: ("Integer zero divisors trap DivZero", "Remainder of signed minimum by -1 is zero", "without introducing intermediate overflow", "-g*(x/y)/y"),
     46: ("Floor, ceil, and round are exact identities on integers", "-g*y*y using the forward y=1/x", "including zero for x=0 and NaN"),

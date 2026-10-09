@@ -104,7 +104,7 @@ widths remain governed by [04-NUM-8].
 | `sub` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise direct subtraction | `(g, -g)` |
 | `mul` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise multiplication | `(g * y, g * x)` |
 | `div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise IEEE-754 division `a / b` (**float operands only**) | `(g / b, -g * (a/b) / b)` (= `(g/b, -g*y/b)` using `y = a/b`) |
-| `pow` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise correctly rounded power `x^y` with the IEEE-754 `pow` special cases (**float operands only**; [05-OP-79]) | `(where(y == 0, 0, g * (y * pow(x, y - 1))), where(x == 0, 0, g * (r * log(x))))` using `r = pow(x, y)` |
+| `pow` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise correctly rounded power `x^y` with the IEEE-754 `pow` special cases (**float operands only**; [05-OP-79]) | Base: `g * (y * pow(x, y - 1))`, or `g * (y * (r / x))` where `x != 0` and `abs(y) >= 2^p`, and exact zero at `y == 0`; exponent: `where(x == 0, 0, g * (r * log(x)))`; `r = pow(x, y)` ([05-OP-79]) |
 | `floor_div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise floor division: `floor(a / b)`, rounding toward −∞ | Non-differentiable (piecewise constant); `grad` rejects it |
 | `trunc_div` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | Element-wise truncating division (round toward zero), **integer operands only** | Non-differentiable (piecewise constant); `grad` rejects it |
 | `wrap_add` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | Element-wise modular addition | Non-differentiable; `grad` rejects it |
@@ -192,15 +192,26 @@ at the explicit `floor_div` / `trunc_div` integer primitives below.
 > IEEE status flags are not observable.
 >
 > Adjoint: With cotangent `g` and the forward result `r = pow(x,y)`, the base
-> receives `where(y == 0, 0, g * (y * pow(x, y - 1)))` and the exponent receives
-> `where(x == 0, 0, g * (r * log(x)))`, where `==` is [05-OP-36]'s float
-> equality (so `-0 == 0`), `where` is [05-OP-53]'s selection, `0` is the
-> operand dtype's positive zero, and every other operation is its own primitive
-> at the operand dtype, `y - 1` included. A zero exponent is a constant-one
-> function of the base, so its base cotangent is exactly zero; a zero base is a
-> constant function of the exponent on each side of `y = 0`, so its exponent
-> cotangent is exactly zero. A negative base gives the exponent a NaN cotangent
-> through `log`, since `x^y` is not real for non-integer `y` near any `y`.
+> receives `where(y == 0, 0, where(c, g * (y * (r / x)), g * (y * pow(x, y - 1))))`
+> and the exponent receives `where(x == 0, 0, g * (r * log(x)))`, where `c` is
+> true exactly where both `x != 0` and `abs(y) >= m` hold, `m` is `2^p` for the
+> operand dtype's significand precision `p` (`2^11` at `f16`, `2^8` at `bf16`,
+> `2^24` at `f32`, `2^53` at `f64`), `==`, `!=`, and `>=` are [05-OP-36]'s
+> float comparisons (so `-0 == 0`), `where` is [05-OP-53]'s selection, `0` is
+> the operand dtype's positive zero, and every other operation is its own
+> primitive at the operand dtype, `y - 1` included. Below `m`, `y - 1` is
+> exact for every integer `y`, so `pow(x, y - 1)` keeps the sign of a negative
+> base's odd power and is one rounding of the derivative, including where `r`
+> overflows or underflows but `x^(y-1)` does not. From `m` on, every exponent
+> is an even integer and, apart from `y = m`, its `y - 1` rounds to an even
+> integer, losing that sign, while `r / x` keeps it; a finite nonzero `r` there needs `|x|` within
+> about `1/|y|` of one, where `r / x` neither overflows nor underflows apart
+> from `r`. A zero base keeps `pow(x, y - 1)`, which decides its `0`, `1`, and
+> infinite cases. A zero exponent is a constant-one function of the base, so
+> its base cotangent is exactly zero; a zero base is a constant function of
+> the exponent on each side of `y = 0`, so its exponent cotangent is exactly
+> zero. A negative base gives the exponent a NaN cotangent through `log`,
+> since `x^y` is not real for non-integer `y` near any `y`.
 >
 > Accumulator: None. An algebraic rewrite of `pow` (for example `pow(x, 2)` as
 > `x * x`) is admissible only where it yields the same bits for every operand.
