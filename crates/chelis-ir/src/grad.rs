@@ -1004,14 +1004,7 @@ fn grad_dag_result(
             node.inputs
                 .iter()
                 .map(|&input_id| {
-                    let input_ty = forward.get(input_id).unwrap().output_type.clone();
-                    let zero = dag.add_node(
-                        node.owner,
-                        RiscOp::synth_const(input_ty.precision, 0.0),
-                        vec![],
-                        input_ty,
-                        None,
-                    );
+                    let zero = fill_like(&mut dag, node.owner, input_id, 0.0);
                     (input_id, zero)
                 })
                 .collect()
@@ -1217,7 +1210,7 @@ fn mask_to_activation(
             None,
         );
     }
-    let zero = zero_like(dag, owner, contribution, &ty);
+    let zero = zero_like(dag, owner, contribution);
     Ok(dag.add_node(
         owner,
         RiscOp::Where,
@@ -1250,13 +1243,27 @@ fn activation_implies(dag: &Dag, inner: Option<NodeId>, outer: NodeId) -> bool {
     false
 }
 
-/// Construct positive zero with the physical axes of a forward value. Anonymous
-/// dimensions are claims, not an allocation or equality witness; each Expand
-/// therefore reads its axis directly from that value.
-fn zero_like(dag: &mut Dag, owner: Owner, source: NodeId, ty: &TensorType) -> NodeId {
-    let mut value = dag.add_node(
+/// Construct positive zero with the physical axes of a forward value.
+fn zero_like(dag: &mut Dag, owner: Owner, source: NodeId) -> NodeId {
+    fill_like(dag, owner, source, 0.0)
+}
+
+/// Construct a uniform `value` with the dtype and physical axes of `source`,
+/// a node already in `dag`. Every synthesized backward constant at positive
+/// rank goes through here. Anonymous dimensions are claims, not an allocation
+/// or equality witness, so a ranked `Const` that merely copies `source`'s
+/// type has no extent source for them (the chelis#1482 refusal, reached from
+/// grad in chelis#3381). Instead a rank-0 constant is widened one axis at a
+/// time, each `Expand` reading its extent directly from `source`.
+fn fill_like(dag: &mut Dag, owner: Owner, source: NodeId, value: f64) -> NodeId {
+    let ty = dag
+        .get(source)
+        .expect("fill_like source is a node of the backward DAG")
+        .output_type
+        .clone();
+    let mut filled = dag.add_node(
         owner,
-        RiscOp::synth_const(ty.precision, 0.0),
+        RiscOp::synth_const(ty.precision, value),
         vec![],
         TensorType {
             dims: vec![],
@@ -1265,7 +1272,7 @@ fn zero_like(dag: &mut Dag, owner: Owner, source: NodeId, ty: &TensorType) -> No
         None,
     );
     for axis in 0..ty.dims.len() {
-        value = dag.add_node(
+        filled = dag.add_node(
             owner,
             RiscOp::Expand {
                 axis,
@@ -1274,7 +1281,7 @@ fn zero_like(dag: &mut Dag, owner: Owner, source: NodeId, ty: &TensorType) -> No
                     axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits i32")),
                 },
             },
-            vec![value, source],
+            vec![filled, source],
             TensorType {
                 dims: ty.dims[..=axis].to_vec(),
                 precision: ty.precision,
@@ -1282,7 +1289,7 @@ fn zero_like(dag: &mut Dag, owner: Owner, source: NodeId, ty: &TensorType) -> No
             None,
         );
     }
-    value
+    filled
 }
 
 /// Combine one forward value's incoming cotangent contributions in the exact
@@ -1298,7 +1305,7 @@ fn balanced_adjoint_sum(
     debug_assert!(!contributions.is_empty());
     let ty = forward_node.output_type.clone();
     let before_zero = dag.len();
-    let zero = zero_like(dag, forward_node.owner, forward_node.id, &ty);
+    let zero = zero_like(dag, forward_node.owner, forward_node.id);
     stamp_grad_marker(dag, before_zero, forward_node);
 
     let mut level = Vec::with_capacity(contributions.len() + 1);
@@ -1517,22 +1524,8 @@ fn compute_adjoints(
         RiscOp::Compare(_) => {
             let a = node.inputs[0];
             let b = node.inputs[1];
-            let ty_a = forward.get(a).unwrap().output_type.clone();
-            let ty_b = forward.get(b).unwrap().output_type.clone();
-            let za = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty_a.precision, 0.0),
-                vec![],
-                ty_a,
-                None,
-            );
-            let zb = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty_b.precision, 0.0),
-                vec![],
-                ty_b,
-                None,
-            );
+            let za = fill_like(dag, node.owner, a, 0.0);
+            let zb = fill_like(dag, node.owner, b, 0.0);
             Some(vec![(a, za), (b, zb)])
         }
         RiscOp::Logical(_) => None,
@@ -1564,10 +1557,9 @@ fn compute_adjoints(
             let condition = node.inputs[0];
             let then_value = node.inputs[1];
             let else_value = node.inputs[2];
-            let condition_ty = forward.get(condition).unwrap().output_type.clone();
             let branch_ty = forward.get(then_value).unwrap().output_type.clone();
-            let zero_condition = zero_like(dag, node.owner, condition, &condition_ty);
-            let zero_branch = zero_like(dag, node.owner, then_value, &branch_ty);
+            let zero_condition = zero_like(dag, node.owner, condition);
+            let zero_branch = zero_like(dag, node.owner, then_value);
             let then_grad = dag.add_node(
                 node.owner,
                 RiscOp::Where,
@@ -1623,23 +1615,9 @@ fn compute_adjoints(
             let a = node.inputs[0];
             let b = node.inputs[1];
             let cotangent = node.inputs[2];
-            let ty_a = forward.get(a).unwrap().output_type.clone();
-            let ty_b = forward.get(b).unwrap().output_type.clone();
             let ty_g = forward.get(cotangent).unwrap().output_type.clone();
-            let zero_a = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty_a.precision, 0.0),
-                vec![],
-                ty_a,
-                None,
-            );
-            let zero_b = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty_b.precision, 0.0),
-                vec![],
-                ty_b,
-                None,
-            );
+            let zero_a = fill_like(dag, node.owner, a, 0.0);
+            let zero_b = fill_like(dag, node.owner, b, 0.0);
             let dg = dag.add_node(
                 node.owner,
                 RiscOp::ExtremaAdjoint {
@@ -1694,15 +1672,8 @@ fn compute_adjoints(
         RiscOp::ReluAdjoint => {
             let x = node.inputs[0];
             let cotangent = node.inputs[1];
-            let ty_x = forward.get(x).unwrap().output_type.clone();
             let ty_g = forward.get(cotangent).unwrap().output_type.clone();
-            let zero_x = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty_x.precision, 0.0),
-                vec![],
-                ty_x,
-                None,
-            );
+            let zero_x = fill_like(dag, node.owner, x, 0.0);
             let dg = dag.add_node(node.owner, RiscOp::ReluAdjoint, vec![x, g], ty_g, None);
             Some(vec![(x, zero_x), (cotangent, dg)])
         }
@@ -1757,13 +1728,7 @@ fn compute_adjoints(
             // d/dx sqrt(x) = 1 / (2 * sqrt(x)). Reuse forward sqrt node.
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let two = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, 2.0),
-                vec![],
-                ty.clone(),
-                None,
-            );
+            let two = fill_like(dag, node.owner, x, 2.0);
             let two_sqrt = dag.add_node(
                 node.owner,
                 RiscOp::Mul,
@@ -1802,13 +1767,7 @@ fn compute_adjoints(
             // d/dx atan(x) = 1 / (1 + x²) = g / (1 + x*x)
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let one = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, 1.0),
-                vec![],
-                ty.clone(),
-                None,
-            );
+            let one = fill_like(dag, node.owner, x, 1.0);
             let x_sq = dag.add_node(node.owner, RiscOp::Mul, vec![x, x], ty.clone(), None);
             let denom = dag.add_node(node.owner, RiscOp::Add, vec![one, x_sq], ty.clone(), None);
             let dx = tier2::lower_div(node.owner, dag, g, denom, &ty, None);
@@ -1818,13 +1777,7 @@ fn compute_adjoints(
             // [05-OP-46]: tanh gives g * (1 - y * y) using the forward y = tanh(x).
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let one = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, 1.0),
-                vec![],
-                ty.clone(),
-                None,
-            );
+            let one = fill_like(dag, node.owner, x, 1.0);
             let y_sq = dag.add_node(
                 node.owner,
                 RiscOp::Mul,
@@ -1843,13 +1796,7 @@ fn compute_adjoints(
             // the operand dtype.
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let k = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, std::f64::consts::FRAC_2_SQRT_PI),
-                vec![],
-                ty.clone(),
-                None,
-            );
+            let k = fill_like(dag, node.owner, x, std::f64::consts::FRAC_2_SQRT_PI);
             let x_sq = dag.add_node(node.owner, RiscOp::Mul, vec![x, x], ty.clone(), None);
             let neg_x_sq = dag.add_node(node.owner, RiscOp::Neg, vec![x_sq], ty.clone(), None);
             let density = dag.add_node(node.owner, RiscOp::Exp, vec![neg_x_sq], ty.clone(), None);
@@ -1872,13 +1819,7 @@ fn compute_adjoints(
                 dims: ty.dims.clone(),
                 precision: chelis_types::types::Prim::Bool,
             };
-            let zero = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, 0.0),
-                vec![],
-                ty.clone(),
-                None,
-            );
+            let zero = fill_like(dag, node.owner, x, 0.0);
             // positive mask: x > 0  i.e. cmplt(0, x)
             let pos_bool = dag.add_node(
                 node.owner,
@@ -1922,42 +1863,21 @@ fn compute_adjoints(
             // floor is non-differentiable — grad_dag_checked will have already
             // rejected this; this arm is a safety net returning zero gradient.
             let x = node.inputs[0];
-            let ty = forward.get(x).unwrap().output_type.clone();
-            let zero = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, 0.0),
-                vec![],
-                ty,
-                None,
-            );
+            let zero = fill_like(dag, node.owner, x, 0.0);
             Some(vec![(x, zero)])
         }
         RiscOp::Ceil => {
             // ceil is non-differentiable — grad_dag_checked will have already
             // rejected this; this arm is a safety net returning zero gradient.
             let x = node.inputs[0];
-            let ty = forward.get(x).unwrap().output_type.clone();
-            let zero = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, 0.0),
-                vec![],
-                ty,
-                None,
-            );
+            let zero = fill_like(dag, node.owner, x, 0.0);
             Some(vec![(x, zero)])
         }
         RiscOp::Round => {
             // round is non-differentiable — grad_dag_checked will have already
             // rejected this; this arm is a safety net returning zero gradient.
             let x = node.inputs[0];
-            let ty = forward.get(x).unwrap().output_type.clone();
-            let zero = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty.precision, 0.0),
-                vec![],
-                ty,
-                None,
-            );
+            let zero = fill_like(dag, node.owner, x, 0.0);
             Some(vec![(x, zero)])
         }
         RiscOp::Bitwise(_) => Some(vec![]),
@@ -1968,22 +1888,8 @@ fn compute_adjoints(
             // returning zero gradient to both operands.
             let a = node.inputs[0];
             let b = node.inputs[1];
-            let ty_a = forward.get(a).unwrap().output_type.clone();
-            let ty_b = forward.get(b).unwrap().output_type.clone();
-            let za = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty_a.precision, 0.0),
-                vec![],
-                ty_a,
-                None,
-            );
-            let zb = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(ty_b.precision, 0.0),
-                vec![],
-                ty_b,
-                None,
-            );
+            let za = fill_like(dag, node.owner, a, 0.0);
+            let zb = fill_like(dag, node.owner, b, 0.0);
             Some(vec![(a, za), (b, zb)])
         }
         // [05-OP-37]: the input's pathwise adjoint replays the forward mask
@@ -2007,14 +1913,7 @@ fn compute_adjoints(
         // template's dtype ([05-OP-8]), as the verifier requires.
         RiscOp::UniformLike => {
             let template = node.inputs[0];
-            let template_ty = forward.get(template).unwrap().output_type.clone();
-            let zero = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(template_ty.precision, 0.0),
-                vec![],
-                template_ty,
-                None,
-            );
+            let zero = fill_like(dag, node.owner, template, 0.0);
             let mut contributions = vec![(template, zero)];
             for (slot, bound) in [
                 (1, crate::dag::UniformBound::Low),
@@ -2178,13 +2077,7 @@ fn compute_adjoints(
             }
 
             // Prefix products: prefix[i] = prod_{j<i} slices[j], with prefix[0] = 1.
-            let one = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(slice_ty.precision, 1.0),
-                vec![],
-                slice_ty.clone(),
-                None,
-            );
+            let one = fill_like(dag, node.owner, slices[0], 1.0);
             let mut prefix: Vec<NodeId> = Vec::with_capacity(axis_size);
             prefix.push(one);
             for i in 1..axis_size {
@@ -2800,14 +2693,7 @@ fn compute_adjoints(
             // `g` has the scalar output's type, which differs from the
             // input's, so it is not reused here).
             let x = node.inputs[0];
-            let input_ty = forward.get(x).unwrap().output_type.clone();
-            let zero = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(input_ty.precision, 0.0),
-                vec![],
-                input_ty,
-                None,
-            );
+            let zero = fill_like(dag, node.owner, x, 0.0);
             Some(vec![(x, zero)])
         }
 
@@ -2860,13 +2746,7 @@ fn compute_adjoints(
                 // pairs no admitted program reaches (a float source at a
                 // deferred `f8e4m3` or non-numeric target); those are
                 // rejected long before AD.
-                let zero = dag.add_node(
-                    node.owner,
-                    RiscOp::synth_const(input_ty.precision, 0.0),
-                    vec![],
-                    input_ty,
-                    None,
-                );
+                let zero = fill_like(dag, node.owner, x, 0.0);
                 Some(vec![(x, zero)])
             }
         }
@@ -2915,13 +2795,7 @@ fn compute_adjoints(
             let values = node.inputs[0];
             let indices = node.inputs[1];
             let values_ty = forward.get(values).unwrap().output_type.clone();
-            let zero = dag.add_node(
-                node.owner,
-                RiscOp::synth_const(values_ty.precision, 0.0),
-                vec![],
-                values_ty.clone(),
-                None,
-            );
+            let zero = fill_like(dag, node.owner, values, 0.0);
             let dvalues = dag.add_node(
                 node.owner,
                 RiscOp::ScatterAdd {
@@ -3187,14 +3061,7 @@ fn extrema_reduce_adjoint(
         input_ty.clone(),
         None,
     );
-    let zero = dag.add_node(
-        node.owner,
-        RiscOp::synth_const(input_ty.precision, 0.0),
-        vec![],
-        input_ty.clone(),
-        None,
-    );
-    dag.add_shape_dep(zero, x);
+    let zero = fill_like(dag, node.owner, x, 0.0);
     let non_nan_dx = dag.add_node(
         node.owner,
         RiscOp::Where,
@@ -3258,14 +3125,7 @@ fn extrema_reduce_adjoint(
         reduced_i64.clone(),
         None,
     );
-    let zero_count = dag.add_node(
-        node.owner,
-        RiscOp::synth_const(Prim::Int64, 0.0),
-        vec![],
-        reduced_i64,
-        None,
-    );
-    dag.add_shape_dep(zero_count, nan_count);
+    let zero_count = fill_like(dag, node.owner, nan_count, 0.0);
     let has_nan = dag.add_node(
         node.owner,
         RiscOp::Compare(ComparisonKind::Gt),

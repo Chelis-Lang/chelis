@@ -231,7 +231,7 @@ fn an_axis_with_no_extent_source_is_still_refused() {
         "the receipt must name the exact cardinality: {rendered}"
     );
     assert!(
-        rendered.contains("chelis#1482"),
+        rendered.contains("chelis#1277"),
         "the receipt must cite its authority: {rendered}"
     );
 }
