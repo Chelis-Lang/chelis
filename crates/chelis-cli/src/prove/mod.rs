@@ -594,6 +594,7 @@ fn prove_surf_file(
                             property_run::LinkedPropertySource {
                                 path,
                                 package_root: package_root.as_deref(),
+                                diagnostic_names: &prepared.diagnostic_names,
                             },
                             &reachable_decls,
                             &prepared.entry_decls,

@@ -62,6 +62,7 @@ pub(super) fn run_surf_properties_shared(
 pub(super) struct LinkedPropertySource<'a> {
     pub path: &'a Path,
     pub package_root: Option<&'a Path>,
+    pub diagnostic_names: &'a chelis_reef::DiagnosticNames,
 }
 
 pub(super) fn run_surf_linked_properties_shared(
@@ -122,6 +123,25 @@ pub(super) fn run_surf_linked_properties_shared(
     for outcome in &mut outcomes {
         if let Some(display_name) = display_names.get(&outcome.name) {
             outcome.name = display_name.clone();
+        }
+        // Beacon's proof graph inlines source functions, so its supplemental
+        // source binding records the exact linked declarations separately.
+        // Render those identities through Reef's checked map for CLI users;
+        // the declaration digest remains the machine provenance.
+        if let Some(declarations) = outcome
+            .engine_evidence
+            .as_mut()
+            .and_then(|evidence| evidence.get_mut("source_binding"))
+            .and_then(|binding| binding.get_mut("declarations"))
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for declaration in declarations {
+                if let Some(linked) = declaration["name"].as_str()
+                    && let Some(source_name) = source.diagnostic_names.source_name(linked)
+                {
+                    declaration["name"] = serde_json::Value::String(source_name.to_owned());
+                }
+            }
         }
     }
     render_all(path, &outcomes, "surf", options, totals)
