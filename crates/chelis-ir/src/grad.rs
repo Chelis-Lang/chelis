@@ -258,11 +258,7 @@ fn grad_dag_checked_impl(
     for node in forward.nodes() {
         if live[node.id.0]
             && let Some(rejection) = structural_rejection(node, forward, selected_data[node.id.0])
-            && !is_cotangent_free_integer_computation(
-                node,
-                reach[node.id.0],
-                discrete_parameters[node.id.0],
-            )
+            && !is_cotangent_free_integer_computation(node, discrete_parameters[node.id.0])
         {
             return Err(rejection);
         }
@@ -281,19 +277,16 @@ const ACTIVE_COTANGENT: u8 = 1;
 const ZERO_COTANGENT: u8 = 2;
 
 /// [04-NUM-14]: "a bool or integer source is a discrete forward-only value and
-/// carries no cotangent", so a cast from one is a zero-cotangent edge in
-/// [`cotangent_reach`], as a comparison is. An integer computation that no
-/// active cotangent reaches and that does not compute from a bool or integer
-/// parameter being differentiated is therefore never on a cotangent path: it
-/// is an exact forward value, and its structural rejection does not apply
-/// (chelis#3426, chelis#3427). An integer value that is itself differentiated
-/// keeps its atom's rejection.
-fn is_cotangent_free_integer_computation(
-    node: &DagNode,
-    reach: u8,
-    discrete_parameter: bool,
-) -> bool {
-    integer_computation(node).is_some() && reach & ACTIVE_COTANGENT == 0 && !discrete_parameter
+/// carries no cotangent", so [`cotangent_reach`] makes every edge into a bool
+/// or integer value a zero-cotangent edge, as a comparison's is, and no
+/// cotangent ever reaches an integer computation. Such a computation is an
+/// exact forward value and its structural rejection does not apply
+/// (chelis#3426, chelis#3427), unless it computes from a bool or integer
+/// parameter selected for differentiation: that value is itself
+/// differentiated and keeps its atom's rejection. Only a direct IR caller can
+/// select one; Surf rejects a discrete `wrt` as a type error.
+fn is_cotangent_free_integer_computation(node: &DagNode, discrete_parameter: bool) -> bool {
+    integer_computation(node).is_some() && !discrete_parameter
 }
 
 /// How `grad` treats a node whose signed-integer result it computes.
@@ -596,9 +589,10 @@ impl From<String> for BackwardFailure {
 /// The atom-owned structural AD disposition for a forward node. Both the
 /// live-node precheck and the actual backward walk use this table. A
 /// piecewise-constant conversion reached through exact zero retains its
-/// named reason. A signed-integer computation that no cotangent reaches is
-/// exempt ([`is_cotangent_free_integer_computation`]): it has no requested
-/// adjoint and passes exact zero to its producers.
+/// named reason. A signed-integer computation is exempt unless it computes
+/// from a differentiated bool or integer parameter
+/// ([`is_cotangent_free_integer_computation`]): it has no requested adjoint
+/// and passes exact zero to its producers.
 fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> Option<AdError> {
     match &node.op {
         RiscOp::Bitwise(kind) if selected_data => {
@@ -971,7 +965,6 @@ fn grad_dag_result(
     // spec/design/chelis_span_survival.md §2.3 AD row: "Forward nodes:
     // clone span_id and merged_spans."
     let mut dag = forward.clone();
-    let reach = cotangent_reach(forward, output);
     let selected_data = selected_data_reach(forward, wrt);
     let discrete_parameters = discrete_parameter_reach(forward, wrt);
     let mut adjoints: UnordMap<NodeId, NodeId> = UnordMap::new();
@@ -1109,11 +1102,8 @@ fn grad_dag_result(
 
         let node = forward.get(node_id).unwrap().clone();
         let rejection = structural_rejection(&node, forward, selected_data[node_id.0]);
-        let cotangent_free = is_cotangent_free_integer_computation(
-            &node,
-            reach[node_id.0],
-            discrete_parameters[node_id.0],
-        );
+        let cotangent_free =
+            is_cotangent_free_integer_computation(&node, discrete_parameters[node_id.0]);
         if let Some(rejection) = rejection
             && !cotangent_free
         {
