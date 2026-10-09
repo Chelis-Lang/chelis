@@ -373,3 +373,100 @@ fn review_witnesses_agree_in_both_lanes() {
         failures.join("\n")
     );
 }
+
+/// A binder no context fixes stays unfixed, whatever evidence the result
+/// offers. The issue_2599 shapes run in eval and must be refused by C host
+/// lowering as unresolved ([05-UNS-1]); a result-only dtype binder fixed by
+/// the result while a dimension binder stays unfixed is refused the same
+/// way; and a result-only dtype binder with no context at all is a checker
+/// error, so both lanes refuse it.
+#[test]
+fn unfixed_binders_stay_rejected() {
+    let dir = tempdir().expect("tempdir");
+    let path = payload(&dir);
+    const COL: &str = "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\n";
+    let eval_runs_c_refuses: Vec<(&str, String)> = vec![
+        ("root_none", "a = None\n".to_string()),
+        (
+            "len_of_none_list",
+            "def case(flag: bool) -> i64 = len([None, None])\na = case(true)\n".to_string(),
+        ),
+        (
+            "scan_callback_len_of_none",
+            "def case(flag: bool) -> List[i64] =\n  scan(fn (acc: i64, x: i64) -> len([None, None]), 0i64, [1i64, 2i64])\na = case(true)\n".to_string(),
+        ),
+        (
+            "flat_map_callback_len_of_none",
+            "def case(flag: bool) -> List[i64] =\n  flat_map(fn (x: i64) -> [len([None])], [1i64, 2i64])\na = case(true)\n".to_string(),
+        ),
+        (
+            "fold_callback_len_of_none",
+            "def case(flag: bool) -> i64 =\n  fold(fn (acc: i64, x: i64) -> add(acc, len([None])), 0i64, [1i64, 2i64])\na = case(true)\n".to_string(),
+        ),
+        (
+            "recursive_generic_adt_dimension_unfixed",
+            format!(
+                "{COL}def repl[n](xs: List[Col[n]], acc: List[Col[n]]) -> List[Col[n]] =\n  if eq(len(xs), 0i64) then acc\n  else {{\n    hp = index(xs, 0i64)\n    repl(skip(xs, 1i64), append(acc, hp))\n  }}\na = len(repl([], []))\n"
+            ),
+        ),
+        (
+            "result_dtype_fixed_dimension_unfixed",
+            format!(
+                "{COL}def repl[n, p: Float](m: MappedFile, xs: List[Col[n]], acc: List[Col[n]]) -> tensor[*, p] =\n  if eq(len(xs), 0i64) then mmap_tensor(m, 0i64, add(len(acc), 1i64), p)\n  else {{\n    hp = index(xs, 0i64)\n    repl(m, skip(xs, 1i64), append(acc, hp))\n  }}\n{}",
+                main_reading(&path, "f32] = repl(m, [], [])")
+            ),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, source) in &eval_runs_c_refuses {
+        let evaluated = eval(&dir, name, source);
+        let built = compiled(&dir, name, source);
+        let refused = matches!(
+            &built,
+            Err(error) if error.contains("unresolved host inference variable")
+                && error.contains("[05-UNS-1]")
+        );
+        println!(
+            "cell {name}: eval {}, C {}",
+            if evaluated.is_ok() { "runs" } else { "fails" },
+            if refused {
+                "refuses as unresolved"
+            } else {
+                "does not refuse as unresolved"
+            }
+        );
+        if evaluated.is_err() || !refused {
+            failures.push(format!("{name}: eval {evaluated:?}, C {built:?}"));
+        }
+    }
+    let no_context = format!(
+        "def load[p: Float](m: MappedFile) -> tensor[*, p] = mmap_tensor(m, 0i64, 2i64, p)\ndef main() -> unit ! {{ IO }} = {{\n  m = mmap_file({:?})\n  print(numel(load(m)))\n}}\nrun = main()\n",
+        path.to_str().unwrap()
+    );
+    let evaluated = eval(&dir, "result_dtype_no_context", &no_context);
+    let built = compiled(&dir, "result_dtype_no_context", &no_context);
+    let checker_refuses = |result: &Result<String, String>| matches!(result, Err(error) if error.contains("Type errors"));
+    println!(
+        "cell result_dtype_no_context: eval {}, C {}",
+        if checker_refuses(&evaluated) {
+            "refuses"
+        } else {
+            "does not refuse"
+        },
+        if checker_refuses(&built) {
+            "refuses"
+        } else {
+            "does not refuse"
+        }
+    );
+    if !checker_refuses(&evaluated) || !checker_refuses(&built) {
+        failures.push(format!(
+            "result_dtype_no_context: eval {evaluated:?}, C {built:?}"
+        ));
+    }
+    assert!(
+        failures.is_empty(),
+        "failing cells:\n{}",
+        failures.join("\n")
+    );
+}

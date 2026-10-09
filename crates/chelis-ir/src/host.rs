@@ -13503,7 +13503,8 @@ fn actualize_retained_host_contract(
     // A binder that only the result mentions (a dtype binder stated by a
     // body's dtype argument, [05-OP-80]) is bound by the call's checked
     // result type. Arguments bind first; the result only fills what they
-    // leave open. Inside a generic caller the result still names the
+    // leave open, and only with a concrete dtype (`solve_result_dtype_vars`).
+    // Inside a generic caller the result still names the
     // caller's own binders, so it is read through the active caller
     // substitution first; that is what lets a binder solved at any call depth
     // reach this one.
@@ -13519,7 +13520,7 @@ fn actualize_retained_host_contract(
         .map(|stamped| apply_host_type_subst(&stamped, &active_substitution));
     for result in std::iter::once(call_result).chain(stamped_result.as_ref()) {
         if let Some(checked_term) = decode_expanded_host_type_expr(program, &checked_result) {
-            solve_host_type_vars(&checked_term, result, &mut checked_substitution);
+            solve_result_dtype_vars(&checked_term, result, &mut checked_substitution);
         }
     }
     let mut body_substitution = active_substitution.clone();
@@ -13577,7 +13578,7 @@ fn actualize_retained_host_contract(
     }
     if let Some(authored_term) = decode_expanded_host_type_expr(program, &authored_result) {
         for result in std::iter::once(call_result).chain(stamped_result.as_ref()) {
-            solve_host_type_vars(&authored_term, result, &mut authored_substitution);
+            solve_result_dtype_vars(&authored_term, result, &mut authored_substitution);
         }
     }
     let mut params = signature
@@ -22656,6 +22657,60 @@ fn inline_call_type_subst(
 ///
 /// Only the shapes a generic signature can name are walked; anything else
 /// contributes no binding rather than guessing one.
+/// Result evidence for a result-only dtype binder: bind a precision variable,
+/// or a type variable standing for a scalar dtype, to the concrete dtype the
+/// call's result type holds at the same position, and nothing else. A type
+/// variable that the result fills with anything but a concrete dtype (a
+/// dimension argument the host type erases to `unit`, an ADT, a container)
+/// stays unsolved, so a call no context fixes is still rejected as
+/// unresolved ([05-UNS-1], chelis#2599). Existing bindings win.
+fn solve_result_dtype_vars(
+    declared: &HostTypeTerm,
+    actual: &HostTypeTerm,
+    out: &mut UnordMap<String, HostTypeTerm>,
+) {
+    match (declared, actual) {
+        (
+            HostTypeTerm::TypeVariable(name)
+            | HostTypeTerm::Scalar(HostPrecisionTerm::Variable(name)),
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)),
+        ) => {
+            out.entry(name.clone())
+                .or_insert(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+                    *precision,
+                )));
+        }
+        (
+            HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                precision: HostPrecisionTerm::Variable(name),
+                ..
+            }),
+            HostTypeTerm::Tensor(TensorType { precision, .. })
+            | HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                precision: HostPrecisionTerm::Concrete(precision),
+                ..
+            }),
+        ) => {
+            out.entry(name.clone())
+                .or_insert(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+                    *precision,
+                )));
+        }
+        (HostTypeTerm::List(declared), HostTypeTerm::List(actual))
+        | (HostTypeTerm::Option(declared), HostTypeTerm::Option(actual)) => {
+            solve_result_dtype_vars(declared, actual, out);
+        }
+        (HostTypeTerm::Tuple(declared), HostTypeTerm::Tuple(actual))
+            if declared.len() == actual.len() =>
+        {
+            for (declared, actual) in declared.iter().zip(actual) {
+                solve_result_dtype_vars(declared, actual, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn solve_host_type_vars(
     declared: &HostTypeTerm,
     actual: &HostTypeTerm,
