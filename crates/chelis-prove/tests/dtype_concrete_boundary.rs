@@ -9,6 +9,20 @@ fn function_slice<'a>(source: &'a str, start: &str, next: &str) -> &'a str {
     &tail[..end]
 }
 
+fn injection_tensor_arm_uses_typed_values(source: &str) -> bool {
+    let sampler = function_slice(source, "fn sample_plan(", "fn materialize_value(");
+    let tensor_arm = function_slice(
+        sampler,
+        "ValuePlan::Tensor { dims, precision } =>",
+        "ValuePlan::Opaque(inv) =>",
+    );
+    tensor_arm.contains("sample_scalar(precision, rng)")
+        && tensor_arm.contains("tensor_value_expr_typed(")
+        && !tensor_arm.contains("tensor_value_expr(")
+        && !tensor_arm.contains("Vec<f64>")
+        && !tensor_arm.contains("&[f64]")
+}
+
 #[test]
 fn concrete_evaluator_and_tier_c_have_no_bare_f64_environment() {
     crate::support::isolate();
@@ -138,9 +152,30 @@ fn every_prover_fuzz_tensor_builder_uses_typed_values() {
         "pub(super) fn prove_with_injection(",
         "fn max_injection_attempts(",
     );
-    assert!(injection_loop.contains("tensor_value_expr_typed"));
+    assert!(injection_loop.contains("sample_plan("));
     assert!(!injection_loop.contains("Vec<f64>"));
+    assert!(
+        injection_tensor_arm_uses_typed_values(injection),
+        "the recursive injection sampler must retain dtype-tagged tensor elements"
+    );
     let injection_sample = function_slice(injection, "fn sample_scalar(", "fn rng_f64(");
     assert!(injection_sample.contains("-> ScalarValue"));
     assert!(injection_sample.contains("scalar_from_i64"));
+}
+
+#[test]
+fn injection_tensor_guard_rejects_an_untyped_builder_or_sampler() {
+    crate::support::isolate();
+    let injection = include_str!("../src/property_runner/injection.rs");
+    assert!(injection_tensor_arm_uses_typed_values(injection));
+
+    let untyped_builder = injection.replacen(
+        "crate::opaque::tensor_value_expr_typed(",
+        "crate::opaque::tensor_value_expr(",
+        1,
+    );
+    assert!(!injection_tensor_arm_uses_typed_values(&untyped_builder));
+
+    let untyped_sampler = injection.replacen("sample_scalar(precision, rng)", "rng_f64(rng)", 1);
+    assert!(!injection_tensor_arm_uses_typed_values(&untyped_sampler));
 }

@@ -869,6 +869,7 @@ fn prove_surf_property(
     if has_injected_binder {
         let mut outcome = injection::prove_with_injection(
             module_decls,
+            &property.decl_path,
             &property.name,
             &property.params,
             &property.preconditions,
