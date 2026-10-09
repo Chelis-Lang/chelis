@@ -255,3 +255,72 @@ fn shadowing_bindings_in_higher_order_positions_agree_in_eval_and_compiled_c() {
         ],
     );
 }
+
+/// A typed key-builtin alias shadows a def of every lowering shape, in a
+/// direct call and as a `map` callback. Each shape has its own definition
+/// route in application lowering; none may see the lexical callee.
+#[test]
+fn typed_key_alias_shadows_every_def_shape_in_eval_and_compiled_c() {
+    for (shape, def) in [
+        (
+            "monomorphic",
+            "def seed(x: i64) -> key = key_from_seed(100i64)\n",
+        ),
+        (
+            "generic",
+            "def seed[t](x: t) -> key = key_from_seed(100i64)\n",
+        ),
+        (
+            "precision-polymorphic",
+            "def seed[p: Float](x: p) -> key = key_from_seed(100i64)\n",
+        ),
+        (
+            "rank-polymorphic",
+            "def seed[r](x: tensor[..r, i64]) -> key = key_from_seed(100i64)\n",
+        ),
+        (
+            "nullary generic constructor wrapper",
+            "type Box[a] =\n  | Empty\n  | Full { value: a }\ndef seed[a]() -> Box[a] = Empty\n",
+        ),
+        (
+            "callable-parameter",
+            "def seed(f: i64 -> key, xs: List[i64]) -> List[key] = map(f, xs)\n",
+        ),
+        (
+            "summary-dispatched",
+            "def seed(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(a, b)\n",
+        ),
+        (
+            "recursive",
+            "def seed(n: i64) -> key = if n <= 0i64 then key_from_seed(100i64) else seed(n - 1i64)\n",
+        ),
+        (
+            "recursive generic",
+            "def seed[t](x: t, n: i64) -> key = if n <= 0i64 then key_from_seed(100i64) else seed(x, n - 1i64)\n",
+        ),
+    ] {
+        let source = format!(
+            "{def}def go() -> (key, List[key]) = {{\n  \
+               seed: i64 -> key = key_from_seed\n  \
+               (seed(7i64), map(seed, [-1i64]))\n\
+             }}\n\
+             def main() = go()\n"
+        );
+        let evaluated = evaluated_lines(&source);
+        assert_eq!(
+            evaluated,
+            [
+                "main.0 = key(0000000000000007)",
+                "main.1 = [key(ffffffffffffffff)]",
+            ],
+            "evaluation, {shape} def"
+        );
+        let compiled = compiled_stdout(&source);
+        for line in &evaluated {
+            assert!(
+                compiled.lines().any(|printed| printed == line),
+                "{shape} def: compiled C must print `{line}`:\n{compiled}"
+            );
+        }
+    }
+}
