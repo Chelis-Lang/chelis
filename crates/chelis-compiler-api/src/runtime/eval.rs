@@ -450,6 +450,15 @@ impl DeclaredResultClaim {
     }
 }
 
+/// One position of a nested result claim's walk: the pattern node, the value
+/// at it and its producer provenance, and the next component to visit.
+struct VerdictVisit<'a> {
+    node: ClaimNodeId,
+    value: &'a RuntimeValue,
+    tree: Option<&'a ResultProducer>,
+    next: usize,
+}
+
 /// Walk `value` along a nested claim. Only the constructor the value carries
 /// is walked; a tensor's verdict names the producer `tree` records for it.
 /// Components are visited depth first in declared order, as a recursive walk
@@ -460,14 +469,8 @@ fn nested_claim_verdict(
     value: &RuntimeValue,
     tree: Option<&ResultProducer>,
 ) -> Result<(), String> {
-    struct Visit<'a> {
-        node: ClaimNodeId,
-        value: &'a RuntimeValue,
-        tree: Option<&'a ResultProducer>,
-        next: usize,
-    }
     let pattern = &nested.pattern;
-    let mut pending = vec![Visit {
+    let mut pending = vec![VerdictVisit {
         node: nested.node,
         value,
         tree,
@@ -536,7 +539,7 @@ fn nested_claim_verdict(
             Some(None) => {}
             Some(Some((child, item))) => {
                 let tree = visit.tree.and_then(|tree| tree.child_ref(index));
-                pending.push(Visit {
+                pending.push(VerdictVisit {
                     node: child,
                     value: item,
                     tree,
@@ -859,6 +862,15 @@ impl EntryPathText {
     }
 }
 
+/// One position of a nested entry walk: the pattern node, the value at it,
+/// the path that reaches it, and the next component to visit.
+struct EntryVisit<'a> {
+    node: ClaimNodeId,
+    value: &'a RuntimeValue,
+    path: EntryPathText,
+    next: usize,
+}
+
 /// Collect the tensors a formal nests in an aggregate or nominal value, in
 /// depth-first declared order, as entry observations of their claimed types.
 /// Only the constructor the value carries is walked. Components are visited
@@ -871,13 +883,7 @@ fn collect_nested_entry_actuals(
     path: String,
     out: &mut Vec<EntryActual>,
 ) {
-    struct Visit<'a> {
-        node: ClaimNodeId,
-        value: &'a RuntimeValue,
-        path: EntryPathText,
-        next: usize,
-    }
-    let mut pending = vec![Visit {
+    let mut pending = vec![EntryVisit {
         node,
         value,
         path: EntryPathText::new(path),
@@ -954,7 +960,7 @@ fn collect_nested_entry_actuals(
             Some(None) => {}
             Some(Some((child, item, segment))) => {
                 let path = visit.path.join(&segment);
-                pending.push(Visit {
+                pending.push(EntryVisit {
                     node: child,
                     value: item,
                     path,
