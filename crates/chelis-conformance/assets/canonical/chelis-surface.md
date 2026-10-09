@@ -484,7 +484,8 @@ Each target checks whether it can lower the selected source function.
   backward DAG.
 - **Zero cotangent or barrier:** `cmplt` and comparison results, `const`,
   `load`, and the `uniform_like` template carry zero cotangent.
-  `stop_gradient` cuts a selected path. Logical operations reject `grad`
+  [05-OP-42] specifies `stop_gradient` as the barrier that cuts a selected
+  path; programs cannot call it yet (chelis#1312). Logical operations reject `grad`
   structurally.
 - **Structural rejection:** float `floor`/`ceil`/`round` and the named
   casts `cast_trunc`, `cast_saturate` and `cast_wrap` are piecewise constant; `count` and argument reductions have discrete

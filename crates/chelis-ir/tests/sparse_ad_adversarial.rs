@@ -635,7 +635,7 @@ fn scatter_ad_error_display_contains_canonical_language() {
         "non-deterministic",
         "duplicate",
         "scatter_add",
-        "stop-gradient",
+        "data path",
     ];
     for phrase in must_contain {
         assert!(

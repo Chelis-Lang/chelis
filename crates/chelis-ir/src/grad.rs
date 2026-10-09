@@ -112,47 +112,53 @@ impl AdError {
     }
 }
 
+/// spec/06 §7.5: a structural rejection applies only to an active operation
+/// whose result has a data path, so each of those diagnostics names the data
+/// path and how to keep the operation off one.
+const DATA_PATH: &str = "its result has a data path to the differentiated output";
+const OFF_THE_DATA_PATH: &str = "read that result only as a comparison operand, a condition, \
+     an index, or a movement bound, or compute it from values that are not differentiated";
+
 impl fmt::Display for AdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AdError::NotSupported { op, reason } => match reason {
                 AdRejectionReason::IntegerIndexOutput => write!(
                     f,
-                    "grad: {op} is non-differentiable (integer-index output); \
-                     remove it from the gradient path or wrap it in a stop-gradient"
+                    "grad: {op} is non-differentiable (integer-index output) and {DATA_PATH}; \
+                     {OFF_THE_DATA_PATH}"
                 ),
                 AdRejectionReason::IntegerReductionOutput => write!(
                     f,
-                    "grad: {op} is non-differentiable (integer-reduction output); \
-                     remove it from the gradient path or wrap it in a stop-gradient"
+                    "grad: {op} is non-differentiable (integer-reduction output) and {DATA_PATH}; \
+                     {OFF_THE_DATA_PATH}"
                 ),
                 AdRejectionReason::IntegerArithmeticOutput => write!(
                     f,
-                    "grad: {op} is non-differentiable (signed-integer arithmetic output); \
-                     use a float dtype or remove it from the gradient path"
+                    "grad: {op} is non-differentiable (signed-integer arithmetic output) and \
+                     {DATA_PATH}; use a float dtype, or {OFF_THE_DATA_PATH}"
                 ),
                 AdRejectionReason::PiecewiseConstant => write!(
                     f,
-                    "grad: {op} is non-differentiable (piecewise constant); \
-                     remove it from the gradient path or wrap it in a stop-gradient"
+                    "grad: {op} is non-differentiable (piecewise constant) and {DATA_PATH}; \
+                     {OFF_THE_DATA_PATH}"
                 ),
                 AdRejectionReason::TruncatedQuotientJump => write!(
                     f,
                     "grad: {op} is non-differentiable (it jumps wherever its truncated \
-                     quotient changes, [05-OP-64]); remove it from the gradient path or wrap \
-                     it in a stop-gradient"
+                     quotient changes, [05-OP-64]) and {DATA_PATH}; {OFF_THE_DATA_PATH}"
                 ),
                 AdRejectionReason::LogicalOperation => write!(
                     f,
-                    "grad: {op} is non-differentiable (logical operation); \
-                     remove it from the gradient path or wrap it in a stop-gradient"
+                    "grad: {op} is non-differentiable (logical operation) and {DATA_PATH}; \
+                     {OFF_THE_DATA_PATH}"
                 ),
                 AdRejectionReason::NonDeterministicAtDuplicateIndices => write!(
                     f,
                     "grad: {op} is non-differentiable (non-deterministic at duplicate \
                      indices -- last-write-wins forward semantics has no well-defined \
-                     adjoint); use scatter_add (whose adjoint is gather) or wrap \
-                     {op} in a stop-gradient"
+                     adjoint) and {DATA_PATH}; use scatter_add (whose adjoint is gather), \
+                     or {OFF_THE_DATA_PATH}"
                 ),
                 AdRejectionReason::RandomSelectionParameter => write!(
                     f,
@@ -5162,6 +5168,33 @@ mod tests {
                 }
             );
             assert!(grad_dag(&dag, out, &[x, m]).is_none());
+        }
+    }
+
+    /// spec/06 §7.5: every structural rejection names the data path that
+    /// makes it apply and how to keep the operation off one. No diagnostic
+    /// recommends `stop_gradient`, which is not implemented (chelis#1312).
+    #[test]
+    fn structural_rejection_diagnostics_name_the_data_path() {
+        for reason in [
+            AdRejectionReason::IntegerIndexOutput,
+            AdRejectionReason::IntegerReductionOutput,
+            AdRejectionReason::IntegerArithmeticOutput,
+            AdRejectionReason::PiecewiseConstant,
+            AdRejectionReason::TruncatedQuotientJump,
+            AdRejectionReason::LogicalOperation,
+            AdRejectionReason::NonDeterministicAtDuplicateIndices,
+        ] {
+            let rendered = AdError::not_supported("op", reason).to_string();
+            assert!(
+                rendered.contains("its result has a data path to the differentiated output")
+                    && rendered.contains("compute it from values that are not differentiated"),
+                "{rendered}"
+            );
+            assert!(
+                !rendered.contains("stop-gradient") && !rendered.contains("stop_gradient"),
+                "{rendered}"
+            );
         }
     }
 

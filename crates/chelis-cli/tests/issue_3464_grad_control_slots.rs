@@ -397,3 +397,28 @@ out = grad(loss, wrt=x)(to_tensor([1.5f32, -2.5f32]), to_tensor([0.0f32, 0.0f32]
         assert_refused(&source, stem, needle);
     }
 }
+
+/// The rejection names the data path that makes it apply and how to keep the
+/// conversion off one. It does not recommend `stop_gradient`, which no
+/// program can call yet.
+#[test]
+fn active_conversion_diagnostic_names_the_data_path() {
+    let source = r#"
+def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, cast(cast(x, i32), f32)), 0i32))
+out = grad(loss, wrt=x)(to_tensor([1.0f32, 2.0f32, 3.0f32]))
+"#;
+    let stderr = assert_refused(
+        source,
+        "data_path_diagnostic",
+        "grad: cast is non-differentiable (piecewise constant) and its result has a data path \
+         to the differentiated output",
+    );
+    assert!(
+        stderr.contains("compute it from values that are not differentiated"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("stop-gradient") && !stderr.contains("stop_gradient"),
+        "{stderr}"
+    );
+}

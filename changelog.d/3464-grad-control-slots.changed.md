@@ -21,3 +21,9 @@ operand slot, indices included, except metadata reads such as `shape` and
 guard predicates, so a conversion of a value gathered by an index computed
 from `x` is active and rejects when used as data. See
 [#3487](https://github.com/Chelis-Lang/chelis/issues/3487).
+
+The structural `grad` rejections (piecewise constant, integer index or
+reduction output, signed-integer arithmetic, truncated-quotient jump, logical
+operation, and replace-scatter) now say that the operation's result has a data
+path to the differentiated output and how to keep it off one, instead of
+recommending a `stop_gradient` that programs cannot yet call.
