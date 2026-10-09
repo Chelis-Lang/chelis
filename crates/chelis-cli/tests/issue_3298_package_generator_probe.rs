@@ -99,14 +99,26 @@ fn linked_package_matches_standalone_for_true_and_false_properties() {
 #[test]
 fn generated_probe_name_is_fresh_in_a_linked_package() {
     let (_dir, _reef_home, app) = common::make_app("issue-3298-collision");
-    fs::write(
-        app.join("src/main.ch"),
-        SOURCE.replace(
+    // The linked generator stem ends in `chelis_gen_probe`, so this user
+    // definition occupies the name the generator would otherwise choose.
+    // Calling it from `w` also checks that the user definition survives.
+    let source = SOURCE
+        .replace(
             "@property w forall",
-            "def __chelis_gen_probe() -> bool = true\n@property w forall",
-        ),
-    )
-    .expect("write package module");
+            "def chelis_gen_probe() -> bool = true\n@property w forall",
+        )
+        .replace(
+            "(prob_value(p) <= 0.5005f32)",
+            "((prob_value(p) <= 0.5005f32) && chelis_gen_probe())",
+        );
+    fs::write(app.join("src/main.ch"), source).expect("write package module");
     let (_code, records) = prove(&app, "src/main.ch", "fuzz-only", Some(&_reef_home));
     assert_constructor_outcomes(&records);
+    assert!(
+        property(&records, "w")["goal"]
+            .as_str()
+            .expect("goal")
+            .contains("chelis_gen_probe("),
+        "the true property must call the colliding user definition: {records:#?}"
+    );
 }
