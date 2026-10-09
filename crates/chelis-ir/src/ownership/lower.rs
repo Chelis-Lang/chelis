@@ -848,6 +848,16 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             .find_map(|scope| scope.names.get(name).copied())
     }
 
+    /// The signature of the def a call of `function` names. A lexical
+    /// binding of the spelling shadows every def, so a call through one never
+    /// resolves to a def.
+    fn definition_signature(&self, function: &str) -> Option<&Signature> {
+        if self.lookup(function).is_some() {
+            return None;
+        }
+        self.ctx.signatures.get(function)
+    }
+
     fn copy(&mut self, source: OwnerId) -> Result<OwnerId, OwnershipError> {
         let info = self.info(source)?;
         let ty = info.ty.clone();
@@ -1195,9 +1205,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     None
                 } else {
                     native_specs.clone().or_else(|| {
-                        self.ctx
-                            .signatures
-                            .get(function)
+                        self.definition_signature(function)
                             .map(|signature| signature.params.clone())
                     })
                 };
@@ -1772,7 +1780,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 ApplyKind::NativeProviderCall,
                 native_specs.expect("native provider specs present"),
             ),
-            Some(Place::Owner(_)) | None => match self.ctx.signatures.get(function) {
+            Some(Place::Owner(_)) | None => match self.definition_signature(function) {
                 Some(signature) => {
                     let callee =
                         self.ctx

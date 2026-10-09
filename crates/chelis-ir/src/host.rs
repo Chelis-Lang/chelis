@@ -389,6 +389,13 @@ fn bind_top_level_callable(
     scope.insert(callable_origin_key(name), HostTypeTerm::Unit);
 }
 
+/// Whether `name` is lexically bound in `scope`, rather than recorded there
+/// as a visible top-level callable. A lexical binding shadows every
+/// definition of its spelling.
+fn host_lexically_binds(scope: &UnordMap<String, HostTypeTerm>, name: &str) -> bool {
+    scope.contains_key(name) && !scope.contains_key(&callable_origin_key(name))
+}
+
 /// Give each free top-level value read the identity of its declaration
 /// before substituting a callee body into a different lexical scope. The
 /// linearity walk honors function parameters, block locals and patterns; a
@@ -4200,28 +4207,32 @@ fn derive_host_function_specialization(
                 }
             }
         }
+        // A parameter shadows every def of its spelling, so a call through one
+        // never inherits a def's summary.
         HostExprKind::Call {
             function: callee,
             args,
             ..
-        } => match summaries.get(callee)? {
-            HostFunctionSpecialization::BlasMatmul(summary) => {
-                remap_blas_summary_to_params(summary, args, &function.params)
-                    .map(HostFunctionSpecialization::BlasMatmul)
+        } if !function.params.iter().any(|param| param.name == *callee) => {
+            match summaries.get(callee)? {
+                HostFunctionSpecialization::BlasMatmul(summary) => {
+                    remap_blas_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::BlasMatmul)
+                }
+                HostFunctionSpecialization::SparseGather(summary) => {
+                    remap_sparse_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::SparseGather)
+                }
+                HostFunctionSpecialization::SparseScatterAdd(summary) => {
+                    remap_sparse_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::SparseScatterAdd)
+                }
+                HostFunctionSpecialization::SparseScatterReplace(summary) => {
+                    remap_sparse_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::SparseScatterReplace)
+                }
             }
-            HostFunctionSpecialization::SparseGather(summary) => {
-                remap_sparse_summary_to_params(summary, args, &function.params)
-                    .map(HostFunctionSpecialization::SparseGather)
-            }
-            HostFunctionSpecialization::SparseScatterAdd(summary) => {
-                remap_sparse_summary_to_params(summary, args, &function.params)
-                    .map(HostFunctionSpecialization::SparseScatterAdd)
-            }
-            HostFunctionSpecialization::SparseScatterReplace(summary) => {
-                remap_sparse_summary_to_params(summary, args, &function.params)
-                    .map(HostFunctionSpecialization::SparseScatterReplace)
-            }
-        },
+        }
         _ => None,
     }
 }
@@ -8493,7 +8504,7 @@ fn lower_host_expr_kind(
                     } else {
                         bindings.push(host_binding);
                     }
-                    scoped.insert(name.to_string(), bind_ty);
+                    bind_host_local(&mut scoped, name.to_string(), bind_ty);
                 }
             }
             let mut body = lower_host_expr(body_expr, program, &scoped, tensor_helpers)?;
@@ -9354,8 +9365,12 @@ fn refine_host_expr_types(
                 HostTypeTerm::Fn(params, ret) => Some((params.clone(), (**ret).clone())),
                 _ => None,
             });
-            let declared_sig = signatures.get(function).cloned();
-            let sig = inferred_sig.or(declared_sig);
+            // A bound name shadows every def of its spelling.
+            let sig = if scope.contains_key(function) {
+                inferred_sig
+            } else {
+                signatures.get(function).cloned()
+            };
             if let Some((params, ret)) = sig {
                 for (index, arg_ty) in arg_tys.iter_mut().enumerate() {
                     if let Some(inferred) = params.get(index)
@@ -12307,25 +12322,35 @@ fn lower_app_host_expr(
             }
         })
         .to_string();
+    // A lexical binding shadows every definition of its spelling, so neither
+    // the call's signature nor its result claims come from a def.
+    let callee_is_lexical = host_lexically_binds(scope, &name);
     let fn_sig = scope
         .get(&name)
         .and_then(host_fn_signature)
-        .or_else(|| lookup_declared_fn_type(program, &name))
+        .or_else(|| {
+            (!callee_is_lexical)
+                .then(|| lookup_declared_fn_type(program, &name))
+                .flatten()
+        })
         .or_else(|| kids.first().and_then(expr_fn_type));
     // Result claims belong to the callee's authored declaration. Keep that
     // source separate from `fn_sig`: lexical and application metadata may
     // carry an inferred/specialized result shape that must not manufacture a
     // declaration-site obligation.
-    let declared_fn_sig = lookup_declared_fn_type(program, &name);
+    let declared_fn_sig = (!callee_is_lexical)
+        .then(|| lookup_declared_fn_type(program, &name))
+        .flatten();
     // Ordinary lexical lookup precedes builtin callable routes. A
     // function-typed parameter named `round_to` or `map` is a call through
     // that parameter, not a builtin selected by spelling
     // (spec/04-type-system.md §8.6; chelis#1076). Keep the override exact to
     // `BUILTIN_NAMES`: applied uppercase heads retain constructor precedence
     // under spec/01-nomenclature.md §3.2.
-    let callee_is_local_callable = scope
-        .get(&name)
-        .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
+    let callee_is_local_callable = callee_is_lexical
+        || scope
+            .get(&name)
+            .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
     let callee_shadows_builtin = BUILTIN_NAMES.contains(&name.as_str()) && callee_is_local_callable;
     let callee_is_builtin = BUILTIN_NAMES.contains(&name.as_str())
         && !scope.contains_key(&name)
@@ -17139,6 +17164,16 @@ fn lower_host_callback(
             let Some(name) = list.children_slice().first().and_then(symbol_name) else {
                 return Ok(None);
             };
+            // A lexical binding shadows every definition of its spelling, so
+            // its own function type is the only signature this callback may
+            // take. A binding without one (an unannotated key-builtin alias)
+            // is not a lowerable callback.
+            if host_lexically_binds(scope, name) {
+                return Ok(scope
+                    .get(name)
+                    .and_then(host_fn_signature)
+                    .map(|(param_tys, ret_ty)| named_host_callback(name, param_tys, ret_ty)));
+            }
             let Some((param_tys, ret_ty)) = scope
                 .get(name)
                 .and_then(host_fn_signature)
@@ -17152,23 +17187,35 @@ fn lower_host_callback(
             else {
                 return Ok(None);
             };
-            let params = param_tys
-                .into_iter()
-                .enumerate()
-                .map(|(index, ty)| HostParam {
-                    name: format!("arg{index}"),
-                    ty,
-                })
-                .collect();
-            Ok(Some(HostCallback {
-                kind: HostCallbackKind::Named {
-                    function: name.to_string(),
-                    params,
-                },
-                ret_ty,
-            }))
+            Ok(Some(named_host_callback(name, param_tys, ret_ty)))
         }
         _ => Ok(None),
+    }
+}
+
+/// Positional callback parameters `arg0`, `arg1`, ... of the given types.
+fn positional_host_params(param_tys: Vec<HostTypeTerm>) -> Vec<HostParam> {
+    param_tys
+        .into_iter()
+        .enumerate()
+        .map(|(index, ty)| HostParam {
+            name: format!("arg{index}"),
+            ty,
+        })
+        .collect()
+}
+
+fn named_host_callback(
+    name: &str,
+    param_tys: Vec<HostTypeTerm>,
+    ret_ty: HostTypeTerm,
+) -> HostCallback {
+    HostCallback {
+        kind: HostCallbackKind::Named {
+            function: name.to_string(),
+            params: positional_host_params(param_tys),
+        },
+        ret_ty,
     }
 }
 
