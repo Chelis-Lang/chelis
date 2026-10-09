@@ -80,11 +80,12 @@ rule. The coverage for an AST-only PR is:
 | Clarabel provider-plus-SMT build and tests | New `required_feature_job_rule` |
 | Other optional feature configurations | Scheduled matrix, unless another reviewed PR rule applies |
 
-A split into `crates/chelis-surf/src/ast/` adds a directory rule in the same
-change that moves the definitions; the candidate's old and new paths both
-participate in selection. Changes confined to `parser.rs`, `resugar.rs`,
-other Surf files, or unrelated crates do not select the Clarabel job unless
-they match another reviewed rule. A similarly named `ast.rs.bak` does not
+A split into `crates/chelis-surf/src/ast/` updates both the feature rule and
+the existing package rule in the same change that moves the definitions; the
+candidate's old and new paths both participate in selection. Changes confined
+to `parser.rs`, `resugar.rs`, other Surf files, or unrelated crates do not
+select the Clarabel job unless another reviewed rule matches. A similarly
+named `ast.rs.bak` does not
 match the exact AST path.
 
 ## Implementation and acceptance
@@ -92,11 +93,11 @@ match the exact AST path.
 1. Add the strict feature-rule schema and parser to the existing ownership
    manifest and version its plan representation. Put bootstrap-light rule
    parsing in a shared standard-library module consumed by candidate
-   detection and the change-owned/targeted-rebase
-   planner; route that new module through the CI-contract preflight. Replace
-   the hard-coded `CLARABEL_PATHS` and `CLARABEL_PREFIXES` with the table's
-   selected-job projection; retain the existing `clarabel_changed` output
-   and job wiring.
+   detection and the change-owned/targeted-rebase planner; route that new
+   module through the CI-contract preflight. Migrate every existing
+   `CLARABEL_PATHS` and `CLARABEL_PREFIXES` owner into the new rule table,
+   then replace those hard-coded lists with the selected-job
+   projection. Retain the existing `clarabel_changed` output and job wiring.
 2. Add the Surf AST rule. Keep its package rule intact. Validate that the
    selected job exists, runs the provider-plus-SMT Clippy command, and is
    required by Integration when selected. Update the Clarabel cadence row in
@@ -107,7 +108,9 @@ match the exact AST path.
    Reject an unknown job, an untracked path, and a rule or workflow edit that
    removes required-context wiring. Include a rename/move whose old AST path
    must still select the job. Test the targeted-rebase projection against the
-   ordinary PR projection.
+   ordinary PR projection. Compare the old and new selectors over every
+   tracked path: existing Clarabel owners must stay selected, and only the
+   reviewed AST edge may expand selection.
 
 Run `.venv/bin/python scripts/test_ci_detect_docs_only.py` and the ownership
 planner's focused tests, then `python3 scripts/gate.py --fast` before the
