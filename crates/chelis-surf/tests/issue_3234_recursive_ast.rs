@@ -39,6 +39,11 @@ fn nested_invalid_tensor_precision_source(depth: usize) -> String {
     )
 }
 
+fn nested_reference_expression_source(depth: usize, valid: bool) -> String {
+    let tail = if valid { "" } else { " invalid" };
+    format!("module Probe.Ast\nx = {}1i64{tail}\n", "& ".repeat(depth))
+}
+
 fn nested_match_pattern_source(depth: usize, valid: bool) -> String {
     let tail = if valid { "" } else { " invalid" };
     format!(
@@ -52,6 +57,14 @@ fn nested_binding_pattern_source(depth: usize, valid: bool) -> String {
     let tail = if valid { "" } else { " invalid" };
     format!(
         "module Probe.Ast\nx = {{\n{}v{} = 1i64\n0i64\n}}{tail}\n",
+        "(".repeat(depth),
+        ",)".repeat(depth)
+    )
+}
+
+fn nested_invalid_binding_expression_source(depth: usize) -> String {
+    format!(
+        "module Probe.Ast\nx = {{\n{}1i64{} = 1i64\n0i64\n}}\n",
         "(".repeat(depth),
         ",)".repeat(depth)
     )
@@ -95,6 +108,42 @@ fn direct_parser_reports_invalid_deep_precision_on_small_stack() {
             assert!(message.contains("precision type name"), "{message}");
             assert!(message.contains("reference type"), "{message}");
             assert!(message.contains("byte"), "{message}");
+        },
+    );
+}
+
+#[test]
+fn direct_parser_releases_deep_reference_expression_on_small_stack() {
+    on_small_stack(
+        "direct_parser_releases_deep_reference_expression_on_small_stack",
+        || {
+            let source = nested_reference_expression_source(20_000, true);
+            let parsed = parse_str(&source).expect("nested reference expression is Surf syntax");
+            drop(parsed);
+        },
+    );
+}
+
+#[test]
+fn direct_parser_rejects_invalid_deep_reference_expression_on_small_stack() {
+    on_small_stack(
+        "direct_parser_rejects_invalid_deep_reference_expression_on_small_stack",
+        || {
+            let source = nested_reference_expression_source(20_000, false);
+            let error = parse_str(&source).expect_err("trailing token must be rejected");
+            assert!(error.to_string().contains("byte"), "{error}");
+        },
+    );
+}
+
+#[test]
+fn direct_parser_rejects_deep_expression_from_invalid_binding_on_small_stack() {
+    on_small_stack(
+        "direct_parser_rejects_deep_expression_from_invalid_binding_on_small_stack",
+        || {
+            let source = nested_invalid_binding_expression_source(20_000);
+            let error = parse_str(&source).expect_err("invalid binding leaf must be rejected");
+            assert!(error.to_string().contains("byte"), "{error}");
         },
     );
 }

@@ -298,6 +298,91 @@ pub enum Expr {
     Block(Vec<LetBinding>, Box<Expr>, Span), // { x = ...; expr }
 }
 
+impl Expr {
+    fn take_children_for_drop(&mut self, pending: &mut Vec<Expr>) {
+        fn take_boxed(child: &mut Box<Expr>, span: Span) -> Expr {
+            std::mem::replace(child.as_mut(), Expr::Lit(Literal::Bool(false), span))
+        }
+
+        match self {
+            Self::Lit(_, _) | Self::Var(_, _) | Self::Constructor(_, _) => {}
+            Self::Apply(callee, args, span) => {
+                pending.push(take_boxed(callee, *span));
+                pending.extend(std::mem::take(args));
+            }
+            Self::Accumulate(call, _, span)
+            | Self::Access(call, _, span)
+            | Self::TupleGet(call, _, span)
+            | Self::Cast(call, _, _, span)
+            | Self::Grad(call, _, span)
+            | Self::Vmap(call, _, span)
+            | Self::Jit(call, span)
+            | Self::Realize(call, span)
+            | Self::Copy(call, span)
+            | Self::Borrow(call, span)
+            | Self::Quote(call, span)
+            | Self::Unquote(call, span)
+            | Self::Splice(call, span)
+            | Self::Annotate(call, _, span) => pending.push(take_boxed(call, *span)),
+            Self::List(items, _)
+            | Self::Tuple(items, _)
+            | Self::Par(items, _)
+            | Self::Do(items, _) => pending.extend(std::mem::take(items)),
+            Self::Record(_, fields, _) => {
+                pending.extend(std::mem::take(fields).into_iter().map(|(_, value)| value));
+            }
+            Self::RecordUpdate(base, fields, span) => {
+                pending.push(take_boxed(base, *span));
+                pending.extend(std::mem::take(fields).into_iter().map(|(_, value)| value));
+            }
+            Self::Binary(_, left, right, span) | Self::WithDevice(left, right, span) => {
+                pending.push(take_boxed(left, *span));
+                pending.push(take_boxed(right, *span));
+            }
+            Self::Unary(_, value, span) => pending.push(take_boxed(value, *span)),
+            Self::Pipe(value, stages, span) => {
+                pending.push(take_boxed(value, *span));
+                pending.extend(
+                    std::mem::take(stages)
+                        .into_iter()
+                        .map(|stage| stage.expression),
+                );
+            }
+            Self::If(condition, yes, no, span) => {
+                pending.push(take_boxed(condition, *span));
+                pending.push(take_boxed(yes, *span));
+                pending.push(take_boxed(no, *span));
+            }
+            Self::Match(value, arms, span) => {
+                pending.push(take_boxed(value, *span));
+                for arm in std::mem::take(arms) {
+                    pending.extend(arm.guard);
+                    pending.push(arm.body);
+                }
+            }
+            Self::Lambda(_, body, span) => pending.push(take_boxed(body, *span)),
+            Self::Block(bindings, result, span) => {
+                pending.extend(
+                    std::mem::take(bindings)
+                        .into_iter()
+                        .map(|binding| binding.value),
+                );
+                pending.push(take_boxed(result, *span));
+            }
+        }
+    }
+}
+
+impl Drop for Expr {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        self.take_children_for_drop(&mut pending);
+        while let Some(mut child) = pending.pop() {
+            child.take_children_for_drop(&mut pending);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LetBinding {
     pub pattern: LetPattern,

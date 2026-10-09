@@ -1494,17 +1494,19 @@ impl Parser {
         let start = self.advance().span; // consume with
         let (name, _) = self.expect_ident()?;
         self.expect(&TokenKind::Eq)?;
-        let value = self.parse_expr_until_block_separator()?;
+        let mut value = self.parse_expr_until_block_separator()?;
         let span = start.merge(expression_span(&value));
         match name.as_str() {
             "tolerance" => Ok(PropertyOption::Tolerance(value, span)),
             "seed" => Ok(PropertyOption::Seed(value, span)),
             "samples" => Ok(PropertyOption::Samples(value, span)),
-            "contract" => match value {
-                Expr::Lit(Literal::Str(id), _) => Ok(PropertyOption::Contract(id, span)),
+            "contract" => match &mut value {
+                Expr::Lit(Literal::Str(id), _) => {
+                    Ok(PropertyOption::Contract(std::mem::take(id), span))
+                }
                 _ => Err(ParseError::Expected {
                     expected: "string literal contract id".into(),
-                    found: format!("{value:?}"),
+                    found: "non-string expression".into(),
                     offset: start.offset,
                 }),
             },
@@ -4129,12 +4131,14 @@ impl Parser {
 /// single-letter names so multi-letter PascalCase stays unambiguously a
 /// type or constructor name (§1.1, §3.1).
 fn extend_legacy_application(expr: Expr, args: Vec<Expr>, span: Span) -> Expr {
-    match expr {
-        Expr::Apply(function, mut existing, _) => {
+    let mut expr = expr;
+    match &mut expr {
+        Expr::Apply(_, existing, old_span) => {
             existing.extend(args);
-            Expr::Apply(function, existing, span)
+            *old_span = span;
+            expr
         }
-        other => Expr::Apply(Box::new(other), args, span),
+        _ => Expr::Apply(Box::new(expr), args, span),
     }
 }
 
@@ -4576,10 +4580,10 @@ mod tests {
     #[test]
     fn add_mul_precedence() {
         let e = body("x = a + b * c");
-        match e {
+        match &e {
             Expr::Binary(BinOp::Add, lhs, rhs, _) => {
-                assert!(matches!(*lhs, Expr::Var(ref n, _) if n == "a"));
-                assert!(matches!(*rhs, Expr::Binary(BinOp::Mul, _, _, _)));
+                assert!(matches!(&**lhs, Expr::Var(n, _) if n == "a"));
+                assert!(matches!(&**rhs, Expr::Binary(BinOp::Mul, _, _, _)));
             }
             _ => panic!("expected Add(a, Mul(b, c)), got {e:?}"),
         }
@@ -4588,10 +4592,10 @@ mod tests {
     #[test]
     fn mul_add_precedence() {
         let e = body("x = a * b + c");
-        match e {
+        match &e {
             Expr::Binary(BinOp::Add, lhs, rhs, _) => {
-                assert!(matches!(*lhs, Expr::Binary(BinOp::Mul, _, _, _)));
-                assert!(matches!(*rhs, Expr::Var(ref n, _) if n == "c"));
+                assert!(matches!(&**lhs, Expr::Binary(BinOp::Mul, _, _, _)));
+                assert!(matches!(&**rhs, Expr::Var(n, _) if n == "c"));
             }
             _ => panic!("expected Add(Mul(a, b), c), got {e:?}"),
         }
@@ -4600,10 +4604,10 @@ mod tests {
     #[test]
     fn left_assoc_add() {
         let e = body("x = a + b + c");
-        match e {
+        match &e {
             Expr::Binary(BinOp::Add, lhs, rhs, _) => {
-                assert!(matches!(*lhs, Expr::Binary(BinOp::Add, _, _, _)));
-                assert!(matches!(*rhs, Expr::Var(ref n, _) if n == "c"));
+                assert!(matches!(&**lhs, Expr::Binary(BinOp::Add, _, _, _)));
+                assert!(matches!(&**rhs, Expr::Var(n, _) if n == "c"));
             }
             _ => panic!("expected Add(Add(a, b), c), got {e:?}"),
         }
@@ -4612,9 +4616,9 @@ mod tests {
     #[test]
     fn unary_neg_plus() {
         let e = body("x = -a + b");
-        match e {
+        match &e {
             Expr::Binary(BinOp::Add, lhs, _, _) => {
-                assert!(matches!(*lhs, Expr::Unary(UnaryOp::Neg, _, _)));
+                assert!(matches!(&**lhs, Expr::Unary(UnaryOp::Neg, _, _)));
             }
             _ => panic!("expected Add(Neg(a), b), got {e:?}"),
         }
@@ -4629,9 +4633,9 @@ mod tests {
     #[test]
     fn parens_override() {
         let e = body("x = (a + b) * c");
-        match e {
+        match &e {
             Expr::Binary(BinOp::Mul, lhs, _, _) => {
-                assert!(matches!(*lhs, Expr::Binary(BinOp::Add, _, _, _)));
+                assert!(matches!(&**lhs, Expr::Binary(BinOp::Add, _, _, _)));
             }
             _ => panic!("expected Mul(Add(a, b), c), got {e:?}"),
         }
@@ -4642,7 +4646,7 @@ mod tests {
     #[test]
     fn pipe_chain() {
         let e = body("x = x |> f |> g");
-        match e {
+        match &e {
             Expr::Pipe(_, stages, _) => {
                 assert_eq!(stages.len(), 2);
             }
@@ -4655,9 +4659,9 @@ mod tests {
     #[test]
     fn paren_apply() {
         let e = body("x = f(x, y)");
-        match e {
+        match &e {
             Expr::Apply(func, args, _) => {
-                assert!(matches!(*func, Expr::Var(ref n, _) if n == "f"));
+                assert!(matches!(&**func, Expr::Var(n, _) if n == "f"));
                 assert_eq!(args.len(), 2);
             }
             _ => panic!("expected Apply, got {e:?}"),
@@ -4669,10 +4673,10 @@ mod tests {
     #[test]
     fn type_annotation_expr() {
         let e = body("x = y : f32");
-        match e {
+        match &e {
             Expr::Annotate(inner, ty, _) => {
-                assert!(matches!(*inner, Expr::Var(ref n, _) if n == "y"));
-                assert!(matches!(ty, TypeExpr::Named(ref n, _) if n == "f32"));
+                assert!(matches!(&**inner, Expr::Var(n, _) if n == "y"));
+                assert!(matches!(ty, TypeExpr::Named(n, _) if n == "f32"));
             }
             _ => panic!("expected Annotate, got {e:?}"),
         }
@@ -4689,7 +4693,7 @@ mod tests {
     #[test]
     fn match_expr() {
         let e = body("x = match x with { | Some y => y | None => 0 }");
-        match e {
+        match &e {
             Expr::Match(_, arms, _) => {
                 assert_eq!(arms.len(), 2);
                 assert!(
@@ -4718,10 +4722,10 @@ mod tests {
     #[test]
     fn lambda_expr() {
         let e = body("x = fn (x, y) -> x + y");
-        match e {
+        match &e {
             Expr::Lambda(params, body, _) => {
                 assert_eq!(params.len(), 2);
-                assert!(matches!(*body, Expr::Binary(BinOp::Add, _, _, _)));
+                assert!(matches!(&**body, Expr::Binary(BinOp::Add, _, _, _)));
             }
             _ => panic!("expected Lambda, got {e:?}"),
         }
@@ -4736,10 +4740,10 @@ mod tests {
                 y
             }",
         );
-        match e {
+        match &e {
             Expr::Block(bindings, body, _) => {
                 assert_eq!(bindings.len(), 2);
-                assert!(matches!(*body, Expr::Var(ref n, _) if n == "y"));
+                assert!(matches!(&**body, Expr::Var(n, _) if n == "y"));
             }
             _ => panic!("expected Block, got {e:?}"),
         }
@@ -4754,10 +4758,10 @@ mod tests {
                 y
             }",
         );
-        match e {
+        match &e {
             Expr::Block(bindings, body, _) => {
                 assert_eq!(bindings.len(), 2);
-                assert!(matches!(*body, Expr::Var(ref n, _) if n == "y"));
+                assert!(matches!(&**body, Expr::Var(n, _) if n == "y"));
             }
             _ => panic!("expected Block, got {e:?}"),
         }
@@ -4771,11 +4775,11 @@ mod tests {
                 x
             }",
         );
-        match e {
+        match &e {
             Expr::Block(bindings, body, _) => {
                 assert_eq!(bindings.len(), 1);
                 assert!(bindings[0].ty.is_some());
-                assert!(matches!(*body, Expr::Var(ref n, _) if n == "x"));
+                assert!(matches!(&**body, Expr::Var(n, _) if n == "x"));
             }
             _ => panic!("expected Block, got {e:?}"),
         }
@@ -4792,11 +4796,11 @@ mod tests {
                 loss
             }",
         );
-        match e {
+        match &e {
             Expr::Block(bindings, body, _) => {
                 assert_eq!(bindings.len(), 1);
                 assert!(matches!(bindings[0].value, Expr::Pipe(_, _, _)));
-                assert!(matches!(*body, Expr::Var(ref n, _) if n == "loss"));
+                assert!(matches!(&**body, Expr::Var(n, _) if n == "loss"));
             }
             _ => panic!("expected Block, got {e:?}"),
         }
@@ -4822,7 +4826,7 @@ mod tests {
                 b
             }",
         );
-        match e {
+        match &e {
             Expr::Par(exprs, _) => {
                 assert_eq!(exprs.len(), 2);
             }
@@ -4849,11 +4853,11 @@ mod tests {
                 |> h
             }",
         );
-        match e {
+        match &e {
             Expr::Block(bindings, body, _) => {
                 assert!(bindings.is_empty());
                 assert!(
-                    matches!(*body, Expr::Pipe(_, _, _)),
+                    matches!(&**body, Expr::Pipe(_, _, _)),
                     "tail should be a pipeline: {body:?}"
                 );
             }
@@ -4872,11 +4876,11 @@ mod tests {
                 |> mul(labels)
             }",
         );
-        match e {
+        match &e {
             Expr::Block(bindings, body, _) => {
                 assert_eq!(bindings.len(), 1);
                 assert!(
-                    matches!(*body, Expr::Pipe(_, _, _)),
+                    matches!(&**body, Expr::Pipe(_, _, _)),
                     "tail should be a pipeline: {body:?}"
                 );
             }
@@ -4896,11 +4900,11 @@ mod tests {
                 }
             }",
         );
-        match e {
+        match &e {
             Expr::Block(bindings, body, _) => {
                 assert!(bindings.is_empty());
-                match *body {
-                    Expr::Match(_, ref arms, _) => assert_eq!(arms.len(), 2),
+                match &**body {
+                    Expr::Match(_, arms, _) => assert_eq!(arms.len(), 2),
                     ref other => panic!("expected Match tail, got {other:?}"),
                 }
             }
@@ -4923,11 +4927,11 @@ mod tests {
                 )
             }",
         );
-        match e {
+        match &e {
             Expr::Block(bindings, body, _) => {
                 assert!(bindings.is_empty());
                 assert!(
-                    matches!(*body, Expr::Apply(_, _, _)),
+                    matches!(&**body, Expr::Apply(_, _, _)),
                     "tail should be a call: {body:?}"
                 );
             }
@@ -4947,11 +4951,11 @@ mod tests {
                 }
             }",
         );
-        match e {
+        match &e {
             Expr::Block(bindings, body, _) => {
                 assert_eq!(bindings.len(), 1);
                 assert!(
-                    matches!(*body, Expr::Block(_, _, _)),
+                    matches!(&**body, Expr::Block(_, _, _)),
                     "tail should be a nested block: {body:?}"
                 );
             }
@@ -4969,9 +4973,9 @@ mod tests {
                 f(y)
             }",
         );
-        match e {
-            Expr::WithDevice(_, body, _) => match *body {
-                Expr::Block(ref bindings, ref tail, _) => {
+        match &e {
+            Expr::WithDevice(_, body, _) => match &**body {
+                Expr::Block(bindings, tail, _) => {
                     assert_eq!(bindings.len(), 1);
                     assert!(matches!(**tail, Expr::Apply(_, _, _)));
                 }
@@ -4985,10 +4989,10 @@ mod tests {
     fn block_tail_trailing_separator_parses() {
         // Positive #6: a trailing separator after the tail is fine.
         let e = body("def f(x) = { g(x); }");
-        match e {
+        match &e {
             Expr::Block(bindings, body, _) => {
                 assert!(bindings.is_empty());
-                assert!(matches!(*body, Expr::Apply(_, _, _)));
+                assert!(matches!(&**body, Expr::Apply(_, _, _)));
             }
             _ => panic!("expected Block, got {e:?}"),
         }
@@ -5383,12 +5387,10 @@ mod tests {
     #[test]
     fn with_device_handler_expr() {
         let e = body("def f() = with device(\"gpu:0\") { x }");
-        match e {
+        match &e {
             Expr::WithDevice(device, body, _) => {
-                assert!(
-                    matches!(*device, Expr::Lit(Literal::Str(ref value), _) if value == "gpu:0")
-                );
-                assert!(matches!(*body, Expr::Block(_, _, _)));
+                assert!(matches!(&**device, Expr::Lit(Literal::Str(value), _) if value == "gpu:0"));
+                assert!(matches!(&**body, Expr::Block(_, _, _)));
             }
             _ => panic!("expected WithDevice, got {e:?}"),
         }
@@ -5678,7 +5680,7 @@ mod tests {
     #[test]
     fn cast_expr() {
         let e = body("x = cast(y, f64)");
-        match e {
+        match &e {
             Expr::Cast(_, prec, _, _) => assert_eq!(prec, "f64"),
             _ => panic!("expected Cast, got {e:?}"),
         }
@@ -5693,8 +5695,8 @@ mod tests {
     #[test]
     fn grad_expr_with_single_wrt() {
         let e = body("x = grad(f, wrt=w)");
-        match e {
-            Expr::Grad(_, Some(wrt), _) => assert_eq!(wrt, vec!["w".to_string()]),
+        match &e {
+            Expr::Grad(_, Some(wrt), _) => assert_eq!(wrt.as_slice(), ["w"]),
             _ => panic!("expected Grad with wrt, got {e:?}"),
         }
     }
@@ -5702,9 +5704,9 @@ mod tests {
     #[test]
     fn grad_expr_with_multiple_wrt() {
         let e = body("x = grad(f, wrt=(w, b))");
-        match e {
+        match &e {
             Expr::Grad(_, Some(wrt), _) => {
-                assert_eq!(wrt, vec!["w".to_string(), "b".to_string()])
+                assert_eq!(wrt.as_slice(), ["w", "b"])
             }
             _ => panic!("expected Grad with wrt tuple, got {e:?}"),
         }
@@ -5713,7 +5715,7 @@ mod tests {
     #[test]
     fn vmap_expr() {
         let e = body("x = vmap(f)");
-        match e {
+        match &e {
             Expr::Vmap(_, axis, _) => assert!(axis.is_none()),
             _ => panic!("expected Vmap, got {e:?}"),
         }
@@ -5722,8 +5724,8 @@ mod tests {
     #[test]
     fn vmap_with_axis() {
         let e = body("x = vmap(f, axis=1)");
-        match e {
-            Expr::Vmap(_, axis, _) => assert_eq!(axis, Some(1)),
+        match &e {
+            Expr::Vmap(_, axis, _) => assert_eq!(*axis, Some(1)),
             _ => panic!("expected Vmap, got {e:?}"),
         }
     }
@@ -5731,7 +5733,7 @@ mod tests {
     #[test]
     fn vmap_result_can_be_applied() {
         let e = body("x = vmap(f)(xs)");
-        match e {
+        match &e {
             Expr::Apply(func, args, _) => {
                 assert_eq!(args.len(), 1);
                 assert!(matches!(&args[0], Expr::Var(name, _) if name == "xs"));
@@ -5786,9 +5788,9 @@ mod tests {
     #[test]
     fn and_or_precedence() {
         let e = body("x = a || b && c");
-        match e {
+        match &e {
             Expr::Binary(BinOp::Or, _, rhs, _) => {
-                assert!(matches!(*rhs, Expr::Binary(BinOp::And, _, _, _)));
+                assert!(matches!(&**rhs, Expr::Binary(BinOp::And, _, _, _)));
             }
             _ => panic!("expected Or(a, And(b, c)), got {e:?}"),
         }
@@ -5799,7 +5801,7 @@ mod tests {
     #[test]
     fn tuple_expr() {
         let e = body("x = (1, 2, 3)");
-        match e {
+        match &e {
             Expr::Tuple(elems, _) => assert_eq!(elems.len(), 3),
             _ => panic!("expected Tuple, got {e:?}"),
         }
@@ -5848,7 +5850,7 @@ mod tests {
                 add(let, in)
             }",
         );
-        match e {
+        match &e {
             Expr::Block(bindings, body, _) => {
                 assert_eq!(bindings.len(), 2);
                 assert!(matches!(
@@ -5859,7 +5861,7 @@ mod tests {
                     &bindings[1].pattern,
                     LetPattern::Var(name, _) if name == "in"
                 ));
-                assert!(matches!(*body, Expr::Apply(_, _, _)));
+                assert!(matches!(&**body, Expr::Apply(_, _, _)));
             }
             _ => panic!("expected Block, got {e:?}"),
         }
@@ -6085,7 +6087,7 @@ mod tests {
     #[test]
     fn record_pattern() {
         let e = body("x = match x with { | Adam { lr, eps } => lr }");
-        match e {
+        match &e {
             Expr::Match(_, arms, _) => {
                 assert_eq!(arms.len(), 1);
                 match &arms[0].pattern {
@@ -6109,7 +6111,7 @@ mod tests {
     #[test]
     fn as_pattern() {
         let e = body("x = match x with { | y @ Some z => y }");
-        match e {
+        match &e {
             Expr::Match(_, arms, _) => {
                 assert_eq!(arms.len(), 1);
                 match &arms[0].pattern {
@@ -6213,7 +6215,7 @@ mod tests {
     #[test]
     fn invariant_without_opaque_is_error() {
         let e = p_err("module M\n@invariant(p) p.value >= 0.0\ntype T = | T { value: f32 }");
-        match e {
+        match &e {
             ParseError::Expected { expected, .. } => {
                 assert_eq!(expected, "invariant requires @opaque");
             }
@@ -6228,7 +6230,7 @@ mod tests {
         // fresh declaration with no `@opaque`.
         let e =
             p_err("module M\n@opaque\ntype T = | T { value: f32 }\n@invariant(p) p.value >= 0.0");
-        match e {
+        match &e {
             ParseError::Expected { expected, .. } => {
                 assert_eq!(expected, "invariant requires @opaque");
             }
@@ -6242,7 +6244,7 @@ mod tests {
             "module M\n@opaque\n@invariant(p) p.value >= 0.0\n\
              @invariant(p) p.value <= 1.0\ntype T = | T { value: f32 }",
         );
-        match e {
+        match &e {
             ParseError::Expected { expected, .. } => {
                 assert_eq!(expected, "exactly one @invariant");
             }
@@ -6255,7 +6257,7 @@ mod tests {
         let e = p_err(
             "module M\n@opaque\n@invariant(p, q) p.value >= 0.0\ntype T = | T { value: f32 }",
         );
-        match e {
+        match &e {
             ParseError::Expected { expected, .. } => {
                 assert_eq!(expected, "exactly one invariant binder");
             }
@@ -6357,8 +6359,8 @@ mod tests {
 
     // Convenience: parse a single def, return the first match arm's pattern.
     fn first_arm_pattern(s: &str) -> Pattern {
-        match body(s) {
-            Expr::Match(_, arms, _) => arms.into_iter().next().unwrap().pattern,
+        match &body(s) {
+            Expr::Match(_, arms, _) => arms.first().unwrap().pattern.clone(),
             other => panic!("expected Match, got {other:?}"),
         }
     }
@@ -6489,7 +6491,7 @@ mod tests {
         // resolver later binds it to the parameter. Either way the surface
         // round-trips, so assert the body parses to a head named `S`.
         let b = body("def use_spot(S: f32) -> f32 = S");
-        match b {
+        match &b {
             Expr::Var(name, _) | Expr::Constructor(name, _) => assert_eq!(name, "S"),
             other => panic!("expected Var or Constructor head S, got {other:?}"),
         }
@@ -6566,8 +6568,8 @@ mod tests {
         // In expression position `Some(x)` is still a constructor
         // application; the value-binding override does not touch it.
         let b = body("def f(x: f32) -> f32 = Some(x)");
-        match b {
-            Expr::Apply(head, _, _) => match *head {
+        match &b {
+            Expr::Apply(head, _, _) => match &**head {
                 Expr::Constructor(name, _) => assert_eq!(name, "Some"),
                 other => panic!("expected Constructor head, got {other:?}"),
             },
