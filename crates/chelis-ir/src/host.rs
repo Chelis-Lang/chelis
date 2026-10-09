@@ -6138,9 +6138,9 @@ fn lower_host_function(
         ..
     } = signature;
     let entry_claims = entry_claims
-        .map_err(|error| host_expr_lowering_error(body, format!("`{name}` formal: {error}")))?;
+        .map_err(|error| claim_pattern_refusal(body, format!("`{name}` formal: {error}")))?;
     let result_claim = result_claim
-        .map_err(|error| host_expr_lowering_error(body, format!("`{name}` result: {error}")))?;
+        .map_err(|error| claim_pattern_refusal(body, format!("`{name}` result: {error}")))?;
     let entry_contract = EntryContract::from_params(&params);
     refine_function_params_from_body(&mut params, &host_body);
     let ret_ty = if ret_ty.is_unresolved() {
@@ -8198,7 +8198,7 @@ fn retain_local_nested_ascription(
         return Ok(value);
     };
     let Some(pattern) = nested_claim_pattern(program, &authored)
-        .map_err(|error| host_expr_lowering_error(initializer, error))?
+        .map_err(|error| claim_pattern_refusal(initializer, error))?
     else {
         return Ok(value);
     };
@@ -8280,6 +8280,18 @@ fn lower_checked_local_ascription_region(
         sites,
         ty,
     }))
+}
+
+/// A claim source whose claim pattern cannot be derived, such as one that
+/// passes through non-regular recursion (runtime_extents.md C6.5), is
+/// refused before execution; it is never checked partially.
+fn claim_pattern_refusal(expr: &Expr, detail: impl Into<String>) -> crate::lower::LowerDiagnostic {
+    crate::lower::LowerDiagnostic::new(
+        format!("extent claim refused: {}", detail.into()),
+        Some(expr.span()),
+        expr.span_id().map(str::to_string),
+    )
+    .fatal()
 }
 
 fn host_expr_lowering_error(
@@ -13557,9 +13569,10 @@ fn signature_binder_requirement(
 fn retain_nested_result_claim(
     body: HostExpr,
     pattern: Option<&Arc<crate::claim_pattern::ClaimPattern>>,
-) -> HostExpr {
+    origin: &Expr,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let Some(pattern) = pattern else {
-        return body;
+        return Ok(body);
     };
     let scope = |inner: HostExpr, binders: Vec<Option<NestedBinderWitness>>| {
         let ty = host_expr_type(&inner);
@@ -13621,10 +13634,18 @@ fn retain_nested_result_claim(
                     prepared,
                     axis,
                 }) => {
+                    // Read the witness right after entry: the formal may be
+                    // released before the body's producer runs.
                     let prepared_ty = bindings
                         .iter()
                         .find(|binding| binding.name == prepared)
-                        .map(|binding| binding.ty.clone());
+                        .map(|binding| binding.ty.clone())
+                        .ok_or_else(|| {
+                            claim_pattern_refusal(
+                                origin,
+                                format!("retained witness `{prepared}` has no prepared binding"),
+                            )
+                        })?;
                     let mut serial = 0usize;
                     let extent = loop {
                         let candidate = format!("__chelis_nested_claim_extent_{serial}");
@@ -13632,10 +13653,6 @@ fn retain_nested_result_claim(
                             break candidate;
                         }
                         serial += 1;
-                    };
-                    let Some(prepared_ty) = prepared_ty else {
-                        binders.push(None);
-                        continue;
                     };
                     bindings.push(HostBinding {
                         name: extent.clone(),
@@ -13665,7 +13682,7 @@ fn retain_nested_result_claim(
             });
         }
         let scoped = scope(*body, binders);
-        return HostExpr {
+        return Ok(HostExpr {
             kind: HostExprKind::RetainedInvocation {
                 bindings,
                 body: Box::new(scoped),
@@ -13673,17 +13690,17 @@ fn retain_nested_result_claim(
             },
             span_id,
             merged_spans,
-        };
+        });
     }
     let binders = vec![None; pattern.binders().len()];
-    scope(
+    Ok(scope(
         HostExpr {
             kind,
             span_id,
             merged_spans,
         },
         binders,
-    )
+    ))
 }
 
 /// The authored literal axes in a result signature are obligations on the
@@ -14733,7 +14750,7 @@ fn lower_named_retained_host_invocation(
     invocation.entry_claims = signature
         .entry_claims
         .clone()
-        .map_err(|error| host_expr_lowering_error(expr, format!("`{name}` formal: {error}")))?;
+        .map_err(|error| claim_pattern_refusal(expr, format!("`{name}` formal: {error}")))?;
     let actualized_expected = result_claim
         .as_ref()
         .map(result_claim_body_type)
@@ -14754,12 +14771,15 @@ fn lower_named_retained_host_invocation(
             tensor_specialization: actualize_polymorphic_contract.then_some(tensor_specialization),
         },
     )
-    .map(|body| {
-        let nested = signature.result_claim.as_ref().ok().cloned().flatten();
-        Some((
-            retain_nested_result_claim(body, nested.as_ref()),
+    .and_then(|body| {
+        let nested = signature
+            .result_claim
+            .clone()
+            .map_err(|error| claim_pattern_refusal(expr, format!("`{name}` result: {error}")))?;
+        Ok(Some((
+            retain_nested_result_claim(body, nested.as_ref(), expr)?,
             result_claim,
-        ))
+        )))
     })
 }
 
@@ -15614,11 +15634,11 @@ fn ensure_mono_specialization(
     let result_claim = authored
         .result_claim
         .clone()
-        .map_err(|error| host_expr_lowering_error(app_expr, format!("`{name}` result: {error}")))?;
+        .map_err(|error| claim_pattern_refusal(app_expr, format!("`{name}` result: {error}")))?;
     let entry_claims = authored
         .entry_claims
         .clone()
-        .map_err(|error| host_expr_lowering_error(app_expr, format!("`{name}` formal: {error}")))?;
+        .map_err(|error| claim_pattern_refusal(app_expr, format!("`{name}` formal: {error}")))?;
     let entry_params = authored
         .params
         .into_iter()
