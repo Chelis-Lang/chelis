@@ -267,10 +267,11 @@ Comparisons, predicates, and `shape` use their specified zero-cotangent rules
 and therefore do not block a surrounding differentiable graph. Extrema use
 their exact tie/NaN subgradient rules, not a generic zero-at-ties convention.
 Piecewise-constant numeric conversions and roundings whose atoms specify
-`AdRejectionReason::PiecewiseConstant` reject the transformed graph even
-though their forward execution is legal; they never silently return zero.
-The one boundary that structural analysis does not cross is [05-OP-42]'s
-`stop_gradient` barrier: its argument's subgraph is outside adjoint
+`AdRejectionReason::PiecewiseConstant` reject the transformed graph wherever
+their result has a data path to the differentiated output (§7.5), even though
+their forward execution is legal; they never silently return zero.
+Structural analysis does not cross a control slot (§7.5) or [05-OP-42]'s
+`stop_gradient` barrier. The barrier's argument subgraph is outside adjoint
 construction and rejection analysis, its forward value passes through
 unchanged, and its argument receives the shape-preserving exact zero
 cotangent.
@@ -987,8 +988,22 @@ comparison or `shape`, it contributes exact zero to each input named by its
 atom and traversal continues. An implementation may emit a diagnostic note,
 but that note does not change validity or the cotangent.
 
-When traversal encounters an operation whose atom requires structural
-rejection, construction stops with that atom's exact `AdRejectionReason`.
+An operand slot to which its atom assigns exact zero cotangent for every
+operand dtype is a control slot: comparison and `is_*` operands, the `where`,
+`if`, or `match` condition or tag, a guard's firing predicate, indices,
+movement bounds, sizes, and axes, `shape` reads, and random controls. A data
+path is a path to the differentiated output that enters no control slot and no
+`stop_gradient`; only an operation whose result has one is checked for
+structural rejection. A slot that is zero only because its operand is bool or
+integer ([04-NUM-14]) is not a control slot. An operation whose result
+reaches the output only through control slots executes forward, with its
+traps, and contributes nothing: its adjoint is not constructed, so no value
+its forward evaluation computes, finite or not, enters a cotangent, and each
+operand it reads receives exact positive zero from it.
+
+When traversal encounters, on a data path, an operation whose atom requires
+structural rejection, construction stops with that atom's exact
+`AdRejectionReason`.
 This includes piecewise-constant float-to-integer conversion and rounding; it
 does not silently insert `Const(0)`. Float-to-float precision casts use their
 declared cast adjoint. A [05-OP-42] `stop_gradient` node is a barrier:
@@ -997,13 +1012,14 @@ does not enter the argument's subgraph, so a structurally rejected operation
 inside it does not stop construction.
 
 A signed-integer operation whose atom assigns the `IntegerArithmeticOutput`
-structural rejection passes exact zero to its operands when reached only by an
-exact-zero control cotangent; this does not request its forward-only adjoint.
-Traversal still visits those operands, so a structural rejection such as a
-float-to-integer cast beneath the operation is reported. If any path reaches
-that same operation outside the exact-zero control path, its
-`IntegerArithmeticOutput` rejection applies. Other operations retain their
-own atom's disposition, including a structural rejection on a zero path.
+structural rejection passes exact zero to its operands when reached only by
+the exact zero cotangent of an integer value; this does not request its
+forward-only adjoint. Its operands stay on the data paths that reach it, so a
+structural rejection such as a float-to-integer cast beneath the operation is
+reported. If any path reaches that same operation with another cotangent,
+its `IntegerArithmeticOutput` rejection applies. Other operations retain
+their own atom's disposition, including a structural rejection on every data
+path.
 
 ### 7.6 Verification
 

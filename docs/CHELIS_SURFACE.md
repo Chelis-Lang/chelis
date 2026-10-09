@@ -489,7 +489,12 @@ Each target checks whether it can lower the selected source function.
 - **Structural rejection:** float `floor`/`ceil`/`round` and the named
   casts `cast_trunc`, `cast_saturate` and `cast_wrap` are piecewise constant; `count` and argument reductions have discrete
   outputs; replace-scatter variants reject duplicate-sensitive gradients.
-  Integer arithmetic is forward-only where its atom says so.
+  Integer arithmetic is forward-only where its atom says so. A rejection
+  applies only when the operation's result has a data path to the
+  differentiated output (`spec/06` §7.5): a comparison operand, a
+  `where`/`if`/`match` condition, an index, a movement bound or size, and a
+  `shape` read are control slots, so an operation read only there runs
+  forward and contributes zero.
 - **Host values and control:** `spec/06` §2.10 defines cotangents for
   selected `List` combinators, the executed `if`/`match` branch, recursive
   trajectories, and ADT fields. Integration tests cover

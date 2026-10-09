@@ -238,25 +238,20 @@ fn grad_dag_checked_impl(
         });
     }
 
-    // Walk the subgraph of nodes reachable from `output` and look for ops
-    // whose adjoint is intentionally undefined.
-    //
-    // chelis#616: movement bound sources and indexed-operation indices are
-    // INDEX MATH, not data. They carry no cotangent, so their input edges are a
-    // stop-gradient boundary and must not pull their producers -- which may be
-    // intentionally non-differentiable integer arithmetic -- into this check.
-    // The edge selection here mirrors `compute_adjoints`: movement ops
-    // (`expand`, whose size is an `insert` extent, among them; [05-MOV-1],
-    // chelis#3382) and `Gather` route only to their values input, while
-    // `ScatterAdd` routes to target and updates but not indices. A control scalar that is ALSO reached
-    // through a genuine data edge stays live through that edge and is checked.
-    let reach = cotangent_reach(forward, output);
-    let live = reach.iter().map(|&state| state != 0).collect::<Vec<_>>();
+    // spec/06 §7.5: an operation whose atom structurally rejects `grad` is
+    // checked only when its result has a data path to `output`, one that
+    // enters no control slot ([`OperandSlot`]). A comparison operand, a
+    // `where` condition, an index, or a movement bound (chelis#616,
+    // [05-MOV-1]) reads its producer's value without carrying a cotangent,
+    // so a conversion read only there executes forward and contributes
+    // nothing (chelis#3464). A producer that is ALSO reached through a data
+    // slot keeps that data path and is checked.
+    let data_path = data_path_reach(forward, output);
     let selected_data = selected_data_reach(forward, wrt);
     let discrete_parameters = discrete_parameter_reach(forward, wrt);
-    reject_random_selection_parameters(forward, &live, wrt)?;
+    reject_random_selection_parameters(forward, &data_path, wrt)?;
     for node in forward.nodes() {
-        if live[node.id.0]
+        if data_path[node.id.0]
             && let Some(rejection) = structural_rejection(node, forward, selected_data[node.id.0])
             && !is_cotangent_free_integer_computation(node, discrete_parameters[node.id.0])
         {
@@ -273,18 +268,15 @@ fn grad_dag_checked_impl(
     })
 }
 
-const ACTIVE_COTANGENT: u8 = 1;
-const ZERO_COTANGENT: u8 = 2;
-
 /// [04-NUM-14]: "a bool or integer source is a discrete forward-only value and
-/// carries no cotangent", so [`cotangent_reach`] makes every edge into a bool
-/// or integer value a zero-cotangent edge, as a comparison's is, and no
-/// cotangent ever reaches an integer computation. Such a computation is an
-/// exact forward value and its structural rejection does not apply
-/// (chelis#3426, chelis#3427), unless it computes from a bool or integer
-/// parameter selected for differentiation: that value is itself
+/// carries no cotangent", so every edge into a bool or integer value carries
+/// exact zero and no cotangent ever reaches an integer computation. Such a
+/// computation is an exact forward value and its structural rejection does
+/// not apply (chelis#3426, chelis#3427), unless it computes from a bool or
+/// integer parameter selected for differentiation: that value is itself
 /// differentiated and keeps its atom's rejection. Only a direct IR caller can
-/// select one; Surf rejects a discrete `wrt` as a type error.
+/// select one; Surf rejects a discrete `wrt` as a type error. The edge into it
+/// is still a data slot, so its operands keep their data paths.
 fn is_cotangent_free_integer_computation(node: &DagNode, discrete_parameter: bool) -> bool {
     integer_computation(node).is_some() && !discrete_parameter
 }
@@ -419,7 +411,8 @@ fn discrete_parameter_reach(forward: &Dag, wrt: &[NodeId]) -> Vec<bool> {
     data_reach(forward, &discrete_wrt, is_discrete)
 }
 
-/// Forward data reach from `seeds` into the nodes `admit` accepts.
+/// Forward reach from `seeds` into the nodes `admit` accepts, through every
+/// operand slot except index math ([`OperandSlot::Index`]).
 fn data_reach(forward: &Dag, seeds: &[NodeId], admit: impl Fn(&DagNode) -> bool) -> Vec<bool> {
     let mut reached = vec![false; forward.len()];
     for parameter in seeds {
@@ -432,139 +425,170 @@ fn data_reach(forward: &Dag, seeds: &[NodeId], admit: impl Fn(&DagNode) -> bool)
             continue;
         }
         reached[node.id.0] = node.inputs.iter().enumerate().any(|(slot, input)| {
-            let data_edge = match &node.op {
-                RiscOp::Shape { .. }
-                | RiscOp::ExtentWitness { .. }
-                | RiscOp::KeyFromSeed
-                | RiscOp::Split { .. }
-                | RiscOp::FoldIn
-                | RiscOp::SplitN { .. }
-                | RiscOp::KeySelect => false,
-                RiscOp::Shrink { .. }
-                | RiscOp::Stride { .. }
-                | RiscOp::Pad { .. }
-                | RiscOp::Reshape { .. }
-                | RiscOp::Expand { .. }
-                | RiscOp::Gather { .. }
-                | RiscOp::Dropout
-                | RiscOp::DropoutReplay => slot == 0,
-                RiscOp::ScatterAdd { .. } => matches!(slot, 0 | 2),
-                RiscOp::UniformLike => matches!(slot, 1 | 2),
-                RiscOp::UniformBoundAdjoint { .. } | RiscOp::GuardedFail { .. } => slot == 1,
-                // The selected condition determines the forward value, even
-                // though it carries a zero cotangent.
-                RiscOp::Where | RiscOp::Compare(_) => true,
-                _ => true,
-            };
-            data_edge && reached[input.0]
+            operand_slot(&node.op, slot) != OperandSlot::Index && reached[input.0]
         });
     }
     reached
 }
 
-/// Reachability is carried with cotangent provenance. A comparison, shape
-/// query, or `where` condition sends exact zero, while other selected edges
-/// retain the ordinary structural AD obligation. Both bits may reach a
-/// shared producer; the ordinary path then takes precedence.
-fn cotangent_reach(forward: &Dag, output: NodeId) -> Vec<u8> {
-    let mut reach = vec![0; forward.len()];
-    reach[output.0] = ACTIVE_COTANGENT;
+/// How an operation's atom treats one operand slot under `grad` (spec/05 §5,
+/// spec/06 §7.5). Every reach the checked transform takes reads this one
+/// classification, so the data path, the selected-parameter dependence, and
+/// the random-rate reach cannot disagree about a slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperandSlot {
+    /// The atom gives the slot an adjoint or a structural rejection at a
+    /// float operand. A bool or integer operand receives no cotangent here
+    /// ([04-NUM-14]), but the slot is still a data slot: the zero comes from
+    /// the operand's dtype, not from the slot.
+    Data,
+    /// A control slot whose operand selects the result's value: a comparison
+    /// operand or a `where` condition. Its cotangent is exact zero for every
+    /// operand dtype, and its operand still carries [05-OP-47]'s dependence
+    /// on a selected parameter.
+    Selector,
+    /// A control slot of index math or metadata: an index, a movement bound,
+    /// size or axis, a `shape` read, a random control or dropout rate, or a
+    /// guard's firing predicate. Its cotangent is exact zero for every
+    /// operand dtype, and its operand carries no dependence.
+    Index,
+}
+
+/// The [`OperandSlot`] of input `slot` of an `op` node. The match is
+/// exhaustive so a new operation states its slots when it is added.
+fn operand_slot(op: &RiscOp, slot: usize) -> OperandSlot {
+    use OperandSlot::{Data, Index, Selector};
+    match op {
+        RiscOp::Compare(_) => Selector,
+        RiscOp::Where if slot == 0 => Selector,
+        RiscOp::Where => Data,
+        // The value is input 0; every later input is an index, a runtime
+        // bound or size ([05-MOV-1]), a List map's length carrier, an extent
+        // witness, or a dropout's rate and key.
+        RiscOp::Shrink { .. }
+        | RiscOp::Stride { .. }
+        | RiscOp::Pad { .. }
+        | RiscOp::Reshape { .. }
+        | RiscOp::Expand { .. }
+        | RiscOp::Gather { .. }
+        | RiscOp::ListMapCapture { .. }
+        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedUnitAxis { .. }
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay => {
+            if slot == 0 {
+                Data
+            } else {
+                Index
+            }
+        }
+        // `target, indices, updates`.
+        RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } | RiscOp::ScatterElements { .. } => {
+            if slot == 1 {
+                Index
+            } else {
+                Data
+            }
+        }
+        // `condition, fallback` and `template, cotangent, key`: the guard's
+        // predicate (chelis#1464, [05-OP-68]) and the template and key are
+        // controls.
+        RiscOp::GuardedFail { .. } | RiscOp::UniformBoundAdjoint { .. } => {
+            if slot == 1 {
+                Data
+            } else {
+                Index
+            }
+        }
+        // `template, low, high, key`: the bounds carry their
+        // reparameterisation adjoints ([05-OP-8]).
+        RiscOp::UniformLike => {
+            if matches!(slot, 1 | 2) {
+                Data
+            } else {
+                Index
+            }
+        }
+        RiscOp::OneHot { .. }
+        | RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn
+        | RiscOp::SplitN { .. }
+        | RiscOp::KeySelect => Index,
+        RiscOp::Iota
+        | RiscOp::OrderedAdjointSum { .. }
+        | RiscOp::Add
+        | RiscOp::Sub
+        | RiscOp::Mul
+        | RiscOp::Div
+        | RiscOp::Pow
+        | RiscOp::FloorDiv
+        | RiscOp::TruncDiv
+        | RiscOp::Mod
+        | RiscOp::Bitwise(_)
+        | RiscOp::Logical(_)
+        | RiscOp::MaxElem
+        | RiscOp::MinElem
+        | RiscOp::ExtremaAdjoint { .. }
+        | RiscOp::Relu
+        | RiscOp::Softmax { .. }
+        | RiscOp::ReluAdjoint
+        | RiscOp::Neg
+        | RiscOp::Exp
+        | RiscOp::Log
+        | RiscOp::Sin
+        | RiscOp::Sqrt
+        | RiscOp::Cos
+        | RiscOp::Tan
+        | RiscOp::Atan
+        | RiscOp::Tanh
+        | RiscOp::Erf
+        | RiscOp::Erfc
+        | RiscOp::Abs
+        | RiscOp::Floor
+        | RiscOp::Ceil
+        | RiscOp::Round
+        | RiscOp::Recip
+        | RiscOp::Sum { .. }
+        | RiscOp::Count { .. }
+        | RiscOp::MaxReduce { .. }
+        | RiscOp::MinReduce { .. }
+        | RiscOp::ProdReduce { .. }
+        | RiscOp::ReduceWindow { .. }
+        | RiscOp::ReduceWindowGrad { .. }
+        | RiscOp::Argmax { .. }
+        | RiscOp::Argmin { .. }
+        | RiscOp::Permute { .. }
+        | RiscOp::Const { .. }
+        | RiscOp::ConstTensor { .. }
+        | RiscOp::Load { .. }
+        | RiscOp::Store { .. }
+        | RiscOp::Copy
+        | RiscOp::Drop
+        | RiscOp::Realize
+        | RiscOp::Cast { .. }
+        | RiscOp::NamedCast { .. }
+        | RiscOp::FusedElem { .. }
+        | RiscOp::BlasMatmul { .. } => Data,
+    }
+}
+
+/// spec/06 §7.5: whether each node has a data path to `output`, a path that
+/// enters no control slot. The edge into a bool or integer value stays on it
+/// ([04-NUM-14] zeroes that value's cotangent by dtype, not by slot), so a
+/// conversion that reaches the output through integer data keeps its
+/// structural rejection.
+fn data_path_reach(forward: &Dag, output: NodeId) -> Vec<bool> {
+    let mut reach = vec![false; forward.len()];
+    reach[output.0] = true;
     for i in (0..forward.len()).rev() {
-        if reach[i] != 0 {
+        if reach[i] {
             let node = &forward.nodes()[i];
-            let current = reach[i];
-            // [04-NUM-14] and spec/06 §2.1: a bool or integer value carries
-            // no cotangent, so every edge into one (a cast or `one_hot`
-            // source, or an integer operand) is a zero-cotangent edge.
-            let mut mark = |input: NodeId, edge: u8| {
-                let discrete = forward
-                    .get(input)
-                    .is_some_and(|value| !value.output_type.precision.is_float());
-                reach[input.0] |= if discrete { ZERO_COTANGENT } else { edge };
-            };
-            match &node.op {
-                RiscOp::Shrink { .. }
-                | RiscOp::Stride { .. }
-                | RiscOp::Pad { .. }
-                | RiscOp::Reshape { .. }
-                | RiscOp::Expand { .. }
-                | RiscOp::Gather { .. } => {
-                    if let Some(values) = node.inputs.first() {
-                        mark(*values, current);
-                    }
-                }
-                RiscOp::ScatterAdd { .. } => {
-                    if let Some(target) = node.inputs.first() {
-                        mark(*target, current);
-                    }
-                    if let Some(updates) = node.inputs.get(2) {
-                        mark(*updates, current);
-                    }
-                }
-                // Key-operand draws: the key and activation are discrete
-                // controls, and a dropout rate is a selection whose only
-                // question is the rejection below. A uniform draw's template
-                // stays live, and its bounds carry their reparameterisation
-                // adjoints.
-                RiscOp::Dropout | RiscOp::DropoutReplay => {
-                    if let Some(data) = node.inputs.first() {
-                        mark(*data, current);
-                    }
-                }
-                RiscOp::UniformLike => {
-                    for bound in node.inputs.iter().take(3) {
-                        mark(*bound, current);
-                    }
-                }
-                RiscOp::UniformBoundAdjoint { .. } => {
-                    if let Some(cotangent) = node.inputs.get(1) {
-                        mark(*cotangent, current);
-                    }
-                }
-                // A key and its i64 seed or index are discrete: nothing a
-                // key operation reads is on the gradient path, and a join's
-                // activations are control edges, as a draw's are.
-                RiscOp::KeyFromSeed
-                | RiscOp::Split { .. }
-                | RiscOp::FoldIn
-                | RiscOp::SplitN { .. }
-                | RiscOp::KeySelect => {}
-                // chelis#1464 / [05-OP-68]: input 0 is the guard's firing
-                // predicate, a control edge, and input 1 is the value the
-                // result carries. Only the fallback is on the gradient path.
-                // The predicate is a `Bool` built from `Compare` and
-                // `Logical` nodes; treating the control edge as
-                // live would reject a program whose gradient is perfectly
-                // well defined, exactly as the `UniformLike` note above
-                // describes for its activation edge.
-                RiscOp::GuardedFail { .. } => {
-                    if let Some(fallback) = node.inputs.get(1) {
-                        mark(*fallback, current);
-                    }
-                }
-                // A comparison contributes exact zero cotangents to both
-                // operands, then traversal continues through their producers
-                // ([06] §7.5). That includes structural rejection analysis.
-                RiscOp::Compare(_) => {
-                    for input in &node.inputs {
-                        mark(*input, ZERO_COTANGENT);
-                    }
-                }
-                RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => {
-                    for input in &node.inputs {
-                        mark(*input, ZERO_COTANGENT);
-                    }
-                }
-                RiscOp::Where => {
-                    mark(node.inputs[0], ZERO_COTANGENT);
-                    for input in node.inputs.iter().skip(1) {
-                        mark(*input, current);
-                    }
-                }
-                _ => {
-                    for input in &node.inputs {
-                        mark(*input, current);
-                    }
+            for (slot, input) in node.inputs.iter().enumerate() {
+                if operand_slot(&node.op, slot) == OperandSlot::Data {
+                    reach[input.0] = true;
                 }
             }
         }
@@ -587,10 +611,10 @@ impl From<String> for BackwardFailure {
 }
 
 /// The atom-owned structural AD disposition for a forward node. Both the
-/// live-node precheck and the actual backward walk use this table. A
-/// piecewise-constant conversion reached through exact zero retains its
-/// named reason. A signed-integer computation is exempt unless it computes
-/// from a differentiated bool or integer parameter
+/// data-path precheck and the actual backward walk use this table, and both
+/// apply it only to a node with a data path ([`data_path_reach`]). A
+/// signed-integer computation is exempt unless it computes from a
+/// differentiated bool or integer parameter
 /// ([`is_cotangent_free_integer_computation`]): it has no requested adjoint
 /// and passes exact zero to its producers.
 fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> Option<AdError> {
@@ -736,14 +760,14 @@ fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> O
 }
 
 /// [05-OP-37]'s rate rejection. A parameter reaches a node when the node is
-/// the parameter, or the node has a float output and one of its operand
-/// slots that carries an adjoint contract reads a reached node. Zero-cotangent
-/// slots (a uniform template, the random controls, a comparison operand) and
-/// non-float values break the path, as a `stop_gradient` barrier would. A
-/// live dropout, or dropout replay, whose rate is reached is rejected.
+/// the parameter, or the node has a float output and one of its data slots
+/// ([`OperandSlot::Data`]) reads a reached node. Control slots (a uniform
+/// template, the random controls, a comparison operand) and non-float values
+/// break the path, as a `stop_gradient` barrier would. A dropout, or dropout
+/// replay, with a data path whose rate is reached is rejected.
 fn reject_random_selection_parameters(
     forward: &Dag,
-    live: &[bool],
+    data_path: &[bool],
     wrt: &[NodeId],
 ) -> Result<(), AdError> {
     if !forward
@@ -763,33 +787,12 @@ fn reject_random_selection_parameters(
         if reached[node.id.0] || !node.output_type.precision.is_float() {
             continue;
         }
-        let carrying: &[NodeId] = match &node.op {
-            RiscOp::Shrink { .. }
-            | RiscOp::Stride { .. }
-            | RiscOp::Pad { .. }
-            | RiscOp::Reshape { .. }
-            | RiscOp::Expand { .. }
-            | RiscOp::Gather { .. }
-            | RiscOp::Dropout
-            | RiscOp::DropoutReplay => &node.inputs[..node.inputs.len().min(1)],
-            RiscOp::ScatterAdd { .. } => {
-                reached[node.id.0] = [0, 2]
-                    .iter()
-                    .filter_map(|slot| node.inputs.get(*slot))
-                    .any(|input| reached[input.0]);
-                continue;
-            }
-            RiscOp::UniformLike => &node.inputs[1..3],
-            RiscOp::UniformBoundAdjoint { .. } => &node.inputs[1..2],
-            RiscOp::GuardedFail { .. } => &node.inputs[1..2],
-            RiscOp::Where => &node.inputs[1..],
-            RiscOp::Compare(_) | RiscOp::Shape { .. } => &[],
-            _ => &node.inputs,
-        };
-        reached[node.id.0] = carrying.iter().any(|input| reached[input.0]);
+        reached[node.id.0] = node.inputs.iter().enumerate().any(|(slot, input)| {
+            operand_slot(&node.op, slot) == OperandSlot::Data && reached[input.0]
+        });
     }
     for node in forward.nodes() {
-        if live[node.id.0]
+        if data_path[node.id.0]
             && matches!(node.op, RiscOp::Dropout | RiscOp::DropoutReplay)
             && node.inputs.get(1).is_some_and(|rate| reached[rate.0])
         {
@@ -965,6 +968,7 @@ fn grad_dag_result(
     // spec/design/chelis_span_survival.md §2.3 AD row: "Forward nodes:
     // clone span_id and merged_spans."
     let mut dag = forward.clone();
+    let data_path = data_path_reach(forward, output);
     let selected_data = selected_data_reach(forward, wrt);
     let discrete_parameters = discrete_parameter_reach(forward, wrt);
     let mut adjoints: UnordMap<NodeId, NodeId> = UnordMap::new();
@@ -1102,8 +1106,13 @@ fn grad_dag_result(
 
         let node = forward.get(node_id).unwrap().clone();
         let rejection = structural_rejection(&node, forward, selected_data[node_id.0]);
-        let cotangent_free =
-            is_cotangent_free_integer_computation(&node, discrete_parameters[node_id.0]);
+        // spec/06 §7.5: a node with no data path was reached only through
+        // control slots. Its cotangent is exact zero, so it contributes exact
+        // zero without constructing its adjoint, and its structural
+        // rejection does not apply.
+        let off_data_path = !data_path[node_id.0];
+        let cotangent_free = off_data_path
+            || is_cotangent_free_integer_computation(&node, discrete_parameters[node_id.0]);
         if let Some(rejection) = rejection
             && !cotangent_free
         {
@@ -1113,24 +1122,33 @@ fn grad_dag_result(
         // A broadcast's adjoint contracts an axis. Select inactive rows
         // away while that axis still exists; the scalar/shared source may
         // no longer carry the branch activation after the reduction.
-        let masks_before_reduction = matches!(node.op, RiscOp::Expand { .. });
+        let masks_before_reduction = !off_data_path && matches!(node.op, RiscOp::Expand { .. });
         let grad_out = if masks_before_reduction {
             let input = forward.get(node.inputs[0]).expect("expand source exists");
             mask_to_activation(&mut dag, &node, input, grad_out)?
         } else {
             grad_out
         };
-        let adjoint = compute_adjoints(&node, grad_out, forward, &mut dag);
+        let adjoint = if off_data_path {
+            None
+        } else {
+            compute_adjoints(&node, grad_out, forward, &mut dag)
+        };
         let input_grads = match adjoint {
             Some(input_grads) => input_grads,
-            // A cotangent-free integer computation whose atom defines no
-            // adjoint was reached solely by exact zero. Pass that zero to
-            // its producers so a no-grad conversion beneath it still
-            // receives its required structural diagnostic.
+            // A cotangent-free node off every data path, or one whose atom
+            // defines no adjoint, was reached solely by exact zero. Pass that
+            // zero through every slot but index math, as a comparison passes
+            // it to its operands: a parameter read only through control slots
+            // still receives its exact zero, and a no-grad conversion beneath
+            // an integer computation on a data path still receives its
+            // required structural diagnostic.
             None if cotangent_free => node
                 .inputs
                 .iter()
-                .map(|&input_id| {
+                .enumerate()
+                .filter(|&(slot, _)| operand_slot(&node.op, slot) != OperandSlot::Index)
+                .map(|(_, &input_id)| {
                     let zero = fill_like(&mut dag, node.owner, input_id, 0.0);
                     (input_id, zero)
                 })
@@ -1147,7 +1165,9 @@ fn grad_dag_result(
         let input_grads = input_grads
             .into_iter()
             .map(|(input_id, grad_node)| {
-                if masks_before_reduction {
+                // An exact zero off every data path is already its input's
+                // shape and has nothing to select away.
+                if masks_before_reduction || off_data_path {
                     return Ok((input_id, grad_node));
                 }
                 let input = forward
@@ -3875,6 +3895,99 @@ mod tests {
         ));
     }
 
+    /// `bitwise(cast(cmplt(x, 1), i32), 1)` either compared under a `where`
+    /// condition, reaching the output only through control slots, or, with
+    /// `data_use`, cast back to f32 and multiplied by `x`, a data path.
+    fn bitwise_of_a_comparison(
+        kind: chelis_types::BitwiseKind,
+        data_use: bool,
+    ) -> (Dag, NodeId, NodeId) {
+        let mut dag = Dag::new();
+        let owner = dag.declare("test");
+        let int_ty = TensorType {
+            dims: vec![],
+            precision: Prim::Int32,
+        };
+        let bool_ty = TensorType {
+            dims: vec![],
+            precision: Prim::Bool,
+        };
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let one_float = dag.add_node(
+            owner,
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let first_control = dag.add_node(
+            owner,
+            RiscOp::Compare(ComparisonKind::CmpLt),
+            vec![x, one_float],
+            bool_ty.clone(),
+            None,
+        );
+        let discrete = dag.add_node(
+            owner,
+            RiscOp::Cast {
+                new_precision: Prim::Int32,
+            },
+            vec![first_control],
+            int_ty.clone(),
+            None,
+        );
+        let one_int = dag.add_node(
+            owner,
+            RiscOp::synth_const(Prim::Int32, 1.0),
+            vec![],
+            int_ty.clone(),
+            None,
+        );
+        let selected_bitwise = dag.add_node(
+            owner,
+            RiscOp::Bitwise(kind),
+            vec![discrete, one_int],
+            int_ty,
+            None,
+        );
+        let out = if data_use {
+            let coefficient = dag.add_node(
+                owner,
+                RiscOp::Cast {
+                    new_precision: Prim::F32,
+                },
+                vec![selected_bitwise],
+                scalar_f32(),
+                None,
+            );
+            dag.add_node(owner, RiscOp::Mul, vec![x, coefficient], scalar_f32(), None)
+        } else {
+            let final_control = dag.add_node(
+                owner,
+                RiscOp::Compare(ComparisonKind::CmpLt),
+                vec![selected_bitwise, one_int],
+                bool_ty,
+                None,
+            );
+            dag.add_node(
+                owner,
+                RiscOp::Where,
+                vec![final_control, x, x],
+                scalar_f32(),
+                None,
+            )
+        };
+        (dag, x, out)
+    }
+
+    /// [05-OP-47]: a bitwise operation on a value that depends on `x` through
+    /// a comparison still rejects when its result has a data path.
     #[test]
     fn bitwise_comparison_path_keeps_selected_value_origin() {
         for kind in [
@@ -3884,74 +3997,7 @@ mod tests {
             chelis_types::BitwiseKind::ShiftLeft,
             chelis_types::BitwiseKind::ShiftRight,
         ] {
-            let mut dag = Dag::new();
-            let owner = dag.declare("test");
-            let int_ty = TensorType {
-                dims: vec![],
-                precision: Prim::Int32,
-            };
-            let bool_ty = TensorType {
-                dims: vec![],
-                precision: Prim::Bool,
-            };
-            let x = dag.add_node(
-                owner,
-                RiscOp::Load { name: "x".into() },
-                vec![],
-                scalar_f32(),
-                None,
-            );
-            let one_float = dag.add_node(
-                owner,
-                RiscOp::synth_const(Prim::F32, 1.0),
-                vec![],
-                scalar_f32(),
-                None,
-            );
-            let first_control = dag.add_node(
-                owner,
-                RiscOp::Compare(ComparisonKind::CmpLt),
-                vec![x, one_float],
-                bool_ty.clone(),
-                None,
-            );
-            let discrete = dag.add_node(
-                owner,
-                RiscOp::Cast {
-                    new_precision: Prim::Int32,
-                },
-                vec![first_control],
-                int_ty.clone(),
-                None,
-            );
-            let one_int = dag.add_node(
-                owner,
-                RiscOp::synth_const(Prim::Int32, 1.0),
-                vec![],
-                int_ty.clone(),
-                None,
-            );
-            let selected_bitwise = dag.add_node(
-                owner,
-                RiscOp::Bitwise(kind),
-                vec![discrete, one_int],
-                int_ty.clone(),
-                None,
-            );
-            let final_control = dag.add_node(
-                owner,
-                RiscOp::Compare(ComparisonKind::CmpLt),
-                vec![selected_bitwise, one_int],
-                bool_ty,
-                None,
-            );
-            let out = dag.add_node(
-                owner,
-                RiscOp::Where,
-                vec![final_control, x, x],
-                scalar_f32(),
-                None,
-            );
+            let (dag, x, out) = bitwise_of_a_comparison(kind, true);
             assert!(
                 matches!(
                     grad_dag_checked(&dag, out, &[x]),
@@ -3960,10 +4006,31 @@ mod tests {
                         reason: AdRejectionReason::IntegerArithmeticOutput
                     }) if op == kind.name()
                 ),
-                "{} must reject even through comparison zero-cotangent edges",
+                "{} on a data path must reject even through a comparison",
                 kind.name()
             );
             assert!(grad_dag(&dag, out, &[x]).is_none());
+        }
+    }
+
+    /// chelis#3464: the same bitwise operation read only through a comparison
+    /// and a `where` condition, both control slots, is a forward value.
+    #[test]
+    fn bitwise_read_only_through_control_slots_is_a_forward_value() {
+        for kind in [
+            chelis_types::BitwiseKind::And,
+            chelis_types::BitwiseKind::Or,
+            chelis_types::BitwiseKind::Xor,
+            chelis_types::BitwiseKind::ShiftLeft,
+            chelis_types::BitwiseKind::ShiftRight,
+        ] {
+            let (dag, x, out) = bitwise_of_a_comparison(kind, false);
+            let result = match grad_dag_checked(&dag, out, &[x]) {
+                Ok(result) => result,
+                Err(error) => panic!("{} under a condition must not reject: {error}", kind.name()),
+            };
+            let values = eval_scalar(&result.dag, &UnordMap::from([("x".to_string(), 0.5)]));
+            assert_eq!(values[&result.grad_nodes[&x]], 1.0, "{}", kind.name());
         }
     }
 
@@ -3982,20 +4049,9 @@ mod tests {
                 dims: vec![],
                 precision: Prim::Int32,
             };
-            let bool_ty = TensorType {
-                dims: vec![],
-                precision: Prim::Bool,
-            };
             let x = dag.add_node(
                 owner,
                 RiscOp::Load { name: "x".into() },
-                vec![],
-                scalar_f32(),
-                None,
-            );
-            let n = dag.add_node(
-                owner,
-                RiscOp::Load { name: "n".into() },
                 vec![],
                 scalar_f32(),
                 None,
@@ -4005,7 +4061,7 @@ mod tests {
                 RiscOp::Cast {
                     new_precision: Prim::Int32,
                 },
-                vec![n],
+                vec![x],
                 int_ty.clone(),
                 None,
             );
@@ -4023,20 +4079,16 @@ mod tests {
                 int_ty,
                 None,
             );
-            let predicate = dag.add_node(
+            let coefficient = dag.add_node(
                 owner,
-                RiscOp::Compare(ComparisonKind::Eq),
-                vec![bits, one],
-                bool_ty,
-                None,
-            );
-            let output = dag.add_node(
-                owner,
-                RiscOp::Where,
-                vec![predicate, x, x],
+                RiscOp::Cast {
+                    new_precision: Prim::F32,
+                },
+                vec![bits],
                 scalar_f32(),
                 None,
             );
+            let output = dag.add_node(owner, RiscOp::Mul, vec![x, coefficient], scalar_f32(), None);
             assert!(matches!(
                 grad_dag_checked(&dag, output, &[x]),
                 Err(AdError::NotSupported {
@@ -4728,14 +4780,24 @@ mod tests {
         );
     }
 
-    // [06] §7.5: a comparison queues exact zero cotangents for its
-    // operands, so rejection analysis must visit their producers too.
+    /// spec/06 §7.5: `where(cmplt(cast(conv(x), f32), 1), x * x, x)`, where
+    /// `conv` is the checked `cast` or a named cast rung to i32 (of
+    /// `cast(x, i64)` for `cast_wrap`, which reads only a signed integer),
+    /// optionally through integer `max_elem`. The conversion reaches the
+    /// output only through a comparison operand and a `where` condition, both
+    /// control slots. With `data_use`, the output also adds the restored
+    /// value, so the conversion has a data path as well.
     fn comparison_with_discrete_cast(
         named: Option<crate::dag::NamedCastMode>,
         through_integer_extrema: bool,
+        data_use: bool,
     ) -> (Dag, NodeId, NodeId) {
         let mut dag = Dag::new();
         let owner = Owner::from(dag.declare("test"));
+        let scalar = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
         let x = dag.add_node(
             owner,
             RiscOp::Load { name: "x".into() },
@@ -4743,22 +4805,19 @@ mod tests {
             scalar_f32(),
             None,
         );
-        // `cast_wrap` reads only a signed integer.
-        let m_type = if named == Some(crate::dag::NamedCastMode::Wrap) {
-            TensorType {
-                dims: vec![],
-                precision: Prim::Int64,
-            }
+        let source = if named == Some(crate::dag::NamedCastMode::Wrap) {
+            dag.add_node(
+                owner,
+                RiscOp::Cast {
+                    new_precision: Prim::Int64,
+                },
+                vec![x],
+                scalar(Prim::Int64),
+                None,
+            )
         } else {
-            scalar_f32()
+            x
         };
-        let m = dag.add_node(
-            owner,
-            RiscOp::Load { name: "m".into() },
-            vec![],
-            m_type,
-            None,
-        );
         let discrete = dag.add_node(
             owner,
             match named {
@@ -4770,11 +4829,8 @@ mod tests {
                     new_precision: Prim::Int32,
                 },
             },
-            vec![m],
-            TensorType {
-                dims: vec![],
-                precision: Prim::Int32,
-            },
+            vec![source],
+            scalar(Prim::Int32),
             None,
         );
         let discrete = if through_integer_extrema {
@@ -4782,25 +4838,150 @@ mod tests {
                 owner,
                 RiscOp::synth_const(Prim::Int32, 0.0),
                 vec![],
-                TensorType {
-                    dims: vec![],
-                    precision: Prim::Int32,
-                },
+                scalar(Prim::Int32),
                 None,
             );
             dag.add_node(
                 owner,
                 RiscOp::MaxElem,
                 vec![discrete, zero],
-                TensorType {
-                    dims: vec![],
-                    precision: Prim::Int32,
-                },
+                scalar(Prim::Int32),
                 None,
             )
         } else {
             discrete
         };
+        let restored = dag.add_node(
+            owner,
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![discrete],
+            scalar_f32(),
+            None,
+        );
+        let one = dag.add_node(
+            owner,
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let predicate = dag.add_node(
+            owner,
+            RiscOp::Compare(ComparisonKind::CmpLt),
+            vec![restored, one],
+            scalar(Prim::Bool),
+            None,
+        );
+        let square = dag.add_node(owner, RiscOp::Mul, vec![x, x], scalar_f32(), None);
+        let selected = dag.add_node(
+            owner,
+            RiscOp::Where,
+            vec![predicate, square, x],
+            scalar_f32(),
+            None,
+        );
+        let out = if data_use {
+            dag.add_node(
+                owner,
+                RiscOp::Add,
+                vec![selected, restored],
+                scalar_f32(),
+                None,
+            )
+        } else {
+            selected
+        };
+        (dag, x, out)
+    }
+
+    fn discrete_cast_variants() -> impl Iterator<Item = (Option<crate::dag::NamedCastMode>, bool)> {
+        let rungs = crate::dag::NamedCastMode::ALL.iter().copied().map(Some);
+        std::iter::once(None)
+            .chain(rungs)
+            .flat_map(|named| [(named, false), (named, true)])
+    }
+
+    /// chelis#3464: a conversion read only through control slots executes
+    /// forward and contributes nothing, so `grad` differentiates the selected
+    /// branch, `2x` where the converted value is below one and `1` elsewhere.
+    /// This replaces the two units that pinned its PiecewiseConstant
+    /// rejection, which spec/06 §7.5 now confines to a data path.
+    #[test]
+    fn grad_conversion_read_only_through_control_slots_differentiates() {
+        for (named, through_integer_extrema) in discrete_cast_variants() {
+            let op = named.map_or("cast", |mode| mode.keyword());
+            let (dag, x, out) =
+                comparison_with_discrete_cast(named, through_integer_extrema, false);
+            let result = match grad_dag_checked(&dag, out, &[x]) {
+                Ok(result) => result,
+                Err(error) => panic!("{op} read only by control slots must not reject: {error}"),
+            };
+            for (x0, expected) in [(-2.0, -4.0), (3.0, 1.0)] {
+                let values = eval_scalar(&result.dag, &UnordMap::from([("x".to_string(), x0)]));
+                assert_eq!(
+                    values[&result.grad_nodes[&x]], expected,
+                    "{op} (integer extrema: {through_integer_extrema}) at x = {x0}"
+                );
+            }
+        }
+    }
+
+    /// Negative parity: the same conversion with a data path keeps its
+    /// atom's rejection, through integer arithmetic too. `cast_wrap` reads
+    /// `cast(x, i64)`, the first conversion on that path.
+    #[test]
+    fn grad_conversion_with_a_data_path_still_rejects() {
+        for (named, through_integer_extrema) in discrete_cast_variants() {
+            let op = match named {
+                Some(crate::dag::NamedCastMode::Wrap) | None => "cast",
+                Some(mode) => mode.keyword(),
+            };
+            let (dag, x, out) = comparison_with_discrete_cast(named, through_integer_extrema, true);
+            let error = match grad_dag_checked(&dag, out, &[x]) {
+                Ok(_) => panic!("{op} on a data path must reject grad"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                AdError::NotSupported {
+                    op,
+                    reason: AdRejectionReason::PiecewiseConstant,
+                },
+                "integer extrema: {through_integer_extrema}"
+            );
+            assert!(grad_dag(&dag, out, &[x]).is_none());
+        }
+    }
+
+    /// A parameter read only through control slots receives exact positive
+    /// zero, and the checked transform still returns its gradient node.
+    #[test]
+    fn grad_predicate_only_parameter_is_positive_zero() {
+        let (mut dag, x, selected) = comparison_with_discrete_cast(None, false, false);
+        let owner = dag.get(selected).unwrap().owner;
+        // Read a second parameter only through a comparison and a `where`
+        // condition: `where(cmplt(cast(cast(y, i32), f32), 1), out, -out)`.
+        let y = dag.add_node(
+            owner,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let discrete = dag.add_node(
+            owner,
+            RiscOp::Cast {
+                new_precision: Prim::Int32,
+            },
+            vec![y],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int32,
+            },
+            None,
+        );
         let restored = dag.add_node(
             owner,
             RiscOp::Cast {
@@ -4827,55 +5008,26 @@ mod tests {
             },
             None,
         );
-        let square = dag.add_node(owner, RiscOp::Mul, vec![x, x], scalar_f32(), None);
+        let negated = dag.add_node(owner, RiscOp::Neg, vec![selected], scalar_f32(), None);
         let out = dag.add_node(
             owner,
             RiscOp::Where,
-            vec![predicate, square, x],
+            vec![predicate, selected, negated],
             scalar_f32(),
             None,
         );
-        (dag, x, out)
-    }
-
-    #[test]
-    fn grad_comparison_operand_reports_its_structural_rejection() {
-        let rungs = crate::dag::NamedCastMode::ALL.iter().copied().map(Some);
-        for named in std::iter::once(None).chain(rungs) {
-            let op = named.map_or("cast", |mode| mode.keyword());
-            let (dag, x, out) = comparison_with_discrete_cast(named, false);
-            let error = match grad_dag_checked(&dag, out, &[x]) {
-                Ok(_) => panic!("{op} beneath comparison must reject grad"),
-                Err(error) => error,
-            };
-            assert_eq!(
-                error,
-                AdError::NotSupported {
-                    op,
-                    reason: AdRejectionReason::PiecewiseConstant,
-                }
+        let result = match grad_dag_checked(&dag, out, &[x, y]) {
+            Ok(result) => result,
+            Err(error) => panic!("a predicate-only parameter must not reject: {error}"),
+        };
+        for (y0, sign) in [(-5.0, 1.0), (4.0, -1.0)] {
+            let values = eval_scalar(
+                &result.dag,
+                &UnordMap::from([("x".to_string(), -2.0), ("y".to_string(), y0)]),
             );
-        }
-    }
-
-    #[test]
-    fn grad_zero_only_integer_control_still_reports_float_to_integer_cast() {
-        let rungs = crate::dag::NamedCastMode::ALL.iter().copied().map(Some);
-        for named in std::iter::once(None).chain(rungs) {
-            let (dag, x, out) = comparison_with_discrete_cast(named, true);
-            let error = match grad_dag_checked(&dag, out, &[x]) {
-                Ok(_) => {
-                    panic!("float-to-integer cast beneath zero-only integer control must reject")
-                }
-                Err(error) => error,
-            };
-            assert_eq!(
-                error,
-                AdError::NotSupported {
-                    op: named.map_or("cast", |mode| mode.keyword()),
-                    reason: AdRejectionReason::PiecewiseConstant,
-                }
-            );
+            assert_eq!(values[&result.grad_nodes[&x]], sign * -4.0, "y = {y0}");
+            let dy = values[&result.grad_nodes[&y]];
+            assert_eq!(dy.to_bits(), 0.0f64.to_bits(), "y = {y0}: {dy}");
         }
     }
 
