@@ -5196,8 +5196,7 @@ impl UncarriableWalk<'_> {
                 if !is_static_constructor(base, self) {
                     return Some(
                         "a field projection on a runtime record value, which IR lowering \
-                         resolves only for a compile-time-known record construction \
-                         (chelis#520 D1)"
+                         resolves only for a compile-time-known record construction"
                             .to_string(),
                     );
                 }
@@ -5211,7 +5210,7 @@ impl UncarriableWalk<'_> {
                 if !is_static_constructor(scrutinee, self) {
                     return Some(
                         "a `match` on a runtime scrutinee, which IR lowering resolves only \
-                         for a compile-time-known constructor value (chelis#520 D1)"
+                         for a compile-time-known constructor value (chelis#618)"
                             .to_string(),
                     );
                 }
