@@ -129,27 +129,6 @@ def _run(
 
 
 class LegManifestTests(unittest.TestCase):
-    def test_local_fast_keeps_every_tier_zero_writer_but_uses_structural_registry(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = _fake_repo(Path(td))
-            recorder = _Recorder()
-            code, output = _run(
-                ["--tier", "0", "--local-fast"], repo_root=root, recorder=recorder
-            )
-        self.assertEqual(code, 0, output)
-        self.assertEqual(
-            recorder.rendered()[0],
-            f"{PYTHON} scripts/generate_rejection_registries.py --write --structural-only",
-        )
-        self.assertEqual(len(recorder.calls), 4)
-
-    def test_local_fast_is_rejected_for_check_and_full_modes(self):
-        for argv in (["--check", "--local-fast"], ["--full", "--local-fast"]):
-            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit) as raised:
-                    regen_all.parse_args(argv)
-            self.assertEqual(raised.exception.code, 2)
-
     def test_default_tier_is_zero_in_order(self):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))

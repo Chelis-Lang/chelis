@@ -5,21 +5,16 @@ Usage (from the repository root, with the worktree's managed Python):
 
     .venv/bin/python scripts/regen_all.py               # write tier 0
     .venv/bin/python scripts/regen_all.py --check       # report stale legs only
-    .venv/bin/python scripts/regen_all.py --tier 0      # full tier-0 regeneration
-    .venv/bin/python scripts/regen_all.py --tier 0 --local-fast
-                                                        # pre-push structural
-                                                        # registry regeneration
+    .venv/bin/python scripts/regen_all.py --tier 0      # lightweight generators
     .venv/bin/python scripts/regen_all.py --full        # tiers 0 and 1 plus the
                                                         # check-only legs
     .venv/bin/python scripts/regen_all.py --full --check
 
 Tiers, in dependency order
 --------------------------
-0   The source-derived rejection issue manifest and Rust
-    registry (`generate_rejection_registries.py --write`) derive the production
-    module graph through the existing `syn` inventory helper and verify the
-    independent rustc-read closure. `--local-fast` omits the rustc-read closure
-    only in write mode; the always-running Docs Phase 4B PR oracle checks it;
+0   Lightweight writers: the source-derived rejection issue manifest and Rust
+    registry (`generate_rejection_registries.py --write`) compile and run only
+    the existing `syn` inventory helper to derive the production module graph;
     the embedded conformance skill assets
     (`regenerate_conformance_assets.py`), the centralized reviewed
     unsupported-wording expectation
@@ -94,7 +89,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -631,11 +626,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "the binding graph writer, and the check-only legs)"
         ),
     )
-    parser.add_argument(
-        "--local-fast",
-        action="store_true",
-        help="use parser-confirmed registry regeneration for the pre-push gate",
-    )
     args = parser.parse_args(argv)
     if args.tier is None:
         args.tiers = FULL_TIERS if args.full else DEFAULT_TIERS
@@ -643,8 +633,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         args.tiers = tuple(sorted(set(args.tier)))
     if 1 in args.tiers and not args.full:
         parser.error("--tier 1 requires --full")
-    if args.local_fast and (args.check or args.full or args.tiers != (0,)):
-        parser.error("--local-fast requires write mode and tier 0 only")
     return args
 
 
@@ -670,13 +658,6 @@ def main(
     )
 
     legs = select_legs(all_legs, args.tiers)
-    if args.local_fast:
-        legs = [
-            replace(leg, write_argv=(*leg.write_argv, "--structural-only"))
-            if leg.name == "rejection-registry" and leg.write_argv is not None
-            else leg
-            for leg in legs
-        ]
     mode = "check" if args.check else "write"
     print(
         f"regen_all: {mode} mode, tiers {', '.join(str(t) for t in args.tiers)}, "

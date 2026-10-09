@@ -3,11 +3,9 @@
 
 from __future__ import annotations
 
-import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -40,8 +38,8 @@ from generate_rejection_registries import (
 ROOT = Path(__file__).resolve().parent.parent
 
 
-class LocalFastRegistryMode(unittest.TestCase):
-    def test_structural_write_regenerates_citations_without_compiler_closure(self) -> None:
+class RegistryWriterAndChecker(unittest.TestCase):
+    def test_write_regenerates_citations_and_check_requires_compiler_closure(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             (root / "scripts").mkdir()
@@ -59,17 +57,19 @@ class LocalFastRegistryMode(unittest.TestCase):
                 mock.patch.object(registries, "discover_atoms", return_value=["[05-OP-1]"]),
                 mock.patch.object(registries, "verify_compiler_source_closure") as closure,
             ):
-                self.assertEqual(registries.main(["--write", "--structural-only"]), 0)
+                self.assertEqual(registries.main(["--write"]), 0)
                 discover.assert_called_once_with(root.resolve(), workspace)
                 closure.assert_not_called()
                 self.assertEqual(registries.main(["--check"]), 0)
                 closure.assert_called_once()
-                self.assertEqual(registries.main(["--write"]), 0)
+                closure.side_effect = RegistryError("compiler-only source omitted")
+                with self.assertRaisesRegex(RegistryError, "compiler-only source omitted"):
+                    registries.main(["--check"])
                 self.assertEqual(closure.call_count, 2)
             self.assertEqual(load_issue_manifest(root / MANIFEST_REL), [1234])
             self.assertIn("[05-OP-1]", (root / OUTPUT_REL).read_text())
 
-    def test_structural_write_rejects_a_dynamic_production_citation(self) -> None:
+    def test_write_rejects_a_dynamic_production_citation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             (root / "scripts").mkdir()
@@ -84,13 +84,8 @@ class LocalFastRegistryMode(unittest.TestCase):
                 mock.patch.object(registries, "verify_compiler_source_closure") as closure,
             ):
                 with self.assertRaisesRegex(RegistryError, "positive decimal integer literal"):
-                    registries.main(["--write", "--structural-only"])
+                    registries.main(["--write"])
                 closure.assert_not_called()
-
-    def test_structural_only_check_is_forbidden(self) -> None:
-        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
-            registries.main(["--check", "--structural-only"])
-        self.assertEqual(raised.exception.code, 2)
 
 
 class DiscoverAtoms(unittest.TestCase):
