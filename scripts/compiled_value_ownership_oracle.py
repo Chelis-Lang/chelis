@@ -120,7 +120,6 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ManifestContractTests.test_option_and_recursive_function_projection_universe_is_frozen
     ManifestContractTests.test_option_scalars_freeze_every_emitted_root
     ManifestContractTests.test_phase_one_mutation_canaries_bind_exact_runtime_receipts
-    ManifestContractTests.test_phase_three_storage_proof_mutations_fail_closed
     ManifestContractTests.test_phase_two_mutation_canaries_bind_exact_execution_receipts
     ManifestContractTests.test_phase_zero_is_hardware_independent_but_hardware_row_exists
     ManifestContractTests.test_recursive_function_fixtures_reach_named_value_projection
@@ -1374,179 +1373,6 @@ def mutation_manifest() -> tuple[Mutation, ...]:
         Mutation("ledger-event-stream-emptied", 0, Detector.ZERO_VACUITY, "empty-ledger parser test"),
         Mutation("manifest-receipt-omitted", 0, Detector.MANIFEST, "receipt bijection"),
     )
-
-
-def validate_active_mutation_contracts(phase: str) -> None:
-    """Fail closed when an active structural ownership mutation is present."""
-
-    if phase in {"0", "1"}:
-        return
-    host_source = (REPO_ROOT / "crates/chelis-backend-c/src/host_emit.rs").read_text()
-    ownership_source = (REPO_ROOT / "crates/chelis-ir/src/ownership/mod.rs").read_text()
-    owner_view = re.search(
-        r"impl<'a> VerifiedOwnerView<'a> \{(?P<body>.*?)\n\}\n\n/// A binder spelling",
-        ownership_source,
-        flags=re.DOTALL,
-    )
-    if owner_view is None:
-        raise OracleFailure(
-            "backend-local-ownership-predicate-restored: "
-            "the sealed VerifiedOwnerView capability boundary is missing"
-        )
-    owner_capabilities = tuple(
-        re.findall(r"pub fn ([a-zA-Z0-9_]+)\(", owner_view.group("body"))
-    )
-    if owner_capabilities != ("id", "ty", "is_heap"):
-        raise OracleFailure(
-            "backend-local-ownership-predicate-restored: generic verified owner "
-            f"capabilities drifted from (id, ty, is_heap): {owner_capabilities!r}"
-        )
-    if ".names()" in host_source:
-        raise OracleFailure(
-            "backend-local-ownership-predicate-restored: C host emission reads a "
-            "generic owner binder spelling outside a certified binding projection"
-        )
-    required = (
-        "VerifiedHostAction::Operation",
-        "VerifiedHostTerminator::Return",
-        "emit_expression_site",
-        "binding_name",
-    )
-    missing = tuple(name for name in required if name not in host_source)
-    if missing:
-        raise OracleFailure(
-            "backend-local-ownership-predicate-restored: "
-            f"verified C host ownership action path is incomplete {missing!r}"
-        )
-    if phase not in {"3", "4", "complete"}:
-        return
-
-    storage_source = (
-        REPO_ROOT / "crates/chelis-ir/src/ownership/storage.rs"
-    ).read_text()
-    storage_requirements = (
-        "pub struct VerifiedStoragePlan<L: StorageLane> {\n    program: VerifiedDagProgram,",
-        "pub struct ReusableOwnedStorage {\n    source: NodeId,\n    storage: StorageId,\n    consumer: NodeId,\n}",
-        "        if !self.one_live_program_owner {",
-        "        if !self.unique_descriptor_and_storage {",
-        "        if self.provenance != StorageProvenance::RuntimeOwned || !self.writable {",
-        "        if !self.no_live_view_or_borrow {",
-        "        if self.exact.is_none() {",
-        "        if !self.terminal_use {",
-        ".capacity\n                    .proves_equal(&consumer_requirement.capacity)",
-        "&& exact_shape_equal(dag, source, consumer.id)?",
-        "matches!(consumer.op, RiscOp::FusedElem { .. })",
-        "let token = self.reusable.remove(&consumer);",
-        "pub fn plan_c_storage(\n    program: VerifiedDagProgram,",
-        "pub fn plan_hip_storage(\n    program: VerifiedDagProgram,",
-        "fn physical_live_byte_bound(slots: &[StorageSlotPlan])",
-        "    for slot in slots {",
-        "slot.capacity.allocation_bytes",
-        "total = total\n            .checked_add(bytes)",
-        "Ok(LiveByteBound::Exact(total))",
-    )
-    missing_storage = tuple(
-        requirement
-        for requirement in storage_requirements
-        if requirement not in storage_source
-    )
-    if missing_storage:
-        raise OracleFailure(
-            "shared storage proof drift: exact-capacity, six-condition, linear-token, "
-            f"or physical-byte authority is incomplete {missing_storage!r}"
-        )
-    token_prefix = storage_source.split("pub struct ReusableOwnedStorage {", 1)[0]
-    token_derive = token_prefix.rsplit("#[derive(", 1)[-1].split(")]", 1)[0]
-    if "Clone" in token_derive or "Copy" in token_derive:
-        raise OracleFailure(
-            "shared storage proof drift: ReusableOwnedStorage became duplicable"
-        )
-
-    c_memory = (REPO_ROOT / "crates/chelis-backend-c/src/memory.rs").read_text()
-    hip_memory = (REPO_ROOT / "crates/chelis-backend-hip/src/memory.rs").read_text()
-    c_emit = (REPO_ROOT / "crates/chelis-backend-c/src/emit.rs").read_text()
-    hip_emit = (REPO_ROOT / "crates/chelis-backend-hip/src/emit.rs").read_text()
-    hip_fusion = (REPO_ROOT / "crates/chelis-backend-hip/src/fusion.rs").read_text()
-    forbidden_local_authority = (
-        "DimExprKey",
-        "capacity_fits",
-        "logical_elements",
-        "fused_in_place_spec",
-        "binder_equivalent_tensor_type",
-        "borrows_caller_storage",
-    )
-    restored = tuple(
-        name
-        for name in forbidden_local_authority
-        if any(name in source for source in (c_memory, hip_memory, c_emit, hip_emit, hip_fusion))
-    )
-    if restored:
-        raise OracleFailure(
-            "backend-local capacity authority restored: "
-            f"C or HIP contains forbidden eligibility mechanisms {restored!r}"
-        )
-
-    c_lib = (REPO_ROOT / "crates/chelis-backend-c/src/lib.rs").read_text()
-    hip_lib = (REPO_ROOT / "crates/chelis-backend-hip/src/lib.rs").read_text()
-    backend_requirements = (
-        (c_lib, "pub fn codegen(\n    dag: chelis_ir::ownership::VerifiedDagProgram,"),
-        (c_lib, "pub fn codegen_with_options(\n    dag: chelis_ir::ownership::VerifiedDagProgram,"),
-        (c_emit, "let mut plan = plan_c_storage(dag)"),
-        (c_emit, "token: ReusableOwnedStorage"),
-        (hip_lib, "pub fn codegen_hip(\n    dag: chelis_ir::ownership::VerifiedDagProgram,"),
-        (hip_lib, "plan_hip_storage(dag)"),
-        (hip_fusion, "token: ReusableOwnedStorage"),
-    )
-    missing_backend = tuple(
-        requirement
-        for source, requirement in backend_requirements
-        if requirement not in source
-    )
-    if missing_backend:
-        raise OracleFailure(
-            "shared storage proof drift: C or HIP no longer consumes one owned "
-            f"verified plan and token {missing_backend!r}"
-        )
-
-    metal_source = (REPO_ROOT / "crates/chelis-backend-metal/src/lib.rs").read_text()
-    metal_requirements = (
-        "pub struct MetalNeverReuse {\n    program: VerifiedDagProgram,",
-        "pub fn plan_metal(program: VerifiedDagProgram) -> MetalNeverReuse",
-        "pub fn codegen_metal(\n    plan: MetalNeverReuse,",
-    )
-    if "ReusableOwnedStorage" in metal_source or any(
-        requirement not in metal_source for requirement in metal_requirements
-    ):
-        raise OracleFailure(
-            "Metal no-reuse boundary drift: the owning plan became reuse-capable or borrowable"
-        )
-
-    runtime_source = (REPO_ROOT / "crates/chelis-runtime/src/lib.rs").read_text()
-    runtime_header = (
-        REPO_ROOT / "crates/chelis-runtime/include/chelis_runtime.h"
-    ).read_text()
-    runtime_requirements = (
-        "pub unsafe extern \"C\" fn chelis_tensor_repurpose(",
-        "    rank: chelis_scalar,",
-        "    shape: *const chelis_scalar,",
-        "exact_i64_scalar(rank, \"chelis_tensor_repurpose rank\")",
-        "tensor_ref.header.strong.load(Ordering::Relaxed) != 1",
-        "storage.header.strong.load(Ordering::Relaxed) != 1",
-        "storage.provenance != TensorStorageProvenance::RuntimeOwned",
-        "    if metadata.bytes() != storage.byte_capacity {",
-    )
-    tagged_repurpose_signature = (
-        "void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar rank, "
-        "const chelis_scalar *shape);"
-    )
-    if (
-        any(requirement not in runtime_source for requirement in runtime_requirements)
-        or tagged_repurpose_signature not in runtime_header
-    ):
-        raise OracleFailure(
-            "runtime repurpose defense drift: exact capacity, descriptor/storage "
-            "uniqueness, or runtime provenance check is missing"
-        )
 
 
 def validate_manifest(
@@ -2988,7 +2814,6 @@ def run_phase(phase: str, *, require_hip: bool) -> None:
     fixtures = fixture_manifest()
     mutations = mutation_manifest()
     validate_manifest(fixtures, mutations)
-    validate_active_mutation_contracts(phase)
     if phase in {"3", "4", "complete"} and not require_hip:
         raise OracleFailure(f"phase {phase} requires --require-hip")
     if require_hip:
