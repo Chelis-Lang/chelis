@@ -85,8 +85,8 @@ ordinary consume, so the two cannot disagree about which earlier consumes are
 repairable.
 
 Explicit source `copy()` lowers to the same `RiscOp::Copy` used for inserted copies.
-Cost and fitness signals intentionally do not distinguish explicit and inserted
-copies.
+`copy_count` and the fitness report do not distinguish explicit and inserted copies;
+`copy_repairs` lists only inserted ones.
 
 ## Destructured Components
 
@@ -309,8 +309,14 @@ order, each with its span identity and its `kind`: `consume`, `borrow`, `capture
 destructuring `let`, has no source location and is not listed; the source use it
 belongs to is.
 
-A later ordinary consume becomes the next copy site, so a chain of consumes reports one
-entry per earlier consume. Across a branch join the latest ordinary consume of every path
+Copy sites are kept per projection path. A tuple projection or field access moves its
+component out ([04-LIN-11]), so `p.w` and `p.0` are consumes of that component, and a
+use forces a copy only at an earlier consume whose path overlaps its own, one path being
+a prefix of the other: `p.w` and `p.b` never copy for each other, while a use of `p`
+whole overlaps every component, before or after it. A later ordinary consume replaces
+the overlapping sites and becomes the next copy site, so a chain of consumes reports one
+entry per earlier consume. This bookkeeping is the report's own; it reads the checker's
+walk but changes no verdict. Across a branch join the latest ordinary consume of every path
 receives a copy when a use follows the join ([04-LIN-5]), so each branch's consume is
 listed. Root observations happen in manifest order after every initializer: a root
 whose value an initializer consumed copies at that consume, and of two roots denoting
@@ -324,8 +330,8 @@ language semantics place at a source consume. `copy_count` counts the `RiscOp::C
 nodes of the lowered tensor DAG, where a call that never consumes its input in the
 lowered program pays nothing for the repair, so the two counts can differ. The copies
 [04-LIN-7] requires before an externally supplied entry argument crosses an internal
-owned-parameter edge are not listed: which declarations are artifact entries depends on
-what a build exports, not on the program text this report reads.
+owned-parameter edge are not listed yet: reporting them needs the artifact's entry set,
+which the linearity walk does not carry.
 
 ## Migration And Linting
 

@@ -102,14 +102,10 @@ struct ConsumeSite {
     /// Where the consume is written; `None` for a consume with no source
     /// node of its own, such as a root observation.
     at: Option<SiteLocation>,
-    /// The ordinary consumes that each receive an inserted copy when a later
-    /// use follows this state: the latest ordinary consume on every path
-    /// into it. A straight-line consume holds its own site; a branch join
-    /// holds every branch's (spec/04 section 8.3, [04-LIN-5]).
-    copy_sites: Vec<CopySite>,
 }
 
-/// A consume that receives an inserted copy when a later use follows it.
+/// An ordinary consume that receives an inserted copy when a later use of an
+/// overlapping path follows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CopySite {
     at: SiteLocation,
@@ -117,7 +113,34 @@ struct CopySite {
     /// it: `x`, or `p.w` for a component a projection moves out
     /// ([04-LIN-11]).
     binding: String,
+    /// The component the consume took, from the binding outward; empty for
+    /// the binding whole.
+    path: Vec<ProjectionStep>,
     consumed_by: String,
+}
+
+/// What a use leaves in its owner's copy frontier ([`BindingRecord::copy_frontier`]).
+enum Takes {
+    /// A borrow or a capture that borrows: the frontier is unchanged.
+    Nothing,
+    /// An ordinary consume: it replaces every overlapping site and is the
+    /// site a still later overlapping use copies at.
+    Copyable {
+        at: SiteLocation,
+        consumed_by: String,
+    },
+    /// A consume no copy follows (a `drop`, a match scrutinee, a consuming
+    /// capture): it removes every overlapping site.
+    Original,
+}
+
+/// The projection chain the walk is inside: its source spelling, its path,
+/// and its location, `None` for a chain the desugarer synthesized.
+#[derive(Debug, Clone)]
+struct ProjectionUse {
+    label: String,
+    path: Vec<ProjectionStep>,
+    at: Option<SiteLocation>,
 }
 
 impl ConsumeSite {
@@ -319,6 +342,12 @@ struct BindingRecord {
     /// a projection overlapping a dropped component, is `UseAfterConsume`;
     /// a projection disjoint from every dropped component stays usable.
     dropped_components: Vec<(Vec<ProjectionStep>, String)>,
+    /// Report-only, for `copy_repairs`; no verdict reads it. The latest
+    /// ordinary consume of each component on every path into this point,
+    /// with the path it took ([04-LIN-11]). A later use whose path overlaps
+    /// a site's forces a copy there. Branch joins union the branches'
+    /// frontiers ([04-LIN-5]).
+    copy_frontier: Vec<CopySite>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -367,6 +396,7 @@ impl LinearScope {
                 moved_key_components: BTreeSet::new(),
                 closure_borrows: Vec::new(),
                 dropped_components: Vec::new(),
+                copy_frontier: Vec::new(),
             },
         );
         self.visible.entry(name).or_default().push(id);
@@ -625,7 +655,7 @@ struct Checker {
     /// While the walk is inside a projection chain, the chain as the source
     /// spells it (`p.w`) and its location: a consume of the chain's root is
     /// a consume of that component ([04-LIN-11]).
-    projection_use: Option<(String, Option<SiteLocation>)>,
+    projection_use: Option<ProjectionUse>,
     /// Every consuming fan-out the walk accepted on the strength of an
     /// inserted copy.
     repairs: CopyRepairs,
@@ -641,42 +671,74 @@ impl Checker {
         self.errors.push(error);
     }
 
-    /// Record that each copy site of the ordinary consume `earlier` receives
-    /// an inserted copy because of a later use at `later`. A later use with no
-    /// source location of its own, a node the desugarer synthesized, still
-    /// forces the copy but is not listed as a use.
+    /// Record that `site` receives an inserted copy because of a later use
+    /// at `later`. A use the desugarer synthesized has no location; it is
+    /// not listed, and a copy only it forces is not either.
     fn record_copy_repair(
         &mut self,
-        earlier: &ConsumeSite,
+        site: &CopySite,
         later: Option<SiteLocation>,
         kind: CopyRepairUseKind,
     ) {
-        for copy in &earlier.copy_sites {
-            let uses = &mut self
-                .repairs
-                .entry(copy.at.clone())
-                .or_insert_with(|| {
-                    (
-                        copy.binding.clone(),
-                        copy.consumed_by.clone(),
-                        BTreeSet::new(),
-                    )
-                })
-                .2;
-            if let Some(later) = &later {
-                uses.insert((later.clone(), kind));
-            }
-        }
+        let Some(later) = later else {
+            return;
+        };
+        self.repairs
+            .entry(site.at.clone())
+            .or_insert_with(|| {
+                (
+                    site.binding.clone(),
+                    site.consumed_by.clone(),
+                    BTreeSet::new(),
+                )
+            })
+            .2
+            .insert((later, kind));
     }
 
-    /// Where a later use is written, for [`CopyRepairUse::at`]. Inside a
-    /// projection chain the use is the projection, not its root variable;
-    /// a node with neither a span identity nor an extent was synthesized by
-    /// the desugarer and has no source location.
-    fn later_use_location(&self, expr: &Expr) -> Option<SiteLocation> {
-        match &self.projection_use {
-            Some((_, at)) => at.clone(),
-            None => source_location(expr),
+    /// Report a use of `owner`, spelled `name` at `expr`, through the
+    /// projection chain the walk is in, or of the binding whole outside one.
+    /// Every frontier site whose path overlaps the use's receives a copy, and
+    /// `takes` updates the frontier. Only the report reads this.
+    fn report_use(
+        &mut self,
+        scope: &mut LinearScope,
+        owner: BindingId,
+        name: &str,
+        expr: &Expr,
+        kind: CopyRepairUseKind,
+        takes: Takes,
+    ) {
+        let (label, path, later) = match &self.projection_use {
+            Some(projection) => (
+                projection.label.clone(),
+                projection.path.clone(),
+                projection.at.clone(),
+            ),
+            None => (name.to_string(), Vec::new(), source_location(expr)),
+        };
+        let Some(record) = scope.record_mut(owner) else {
+            return;
+        };
+        let (forced, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut record.copy_frontier)
+            .into_iter()
+            .partition(|site| projection_paths_overlap(&site.path, &path));
+        record.copy_frontier = kept;
+        match takes {
+            Takes::Nothing => record.copy_frontier.extend(forced.iter().cloned()),
+            Takes::Original => {}
+            Takes::Copyable { at, consumed_by } => record.copy_frontier.push(CopySite {
+                at: SiteLocation {
+                    declaration: self.current_def.clone(),
+                    ..at
+                },
+                binding: label,
+                path,
+                consumed_by,
+            }),
+        }
+        for site in &forced {
+            self.record_copy_repair(site, later.clone(), kind);
         }
     }
 
@@ -993,7 +1055,7 @@ impl Checker {
         &mut self,
         expr: &Expr,
         scope: &LinearScope,
-        observed: &mut BTreeMap<BindingId, ConsumeSite>,
+        observed: &mut BTreeMap<BindingId, Vec<CopySite>>,
     ) {
         let children = match expr.carrier() {
             ExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
@@ -1031,34 +1093,27 @@ impl Checker {
             return;
         }
         let owner = scope.resolve_alias_chain(id).unwrap_or(id);
-        let earlier = observed
-            .get(&owner)
-            .cloned()
-            .or_else(|| match scope.state(owner) {
-                Some(BindingState::Consumed(site)) if site.is_ordinary() => Some(site.clone()),
-                _ => None,
-            });
+        let frontier = observed.get(&owner).cloned().unwrap_or_else(|| {
+            scope
+                .record(owner)
+                .map(|record| record.copy_frontier.clone())
+                .unwrap_or_default()
+        });
         let at = SiteLocation {
             declaration: Some(name.to_string()),
             ..site_location(expr)
         };
-        if let Some(earlier) = earlier {
-            self.record_copy_repair(&earlier, Some(at.clone()), CopyRepairUseKind::Root);
+        for site in &frontier {
+            self.record_copy_repair(site, Some(at.clone()), CopyRepairUseKind::Root);
         }
-        let description = format!("the root observation of `{name}`");
         observed.insert(
             owner,
-            ConsumeSite {
-                description: description.clone(),
-                kind: ConsumeKind::Structural,
-                terminal: false,
-                at: Some(at.clone()),
-                copy_sites: vec![CopySite {
-                    at,
-                    binding: name.to_string(),
-                    consumed_by: description,
-                }],
-            },
+            vec![CopySite {
+                at,
+                binding: name.to_string(),
+                path: Vec::new(),
+                consumed_by: format!("the root observation of `{name}`"),
+            }],
         );
     }
 
@@ -1130,7 +1185,6 @@ impl Checker {
                 kind: ConsumeKind::Structural,
                 terminal: false,
                 at: None,
-                copy_sites: Vec::new(),
             },
         );
     }
@@ -1237,7 +1291,6 @@ impl Checker {
                     kind: ConsumeKind::Structural,
                     terminal: false,
                     at: Some(site_location(body)),
-                    copy_sites: Vec::new(),
                 },
             );
         } else if is_var_expr(body) && self.expr_is_owned_linear(body, scope) {
@@ -1258,7 +1311,6 @@ impl Checker {
                     kind: ConsumeKind::Aliasing,
                     terminal: false,
                     at: Some(site_location(body)),
-                    copy_sites: Vec::new(),
                 },
             );
             if let Some((alias_id, source_id)) = alias_link {
@@ -1320,8 +1372,13 @@ impl Checker {
                     && self.projection_root.is_none()
                     && self.check_projection_use(expr, scope);
                 if entered_projection {
-                    self.projection_use =
-                        projection_label(expr).map(|label| (label, source_location(expr)));
+                    self.projection_use = projection_chain(expr).and_then(|(_, path)| {
+                        Some(ProjectionUse {
+                            label: projection_label(expr)?,
+                            path,
+                            at: source_location(expr),
+                        })
+                    });
                 }
                 match tag {
                     DeepTag::Var => self.consume_var_expr(expr, scope, generic_site(expr)),
@@ -1528,8 +1585,22 @@ impl Checker {
         if let Some(target) = children.first() {
             if is_var_expr(target) && self.expr_holds_key(target, scope) {
                 self.project_key_holder(target, children.get(1), scope);
-            } else if is_var_expr(target) && self.expr_is_owned_linear(target, scope) {
-                self.read_var_expr(target, scope);
+            } else if let Some(name) = var_name(target)
+                && self.expr_is_owned_linear(target, scope)
+            {
+                self.read_or_error(name, target, scope, true);
+                scope.borrow(name, borrow_site(target));
+                // [04-LIN-11]: a tuple projection the source wrote moves its
+                // component out, so the report takes it as an ordinary consume
+                // of that component; the verdict keeps treating it as a read.
+                let takes = match self.projection_use.as_ref().and_then(|p| p.at.clone()) {
+                    Some(at) => Takes::Copyable {
+                        at,
+                        consumed_by: "projection".to_string(),
+                    },
+                    None => Takes::Nothing,
+                };
+                self.report_read(name, target, scope, CopyRepairUseKind::Consume, takes);
             } else {
                 self.check_expr(target, scope);
             }
@@ -1733,7 +1804,6 @@ impl Checker {
                             kind: ConsumeKind::Structural,
                             terminal: false,
                             at: Some(site_location(value)),
-                            copy_sites: Vec::new(),
                         },
                     );
                 } else if is_var_expr(value) && self.expr_is_owned_linear(value, scope) {
@@ -1756,7 +1826,6 @@ impl Checker {
                             kind: ConsumeKind::Aliasing,
                             terminal: false,
                             at: Some(site_location(value)),
-                            copy_sites: Vec::new(),
                         },
                     );
                 } else if matches!(get_tag_expr(value), Some(DeepTag::Borrow)) {
@@ -1792,7 +1861,7 @@ impl Checker {
         }
 
         let declaration = std::mem::take(&mut self.declaration_free_reads);
-        let capture_use = (!declaration).then_some(CopyRepairUseKind::Capture);
+        let repairable = !declaration;
         let params = param_names(&children[0]);
         let captured = free_vars(&children[1], &params);
         let mut inner_scope = outer_scope.clone();
@@ -1878,7 +1947,16 @@ impl Checker {
                 true
             });
             if body_consumes {
-                self.read_or_error(name.as_str(), expr, outer_scope, capture_use);
+                self.read_or_error(name.as_str(), expr, outer_scope, repairable);
+                if repairable {
+                    self.report_read(
+                        name.as_str(),
+                        expr,
+                        outer_scope,
+                        CopyRepairUseKind::Capture,
+                        Takes::Original,
+                    );
+                }
                 // chelis#1200: forward the capture consume to a
                 // destructured component's carrier.
                 //
@@ -1922,7 +2000,6 @@ impl Checker {
                             kind: ConsumeKind::Structural,
                             terminal: false,
                             at: Some(site_location(expr)),
-                            copy_sites: Vec::new(),
                         },
                     );
                 }
@@ -1935,8 +2012,17 @@ impl Checker {
                 // the body's borrow-reads inside the closure resolve
                 // against the captured borrow rather than re-entering
                 // the outer binding state.
-                self.read_or_error(name.as_str(), expr, outer_scope, capture_use);
+                self.read_or_error(name.as_str(), expr, outer_scope, repairable);
                 outer_scope.borrow(name.as_str(), borrow_site(expr));
+                if repairable {
+                    self.report_read(
+                        name.as_str(),
+                        expr,
+                        outer_scope,
+                        CopyRepairUseKind::Capture,
+                        Takes::Nothing,
+                    );
+                }
                 if let Some(use_id) = outer_scope.top_id(&name) {
                     let owner = outer_scope.resolve_alias_chain(use_id).unwrap_or(use_id);
                     if let Some(record) = outer_scope.record_mut(owner) {
@@ -2020,7 +2106,6 @@ impl Checker {
                     kind: ConsumeKind::Structural,
                     terminal: false,
                     at: Some(site_location(&children[0])),
-                    copy_sites: Vec::new(),
                 },
             );
         } else {
@@ -2113,7 +2198,6 @@ impl Checker {
             kind: ConsumeKind::Structural,
             terminal: false,
             at: site.at.clone(),
-            copy_sites: site.copy_sites.clone(),
         };
         for id in visible_ids {
             let Some(record) = arm_scope.record(*id) else {
@@ -2156,7 +2240,6 @@ impl Checker {
                         kind: ConsumeKind::Structural,
                         terminal: false,
                         at: None,
-                        copy_sites: Vec::new(),
                     },
                 ));
             }
@@ -2309,9 +2392,7 @@ impl Checker {
             // consume, after which every use is rejected, outranks an ordinary
             // one, which copies repair (spec/04 section 8.3). Ranking rather
             // than taking the first branch keeps the verdict independent of
-            // branch order. When the joined consume is ordinary, a later use
-            // copies at the latest ordinary consume of every path, so the
-            // joined state carries every branch's copy sites.
+            // branch order.
             let branch_sites = branches
                 .iter()
                 .filter_map(|branch| match branch.state(*id) {
@@ -2323,23 +2404,25 @@ impl Checker {
                 .iter()
                 .map(|site| site.join_rank())
                 .max()
-                .and_then(|rank| {
-                    let mut joined =
-                        (*branch_sites.iter().find(|site| site.join_rank() == rank)?).clone();
-                    if rank == 1 {
-                        for site in &branch_sites {
-                            if site.join_rank() != rank {
-                                continue;
-                            }
-                            for copy in &site.copy_sites {
-                                if !joined.copy_sites.contains(copy) {
-                                    joined.copy_sites.push(copy.clone());
-                                }
-                            }
-                        }
+                .and_then(|rank| branch_sites.iter().find(|site| site.join_rank() == rank))
+                .map(|site| (*site).clone());
+            // [04-LIN-5]: a later use copies at the latest ordinary consume of
+            // every path, so the report's frontier is every branch's.
+            let mut frontier: Vec<CopySite> = Vec::new();
+            for branch in branches {
+                for site in branch
+                    .record(*id)
+                    .map(|record| record.copy_frontier.as_slice())
+                    .unwrap_or_default()
+                {
+                    if !frontier.contains(site) {
+                        frontier.push(site.clone());
                     }
-                    Some(joined)
-                });
+                }
+            }
+            if let Some(record) = scope.record_mut(*id) {
+                record.copy_frontier = frontier;
+            }
             let Some(site) = consumed_site else {
                 continue;
             };
@@ -2534,30 +2617,10 @@ impl Checker {
         }
     }
 
-    fn consume_var_expr(&mut self, expr: &Expr, scope: &mut LinearScope, mut site: ConsumeSite) {
+    fn consume_var_expr(&mut self, expr: &Expr, scope: &mut LinearScope, site: ConsumeSite) {
         let Some(name) = var_name(expr) else {
             return;
         };
-        if let Some(at) = &site.at {
-            let consumed_by = site
-                .description
-                .strip_suffix(&format!(" at {}", at.id))
-                .unwrap_or(&site.description)
-                .to_string();
-            let (binding, at) = match &self.projection_use {
-                Some((path, Some(projection))) => (path.clone(), projection.clone()),
-                Some((path, None)) => (path.clone(), at.clone()),
-                None => (name.to_string(), at.clone()),
-            };
-            site.copy_sites = vec![CopySite {
-                at: SiteLocation {
-                    declaration: self.current_def.clone(),
-                    ..at
-                },
-                binding,
-                consumed_by,
-            }];
-        }
         if !self.expr_is_owned_linear(expr, scope) {
             return;
         }
@@ -2642,6 +2705,45 @@ impl Checker {
                 )],
             ));
             return;
+        }
+        if matches!(site.kind, ConsumeKind::Structural) {
+            let takes = match (&site.at, &self.projection_use) {
+                (_, Some(projection)) if site.is_ordinary() => match &projection.at {
+                    Some(at) => Takes::Copyable {
+                        at: at.clone(),
+                        consumed_by: "projection".to_string(),
+                    },
+                    None => Takes::Original,
+                },
+                (Some(at), None) if site.is_ordinary() => Takes::Copyable {
+                    at: at.clone(),
+                    consumed_by: site
+                        .description
+                        .strip_suffix(&format!(" at {}", at.id))
+                        .unwrap_or(&site.description)
+                        .to_string(),
+                },
+                _ => Takes::Original,
+            };
+            let kind = if site.terminal {
+                CopyRepairUseKind::Drop
+            } else {
+                CopyRepairUseKind::Consume
+            };
+            self.report_use(scope, target, name, expr, kind, takes);
+        } else {
+            // An aliasing bind shares the value: the new name and the old both
+            // still need it, so it forces the copies a later use would and
+            // takes nothing. A destructuring `let` binds its value this way.
+            let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
+            self.report_use(
+                scope,
+                owner,
+                name,
+                expr,
+                CopyRepairUseKind::Consume,
+                Takes::Nothing,
+            );
         }
         match scope.state(target) {
             Some(BindingState::Live { .. }) => scope.consume_id(target, site),
@@ -2731,23 +2833,13 @@ impl Checker {
             // A `drop` still ends the owner after an earlier consume: copy
             // insertion gives the earlier use the copy, so a use after
             // `a = eat(x); c = drop(x)` is refused.
-            Some(BindingState::Consumed(earlier)) if site.terminal => {
-                if earlier.is_ordinary() {
-                    let earlier = earlier.clone();
-                    let later = self.later_use_location(expr);
-                    self.record_copy_repair(&earlier, later, CopyRepairUseKind::Drop);
-                }
-                scope.consume_id(target, site)
-            }
+            Some(BindingState::Consumed(_)) if site.terminal => scope.consume_id(target, site),
             // Consuming fan-out: the implicit-linearity pass inserts a Copy at
             // the earlier consume (spec/04 section 8.3), and this consume
             // becomes the binding's state. A later ordinary consume is then the
             // site a still later use copies at; a later match scrutinee makes
             // every still later use a use-after-consume.
             Some(BindingState::Consumed(earlier)) if earlier.is_ordinary() => {
-                let earlier = earlier.clone();
-                let later = self.later_use_location(expr);
-                self.record_copy_repair(&earlier, later, CopyRepairUseKind::Consume);
                 if matches!(site.kind, ConsumeKind::Structural) {
                     scope.consume_id(target, site);
                 }
@@ -2766,23 +2858,38 @@ impl Checker {
         if !self.expr_is_owned_linear(expr, scope) {
             return;
         }
-        self.read_or_error(name, expr, scope, Some(CopyRepairUseKind::Borrow));
+        self.read_or_error(name, expr, scope, true);
         scope.borrow(name, borrow_site(expr));
+        self.report_read(name, expr, scope, CopyRepairUseKind::Borrow, Takes::Nothing);
+    }
+
+    /// [`Self::report_use`] for a use of `name` that the walk read rather
+    /// than consumed, against the owner its alias chain resolves to.
+    fn report_read(
+        &mut self,
+        name: &str,
+        expr: &Expr,
+        scope: &mut LinearScope,
+        kind: CopyRepairUseKind,
+        takes: Takes,
+    ) {
+        if self.expr_holds_key(expr, scope) {
+            return;
+        }
+        let Some(use_id) = scope.top_id(name) else {
+            return;
+        };
+        let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
+        self.report_use(scope, owner, name, expr, kind, takes);
     }
 
     /// Check a use of `name` that leaves its owner live, a read or a closure
     /// capture, against the owner's consumed state. After an ordinary consume
     /// the use is consuming fan-out, repaired by a copy inserted at that
     /// consume exactly as a later consume is (spec/04 section 8.3); after any
-    /// other consume it is a use-after-consume. `kind` is `None` for a use no
-    /// copy repairs, a function declaration's free reference.
-    fn read_or_error(
-        &mut self,
-        name: &str,
-        expr: &Expr,
-        scope: &LinearScope,
-        kind: Option<CopyRepairUseKind>,
-    ) {
+    /// other consume it is a use-after-consume. `repairable` is `false` for a
+    /// use no copy repairs, a function declaration's free reference.
+    fn read_or_error(&mut self, name: &str, expr: &Expr, scope: &LinearScope, repairable: bool) {
         // A structural consume of an alias is recorded on its source
         // generation. Check that generation so reads through either
         // name observe the same consumed state.
@@ -2817,12 +2924,7 @@ impl Checker {
             );
             return;
         }
-        if let Some(kind) = kind
-            && site.is_ordinary()
-            && !scope.is_destructured_id(resolved)
-        {
-            let later = self.later_use_location(expr);
-            self.record_copy_repair(site, later, kind);
+        if repairable && site.is_ordinary() && !scope.is_destructured_id(resolved) {
             return;
         }
         let message = with_macro_provenance(
@@ -4805,7 +4907,6 @@ fn app_site(expr: &Expr, children: &[Expr], builtin_callee: Option<&str>) -> Con
         kind: ConsumeKind::Structural,
         terminal: builtin_callee == Some("drop"),
         at: Some(site_location(expr)),
-        copy_sites: Vec::new(),
     }
 }
 
@@ -4815,7 +4916,6 @@ fn generic_site(expr: &Expr) -> ConsumeSite {
         kind: ConsumeKind::Structural,
         terminal: false,
         at: Some(site_location(expr)),
-        copy_sites: Vec::new(),
     }
 }
 
@@ -4825,7 +4925,6 @@ fn realize_site(expr: &Expr) -> ConsumeSite {
         kind: ConsumeKind::Structural,
         terminal: false,
         at: Some(site_location(expr)),
-        copy_sites: Vec::new(),
     }
 }
 

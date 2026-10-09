@@ -477,3 +477,197 @@ fn root_observation_forces_copies() {
     assert_eq!(aliased[0].consumed_by, "the root observation of `x`");
     assert_eq!(aliased[0].forced_by[0].kind, CopyRepairUseKind::Root);
 }
+
+/// One use of the parameter `p` in the generated programs below: consume it
+/// whole, project one of its two components (a projection moves the component
+/// out, [04-LIN-11]), or borrow it whole.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PUse {
+    ConsumeWhole,
+    First,
+    Second,
+    BorrowWhole,
+}
+
+impl PUse {
+    /// The projection path this use touches; empty for the whole value.
+    fn path(self) -> &'static [usize] {
+        match self {
+            PUse::First => &[0],
+            PUse::Second => &[1],
+            PUse::ConsumeWhole | PUse::BorrowWhole => &[],
+        }
+    }
+
+    fn consumes(self) -> bool {
+        self != PUse::BorrowWhole
+    }
+}
+
+/// The copies the language places for a use sequence ([04-LIN-11], spec/04
+/// section 8.3): each use forces a copy at every earlier consume still in the
+/// frontier whose path overlaps its own, one path being a prefix of the other;
+/// a consume then replaces the overlapping sites. Returns, per copy site, the
+/// uses that forced it, as indices into `uses`.
+fn expected_copies(uses: &[PUse]) -> std::collections::BTreeMap<usize, Vec<usize>> {
+    let overlap = |a: &[usize], b: &[usize]| a.iter().zip(b).all(|(x, y)| x == y);
+    let mut frontier: Vec<usize> = Vec::new();
+    let mut copies = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+    for (index, use_) in uses.iter().enumerate() {
+        let (forced, kept): (Vec<usize>, Vec<usize>) = frontier
+            .iter()
+            .partition(|site| overlap(uses[**site].path(), use_.path()));
+        for site in &forced {
+            copies.entry(*site).or_default().push(index);
+        }
+        frontier = if use_.consumes() {
+            let mut next = kept;
+            next.push(index);
+            next
+        } else {
+            frontier
+        };
+    }
+    copies
+}
+
+/// Every sequence of two and three uses over a record's fields and a tuple's
+/// elements: the report lists exactly the copies the reference model above
+/// places, each at the consume that receives it and forced by the uses that
+/// need it. Disjoint components never copy for each other; a whole use
+/// overlaps every component, before or after it.
+#[test]
+fn projection_copies_follow_path_overlap_for_every_short_use_sequence() {
+    let carriers = [
+        (
+            "type Lin =\n  | Lin { w: tensor[2, f32], b: tensor[2, f32] }\n\
+             def eatp(p: Lin) -> f32 = tensor_to_scalar(sum(p.w, 0i32))\n\
+             def lookp(p: &Lin) -> f32 = 0.0f32\n",
+            "Lin",
+            ["p.w", "p.b"],
+        ),
+        (
+            "def eatp(p: (tensor[2, f32], tensor[2, f32])) -> f32 = tensor_to_scalar(sum(p.0, 0i32))\n\
+             def lookp(p: &(tensor[2, f32], tensor[2, f32])) -> f32 = 0.0f32\n",
+            "(tensor[2, f32], tensor[2, f32])",
+            ["p.0", "p.1"],
+        ),
+    ];
+    let alphabet = [
+        PUse::ConsumeWhole,
+        PUse::First,
+        PUse::Second,
+        PUse::BorrowWhole,
+    ];
+    let mut sequences: Vec<Vec<PUse>> = Vec::new();
+    for a in alphabet {
+        for b in alphabet {
+            sequences.push(vec![a, b]);
+            for c in alphabet {
+                sequences.push(vec![a, b, c]);
+            }
+        }
+    }
+    for (decls, ty, [first, second]) in carriers {
+        for uses in &sequences {
+            let mut body = format!("{decls}def f(p: {ty}) -> f32 = {{\n");
+            let mut line_starts = Vec::new();
+            for (index, use_) in uses.iter().enumerate() {
+                let call = match use_ {
+                    PUse::ConsumeWhole => "eatp(p)".to_string(),
+                    PUse::First => format!("eats({first})"),
+                    PUse::Second => format!("eats({second})"),
+                    PUse::BorrowWhole => "lookp(p)".to_string(),
+                };
+                line_starts.push(PRELUDE.len() + body.len());
+                body.push_str(&format!("  u{index} = {call}\n"));
+            }
+            let total = (1..uses.len()).fold("u0".to_string(), |acc, index| {
+                format!("add({acc}, u{index})")
+            });
+            body.push_str(&format!("  {total}\n}}\n"));
+            let line_of = |id: &str| {
+                let start: usize = id
+                    .strip_prefix("surf:")
+                    .and_then(|range| range.split_once(".."))
+                    .and_then(|(start, _)| start.parse().ok())
+                    .unwrap_or_else(|| panic!("`{id}` is not a Surf span identity"));
+                line_starts
+                    .iter()
+                    .rposition(|line| *line <= start)
+                    .unwrap_or_else(|| panic!("`{id}` precedes every use"))
+            };
+            let actual = accepted(&body)
+                .into_iter()
+                .filter(|repair| repair.declaration.as_deref() == Some("f"))
+                .map(|repair| {
+                    (
+                        line_of(&repair.copy_at),
+                        repair
+                            .forced_by
+                            .iter()
+                            .map(|later| line_of(&later.at))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(actual, expected_copies(uses), "{ty} {uses:?}\n{body}");
+        }
+    }
+}
+
+/// A closure an eager top-level initializer creates captures at its creation
+/// ([04-LIN-2]), so a capture after an earlier initializer's consume is a
+/// later use, and the consume receives the copy (spec/04 section 8.3). Unlike
+/// a top-level function declaration, the closure has a place in initializer
+/// order.
+#[test]
+fn a_top_level_closure_initializer_after_a_top_level_consume_is_copy_repaired() {
+    let source = "x = to_tensor([1.0f32, 2.0f32])\nu = eats(x)\nv = {\n  g = fn (k: f32) -> add(k, look(x))\n  g(u)\n}\n";
+    let repairs = accepted(source);
+    assert_eq!(repairs.len(), 1, "{repairs:#?}");
+    assert_eq!(repairs[0].declaration.as_deref(), Some("u"));
+    assert_eq!(span_text(source, &repairs[0].copy_at), "eats(x)");
+    assert_eq!(
+        repairs[0]
+            .forced_by
+            .iter()
+            .map(|later| later.kind)
+            .collect::<Vec<_>>(),
+        // `x` is also a root, so its observation needs the value too.
+        [CopyRepairUseKind::Capture, CopyRepairUseKind::Root]
+    );
+}
+
+/// A consuming capture takes the original, so a use after it is rejected even
+/// when an ordinary consume came first and the capture itself was repaired.
+#[test]
+fn a_use_after_an_owned_call_then_a_consuming_capture_is_rejected() {
+    for later in ["look(x)", "eats(x)"] {
+        rejected(
+            &format!(
+                "def f(x: tensor[2, f32]) -> f32 = {{\n  u = eats(x)\n  g = fn (k: f32) -> add(k, eats(x))\n  add(g(u), {later})\n}}\n"
+            ),
+            "closure capture",
+        );
+    }
+}
+
+/// A destructured component is excepted from copy insertion, so capturing one
+/// after its consume is rejected, whether the capture borrows or consumes.
+#[test]
+fn a_capture_of_a_consumed_component_is_rejected() {
+    for body in ["look(a)", "eats(a)"] {
+        let errors = repairs(&format!(
+            "def f(p: (tensor[2, f32], tensor[2, f32])) -> f32 = {{\n  (a, b) = p\n  u = eats(a)\n  g = fn (k: f32) -> add(k, {body})\n  add(g(u), eats(b))\n}}\n"
+        ))
+        .expect_err("a component's fan-out is not copied");
+        assert!(
+            errors.iter().any(|error| {
+                matches!(error.kind, CheckErrorKind::UseAfterConsume)
+                    && error.message.contains("variable `a`")
+            }),
+            "{body}: {errors:?}"
+        );
+    }
+}
