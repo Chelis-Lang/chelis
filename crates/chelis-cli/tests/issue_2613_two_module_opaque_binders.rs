@@ -161,6 +161,49 @@ fn two_defining_modules_match_the_same_module_true_and_false_control() {
 }
 
 #[test]
+fn generated_value_helper_is_fresh_against_the_linked_terminal() {
+    let right = RIGHT.replace(
+        "def make_right()",
+        "def chelis_value_probe() -> f32 = 1.0f32\ndef make_right()",
+    );
+    let (_dir, root) = package(
+        "two-module-helper-collision",
+        &[
+            ("src/left.ch", LEFT),
+            ("src/deep/right.ch", &right),
+            ("src/main.ch", MAIN_TWO),
+        ],
+    );
+    let (code, records) = prove(&root);
+    assert_eq!(code, 1, "{records:#?}");
+    assert_true_false(&records);
+}
+
+#[test]
+fn authored_source_cannot_call_the_generated_value_helper() {
+    let forged = MAIN_TWO.replace(
+        "@property joint forall",
+        "def forged() -> WideRight = chelis_value_probe\n@property joint forall",
+    );
+    let (_dir, root) = package(
+        "two-module-helper-forged",
+        &[
+            ("src/left.ch", LEFT),
+            ("src/deep/right.ch", RIGHT),
+            ("src/main.ch", &forged),
+        ],
+    );
+    let (code, records) = prove(&root);
+    assert_ne!(code, 0, "{records:#?}");
+    assert!(
+        records
+            .iter()
+            .any(|record| record["kind"] == "error" && record["stage"] == "check"),
+        "authored source must be checked before generated helpers exist: {records:#?}"
+    );
+}
+
+#[test]
 fn user_construction_outside_the_second_defining_module_stays_forbidden() {
     let forged = MAIN_TWO.replace(
         "@property joint forall",
@@ -183,4 +226,3 @@ fn user_construction_outside_the_second_defining_module_stays_forbidden() {
         .unwrap_or_else(|| panic!("missing check failure: {records:#?}"));
     assert!(reason.contains("outside its defining module"), "{reason}");
 }
-
