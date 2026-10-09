@@ -33,7 +33,7 @@ GitHub-hosted runners run every job for ordinary pull-request and push events. `
 
 In a full `heavy-e2e.yml` run on `main`, every execution job except `module-oracles` and `test-telemetry` uses the `chelis-ci-warm-x64` label. The warm hosts admit only jobs that have a reviewed member route, and `module-oracles` has none (chelis#3070), so it runs GitHub-hosted on every ref; its five-hour shard limit stays inside the six-hour hosted job limit. The separate dispatch-scope receipt job uses a GitHub-hosted runner. Dispatches on any other branch stay GitHub-hosted. GitHub Actions has no job priority, so on `main` the warm jobs share the `linux-extended-warm-x64` concurrency group with `queue: max`: the nightly holds at most one runner of the two-runner pool and leaves the other free for the pool's other jobs (chelis#2543). Waiting jobs stay pending in order instead of being cancelled, so a `main` run lasts about the sum of its jobs. Off `main` each job has its own group, so candidate validation stays parallel. `scripts/test_ci_cadence.py` locks both properties.
 
-Eligible jobs execute repository commands through `chelis-ci-shell run` and `chelis-gate` whichever runner kind executes them. `.github/actions/setup-project-ci` supplies both. GitHub-hosted runners cannot reach the private Nix cache, so they keep the toolchain main uses: Ubuntu's C compilers and OpenBLAS, a stable rustup toolchain, the uv-managed interpreter from `scripts/ci_setup_uv_python.py`, and two plain shims from `scripts/ci_hosted_commands.py`; Cargo compiles the numerics from their vendored sources and no Devenv profile is realized there. The self-hosted runner activates the `ci` profile once, which owns the Nix-built numerics cache and the static LP64 OpenBLAS provider substituted from the private cache; its SMT worker selects `ci-smt`, which extends `ci` with the CVC5 closure. Python, its virtual environment and PyO3 use one project-owned interpreter on either runner. The action's last step installs the Python binding's declared dependencies from `bindings/python/pyproject.toml` into that interpreter, because any job that sets up the project can run `chelis-python` tests and those tests import them; no job carries its own copy of that step. `scripts/test_pr_workflow_routing.py` fails a workflow job that can run `chelis-python` tests with neither project setup nor an explicit install before the step. Native library paths apply to repository commands, not GitHub action runtimes.
+Eligible jobs execute repository commands through `chelis-ci-shell run` and `chelis-gate` whichever runner kind executes them. `.github/actions/setup-project-ci` supplies both. GitHub-hosted runners cannot reach the private Nix cache, so they keep the toolchain main uses: Ubuntu's C compilers and OpenBLAS, a stable rustup toolchain, the uv-managed interpreter from `scripts/ci_setup_uv_python.py`, and two plain shims from `scripts/ci_hosted_commands.py`; Cargo compiles the numerics from their vendored sources and no Devenv profile is realized there. The self-hosted runner activates the `ci` profile once, which owns the Nix-built numerics cache and the static LP64 OpenBLAS provider substituted from the private cache; its SMT worker selects `ci-smt`, which extends `ci` with the CVC5 closure. Python, its virtual environment and PyO3 use one project-owned interpreter on either runner. The action's last step installs the Python binding's declared dependencies from `bindings/python/pyproject.toml` into that interpreter, because any job that sets up the project can run `chelis-python` tests and those tests import them; no job that sets up the project carries its own copy of that step. `macos-nightly.yml` and `pr-package-expansion.yml` do not use project setup, so each installs the same file explicitly before its tests. `scripts/test_pr_workflow_routing.py` fails a workflow job whose step text can run `chelis-python` tests (a gate stage, a planned shard, or a Cargo test run not limited to other packages) with neither project setup nor an explicit install before the step; a script that runs Cargo itself is outside what it reads. Native library paths apply to repository commands, not GitHub action runtimes.
 
 The self-hosted CI profile owns GNU Make's `make` and `gmake` entry points, the LP64 OpenBLAS ABI and Linux Fortran provider, and the native libraries needed by embedded Python/NumPy. Compiler wrappers preserve arbitrary path bytes; Linux linkers emit content-derived GNU build IDs. `.kache.toml` includes these compiler/linker policy variables in artifact keys. Self-hosted runners rely on Kache and skip the GitHub Rust target caches, so a Nix-built output never reaches a hosted job.
 
@@ -196,8 +196,9 @@ requires only the complete prior-to-current synthetic-candidate delta to be
 documentation-only; the PR itself may contain code. It runs the contract
 preflight, PR acknowledgements, changelog policy, Docs, and inexpensive metadata
 paths. A code-bearing delta is classified into exact packages and reviewed owner
-jobs. A path a required-package rule matches also seeds that rule's packages,
-so the frontier holds every package the planner selects for the same delta.
+jobs. The verifier also runs the planner's own package selection,
+`select_change`, over that exact delta and adds what it selects, so the
+frontier holds every package the planner selects for the same delta.
 Package seeds expand through reverse workspace dependencies. The targeted
 lane runs package-scoped Clippy, formatting, default-feature library/binary
 units and existing doctest owners for that package frontier, every eligible
@@ -290,12 +291,15 @@ execute and report the affected targets on the current synthetic candidate
 before the required integration context passes.
 After a force-push no branch or tag reaches the prior synthetic candidate, so
 the planner, whose checkout fetches only branches, tags and the current
-candidate, fetches it by SHA. If the remote no longer has it, the planner
-plans the pull request's own change from the current target base instead, with
-the same trusted package frontier. Because that frontier already holds every
-package the exact delta selects, the substitute plan covers at least the exact
-one, and a rerun after the old commit is collected neither fails nor narrows
-coverage.
+candidate, fetches it by SHA. When the remote reports that it does not have
+the object (`not our ref`), the planner plans the pull request's own change
+from the current target base instead, with the same trusted package frontier.
+Because that frontier already holds every package the planner selects for the
+exact delta, the substitute plan selects at least what the exact one selects,
+so a rerun after the old commit is collected neither fails nor narrows
+coverage. Its duration check judges the pull request's own added or modified
+targets, as the ordinary lane does. Any other fetch failure, and an object
+that is not a commit, fail the planner.
 
 On a push to `main`, `Integration Tests (Linux)` instead requires only the fixed `ci-fast` standing receipt. The planner, change-owned workers, and their report are skipped. This makes every default-branch commit answer the same standing acceptance question: a merge cannot make `main` red merely because its file diff happens to select known nightly residuals, and a later unrelated merge cannot make `main` green by selecting a different target set. Full workspace and hardware-sensitive residual work remains owned by the scheduled suites and its tracking issues.
 

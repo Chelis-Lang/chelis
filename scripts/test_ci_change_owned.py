@@ -1,10 +1,13 @@
 """Change-owned CI planning, execution, schema, and receipt controls."""
 from __future__ import annotations
 
+import ast
 import contextlib
 import copy
 from dataclasses import replace
+import inspect
 import io
+import itertools
 import json
 import os
 import re
@@ -12,6 +15,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import tomllib
 import unittest
@@ -3255,23 +3259,83 @@ packages = ["chelis-cli", "chelis-e2e"]
             frontier["unsafe_paths"], ["crates/p/tests/heavy.rs"]
         )
 
-    def test_targeted_frontier_carries_required_package_rules(self) -> None:
+    def test_trusted_frontier_holds_the_planners_own_selection(self) -> None:
+        # A required rule selects q for a path inside p. The eligibility
+        # classifier alone does not seed it; the planner's selection does.
         config = load_config(
             config_text(required_package_rule=("crates/p/src/binder.rs", ("q",)))
         )
+        tracked = set(fixture_sources()) | {"scripts/tool.py", "crates/p/src/binder.rs"}
         for path, packages in (
             ("crates/p/src/binder.rs", ["p", "q"]),
             ("crates/p/src/lib.rs", ["p"]),
         ):
             with self.subTest(path=path):
-                frontier = owned.targeted_rebase_frontier(
+                eligibility = owned.targeted_rebase_frontier(
                     [path],
                     base_metadata=fixture_metadata(),
                     candidate_metadata=fixture_metadata(),
                     config=config,
                 )
+                self.assertEqual(eligibility["packages"], ["p"])
+                frontier = owned.trusted_rebase_frontier(
+                    [path],
+                    [owned.ChangeRecord("M", path)],
+                    base_metadata=fixture_metadata(),
+                    candidate_metadata=fixture_metadata(),
+                    config=config,
+                    tracked_paths=tracked,
+                    base_tracked_paths=tracked,
+                )
                 self.assertEqual(frontier["packages"], packages)
                 self.assertEqual(frontier["unsafe_paths"], [])
+
+    def test_trusted_frontier_skips_selection_for_an_ineligible_delta(self) -> None:
+        with mock.patch.object(owned, "select_change") as select:
+            frontier = owned.trusted_rebase_frontier(
+                ["crates/p/tests/heavy.rs"],
+                [owned.ChangeRecord("M", "crates/p/tests/heavy.rs")],
+                base_metadata=fixture_metadata(),
+                candidate_metadata=fixture_metadata(),
+                config=load_config(),
+                tracked_paths=set(fixture_sources()),
+                base_tracked_paths=set(fixture_sources()),
+            )
+        select.assert_not_called()
+        self.assertEqual(frontier["unsafe_paths"], ["crates/p/tests/heavy.rs"])
+
+    def test_make_plan_selects_packages_only_through_select_change(self) -> None:
+        # The fallback's guarantee needs every selection mechanism inside
+        # select_change, which the trusted verifier also runs.
+        tree = ast.parse(textwrap.dedent(inspect.getsource(owned.make_plan)))
+        calls = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "selected_packages"
+        }
+        assignments = [
+            ast.unparse(node.value)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+            and any(
+                isinstance(target, ast.Name) and target.id == "selected_packages"
+                for target in (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+            )
+        ]
+        self.assertEqual(calls, set())
+        self.assertEqual(
+            assignments,
+            [
+                "set(trusted_targeted_packages) | selection.selected_packages",
+                "workspace_reverse_dependency_closure(candidate_metadata, "
+                "selected_packages)",
+            ],
+        )
 
     def test_current_base_fallback_covers_the_exact_targeted_plan(self) -> None:
         # The target moved a required-rule path; the PR changed lib.rs. A plan
@@ -3287,11 +3351,15 @@ packages = ["chelis-cli", "chelis-e2e"]
             config_text(required_package_rule=("crates/p/src/binder.rs", ("q",)))
         )
         delta = ["crates/p/src/binder.rs", "crates/p/src/lib.rs"]
-        frontier = owned.targeted_rebase_frontier(
+        delta_records = [owned.ChangeRecord("M", path) for path in delta]
+        frontier = owned.trusted_rebase_frontier(
             delta,
+            delta_records,
             base_metadata=fixture_metadata(),
             candidate_metadata=fixture_metadata(),
             config=config,
+            tracked_paths=tracked,
+            base_tracked_paths=tracked,
         )
 
         def targeted(records: list[owned.ChangeRecord]) -> dict:
@@ -3309,7 +3377,7 @@ packages = ["chelis-cli", "chelis-e2e"]
                 targeted_packages=tuple(frontier["packages"]),
             )
 
-        exact = targeted([owned.ChangeRecord("M", path) for path in delta])
+        exact = targeted(delta_records)
         fallback = targeted([owned.ChangeRecord("M", "crates/p/src/lib.rs")])
 
         self.assertEqual(
@@ -3318,6 +3386,114 @@ packages = ["chelis-cli", "chelis-e2e"]
         )
         self.assertEqual(fallback["change_owned"], exact["change_owned"])
         owned.verify_plan_digest(fallback)
+
+    def test_current_base_fallback_never_under_selects(self) -> None:
+        # Every eligible delta over a world with a reverse dependency (r on q),
+        # a required rule, an owner rule, a packages path rule, docs, and a
+        # target the target branch added, against every PR change of up to two
+        # paths. The fallback plan's change-owned set must contain the exact
+        # plan's.
+        def world(with_new: bool) -> dict:
+            q_targets = [("smoke", "crates/q/tests/smoke.rs", [])]
+            if with_new:
+                q_targets.append(("new", "crates/q/tests/new.rs", []))
+            return metadata(
+                package(
+                    "p",
+                    [
+                        ("smoke", "crates/p/tests/smoke.rs", []),
+                        ("heavy", "crates/p/tests/heavy.rs", []),
+                        ("gated", "crates/p/tests/gated.rs", ["extra"]),
+                        ("default_gated", "crates/p/tests/default_gated.rs", ["enabled"]),
+                    ],
+                    features={"default": ["enabled"], "enabled": [], "extra": []},
+                ),
+                package("q", q_targets),
+                package("r", [("smoke", "crates/r/tests/smoke.rs", [])], dependencies=("q",)),
+            )
+
+        sources = fixture_sources()
+        sources["crates/q/tests/new.rs"] = "#[test]\nfn n() {}\n"
+        sources["crates/r/tests/smoke.rs"] = "#[test]\nfn r() {}\n"
+        tracked = set(sources) | {
+            "scripts/tool.py",
+            "crates/p/src/binder.rs",
+            "crates/p/src/lib.rs",
+            "crates/q/src/lib.rs",
+            "docs/x.md",
+            "tools/gen.txt",
+        }
+        config = load_config(
+            config_text(required_package_rule=("crates/p/src/binder.rs", ("q",)))
+            + '\n[[path_rule]]\nprefix = "tools/"\ndisposition = "packages"\n'
+            'packages = ["r"]\n'
+        )
+        universe = [
+            "tools/gen.txt",
+            "crates/p/src/lib.rs",
+            "crates/p/src/binder.rs",
+            "crates/q/src/lib.rs",
+            "crates/p/tests/smoke.rs",
+            "crates/q/tests/smoke.rs",
+            "scripts/tool.py",
+            "docs/x.md",
+        ]
+
+        def plan(records, base_metadata, frontier) -> dict:
+            return owned.make_plan(
+                mode="targeted_rebase",
+                base_sha="a" * 40,
+                candidate_sha="b" * 40,
+                event_pr_head="c" * 40,
+                records=records,
+                base_metadata=base_metadata,
+                candidate_metadata=candidate,
+                config=config,
+                tracked_paths=tracked,
+                base_tracked_paths=tracked,
+                source_reader=sources.__getitem__,
+                targeted_packages=tuple(frontier),
+            )
+
+        checked = 0
+        for target_added in (False, True):
+            prior = world(False)
+            candidate = world(target_added)
+            added = ["crates/q/tests/new.rs"] if target_added else []
+            for size in range(1, len(universe) + 1):
+                for moved in itertools.combinations(universe, size):
+                    delta = [*moved, *added]
+                    delta_records = [
+                        owned.ChangeRecord("A" if path in added else "M", path)
+                        for path in delta
+                    ]
+                    frontier = owned.trusted_rebase_frontier(
+                        delta,
+                        delta_records,
+                        base_metadata=prior,
+                        candidate_metadata=candidate,
+                        config=config,
+                        tracked_paths=tracked,
+                        base_tracked_paths=tracked,
+                    )
+                    if frontier["unsafe_paths"] or not frontier["packages"]:
+                        continue
+                    exact = set(plan(delta_records, prior, frontier["packages"])["change_owned"])
+                    for own_size in range(0, 3):
+                        for own in itertools.combinations(universe, own_size):
+                            checked += 1
+                            fallback = plan(
+                                [owned.ChangeRecord("M", path) for path in own],
+                                candidate,
+                                frontier["packages"],
+                            )
+                            missing = exact - set(fallback["change_owned"])
+                            if missing:
+                                self.fail(
+                                    f"fallback under-selects {sorted(missing)} for "
+                                    f"delta {delta} and PR change {list(own)}"
+                                )
+        self.assertGreater(checked, 5000)
 
     def test_excluded_direct_target_resolves_to_alternative_owner(self) -> None:
         plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/heavy.rs")])
@@ -3569,6 +3745,48 @@ class TargetedRebaseValidationBaseTests(unittest.TestCase):
 
         self.assertEqual(make.call_args.kwargs["base_sha"], self.prior_candidate)
         self.assertEqual(stderr, "")
+
+    def test_an_unreachable_remote_fails_rather_than_falling_back(self) -> None:
+        self.serve_prior_candidate()
+        self.checkout_candidate()
+        _git_text(
+            self.planner,
+            "remote",
+            "set-url",
+            "origin",
+            (self.origin.parent / "missing.git").resolve().as_uri(),
+        )
+        with (
+            mock.patch.object(owned, "read_config", return_value=load_config()),
+            mock.patch.object(owned, "make_plan") as make,
+            self.assertRaisesRegex(
+                ValueError,
+                "cannot fetch targeted rebase validation base "
+                f"{self.prior_candidate}: .*missing.git",
+            ),
+        ):
+            owned.generate_plan(
+                self.planner,
+                event_name="targeted_rebase",
+                pr_head=self.pr_head,
+                before=self.prior_candidate,
+                after="",
+                config_path=Path("config.toml"),
+                targeted_packages=("p",),
+            )
+        make.assert_not_called()
+
+    def test_a_validation_base_that_is_not_a_commit_fails(self) -> None:
+        self.serve_prior_candidate()
+        self.checkout_candidate()
+        tree = _git_text(self.author, "rev-parse", f"{self.prior_candidate}^{{tree}}")
+        with self.assertRaisesRegex(
+            ValueError,
+            f"targeted rebase validation base {tree} is not a commit",
+        ):
+            owned.targeted_rebase_validation_base(
+                self.planner, tree, self.current_base
+            )
 
     def test_malformed_validation_base_still_fails(self) -> None:
         self.checkout_candidate()

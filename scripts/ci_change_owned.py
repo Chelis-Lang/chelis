@@ -754,16 +754,6 @@ def targeted_rebase_frontier(
     unsafe_paths: set[str] = set()
 
     for path in paths:
-        # The planner requires these packages for the same path. Seeding them
-        # here keeps the frontier a superset of every package the exact delta
-        # selects, which the planner's current-base fallback relies on.
-        for rule in config.required_package_rules:
-            if not rule.matches(path):
-                continue
-            if set(rule.packages) <= candidate_names:
-                seeds.update(rule.packages)
-            else:
-                unsafe_paths.add(path)
         targets = {
             identity
             for identity in (
@@ -1427,63 +1417,41 @@ def config_digest(config: Config) -> str:
     return sha256_bytes(canonical_json(payload))
 
 
-def make_plan(
-    *,
-    mode: str,
-    base_sha: str,
-    candidate_sha: str,
+@dataclass(frozen=True)
+class ChangeSelection:
+    """What a change's own records select, before any mode-specific expansion."""
+
+    selected_packages: frozenset[str]
+    required_packages: frozenset[str]
+    change_owned: frozenset[Identity]
+    dispositions: tuple[dict[str, Any], ...]
+    target_dispositions: tuple[dict[str, Any], ...]
+
+
+def select_change(
     records: Sequence[ChangeRecord],
+    *,
     base_metadata: Mapping[str, Any],
     candidate_metadata: Mapping[str, Any],
     config: Config,
     tracked_paths: set[str],
-    source_reader: Callable[[str], str],
-    event_pr_head: str | None = None,
     base_tracked_paths: set[str] | None = None,
-    targeted_packages: Sequence[str] = (),
-    duration_baseline: DurationBaseline | None = None,
-) -> dict[str, Any]:
-    if mode not in {"pull_request", "push", "targeted_rebase"}:
-        raise ValueError(f"unsupported planning mode: {mode}")
-    if duration_baseline is None:
-        duration_baseline = DurationBaseline(
-            default_milliseconds=DEFAULT_DURATION_MILLISECONDS,
-            targets={},
-            digest="0" * 64,
-        )
-    validate_config(
-        config,
-        candidate_metadata,
-        tracked_paths | (base_tracked_paths or set()),
-        source_reader,
-    )
+) -> ChangeSelection:
+    """The planner's one selection of packages and targets for a change.
+
+    `make_plan` takes every package and target a change selects from here,
+    and `trusted_rebase_frontier` runs the same selection over an exact
+    synthetic-candidate delta, so a selection mechanism added here applies
+    to both.
+    """
 
     base_all = all_integration_targets(base_metadata)
     candidate_all = all_integration_targets(candidate_metadata)
-    candidate_eligible = candidate_all
     base_packages = package_infos(base_metadata)
     candidate_packages = package_infos(candidate_metadata)
     candidate_package_names = {package.name for package in candidate_packages}
 
-    trusted_targeted_packages = set(targeted_packages)
-    if len(trusted_targeted_packages) != len(targeted_packages):
-        raise ValueError("targeted package frontier contains duplicates")
-    if any(not IDENTIFIER.fullmatch(package) for package in targeted_packages):
-        raise ValueError("targeted package frontier contains an invalid package")
-    if mode != "targeted_rebase" and trusted_targeted_packages:
-        raise ValueError(
-            "only targeted_rebase planning accepts a targeted package frontier"
-        )
-    unknown_targeted_packages = sorted(
-        trusted_targeted_packages - candidate_package_names
-    )
-    if unknown_targeted_packages:
-        raise ValueError(
-            "targeted package frontier contains unknown workspace packages: "
-            f"{unknown_targeted_packages}"
-        )
-
-    selected_packages: set[str] = set(trusted_targeted_packages)
+    selected_packages: set[str] = set()
     required_packages: set[str] = set()
     change_owned: set[Identity] = set()
     dispositions: list[dict[str, Any]] = []
@@ -1668,6 +1636,129 @@ def make_plan(
         required_rows = required_rows_by_path.get(disposition["path"])
         if required_rows:
             disposition["required_package_rules"] = required_rows
+
+    return ChangeSelection(
+        selected_packages=frozenset(selected_packages),
+        required_packages=frozenset(required_packages),
+        change_owned=frozenset(change_owned),
+        dispositions=tuple(dispositions),
+        target_dispositions=tuple(target_dispositions),
+    )
+
+
+def trusted_rebase_frontier(
+    delta_paths: Sequence[str],
+    records: Sequence[ChangeRecord],
+    *,
+    base_metadata: Mapping[str, Any],
+    candidate_metadata: Mapping[str, Any],
+    config: Config,
+    tracked_paths: set[str],
+    base_tracked_paths: set[str],
+) -> dict[str, object]:
+    """The trusted rebase verifier's frontier for an exact synthetic delta.
+
+    `targeted_rebase_frontier` decides whether the delta is eligible and which
+    owner jobs it needs. Its packages then gain everything the planner's own
+    `select_change` selects for the same delta, closed over reverse
+    dependencies. A targeted plan selects that closure of its frontier and
+    its own change, so a plan from any base that starts from this frontier
+    selects at least what the exact plan selects, whichever mechanism
+    selected it.
+    """
+
+    frontier = targeted_rebase_frontier(
+        delta_paths,
+        base_metadata=base_metadata,
+        candidate_metadata=candidate_metadata,
+        config=config,
+    )
+    if frontier["unsafe_paths"]:
+        return frontier
+    selection = select_change(
+        records,
+        base_metadata=base_metadata,
+        candidate_metadata=candidate_metadata,
+        config=config,
+        tracked_paths=tracked_paths,
+        base_tracked_paths=base_tracked_paths,
+    )
+    exact = workspace_reverse_dependency_closure(
+        candidate_metadata, set(selection.selected_packages)
+    )
+    return {**frontier, "packages": sorted({*frontier["packages"], *exact})}
+
+
+def make_plan(
+    *,
+    mode: str,
+    base_sha: str,
+    candidate_sha: str,
+    records: Sequence[ChangeRecord],
+    base_metadata: Mapping[str, Any],
+    candidate_metadata: Mapping[str, Any],
+    config: Config,
+    tracked_paths: set[str],
+    source_reader: Callable[[str], str],
+    event_pr_head: str | None = None,
+    base_tracked_paths: set[str] | None = None,
+    targeted_packages: Sequence[str] = (),
+    duration_baseline: DurationBaseline | None = None,
+) -> dict[str, Any]:
+    if mode not in {"pull_request", "push", "targeted_rebase"}:
+        raise ValueError(f"unsupported planning mode: {mode}")
+    if duration_baseline is None:
+        duration_baseline = DurationBaseline(
+            default_milliseconds=DEFAULT_DURATION_MILLISECONDS,
+            targets={},
+            digest="0" * 64,
+        )
+    validate_config(
+        config,
+        candidate_metadata,
+        tracked_paths | (base_tracked_paths or set()),
+        source_reader,
+    )
+
+    candidate_eligible = all_integration_targets(candidate_metadata)
+    candidate_package_names = {
+        package.name for package in package_infos(candidate_metadata)
+    }
+
+    trusted_targeted_packages = set(targeted_packages)
+    if len(trusted_targeted_packages) != len(targeted_packages):
+        raise ValueError("targeted package frontier contains duplicates")
+    if any(not IDENTIFIER.fullmatch(package) for package in targeted_packages):
+        raise ValueError("targeted package frontier contains an invalid package")
+    if mode != "targeted_rebase" and trusted_targeted_packages:
+        raise ValueError(
+            "only targeted_rebase planning accepts a targeted package frontier"
+        )
+    unknown_targeted_packages = sorted(
+        trusted_targeted_packages - candidate_package_names
+    )
+    if unknown_targeted_packages:
+        raise ValueError(
+            "targeted package frontier contains unknown workspace packages: "
+            f"{unknown_targeted_packages}"
+        )
+
+    # Every package and target the change itself selects comes from
+    # select_change, which the trusted rebase verifier also runs; selection
+    # added anywhere else in this function would escape it.
+    selection = select_change(
+        records,
+        base_metadata=base_metadata,
+        candidate_metadata=candidate_metadata,
+        config=config,
+        tracked_paths=tracked_paths,
+        base_tracked_paths=base_tracked_paths,
+    )
+    selected_packages = set(trusted_targeted_packages) | selection.selected_packages
+    required_packages = set(selection.required_packages)
+    change_owned = set(selection.change_owned)
+    dispositions = list(selection.dispositions)
+    target_dispositions = list(selection.target_dispositions)
 
     change_owned.update(
         identity
@@ -2883,17 +2974,26 @@ def _has_commit(repo: Path, value: str) -> bool:
     ).returncode == 0
 
 
+# What git prints when the remote does not have the requested object: the
+# only fetch failure that means "collected", rather than a broken checkout,
+# network, or credential, which stay loud.
+COLLECTED_OBJECT_FETCH_ERRORS = ("not our ref", "couldn't find remote ref")
+
+
 def targeted_rebase_validation_base(
     repo: Path, before: str, current_base: str
 ) -> str:
-    """Return the prior synthetic candidate, or the current base without it.
+    """Return the prior synthetic candidate, or the current base once collected.
 
     The trusted verifier hands over the prior receipt's synthetic candidate.
     After a force-push no branch or tag reaches that merge commit, so a
-    checkout of the current candidate lacks it and must fetch it by SHA. The
-    remote eventually collects it. The current target base then stands in:
-    the trusted package frontier already seeds every package the exact delta
-    selects, so planning the PR's own change on top of it only adds coverage.
+    checkout of the current candidate lacks it and must fetch it by SHA. Only
+    when the remote reports that it no longer has the object does the current
+    target base stand in: the trusted frontier already holds every package
+    the planner selects for the exact delta, so the substitute plan selects
+    at least what the exact plan selects, and its duration check judges the
+    PR's own added or modified targets, as the ordinary lane does. Any other
+    fetch failure, or an object that is not a commit, fails.
     """
     if not SHA.fullmatch(before):
         raise ValueError(
@@ -2909,15 +3009,24 @@ def targeted_rebase_validation_base(
         text=True,
         check=False,
     )
-    if fetched.returncode == 0 and _has_commit(repo, before):
-        return before
+    detail = " ".join(fetched.stderr.split())
+    if fetched.returncode == 0:
+        if _has_commit(repo, before):
+            return before
+        raise ValueError(
+            f"targeted rebase validation base {before} is not a commit"
+        )
+    if not any(marker in detail for marker in COLLECTED_OBJECT_FETCH_ERRORS):
+        raise ValueError(
+            f"cannot fetch targeted rebase validation base {before}: "
+            f"{detail or f'git fetch exited {fetched.returncode}'}"
+        )
     print(
         f"CHANGE-OWNED CI: targeted rebase validation base {before} is "
         "unavailable; planning from the current target base "
         f"{current_base} with the trusted package frontier",
         file=sys.stderr,
     )
-    detail = " ".join(fetched.stderr.split()) or "fetched object is not a commit"
     print(f"CHANGE-OWNED CI: git fetch: {detail}", file=sys.stderr)
     return current_base
 

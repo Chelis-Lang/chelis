@@ -1074,11 +1074,21 @@ BINDING_DEPENDENCY_INSTALL_PATTERN = re.compile(
 # Commands whose test selection can include chelis-python, whose unit tests
 # import the binding's runtime dependencies (chelis#3471). Any gate stage and
 # any planned shard counts; a Cargo run counts unless it selects only other
-# packages.
+# packages. Cargo is matched as `cargo`, `$CARGO` or `${CARGO}`, with an
+# optional `+toolchain`, running `test`, `t`, `nextest run` or `llvm-cov`.
+#
+# This reads workflow text, so it cannot see a script or tool that runs Cargo
+# itself (`scripts/runtime_representation_phase2.py` runs `-p chelis-python`,
+# for one), nor a Cargo spelling assembled at run time. Jobs that set up the
+# project are provisioned whatever they run; the gap is a job that skips
+# project setup and runs such a script.
 GATE_OR_SHARD_RUNNER = re.compile(
     r"\bchelis-gate\b|\bscripts/gate\.py\b|\bci_change_owned\.py\s+run-shard\b"
 )
-CARGO_TEST_RUNNER = re.compile(r"\bcargo\s+(?:nextest\s+run|test)\b")
+CARGO_TEST_RUNNER = re.compile(
+    r"""(?:\bcargo|"?\$\{?CARGO\}?"?)(?:\s+\+\S+)?"""
+    r"\s+(?:nextest\s+run|test|t|llvm-cov)(?=\s|$)"
+)
 CARGO_PACKAGE_SELECTION = re.compile(r"(?:^|\s)(?:-p|--package)[\s=](\S+)")
 CARGO_WORKSPACE_SELECTION = re.compile(r"(?:^|\s)(?:--workspace|--all)(?:\s|$)")
 
@@ -1706,6 +1716,13 @@ class PythonBindingProvisioningTests(unittest.TestCase):
         action = yaml.safe_load(SETUP_PROJECT_CI.read_text())
         cases = {
             "cargo nextest run --workspace --lib": True,
+            "cargo +stable test --workspace": True,
+            "cargo t -p chelis-python": True,
+            '"$CARGO" test --workspace': True,
+            "${CARGO} nextest run -p chelis-python": True,
+            "cargo llvm-cov nextest --workspace": True,
+            "cargo +nightly test -p chelis-prove": False,
+            "cargo tree --workspace": False,
             "cargo nextest run -p chelis-python --lib": True,
             "cargo test --package=chelis-python": True,
             "cargo test -p chelis-prove -p chelis-python --lib": True,
