@@ -1002,6 +1002,7 @@ fn infer_app_inner(
             &alternatives,
             tensor_concat,
             split_keys_call_count(kids, env),
+            spells_container_borrow(kids),
         );
     }
     let related_results = if subst

@@ -847,8 +847,8 @@ and do not consume it, so reading a container's length or an element does not
 forbid a later reuse of the container. A container operand that is already
 borrowed, such as a `&List[T]` or `&Dict[K, V]` parameter, is decided on its
 referent; the unsupported surface form is only the explicit borrow expression
-`len(&xs)` or `index(&xs, i)`, whatever its operand. See
-`spec/05-risc-primitives.md` §1.3.1.
+`len(&xs)` or `index(&xs, i)`, written at a direct call or through a function
+value. See `spec/05-risc-primitives.md` §1.3.1.
 
 ---
 

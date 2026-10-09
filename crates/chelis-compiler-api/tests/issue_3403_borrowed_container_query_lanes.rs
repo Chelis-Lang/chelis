@@ -57,8 +57,19 @@ const POSITIVE: &[Case] = &[
 ];
 
 /// The explicit borrow expression, on a borrowed and on an owned container,
-/// with the one refusal both lanes report.
+/// at a direct call and through a function value, with the one refusal both
+/// lanes report.
 const EXPLICIT_BORROW: &[(&str, &str)] = &[
+    (
+        "def count_e(xs: &List[tensor[2, f32]]) -> i64 = {\n  f = len\n  f(&xs)\n}\nn = count_e(rows(0i64))\n",
+        "len auto-borrows its List/Dict argument, so an explicit `&` is not a supported surface \
+         form: write `len(xs)`, not `len(&xs)` (got &List tensor[2, f32])",
+    ),
+    (
+        "def first_e(xs: &List[tensor[2, f32]]) -> tensor[2, f32] = {\n  g = index\n  g(&xs, 0i64)\n}\nfirst = to_list(first_e(rows(0i64)))\n",
+        "index auto-borrows its List argument, so an explicit `&` is not a supported surface \
+         form: write `index(xs, i)`, not `index(&xs, i)` (got &List tensor[2, f32])",
+    ),
     (
         "def count_e(xs: &List[tensor[2, f32]]) -> i64 = len(&xs)\nn = count_e(rows(0i64))\n",
         "len auto-borrows its List/Dict argument, so an explicit `&` is not a supported surface \

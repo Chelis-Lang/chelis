@@ -23,8 +23,13 @@ pub(super) fn finish_unified_app(
     expected_result: Option<&Type>,
     defer_result_replay: bool,
 ) -> Type {
-    if let Some(message) =
-        explicit_container_borrow_refusal(func_name.as_deref(), kids, &arg_tys, subst)
+    if let Some(message) = func_name
+        .as_deref()
+        .filter(|_| spells_container_borrow(kids))
+        .zip(arg_tys.first())
+        .and_then(|(query, operand)| {
+            explicit_container_borrow_refusal(query, &subst.apply(operand))
+        })
     {
         return report(
             errors,

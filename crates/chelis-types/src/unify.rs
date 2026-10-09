@@ -1843,6 +1843,7 @@ impl Subst {
         callees: &[Type],
         tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
         split_keys_count: Option<i64>,
+        container_borrow_spelled: bool,
     ) {
         let callees = callees.iter().map(|ty| self.apply(ty)).collect::<Vec<_>>();
         let mut contracts = self
@@ -1864,6 +1865,11 @@ impl Subst {
                 CollectionConstraint::SplitKeys { .. } => Some(
                     crate::infer::CollectionCallEvidence::SplitKeysCount(split_keys_count),
                 ),
+                CollectionConstraint::Len { .. } | CollectionConstraint::Index { .. }
+                    if container_borrow_spelled =>
+                {
+                    Some(crate::infer::CollectionCallEvidence::ExplicitBorrowOperand)
+                }
                 _ => None,
             };
             instance.state = CollectionContractState::Consumed { evidence };

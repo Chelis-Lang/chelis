@@ -227,20 +227,90 @@ fn explicit_borrow_of_an_owned_list_is_still_refused() {
 }
 
 #[test]
-fn explicit_borrow_is_refused_whatever_its_operand() {
-    // The refusal is the spelling, so a borrowed tensor gets it too; the
-    // operand's type only names what was borrowed.
-    assert_single_mismatch(
-        "def count_t(t: tensor[2, f32]) -> i64 = len(&t)\n",
-        "len auto-borrows its List/Dict argument, so an explicit `&` is not a supported surface \
-         form: write `len(xs)`, not `len(&xs)` (got &tensor[2, f32])",
-        "len(&t) of a tensor",
-    );
+fn explicit_borrow_guidance_is_for_containers_only() {
+    // An explicit borrow of a container gets the spelling refusal.
     assert_single_mismatch(
         "def count_d(d: Dict[string, tensor[2, f32]]) -> i64 = len(&d)\n",
         "len auto-borrows its List/Dict argument, so an explicit `&` is not a supported surface \
          form: write `len(xs)`, not `len(&xs)` (got &Dict string tensor[2, f32])",
         "len(&d) of an owned Dict",
+    );
+    // A non-container is the query's own type error: advising `len(t)` would
+    // only lead to that error next.
+    assert_single_mismatch(
+        "def count_t(t: tensor[2, f32]) -> i64 = len(&t)\n",
+        "len expects List or Dict input, got &tensor[2, f32]",
+        "len(&t) of a tensor",
+    );
+    assert_single_mismatch(
+        "def count_d(d: Dict[string, tensor[2, f32]]) -> tensor[2, f32] = index(&d, 0i64)\n",
+        "index expects List input, got &Dict string tensor[2, f32]",
+        "index(&d, i) of a Dict",
+    );
+}
+
+#[test]
+fn explicit_borrow_through_a_function_value_is_refused() {
+    // The spelling belongs to the application, so a call of `len` or `index`
+    // through a function value carries it to the transported contract.
+    for (parameter, call, ret) in [
+        ("xs: List[tensor[2, f32]]", "f = len\n  f(&xs)", "i64"),
+        ("xs: &List[tensor[2, f32]]", "f = len\n  f(&xs)", "i64"),
+        ("d: Dict[string, tensor[2, f32]]", "f = len\n  f(&d)", "i64"),
+        (
+            "xs: &List[tensor[2, f32]]",
+            "g = index\n  g(&xs, 0i64)",
+            "tensor[2, f32]",
+        ),
+    ] {
+        let errors = check_errors(&format!(
+            "def probe({parameter}) -> {ret} = {{\n  {call}\n}}\n"
+        ));
+        assert!(
+            matches!(errors.as_slice(), [error]
+                if matches!(error.kind, CheckErrorKind::TypeMismatch)
+                    && error.message.contains("auto-borrows its")
+                    && error.message.contains("an explicit `&` is not a supported surface form")),
+            "{call} on {parameter}: expected the explicit-borrow refusal; got {errors:?}"
+        );
+    }
+    // Decided once a deferred operand settles, too: `ys` is unresolved when
+    // `f(&ys)` is inferred and is settled by the outer application.
+    let errors = check_errors(
+        "def apply_it(g: (List[tensor[2, f32]]) -> i64, t: List[tensor[2, f32]]) -> i64 = g(t)\n\
+         def probe(xs: List[tensor[2, f32]]) -> i64 = \
+         apply_it(fn (ys) -> {\n    f = len\n    f(&ys)\n  }, xs)\n",
+    );
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .contains("an explicit `&` is not a supported surface form")),
+        "deferred f(&ys): expected the explicit-borrow refusal; got {errors:?}"
+    );
+}
+
+#[test]
+fn a_query_passed_to_a_borrowed_callback_parameter_checks() {
+    // spec/04 section 2.6: a borrowed container operand is decided on its
+    // referent. The callback's call `f(&xs)` applies a declared parameter,
+    // not a query, so its spelling is the parameter's own.
+    assert_checks(
+        r#"
+def apply_q(f: (&List[tensor[2, f32]]) -> i64, xs: List[tensor[2, f32]]) -> i64 = f(&xs)
+def probe(xs: List[tensor[2, f32]]) -> i64 = apply_q(len, xs)
+"#,
+        "len passed for a borrowed-List callback",
+    );
+    // NEGATIVE TWIN: the same callback cannot receive a consuming builtin.
+    let errors = check_errors(
+        r#"
+def apply_q(f: (&List[tensor[2, f32]]) -> List[tensor[2, f32]], xs: List[tensor[2, f32]]) -> List[tensor[2, f32]] = f(&xs)
+def probe(xs: List[tensor[2, f32]]) -> List[tensor[2, f32]] = apply_q(fn (ys) -> append(ys, to_tensor([1.0f32, 2.0f32])), xs)
+"#,
+    );
+    assert!(
+        !errors.is_empty(),
+        "a consuming callback for a borrowed-List parameter must be refused"
     );
 }
 
