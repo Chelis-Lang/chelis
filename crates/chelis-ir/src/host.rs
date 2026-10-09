@@ -1272,6 +1272,10 @@ pub struct HostFunction<T = HostTypeTerm> {
     /// nominal value (runtime_extents.md C6.5), derived before body
     /// refinement. `None` owes nothing beyond a top-level tensor claim.
     pub result_claim: Option<std::sync::Arc<crate::claim_pattern::ClaimPattern>>,
+    /// Per formal in signature order, the authored claims on tensors the
+    /// formal nests in a tuple or nominal value (runtime_extents.md C6.5).
+    /// Empty when no formal owes one.
+    pub entry_claims: Vec<Option<std::sync::Arc<crate::claim_pattern::ClaimPattern>>>,
     pub name: String,
     /// Authored parameter order and recursive List admission, retained
     /// before body refinement and projected unchanged across host lanes.
@@ -1304,6 +1308,10 @@ pub struct HostListEntry<T = HostTypeTerm> {
     pub name: String,
     pub ty: T,
     pub value: HostExpr<T>,
+    /// The claim pattern of a formal that nests its tensors below a nominal
+    /// type (runtime_extents.md C6.5). Such an entry is walked along the
+    /// pattern rather than as a claimed List.
+    pub claim: Option<Arc<crate::claim_pattern::ClaimPattern>>,
 }
 
 pub type ConcreteHostProgram = HostProgram<ConcreteHostType>;
@@ -2437,6 +2445,7 @@ fn resolve_host_function(
     Ok(ConcreteHostFunction {
         helper_result_claim_axes: function.helper_result_claim_axes,
         result_claim: function.result_claim,
+        entry_claims: function.entry_claims,
         name: function.name,
         entry_contract: function
             .entry_contract
@@ -2513,6 +2522,7 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
                         name: entry.name,
                         ty: entry.ty.into_concrete()?,
                         value: resolve_host_expr(entry.value)?,
+                        claim: entry.claim,
                     })
                 })
                 .collect::<Result<Vec<_>, crate::HostTypeResolutionError>>()?,
@@ -4476,6 +4486,9 @@ struct HostDefSignature {
     /// The authored result's claims on tensors nested below its top level,
     /// or the typed refusal its derivation raised (runtime_extents.md C6.5).
     result_claim: Result<Option<Arc<crate::claim_pattern::ClaimPattern>>, String>,
+    /// Per formal, the nested claim of its authored type (see
+    /// `HostFunction::entry_claims`), or the refusal its derivation raised.
+    entry_claims: Result<Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>, String>,
 }
 
 /// The nested claim pattern of an authored claim-source type, or `None` when
@@ -6006,6 +6019,43 @@ fn host_def_signature(
     let result_claim = fn_type_parts
         .as_ref()
         .map_or(Ok(None), |(_, ret)| nested_claim_pattern(program, ret));
+    let entry_claims = fn_type_parts
+        .as_ref()
+        .map_or(Ok(Vec::new()), |(formals, _)| {
+            // A tensor or List-of-tensor formal keeps its established entry
+            // pattern; the nested pattern owns every other carrier.
+            let claims = formals
+                .iter()
+                .zip(&params)
+                .map(|(formal, param)| {
+                    if EntryContract::from_params(std::slice::from_ref(param)).formals()[0]
+                        .pattern()
+                        .has_tensor()
+                    {
+                        return Ok::<_, String>(None);
+                    }
+                    // A tensor at a fixed tuple position is already an ordinary
+                    // signature observation of the entry plan.
+                    let pattern = nested_claim_pattern(program, formal)?;
+                    Ok(pattern.filter(|pattern| {
+                        !pattern.nodes().iter().all(|node| {
+                            matches!(
+                                node,
+                                crate::claim_pattern::ClaimNode::Tuple(_)
+                                    | crate::claim_pattern::ClaimNode::Tensor(_)
+                            )
+                        })
+                    }))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(
+                if claims.iter().any(Option::is_some) && claims.len() == params.len() {
+                    claims
+                } else {
+                    Vec::new()
+                },
+            )
+        });
     Some(HostDefSignature {
         name: name.to_string(),
         params,
@@ -6013,6 +6063,7 @@ fn host_def_signature(
         ret_ty,
         body_expr: inline_local_callable_lets(&body_expr),
         result_claim,
+        entry_claims,
     })
 }
 
@@ -6083,8 +6134,11 @@ fn lower_host_function(
         mut params,
         ret_ty,
         result_claim,
+        entry_claims,
         ..
     } = signature;
+    let entry_claims = entry_claims
+        .map_err(|error| host_expr_lowering_error(body, format!("`{name}` formal: {error}")))?;
     let result_claim = result_claim
         .map_err(|error| host_expr_lowering_error(body, format!("`{name}` result: {error}")))?;
     let entry_contract = EntryContract::from_params(&params);
@@ -6100,6 +6154,7 @@ fn lower_host_function(
         function: HostFunction {
             helper_result_claim_axes,
             result_claim,
+            entry_claims,
             name: name.to_string(),
             entry_contract,
             params,
@@ -6490,6 +6545,7 @@ fn lower_host_body_with_record_locals(
         ret_ty: signature.ret_ty.clone(),
         body_expr: rewritten.clone(),
         result_claim: signature.result_claim.clone(),
+        entry_claims: signature.entry_claims.clone(),
     };
     let body = match lower_def_body_kernel(program, &rewritten_signature, tensor_helpers)? {
         Some(kernel_call) => kernel_call,
@@ -14162,6 +14218,8 @@ struct RetainedHostInvocation<'a> {
     entry: SignatureEntryPlan,
     callable_entries: Vec<bool>,
     name: Option<&'a str>,
+    /// Per formal, the nested claim of its authored type (C6.5).
+    entry_claims: Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>,
 }
 
 impl<'a> RetainedHostInvocation<'a> {
@@ -14223,6 +14281,7 @@ impl<'a> RetainedHostInvocation<'a> {
             entry,
             callable_entries,
             name: None,
+            entry_claims: Vec::new(),
         }
     }
 }
@@ -14625,6 +14684,10 @@ fn lower_named_retained_host_invocation(
     };
     let mut invocation = RetainedHostInvocation::new(&params, &signature.body_expr);
     invocation.name = Some(name);
+    invocation.entry_claims = signature
+        .entry_claims
+        .clone()
+        .map_err(|error| host_expr_lowering_error(expr, format!("`{name}` formal: {error}")))?;
     let actualized_expected = result_claim
         .as_ref()
         .map(result_claim_body_type)
@@ -14801,6 +14864,15 @@ fn lower_retained_host_invocation(
                 name: formal.name.clone(),
                 ty: formal.ty.clone(),
                 value: HostExpr::new(HostExprKind::Var(formal_local.clone(), ty.clone())),
+                claim: None,
+            });
+        } else if let Some(Some(claim)) = invocation.entry_claims.get(index) {
+            list_observations.push(HostListEntry {
+                position: index,
+                name: formal.name.clone(),
+                ty: formal.ty.clone(),
+                value: HostExpr::new(HostExprKind::Var(formal_local.clone(), ty.clone())),
+                claim: Some(claim.clone()),
             });
         }
         substitutions.insert(
@@ -15497,6 +15569,10 @@ fn ensure_mono_specialization(
         .result_claim
         .clone()
         .map_err(|error| host_expr_lowering_error(app_expr, format!("`{name}` result: {error}")))?;
+    let entry_claims = authored
+        .entry_claims
+        .clone()
+        .map_err(|error| host_expr_lowering_error(app_expr, format!("`{name}` formal: {error}")))?;
     let entry_params = authored
         .params
         .into_iter()
@@ -15524,6 +15600,7 @@ fn ensure_mono_specialization(
         ret_ty,
         authored_result_ty,
         result_claim,
+        entry_claims,
         body_expr: &body_expr,
         fn_expr: body,
         program,
@@ -15546,6 +15623,7 @@ struct MonoSpecializedFunctionInput<'a> {
     ret_ty: &'a HostTypeTerm,
     authored_result_ty: HostTypeTerm,
     result_claim: Option<Arc<crate::claim_pattern::ClaimPattern>>,
+    entry_claims: Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>,
     body_expr: &'a Expr,
     fn_expr: &'a Expr,
     program: &'a HostLoweringSession<'a>,
@@ -15564,6 +15642,7 @@ fn lower_mono_specialized_function(
         ret_ty,
         authored_result_ty,
         result_claim,
+        entry_claims,
         body_expr,
         fn_expr,
         program,
@@ -15615,6 +15694,7 @@ fn lower_mono_specialized_function(
         function: HostFunction {
             helper_result_claim_axes: Vec::new(),
             result_claim,
+            entry_claims,
             name: symbol.to_string(),
             entry_contract,
             params,
@@ -17322,6 +17402,7 @@ fn lower_host_callback(
                             name: param.name.clone(),
                             ty: declared.ty.clone(),
                             value,
+                            claim: None,
                         })
                     }
                     _ => {}
@@ -23551,6 +23632,7 @@ def bad[b](box: Box[b]) -> bool =
                 function: HostFunction {
                     helper_result_claim_axes: Vec::new(),
                     result_claim: None,
+                    entry_claims: Vec::new(),
                     name: "seeded__mono_0123456789abcdef".to_string(),
                     entry_contract: EntryContract::default(),
                     params: Vec::new(),
@@ -23773,6 +23855,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
         HostFunction {
             helper_result_claim_axes: Vec::new(),
             result_claim: None,
+            entry_claims: Vec::new(),
             name: name.to_string(),
             entry_contract: EntryContract::default(),
             params: vec![HostParam {
@@ -27907,6 +27990,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                     vec![HostListEntry {
                         position: 0,
                         name: "xs".into(),
+                        claim: None,
                         ty: list_ty.clone(),
                         value: HostExpr::new(HostExprKind::List(
                             vec![HostExpr::new(HostExprKind::Var(
@@ -28381,6 +28465,7 @@ mod record_hoist_binder_vocabulary_tests {
                     name: "list".into(),
                     ty: list_term.clone(),
                     value: HostExpr::new(HostExprKind::Var("prepared_list".into(), list_term)),
+                    claim: None,
                 }],
             });
             let result_ty = HostTypeTerm::Tensor(tensor.clone());

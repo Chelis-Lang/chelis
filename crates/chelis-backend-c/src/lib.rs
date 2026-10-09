@@ -750,6 +750,7 @@ mod tests {
         let func = HostFunction {
             helper_result_claim_axes: Vec::new(),
             result_claim: None,
+            entry_claims: Vec::new(),
             entry_contract: Default::default(),
             name: "my_fn".to_string(),
             params: vec![HostParam {
@@ -865,6 +866,7 @@ mod tests {
         let func = HostFunction {
             helper_result_claim_axes: Vec::new(),
             result_claim: None,
+            entry_claims: Vec::new(),
             entry_contract: Default::default(),
             name: "my_fn".to_string(),
             params: vec![HostParam {
@@ -3764,6 +3766,7 @@ int main(void) {{
         let func = HostFunction {
             helper_result_claim_axes: Vec::new(),
             result_claim: None,
+            entry_claims: Vec::new(),
             entry_contract: Default::default(),
             name: "my_func".to_string(),
             params: vec![HostParam {
@@ -3848,6 +3851,7 @@ int main(void) {{
         let func = HostFunction {
             helper_result_claim_axes: Vec::new(),
             result_claim: None,
+            entry_claims: Vec::new(),
             entry_contract: Default::default(),
             name: "exported_fn".to_string(),
             params: vec![HostParam {

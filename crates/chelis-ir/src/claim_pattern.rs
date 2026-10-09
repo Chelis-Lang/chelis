@@ -547,6 +547,12 @@ fn tensor_claim(ty: &Expr, children: &[Expr]) -> Result<Option<ClaimTensor>, Cla
     }))
 }
 
+/// The deterministic spelling of a type, independent of metadata and spans:
+/// a cache key for the pattern of an authored claim-source type.
+pub fn type_key(expr: &Expr) -> String {
+    canonical(expr)
+}
+
 /// The deterministic spelling of a substituted type argument, for the memo.
 fn canonical(expr: &Expr) -> String {
     match type_parts(expr) {

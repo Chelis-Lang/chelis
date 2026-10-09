@@ -2779,7 +2779,7 @@ impl HostResultClaim {
 
 /// Static C tables for a claim pattern (runtime_extents.md C6.5), the node
 /// array named `name`. Binder slots follow [`ClaimPattern::binders`].
-fn claim_pattern_table_lines(
+pub(super) fn claim_pattern_table_lines(
     pattern: &chelis_ir::claim_pattern::ClaimPattern,
     name: &str,
     indent: &str,
@@ -2790,11 +2790,22 @@ fn claim_pattern_table_lines(
         node.map_or("-1".to_string(), |node| node.index().to_string())
     };
     let mut lines = Vec::new();
+    let mut table = |kind: &str, index: usize, values: Vec<String>, ty: &str| {
+        let array = format!("{name}_{kind}{index}");
+        // A tensor's axis rows are triples.
+        let rows = if kind == "axes" { "[3]" } else { "" };
+        lines.push(format!(
+            "{indent}static const {ty} {array}[]{rows} = {{ {} }};",
+            values.join(", ")
+        ));
+        array
+    };
     let mut rows = Vec::new();
     for (index, node) in pattern.nodes().iter().enumerate() {
-        let (kind, rank, count, axes, names, offsets, children) = match node {
+        let null = || "NULL".to_string();
+        // kind, rank, count, axes, names, offsets, children, labels
+        let row: (u8, i64, usize, String, String, String, String, String) = match node {
             ClaimNode::Tensor(tensor) => {
-                let axes = format!("{name}_axes{index}");
                 let entries = tensor
                     .axes
                     .iter()
@@ -2817,102 +2828,94 @@ fn claim_pattern_table_lines(
                         format!("{{ {position}, {slot}, {literal} }}")
                     })
                     .collect::<Vec<_>>();
-                lines.push(format!(
-                    "{indent}static const int64_t {axes}[][3] = {{ {} }};",
-                    entries.join(", ")
-                ));
+                let axes = table("axes", index, entries, "int64_t");
+                let rank = tensor.rank.map_or(-1, |rank| rank as i64);
                 (
                     0,
-                    tensor.rank.map_or(-1, |rank| rank as i64),
+                    rank,
                     tensor.axes.len(),
                     axes,
-                    "NULL".to_string(),
-                    "NULL".to_string(),
-                    "NULL".to_string(),
+                    null(),
+                    null(),
+                    null(),
+                    null(),
                 )
             }
             ClaimNode::Tuple(items) => {
-                let children = format!("{name}_children{index}");
-                lines.push(format!(
-                    "{indent}static const int64_t {children}[] = {{ {} }};",
-                    items
-                        .iter()
-                        .map(|item| child(*item))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-                (
-                    1,
-                    -1,
-                    items.len(),
-                    "NULL".into(),
-                    "NULL".into(),
-                    "NULL".into(),
-                    children,
-                )
+                let children = table(
+                    "children",
+                    index,
+                    items.iter().map(|item| child(*item)).collect(),
+                    "int64_t",
+                );
+                let labels = table(
+                    "labels",
+                    index,
+                    (0..items.len())
+                        .map(|component| c_string_literal(&format!(".{component}")))
+                        .collect(),
+                    "char *const",
+                );
+                (1, -1, items.len(), null(), null(), null(), children, labels)
             }
-            ClaimNode::List(item) | ClaimNode::Option(item) => {
-                let children = format!("{name}_children{index}");
-                lines.push(format!(
-                    "{indent}static const int64_t {children}[] = {{ {} }};",
-                    item.index()
-                ));
-                let kind = if matches!(node, ClaimNode::List(_)) {
-                    2
-                } else {
-                    3
-                };
-                (
-                    kind,
-                    -1,
-                    1,
-                    "NULL".into(),
-                    "NULL".into(),
-                    "NULL".into(),
-                    children,
-                )
+            ClaimNode::List(item) => {
+                let children = table("children", index, vec![item.index().to_string()], "int64_t");
+                (2, -1, 1, null(), null(), null(), children, null())
+            }
+            ClaimNode::Option(item) => {
+                let children = table("children", index, vec![item.index().to_string()], "int64_t");
+                let labels = table(
+                    "labels",
+                    index,
+                    vec![c_string_literal(".Some.value")],
+                    "char *const",
+                );
+                (3, -1, 1, null(), null(), null(), children, labels)
             }
             ClaimNode::Nominal { constructors, .. } => {
-                let names = format!("{name}_names{index}");
-                let offsets = format!("{name}_offsets{index}");
-                let children = format!("{name}_children{index}");
-                lines.push(format!(
-                    "{indent}static const char *const {names}[] = {{ {} }};",
+                let several = constructors.len() > 1;
+                let mut offsets = vec!["0".to_string()];
+                let mut slots = Vec::new();
+                let mut slot_labels = Vec::new();
+                for constructor in constructors {
+                    offsets.push((slots.len() + constructor.fields.len()).to_string());
+                    for (position, field) in constructor.fields.iter().enumerate() {
+                        slots.push(child(field.node));
+                        let segment = field.name.clone().unwrap_or_else(|| position.to_string());
+                        slot_labels.push(c_string_literal(&if several {
+                            format!(".{}.{segment}", constructor.stored_name)
+                        } else {
+                            format!(".{segment}")
+                        }));
+                    }
+                }
+                let names = table(
+                    "names",
+                    index,
                     constructors
                         .iter()
                         .map(|constructor| c_string_literal(&constructor.stored_name))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-                let mut at = 0;
-                let mut offset_values = vec!["0".to_string()];
-                let mut slots = Vec::new();
-                for constructor in constructors {
-                    at += constructor.fields.len();
-                    offset_values.push(at.to_string());
-                    slots.extend(constructor.fields.iter().map(|field| child(field.node)));
-                }
-                lines.push(format!(
-                    "{indent}static const int64_t {offsets}[] = {{ {} }};",
-                    offset_values.join(", ")
-                ));
-                lines.push(format!(
-                    "{indent}static const int64_t {children}[] = {{ {} }};",
-                    slots.join(", ")
-                ));
+                        .collect(),
+                    "char *const",
+                );
+                let offsets = table("offsets", index, offsets, "int64_t");
+                let children = table("children", index, slots, "int64_t");
+                let labels = table("labels", index, slot_labels, "char *const");
                 (
                     4,
                     -1,
                     constructors.len(),
-                    "NULL".into(),
+                    null(),
                     names,
                     offsets,
                     children,
+                    labels,
                 )
             }
         };
+        let (kind, rank, count, axes, names, offsets, children, labels) = row;
         rows.push(format!(
-            "{{ {kind}, {rank}, {count}, {axes}, {names}, {offsets}, {children} }}"
+            "{{ {kind}, {rank}, {count}, {axes}, {names}, {offsets}, {children}, {labels} }}"
         ));
     }
     lines.push(format!(
@@ -3103,7 +3106,8 @@ typedef struct __chelis_host_result_axis {
    tuple, 2 for a List, 3 for an Option and 4 for a nominal value. A tensor's
    `axes` rows are { axis (from the end when negative), binder slot or -1,
    literal }. A nominal's constructor c owns child slots offsets[c] up to
-   offsets[c + 1]. A child of -1 owes nothing. */
+   offsets[c + 1]. A child of -1 owes nothing; `labels` names each child
+   slot's path segment. */
 typedef struct __chelis_claim_node {
     int64_t kind;
     int64_t rank;
@@ -3112,6 +3116,7 @@ typedef struct __chelis_claim_node {
     const char *const *names;
     const int64_t *offsets;
     const int64_t *children;
+    const char *const *labels;
 } __chelis_claim_node;
 
 /* A frame with `nodes` claims the pattern node `node` of the value it is
@@ -3879,6 +3884,22 @@ fn validate_retained_entry_contract(
     }
     let mut projected_binders = Vec::new();
     for entry in lists {
+        if entry.claim.is_some() {
+            // A nested claim's formal carries no tensor of its own pattern.
+            if contract
+                .formals()
+                .get(entry.position)
+                .is_none_or(|formal| formal.name() != entry.name || formal.pattern().has_tensor())
+                || represented[entry.position]
+            {
+                return Err(invalid_abi_shape(
+                    "retained entry changed a nested-claim formal".into(),
+                    "signature entry",
+                ));
+            }
+            represented[entry.position] = true;
+            continue;
+        }
         let Some(formal) = contract.formals().get(entry.position) else {
             return Err(invalid_abi_shape(
                 "retained entry has an invalid List position".into(),
@@ -4118,18 +4139,27 @@ fn signature_entry_lines(
 fn entry_receipt_groups(program: &HostProgram) -> UnordMap<String, usize> {
     let mut groups = UnordMap::new();
     for (index, function) in program.functions.iter().enumerate() {
-        let representative = program.functions[..index]
-            .iter()
-            .position(|prior| {
-                prior.entry_contract == function.entry_contract
-                    && prior.params.len() == function.params.len()
-                    && prior
-                        .params
-                        .iter()
-                        .zip(&function.params)
-                        .all(|(left, right)| left.name == right.name && left.ty == right.ty)
-            })
-            .unwrap_or(index);
+        let representative =
+            program.functions[..index]
+                .iter()
+                .position(|prior| {
+                    prior.entry_contract == function.entry_contract
+                        && prior.entry_claims.len() == function.entry_claims.len()
+                        && prior.entry_claims.iter().zip(&function.entry_claims).all(
+                            |(left, right)| match (left, right) {
+                                (None, None) => true,
+                                (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+                                _ => false,
+                            },
+                        )
+                        && prior.params.len() == function.params.len()
+                        && prior
+                            .params
+                            .iter()
+                            .zip(&function.params)
+                            .all(|(left, right)| left.name == right.name && left.ty == right.ty)
+                })
+                .unwrap_or(index);
         groups.insert(function.name.clone(), representative);
     }
     groups
@@ -7393,13 +7423,21 @@ impl<'a> HostEmitter<'a> {
                     )?);
                 } else {
                     let count = contract.formals().len();
+                    let mut named_list_binders = contract.named_list_binders().to_vec();
+                    for pattern in lists.iter().filter_map(|entry| entry.claim.as_ref()) {
+                        for binder in pattern.binders() {
+                            if !named_list_binders.contains(&binder) {
+                                named_list_binders.push(binder);
+                            }
+                        }
+                    }
                     let mut work = entry_walk::FunctionEntryWork {
                         args: actuals.clone(),
                         owners: positions.clone(),
                         params: (0..count)
                             .map(|_| entry_walk::ParamEntryWork::default())
                             .collect(),
-                        named_list_binders: contract.named_list_binders().to_vec(),
+                        named_list_binders,
                         release: Vec::new(),
                     };
                     if positions.len() != args.len() {
@@ -7416,6 +7454,23 @@ impl<'a> HostEmitter<'a> {
                     for entry in lists {
                         let temp = self.next_temp("entry_list");
                         self.emit_expr_to_var(&entry.value, &temp, &host_type(&entry.value))?;
+                        if let Some(pattern) = &entry.claim {
+                            let step = entry_walk::nested_entry_step(
+                                pattern,
+                                &HostParam {
+                                    name: entry.name.clone(),
+                                    ty: host_type(&entry.value),
+                                },
+                                &temp,
+                                entry.position,
+                                &work.named_list_binders,
+                            )?;
+                            work.params[entry.position].extents.push(step.clone());
+                            work.params[entry.position]
+                                .ordered_extents
+                                .push(entry_walk::ExtentStep::Walk(step));
+                            continue;
+                        }
                         work.params[entry.position].metadata.extend(
                             entry_walk::retained_list_pass(
                                 &entry.ty,
@@ -13561,7 +13616,7 @@ fn host_type(expr: &HostExpr) -> HostType {
 /// conservatively treated as able to.
 /// The value tag of an aggregate that may hold a claimed tensor, for a
 /// borrowed boundary walk of its pattern claims.
-fn borrowed_claim_value_tag(ty: &HostType) -> Option<&'static str> {
+pub(super) fn borrowed_claim_value_tag(ty: &HostType) -> Option<&'static str> {
     if !host_type_may_carry_result_origin(ty) {
         return None;
     }

@@ -2046,6 +2046,7 @@ fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
         functions: vec![ConcreteHostFunction {
             helper_result_claim_axes: Vec::new(),
             result_claim: None,
+            entry_claims: Vec::new(),
             entry_contract: Default::default(),
             name: "identity".into(),
             params: Vec::new(),

@@ -740,11 +740,134 @@ fn check_signature_entry_plan(
     Ok(())
 }
 
+/// The claim patterns of authored types that nest tensors in an aggregate
+/// or nominal value (runtime_extents.md C6.5), derived once per type.
+#[derive(Clone, Copy)]
+struct EntryClaimPatterns<'a> {
+    registry: &'a chelis_types::adt::AdtRegistry,
+    cache: &'a std::cell::RefCell<
+        UnordMap<String, Option<Arc<chelis_ir::claim_pattern::ClaimPattern>>>,
+    >,
+}
+
+impl EntryClaimPatterns<'_> {
+    fn pattern(
+        &self,
+        authored: &Expr,
+    ) -> Result<Option<Arc<chelis_ir::claim_pattern::ClaimPattern>>, String> {
+        if tensor_type_dim_exprs(authored).is_some() {
+            return Ok(None);
+        }
+        let key = chelis_ir::claim_pattern::type_key(authored);
+        if let Some(cached) = self.cache.borrow().get(&key) {
+            return Ok(cached.clone());
+        }
+        let pattern = chelis_ir::claim_pattern::ClaimPattern::derive(authored, self.registry)
+            .map_err(|error| format!("host runtime: {error}"))?;
+        let pattern = pattern.nested_root().is_some().then(|| Arc::new(pattern));
+        self.cache.borrow_mut().insert(key, pattern.clone());
+        Ok(pattern)
+    }
+}
+
+/// Collect the tensors a formal nests in an aggregate or nominal value, in
+/// depth-first declared order, as entry observations of their claimed types.
+/// Only the constructor the value carries is walked.
+fn collect_nested_entry_actuals(
+    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    node: chelis_ir::claim_pattern::ClaimNodeId,
+    value: &RuntimeValue,
+    path: String,
+    out: &mut Vec<EntryActual>,
+) {
+    use chelis_ir::claim_pattern::{ClaimNode, ClaimStep};
+    match (pattern.node(node), value) {
+        (ClaimNode::Tensor(claim), RuntimeValue::Tensor(tensor)) => out.push(EntryActual {
+            checked: claim.ty.clone(),
+            authored: claim.ty.clone(),
+            actual_type: TensorType {
+                dims: tensor
+                    .value
+                    .shape
+                    .iter()
+                    .copied()
+                    .map(DimInfo::Lit)
+                    .collect(),
+                precision: tensor.precision,
+            },
+            path,
+            shape: tensor.value.shape.clone(),
+        }),
+        (ClaimNode::Tuple(_), RuntimeValue::Tuple(items)) => {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(child) = pattern.child(node, ClaimStep::Component(index)) {
+                    collect_nested_entry_actuals(
+                        pattern,
+                        child,
+                        item,
+                        format!("{path}.{index}"),
+                        out,
+                    );
+                }
+            }
+        }
+        (ClaimNode::List(child), RuntimeValue::List(items)) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_nested_entry_actuals(
+                    pattern,
+                    *child,
+                    item,
+                    format!("{path}[{index}]"),
+                    out,
+                );
+            }
+        }
+        (ClaimNode::Option(child), RuntimeValue::Adt { ctor, fields, .. }) => {
+            if ctor == "Some"
+                && let Some(payload) = fields.first()
+            {
+                collect_nested_entry_actuals(pattern, *child, payload, format!("{path}.Some"), out);
+            }
+        }
+        (
+            ClaimNode::Nominal { constructors, .. },
+            RuntimeValue::Adt {
+                ctor,
+                source_name,
+                fields,
+                ..
+            },
+        ) => {
+            let Some(constructor) = constructors
+                .iter()
+                .find(|constructor| constructor.name == *ctor || constructor.stored_name == *ctor)
+            else {
+                return;
+            };
+            let several = constructors.len() > 1;
+            for (index, (field, item)) in constructor.fields.iter().zip(fields.iter()).enumerate() {
+                let Some(child) = field.node else {
+                    continue;
+                };
+                let segment = field.name.clone().unwrap_or_else(|| index.to_string());
+                let path = if several {
+                    format!("{path}.{source_name}.{segment}")
+                } else {
+                    format!("{path}.{segment}")
+                };
+                collect_nested_entry_actuals(pattern, child, item, path, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn check_callable_invocation_contract(
     contract: &Expr,
     args: &[RuntimeValue],
     session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
     present: Option<&[bool]>,
+    nested: Option<EntryClaimPatterns<'_>>,
 ) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
     let Some((_, params)) = checked_function_children(contract).and_then(<[Expr]>::split_last)
     else {
@@ -754,8 +877,15 @@ fn check_callable_invocation_contract(
     let names = (0..args.len())
         .map(|index| format!("arg{index}"))
         .collect::<Vec<_>>();
-    let actualized =
-        actualize_tensor_entry_parameters(Some(params), &authored, args, &names, session, present)?;
+    let actualized = actualize_tensor_entry_parameters(
+        Some(params),
+        &authored,
+        args,
+        &names,
+        session,
+        present,
+        nested,
+    )?;
     let mut entry_inputs = Vec::with_capacity(actualized.len());
     let mut entry_shapes: Vec<Vec<usize>> = Vec::with_capacity(actualized.len());
     for (parameter, ty, shape) in &actualized {
@@ -796,6 +926,7 @@ fn actualize_tensor_entry_parameters(
     names: &[String],
     session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
     present: Option<&[bool]>,
+    nested: Option<EntryClaimPatterns<'_>>,
 ) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
     fn collect(
         pattern: &EntryPattern<Expr>,
@@ -896,6 +1027,23 @@ fn actualize_tensor_entry_parameters(
             formal.name().to_string(),
             &mut actuals,
         )?;
+        // A formal that nests its tensors below a tuple or nominal type owes
+        // their claims in its own signature position (runtime_extents.md
+        // C6.5): signature order, then depth-first declared order.
+        if !formal.pattern().has_tensor()
+            && let Some(nested) = nested
+            && let Some(authored) = normalized_authored.get(index).and_then(Option::as_ref)
+            && let Some(pattern) = nested.pattern(authored)?
+            && let Some(root) = pattern.nested_root()
+        {
+            collect_nested_entry_actuals(
+                &pattern,
+                root,
+                arg,
+                formal.name().to_string(),
+                &mut actuals,
+            );
+        }
     }
     let types = chelis_ir::lower::actualize_authored_tensor_parameters(
         &actuals
@@ -3151,6 +3299,10 @@ impl<'a> EvalContext<'a> {
                     &args,
                     self.session.as_ref(),
                     present,
+                    Some(EntryClaimPatterns {
+                        registry: &self.adt_registry,
+                        cache: &self.claim_patterns,
+                    }),
                 )?;
                 let Some((result, params)) =
                     checked_function_children(contract).and_then(<[Expr]>::split_last)
@@ -3299,6 +3451,10 @@ impl<'a> EvalContext<'a> {
                         &params,
                         self.session.as_ref(),
                         present,
+                        Some(EntryClaimPatterns {
+                            registry: &self.adt_registry,
+                            cache: &self.claim_patterns,
+                        }),
                     )?;
                     let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
                     let mut entry_shapes: Vec<Vec<usize>> =
@@ -3497,9 +3653,8 @@ impl<'a> EvalContext<'a> {
                     // Frames retain distinct declarations even when the literal
                     // values agree. Forwarding a frame does not append it again.
                     let nested_claim = match (&active_declaration, &authored_result) {
-                        (Some(name), Some(authored)) => self
-                            .nested_result_pattern(name, authored)?
-                            .and_then(|pattern| {
+                        (Some(_), Some(authored)) => {
+                            self.nested_claim_pattern(authored)?.and_then(|pattern| {
                                 let node = pattern.nested_root()?;
                                 let binders = named_result_witnesses
                                     .iter()
@@ -3519,7 +3674,8 @@ impl<'a> EvalContext<'a> {
                                     }
                                     .claim(),
                                 )
-                            }),
+                            })
+                        }
                         _ => None,
                     };
                     let late_first_sites = declaration_claim
@@ -3674,27 +3830,16 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    /// The claim pattern of def `name`'s authored result when that result is
-    /// not itself a tensor, derived once per def.
-    fn nested_result_pattern(
-        &mut self,
-        name: &str,
+    /// The nested claim pattern of an authored claim-source type.
+    fn nested_claim_pattern(
+        &self,
         authored: &Expr,
     ) -> Result<Option<Arc<chelis_ir::claim_pattern::ClaimPattern>>, String> {
-        if let Some(cached) = self.nested_result_patterns.get(name) {
-            return Ok(cached.clone());
+        EntryClaimPatterns {
+            registry: &self.adt_registry,
+            cache: &self.claim_patterns,
         }
-        let pattern = if tensor_type_dim_exprs(authored).is_some() {
-            None
-        } else {
-            let pattern =
-                chelis_ir::claim_pattern::ClaimPattern::derive(authored, &self.adt_registry)
-                    .map_err(|error| format!("host runtime: `{name}` result: {error}"))?;
-            pattern.nested_root().is_some().then(|| Arc::new(pattern))
-        };
-        self.nested_result_patterns
-            .insert(name.to_string(), pattern.clone());
-        Ok(pattern)
+        .pattern(authored)
     }
 
     fn check_declared_result_claim(
@@ -6266,6 +6411,7 @@ mod tensor_entry_actualization_tests {
             &names,
             None,
             None,
+            None,
         )
         .expect("scalar neighbors do not contaminate the rank-zero tensor formal");
         assert_eq!(
@@ -6289,6 +6435,7 @@ mod tensor_entry_actualization_tests {
                 RuntimeValue::int64(3),
             ],
             &names,
+            None,
             None,
             None,
         )
@@ -6386,7 +6533,7 @@ mod legacy_capture_order_tests {
             session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
             active_declaration_names: Vec::new(),
             def_kernels: UnordMap::new(),
-            nested_result_patterns: UnordMap::new(),
+            claim_patterns: Default::default(),
             transcript: Vec::new(),
             transcript_capture: None,
             resolving_top_levels: Vec::new(),

@@ -820,7 +820,7 @@ fn evaluate_host_program_core(
         }),
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
-        nested_result_patterns: UnordMap::new(),
+        claim_patterns: Default::default(),
         transcript: Vec::new(),
         transcript_capture: crate::transcript_capture::current_transcript_capture(),
         resolving_top_levels: Vec::new(),
@@ -1366,11 +1366,13 @@ struct EvalContext<'a> {
     /// Per-def kernel decision: `None` is the host lane, `Some` a kernel
     /// reused across applications (see `EvalContext::def_kernel`).
     def_kernels: UnordMap<String, Option<std::sync::Arc<chelis_ir::host::HostDefKernel>>>,
-    /// Each def's authored result claim on the tensors it nests in an
-    /// aggregate or nominal value (runtime_extents.md C6.5); `None` owes
-    /// nothing beyond a top-level tensor claim.
-    nested_result_patterns:
+    /// The claim pattern of each authored claim-source type that nests
+    /// tensors in an aggregate or nominal value (runtime_extents.md C6.5),
+    /// keyed by the type's spelling; `None` owes nothing beyond a top-level
+    /// tensor claim.
+    claim_patterns: std::cell::RefCell<
         UnordMap<String, Option<std::sync::Arc<chelis_ir::claim_pattern::ClaimPattern>>>,
+    >,
     transcript: Vec<String>,
     transcript_capture: Option<crate::TranscriptCapture>,
     resolving_top_levels: Vec<String>,

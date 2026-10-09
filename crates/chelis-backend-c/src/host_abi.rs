@@ -523,6 +523,7 @@ fn project_function(
     Ok(HostAbiFunction {
         helper_result_claim_axes: function.helper_result_claim_axes().to_vec(),
         result_claim: function.result_claim().cloned(),
+        entry_claims: function.entry_claims().to_vec(),
         name: function.name().to_string(),
         entry_contract: function
             .entry_contract()
@@ -836,6 +837,7 @@ fn project_expr(
                         name: entry.name,
                         ty: HostAbiType::try_from_concrete(&entry.ty)?,
                         value: project_expr(entry.value, allowed_callbacks)?,
+                        claim: entry.claim,
                     })
                 })
                 .collect::<Result<Vec<_>, Unsupported>>()?,

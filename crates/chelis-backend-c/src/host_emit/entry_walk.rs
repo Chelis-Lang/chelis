@@ -145,7 +145,13 @@ pub(super) struct FunctionEntryWork {
 impl FunctionEntryWork {
     /// Whether any parameter's value is walked.
     pub fn walks(&self) -> bool {
-        self.params.iter().any(|param| !param.metadata.is_empty())
+        self.params.iter().any(|param| {
+            !param.metadata.is_empty()
+                || param
+                    .ordered_extents
+                    .iter()
+                    .any(|step| matches!(step, ExtentStep::Walk(_)))
+        })
     }
 }
 
@@ -543,7 +549,18 @@ impl<'a> EntryWalkers<'a> {
     /// The entry work of one function's body and of its exported entry.
     pub fn entry_work(&mut self, function: &HostFunction) -> Result<EntryWork, Unsupported> {
         validate_entry_contract(function)?;
-        let named_list_binders = function.entry_contract.named_list_binders().to_vec();
+        let mut named_list_binders = function.entry_contract.named_list_binders().to_vec();
+        // A binder a formal nests below a tuple or nominal type may first be
+        // witnessed there, so it shares the List witness state: every
+        // observation in signature order defines it or is compared with it
+        // (runtime_extents.md C6.5). Appending keeps every List state index.
+        for pattern in function.entry_claims.iter().flatten() {
+            for binder in pattern.binders() {
+                if !named_list_binders.contains(&binder) {
+                    named_list_binders.push(binder);
+                }
+            }
+        }
         let claimed_lists = function
             .entry_contract
             .formals()
@@ -553,7 +570,8 @@ impl<'a> EntryWalkers<'a> {
                     && entry_pattern_has_extent_claim(formal.pattern())
             })
             .collect::<Vec<_>>();
-        let extent_at_body = claimed_lists.iter().any(|claimed| *claimed);
+        let extent_at_body = claimed_lists.iter().any(|claimed| *claimed)
+            || function.entry_claims.iter().any(Option::is_some);
         // The exported entry checks every aggregate in signature order.
         // Internal calls retain the established List-only admission boundary.
         let exported = if has_exported_entry(function) {
@@ -639,6 +657,19 @@ impl<'a> EntryWalkers<'a> {
                 &mut serial,
                 &mut work,
             )?;
+            if let Some(pattern) = function.entry_claims.get(index).and_then(Option::as_ref) {
+                let step = nested_entry_step(
+                    pattern,
+                    param,
+                    &c_ident(&param.name),
+                    index,
+                    &work.named_list_binders,
+                )?;
+                work.params[index].extents.push(step.clone());
+                work.params[index]
+                    .ordered_extents
+                    .push(ExtentStep::Walk(step));
+            }
         }
         Ok(work)
     }
@@ -789,6 +820,77 @@ static inline const char *__chelis_entry_path_text(const __chelis_entry_path *pa
         memcpy(buffer + end, marker, sizeof marker);
     }
     return buffer;
+}
+"#
+            .to_string(),
+        );
+        out.push(
+            r#"
+/* Check the claims a formal nests below a tuple or nominal type against the
+   value it carries (runtime_extents.md C6.5): a literal axis as a literal
+   entry extent, a binder axis through the invocation's witness states. */
+static void __chelis_entry_claim_walk(const __chelis_host_result_claim *frame, int64_t node, chelis_value value, const __chelis_entry_path *path, const char *const *keys, __chelis_entry_named_state *states, size_t count) {
+    const __chelis_claim_node *pattern = &frame->nodes[node];
+    if (pattern->kind == 0 && value.tag == CHELIS_VALUE_TENSOR) {
+        const chelis_tensor *tensor = chelis_tensor_borrow_value(value);
+        int64_t rank = chelis_tensor_rank(tensor);
+        if (pattern->rank >= 0 && pattern->rank != rank) return;
+        for (int64_t i = 0; i < pattern->count; ++i) {
+            int64_t axis = pattern->axes[i][0] < 0 ? rank + pattern->axes[i][0] : pattern->axes[i][0];
+            if (axis < 0 || axis >= rank) continue;
+            int64_t observed = chelis_tensor_shape(tensor, axis);
+            if (pattern->axes[i][1] >= 0) {
+                if (states != NULL) __chelis_entry_named_observe(states, count, keys[pattern->axes[i][1]], __chelis_entry_path_text(path), (int)axis, observed);
+            } else if (observed != pattern->axes[i][2]) {
+                fprintf(stderr, "input `%s` axis %lld expected %lld, got %lld\n", __chelis_entry_path_text(path), (long long)axis, (long long)pattern->axes[i][2], (long long)observed);
+                chelis_numeric_trap("numeric trap: domain in load at i64");
+            }
+        }
+    } else if (pattern->kind == 1 && value.tag == CHELIS_VALUE_TUPLE) {
+        const chelis_tuple *tuple = chelis_tuple_borrow_value(value);
+        for (int64_t i = 0; i < pattern->count && i < chelis_tuple_len(tuple); ++i) {
+            if (pattern->children[i] < 0) continue;
+            chelis_value item = chelis_tuple_get(tuple, i);
+            const __chelis_entry_path segment = { path, pattern->labels[i], 0 };
+            __chelis_entry_claim_walk(frame, pattern->children[i], item, &segment, keys, states, count);
+            chelis_value_release(item);
+        }
+    } else if (pattern->kind == 2 && value.tag == CHELIS_VALUE_LIST) {
+        const chelis_list *list = chelis_list_borrow_value(value);
+        for (int64_t i = 0; i < chelis_list_len(list); ++i) {
+            chelis_value item = chelis_list_index(list, i);
+            const __chelis_entry_path segment = { path, NULL, i };
+            __chelis_entry_claim_walk(frame, pattern->children[0], item, &segment, keys, states, count);
+            chelis_value_release(item);
+        }
+    } else if (pattern->kind == 3 && value.tag == CHELIS_VALUE_OPTION) {
+        const chelis_option *option = chelis_option_borrow_value(value);
+        if (chelis_option_is_some(option)) {
+            chelis_value item = chelis_option_unwrap(option);
+            const __chelis_entry_path segment = { path, pattern->labels[0], 0 };
+            __chelis_entry_claim_walk(frame, pattern->children[0], item, &segment, keys, states, count);
+            chelis_value_release(item);
+        }
+    } else if (pattern->kind == 4 && value.tag == CHELIS_VALUE_ADT) {
+        const chelis_adt *adt = chelis_adt_borrow_value(value);
+        chelis_string tag = chelis_adt_get_tag(adt);
+        for (int64_t c = 0; c < pattern->count; ++c) {
+            chelis_string name = chelis_string_from_cstr(pattern->names[c]);
+            bool carried = chelis_string_eq(tag, name);
+            chelis_string_release(name);
+            if (!carried) continue;
+            for (int64_t slot = pattern->offsets[c]; slot < pattern->offsets[c + 1]; ++slot) {
+                int64_t field = slot - pattern->offsets[c];
+                if (pattern->children[slot] < 0 || field >= chelis_adt_field_count(adt)) continue;
+                chelis_value item = chelis_adt_get_field(adt, field);
+                const __chelis_entry_path segment = { path, pattern->labels[slot], 0 };
+                __chelis_entry_claim_walk(frame, pattern->children[slot], item, &segment, keys, states, count);
+                chelis_value_release(item);
+            }
+            break;
+        }
+        chelis_string_release(tag);
+    }
 }
 "#
             .to_string(),
@@ -977,6 +1079,63 @@ static inline const char *__chelis_entry_path_text(const __chelis_entry_path *pa
         }
         out.push(String::new());
     }
+}
+
+/// The entry check of the claims a formal nests below a tuple or nominal
+/// type (runtime_extents.md C6.5): one walk of the carried value along its
+/// claim pattern, in the formal's signature position.
+pub(super) fn nested_entry_step(
+    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    param: &HostParam,
+    value: &str,
+    index: usize,
+    named_binders: &[String],
+) -> Result<String, Unsupported> {
+    let tag = borrowed_claim_value_tag(&param.ty).ok_or_else(|| {
+        invalid_abi_shape(
+            format!("claimed formal `{}` carries no walkable value", param.name),
+            "signature entry",
+        )
+    })?;
+    let root = pattern
+        .root()
+        .expect("an entry claim owes an obligation")
+        .index();
+    let nodes = format!("__chelis_entry_claim_{index}_nodes");
+    let mut lines = claim_pattern_table_lines(pattern, &nodes, "");
+    let keys = format!("__chelis_entry_claim_{index}_keys");
+    let binders = pattern.binders();
+    lines.push(if binders.is_empty() {
+        format!("static const char *const *const {keys} = NULL;")
+    } else {
+        format!(
+            "static const char *const {keys}[] = {{ {} }};",
+            binders
+                .iter()
+                .map(|binder| c_string_literal(binder))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    lines.push(format!(
+        "const __chelis_host_result_claim __chelis_entry_claim_{index} = {{ NULL, -1, 0, NULL, 0, {nodes}, {root}, NULL }};"
+    ));
+    lines.push(format!(
+        "const __chelis_entry_path __chelis_entry_claim_path_{index} = {{ NULL, {}, 0 }};",
+        c_utf8_byte_literal(&param.name)
+    ));
+    let (states, count) = if named_binders.is_empty() {
+        ("NULL".to_string(), 0)
+    } else {
+        (
+            "__chelis_entry_named_states".to_string(),
+            named_binders.len(),
+        )
+    };
+    lines.push(format!(
+        "__chelis_entry_claim_walk(&__chelis_entry_claim_{index}, {root}, (chelis_value){{ .tag = {tag}, .payload = {{ .handle = (void *){value} }} }}, &__chelis_entry_claim_path_{index}, {keys}, {states}, {count});"
+    ));
+    Ok(format!("{{ {} }}", lines.join(" ")))
 }
 
 /// How a check names the tensor it reads: a format fragment and the
@@ -1184,6 +1343,7 @@ mod entry_contract_tests {
         HostFunction {
             helper_result_claim_axes: Vec::new(),
             result_claim: None,
+            entry_claims: Vec::new(),
             name: "f".into(),
             entry_contract,
             params: [
