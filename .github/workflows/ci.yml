@@ -323,7 +323,7 @@ jobs:
           # are present and comparable, so this step reads a stated
           # property instead of inheriting whatever ran before it
           # (chelis#2228, chelis#2234).
-          git diff --name-only "$BASE..$HEAD" \
+          git diff --name-only --no-renames "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
       - name: Validate candidate lifecycle

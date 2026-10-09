@@ -336,6 +336,11 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         "rebase_run_hull",
     ):
         test.assertIn(output, changes["outputs"])
+    detect = next(
+        step for step in changes["steps"]
+        if step.get("name") == "Compute docs_only"
+    )
+    test.assertIn('git diff --name-only --no-renames "$BASE..$HEAD"', detect["run"])
     test.assertEqual(
         changes["outputs"]["ci_contract_changed"],
         "${{ steps.candidate-preflight.outputs.ci_contract_changed }}",
