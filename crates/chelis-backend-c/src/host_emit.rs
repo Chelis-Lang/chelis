@@ -337,12 +337,126 @@ use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap};
 use chelis_unord::{UnordMap, UnordSet};
 
+thread_local! {
+    /// Whether the program being emitted carries any nested claim pattern
+    /// (runtime_extents.md C6.5). Without one no claim frame can name a
+    /// pattern node, so construction projects nothing and no aggregate is
+    /// walked.
+    static NESTED_CLAIMS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn nested_claims_emitted() -> bool {
+    NESTED_CLAIMS.with(std::cell::Cell::get)
+}
+
+/// Restores the enclosing program's flag when one emission ends.
+struct NestedClaimsGuard(bool);
+
+impl NestedClaimsGuard {
+    fn set(value: bool) -> Self {
+        Self(NESTED_CLAIMS.with(|flag| flag.replace(value)))
+    }
+}
+
+impl Drop for NestedClaimsGuard {
+    fn drop(&mut self) {
+        NESTED_CLAIMS.with(|flag| flag.set(self.0));
+    }
+}
+
+fn program_has_nested_claims(program: &HostProgram) -> bool {
+    fn uses(node: &HostExpr) -> bool {
+        let any = |items: &[HostExpr]| items.iter().any(uses);
+        match &node.kind {
+            HostExprKind::ResultClaimScope { plan, body, .. } => {
+                plan.nested().is_some() || uses(body)
+            }
+            HostExprKind::SignatureEntry { args, lists, .. } => {
+                any(args)
+                    || lists
+                        .iter()
+                        .any(|entry| entry.claim.is_some() || uses(&entry.value))
+            }
+            HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
+                uses(value)
+            }
+            HostExprKind::Call { args, .. }
+            | HostExprKind::Builtin { args, .. }
+            | HostExprKind::TensorCall { args, .. }
+            | HostExprKind::List(args, _)
+            | HostExprKind::Tuple(args, _)
+            | HostExprKind::AdtConstruct { fields: args, .. } => any(args),
+            HostExprKind::AdtFieldAccess { base, .. } => uses(base),
+            HostExprKind::If {
+                cond,
+                then_expr,
+                else_expr,
+                ..
+            } => uses(cond) || uses(then_expr) || uses(else_expr),
+            HostExprKind::MatchOption {
+                scrutinee,
+                some_expr,
+                none_expr,
+                ..
+            } => uses(scrutinee) || uses(some_expr) || uses(none_expr),
+            HostExprKind::MatchAdt {
+                scrutinee,
+                arms,
+                default_expr,
+                ..
+            } => {
+                uses(scrutinee)
+                    || arms.iter().any(|arm| uses(&arm.expr))
+                    || default_expr.as_deref().is_some_and(uses)
+            }
+            HostExprKind::Let { bindings, body, .. }
+            | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+                bindings.iter().any(|binding| uses(&binding.value)) || uses(body)
+            }
+            HostExprKind::Map { callback, list, .. }
+            | HostExprKind::Filter { callback, list, .. }
+            | HostExprKind::Partition { callback, list, .. }
+            | HostExprKind::FlatMap { callback, list, .. } => callback_expr(callback) || uses(list),
+            HostExprKind::Fold {
+                callback,
+                init,
+                list,
+                ..
+            }
+            | HostExprKind::Scan {
+                callback,
+                init,
+                list,
+                ..
+            } => callback_expr(callback) || uses(init) || uses(list),
+            HostExprKind::Int(_)
+            | HostExprKind::Float(_)
+            | HostExprKind::Bool(_)
+            | HostExprKind::String(_)
+            | HostExprKind::Unit
+            | HostExprKind::Var(_, _) => false,
+        }
+    }
+    fn callback_expr(callback: &HostCallback) -> bool {
+        match &callback.kind {
+            HostCallbackKind::Named { .. } => false,
+            HostCallbackKind::Inline { body, .. } => uses(body),
+        }
+    }
+    program.functions.iter().any(|function| {
+        function.result_claim.is_some()
+            || function.entry_claims.iter().any(Option::is_some)
+            || uses(&function.body)
+    }) || program.globals.iter().any(|binding| uses(&binding.value))
+}
+
 pub(crate) fn emit_host_abi_program(
     projected: &ProjectedHostProgram<'_>,
     program_name: &str,
     external_helpers: &UnordSet<String>,
 ) -> Result<String, Unsupported> {
     let program = projected.program();
+    let _nested_claims = NestedClaimsGuard::set(program_has_nested_claims(program));
     let _site_identity_count = projected.sites().len();
     // Emit helpers and functions into a body buffer first so we can detect which
     // runtime headers they transitively require (`chelis_blas.h` when a helper
@@ -666,6 +780,9 @@ pub(crate) fn emit_host_abi_program(
         append_host_stack_budget_support(&mut result_claim_support);
     }
     append_host_result_claim_checks(&mut result_claim_support);
+    if nested_claims_emitted() {
+        append_nested_claim_support(&mut result_claim_support);
+    }
     result_claim_support.push(String::new());
     result_claim_support.extend(body);
     body = result_claim_support;
@@ -3412,6 +3529,145 @@ static void __chelis_host_recursive_call_guard(__chelis_host_result_origin_arena
 "#.to_string());
 }
 
+/// The projection and boundary walk of nested claim frames
+/// (runtime_extents.md C6.5), emitted only for a program that has one.
+fn append_nested_claim_support(out: &mut Vec<String>) {
+    out.push(
+        r#"
+/* The pattern node a component of a value owes: `kind` as in a claim node,
+   `ctor` the constructor tag of a nominal value, `field` its slot. */
+static int64_t __chelis_claim_child(const __chelis_claim_node *nodes, int64_t index, int64_t kind, const char *ctor, int64_t field) {
+    const __chelis_claim_node *node = &nodes[index];
+    if (node->kind != kind) return -1;
+    if (kind == 1) return field >= 0 && field < node->count ? node->children[field] : -1;
+    if (kind == 2 || kind == 3) return node->children[0];
+    for (int64_t c = 0; c < node->count; ++c) {
+        if (strcmp(node->names[c], ctor) != 0) continue;
+        int64_t slot = node->offsets[c] + field;
+        return field >= 0 && slot < node->offsets[c + 1] ? node->children[slot] : -1;
+    }
+    return -1;
+}
+
+/* The claims a component of a value under construction owes: every pattern
+   frame projected to that component, in order. A tensor frame says nothing
+   about a component. */
+static const __chelis_host_result_claim *__chelis_project_host_result_claims(__chelis_host_result_origin_arena *arena, const __chelis_host_result_claim *claims, int64_t kind, const char *ctor, int64_t field) {
+    int64_t count = 0;
+    for (const __chelis_host_result_claim *frame = claims; frame != NULL; frame = frame->next) {
+        if (frame->nodes != NULL && __chelis_claim_child(frame->nodes, frame->node, kind, ctor, field) >= 0) count += 1;
+    }
+    if (count == 0) return NULL;
+    if (arena == NULL || (uint64_t)count > (SIZE_MAX - sizeof(__chelis_host_result_claim_block)) / sizeof(__chelis_host_result_claim)) {
+        fprintf(stderr, "host runtime: invalid result claim projection\n");
+        abort();
+    }
+    __chelis_host_result_claim_block *block = (__chelis_host_result_claim_block *)malloc(sizeof(__chelis_host_result_claim_block) + (size_t)count * sizeof(__chelis_host_result_claim));
+    if (block == NULL) {
+        fprintf(stderr, "host runtime: result claim projection allocation failed\n");
+        abort();
+    }
+    block->next = arena->claim_head;
+    arena->claim_head = block;
+    int64_t at = 0;
+    for (const __chelis_host_result_claim *frame = claims; frame != NULL; frame = frame->next) {
+        if (frame->nodes == NULL) continue;
+        int64_t child = __chelis_claim_child(frame->nodes, frame->node, kind, ctor, field);
+        if (child < 0) continue;
+        block->frames[at] = *frame;
+        block->frames[at].node = child;
+        block->frames[at].next = at + 1 < count ? &block->frames[at + 1] : NULL;
+        at += 1;
+    }
+    return &block->frames[0];
+}
+
+static const __chelis_host_result_origin *__chelis_claim_origin_child(const __chelis_host_result_origin *origin, int64_t index) {
+    if (origin == NULL || origin->uniform) return origin;
+    if (origin->child_count < 0 || index >= origin->child_count || origin->child_view == NULL) return NULL;
+    return origin->child_view[index];
+}
+
+/* Check one pattern frame at node `node` against `value`, already produced:
+   walk the value and its producer provenance together. Only the constructor
+   a value carries is walked, and every tensor is checked against the
+   producer its provenance records. */
+static void __chelis_check_claim_frame_value(const __chelis_host_result_claim *frame, int64_t node, chelis_value value, const __chelis_host_result_origin *origin) {
+    const __chelis_claim_node *pattern = &frame->nodes[node];
+    if (pattern->kind == 0 && value.tag == CHELIS_VALUE_TENSOR) {
+        const chelis_tensor *tensor = chelis_tensor_borrow_value(value);
+        __chelis_host_result_claim single = *frame;
+        single.next = NULL;
+        single.node = node;
+        single.outer_claims_first = 0;
+        if (origin == NULL || origin->child_count != -1 || origin->op == NULL || origin->trap == NULL) {
+            if (!__chelis_claim_pattern_tensor(&single, chelis_tensor_rank(tensor))) return;
+            for (int64_t i = 0; i < pattern->count; ++i) {
+                __chelis_host_result_axis claim;
+                if (__chelis_claim_pattern_axis(&single, chelis_tensor_rank(tensor), i, &claim) && chelis_tensor_shape(tensor, claim.axis) != claim.required) {
+                    fprintf(stderr, "host runtime: pending result claim reached a tensor without producer provenance\n");
+                    abort();
+                }
+            }
+            return;
+        }
+        __chelis_check_host_result_claims(&single, tensor, origin->op, origin->trap);
+    } else if (pattern->kind == 1 && value.tag == CHELIS_VALUE_TUPLE) {
+        const chelis_tuple *tuple = chelis_tuple_borrow_value(value);
+        for (int64_t i = 0; i < pattern->count && i < chelis_tuple_len(tuple); ++i) {
+            if (pattern->children[i] < 0) continue;
+            chelis_value item = chelis_tuple_get(tuple, i);
+            __chelis_check_claim_frame_value(frame, pattern->children[i], item, __chelis_claim_origin_child(origin, i));
+            chelis_value_release(item);
+        }
+    } else if (pattern->kind == 2 && value.tag == CHELIS_VALUE_LIST) {
+        const chelis_list *list = chelis_list_borrow_value(value);
+        for (int64_t i = 0; i < chelis_list_len(list); ++i) {
+            chelis_value item = chelis_list_index(list, i);
+            __chelis_check_claim_frame_value(frame, pattern->children[0], item, __chelis_claim_origin_child(origin, i));
+            chelis_value_release(item);
+        }
+    } else if (pattern->kind == 3 && value.tag == CHELIS_VALUE_OPTION) {
+        const chelis_option *option = chelis_option_borrow_value(value);
+        if (chelis_option_is_some(option)) {
+            chelis_value item = chelis_option_unwrap(option);
+            __chelis_check_claim_frame_value(frame, pattern->children[0], item, __chelis_claim_origin_child(origin, 0));
+            chelis_value_release(item);
+        }
+    } else if (pattern->kind == 4 && value.tag == CHELIS_VALUE_ADT) {
+        const chelis_adt *adt = chelis_adt_borrow_value(value);
+        chelis_string tag = chelis_adt_get_tag(adt);
+        for (int64_t c = 0; c < pattern->count; ++c) {
+            chelis_string name = chelis_string_from_cstr(pattern->names[c]);
+            bool carried = chelis_string_eq(tag, name);
+            chelis_string_release(name);
+            if (!carried) continue;
+            for (int64_t slot = pattern->offsets[c]; slot < pattern->offsets[c + 1]; ++slot) {
+                int64_t field = slot - pattern->offsets[c];
+                if (pattern->children[slot] < 0 || field >= chelis_adt_field_count(adt)) continue;
+                chelis_value item = chelis_adt_get_field(adt, field);
+                __chelis_check_claim_frame_value(frame, pattern->children[slot], item, __chelis_claim_origin_child(origin, field));
+                chelis_value_release(item);
+            }
+            break;
+        }
+        chelis_string_release(tag);
+    }
+}
+
+/* Check every pattern frame of `claims` against an already produced value,
+   in frame order. */
+static void __chelis_check_host_result_value_claims(const __chelis_host_result_claim *claims, chelis_value value, const __chelis_host_result_origin *origin) {
+    if (claims == NULL) return;
+    if (claims->outer_claims_first) __chelis_check_host_result_value_claims(claims->next, value, origin);
+    if (claims->nodes != NULL) __chelis_check_claim_frame_value(claims, claims->node, value, origin);
+    if (!claims->outer_claims_first) __chelis_check_host_result_value_claims(claims->next, value, origin);
+}
+"#
+        .to_string(),
+    );
+}
+
 fn append_host_result_claim_checks(out: &mut Vec<String>) {
     out.push(r#"
 static void __chelis_host_result_claim_trap(const __chelis_host_result_axis *claim, const char *op, int64_t observed_axis, int64_t observed, const char *trap) {
@@ -3560,135 +3816,6 @@ static void __chelis_check_host_result_claims(const __chelis_host_result_claim *
     if (deferred != NULL) free(deferred);
 }
 
-/* The pattern node a component of a value owes: `kind` as in a claim node,
-   `ctor` the constructor tag of a nominal value, `field` its slot. */
-static int64_t __chelis_claim_child(const __chelis_claim_node *nodes, int64_t index, int64_t kind, const char *ctor, int64_t field) {
-    const __chelis_claim_node *node = &nodes[index];
-    if (node->kind != kind) return -1;
-    if (kind == 1) return field >= 0 && field < node->count ? node->children[field] : -1;
-    if (kind == 2 || kind == 3) return node->children[0];
-    for (int64_t c = 0; c < node->count; ++c) {
-        if (strcmp(node->names[c], ctor) != 0) continue;
-        int64_t slot = node->offsets[c] + field;
-        return field >= 0 && slot < node->offsets[c + 1] ? node->children[slot] : -1;
-    }
-    return -1;
-}
-
-/* The claims a component of a value under construction owes: every pattern
-   frame projected to that component, in order. A tensor frame says nothing
-   about a component. */
-static const __chelis_host_result_claim *__chelis_project_host_result_claims(__chelis_host_result_origin_arena *arena, const __chelis_host_result_claim *claims, int64_t kind, const char *ctor, int64_t field) {
-    int64_t count = 0;
-    for (const __chelis_host_result_claim *frame = claims; frame != NULL; frame = frame->next) {
-        if (frame->nodes != NULL && __chelis_claim_child(frame->nodes, frame->node, kind, ctor, field) >= 0) count += 1;
-    }
-    if (count == 0) return NULL;
-    if (arena == NULL || (uint64_t)count > (SIZE_MAX - sizeof(__chelis_host_result_claim_block)) / sizeof(__chelis_host_result_claim)) {
-        fprintf(stderr, "host runtime: invalid result claim projection\n");
-        abort();
-    }
-    __chelis_host_result_claim_block *block = (__chelis_host_result_claim_block *)malloc(sizeof(__chelis_host_result_claim_block) + (size_t)count * sizeof(__chelis_host_result_claim));
-    if (block == NULL) {
-        fprintf(stderr, "host runtime: result claim projection allocation failed\n");
-        abort();
-    }
-    block->next = arena->claim_head;
-    arena->claim_head = block;
-    int64_t at = 0;
-    for (const __chelis_host_result_claim *frame = claims; frame != NULL; frame = frame->next) {
-        if (frame->nodes == NULL) continue;
-        int64_t child = __chelis_claim_child(frame->nodes, frame->node, kind, ctor, field);
-        if (child < 0) continue;
-        block->frames[at] = *frame;
-        block->frames[at].node = child;
-        block->frames[at].next = at + 1 < count ? &block->frames[at + 1] : NULL;
-        at += 1;
-    }
-    return &block->frames[0];
-}
-
-static const __chelis_host_result_origin *__chelis_claim_origin_child(const __chelis_host_result_origin *origin, int64_t index) {
-    if (origin == NULL || origin->uniform) return origin;
-    if (origin->child_count < 0 || index >= origin->child_count || origin->child_view == NULL) return NULL;
-    return origin->child_view[index];
-}
-
-/* Check one pattern frame at node `node` against `value`, already produced:
-   walk the value and its producer provenance together. Only the constructor
-   a value carries is walked, and every tensor is checked against the
-   producer its provenance records. */
-static void __chelis_check_claim_frame_value(const __chelis_host_result_claim *frame, int64_t node, chelis_value value, const __chelis_host_result_origin *origin) {
-    const __chelis_claim_node *pattern = &frame->nodes[node];
-    if (pattern->kind == 0 && value.tag == CHELIS_VALUE_TENSOR) {
-        const chelis_tensor *tensor = chelis_tensor_borrow_value(value);
-        __chelis_host_result_claim single = *frame;
-        single.next = NULL;
-        single.node = node;
-        single.outer_claims_first = 0;
-        if (origin == NULL || origin->child_count != -1 || origin->op == NULL || origin->trap == NULL) {
-            if (!__chelis_claim_pattern_tensor(&single, chelis_tensor_rank(tensor))) return;
-            for (int64_t i = 0; i < pattern->count; ++i) {
-                __chelis_host_result_axis claim;
-                if (__chelis_claim_pattern_axis(&single, chelis_tensor_rank(tensor), i, &claim) && chelis_tensor_shape(tensor, claim.axis) != claim.required) {
-                    fprintf(stderr, "host runtime: pending result claim reached a tensor without producer provenance\n");
-                    abort();
-                }
-            }
-            return;
-        }
-        __chelis_check_host_result_claims(&single, tensor, origin->op, origin->trap);
-    } else if (pattern->kind == 1 && value.tag == CHELIS_VALUE_TUPLE) {
-        const chelis_tuple *tuple = chelis_tuple_borrow_value(value);
-        for (int64_t i = 0; i < pattern->count && i < chelis_tuple_len(tuple); ++i) {
-            if (pattern->children[i] < 0) continue;
-            chelis_value item = chelis_tuple_get(tuple, i);
-            __chelis_check_claim_frame_value(frame, pattern->children[i], item, __chelis_claim_origin_child(origin, i));
-            chelis_value_release(item);
-        }
-    } else if (pattern->kind == 2 && value.tag == CHELIS_VALUE_LIST) {
-        const chelis_list *list = chelis_list_borrow_value(value);
-        for (int64_t i = 0; i < chelis_list_len(list); ++i) {
-            chelis_value item = chelis_list_index(list, i);
-            __chelis_check_claim_frame_value(frame, pattern->children[0], item, __chelis_claim_origin_child(origin, i));
-            chelis_value_release(item);
-        }
-    } else if (pattern->kind == 3 && value.tag == CHELIS_VALUE_OPTION) {
-        const chelis_option *option = chelis_option_borrow_value(value);
-        if (chelis_option_is_some(option)) {
-            chelis_value item = chelis_option_unwrap(option);
-            __chelis_check_claim_frame_value(frame, pattern->children[0], item, __chelis_claim_origin_child(origin, 0));
-            chelis_value_release(item);
-        }
-    } else if (pattern->kind == 4 && value.tag == CHELIS_VALUE_ADT) {
-        const chelis_adt *adt = chelis_adt_borrow_value(value);
-        chelis_string tag = chelis_adt_get_tag(adt);
-        for (int64_t c = 0; c < pattern->count; ++c) {
-            chelis_string name = chelis_string_from_cstr(pattern->names[c]);
-            bool carried = chelis_string_eq(tag, name);
-            chelis_string_release(name);
-            if (!carried) continue;
-            for (int64_t slot = pattern->offsets[c]; slot < pattern->offsets[c + 1]; ++slot) {
-                int64_t field = slot - pattern->offsets[c];
-                if (pattern->children[slot] < 0 || field >= chelis_adt_field_count(adt)) continue;
-                chelis_value item = chelis_adt_get_field(adt, field);
-                __chelis_check_claim_frame_value(frame, pattern->children[slot], item, __chelis_claim_origin_child(origin, field));
-                chelis_value_release(item);
-            }
-            break;
-        }
-        chelis_string_release(tag);
-    }
-}
-
-/* Check every pattern frame of `claims` against an already produced value,
-   in frame order. */
-static void __chelis_check_host_result_value_claims(const __chelis_host_result_claim *claims, chelis_value value, const __chelis_host_result_origin *origin) {
-    if (claims == NULL) return;
-    if (claims->outer_claims_first) __chelis_check_host_result_value_claims(claims->next, value, origin);
-    if (claims->nodes != NULL) __chelis_check_claim_frame_value(claims, claims->node, value, origin);
-    if (!claims->outer_claims_first) __chelis_check_host_result_value_claims(claims->next, value, origin);
-}
 "#.to_string());
 }
 
@@ -7756,7 +7883,9 @@ impl<'a> HostEmitter<'a> {
         claims: Option<&str>,
         step: (u8, Option<&str>, usize),
     ) -> Result<(), Unsupported> {
-        let Some(claims) = claims.filter(|_| host_type_may_carry_result_origin(ty)) else {
+        let Some(claims) =
+            claims.filter(|_| nested_claims_emitted() && host_type_may_carry_result_origin(ty))
+        else {
             return self.emit_expr_to_var(field, target, ty);
         };
         let (kind, ctor, index) = step;
@@ -7777,6 +7906,7 @@ impl<'a> HostEmitter<'a> {
     fn emit_result_claim_guard(&mut self, target: &str, ty: &HostType, claims: Option<&str>) {
         if let Some(claims) = claims
             && let Some(tag) = borrowed_claim_value_tag(ty)
+            && nested_claims_emitted()
         {
             // A value this activation already produced, or one that entered
             // it: walk it along every pattern frame (runtime_extents.md C6.5).

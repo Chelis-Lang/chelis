@@ -6016,10 +6016,15 @@ fn host_def_signature(
     // unresolved-callable marker builtin
     // (`HOST_UNRESOLVED_CALLABLE_MARKER`), which ABI projection rejects
     // pre-emission.
-    let result_claim = fn_type_parts
+    // Only an authored signature claims; a checked type the body inferred
+    // states no obligation (runtime_extents.md C6.5).
+    let authored_parts = lookup_authored_defsig_type_expr(program, name)
+        .as_ref()
+        .and_then(parse_fn_type_expr_parts);
+    let result_claim = authored_parts
         .as_ref()
         .map_or(Ok(None), |(_, ret)| nested_claim_pattern(program, ret));
-    let entry_claims = fn_type_parts
+    let entry_claims = authored_parts
         .as_ref()
         .map_or(Ok(Vec::new()), |(formals, _)| {
             // A tensor or List-of-tensor formal keeps its established entry

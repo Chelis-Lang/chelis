@@ -824,7 +824,8 @@ static inline const char *__chelis_entry_path_text(const __chelis_entry_path *pa
 "#
             .to_string(),
         );
-        out.push(
+        if nested_claims_emitted() {
+            out.push(
             r#"
 /* Check the claims a formal nests below a tuple or nominal type against the
    value it carries (runtime_extents.md C6.5): a literal axis as a literal
@@ -895,6 +896,7 @@ static void __chelis_entry_claim_walk(const __chelis_host_result_claim *frame, i
 "#
             .to_string(),
         );
+        }
         if self.types.is_empty() {
             return;
         }
