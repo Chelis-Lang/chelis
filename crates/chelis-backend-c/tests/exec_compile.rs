@@ -12888,3 +12888,177 @@ int main(void) {{
         );
     }
 }
+
+/// chelis#3370: an inlined product's expansion keeps its checked plan at its
+/// own position, before the sum allocates anything. A runtime extent that is
+/// negative, or that disagrees with the expansion's declared type, traps in
+/// the expansion exactly as the evaluator does, and no allocation precedes
+/// the trap; the agreeing extent computes the evaluator's bits.
+#[test]
+fn inlined_matmul_expansion_traps_precede_allocation_and_match_the_evaluator() {
+    use chelis_ir::dag::RtDim;
+    let ty = |dims: &[usize], precision| TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    };
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        ty(&[2, 3], Prim::F32),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        ty(&[3, 4], Prim::F32),
+        None,
+    );
+    let n = dag.add_node(
+        decl,
+        RiscOp::Load { name: "n".into() },
+        vec![],
+        ty(&[], Prim::Int64),
+        None,
+    );
+    let product = ty(&[2, 3, 4], Prim::F32);
+    let ea = dag.add_node(
+        decl,
+        RiscOp::Expand {
+            axis: 2,
+            size: RtDim::Node(1),
+        },
+        vec![a, n],
+        product.clone(),
+        None,
+    );
+    let eb = dag.add_node(
+        decl,
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(2),
+        },
+        vec![b],
+        product.clone(),
+        None,
+    );
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], product, None);
+    let sum = dag.add_node(
+        decl,
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
+        vec![mul],
+        ty(&[2, 4], Prim::F32),
+        None,
+    );
+    dag.add_root(sum);
+    let generated = codegen(&dag, "inlined_trap").unwrap().c_source;
+    assert!(
+        generated.contains("__lhs_"),
+        "the product is inlined:\n{generated}"
+    );
+    let allocation = generated
+        .lines()
+        .find(|line| line.contains(" = chelis_alloc("))
+        .expect("result allocation");
+    let lhs: Vec<f64> = (1..=6).map(f64::from).collect();
+    let rhs: Vec<f64> = (1..=12).map(|value| f64::from(value) * 0.5).collect();
+    let mut traps = Vec::<i64>::new();
+    for extent in [4_i64, -1, 5] {
+        let inputs: UnordMap<String, TensorValue> = [
+            (
+                "a".to_string(),
+                TensorValue::from_vec(vec![2, 3], lhs.clone()),
+            ),
+            (
+                "b".to_string(),
+                TensorValue::from_vec(vec![3, 4], rhs.clone()),
+            ),
+            (
+                "n".to_string(),
+                TensorValue::from_vec(vec![], vec![extent as f64]),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let evaluated = eval_tensor(&dag, &inputs);
+        let source = match &evaluated {
+            Ok(_) => generated.clone(),
+            Err(_) => generated.replacen(
+                allocation,
+                &format!("exit(78); /* allocation reached */\n{allocation}"),
+                1,
+            ),
+        };
+        let harness = format!(
+            r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+void inlined_trap(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float a[] = {{ 1, 2, 3, 4, 5, 6 }};
+    float b[] = {{ 0.5f, 1, 1.5f, 2, 2.5f, 3, 3.5f, 4, 4.5f, 5, 5.5f, 6 }};
+    int64_t n[] = {{ {extent} }};
+    int64_t a_shape[] = {{ 2, 3 }}, b_shape[] = {{ 3, 4 }};
+    chelis_tensor *inputs[] = {{
+        chelis_tensor_entry_borrow(2, a_shape, CHELIS_DTYPE_F32, a, sizeof a),
+        chelis_tensor_entry_borrow(2, b_shape, CHELIS_DTYPE_F32, b, sizeof b),
+        chelis_tensor_entry_borrow(0, NULL, CHELIS_DTYPE_I64, n, sizeof n),
+    }};
+    chelis_tensor *outputs[] = {{ NULL }};
+    inlined_trap(inputs, 3, outputs, 1);
+    const float *got = (const float*)chelis_tensor_read_view(outputs[0]).data;
+    for (int i = 0; i < 8; i++) printf("%g\n", got[i]);
+    chelis_tensor_release(outputs[0]);
+    return 0;
+}}
+"#
+        );
+        let run = checked_indexing_run(&source, &harness);
+        match evaluated {
+            Ok(values) => {
+                assert!(
+                    run.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+                let expected = values[&sum]
+                    .to_f64_lossy_vec()
+                    .iter()
+                    .map(|value| format!("{value}\n"))
+                    .collect::<String>();
+                assert_eq!(
+                    String::from_utf8_lossy(&run.stdout),
+                    expected,
+                    "extent {extent}"
+                );
+            }
+            Err(error) => {
+                assert!(!run.status.success(), "extent {extent}: {run:?}");
+                assert_ne!(
+                    run.status.code(),
+                    Some(78),
+                    "allocation preceded the trap: {extent}"
+                );
+                let stderr = String::from_utf8_lossy(&run.stderr);
+                let trap = error.lines().last().expect("evaluator trap line");
+                assert_eq!(
+                    stderr.lines().last(),
+                    Some(trap),
+                    "extent {extent}: {stderr}"
+                );
+                assert!(
+                    trap.starts_with("numeric trap: "),
+                    "extent {extent}: {error}"
+                );
+                traps.push(extent);
+            }
+        }
+    }
+    assert_eq!(traps, [-1, 5], "both disagreeing extents trap");
+}
