@@ -2262,14 +2262,17 @@ class CiParityTests(unittest.TestCase):
             ),
         )
         block = _ci_job_block("script-unit")
-        dependencies = "uv pip install --python \"$PYO3_PYTHON\" -r bindings/python/pyproject.toml"
+        # Project setup installs the binding's declared dependencies;
+        # scripts/test_pr_workflow_routing.py pins that step in the action.
+        setup = "uses: ./.github/actions/setup-project-ci"
         scripts = "python scripts/ci_script_tests.py pr"
         bindings = "python -m unittest discover -s bindings/python/tests -p 'test_*.py'"
-        for command in (dependencies, scripts, bindings):
+        self.assertEqual(block.count(setup), 1)
+        for command in (scripts, bindings):
             _assert_executable_run_once(block, command)
         for command in (scripts, bindings):
             self.assertLess(
-                block.index("run: " + dependencies),
+                block.index(setup),
                 block.index("run: " + command),
                 "binding dependencies must precede every native facade consumer",
             )
@@ -2277,8 +2280,9 @@ class CiParityTests(unittest.TestCase):
     def test_native_binding_dependencies_cannot_follow_script_discovery(self):
         block = _ci_job_block("script-unit")
         dependency_step = (
-            "      - name: Install Python binding dependencies\n"
-            "        run: uv pip install --python \"$PYO3_PYTHON\" -r bindings/python/pyproject.toml\n\n"
+            "      - name: Set up project CI\n"
+            "        id: build-cache\n"
+            "        uses: ./.github/actions/setup-project-ci\n\n"
         )
         self.assertEqual(block.count(dependency_step), 1)
         late = block.replace(dependency_step, "").replace(
@@ -2297,7 +2301,7 @@ class CiParityTests(unittest.TestCase):
         top_level_permissions = workflow[
             workflow.index("permissions:\n") : workflow.index("\nenv:\n")
         ]
-        numpy_command = "run: uv pip install --python \"$PYO3_PYTHON\" -r bindings/python/pyproject.toml"
+        numpy_command = "uses: ./.github/actions/setup-project-ci"
         oracle_command = "run: python scripts/dtype_phase3_oracle.py"
         authenticated_oracle = (
             "env:\n"

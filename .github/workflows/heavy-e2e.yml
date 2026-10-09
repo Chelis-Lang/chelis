@@ -212,9 +212,6 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
-      - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
-
       - name: Build product prerequisites
         run: cargo build --workspace --lib --bins
 
@@ -272,9 +269,6 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
-      - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
-
       - name: Install shared-skill validator dependency
         run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
 
@@ -320,9 +314,6 @@ jobs:
 
       - name: Set up project CI
         uses: ./.github/actions/setup-project-ci
-
-      - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       - name: Cache cargo registry and build
         if: runner.environment == 'github-hosted'
@@ -471,9 +462,6 @@ jobs:
       - name: Set up project CI
         uses: ./.github/actions/setup-project-ci
 
-      - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
-
       - name: Cache cargo registry and build
         if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@v2
@@ -522,13 +510,6 @@ jobs:
 
       - name: Set up project CI
         uses: ./.github/actions/setup-project-ci
-
-      # Phase A's wire capacity leg executes the Python binding facade, so the
-      # venv needs that facade's declared dependencies. Reading them from the
-      # bindings' own pyproject.toml keeps one source of truth; pinning them
-      # here would be a second place to forget.
-      - name: Install the Python binding facade dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       - name: Cache cargo registry and build
         if: runner.environment == 'github-hosted'
@@ -586,9 +567,6 @@ jobs:
 
       - name: Set up project CI
         uses: ./.github/actions/setup-project-ci
-
-      - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       - name: Cache cargo registry and build
         if: runner.environment == 'github-hosted'
@@ -673,9 +651,6 @@ jobs:
           prefix-key: rust-v1-${{ runner.environment }}
           shared-key: linux-workspace
           save-if: false
-
-      - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       - name: Build product prerequisites
         run: cargo build --workspace --lib --bins

@@ -139,19 +139,18 @@ def assert_extended(test, pr, nightly):
         if name == "runtime-representation-phase0-oracle":
             test.assertEqual(job["name"], "Runtime Representation Phase 2 Oracle")
             step_names = [step.get("name") for step in job["steps"]]
+            # Project setup installs the binding's declared dependencies;
+            # scripts/test_pr_workflow_routing.py pins that step in the action.
             test.assertEqual(
                 [
-                    step.get("run")
+                    step.get("uses")
                     for step in job["steps"]
-                    if step.get("name") == "Install Python binding dependencies"
+                    if step.get("name") == "Set up project CI"
                 ],
-                [
-                    'uv pip install --python "$PYO3_PYTHON" '
-                    "-r bindings/python/pyproject.toml"
-                ],
+                ["./.github/actions/setup-project-ci"],
             )
             test.assertLess(
-                step_names.index("Install Python binding dependencies"),
+                step_names.index("Set up project CI"),
                 step_names.index("Gate (runtime representation stage)"),
             )
             artifacts = [

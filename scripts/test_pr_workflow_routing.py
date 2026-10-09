@@ -1063,6 +1063,110 @@ def assert_author_machine_tokens(test: unittest.TestCase) -> None:
     test.assertIn("-f expected_head_sha=", guide)
 
 
+SETUP_PROJECT_CI = ROOT / ".github/actions/setup-project-ci/action.yml"
+SETUP_PROJECT_CI_USES = "./.github/actions/setup-project-ci"
+BINDING_DEPENDENCY_INSTALL = (
+    'uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml'
+)
+BINDING_DEPENDENCY_INSTALL_PATTERN = re.compile(
+    r"\buv pip install --python \S+ -r bindings/python/pyproject\.toml\b"
+)
+# Commands whose test selection can include chelis-python, whose unit tests
+# import the binding's runtime dependencies (chelis#3471). Any gate stage and
+# any planned shard counts; a Cargo run counts unless it selects only other
+# packages.
+GATE_OR_SHARD_RUNNER = re.compile(
+    r"\bchelis-gate\b|\bscripts/gate\.py\b|\bci_change_owned\.py\s+run-shard\b"
+)
+CARGO_TEST_RUNNER = re.compile(r"\bcargo\s+(?:nextest\s+run|test)\b")
+CARGO_PACKAGE_SELECTION = re.compile(r"(?:^|\s)(?:-p|--package)[\s=](\S+)")
+CARGO_WORKSPACE_SELECTION = re.compile(r"(?:^|\s)(?:--workspace|--all)(?:\s|$)")
+
+
+def can_run_chelis_python_tests(run: str) -> bool:
+    if GATE_OR_SHARD_RUNNER.search(run):
+        return True
+    for line in run.replace("\\\n", " ").splitlines():
+        for command in re.split(r"&&|\|\||;", line):
+            runner = CARGO_TEST_RUNNER.search(command)
+            if runner is None:
+                continue
+            arguments = command[runner.end():].split(" -- ", 1)[0]
+            packages = CARGO_PACKAGE_SELECTION.findall(arguments)
+            if (
+                CARGO_WORKSPACE_SELECTION.search(arguments)
+                or not packages
+                or "chelis-python" in packages
+            ):
+                return True
+    return False
+
+
+def setup_action_provisions_bindings(action: dict) -> bool:
+    return any(
+        BINDING_DEPENDENCY_INSTALL_PATTERN.search(str(step.get("run", "")))
+        for step in action["runs"]["steps"]
+    )
+
+
+def assert_setup_action_provisions_bindings(
+    test: unittest.TestCase, action: dict
+) -> None:
+    steps = action["runs"]["steps"]
+    installs = [
+        step for step in steps
+        if BINDING_DEPENDENCY_INSTALL_PATTERN.search(str(step.get("run", "")))
+    ]
+    test.assertEqual(len(installs), 1, "project setup must install bindings once")
+    install = installs[0]
+    test.assertIs(
+        install, steps[-1],
+        "binding dependencies install after both runner environments exist",
+    )
+    test.assertNotIn("if", install, "binding dependencies install on every runner")
+    test.assertEqual(install.get("shell"), "chelis-ci-shell run {0}")
+    test.assertEqual(install.get("run"), BINDING_DEPENDENCY_INSTALL)
+
+
+def binding_provisioning_violations(
+    workflows: dict[str, dict], action: dict
+) -> list[str]:
+    """Name each step that can run chelis-python tests before provisioning."""
+    setup_provisions = setup_action_provisions_bindings(action)
+    violations: list[str] = []
+    for workflow_name, workflow in sorted(workflows.items()):
+        for job_name, job in (workflow.get("jobs") or {}).items():
+            provisioned = False
+            uses_setup = False
+            for index, step in enumerate(job.get("steps") or []):
+                label = f"{workflow_name}:{job_name}:{step.get('name', index)}"
+                if step.get("uses") == SETUP_PROJECT_CI_USES:
+                    uses_setup = True
+                    provisioned = provisioned or setup_provisions
+                    continue
+                run = str(step.get("run", ""))
+                if BINDING_DEPENDENCY_INSTALL_PATTERN.search(run):
+                    if uses_setup and setup_provisions:
+                        violations.append(
+                            f"{label}: repeats the install project setup owns"
+                        )
+                    provisioned = True
+                    continue
+                if can_run_chelis_python_tests(run) and not provisioned:
+                    violations.append(
+                        f"{label}: can run chelis-python tests without the "
+                        "binding dependencies"
+                    )
+    return violations
+
+
+def current_workflows() -> dict[str, dict]:
+    return {
+        path.name: yaml.safe_load(path.read_text())
+        for path in sorted((ROOT / ".github/workflows").glob("*.y*ml"))
+    }
+
+
 class PullRequestWorkflowRoutingTests(unittest.TestCase):
     def test_preflight_requires_the_independent_local_command_contract(self) -> None:
         workflow = copy.deepcopy(yaml.safe_load(CI.read_text()))
@@ -1550,6 +1654,110 @@ class CandidatePrivilegeTests(unittest.TestCase):
                         flag = "--expected-base-ref" if path == RETARGET else "--base-ref"
                         self.assertEqual(arguments[arguments.index(flag) + 1], branch)
                         self.assertFalse((temporary / "injected").exists())
+
+
+class PythonBindingProvisioningTests(unittest.TestCase):
+    """Every lane that can run chelis-python tests has its imports (chelis#3471)."""
+
+    def test_project_setup_provisions_the_binding_dependencies(self) -> None:
+        assert_setup_action_provisions_bindings(
+            self, yaml.safe_load(SETUP_PROJECT_CI.read_text())
+        )
+
+    def test_project_setup_cannot_drop_gate_or_reorder_the_install(self) -> None:
+        action = yaml.safe_load(SETUP_PROJECT_CI.read_text())
+        for mutation in ("dropped", "gated", "early"):
+            mutated = copy.deepcopy(action)
+            steps = mutated["runs"]["steps"]
+            if mutation == "dropped":
+                steps.pop()
+            elif mutation == "gated":
+                steps[-1]["if"] = "runner.environment == 'github-hosted'"
+            else:
+                steps.insert(0, steps.pop())
+            with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
+                assert_setup_action_provisions_bindings(self, mutated)
+
+    def test_every_chelis_python_test_step_is_provisioned(self) -> None:
+        self.assertEqual(
+            binding_provisioning_violations(
+                current_workflows(),
+                yaml.safe_load(SETUP_PROJECT_CI.read_text()),
+            ),
+            [],
+        )
+
+    def test_unprovisioned_project_setup_reds_the_targeted_rebase_units(
+        self,
+    ) -> None:
+        action = yaml.safe_load(SETUP_PROJECT_CI.read_text())
+        action["runs"]["steps"].pop()
+        violations = binding_provisioning_violations(
+            {"ci.yml": yaml.safe_load(CI.read_text())}, action
+        )
+        self.assertIn(
+            "ci.yml:lint-rust:Run affected Rust policy and units for targeted "
+            "rebase: can run chelis-python tests without the binding "
+            "dependencies",
+            violations,
+        )
+
+    def test_unprovisioned_job_selection_is_package_exact(self) -> None:
+        action = yaml.safe_load(SETUP_PROJECT_CI.read_text())
+        cases = {
+            "cargo nextest run --workspace --lib": True,
+            "cargo nextest run -p chelis-python --lib": True,
+            "cargo test --package=chelis-python": True,
+            "cargo test -p chelis-prove -p chelis-python --lib": True,
+            "cargo test": True,
+            "chelis-gate targeted-units": True,
+            "python3 scripts/gate.py --fast": True,
+            "python scripts/ci_change_owned.py run-shard --shard 0": True,
+            "cargo test -p chelis-prove --features smt": False,
+            "cargo nextest run -p chelis-cli --test prove -- --workspace": False,
+            "cargo build --workspace": False,
+        }
+        for run, expected in cases.items():
+            workflow = {
+                "jobs": {"probe": {"steps": [{"name": "probe", "run": run}]}}
+            }
+            with self.subTest(run=run):
+                self.assertEqual(
+                    binding_provisioning_violations({"w.yml": workflow}, action),
+                    (
+                        [
+                            "w.yml:probe:probe: can run chelis-python tests "
+                            "without the binding dependencies"
+                        ]
+                        if expected
+                        else []
+                    ),
+                )
+                workflow["jobs"]["probe"]["steps"].insert(
+                    0, {"name": "install", "run": BINDING_DEPENDENCY_INSTALL}
+                )
+                self.assertEqual(
+                    binding_provisioning_violations({"w.yml": workflow}, action),
+                    [],
+                )
+
+    def test_a_setup_job_may_not_repeat_the_install(self) -> None:
+        action = yaml.safe_load(SETUP_PROJECT_CI.read_text())
+        workflow = {
+            "jobs": {
+                "probe": {
+                    "steps": [
+                        {"name": "setup", "uses": SETUP_PROJECT_CI_USES},
+                        {"name": "again", "run": BINDING_DEPENDENCY_INSTALL},
+                        {"name": "units", "run": "chelis-gate targeted-units"},
+                    ]
+                }
+            }
+        }
+        self.assertEqual(
+            binding_provisioning_violations({"w.yml": workflow}, action),
+            ["w.yml:probe:again: repeats the install project setup owns"],
+        )
 
 
 if __name__ == "__main__":
