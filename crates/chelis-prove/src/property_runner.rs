@@ -42,6 +42,7 @@ use smt_lower::{
 };
 
 mod beacon;
+mod beacon_scalar;
 mod injection;
 use crate::beacon_contract_prover::BeaconContractProver;
 use crate::composition::{

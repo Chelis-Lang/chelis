@@ -132,7 +132,7 @@ impl BeaconShim {
         let inputs: BTreeMap<_, _> = inputs
             .dims
             .iter()
-            .map(|(name, lo, hi)| (name, json!({"lo":lo,"hi":hi})))
+            .map(|(name, lo, hi)| (name, json!({"lo":lo.as_f64_lossy(),"hi":hi.as_f64_lossy()})))
             .collect();
         Ok(
             json!({"schema_version":"beacon.relu_search.v1", "dag":dag,"inputs":inputs,"clauses":[[1]],

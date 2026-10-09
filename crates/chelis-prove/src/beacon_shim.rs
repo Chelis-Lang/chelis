@@ -246,7 +246,7 @@ impl BeaconShim {
         let input_dims: Vec<serde_json::Value> = inputs
             .dims
             .iter()
-            .map(|(name, lo, hi)| serde_json::json!({ "name": name, "lo": lo, "hi": hi }))
+            .map(|(name, lo, hi)| serde_json::json!({ "name": name, "lo": lo.as_f64_lossy(), "hi": hi.as_f64_lossy() }))
             .collect();
         serde_json::json!({
             "schema_version": REQUEST_SCHEMA_VERSION,
@@ -256,8 +256,8 @@ impl BeaconShim {
             "inputs": input_dims,
             "output": {
                 "output": output.output,
-                "lo": output.lo,
-                "hi": output.hi,
+                "lo": output.lo.as_f64_lossy(),
+                "hi": output.hi.as_f64_lossy(),
             },
             "oracle": oracle.request_value(),
             "split_max_depth": serde_json::Value::Null,
@@ -429,6 +429,16 @@ impl DischargeEngine for BeaconShim {
                 serde_json::json!({ "engine": "beacon", "error": "wrong_goal_shape" }),
             );
         };
+
+        // These fields are public. A caller can mutate a valid goal after
+        // construction, so validate again before converting tagged endpoints
+        // into the current Beacon request's f64 fields.
+        if let Err(error) = Goal::box_range(inputs.clone(), output.clone()) {
+            return untrusted_error(
+                &error.to_string(),
+                serde_json::json!({ "engine": "beacon", "error": "invalid_box_range" }),
+            );
+        }
 
         // The handle must address a serialized artifact (dag_hash + root_index).
         let (Some(dag_hash), Some(root_index)) = (goal.ir.dag_hash(), goal.ir.root_index()) else {

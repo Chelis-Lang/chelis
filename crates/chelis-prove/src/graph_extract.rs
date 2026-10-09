@@ -349,7 +349,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// `(name, lo, hi)` dimensions. Beacon's Load seeding and split tie-break
 /// are name-addressed; sorting by name keeps the emitted form stable across
 /// runs regardless of caller insertion order.
-pub fn name_sorted_input_box(mut dims: Vec<(String, f64, f64)>) -> IntervalBox {
+pub fn name_sorted_input_box(
+    mut dims: Vec<(String, chelis_types::ScalarValue, chelis_types::ScalarValue)>,
+) -> IntervalBox {
     dims.sort_by(|a, b| a.0.cmp(&b.0));
     IntervalBox { dims }
 }

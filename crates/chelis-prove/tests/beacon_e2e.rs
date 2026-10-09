@@ -68,7 +68,13 @@ fn input_box(dims: &[(&str, f64, f64)]) -> IntervalBox {
     IntervalBox {
         dims: dims
             .iter()
-            .map(|(n, lo, hi)| (n.to_string(), *lo, *hi))
+            .map(|(n, lo, hi)| {
+                (
+                    n.to_string(),
+                    support::tagged_f64(*lo),
+                    support::tagged_f64(*hi),
+                )
+            })
             .collect(),
     }
 }
@@ -76,8 +82,8 @@ fn input_box(dims: &[(&str, f64, f64)]) -> IntervalBox {
 fn output_range(name: &str, lo: f64, hi: f64) -> OutputRange {
     OutputRange {
         output: name.to_string(),
-        lo,
-        hi,
+        lo: support::tagged_f64(lo),
+        hi: support::tagged_f64(hi),
     }
 }
 

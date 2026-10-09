@@ -1,31 +1,43 @@
 # Scalar range properties through Beacon
 
 `chelis prove --tier beacon-only` selects a fail-closed real-arithmetic lane.
-Each scalar input uses a rank-zero `tensor[f64]` carrier so its operations enter
-the compiler graph lane. Property parameters must each have a finite closed
-interval from explicit f64 literal `where` inequalities on `tensor_to_scalar(x)`.
-The body is `tensor_to_scalar(output_expression) <= upper_f64_literal`.
+The self-contained tensor route uses a rank-zero `tensor[f64]` carrier so its
+operations enter the compiler graph lane. Its property parameters have finite,
+closed intervals from explicit f64 literal `where` inequalities on
+`tensor_to_scalar(x)`. Its body is
+`tensor_to_scalar(output_expression) <= upper_f64_literal`.
+The package scalar route admits named `f64` scalar parameters with direct
+finite, closed `where` bounds and an `output_expression <= upper_f64_literal`
+body. It extracts a proof-only rank-zero graph from the checked linked source
+declarations, including imported pure f64 functions. The original scalar
+functions keep their ordinary host classification. This scalar extractor
+accepts finite typed f64 literals, variables, unary negation, addition,
+subtraction, multiplication, division, and direct calls in a pure f64
+closure; other expressions report unsupported.
 Missing, duplicate or unrecognized constraints are rejected;
 there is no SMT or fuzz fallback in this explicit lane.
 
-For a standalone in-memory source, the source must be self-contained, with no
-imports or shadowing of the `tensor_to_scalar` bridge. The CLI's file path may
-resolve a Reef package first; an imported rank-zero tensor function then lowers
-from the checked linked declarations. The graph inlines that function, so the
-property result also records the selected linked source declarations and a
-digest of the exact authored output expression. These are provenance for the
-compiler's source-to-graph step. Beacon's certificate addresses the graph hash
-and root.
+For a standalone in-memory source, the source must be self-contained. The
+tensor route also rejects shadowing of the `tensor_to_scalar` bridge. The
+CLI's file path may resolve a Reef package first; imported rank-zero tensor
+or pure f64 scalar functions then lower from the checked linked declarations.
+The graph inlines those functions, so the property result records the selected
+linked source declarations and a digest of the exact authored output
+expression. These are provenance for the compiler's source-to-graph step.
+Beacon's certificate addresses the graph hash and root.
 
 The gallery build generates its network source before dispatch.
-[The executable example](../../examples/beacon_scalar_range.ch) is run
+[The tensor example](../../examples/beacon_scalar_range.ch) is run
 with `CHELIS_BEACON_BIN=/absolute/path/to/chelis-beacon chelis prove
 examples/beacon_scalar_range.ch --tier beacon-only --beacon-budget 2000 --json`.
+[The scalar example](../../examples/beacon_scalar_host.ch) exercises the
+proof-only f64 host extraction with the same explicit tier.
 
 The shared property runner lowers the expression's reachable source closure.
 `GoalShape::ScalarUpperBound` carries the named input box and a tagged f64
-`ScalarValue` threshold. This extends the historical two-shape seam without
-changing `BoxRange` or pretending a one-sided bound has a finite lower limit.
+`ScalarValue` threshold. Its `IntervalBox` endpoints and the separate
+`BoxRange` output endpoints also use tagged `ScalarValue`. A one-sided bound
+does not acquire a fictitious finite lower limit.
 The exact WireDag bytes are addressed by SHA256 and a node ID. The shim verifies
 that binding, names and scalar types before adding the folded expression
 `output - threshold`. Its request keeps both output and folded roots, and the

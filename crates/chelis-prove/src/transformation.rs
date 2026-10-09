@@ -102,12 +102,12 @@ mod tests {
     fn make_discharged_entry() -> CorpusEntry {
         let goal = Goal::box_range(
             IntervalBox {
-                dims: vec![("x".into(), 0.0, 1.0)],
+                dims: crate::discharge::test_dims(vec![("x".into(), 0.0, 1.0)]),
             },
             OutputRange {
                 output: "out".into(),
-                lo: 0.0,
-                hi: 1.0,
+                lo: crate::discharge::test_f64(0.0),
+                hi: crate::discharge::test_f64(1.0),
             },
         )
         .unwrap()
@@ -128,12 +128,12 @@ mod tests {
     fn make_undischargeable_entry() -> CorpusEntry {
         let goal = Goal::box_range(
             IntervalBox {
-                dims: vec![("x".into(), 0.0, 1.0)],
+                dims: crate::discharge::test_dims(vec![("x".into(), 0.0, 1.0)]),
             },
             OutputRange {
                 output: "out".into(),
-                lo: 100.0,
-                hi: 200.0,
+                lo: crate::discharge::test_f64(100.0),
+                hi: crate::discharge::test_f64(200.0),
             },
         )
         .unwrap()
@@ -197,12 +197,12 @@ mod tests {
     fn transformation_pipeline_chains_steps() {
         let goal = Goal::box_range(
             IntervalBox {
-                dims: vec![("x".into(), 0.0, 1.0)],
+                dims: crate::discharge::test_dims(vec![("x".into(), 0.0, 1.0)]),
             },
             OutputRange {
                 output: "out".into(),
-                lo: 0.0,
-                hi: 1.0,
+                lo: crate::discharge::test_f64(0.0),
+                hi: crate::discharge::test_f64(1.0),
             },
         )
         .unwrap();

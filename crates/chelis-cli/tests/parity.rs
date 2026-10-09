@@ -714,6 +714,11 @@ fn parity_induction_bond_library_only() {
 }
 
 #[test]
+fn parity_beacon_scalar_host_library_only() {
+    drive_parity(&examples_root().join("beacon_scalar_host.ch"), false);
+}
+
+#[test]
 fn parity_beacon_scalar_range_library_only() {
     drive_parity(&examples_root().join("beacon_scalar_range.ch"), false);
 }

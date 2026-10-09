@@ -33,8 +33,8 @@ const SINGLE_OUTPUT_SOURCE: &str = "x = (x : tensor[f32])\n\
 fn output_range(name: &str, lo: f64, hi: f64) -> OutputRange {
     OutputRange {
         output: name.to_string(),
-        lo,
-        hi,
+        lo: crate::discharge::test_f64(lo),
+        hi: crate::discharge::test_f64(hi),
     }
 }
 
@@ -42,7 +42,13 @@ fn input_box(dims: &[(&str, f64, f64)]) -> IntervalBox {
     IntervalBox {
         dims: dims
             .iter()
-            .map(|(n, lo, hi)| (n.to_string(), *lo, *hi))
+            .map(|(n, lo, hi)| {
+                (
+                    n.to_string(),
+                    crate::discharge::test_f64(*lo),
+                    crate::discharge::test_f64(*hi),
+                )
+            })
             .collect(),
     }
 }
@@ -209,17 +215,17 @@ fn input_box_is_name_keyed_and_deterministically_ordered() {
     assert_eq!(output.output, "out");
     // Single scalar output: the goal carries exactly one OutputRange, not a
     // packed multi-output range.
-    assert_eq!(output.lo, 0.0);
-    assert_eq!(output.hi, 100.0);
+    assert_eq!(output.lo, crate::discharge::test_f64(0.0));
+    assert_eq!(output.hi, crate::discharge::test_f64(100.0));
 }
 
 #[test]
 fn name_sorted_input_box_orders_by_name() {
-    let boxed = name_sorted_input_box(vec![
+    let boxed = name_sorted_input_box(crate::discharge::test_dims(vec![
         ("z".to_string(), 0.0, 1.0),
         ("a".to_string(), 0.0, 1.0),
         ("m".to_string(), 0.0, 1.0),
-    ]);
+    ]));
     let names: Vec<&str> = boxed.dims.iter().map(|(n, _, _)| n.as_str()).collect();
     assert_eq!(names, vec!["a", "m", "z"]);
 }

@@ -46,7 +46,13 @@ fn input_box(dims: &[(&str, f64, f64)]) -> IntervalBox {
     IntervalBox {
         dims: dims
             .iter()
-            .map(|(n, lo, hi)| (n.to_string(), *lo, *hi))
+            .map(|(n, lo, hi)| {
+                (
+                    n.to_string(),
+                    crate::discharge::test_f64(*lo),
+                    crate::discharge::test_f64(*hi),
+                )
+            })
             .collect(),
     }
 }
@@ -54,8 +60,8 @@ fn input_box(dims: &[(&str, f64, f64)]) -> IntervalBox {
 fn target_range(target: &str, lo: f64, hi: f64) -> GradTargetRange {
     GradTargetRange {
         target: target.to_string(),
-        lo,
-        hi,
+        lo: crate::discharge::test_f64(lo),
+        hi: crate::discharge::test_f64(hi),
     }
 }
 

@@ -27,6 +27,7 @@
 //! authoring such goals yet (no producer exists; none is promised this phase).
 
 use crate::tier_b::{SmtProperty, TierBResult};
+use chelis_types::{ScalarValue, types::Prim};
 
 /// A content-addressed back-reference to a serialized exact-version `WireDag` artifact.
 ///
@@ -103,7 +104,7 @@ impl IrHandle {
 #[derive(Debug, Clone, PartialEq)]
 pub struct IntervalBox {
     /// One `(name, lo, hi)` constraint per input dimension.
-    pub dims: Vec<(String, f64, f64)>,
+    pub dims: Vec<(String, ScalarValue, ScalarValue)>,
 }
 
 /// An assertion that a named output lies within `[lo, hi]`.
@@ -112,8 +113,8 @@ pub struct IntervalBox {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputRange {
     pub output: String,
-    pub lo: f64,
-    pub hi: f64,
+    pub lo: ScalarValue,
+    pub hi: ScalarValue,
 }
 
 /// The canonical shape of a [`Goal`].
@@ -160,11 +161,30 @@ pub enum GoalError {
 /// Whether `[lo, hi]` is a non-empty interval. A NaN bound is incomparable, so
 /// `partial_cmp` returns `None` and the interval is treated as ill-formed;
 /// `lo > hi` (an inverted interval) is likewise rejected.
-fn interval_is_non_empty(lo: f64, hi: f64) -> bool {
+fn interval_is_non_empty(lo: ScalarValue, hi: ScalarValue) -> bool {
+    if lo.prim() != Prim::F64 || hi.prim() != Prim::F64 {
+        return false;
+    }
+    if !lo.as_f64_lossy().is_finite() || !hi.as_f64_lossy().is_finite() {
+        return false;
+    }
     matches!(
-        lo.partial_cmp(&hi),
+        lo.as_f64_lossy().partial_cmp(&hi.as_f64_lossy()),
         Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
     )
+}
+
+#[cfg(test)]
+pub(crate) fn test_f64(value: f64) -> ScalarValue {
+    chelis_types::scalar_from_f64("test box bound", Prim::F64, value)
+        .expect("f64 is a valid tagged test bound")
+}
+
+#[cfg(test)]
+pub(crate) fn test_dims(dims: Vec<(String, f64, f64)>) -> Vec<(String, ScalarValue, ScalarValue)> {
+    dims.into_iter()
+        .map(|(name, lo, hi)| (name, test_f64(lo), test_f64(hi)))
+        .collect()
 }
 
 impl Goal {
@@ -177,9 +197,11 @@ impl Goal {
         for (name, lo, hi) in &inputs.dims {
             if name.is_empty()
                 || !names.insert(name)
-                || !lo.is_finite()
-                || !hi.is_finite()
-                || lo > hi
+                || lo.prim() != Prim::F64
+                || hi.prim() != Prim::F64
+                || !lo.as_f64_lossy().is_finite()
+                || !hi.as_f64_lossy().is_finite()
+                || lo.as_f64_lossy() > hi.as_f64_lossy()
             {
                 return Err(GoalError::IllFormed(format!(
                     "invalid or duplicate scalar input `{name}`"
@@ -751,12 +773,12 @@ mod tests {
 
         let box_goal = Goal::box_range(
             IntervalBox {
-                dims: vec![("s".to_string(), 0.0, 100.0)],
+                dims: test_dims(vec![("s".to_string(), 0.0, 100.0)]),
             },
             OutputRange {
                 output: "price".to_string(),
-                lo: 0.0,
-                hi: 50.0,
+                lo: test_f64(0.0),
+                hi: test_f64(50.0),
             },
         )
         .expect("well-formed box goal");
@@ -769,12 +791,15 @@ mod tests {
     fn box_range_goal_accepts_non_empty_intervals() {
         let goal = Goal::box_range(
             IntervalBox {
-                dims: vec![("s".to_string(), 50.0, 150.0), ("t".to_string(), 0.0, 1.0)],
+                dims: test_dims(vec![
+                    ("s".to_string(), 50.0, 150.0),
+                    ("t".to_string(), 0.0, 1.0),
+                ]),
             },
             OutputRange {
                 output: "price".to_string(),
-                lo: 0.0,
-                hi: 1000.0,
+                lo: test_f64(0.0),
+                hi: test_f64(1000.0),
             },
         )
         .expect("non-empty intervals are well-formed");
@@ -786,12 +811,12 @@ mod tests {
     fn box_range_goal_rejects_inverted_input_interval() {
         let err = Goal::box_range(
             IntervalBox {
-                dims: vec![("s".to_string(), 150.0, 50.0)],
+                dims: test_dims(vec![("s".to_string(), 150.0, 50.0)]),
             },
             OutputRange {
                 output: "price".to_string(),
-                lo: 0.0,
-                hi: 1.0,
+                lo: test_f64(0.0),
+                hi: test_f64(1.0),
             },
         )
         .expect_err("lo > hi must be rejected");
@@ -802,12 +827,12 @@ mod tests {
     fn box_range_goal_rejects_nan_input_bound() {
         let err = Goal::box_range(
             IntervalBox {
-                dims: vec![("s".to_string(), f64::NAN, 50.0)],
+                dims: test_dims(vec![("s".to_string(), f64::NAN, 50.0)]),
             },
             OutputRange {
                 output: "price".to_string(),
-                lo: 0.0,
-                hi: 1.0,
+                lo: test_f64(0.0),
+                hi: test_f64(1.0),
             },
         )
         .expect_err("a NaN bound is incomparable and must be rejected");
@@ -815,15 +840,47 @@ mod tests {
     }
 
     #[test]
+    fn box_range_rejects_other_numeric_tags_and_infinite_bounds() {
+        let f32_bound =
+            chelis_types::scalar_from_f64("test bound", Prim::F32, 0.0).expect("exact f32 zero");
+        for invalid in [f32_bound, test_f64(f64::INFINITY)] {
+            let error = Goal::box_range(
+                IntervalBox {
+                    dims: vec![("s".into(), invalid, test_f64(1.0))],
+                },
+                OutputRange {
+                    output: "price".into(),
+                    lo: test_f64(0.0),
+                    hi: test_f64(1.0),
+                },
+            )
+            .expect_err("unsupported or infinite input bound");
+            assert!(matches!(error, GoalError::IllFormed(_)));
+            let error = Goal::box_range(
+                IntervalBox {
+                    dims: test_dims(vec![("s".into(), 0.0, 1.0)]),
+                },
+                OutputRange {
+                    output: "price".into(),
+                    lo: invalid,
+                    hi: test_f64(1.0),
+                },
+            )
+            .expect_err("unsupported or infinite output bound");
+            assert!(matches!(error, GoalError::IllFormed(_)));
+        }
+    }
+
+    #[test]
     fn box_range_goal_rejects_inverted_output_range() {
         let err = Goal::box_range(
             IntervalBox {
-                dims: vec![("s".to_string(), 0.0, 1.0)],
+                dims: test_dims(vec![("s".to_string(), 0.0, 1.0)]),
             },
             OutputRange {
                 output: "price".to_string(),
-                lo: 10.0,
-                hi: 1.0,
+                lo: test_f64(10.0),
+                hi: test_f64(1.0),
             },
         )
         .expect_err("output lo > hi must be rejected");
@@ -1099,12 +1156,12 @@ mod tests {
         let engine = Cvc5Engine::new();
         let goal = Goal::box_range(
             IntervalBox {
-                dims: vec![("s".to_string(), 0.0, 1.0)],
+                dims: test_dims(vec![("s".to_string(), 0.0, 1.0)]),
             },
             OutputRange {
                 output: "price".to_string(),
-                lo: 0.0,
-                hi: 1.0,
+                lo: test_f64(0.0),
+                hi: test_f64(1.0),
             },
         )
         .expect("well-formed box goal");

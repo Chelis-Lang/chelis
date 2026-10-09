@@ -25,7 +25,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn make_input_box() -> IntervalBox {
     IntervalBox {
-        dims: vec![
+        dims: support::tagged_dims(vec![
             // Market parameters (ranges)
             ("s".into(), 50.0, 150.0),
             ("k".into(), 50.0, 150.0),
@@ -51,15 +51,15 @@ fn make_input_box() -> IntervalBox {
                 std::f64::consts::FRAC_2_SQRT_PI,
             ),
             ("small_thresh".into(), 0.00001, 0.00001),
-        ],
+        ]),
     }
 }
 
 fn make_output() -> OutputRange {
     OutputRange {
         output: "bs_call_vec".into(),
-        lo: 0.0,
-        hi: 200.0,
+        lo: support::tagged_f64(0.0),
+        hi: support::tagged_f64(200.0),
     }
 }
 

@@ -3156,15 +3156,23 @@ fn resolve_package_root(input: &Path, explicit: Option<&Path>) -> Option<PathBuf
 fn beacon_is_wired() -> bool {
     use chelis_prove::discharge::{Goal, IntervalBox, OutputRange};
     use chelis_prove::engine_registry::DischargeRegistry;
+    use chelis_types::{dtype_semantics::scalar_from_f64, types::Prim};
+
+    let Ok(lo) = scalar_from_f64("Beacon capability bound", Prim::F64, 0.0) else {
+        return false;
+    };
+    let Ok(hi) = scalar_from_f64("Beacon capability bound", Prim::F64, 1.0) else {
+        return false;
+    };
 
     let Ok(goal) = Goal::box_range(
         IntervalBox {
-            dims: vec![("x".to_string(), 0.0, 1.0)],
+            dims: vec![("x".to_string(), lo, hi)],
         },
         OutputRange {
             output: "y".to_string(),
-            lo: 0.0,
-            hi: 1.0,
+            lo,
+            hi,
         },
     ) else {
         return false;
