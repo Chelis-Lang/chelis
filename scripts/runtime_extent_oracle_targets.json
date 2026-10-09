@@ -1479,6 +1479,7 @@
         "c_recursive_pair_traps_at_the_right_leaf",
         "c_tuple_option_and_record_results_trap_at_their_producer",
         "c_unclaimed_generic_call_checks_nothing",
+        "container_recursive_alias_closes_at_the_alias",
         "eval_absent_variant_owes_nothing",
         "eval_alias_type_argument_claims_like_its_expansion",
         "eval_aliased_nominal_claims_like_its_expansion",

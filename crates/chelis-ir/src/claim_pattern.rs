@@ -133,11 +133,6 @@ pub enum ClaimPatternError {
     UnresolvedNominal {
         nominal: String,
     },
-    /// The claim passes through a recursive type alias that can hold a
-    /// tensor.
-    RecursiveAlias {
-        alias: String,
-    },
     Malformed(String),
 }
 
@@ -154,11 +149,6 @@ impl fmt::Display for ClaimPatternError {
                 "an extent claim passes through `{nominal}`, which has no declaration to \
                  instantiate"
             ),
-            Self::RecursiveAlias { alias } => write!(
-                f,
-                "an extent claim passes through the recursive alias `{alias}`, which can hold a \
-                 tensor, so the claim has no finite pattern to check"
-            ),
             Self::Malformed(detail) => write!(f, "malformed claimed type: {detail}"),
         }
     }
@@ -173,6 +163,7 @@ impl ClaimPattern {
             registry,
             nodes: Vec::new(),
             memo: BTreeMap::new(),
+            alias_targets: BTreeMap::new(),
             analysis: std::cell::OnceCell::new(),
         };
         let authored = expand_aliases(authored, registry)?;
@@ -268,6 +259,9 @@ struct Builder<'a> {
     registry: &'a AdtRegistry,
     nodes: Vec<Option<ClaimNode>>,
     memo: BTreeMap<String, ClaimNodeId>,
+    /// A recursive alias application's node stands for the node of its
+    /// unfolding, `None` when that owes nothing. Resolved in `finish`.
+    alias_targets: BTreeMap<usize, Option<ClaimNodeId>>,
     /// The non-regular and tensor-carrying declarations, computed only when
     /// the walk first meets a nominal application.
     analysis: std::cell::OnceCell<(BTreeSet<String>, BTreeSet<String>)>,
@@ -355,8 +349,9 @@ impl Builder<'_> {
         }
         let Some(definition) = self.registry.lookup(name) else {
             // Only a recursive alias reaches the walk unexpanded (see
-            // `expand_aliases`). Its unfolding owes nothing unless it can hold
-            // a tensor; one that can has no finite pattern and is refused.
+            // `expand_aliases`). Its application is memoized like a nominal
+            // application and stands for its unfolding, so every alias cycle
+            // closes at the alias whatever constructors it passes through.
             if let Some(alias) = self.registry.resolve_alias(name) {
                 let substitution = parameter_substitution(name, &alias.param_args, args)?;
                 let body = expand_aliases_on(
@@ -364,13 +359,12 @@ impl Builder<'_> {
                     self.registry,
                     &mut vec![name.to_string()],
                 )?;
-                return if self.may_carry(&body) {
-                    Err(ClaimPatternError::RecursiveAlias {
-                        alias: name.to_string(),
-                    })
-                } else {
-                    Ok(None)
-                };
+                self.nodes.push(None);
+                let id = ClaimNodeId(self.nodes.len() - 1);
+                self.memo.insert(key, id);
+                let target = self.node(&body)?;
+                self.alias_targets.insert(id.0, target);
+                return Ok(Some(id));
             }
             // A name nothing declares cannot be shown to owe nothing.
             return Err(ClaimPatternError::UnresolvedNominal {
@@ -419,30 +413,79 @@ impl Builder<'_> {
 
     /// Whether a type argument may hold a tensor.
     fn may_carry(&self, ty: &Expr) -> bool {
+        self.may_carry_in(ty, &mut Vec::new())
+    }
+
+    /// `expanding` holds the recursive aliases being unfolded on this path,
+    /// so an alias cycle is examined once.
+    fn may_carry_in(&self, ty: &Expr, expanding: &mut Vec<String>) -> bool {
         let Some((tag, children)) = type_parts(ty) else {
             return false;
         };
         match tag {
             DeepTag::TTensor => true,
             DeepTag::TAdt => {
-                let own = children
-                    .first()
-                    .and_then(symbol)
-                    .is_some_and(|name| self.carrying().contains(name));
-                own || children.iter().skip(1).any(|arg| self.may_carry(arg))
+                let Some(name) = children.first().and_then(symbol) else {
+                    return false;
+                };
+                if children[1..]
+                    .iter()
+                    .any(|arg| self.may_carry_in(arg, expanding))
+                    || self.carrying().contains(name)
+                {
+                    return true;
+                }
+                // A recursive alias left unexpanded carries what its
+                // unfolding carries.
+                if expanding.iter().any(|seen| seen == name) {
+                    return false;
+                }
+                let Some(alias) = self.registry.resolve_alias(name) else {
+                    return false;
+                };
+                let Ok(substitution) =
+                    parameter_substitution(name, &alias.param_args, &children[1..])
+                else {
+                    return false;
+                };
+                expanding.push(name.to_string());
+                let carries = expand_aliases_on(
+                    &substitute(&type_to_deep_expr(&alias.body), &substitution),
+                    self.registry,
+                    &mut expanding.clone(),
+                )
+                .is_ok_and(|body| self.may_carry_in(&body, expanding));
+                expanding.pop();
+                carries
             }
-            _ => children.iter().any(|child| self.may_carry(child)),
+            _ => children
+                .iter()
+                .any(|child| self.may_carry_in(child, expanding)),
         }
     }
 
     /// Drop every node that owes nothing, including a cycle that reaches no
     /// tensor, and renumber the rest.
     fn finish(self, root: Option<ClaimNodeId>) -> ClaimPattern {
-        let nodes = self
-            .nodes
-            .into_iter()
-            .map(|node| node.expect("every reserved claim node is filled"))
+        // An alias node resolves through its unfolding to a real node, or to
+        // nothing when the unfolding owes nothing or is only aliases.
+        let resolved = (0..self.nodes.len())
+            .map(|start| {
+                let mut at = start;
+                let mut seen = BTreeSet::new();
+                loop {
+                    if self.nodes[at].is_some() {
+                        return Some(ClaimNodeId(at));
+                    }
+                    let target = self.alias_targets.get(&at).copied().flatten()?;
+                    if !seen.insert(at) {
+                        return None;
+                    }
+                    at = target.0;
+                }
+            })
             .collect::<Vec<_>>();
+        let nodes = self.nodes;
         let children = |node: &ClaimNode| -> Vec<ClaimNodeId> {
             match node {
                 ClaimNode::Tensor(_) => Vec::new(),
@@ -453,15 +496,21 @@ impl Builder<'_> {
                     .flat_map(|constructor| constructor.fields.iter().filter_map(|f| f.node))
                     .collect(),
             }
+            .into_iter()
+            .filter_map(|child| resolved[child.0])
+            .collect()
         };
         let mut live = nodes
             .iter()
-            .map(|node| matches!(node, ClaimNode::Tensor(_)))
+            .map(|node| matches!(node, Some(ClaimNode::Tensor(_))))
             .collect::<Vec<_>>();
         loop {
             let mut changed = false;
             for (index, node) in nodes.iter().enumerate() {
-                if !live[index] && children(node).iter().any(|child| live[child.0]) {
+                if let Some(node) = node
+                    && !live[index]
+                    && children(node).iter().any(|child| live[child.0])
+                {
                     live[index] = true;
                     changed = true;
                 }
@@ -478,36 +527,38 @@ impl Builder<'_> {
                 next += 1;
             }
         }
-        let map = |id: ClaimNodeId| renumber[id.0];
+        let map = |id: ClaimNodeId| resolved[id.0].and_then(|real| renumber[real.0]);
         let kept = nodes
             .into_iter()
             .zip(&live)
             .filter(|(_, alive)| **alive)
-            .map(|(node, _)| match node {
-                ClaimNode::Tensor(tensor) => ClaimNode::Tensor(tensor),
-                ClaimNode::Tuple(items) => {
-                    ClaimNode::Tuple(items.into_iter().map(|item| item.and_then(map)).collect())
-                }
-                ClaimNode::List(item) => ClaimNode::List(map(item).expect("live child")),
-                ClaimNode::Option(item) => ClaimNode::Option(map(item).expect("live child")),
-                ClaimNode::Nominal { name, constructors } => ClaimNode::Nominal {
-                    name,
-                    constructors: constructors
-                        .into_iter()
-                        .map(|constructor| ClaimConstructor {
-                            fields: constructor
-                                .fields
-                                .into_iter()
-                                .map(|field| ClaimField {
-                                    name: field.name,
-                                    node: field.node.and_then(map),
-                                })
-                                .collect(),
-                            ..constructor
-                        })
-                        .collect(),
+            .map(
+                |(node, _)| match node.expect("a live node is a real node") {
+                    ClaimNode::Tensor(tensor) => ClaimNode::Tensor(tensor),
+                    ClaimNode::Tuple(items) => {
+                        ClaimNode::Tuple(items.into_iter().map(|item| item.and_then(map)).collect())
+                    }
+                    ClaimNode::List(item) => ClaimNode::List(map(item).expect("live child")),
+                    ClaimNode::Option(item) => ClaimNode::Option(map(item).expect("live child")),
+                    ClaimNode::Nominal { name, constructors } => ClaimNode::Nominal {
+                        name,
+                        constructors: constructors
+                            .into_iter()
+                            .map(|constructor| ClaimConstructor {
+                                fields: constructor
+                                    .fields
+                                    .into_iter()
+                                    .map(|field| ClaimField {
+                                        name: field.name,
+                                        node: field.node.and_then(map),
+                                    })
+                                    .collect(),
+                                ..constructor
+                            })
+                            .collect(),
+                    },
                 },
-            })
+            )
             .collect();
         ClaimPattern {
             nodes: kept,
@@ -1187,7 +1238,9 @@ mod tests {
              type Two[a, b] =\n  | Two { l: a, r: b }\n\
              type R = Wrap[R]\n\
              type S = Option[Two[S, S]]\n\
-             type T = Two[tensor[3, f32], T]\n",
+             type T = Two[tensor[3, f32], T]\n\
+             type U = Option[(i64, U)]\n\
+             type V = Option[(tensor[3, f32], V)]\n",
         );
         for plain in [
             "(t-adt {} R)",
@@ -1206,5 +1259,19 @@ mod tests {
         assert_eq!(field(&pattern, root, "Two", 1), root);
         let l = field(&pattern, root, "Two", 0);
         assert_eq!(tensor(&pattern, l).axes[0].claim, ClaimDim::Literal(3));
+        // Recursion through built-in containers alone closes at the alias:
+        // every `Some` reaches a tuple whose tensor owes the claim and whose
+        // tail is again an `Option` of the same shape.
+        let pattern = ClaimPattern::derive(&ty("(t-adt {} V)"), &registry).unwrap();
+        let mut at = pattern.root().expect("V owes its tensor");
+        for _ in 0..4 {
+            let tuple = pattern.child(at, ClaimStep::Some).expect("Some payload");
+            let head = pattern
+                .child(tuple, ClaimStep::Component(0))
+                .expect("tensor");
+            assert_eq!(tensor(&pattern, head).axes[0].claim, ClaimDim::Literal(3));
+            at = pattern.child(tuple, ClaimStep::Component(1)).expect("tail");
+        }
+        assert!(pattern.nodes().len() <= 6, "{:?}", pattern.nodes().len());
     }
 }

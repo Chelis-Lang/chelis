@@ -251,6 +251,11 @@ def g(s: S) -> i64 = 2i64
 out = g(None)
 "#;
 
+const CONTAINER_ALIAS: &str = r#"type V = Option[(tensor[3, f32], V)]
+def f(v: V) -> i64 = 1i64
+out = f(None)
+"#;
+
 /// Run `case` after the shared declarations with `size` read from a file.
 fn run(case: &str, size: usize, native: bool) -> (bool, String) {
     let inputs = tempfile::tempdir().expect("runtime inputs");
@@ -708,4 +713,29 @@ fn tensor_free_recursive_alias_owes_no_claim() {
         let text = String::from_utf8_lossy(&built.stderr);
         assert!(!text.contains("extent claim"), "compiled C\n{text}");
     }
+}
+
+/// A recursive alias whose recursion runs only through built-in containers
+/// closes at the alias, so a claim on it derives a finite pattern instead of
+/// a refusal: Eval runs the program, and compiled C stops only at its
+/// established entry-layout refusal for such a formal. The checker admits no
+/// value of this alias other than `None`.
+#[test]
+fn container_recursive_alias_closes_at_the_alias() {
+    let (ok, output) = run(CONTAINER_ALIAS, 3, false);
+    assert!(ok && output.contains("out = 1"), "Eval\n{output}");
+    let dir = tempfile::tempdir().expect("source dir");
+    let path = dir.path().join("completion.ch");
+    fs::write(&path, format!("{PRELUDE}{CONTAINER_ALIAS}")).expect("fixture");
+    let built = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", "--emit-c", "--allow-style-violations"])
+        .arg(&path)
+        .args(["--target", "c", "-o"])
+        .arg(dir.path().join("c"))
+        .output()
+        .expect("build");
+    let text = String::from_utf8_lossy(&built.stderr);
+    assert!(!text.contains("extent claim"), "compiled C\n{text}");
 }
