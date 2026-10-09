@@ -158,10 +158,7 @@ fn fn_params_as_bare_list_rejection(
         .remove(0)
         .into_node_parts()
         .expect("function params are a stamped node");
-    function_children.insert(
-        0,
-        chelis_deep::Expr::BareList(params_children, params_span),
-    );
+    function_children.insert(0, chelis_deep::Expr::BareList(params_children, params_span));
     let function = chelis_deep::node::Node::try_new(function_tag, function_meta, function_children)
         .expect("a fn node admits a structural params list");
     def_children.push(chelis_deep::Expr::Node(Box::new(function), function_span));
