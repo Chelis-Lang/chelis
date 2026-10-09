@@ -2173,14 +2173,19 @@ inventory. This item does not own user-authored recursive programs ([#257]) or
 general lowering/cost-model recursion ([#409]); those are different recursion
 classes with different oracles.
 
-The inventory fixes a reviewed boundary around production `Cons` recognition
-sites and direct access to the `ConsSpineNode` cell adapter. It reads Rust
-macro tokens as well as ordinary syntax, and includes nested functions, so
-moving recognition into a new helper cannot hide it from review. A new
-constructor or builtin-dispatch site must be classified in that boundary.
-Direct cell access outside the shared iterator is rejected. Generic
+The inventory fixes a reviewed boundary around literal production `Cons`
+recognition sites and exact `ConsSpineNode` adapter call sites. It reads Rust
+macro tokens and statically evaluates `stringify!` and string-valued `concat!`
+expressions, including their nesting and module constants. It includes nested
+functions, so moving these recognition forms into a new helper cannot hide
+them from review. A new constructor or builtin-dispatch site must be
+classified in that boundary. Direct cell access is restricted to the reviewed
+trait default and shared iterator steps, with their call counts fixed. Generic
 whole-expression walkers that stop on `Cons` are classified separately from
-canonical-spine traversal.
+canonical-spine traversal. Arbitrarily computed constructor names and new
+recursive callers that reuse an existing recognizer remain outside this
+inventory's proof; the LU3 acceptance oracle still requires behavioral and
+call-graph coverage for them.
 
 ### LU4 - compositional host-ABI capability ([#955])
 

@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use syn::parse::Parser;
 use syn::visit::Visit;
 
 // The reviewed boundary contains constructors, builtin dispatch, and the two
@@ -87,6 +88,15 @@ const REVIEWED_CONS_LITERALS: &[(&str, &str, usize)] = &[
     ),
 ];
 
+const REVIEWED_CELL_ACCESS: &[(&str, &str, usize)] = &[
+    (
+        "crates/chelis-deep/src/cons_spine.rs",
+        "cons_parts_with_terminal_name",
+        1,
+    ),
+    ("crates/chelis-deep/src/cons_spine.rs", "next", 2),
+];
+
 const SHARED_READERS: &[&str] = &[
     "eval_cons_spine",
     "is_bracket_literal",
@@ -122,13 +132,63 @@ struct BodyScan<'a> {
     function: &'a str,
     cons_literal: bool,
     cons_literal_count: usize,
-    direct_cons_cell_access: bool,
+    direct_cons_cell_access_count: usize,
     self_call: bool,
     shared_spine: bool,
 }
 
+fn static_string_expr(expr: &syn::Expr) -> Option<String> {
+    match expr {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(lit),
+            ..
+        }) => Some(lit.value()),
+        syn::Expr::Group(group) => static_string_expr(&group.expr),
+        syn::Expr::Paren(paren) => static_string_expr(&paren.expr),
+        syn::Expr::Macro(expr) => static_macro_string(&expr.mac),
+        _ => None,
+    }
+}
+
+fn static_macro_string(mac: &syn::Macro) -> Option<String> {
+    static_macro_string_named(&mac.path.segments.last()?.ident.to_string(), &mac.tokens)
+}
+
+fn static_macro_string_named(name: &str, tokens: &proc_macro2::TokenStream) -> Option<String> {
+    match name {
+        "stringify" => Some(tokens.to_string()),
+        "concat" => {
+            let parts = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                .parse2(tokens.clone())
+                .ok()?;
+            parts.iter().map(static_string_expr).collect()
+        }
+        _ => None,
+    }
+}
+
+fn record_cons_macro(mac: &syn::Macro, scan: &mut BodyScan<'_>) {
+    if static_macro_string(mac).as_deref() == Some("Cons") {
+        scan.cons_literal = true;
+        scan.cons_literal_count += 1;
+    }
+}
+
 fn scan_macro_tokens(tokens: proc_macro2::TokenStream, scan: &mut BodyScan<'_>) {
-    for token in tokens {
+    let trees: Vec<_> = tokens.into_iter().collect();
+    for (index, token) in trees.iter().enumerate() {
+        if let (
+            proc_macro2::TokenTree::Ident(name),
+            Some(proc_macro2::TokenTree::Punct(bang)),
+            Some(proc_macro2::TokenTree::Group(group)),
+        ) = (token, trees.get(index + 1), trees.get(index + 2))
+            && bang.as_char() == '!'
+            && static_macro_string_named(&name.to_string(), &group.stream()).as_deref()
+                == Some("Cons")
+        {
+            scan.cons_literal = true;
+            scan.cons_literal_count += 1;
+        }
         match token {
             proc_macro2::TokenTree::Group(group) => scan_macro_tokens(group.stream(), scan),
             proc_macro2::TokenTree::Literal(literal) => {
@@ -142,7 +202,7 @@ fn scan_macro_tokens(tokens: proc_macro2::TokenStream, scan: &mut BodyScan<'_>) 
             proc_macro2::TokenTree::Ident(ident)
                 if ident == "cons_parts" || ident == "cons_parts_with_terminal_name" =>
             {
-                scan.direct_cons_cell_access = true;
+                scan.direct_cons_cell_access_count += 1;
             }
             _ => {}
         }
@@ -174,6 +234,7 @@ impl<'ast> Visit<'ast> for BodyScan<'_> {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        record_cons_macro(mac, self);
         scan_macro_tokens(mac.tokens.clone(), self);
     }
 
@@ -182,16 +243,12 @@ impl<'ast> Visit<'ast> for BodyScan<'_> {
     }
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-        self.direct_cons_cell_access |= use_mentions_cons_cell_method(&item.tree);
+        self.direct_cons_cell_access_count +=
+            usize::from(use_mentions_cons_cell_method(&item.tree));
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if let syn::Expr::Path(path) = call.func.as_ref() {
-            self.direct_cons_cell_access |= path
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| is_cons_cell_method(&segment.ident));
             self.self_call |= path
                 .path
                 .get_ident()
@@ -201,7 +258,7 @@ impl<'ast> Visit<'ast> for BodyScan<'_> {
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        self.direct_cons_cell_access |= is_cons_cell_method(&call.method);
+        self.direct_cons_cell_access_count += usize::from(is_cons_cell_method(&call.method));
         self.self_call |= call.method == self.function
             && matches!(call.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self"));
         syn::visit::visit_expr_method_call(self, call);
@@ -209,11 +266,12 @@ impl<'ast> Visit<'ast> for BodyScan<'_> {
 
     fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
         self.shared_spine |= path.path.segments.iter().any(|s| s.ident == "ConsSpine");
-        self.direct_cons_cell_access |= path
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| is_cons_cell_method(&segment.ident));
+        self.direct_cons_cell_access_count += usize::from(
+            path.path
+                .segments
+                .last()
+                .is_some_and(|segment| is_cons_cell_method(&segment.ident)),
+        );
         syn::visit::visit_expr_path(self, path);
     }
 }
@@ -231,6 +289,7 @@ fn inspect<'a>(name: &'a str, body: &syn::Block) -> BodyScan<'a> {
 struct Inventory {
     seen_shared: BTreeSet<String>,
     seen_cons_literals: BTreeMap<(String, String), usize>,
+    seen_cell_access: BTreeMap<(String, String), usize>,
     problems: Vec<String>,
     source: String,
     function_depth: usize,
@@ -263,19 +322,47 @@ impl Inventory {
                 ));
             }
         }
-        if scan.direct_cons_cell_access && self.source != "crates/chelis-deep/src/cons_spine.rs" {
-            self.problems.push(format!(
-                "{}:{name} has direct Cons cell access outside the shared iterator",
-                self.source
-            ));
+        if scan.direct_cons_cell_access_count != 0 {
+            let key = (self.source.clone(), name.to_string());
+            *self.seen_cell_access.entry(key.clone()).or_default() +=
+                scan.direct_cons_cell_access_count;
+            if !REVIEWED_CELL_ACCESS
+                .iter()
+                .any(|(source, function, _)| *source == key.0 && *function == key.1)
+            {
+                self.problems.push(format!(
+                    "{}:{name} has direct Cons cell access outside the shared iterator",
+                    self.source
+                ));
+            }
         }
     }
 }
 
 impl<'ast> Visit<'ast> for Inventory {
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if self.function_depth == 0 {
+            let mut scan = BodyScan::default();
+            record_cons_macro(mac, &mut scan);
+            scan_macro_tokens(mac.tokens.clone(), &mut scan);
+            if scan.cons_literal_count != 0 {
+                self.problems.push(format!(
+                    "{}:<module macro> has unreviewed Cons recognition",
+                    self.source
+                ));
+            }
+            if scan.direct_cons_cell_access_count != 0 {
+                self.problems.push(format!(
+                    "{}:<module macro> has direct Cons cell access outside the shared iterator",
+                    self.source
+                ));
+            }
+        }
+        syn::visit::visit_macro(self, mac);
+    }
+
     fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
         if self.function_depth == 0
-            && self.source != "crates/chelis-deep/src/cons_spine.rs"
             && path
                 .path
                 .segments
@@ -309,8 +396,7 @@ impl<'ast> Visit<'ast> for Inventory {
                     self.source
                 ));
             }
-            if scan.direct_cons_cell_access && self.source != "crates/chelis-deep/src/cons_spine.rs"
-            {
+            if scan.direct_cons_cell_access_count != 0 {
                 self.problems.push(format!(
                     "{}:<module macro> has direct Cons cell access outside the shared iterator",
                     self.source
@@ -321,9 +407,7 @@ impl<'ast> Visit<'ast> for Inventory {
     }
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-        if self.source != "crates/chelis-deep/src/cons_spine.rs"
-            && use_mentions_cons_cell_method(&item.tree)
-        {
+        if use_mentions_cons_cell_method(&item.tree) {
             self.problems.push(format!(
                 "{}:use has direct Cons cell access outside the shared iterator",
                 self.source
@@ -343,6 +427,15 @@ impl<'ast> Visit<'ast> for Inventory {
         self.record(&item.sig.ident.to_string(), &item.block);
         self.function_depth += 1;
         syn::visit::visit_impl_item_fn(self, item);
+        self.function_depth -= 1;
+    }
+
+    fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+        if let Some(body) = &item.default {
+            self.record(&item.sig.ident.to_string(), body);
+        }
+        self.function_depth += 1;
+        syn::visit::visit_trait_item_fn(self, item);
         self.function_depth -= 1;
     }
 }
@@ -394,6 +487,14 @@ fn canonical_cons_readers_share_the_iterator_and_no_direct_literal_reader_appear
         inventory.seen_cons_literals, reviewed,
         "canonical Cons recognition entry points drifted"
     );
+    let reviewed_cell_access: BTreeMap<_, _> = REVIEWED_CELL_ACCESS
+        .iter()
+        .map(|(source, function, count)| ((source.to_string(), function.to_string()), *count))
+        .collect();
+    assert_eq!(
+        inventory.seen_cell_access, reviewed_cell_access,
+        "direct Cons cell adapter access drifted"
+    );
     assert!(
         inventory.problems.is_empty(),
         "{}",
@@ -434,6 +535,11 @@ fn inventory_rejects_cons_recognition_split_from_recursive_readers() {
         "fn is_cons(name: &str) -> bool { matches!(name, \"Cons\") } fn read(name: &str) { if is_cons(name) { read(name); } }",
         "const CONS: &str = \"Cons\"; fn is_cons(name: &str) -> bool { name == CONS } fn read(name: &str) { if is_cons(name) { read(name); } }",
         "macro_rules! is_cons { ($name:expr) => { $name == \"Cons\" }; } fn read(name: &str) { if is_cons!(name) { read(name); } }",
+        "fn is_cons(name: &str) -> bool { name == stringify!(Cons) } fn read(name: &str) { if is_cons(name) { read(name); } }",
+        "fn is_cons(name: &str) -> bool { name == concat!(\"Con\", \"s\") } fn read(name: &str) { if is_cons(name) { read(name); } }",
+        "fn is_cons(name: &str) -> bool { name == concat!(\"Con\", stringify!(s)) } fn read(name: &str) { if is_cons(name) { read(name); } }",
+        "const CONS: &str = concat!(\"Con\", \"s\"); fn read(name: &str) { if name == CONS { read(name); } }",
+        "macro_rules! is_cons { ($name:expr) => { $name == stringify!(Cons) }; } fn read(name: &str) { if is_cons!(name) { read(name); } }",
     ] {
         let parsed = syn::parse_file(source).expect("valid helper-mediated reader probe");
         let mut inventory = Inventory {
@@ -473,4 +579,24 @@ fn inventory_rejects_direct_cons_cell_access_outside_the_shared_iterator() {
             "direct adapter access escaped the inventory: {source}"
         );
     }
+}
+
+#[test]
+fn inventory_rejects_new_cell_access_in_the_iterator_source() {
+    let parsed = syn::parse_file(
+        "fn added_reader<N: ConsSpineNode>(node: &N) { if let Some((_, tail)) = node.cons_parts() { added_reader(tail); } }",
+    )
+    .expect("valid same-file adapter-bypass probe");
+    let mut inventory = Inventory {
+        source: "crates/chelis-deep/src/cons_spine.rs".to_string(),
+        ..Inventory::default()
+    };
+    inventory.visit_file(&parsed);
+    assert!(
+        inventory
+            .problems
+            .iter()
+            .any(|problem| problem.contains("direct Cons cell access")),
+        "same-file adapter access escaped the inventory"
+    );
 }
