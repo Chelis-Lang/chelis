@@ -324,3 +324,74 @@ fn typed_key_alias_shadows_every_def_shape_in_eval_and_compiled_c() {
         }
     }
 }
+
+/// The reverse direction: a def whose name a compiler-generated binder also
+/// takes stays the callee. Positional callback parameters (`arg0`, `arg1`),
+/// the parameters of a point-free binding, and a staged alias renamed to its
+/// def's spelling inside a scope that binds that spelling must not capture
+/// the def.
+#[test]
+fn defs_named_like_compiler_binders_stay_the_callee_in_eval_and_compiled_c() {
+    for (shape, source, expected) in [
+        (
+            "map callback named arg0",
+            "def arg0(x: i64) -> i64 = x + 1i64\n\
+             def main() = (map(arg0, [1i64, 2i64]), 1i64)\n",
+            "main.0 = [2, 3]",
+        ),
+        (
+            "fold callback named arg1",
+            "def arg1(acc: i64, x: i64) -> i64 = acc + x\n\
+             def main() = (fold(arg1, 0i64, [1i64, 2i64, 3i64]), 1i64)\n",
+            "main.0 = 6",
+        ),
+        (
+            "fold callback named arg0",
+            "def arg0(acc: i64, x: i64) -> i64 = acc * 10i64 + x\n\
+             def main() = (fold(arg0, 0i64, [1i64, 2i64, 3i64]), 1i64)\n",
+            "main.0 = 123",
+        ),
+        (
+            "point-free binding of arg0",
+            "def arg0(x: i64) -> i64 = x + 1i64\n\
+             h: i64 -> i64 = arg0\n\
+             def main() = (h(4i64), 1i64)\n",
+            "main.0 = 5",
+        ),
+        (
+            "point-free binding of arg1",
+            "def arg1(a: i64, b: i64) -> i64 = (a * 10i64) + b\n\
+             h: i64 -> i64 -> i64 = arg1\n\
+             def main() = (h(4i64, 2i64), 1i64)\n",
+            "main.0 = 42",
+        ),
+        (
+            "point-free binding as a map callback",
+            "def arg0(x: i64) -> i64 = x + 1i64\n\
+             h: i64 -> i64 = arg0\n\
+             def main() = (map(h, [4i64, 5i64]), 1i64)\n",
+            "main.0 = [5, 6]",
+        ),
+        (
+            "staged alias renamed over a local",
+            "def halve(e: i64) -> i64 = floor_div(e, 2i64)\n\
+             def go[n](x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n  \
+               g = halve\n  \
+               halve = numel(x)\n  \
+               reshape(x, [g(halve), 2i64])\n\
+             }\n\
+             def main() = (go(to_tensor([1.0, 2.0, 3.0, 4.0], f32)), 1i64)\n",
+            "main.0 = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])",
+        ),
+    ] {
+        let evaluated = evaluated_lines(source);
+        assert_eq!(evaluated, [expected, "main.1 = 1"], "evaluation, {shape}");
+        let compiled = compiled_stdout(source);
+        for line in &evaluated {
+            assert!(
+                compiled.lines().any(|printed| printed == line),
+                "{shape}: compiled C must print `{line}`:\n{compiled}"
+            );
+        }
+    }
+}
