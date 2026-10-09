@@ -338,13 +338,27 @@ pub(super) fn infer_mmap_tensor_app(
             Err(witness) => return propagate(&witness),
         }
     };
-    // A `t-var` child names a dtype binder, which never stands for `key`
-    // ([04-LIN-10]); a `t-prim` child must name a data element dtype.
+    // A `t-prim` child must name a data element dtype. A `t-var` child names
+    // a dtype binder whose declared bound admits only data element dtypes
+    // ([04-DTYPE-2]): every §5.9 family and explicit set does, and an
+    // unbounded binder does not, since it could stand for `string`.
     let precision = match (&dtype, stamped_parts(dtype_child)) {
         (Type::Prim(prim), _) if prim.is_numeric() || *prim == Prim::Bool => {
             TensorPrec::Concrete(*prim)
         }
-        (Type::Var(tv), Some((DeepTag::TVar, _, _))) => TensorPrec::Var(*tv),
+        (Type::Var(tv), Some((DeepTag::TVar, _, _)))
+            if matches!(
+                subst.tvar_restriction(*tv),
+                Some(
+                    TypeVarRestriction::ActiveFloat
+                        | TypeVarRestriction::ActiveInt
+                        | TypeVarRestriction::ActiveNumeric
+                        | TypeVarRestriction::ActiveSet(_)
+                )
+            ) =>
+        {
+            TensorPrec::Var(*tv)
+        }
         _ => {
             return report_at_check_site(
                 errors,
@@ -352,7 +366,7 @@ pub(super) fn infer_mmap_tensor_app(
                     CheckErrorKind::TypeMismatch,
                     format!(
                         "mmap_tensor's dtype argument must be an active data element dtype or \
-                         a dtype binder, not {dtype} ([05-OP-79])"
+                         a dtype binder bounded by a dtype family or set, not {dtype} ([05-OP-79])"
                     ),
                     vec![],
                 ),

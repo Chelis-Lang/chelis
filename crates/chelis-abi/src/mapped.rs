@@ -95,8 +95,7 @@ pub fn mapped_tensor_range(
     let Ok(length) =
         ElementCount::from_extents(&[count]).and_then(|elements| elements.bytes(dtype))
     else {
-        let reason = format!("the byte length at {} overflows i64", dtype.name());
-        return fail(NumericTrapKind::Overflow, &reason);
+        return fail(NumericTrapKind::Overflow, "the byte length overflows i64");
     };
     checked_range(OP, offset, Some(count), length.get(), mapped_len)
 }
@@ -200,8 +199,8 @@ mod tests {
         assert_eq!(
             mapped_tensor_range(0, i64::MAX / 2, RuntimeDType::F32, 5),
             Err(format!(
-                "mmap_tensor offset 0, count {}, mapping length 5: the byte length at f32 \
-                 overflows i64\nnumeric trap: overflow in mmap_tensor at i64",
+                "mmap_tensor offset 0, count {}, mapping length 5: the byte length overflows \
+                 i64\nnumeric trap: overflow in mmap_tensor at i64",
                 i64::MAX / 2
             ))
         );

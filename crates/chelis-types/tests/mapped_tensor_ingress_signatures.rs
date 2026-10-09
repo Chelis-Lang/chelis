@@ -162,8 +162,28 @@ fn mapped_reads_are_pure() {
     );
 }
 
-/// A dtype binder in scope is a dtype argument.
+/// A dtype binder bounded by a family or an explicit set is a dtype
+/// argument.
 #[test]
-fn a_dtype_binder_is_a_dtype_argument() {
-    accepts("def ok[p: Float](m: MappedFile, n: i64) -> tensor[*, p] = mmap_tensor(m, 0i64, n, p)");
+fn a_bounded_dtype_binder_is_a_dtype_argument() {
+    for bound in ["Float", "Int", "Numeric", "{f32, i16}"] {
+        accepts(&format!(
+            "def ok[p: {bound}](m: MappedFile, n: i64) -> tensor[*, p] = mmap_tensor(m, 0i64, n, p)"
+        ));
+    }
+}
+
+/// An unbounded binder could stand for `string`, so it is not a dtype
+/// argument, and instantiating its definition at `string` cannot reach a run.
+#[test]
+fn an_unbounded_binder_is_not_a_dtype_argument() {
+    rejects_with(
+        "def bad[t](m: MappedFile, n: i64) -> tensor[*, t] = mmap_tensor(m, 0i64, n, t)",
+        &["mmap_tensor's dtype argument must be an active data element dtype"],
+    );
+    rejects_with(
+        "def load[t](m: MappedFile, n: i64) -> tensor[*, t] = mmap_tensor(m, 0i64, n, t)\n\
+         def use_it(m: MappedFile) -> tensor[*, string] = load(m, 1i64)",
+        &["mmap_tensor's dtype argument must be an active data element dtype"],
+    );
 }

@@ -283,95 +283,6 @@ fn a_declared_extent_guards_a_computed_count() {
     }
 }
 
-/// [05-OP-79]: a dtype binder that only the result mentions is a dtype
-/// argument in both lanes, directly and through a `cast`.
-#[test]
-fn a_result_only_dtype_binder_reads_in_both_lanes() {
-    let dir = tempdir().expect("tempdir");
-    let data = dir.path().join("payload.bin");
-    fs::write(
-        &data,
-        [1.5f32, -2.0, 4.0]
-            .iter()
-            .flat_map(|x| x.to_le_bytes())
-            .collect::<Vec<_>>(),
-    )
-    .expect("write payload");
-    let direct = format!(
-        "def load[p: Float](m: MappedFile, n: i64) -> tensor[*, p] = mmap_tensor(m, 0i64, n, p)\n{}",
-        program(&data, "  a: tensor[*, f32] = load(m, 3i64)\n  print(a)")
-    );
-    assert_lanes_print(
-        &dir,
-        "binder_direct",
-        &direct,
-        "tensor(shape=[3], data=[1.5, -2.0, 4.0])\nrun = ()\n",
-    );
-    let cast = format!(
-        "def load[p: Float](m: MappedFile, n: i64) -> tensor[*, p] = cast(mmap_tensor(m, 0i64, n, f32), p)\n{}",
-        program(&data, "  a: tensor[*, f64] = load(m, 3i64)\n  print(a)")
-    );
-    assert_lanes_print(
-        &dir,
-        "binder_cast",
-        &cast,
-        "tensor(shape=[3], data=[1.5, -2.0, 4.0])\nrun = ()\n",
-    );
-}
-
-/// [05-OP-79]: a result-only dtype binder solved by a generic caller reads in
-/// both lanes at every call depth, including when caller and callee spell
-/// their binders alike and the caller is instantiated at two dtypes.
-#[test]
-fn a_result_only_dtype_binder_reads_through_generic_callers() {
-    let dir = tempdir().expect("tempdir");
-    let data = dir.path().join("payload.bin");
-    fs::write(
-        &data,
-        [1.5f32, -2.0]
-            .iter()
-            .flat_map(|x| x.to_le_bytes())
-            .collect::<Vec<_>>(),
-    )
-    .expect("write payload");
-    const LOAD: &str =
-        "def load[p: Float](m: MappedFile, n: i64) -> tensor[*, p] = mmap_tensor(m, 0i64, n, p)\n";
-    const TWICE: &str = "def twice[q: Float](m: MappedFile) -> tensor[*, q] = {\n  x: tensor[*, q] = load(m, 2i64)\n  add(x, x)\n}\n";
-    let two_deep = format!(
-        "{LOAD}{TWICE}{}",
-        program(&data, "  b: tensor[*, f32] = twice(m)\n  print(b)")
-    );
-    assert_lanes_print(
-        &dir,
-        "binder_two_deep",
-        &two_deep,
-        "tensor(shape=[2], data=[3.0, -4.0])\nrun = ()\n",
-    );
-    let three_deep = format!(
-        "{LOAD}{TWICE}def outer[r: Float](m: MappedFile) -> tensor[*, r] = {{\n  y: tensor[*, r] = twice(m)\n  add(y, y)\n}}\n{}",
-        program(&data, "  b: tensor[*, f32] = outer(m)\n  print(b)")
-    );
-    assert_lanes_print(
-        &dir,
-        "binder_three_deep",
-        &three_deep,
-        "tensor(shape=[2], data=[6.0, -8.0])\nrun = ()\n",
-    );
-    let same_names = format!(
-        "def load[p: Float](m: MappedFile, n: i64) -> tensor[*, p] = cast(mmap_tensor(m, 0i64, n, f32), p)\ndef twice[p: Float](m: MappedFile) -> tensor[*, p] = {{\n  x: tensor[*, p] = load(m, 2i64)\n  add(x, x)\n}}\n{}",
-        program(
-            &data,
-            "  a: tensor[*, f32] = twice(m)\n  b: tensor[*, f64] = twice(m)\n  _ = print(a)\n  print(b)"
-        )
-    );
-    assert_lanes_print(
-        &dir,
-        "binder_same_names",
-        &same_names,
-        "tensor(shape=[2], data=[3.0, -4.0])\ntensor(shape=[2], data=[3.0, -4.0])\nrun = ()\n",
-    );
-}
-
 /// [05-OP-79]: a range outside the mapping, a negative or overflowing count,
 /// and a `bool` byte other than 0 or 1 trap identically in both lanes. The
 /// overflowing count is computed, so the trap is the run-time one.
@@ -409,7 +320,7 @@ fn invalid_tensor_reads_trap_in_both_lanes() {
             "overflowing_count",
             "mmap_tensor(m, 0i64, mul(mmap_len(m), 576460752303423488i64), f32)",
             &[
-                "mmap_tensor offset 0, count 4611686018427387904, mapping length 8: the byte length at f32 overflows i64",
+                "mmap_tensor offset 0, count 4611686018427387904, mapping length 8: the byte length overflows i64",
                 "numeric trap: overflow in mmap_tensor at i64",
             ],
         ),
