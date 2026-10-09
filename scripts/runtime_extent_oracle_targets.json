@@ -1495,6 +1495,7 @@
         "eval_tuple_option_and_record_results_trap_at_their_producer",
         "eval_unclaimed_generic_call_checks_nothing",
         "literal_visible_generic_call_never_succeeds",
+        "non_closing_alias_recursion_terminates_on_both_lanes",
         "non_regular_recursion_claim_is_refused_on_both_lanes",
         "static_literal_field_is_a_checker_rejection_on_both_lanes",
         "tensor_free_recursive_alias_owes_no_claim"

@@ -256,6 +256,16 @@ def f(v: V) -> i64 = 1i64
 out = f(None)
 "#;
 
+const GROWING_ALIAS: &str = r#"type G[a] = Option[(a, G[(a, a)])]
+def f(g: G[i64]) -> i64 = 1i64
+out = f(None)
+"#;
+
+const GROWING_ALIAS_TENSOR: &str = r#"type G[a] = Option[(a, G[(a, a)])]
+def f(g: G[tensor[3, f32]]) -> i64 = 1i64
+out = f(None)
+"#;
+
 /// Run `case` after the shared declarations with `size` read from a file.
 fn run(case: &str, size: usize, native: bool) -> (bool, String) {
     let inputs = tempfile::tempdir().expect("runtime inputs");
@@ -738,4 +748,62 @@ fn container_recursive_alias_closes_at_the_alias() {
         .expect("build");
     let text = String::from_utf8_lossy(&built.stderr);
     assert!(!text.contains("extent claim"), "compiled C\n{text}");
+}
+
+/// Run `case` on one lane under a time bound: `chelis eval`, or the compiled
+/// C build. A run that exceeds the bound fails the test.
+fn bounded(case: &str, native: bool) -> (bool, String) {
+    let dir = tempfile::tempdir().expect("source dir");
+    let path = dir.path().join("completion.ch");
+    fs::write(&path, format!("{PRELUDE}{case}")).expect("fixture");
+    let mut command = assert_cmd::Command::cargo_bin("chelis").expect("chelis");
+    command
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .timeout(std::time::Duration::from_secs(120));
+    if native {
+        command
+            .args(["build", "--emit-c", "--allow-style-violations"])
+            .arg(&path)
+            .args(["--target", "c", "-o"])
+            .arg(dir.path().join("c"));
+    } else {
+        command
+            .args(["eval", "--allow-style-violations", "--file"])
+            .arg(&path);
+    }
+    let output = command.output().expect("bounded run");
+    assert!(
+        output.status.code().is_some(),
+        "{} did not terminate within its bound",
+        lane(native)
+    );
+    (
+        output.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
+/// A recursive alias whose arguments grow never closes and is never
+/// unfolded. Without a tensor it owes nothing: Eval runs the program, and
+/// compiled C stops only at its established entry-layout refusal. With one
+/// it is refused by name on both lanes. Every run terminates.
+#[test]
+fn non_closing_alias_recursion_terminates_on_both_lanes() {
+    let (ok, output) = bounded(GROWING_ALIAS, false);
+    assert!(ok && output.contains("out = 1"), "Eval\n{output}");
+    let (_, output) = bounded(GROWING_ALIAS, true);
+    assert!(!output.contains("extent claim"), "compiled C\n{output}");
+    for native in [false, true] {
+        let (ok, output) = bounded(GROWING_ALIAS_TENSOR, native);
+        assert!(
+            !ok && output.contains("an extent claim passes through `G`")
+                && output.contains("no finite pattern"),
+            "{}\n{output}",
+            lane(native)
+        );
+    }
 }

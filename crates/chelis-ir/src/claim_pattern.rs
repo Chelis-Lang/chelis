@@ -18,7 +18,7 @@
 
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::{DeepTag, ExprCarrier};
-use chelis_types::adt::{AdtDef, AdtRegistry};
+use chelis_types::adt::AdtRegistry;
 use chelis_types::infer::type_to_deep_expr;
 use chelis_types::types::{Dim, NominalArg, TensorPrec, Type};
 use std::collections::{BTreeMap, BTreeSet};
@@ -166,7 +166,7 @@ impl ClaimPattern {
             alias_targets: BTreeMap::new(),
             analysis: std::cell::OnceCell::new(),
         };
-        let authored = expand_aliases(authored, registry)?;
+        let authored = builder.expand(authored, &mut Vec::new())?;
         let root = builder.node(&authored)?;
         Ok(builder.finish(root))
     }
@@ -268,6 +268,56 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    /// Expand every type alias in `ty`, including inside type arguments at
+    /// any depth and an alias whose body is itself an alias, substituting the
+    /// alias arguments (nominal dimensions included), so an alias spelling
+    /// derives exactly the pattern its expansion does. Two applications stay
+    /// unexpanded and are decided by the walk (`Builder::nominal`): one of an
+    /// alias whose recursion never closes (`non_regular_declarations` covers
+    /// aliases and nominals alike), which no walk may unfold, and one of an
+    /// alias already being expanded on this path, which closes at its
+    /// memoized node.
+    fn expand(&self, ty: &Expr, expanding: &mut Vec<String>) -> Result<Expr, ClaimPatternError> {
+        let Some((tag, children)) = type_parts(ty) else {
+            return Ok(ty.clone());
+        };
+        let expanded = children
+            .iter()
+            .map(|child| self.expand(child, expanding))
+            .collect::<Result<Vec<_>, _>>()?;
+        if tag == DeepTag::TAdt
+            && let Some((name, args)) = expanded.split_first()
+            && let Some(name) = symbol(name)
+            && self.registry.lookup(name).is_none()
+            && !expanding.iter().any(|seen| seen == name)
+            && let Some(alias) = self.registry.resolve_alias(name)
+            && !self.non_regular().contains(name)
+        {
+            let substitution = parameter_substitution(name, &alias.param_args, args)?;
+            let body = substitute(&type_to_deep_expr(&alias.body), &substitution);
+            expanding.push(name.to_string());
+            let result = self.expand(&body, expanding);
+            expanding.pop();
+            return result;
+        }
+        Ok(Expr::node(tag, Metadata::default(), expanded, ty.span()))
+    }
+
+    /// One unfolding of alias `name` applied to `args`, with its own
+    /// recursive applications left unexpanded.
+    fn unfold_alias(
+        &self,
+        name: &str,
+        alias: &chelis_types::adt::TypeAliasDef,
+        args: &[Expr],
+    ) -> Result<Expr, ClaimPatternError> {
+        let substitution = parameter_substitution(name, &alias.param_args, args)?;
+        self.expand(
+            &substitute(&type_to_deep_expr(&alias.body), &substitution),
+            &mut vec![name.to_string()],
+        )
+    }
+
     fn non_regular(&self) -> &BTreeSet<String> {
         &self.analysis().0
     }
@@ -349,16 +399,36 @@ impl Builder<'_> {
         }
         let Some(definition) = self.registry.lookup(name) else {
             // Only a recursive alias reaches the walk unexpanded (see
-            // `expand_aliases`). Its application is memoized like a nominal
-            // application and stands for its unfolding, so every alias cycle
-            // closes at the alias whatever constructors it passes through.
+            // `Builder::expand`).
             if let Some(alias) = self.registry.resolve_alias(name) {
-                let substitution = parameter_substitution(name, &alias.param_args, args)?;
-                let body = expand_aliases_on(
-                    &substitute(&type_to_deep_expr(&alias.body), &substitution),
-                    self.registry,
-                    &mut vec![name.to_string()],
-                )?;
+                // Non-closing recursion is never unfolded: it owes nothing
+                // unless it can hold a tensor, and then it has no finite
+                // pattern.
+                if self.non_regular().contains(name) {
+                    let application = Expr::node(
+                        DeepTag::TAdt,
+                        Metadata::default(),
+                        std::iter::once(Expr::Atom(
+                            Atom::Name(name.to_string()),
+                            chelis_deep::Span::new(0, 0),
+                        ))
+                        .chain(args.iter().cloned())
+                        .collect(),
+                        chelis_deep::Span::new(0, 0),
+                    );
+                    return if self.may_carry(&application) {
+                        Err(ClaimPatternError::NonRegularRecursion {
+                            nominal: name.to_string(),
+                        })
+                    } else {
+                        Ok(None)
+                    };
+                }
+                // A closing recursive alias is memoized like a nominal
+                // application and stands for its unfolding, so its cycle
+                // closes at the alias whatever constructors it passes
+                // through.
+                let body = self.unfold_alias(name, alias, args)?;
                 self.nodes.push(None);
                 let id = ClaimNodeId(self.nodes.len() - 1);
                 self.memo.insert(key, id);
@@ -387,9 +457,9 @@ impl Builder<'_> {
         for variant in &definition.variants {
             let mut fields = Vec::with_capacity(variant.fields.len());
             for (field_name, field_ty) in &variant.fields {
-                let field_ty = expand_aliases(
+                let field_ty = self.expand(
                     &substitute(&type_to_deep_expr(field_ty), &substitution),
-                    self.registry,
+                    &mut Vec::new(),
                 )?;
                 fields.push(ClaimField {
                     name: field_name.clone(),
@@ -443,18 +513,10 @@ impl Builder<'_> {
                 let Some(alias) = self.registry.resolve_alias(name) else {
                     return false;
                 };
-                let Ok(substitution) =
-                    parameter_substitution(name, &alias.param_args, &children[1..])
-                else {
-                    return false;
-                };
                 expanding.push(name.to_string());
-                let carries = expand_aliases_on(
-                    &substitute(&type_to_deep_expr(&alias.body), &substitution),
-                    self.registry,
-                    &mut expanding.clone(),
-                )
-                .is_ok_and(|body| self.may_carry_in(&body, expanding));
+                let carries = self
+                    .unfold_alias(name, alias, &children[1..])
+                    .is_ok_and(|body| self.may_carry_in(&body, expanding));
                 expanding.pop();
                 carries
             }
@@ -627,48 +689,6 @@ fn tensor_claim(ty: &Expr, children: &[Expr]) -> Result<Option<ClaimTensor>, Cla
     }))
 }
 
-/// Expand every type alias in `ty`, including inside type arguments at any
-/// depth and an alias whose body is itself an alias, substituting the alias
-/// arguments (nominal dimensions included). The checker admits a recursive
-/// alias (`type R = Wrap[R]`): an application of an alias already being
-/// expanded on this path stays unexpanded, as the checker's own alias
-/// expansion leaves it, and the walk decides it (see `Builder::nominal`).
-/// Every other type the walk, `may_carry` and the memo keys see is
-/// alias-free, so an alias spelling derives exactly the pattern its
-/// expansion does.
-pub fn expand_aliases(ty: &Expr, registry: &AdtRegistry) -> Result<Expr, ClaimPatternError> {
-    expand_aliases_on(ty, registry, &mut Vec::new())
-}
-
-fn expand_aliases_on(
-    ty: &Expr,
-    registry: &AdtRegistry,
-    expanding: &mut Vec<String>,
-) -> Result<Expr, ClaimPatternError> {
-    let Some((tag, children)) = type_parts(ty) else {
-        return Ok(ty.clone());
-    };
-    let expanded = children
-        .iter()
-        .map(|child| expand_aliases_on(child, registry, expanding))
-        .collect::<Result<Vec<_>, _>>()?;
-    if tag == DeepTag::TAdt
-        && let Some((name, args)) = expanded.split_first()
-        && let Some(name) = symbol(name)
-        && registry.lookup(name).is_none()
-        && !expanding.iter().any(|seen| seen == name)
-        && let Some(alias) = registry.resolve_alias(name)
-    {
-        let substitution = parameter_substitution(name, &alias.param_args, args)?;
-        let body = substitute(&type_to_deep_expr(&alias.body), &substitution);
-        expanding.push(name.to_string());
-        let result = expand_aliases_on(&body, registry, expanding);
-        expanding.pop();
-        return result;
-    }
-    Ok(Expr::node(tag, Metadata::default(), expanded, ty.span()))
-}
-
 /// The deterministic spelling of a type, independent of metadata and spans:
 /// a cache key for the pattern of an authored claim-source type.
 pub fn type_key(expr: &Expr) -> String {
@@ -770,9 +790,8 @@ enum Param {
     Dim(chelis_types::types::DimVar),
 }
 
-fn params(definition: &AdtDef) -> Vec<Option<Param>> {
-    definition
-        .param_args
+fn params(param_args: &[NominalArg]) -> Vec<Option<Param>> {
+    param_args
         .iter()
         .map(|argument| match argument {
             NominalArg::Type(Type::Var(var)) => Some(Param::Type(*var)),
@@ -855,10 +874,32 @@ fn applications<'t>(ty: &'t Type, out: &mut Vec<(&'t str, Vec<NominalArg>)>) {
 fn non_regular_declarations(registry: &AdtRegistry) -> BTreeSet<String> {
     type Vertex = (String, usize);
     let mut edges: Vec<(Vertex, Vertex, bool)> = Vec::new();
-    for definition in registry.defs.values() {
-        let own = params(definition);
-        for variant in &definition.variants {
-            for (_, field) in &variant.fields {
+    // A type alias is one more declaration whose body is its only field, so
+    // alias recursion and nominal recursion meet the same closure test.
+    let declarations = registry
+        .defs
+        .values()
+        .map(|definition| {
+            (
+                definition.name.clone(),
+                params(&definition.param_args),
+                definition
+                    .variants
+                    .iter()
+                    .flat_map(|variant| variant.fields.iter().map(|(_, field)| field))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .chain(
+            registry
+                .aliases
+                .iter()
+                .map(|(name, alias)| (name.clone(), params(&alias.param_args), vec![&alias.body])),
+        )
+        .collect::<Vec<_>>();
+    for (declaration, own, fields) in &declarations {
+        {
+            for field in fields {
                 let mut found = Vec::new();
                 applications(field, &mut found);
                 for (target, args) in found {
@@ -874,7 +915,7 @@ fn non_regular_declarations(registry: &AdtRegistry) -> BTreeSet<String> {
                             };
                             if occurs {
                                 edges.push((
-                                    (definition.name.clone(), from),
+                                    (declaration.clone(), from),
                                     (target.to_string(), to),
                                     !is_exactly(arg, param),
                                 ));
@@ -1240,7 +1281,8 @@ mod tests {
              type S = Option[Two[S, S]]\n\
              type T = Two[tensor[3, f32], T]\n\
              type U = Option[(i64, U)]\n\
-             type V = Option[(tensor[3, f32], V)]\n",
+             type V = Option[(tensor[3, f32], V)]\n\
+             type G[a] = Option[(a, G[(a, a)])]\n",
         );
         for plain in [
             "(t-adt {} R)",
@@ -1273,5 +1315,19 @@ mod tests {
             at = pattern.child(tuple, ClaimStep::Component(1)).expect("tail");
         }
         assert!(pattern.nodes().len() <= 6, "{:?}", pattern.nodes().len());
+        // A recursive alias whose arguments grow never closes. It is never
+        // unfolded: without a tensor it owes nothing, with one it is refused.
+        let plain = ClaimPattern::derive(&ty("(t-adt {} G (t-prim {} i64))"), &registry).unwrap();
+        assert!(plain.is_empty());
+        assert_eq!(
+            ClaimPattern::derive(
+                &ty("(t-adt {} G (t-tensor {} (d-lit {} 3) (t-prim {} f32)))"),
+                &registry
+            )
+            .unwrap_err(),
+            ClaimPatternError::NonRegularRecursion {
+                nominal: "G".into()
+            }
+        );
     }
 }
