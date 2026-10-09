@@ -231,9 +231,9 @@ pub const TENSOR_ALLOCATION_FAILED: &str = "Domain: chelis_alloc tensor allocati
 /// request is then at least 2^58 bytes, more than any current 64-bit virtual
 /// address space holds.
 ///
-/// The host evaluator behind `chelis eval` sizes every result through this
-/// same function, so both evaluators admit and refuse at the same sizes
-/// (chelis#3418).
+/// The host evaluator's own sizing sites (`host_ops`) admit through this
+/// same function, so both evaluators refuse an unrepresentable result at the
+/// same sizes (chelis#3418).
 ///
 /// Returns the admitted element count.
 pub fn admit_result(op: &'static str, shape: &[usize], prim: Prim) -> Result<usize, String> {
@@ -248,12 +248,13 @@ pub fn admit_result(op: &'static str, shape: &[usize], prim: Prim) -> Result<usi
         .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())
 }
 
-/// A result [`admit_tensor`] admitted. Its buffers are the only
-/// output-sized allocations a host-evaluator operation makes, and each is
-/// reserved fallibly, so an allocator refusal is the C runtime's allocation
+/// A result [`admit_tensor`] admitted. The host evaluator's own sizing sites
+/// (`host_ops`) take their output-sized buffers from it, each reserved
+/// fallibly, so there an allocator refusal is the C runtime's allocation
 /// failure rather than a process abort (chelis#3418). The type carries no
-/// public constructor: a buffer sized by a result's extents can only come
-/// from an admission.
+/// public constructor. This evaluator's own sites, and the host paths that
+/// delegate to it or to `RandomKey::split_n`, still allocate infallibly
+/// (chelis#3435).
 #[derive(Clone, Copy, Debug)]
 pub struct AdmittedResult {
     len: usize,
@@ -291,8 +292,8 @@ impl AdmittedResult {
 /// [`admit_result`] refuses a result whose scratch exceeds Rust's allocation
 /// domain, but a smaller one can still exceed what the machine grants, which
 /// for an infallible `Vec` allocation is a process abort. The storage request
-/// is probed here and every output-sized buffer comes from the returned
-/// [`AdmittedResult`], so a refusal anywhere in that band is
+/// is probed here, and a caller that takes its output-sized buffers from the
+/// returned [`AdmittedResult`] turns a refusal anywhere in that band into
 /// `Domain: chelis_alloc tensor allocation failed`, as compiled C reports it.
 pub fn admit_tensor(
     op: &'static str,

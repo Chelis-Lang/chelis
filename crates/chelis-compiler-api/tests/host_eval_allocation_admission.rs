@@ -1,14 +1,16 @@
-//! chelis#3418: the host evaluator allocates an output-sized buffer only
-//! through `chelis_ir::eval::admit_tensor`'s `AdmittedResult`, which admits
-//! the result's metadata and reserves fallibly, so an unrepresentable result
-//! traps and an ungranted one fails as the C runtime's allocation failure.
+//! chelis#3418: in the two scanned host-runtime files, an output-sized
+//! buffer comes only from `chelis_ir::eval::admit_tensor`'s
+//! `AdmittedResult`, which admits the result's metadata and reserves
+//! fallibly, so an unrepresentable result traps and an ungranted one fails as
+//! the C runtime's allocation failure.
 //!
-//! A type cannot stop a `Vec` from being sized by a bare count, so this scan
-//! is the detector: in the host runtime's production source, every
-//! `Vec::with_capacity(..)` and `vec![value; count]` is sized by an existing
-//! value's `.len()`, or carries a `// bounded:` line directly above it naming
-//! the input that bounds it. Anything else is a result-sized allocation that
-//! bypassed admission.
+//! The scan is a text match over `Vec::with_capacity(..)` and
+//! `vec![value; count]` in those files' production source: each is sized by
+//! an existing value's `.len()`, or carries a `// bounded:` line directly
+//! above it naming the input that bounds it. It does not see other spellings
+//! (`collect` over a range), helper modules such as `RandomKey::split_n`, or
+//! the DAG evaluator that some host paths delegate to; those remain under
+//! chelis#3435.
 
 use std::path::Path;
 

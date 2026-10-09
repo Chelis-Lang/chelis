@@ -1,9 +1,11 @@
 //! #3418: a tensor whose element count or byte size does not fit i64 is
 //! refused alike in every lane (spec/04-type-system.md section 4.7,
-//! [05-MOV-1], [05-OP-33]): a run-time size traps `Overflow` under the
-//! owning operation before allocation, in `chelis eval` and in compiled C,
-//! and a representable size the machine cannot hold fails as the C runtime's
-//! allocation failure in both.
+//! [05-MOV-1], [05-OP-33]): a literal-proven size is a type error, and a
+//! run-time size traps `Overflow` under the owning operation before
+//! allocation, in `chelis eval` and in compiled C. For the operations
+//! exercised here (`expand`, `insert`, `pad`, `einsum`), a representable
+//! size the machine cannot hold fails as the C runtime's allocation failure
+//! in both; other `chelis eval` paths can still abort on one (#3435).
 
 mod common;
 
