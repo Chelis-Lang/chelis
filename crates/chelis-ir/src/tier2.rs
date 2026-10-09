@@ -614,12 +614,6 @@ fn require_dim_extent(dim: &DimInfo, context: &str) -> usize {
     }
 }
 
-fn require_axis_size(ty: &TensorType, axis: usize, context: &str) -> usize {
-    dim_size(ty, axis).unwrap_or_else(|| {
-        panic!("{context} requires a concrete extent for axis {axis} in IR lowering")
-    })
-}
-
 fn expand_to_match(
     owner: Owner,
     dag: &mut Dag,
@@ -1250,7 +1244,23 @@ pub fn lower_layer_norm(
     parent_span: Option<&str>,
 ) -> NodeId {
     let axis = x_ty.dims.len().saturating_sub(1);
-    let axis_size = RtDim::Lit(require_axis_size(x_ty, axis, "layer_norm"));
+    // A hidden extent known only at run time (a dimension-generic def,
+    // chelis#3379) is read from `x` itself, as `decompose_softmax` does.
+    let axis_dim = require_dim(x_ty.dims.get(axis), "layer_norm hidden axis");
+    let axis_size = match dim_known_size(&axis_dim) {
+        Some(size) => RtDim::Lit(size),
+        None => RtDim::InputAxis {
+            tensor: 1,
+            axis: rt_axis(axis),
+        },
+    };
+    let expand_inputs = |reduced: NodeId| {
+        if matches!(axis_size, RtDim::Lit(_)) {
+            vec![reduced]
+        } else {
+            vec![reduced, x]
+        }
+    };
     let mean = lower_mean(owner, dag, x, axis, x_ty, parent_span);
     let mean_expanded = add_synth(
         owner,
@@ -1259,7 +1269,7 @@ pub fn lower_layer_norm(
             axis,
             size: axis_size.clone(),
         },
-        vec![mean],
+        expand_inputs(mean),
         x_ty.clone(),
         parent_span,
     );
@@ -1278,9 +1288,9 @@ pub fn lower_layer_norm(
         dag,
         RiscOp::Expand {
             axis,
-            size: axis_size,
+            size: axis_size.clone(),
         },
-        vec![var],
+        expand_inputs(var),
         x_ty.clone(),
         parent_span,
     );
@@ -1617,6 +1627,389 @@ pub fn lower_conv(
         vec![result],
         ty(&output_shape, precision),
         parent_span,
+    )
+}
+
+/// Rank-zero and rank-one i64 extent arithmetic for [`lower_conv_runtime`].
+/// Every node carries the conv's span and is checked i64 dataflow, so
+/// overflow traps rather than wrapping ([05-OP-51]'s checked metadata).
+struct ConvIndexGraph<'a> {
+    owner: Owner,
+    dag: &'a mut Dag,
+    parent_span: Option<&'a str>,
+}
+
+impl ConvIndexGraph<'_> {
+    fn scalar_ty(precision: Prim) -> TensorType {
+        TensorType {
+            dims: Vec::new(),
+            precision,
+        }
+    }
+
+    fn vector_ty(precision: Prim) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Named("*".into(), None)],
+            precision,
+        }
+    }
+
+    fn node(&mut self, op: RiscOp, inputs: Vec<NodeId>, ty: TensorType) -> NodeId {
+        add_synth(self.owner, self.dag, op, inputs, ty, self.parent_span)
+    }
+
+    fn constant(&mut self, value: usize) -> NodeId {
+        let value = i64::try_from(value).expect("a tensor extent fits i64");
+        let value = chelis_types::scalar_from_i64("conv extent", Prim::Int64, value)
+            .expect("an i64 extent finalizes at i64");
+        self.node(
+            RiscOp::Const { value },
+            vec![],
+            Self::scalar_ty(Prim::Int64),
+        )
+    }
+
+    /// The literal extent of `ty`'s `axis`, or a `Shape` read of `tensor`.
+    fn extent(&mut self, tensor: NodeId, ty: &TensorType, axis: usize) -> NodeId {
+        match ty.dims.get(axis).and_then(dim_known_size) {
+            Some(size) => self.constant(size),
+            None => self.node(
+                RiscOp::Shape { axis },
+                vec![tensor],
+                Self::scalar_ty(Prim::Int64),
+            ),
+        }
+    }
+
+    fn scalar(&mut self, op: RiscOp, lhs: NodeId, rhs: NodeId) -> NodeId {
+        self.node(op, vec![lhs, rhs], Self::scalar_ty(Prim::Int64))
+    }
+
+    fn product(&mut self, factors: &[NodeId]) -> NodeId {
+        let one = self.constant(1);
+        factors.iter().fold(one, |total, &factor| {
+            self.scalar(RiscOp::Mul, total, factor)
+        })
+    }
+
+    fn compare(&mut self, kind: ComparisonKind, lhs: NodeId, rhs: NodeId) -> NodeId {
+        self.node(
+            RiscOp::Compare(kind),
+            vec![lhs, rhs],
+            Self::scalar_ty(Prim::Bool),
+        )
+    }
+
+    fn any(&mut self, conditions: &[NodeId]) -> NodeId {
+        conditions
+            .iter()
+            .copied()
+            .reduce(|lhs, rhs| {
+                self.node(
+                    RiscOp::Logical(LogicalKind::Or),
+                    vec![lhs, rhs],
+                    Self::scalar_ty(Prim::Bool),
+                )
+            })
+            .expect("a guard has at least one condition")
+    }
+
+    /// `value`, after trapping with `message` when `condition` holds. Every
+    /// consumer reads the guarded value, so the check precedes its use.
+    fn guard(&mut self, condition: NodeId, value: NodeId, message: &str) -> NodeId {
+        self.node(
+            RiscOp::GuardedFail {
+                message: message.to_owned(),
+                trap_on_true: true,
+            },
+            vec![condition, value],
+            Self::scalar_ty(Prim::Int64),
+        )
+    }
+
+    /// `[0, length)` as a rank-one i64 tensor.
+    fn range(&mut self, length: NodeId) -> NodeId {
+        let zero = self.constant(0);
+        self.node(
+            RiscOp::Iota,
+            vec![zero, length],
+            Self::vector_ty(Prim::Int64),
+        )
+    }
+
+    /// `scalar` broadcast explicitly to the length of the rank-one `like`.
+    fn splat(&mut self, scalar: NodeId, like: NodeId) -> NodeId {
+        self.node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: rt_axis(0),
+                },
+            },
+            vec![scalar, like],
+            Self::vector_ty(Prim::Int64),
+        )
+    }
+
+    /// `vector op scalar`, element-wise over the rank-one `vector`.
+    fn with_scalar(&mut self, op: RiscOp, vector: NodeId, scalar: NodeId) -> NodeId {
+        let scalar = self.splat(scalar, vector);
+        self.node(op, vec![vector, scalar], Self::vector_ty(Prim::Int64))
+    }
+
+    fn vector(&mut self, op: RiscOp, lhs: NodeId, rhs: NodeId) -> NodeId {
+        self.node(op, vec![lhs, rhs], Self::vector_ty(Prim::Int64))
+    }
+}
+
+/// [05-OP-51] cross-correlation when an operand extent, a stride, or a
+/// padding amount is known only at run time (a dimension-generic def, a
+/// shape-derived operand under `grad`, or runtime `i64` metadata;
+/// chelis#3379, chelis#3380). This is [`lower_conv`]'s graph with its
+/// compile-time arithmetic moved into checked i64 dataflow: every extent is
+/// a literal or a `Shape` read of its operand, the window index vectors are
+/// built from `range`, and every metadata rule that [`lower_conv`] asserts is
+/// a runtime guard here, as [05-OP-51]'s failure rule requires of
+/// runtime-dependent obligations. `strides` and `padding` are rank-zero i64
+/// nodes, one entry per spatial axis.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_conv_runtime(
+    owner: Owner,
+    dag: &mut Dag,
+    input: NodeId,
+    kernel: NodeId,
+    input_ty: &TensorType,
+    kernel_ty: &TensorType,
+    output_ty: &TensorType,
+    strides: &[NodeId],
+    padding: &[(NodeId, NodeId)],
+    parent_span: Option<&str>,
+) -> NodeId {
+    assert!(
+        input_ty.dims.len() >= 3 && input_ty.dims.len() == kernel_ty.dims.len(),
+        "conv requires equal ranks of at least 3"
+    );
+    let rank = input_ty.dims.len() - 2;
+    assert!(
+        strides.len() == rank && padding.len() == rank,
+        "conv requires one stride/padding entry per spatial axis"
+    );
+    assert_eq!(
+        input_ty.precision, kernel_ty.precision,
+        "conv dtype mismatch"
+    );
+    assert!(input_ty.precision.is_float(), "conv requires float data");
+    assert_eq!(
+        output_ty.dims.len(),
+        input_ty.dims.len(),
+        "conv output rank mismatch"
+    );
+    let precision = input_ty.precision;
+    let mut graph = ConvIndexGraph {
+        owner,
+        dag,
+        parent_span,
+    };
+
+    let batch = graph.extent(input, input_ty, 0);
+    let out_channels = graph.extent(kernel, kernel_ty, 0);
+    let channels = graph.extent(input, input_ty, 1);
+    let kernel_channels = graph.extent(kernel, kernel_ty, 1);
+    let mismatch = graph.compare(ComparisonKind::Neq, channels, kernel_channels);
+    let channels = graph.guard(
+        mismatch,
+        channels,
+        "conv requires matching channels and one active float dtype",
+    );
+
+    let zero = graph.constant(0);
+    let one = graph.constant(1);
+    let mut lows = Vec::with_capacity(rank);
+    let mut highs = Vec::with_capacity(rank);
+    let mut padded = Vec::with_capacity(rank);
+    let mut kernels = Vec::with_capacity(rank);
+    let mut steps = Vec::with_capacity(rank);
+    let mut outputs = Vec::with_capacity(rank);
+    for (axis, (&stride, &(low, high))) in strides.iter().zip(padding).enumerate() {
+        let size = graph.extent(input, input_ty, axis + 2);
+        let kernel_size = graph.extent(kernel, kernel_ty, axis + 2);
+        let negative_low = graph.compare(ComparisonKind::Lt, low, zero);
+        let negative_high = graph.compare(ComparisonKind::Lt, high, zero);
+        let negative = graph.any(&[negative_low, negative_high]);
+        let low = graph.guard(negative, low, "conv padding must be non-negative");
+        let high = graph.guard(negative, high, "conv padding must be non-negative");
+        let low_padded = graph.scalar(RiscOp::Add, size, low);
+        let padded_size = graph.scalar(RiscOp::Add, low_padded, high);
+        let bad_stride = graph.compare(ComparisonKind::Lte, stride, zero);
+        let empty_kernel = graph.compare(ComparisonKind::Lte, kernel_size, zero);
+        let oversized_kernel = graph.compare(ComparisonKind::Gt, kernel_size, padded_size);
+        let invalid = graph.any(&[bad_stride, empty_kernel, oversized_kernel]);
+        let message = format!("conv invalid kernel/stride/padding at spatial axis {axis}");
+        let stride = graph.guard(invalid, stride, &message);
+        let kernel_size = graph.guard(invalid, kernel_size, &message);
+        let span = graph.scalar(RiscOp::Sub, padded_size, kernel_size);
+        let steps_taken = graph.scalar(RiscOp::FloorDiv, span, stride);
+        outputs.push(graph.scalar(RiscOp::Add, steps_taken, one));
+        lows.push(low);
+        highs.push(high);
+        padded.push(padded_size);
+        kernels.push(kernel_size);
+        steps.push(stride);
+    }
+
+    // Row-major strides of the padded input: `spatial_strides[a]` for
+    // spatial axis `a`, and `channel_stride` for the channel axis.
+    let mut spatial_strides = vec![one; rank];
+    for axis in (0..rank.saturating_sub(1)).rev() {
+        spatial_strides[axis] =
+            graph.scalar(RiscOp::Mul, spatial_strides[axis + 1], padded[axis + 1]);
+    }
+    let channel_stride = graph.scalar(RiscOp::Mul, spatial_strides[0], padded[0]);
+    let batch_stride = graph.scalar(RiscOp::Mul, channels, channel_stride);
+    let padded_len = graph.scalar(RiscOp::Mul, batch, batch_stride);
+    let kernel_volume = graph.product(&kernels);
+    let contracted = graph.scalar(RiscOp::Mul, channels, kernel_volume);
+    let output_volume = graph.product(&outputs);
+    let columns = graph.scalar(RiscOp::Mul, batch, output_volume);
+
+    let mut pad = vec![(RtDim::Lit(0), RtDim::Lit(0)); 2];
+    let mut pad_inputs = vec![input];
+    for (&low, &high) in lows.iter().zip(&highs) {
+        pad.push((
+            RtDim::Node(pad_inputs.len()),
+            RtDim::Node(pad_inputs.len() + 1),
+        ));
+        pad_inputs.extend([low, high]);
+    }
+    let mut padded_dims = input_ty.dims[..2].to_vec();
+    padded_dims.extend((0..rank).map(|_| DimInfo::Named("*".into(), None)));
+    let padded_node = graph.node(
+        RiscOp::zero_pad(precision, pad),
+        pad_inputs,
+        TensorType {
+            dims: padded_dims,
+            precision,
+        },
+    );
+    let flat = graph.node(
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Node(1)],
+        },
+        vec![padded_node, padded_len],
+        ConvIndexGraph::vector_ty(precision),
+    );
+
+    // The same separable index as `lower_conv`: window row `r` (input
+    // channel, kernel offsets) contributes `ch*channel_stride + sum_a
+    // k_a*spatial_strides[a]`, and column `c` (batch, output coordinates)
+    // contributes `b*batch_stride + sum_a o_a*steps[a]*spatial_strides[a]`.
+    let rows = graph.range(contracted);
+    let row_channel = graph.with_scalar(RiscOp::FloorDiv, rows, kernel_volume);
+    let mut row_term = graph.with_scalar(RiscOp::Mul, row_channel, channel_stride);
+    let mut kernel_position = graph.with_scalar(RiscOp::Mod, rows, kernel_volume);
+    for axis in (0..rank).rev() {
+        let offset = graph.with_scalar(RiscOp::Mod, kernel_position, kernels[axis]);
+        kernel_position = graph.with_scalar(RiscOp::FloorDiv, kernel_position, kernels[axis]);
+        let term = graph.with_scalar(RiscOp::Mul, offset, spatial_strides[axis]);
+        row_term = graph.vector(RiscOp::Add, row_term, term);
+    }
+    let cols = graph.range(columns);
+    let column_batch = graph.with_scalar(RiscOp::FloorDiv, cols, output_volume);
+    let mut column_term = graph.with_scalar(RiscOp::Mul, column_batch, batch_stride);
+    let mut output_position = graph.with_scalar(RiscOp::Mod, cols, output_volume);
+    for axis in (0..rank).rev() {
+        let coordinate = graph.with_scalar(RiscOp::Mod, output_position, outputs[axis]);
+        output_position = graph.with_scalar(RiscOp::FloorDiv, output_position, outputs[axis]);
+        let step = graph.scalar(RiscOp::Mul, steps[axis], spatial_strides[axis]);
+        let term = graph.with_scalar(RiscOp::Mul, coordinate, step);
+        column_term = graph.vector(RiscOp::Add, column_term, term);
+    }
+    let matrix_ty = |precision| TensorType {
+        dims: vec![
+            DimInfo::Named("*".into(), None),
+            DimInfo::Named("*".into(), None),
+        ],
+        precision,
+    };
+    let row_matrix = graph.node(
+        RiscOp::Expand {
+            axis: 1,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: rt_axis(0),
+            },
+        },
+        vec![row_term, column_term],
+        matrix_ty(Prim::Int64),
+    );
+    let column_matrix = graph.node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: rt_axis(0),
+            },
+        },
+        vec![column_term, row_term],
+        matrix_ty(Prim::Int64),
+    );
+    let index = graph.node(
+        RiscOp::Add,
+        vec![row_matrix, column_matrix],
+        matrix_ty(Prim::Int64),
+    );
+    let windows = graph.node(
+        RiscOp::Gather {
+            axis: 0,
+            batch_rank: 0,
+        },
+        vec![flat, index],
+        matrix_ty(precision),
+    );
+    let kernel_matrix_ty = TensorType {
+        dims: vec![kernel_ty.dims[0].clone(), DimInfo::Named("*".into(), None)],
+        precision,
+    };
+    let kernel_matrix = graph.node(
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Node(1), RtDim::Node(2)],
+        },
+        vec![kernel, out_channels, contracted],
+        kernel_matrix_ty.clone(),
+    );
+    let contracted_node = lower_matmul(
+        owner,
+        graph.dag,
+        kernel_matrix,
+        windows,
+        &kernel_matrix_ty,
+        &matrix_ty(precision),
+        parent_span,
+    );
+    let mut reshaped_dims = vec![kernel_ty.dims[0].clone(), input_ty.dims[0].clone()];
+    reshaped_dims.extend(output_ty.dims[2..].iter().cloned());
+    let mut reshape_inputs = vec![contracted_node, out_channels, batch];
+    reshape_inputs.extend(&outputs);
+    let reshaped = graph.node(
+        RiscOp::Reshape {
+            new_shape: (1..reshape_inputs.len()).map(RtDim::Node).collect(),
+        },
+        reshape_inputs,
+        TensorType {
+            dims: reshaped_dims,
+            precision,
+        },
+    );
+    let mut axes: Vec<_> = (0..input_ty.dims.len()).collect();
+    axes.swap(0, 1);
+    graph.node(
+        RiscOp::Permute { axes },
+        vec![reshaped],
+        TensorType {
+            dims: output_ty.dims.clone(),
+            precision,
+        },
     )
 }
 
@@ -2575,9 +2968,10 @@ mod tests {
         assert!(verify::verify(&dag).is_empty());
     }
 
+    /// chelis#3379: a hidden extent known only at run time is read from
+    /// `x` by every expand back over the normalized axis.
     #[test]
-    #[should_panic(expected = "layer_norm requires a concrete extent")]
-    fn layer_norm_rejects_symbolic_normalized_axis_extent() {
+    fn layer_norm_reads_a_symbolic_normalized_axis_extent_from_its_operand() {
         let mut dag = Dag::new();
         let owner = Owner::from(dag.declare("test"));
         let x_ty = TensorType {
@@ -2620,9 +3014,34 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let _ = lower_layer_norm(
+        let out = lower_layer_norm(
             owner, &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
         );
+        let normalized_axis_expands: Vec<_> = dag
+            .nodes()
+            .iter()
+            .filter_map(|node| match &node.op {
+                RiscOp::Expand { size, .. } if node.output_type == x_ty => {
+                    Some((size.clone(), node.inputs.get(1).copied()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!normalized_axis_expands.is_empty());
+        assert!(
+            normalized_axis_expands
+                .iter()
+                .all(|(size, source)| matches!(
+                    size,
+                    RtDim::InputAxis {
+                        tensor: 1,
+                        axis: RtAxis::Lit(0)
+                    }
+                ) && *source == Some(x)),
+            "{normalized_axis_expands:?}"
+        );
+        assert_eq!(dag.get(out).unwrap().output_type, x_ty);
+        assert!(verify::verify(&dag).is_empty());
     }
 
     #[test]
@@ -2664,6 +3083,73 @@ mod tests {
             &[(0, 0)],
             None,
         );
+    }
+
+    /// chelis#3379/#3380: symbolic operand extents and node-valued
+    /// metadata lower to a verified graph whose window indices are runtime
+    /// `range` arithmetic and whose metadata rules are guards.
+    #[test]
+    fn conv_runtime_lowers_symbolic_extents_and_runtime_metadata() {
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("test"));
+        let named = |name: &str| DimInfo::Named(name.into(), None);
+        let input_ty = TensorType {
+            dims: vec![named("n"), named("c"), named("h"), named("w")],
+            precision: Prim::F32,
+        };
+        let kernel_ty = TensorType {
+            dims: vec![named("o"), named("c"), named("kh"), named("kw")],
+            precision: Prim::F32,
+        };
+        let output_ty = TensorType {
+            dims: vec![named("n"), named("o"), named("*"), named("*")],
+            precision: Prim::F32,
+        };
+        let load = |dag: &mut Dag, name: &str, ty: &TensorType| {
+            dag.add_node(
+                owner,
+                RiscOp::Load { name: name.into() },
+                vec![],
+                ty.clone(),
+                None,
+            )
+        };
+        let input = load(&mut dag, "x", &input_ty);
+        let kernel = load(&mut dag, "k", &kernel_ty);
+        let i64_ty = TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        };
+        let metadata: Vec<_> = ["s0", "s1", "l0", "h0", "l1", "h1"]
+            .into_iter()
+            .map(|name| load(&mut dag, name, &i64_ty))
+            .collect();
+        let out = lower_conv_runtime(
+            owner,
+            &mut dag,
+            input,
+            kernel,
+            &input_ty,
+            &kernel_ty,
+            &output_ty,
+            &metadata[..2],
+            &[(metadata[2], metadata[3]), (metadata[4], metadata[5])],
+            None,
+        );
+        assert!(
+            verify::verify(&dag).is_empty(),
+            "{:?}",
+            verify::verify(&dag)
+        );
+        assert_eq!(dag.get(out).unwrap().output_type, output_ty);
+        let count = |pred: &dyn Fn(&RiscOp) -> bool| {
+            dag.nodes().iter().filter(|node| pred(&node.op)).count()
+        };
+        assert_eq!(count(&|op| matches!(op, RiscOp::ConstTensor { .. })), 0);
+        assert_eq!(count(&|op| matches!(op, RiscOp::Iota)), 2);
+        // One channel guard, then per spatial axis two padding guards and
+        // the stride and kernel guards.
+        assert_eq!(count(&|op| matches!(op, RiscOp::GuardedFail { .. })), 9);
     }
 
     #[test]

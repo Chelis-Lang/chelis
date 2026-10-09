@@ -5624,8 +5624,10 @@ fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
     assert!(source.contains("kernel_sum_ax1"));
 }
 
+/// A runtime hidden extent lowers (chelis#3379) and divides by a runtime
+/// count, which the HIP lane refuses through its typed exact-reduction gate.
 #[test]
-fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
+fn build_hip_refuses_runtime_count_mean_of_symbolic_layer_norm_axis() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic_hidden_layer_norm.ch");
     write_symbolic_hidden_layer_norm_program(&path);
@@ -5642,12 +5644,10 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
         ])
         .assert()
         .failure()
-        // Inherited CI unblock: the PR base and current main still expected
-        // the pre-949b376e7 wording after production adopted this precise
-        // lowering diagnostic.
         .stderr(predicate::str::contains(
-            "layer_norm requires a concrete extent for axis 1 in IR lowering",
-        ));
+            "`chelis build --target hip` does not yet support exact `mean`",
+        ))
+        .stderr(predicate::str::contains("chelis#2339"));
 }
 
 #[test]

@@ -4510,10 +4510,28 @@ fn top_level_expr_name(expr: &Expr) -> Option<&str> {
 type ConvLiteralParameters = (Vec<usize>, Vec<(usize, usize)>);
 
 fn conv_literal_parameters(strides: &Expr, padding: &Expr) -> Option<ConvLiteralParameters> {
-    let strides = collect_cons_chain(strides)?
+    let (strides, padding) = conv_parameter_exprs(strides, padding)?;
+    let literal = |x: &Expr| usize::try_from(extract_int_for_dim(x)?).ok();
+    let strides = strides
         .into_iter()
-        .map(|x| usize::try_from(extract_int_for_dim(x)?).ok())
+        .map(literal)
         .collect::<Option<Vec<_>>>()?;
+    let padding = padding
+        .into_iter()
+        .map(|(low, high)| Some((literal(low)?, literal(high)?)))
+        .collect::<Option<Vec<_>>>()?;
+    Some((strides, padding))
+}
+
+/// The per-axis stride and `(low, high)` padding expressions of an
+/// enumerable [05-OP-51] metadata list, literal or not.
+type ConvParameterExprs<'a> = (Vec<&'a Expr>, Vec<(&'a Expr, &'a Expr)>);
+
+fn conv_parameter_exprs<'a>(
+    strides: &'a Expr,
+    padding: &'a Expr,
+) -> Option<ConvParameterExprs<'a>> {
+    let strides = collect_cons_chain(strides)?;
     let padding = collect_cons_chain(padding)?
         .into_iter()
         .map(|x| {
@@ -4529,10 +4547,7 @@ fn conv_literal_parameters(strides: &Expr, padding: &Expr) -> Option<ConvLiteral
             let [low, high] = kids else {
                 return None;
             };
-            Some((
-                usize::try_from(extract_int_for_dim(low)?).ok()?,
-                usize::try_from(extract_int_for_dim(high)?).ok()?,
-            ))
+            Some((low, high))
         })
         .collect::<Option<Vec<_>>>()?;
     Some((strides, padding))
@@ -15896,8 +15911,6 @@ impl<'program> LowerCtx<'program> {
             "conv" if args.len() == 4 => {
                 let input = self.lower_expr_node(&args[0], "conv input");
                 let kernel = self.lower_expr_node(&args[1], "conv kernel");
-                let (strides, padding) = conv_literal_parameters(&args[2], &args[3])
-                    .expect("checked conv requires literal per-axis metadata");
                 let input_ty = self
                     .dag
                     .get(input)
@@ -15911,7 +15924,51 @@ impl<'program> LowerCtx<'program> {
                     .output_type
                     .clone();
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_conv(
+                let literal_extents = [&input_ty, &kernel_ty]
+                    .iter()
+                    .all(|ty| ty.dims.iter().all(|dim| concrete_dim_len(dim).is_some()));
+                if literal_extents
+                    && let Some((strides, padding)) = conv_literal_parameters(&args[2], &args[3])
+                {
+                    return tier2::lower_conv(
+                        self.owner(),
+                        &mut self.dag,
+                        input,
+                        kernel,
+                        &input_ty,
+                        &kernel_ty,
+                        ty,
+                        &strides,
+                        &padding,
+                        parent_span.as_deref(),
+                    );
+                }
+                // chelis#3379/#3380: a runtime operand extent, stride, or
+                // padding amount lowers the same graph over checked i64
+                // dataflow with runtime guards.
+                let Some((stride_exprs, padding_exprs)) = conv_parameter_exprs(&args[2], &args[3])
+                else {
+                    self.reject_lowering_at(
+                        (Some(app_span), self.current_span_id.clone()),
+                        "conv strides and padding must be List literals with one entry per \
+                         spatial axis to lower to the IR (spec/05-risc-primitives.md [05-OP-51])"
+                            .to_string(),
+                    )
+                };
+                let strides: Vec<NodeId> = stride_exprs
+                    .into_iter()
+                    .map(|stride| self.lower_expr_node(stride, "conv stride"))
+                    .collect();
+                let padding: Vec<(NodeId, NodeId)> = padding_exprs
+                    .into_iter()
+                    .map(|(low, high)| {
+                        (
+                            self.lower_expr_node(low, "conv padding"),
+                            self.lower_expr_node(high, "conv padding"),
+                        )
+                    })
+                    .collect();
+                tier2::lower_conv_runtime(
                     self.owner(),
                     &mut self.dag,
                     input,
