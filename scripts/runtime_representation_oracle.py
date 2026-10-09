@@ -2572,6 +2572,19 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             ),
         ),
         OracleLeg(
+            "nested C claim pattern table, projection, join and value-walk execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-cli",
+                "--test", "issue_3347_nested_claim_patterns", "-E",
+                "test(=c_nongeneric_box_result_traps_at_insert) | "
+                "test(=c_recursive_pair_traps_at_the_right_leaf) | "
+                "test(=c_tuple_option_and_record_results_trap_at_their_producer) | "
+                "test(=c_mutual_recursion_names_the_innermost_claim) | "
+                "test(=c_self_recursion_checks_its_own_witness) | "
+                "test(=agreeing_claim_walks_run_when_the_host_is_cxx)",
+            ),
+        ),
+        OracleLeg(
             "named List entry metadata and result witness execution",
             (
                 "cargo", "nextest", "run", "-p", "chelis-cli",
