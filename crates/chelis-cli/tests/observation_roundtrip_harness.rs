@@ -1866,7 +1866,7 @@ fn wire_execution_value_rendering_round_trips() {
     };
     let json = serde_json::to_string(&tensor).expect("serialize");
     let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
-    match back {
+    match &back {
         ExecutionValue::Tensor { value } => {
             for (a, b) in value.data.to_f64_lossy_vec().iter().zip(&finite) {
                 assert_eq!(a.to_bits(), b.to_bits(), "wire tensor element drifted");

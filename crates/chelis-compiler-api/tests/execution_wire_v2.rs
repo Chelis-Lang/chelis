@@ -74,7 +74,7 @@ fn v3_int64_payload_is_exact_above_2p53_both_directions() {
         "the exact digits must be on the wire; got: {json}"
     );
     let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
-    match back {
+    match &back {
         ExecutionValue::Tensor { value } => {
             assert_eq!(
                 value.data,
@@ -133,7 +133,7 @@ fn v3_bool_and_half_payloads_round_trip() {
         };
         let json = serde_json::to_string(&tensor).expect("serialize");
         let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
-        match back {
+        match &back {
             ExecutionValue::Tensor { value } => assert_eq!(value.data, data),
             other => panic!("round-trip changed the variant: {other:?}"),
         }

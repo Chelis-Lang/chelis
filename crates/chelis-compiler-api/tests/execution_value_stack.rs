@@ -1,6 +1,6 @@
-//! Deep public execution values must survive embedding input decoding.
+//! Deep public execution values must survive embedding input decoding and drop.
 
-use chelis_compiler_api::schema::ExecutionValue;
+use chelis_compiler_api::schema::{DictEntryValue, ExecutionValue};
 use chelis_compiler_api::{DecodeError, try_decode_adt_value};
 use std::process::Command;
 
@@ -65,6 +65,33 @@ fn run_on_small_stack_in_child(test_name: &str, probe: impl FnOnce() + Send + 's
 }
 
 #[test]
+fn standalone_execution_value_drops_all_recursive_variants_on_small_stack() {
+    run_on_small_stack_in_child(
+        "standalone_execution_value_drops_all_recursive_variants_on_small_stack",
+        || {
+            let mut value = ExecutionValue::Unit;
+            for index in 0..20_000 {
+                value = match index % 4 {
+                    0 => ExecutionValue::List { value: vec![value] },
+                    1 => ExecutionValue::Tuple { value: vec![value] },
+                    2 => ExecutionValue::Adt {
+                        ctor: "Link".to_string(),
+                        fields: vec![value],
+                    },
+                    _ => ExecutionValue::Dict {
+                        entries: vec![DictEntryValue {
+                            key: ExecutionValue::Unit,
+                            value,
+                        }],
+                    },
+                };
+            }
+            drop(value);
+        },
+    );
+}
+
+#[test]
 fn shallow_list_has_the_canonical_recursive_wire_shape() {
     let value = nested_list(1, ExecutionValue::Unit);
     let encoded = serde_json::to_value(&value).expect("serialize shallow value");
@@ -82,7 +109,7 @@ fn structural_decode_accepts_a_deep_list_on_a_small_stack() {
             let value = nested_list(5_000, ExecutionValue::Unit);
             let decoded = try_decode_adt_value(&[], &value).expect("decode deep list");
             drop(decoded);
-            std::mem::forget(value); // isolate decode from recursive wire-value drop
+            drop(value);
         },
     );
 }
@@ -93,7 +120,7 @@ fn structural_decode_rejects_a_deep_invalid_leaf_without_aborting() {
         "structural_decode_rejects_a_deep_invalid_leaf_without_aborting",
         || {
             let value = nested_list(
-                5_000,
+                20_000,
                 ExecutionValue::Adt {
                     ctor: "Missing".to_string(),
                     fields: vec![],
@@ -101,7 +128,7 @@ fn structural_decode_rejects_a_deep_invalid_leaf_without_aborting() {
             );
             let error = try_decode_adt_value(&[], &value).expect_err("unknown ctor rejected");
             assert!(matches!(error, DecodeError::Structural(_)), "{error}");
-            std::mem::forget(value); // isolate decode from recursive wire-value drop
+            drop(value);
         },
     );
 }
@@ -126,7 +153,7 @@ fn nested_adt_decode_accepts_and_rejects_deep_values_on_a_small_stack() {
             );
             let decoded = try_decode_adt_value(&program, &valid).expect("decode deep Chain");
             drop(decoded);
-            std::mem::forget(valid);
+            drop(valid);
 
             let invalid = nested_adt(
                 5_000,
@@ -137,7 +164,7 @@ fn nested_adt_decode_accepts_and_rejects_deep_values_on_a_small_stack() {
             );
             let error = try_decode_adt_value(&program, &invalid).expect_err("reject leaf");
             assert!(matches!(error, DecodeError::Structural(_)), "{error}");
-            std::mem::forget(invalid);
+            drop(invalid);
         },
     );
 }
@@ -161,7 +188,7 @@ fn opaque_carrier_checks_deep_adt_representation_without_overflow() {
             };
             let decoded = try_decode_adt_value(&program, &good).expect("accept finite Carrier");
             drop(decoded);
-            std::mem::forget(good);
+            drop(good);
 
             let bad = ExecutionValue::Adt {
                 ctor: "Carrier".to_string(),
@@ -178,7 +205,7 @@ fn opaque_carrier_checks_deep_adt_representation_without_overflow() {
             };
             let error = try_decode_adt_value(&program, &bad).expect_err("reject Carrier");
             assert!(matches!(error, DecodeError::Invariant(_)), "{error}");
-            std::mem::forget(bad);
+            drop(bad);
 
             let nonfinite = ExecutionValue::Adt {
                 ctor: "Carrier".to_string(),
@@ -201,7 +228,7 @@ fn opaque_carrier_checks_deep_adt_representation_without_overflow() {
             let field_path = format!("next.{}value", "next.".repeat(5_000));
             assert!(message.contains("opaque type `Carrier`"), "{message}");
             assert!(message.contains(&field_path), "{message}");
-            std::mem::forget(nonfinite);
+            drop(nonfinite);
         },
     );
 }

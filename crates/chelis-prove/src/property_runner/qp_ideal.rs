@@ -507,9 +507,9 @@ fn resolved_solve_args(call: &Expr, binding: &str, decls: &[Decl]) -> Result<Vec
         .zip(args)
         .map(|(param, actual)| (param.name.clone(), actual.clone()))
         .collect::<BTreeMap<_, _>>();
-    let body = substitute(body, &substitutions)
+    let mut body = substitute(body, &substitutions)
         .ok_or_else(|| unsupported("wrapper body cannot be resolved to one solve call"))?;
-    let Expr::Apply(inner_callee, inner_args, _) = body else {
+    let Expr::Apply(inner_callee, inner_args, _) = &mut body else {
         return Err(unsupported("wrapper must return one direct solve call"));
     };
     if !matches!(inner_callee.as_ref(), Expr::Var(found, _) if found == binding) {
@@ -517,7 +517,7 @@ fn resolved_solve_args(call: &Expr, binding: &str, decls: &[Decl]) -> Result<Vec
             "wrapper does not call the registered dependency declaration",
         ));
     }
-    Ok(inner_args)
+    Ok(std::mem::take(inner_args))
 }
 
 fn solved_property_body<'a>(
