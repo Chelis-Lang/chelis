@@ -293,9 +293,25 @@ struct Inventory {
     problems: Vec<String>,
     source: String,
     function_depth: usize,
+    module_expr_depth: usize,
 }
 
 impl Inventory {
+    fn record_module_scan(&mut self, scan: &BodyScan<'_>) {
+        if scan.cons_literal_count != 0 {
+            self.problems.push(format!(
+                "{}:<module> has unreviewed Cons recognition",
+                self.source
+            ));
+        }
+        if scan.direct_cons_cell_access_count != 0 {
+            self.problems.push(format!(
+                "{}:<module> has direct Cons cell access outside the shared iterator",
+                self.source
+            ));
+        }
+    }
+
     fn record(&mut self, name: &str, body: &syn::Block) {
         let scan = inspect(name, body);
         if SHARED_READERS.contains(&name) {
@@ -341,69 +357,24 @@ impl Inventory {
 
 impl<'ast> Visit<'ast> for Inventory {
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        if self.function_depth == 0 {
+        if self.function_depth == 0 && self.module_expr_depth == 0 {
             let mut scan = BodyScan::default();
             record_cons_macro(mac, &mut scan);
             scan_macro_tokens(mac.tokens.clone(), &mut scan);
-            if scan.cons_literal_count != 0 {
-                self.problems.push(format!(
-                    "{}:<module macro> has unreviewed Cons recognition",
-                    self.source
-                ));
-            }
-            if scan.direct_cons_cell_access_count != 0 {
-                self.problems.push(format!(
-                    "{}:<module macro> has direct Cons cell access outside the shared iterator",
-                    self.source
-                ));
-            }
+            self.record_module_scan(&scan);
         }
         syn::visit::visit_macro(self, mac);
     }
 
-    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-        if self.function_depth == 0
-            && path
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| is_cons_cell_method(&segment.ident))
-        {
-            self.problems.push(format!(
-                "{}:<module> has direct Cons cell access outside the shared iterator",
-                self.source
-            ));
-        }
-        syn::visit::visit_expr_path(self, path);
-    }
-
-    fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
-        if self.function_depth == 0 && lit.value() == "Cons" {
-            self.problems.push(format!(
-                "{}:<module> has unreviewed Cons recognition",
-                self.source
-            ));
-        }
-    }
-
-    fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
-        if self.function_depth == 0 {
+    fn visit_expr(&mut self, expr: &'ast syn::Expr) {
+        if self.function_depth == 0 && self.module_expr_depth == 0 {
             let mut scan = BodyScan::default();
-            scan_macro_tokens(item.mac.tokens.clone(), &mut scan);
-            if scan.cons_literal_count != 0 {
-                self.problems.push(format!(
-                    "{}:<module macro> has unreviewed Cons recognition",
-                    self.source
-                ));
-            }
-            if scan.direct_cons_cell_access_count != 0 {
-                self.problems.push(format!(
-                    "{}:<module macro> has direct Cons cell access outside the shared iterator",
-                    self.source
-                ));
-            }
+            scan.visit_expr(expr);
+            self.record_module_scan(&scan);
         }
-        syn::visit::visit_item_macro(self, item);
+        self.module_expr_depth += 1;
+        syn::visit::visit_expr(self, expr);
+        self.module_expr_depth -= 1;
     }
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
@@ -583,20 +554,22 @@ fn inventory_rejects_direct_cons_cell_access_outside_the_shared_iterator() {
 
 #[test]
 fn inventory_rejects_new_cell_access_in_the_iterator_source() {
-    let parsed = syn::parse_file(
+    for source in [
         "fn added_reader<N: ConsSpineNode>(node: &N) { if let Some((_, tail)) = node.cons_parts() { added_reader(tail); } }",
-    )
-    .expect("valid same-file adapter-bypass probe");
-    let mut inventory = Inventory {
-        source: "crates/chelis-deep/src/cons_spine.rs".to_string(),
-        ..Inventory::default()
-    };
-    inventory.visit_file(&parsed);
-    assert!(
-        inventory
-            .problems
-            .iter()
-            .any(|problem| problem.contains("direct Cons cell access")),
-        "same-file adapter access escaped the inventory"
-    );
+        "const WALK: fn(&Node) -> Option<&Node> = |node| node.cons_parts();",
+    ] {
+        let parsed = syn::parse_file(source).expect("valid same-file adapter-bypass probe");
+        let mut inventory = Inventory {
+            source: "crates/chelis-deep/src/cons_spine.rs".to_string(),
+            ..Inventory::default()
+        };
+        inventory.visit_file(&parsed);
+        assert!(
+            inventory
+                .problems
+                .iter()
+                .any(|problem| problem.contains("direct Cons cell access")),
+            "same-file adapter access escaped the inventory: {source}"
+        );
+    }
 }

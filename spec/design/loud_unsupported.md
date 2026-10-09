@@ -2176,7 +2176,8 @@ classes with different oracles.
 The inventory fixes a reviewed boundary around literal production `Cons`
 recognition sites and exact `ConsSpineNode` adapter call sites. It reads Rust
 macro tokens and statically evaluates `stringify!` and string-valued `concat!`
-expressions, including their nesting and module constants. It includes nested
+expressions, including their nesting. The same scan covers function bodies and
+module-level expression roots, including const closures. It includes nested
 functions, so moving these recognition forms into a new helper cannot hide
 them from review. A new constructor or builtin-dispatch site must be
 classified in that boundary. Direct cell access is restricted to the reviewed
