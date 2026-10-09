@@ -292,7 +292,13 @@ that the module type-checked and every obligation was discharged.
 ## JSON Output
 
 `--json` emits NDJSON. Each selected property emits one record, followed by one
-summary record.
+summary record. Property and obligation `name`, `goal`, `reason` and check
+`diagnostics` fields use source spellings under `spec/04-type-system.md` §2.5.
+The linker-owned source map renders package declarations at the report
+boundary: the selected module uses bare names and imported modules use
+qualified names. Proof identities and the dependency graph retain their
+existing representation. Tide accepts source text and uses the same authored
+spellings for that source; its interface does not load a package by path.
 
 ```json
 {"kind":"property","name":"confidence_tail_order","status":"passed","composite_verdict":"fuzz_validated","qualifiers":["fuzz","fuzz_base"],"assumptions":[{"name":"preconditions:confidence_tail_order","discharge":{"method":"fuzz","evidence":{"status":"validated","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0}},"non_vacuity":{"status":"established","evidence":{"method":"fuzz","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0}}}],"proof_tier":"fuzz","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0,"samples":100,"seed":0}

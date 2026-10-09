@@ -75,10 +75,28 @@ pub(super) fn check_unlinked_decls(
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
+    check_decls(
+        decls,
+        &chelis_reef::DiagnosticNames::default(),
+        options,
+        totals,
+    )
+}
+
+fn check_decls(
+    decls: &[Decl],
+    names: &chelis_reef::DiagnosticNames,
+    options: &ProveOptions<'_>,
+    totals: &mut Summary,
+) -> Status {
     let deep_exprs = match chelis_surf::desugar::desugar_program(decls) {
         Ok(deep) => deep,
         Err(error) => {
-            emit_check_failure(options, &[error.to_string()], totals);
+            emit_check_failure(
+                options,
+                &[names.render(&error.to_string()).into_owned()],
+                totals,
+            );
             return Status::Error;
         }
     };
@@ -87,7 +105,7 @@ pub(super) fn check_unlinked_decls(
         let messages = infer
             .errors
             .iter()
-            .map(|err| err.message.clone())
+            .map(|err| names.render(&err.message).into_owned())
             .collect::<Vec<_>>();
         emit_check_failure(options, &messages, totals);
         return Status::Error;
@@ -107,6 +125,7 @@ pub(super) fn check_linked_decls(
     stdlib_decls: &[Decl],
     stdlib_source_digest: [u8; 32],
     non_stdlib_decls: &[Decl],
+    names: &chelis_reef::DiagnosticNames,
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
@@ -121,16 +140,16 @@ pub(super) fn check_linked_decls(
         Ok(None) => {
             let mut decls = stdlib_decls.to_vec();
             decls.extend_from_slice(non_stdlib_decls);
-            check_unlinked_decls(&decls, options, totals)
+            check_decls(&decls, names, options, totals)
         }
         Err(error) => {
             let mut messages = error
                 .errors
                 .iter()
-                .map(|diagnostic| diagnostic.message.clone())
+                .map(|diagnostic| names.render(&diagnostic.message).into_owned())
                 .collect::<Vec<_>>();
             if messages.is_empty() {
-                messages.push(error.stage);
+                messages.push(names.render(&error.stage).into_owned());
             }
             emit_check_failure(options, &messages, totals);
             Status::Error
