@@ -11,15 +11,16 @@ kernel behavior. It proves three things and nothing more:
    invert rather than be deleted; and
 3. a new unlisted seam is detected.
 
-# The universe is a file list, not a language
+# The universe is a file set, not a language
 
-The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
-reviewed list of the repository files that can carry a representation seam.
-Ninety are Rust and eleven are C, C++, or Objective-C sources. A completeness
-claim stated over a *language* instead cannot be discharged, because a reviewer
-can always name one more construct; stated over a file list it is decidable,
-and `_assert_source_list_current` proves the list still equals the tracked
-contents of its roots, so a new file fails until someone registers it.
+The inventory's completeness claim is over every file on disk under
+`INVENTORY_ROOTS`, the reviewed roots the baseline's freeze digest binds. A
+completeness claim stated over a *language* instead cannot be discharged,
+because a reviewer can always name one more construct; stated over a file set
+it is decidable. The scanned list is derived, never registered: a new file
+under a root is scanned as soon as it exists, and a seam in it fails as an
+unclassified hit like any other. Changing a root moves the freeze, and a root
+whose directory has departed fails rather than silently shrinking the set.
 
 Every source is read by a real parser for its language. Rust is read with
 `syn`. The headers are read through clang's front end (`-fsyntax-only -Xclang
@@ -71,9 +72,9 @@ PHASE0_COMMAND = (
     "scripts/runtime_representation_oracle.py --phase 0"
 )
 
-# The roots whose tracked contents the frozen source list must equal. Keeping
-# the roots beside the list is what makes the list checkable rather than
-# aspirational.
+# The roots whose on-disk contents are the inventory's universe. The baseline
+# freezes this exact tuple inside the reviewed digest, so adding, removing, or
+# reordering a root is a B1 freeze move; the files under the roots are derived.
 INVENTORY_ROOTS = (
     "crates/chelis-runtime/src/**/*.rs",
     "crates/chelis-runtime/include/**/*.h",
@@ -91,109 +92,6 @@ INVENTORY_ROOTS = (
     # a seam; a root that cannot see it is a closure hole.
     "crates/chelis-backend-*/build.rs",
 )
-
-INVENTORY_SOURCES: tuple[str, ...] = (
-    "crates/chelis-backend-c/src/blas.rs",
-    "crates/chelis-backend-c/src/crmath_kernels.rs",
-    "crates/chelis-backend-c/src/emit.rs",
-    "crates/chelis-backend-c/src/emitted_expr.rs",
-    "crates/chelis-backend-c/src/fp_env.rs",
-    "crates/chelis-backend-c/src/generated_header.rs",
-    "crates/chelis-backend-c/src/host_abi.rs",
-    "crates/chelis-backend-c/src/host_abi_tests.rs",
-    "crates/chelis-backend-c/src/host_emit.rs",
-    "crates/chelis-backend-c/src/host_emit/entry.rs",
-    "crates/chelis-backend-c/src/host_emit/entry_walk.rs",
-    "crates/chelis-backend-c/src/integer_float.rs",
-    "crates/chelis-backend-c/src/lib.rs",
-    "crates/chelis-backend-c/src/memory.rs",
-    "crates/chelis-backend-c/src/toolchain.rs",
-    "crates/chelis-backend-hip/runtime/chelis_device_descriptor.h",
-    "crates/chelis-backend-hip/runtime/chelis_device_owner.cpp",
-    "crates/chelis-backend-hip/runtime/chelis_device_owner.h",
-    "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
-    "crates/chelis-backend-hip/src/blas.rs",
-    "crates/chelis-backend-hip/src/emit.rs",
-    "crates/chelis-backend-hip/src/fusion.rs",
-    "crates/chelis-backend-hip/src/kernels.rs",
-    "crates/chelis-backend-hip/src/launch.rs",
-    "crates/chelis-backend-hip/src/lib.rs",
-    "crates/chelis-backend-hip/src/memory.rs",
-    "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-    "crates/chelis-backend-metal/src/blas.rs",
-    "crates/chelis-backend-metal/src/dtype.rs",
-    "crates/chelis-backend-metal/src/emit.rs",
-    "crates/chelis-backend-metal/src/kernels.rs",
-    "crates/chelis-backend-metal/src/lib.rs",
-    "crates/chelis-ir/src/analysis.rs",
-    "crates/chelis-ir/src/anonymous_dims.rs",
-    "crates/chelis-ir/src/axis_sources.rs",
-    "crates/chelis-ir/src/capacity_key.rs",
-    "crates/chelis-ir/src/compositions.rs",
-    "crates/chelis-ir/src/dag.rs",
-    "crates/chelis-ir/src/eval.rs",
-    "crates/chelis-ir/src/fuse.rs",
-    "crates/chelis-ir/src/grad.rs",
-    "crates/chelis-ir/src/host.rs",
-    "crates/chelis-ir/src/host/signature_entry.rs",
-    "crates/chelis-ir/src/host/staged.rs",
-    "crates/chelis-ir/src/host_type_state.rs",
-    "crates/chelis-ir/src/lib.rs",
-    "crates/chelis-ir/src/load_store_name.rs",
-    "crates/chelis-ir/src/lower.rs",
-    "crates/chelis-ir/src/lowering_trace.rs",
-    "crates/chelis-ir/src/optimize.rs",
-    "crates/chelis-ir/src/ownership/classify.rs",
-    "crates/chelis-ir/src/ownership/error.rs",
-    "crates/chelis-ir/src/ownership/ir.rs",
-    "crates/chelis-ir/src/ownership/last_use.rs",
-    "crates/chelis-ir/src/ownership/lower.rs",
-    "crates/chelis-ir/src/ownership/mod.rs",
-    "crates/chelis-ir/src/ownership/render.rs",
-    "crates/chelis-ir/src/ownership/storage.rs",
-    "crates/chelis-ir/src/ownership/tests.rs",
-    "crates/chelis-ir/src/ownership/verify.rs",
-    "crates/chelis-ir/src/pipeline.rs",
-    "crates/chelis-ir/src/span_merge.rs",
-    "crates/chelis-ir/src/span_sanitize.rs",
-    "crates/chelis-ir/src/specialize.rs",
-    "crates/chelis-ir/src/tier2.rs",
-    "crates/chelis-ir/src/tier2_ordered.rs",
-    "crates/chelis-ir/src/verify.rs",
-    "crates/chelis-ir/src/vmap.rs",
-    "crates/chelis-python/src/compiler_json.rs",
-    "crates/chelis-python/src/dlpack.rs",
-    "crates/chelis-python/src/lib.rs",
-    "crates/chelis-python/src/native_tensor.rs",
-    "crates/chelis-python/src/source_json.rs",
-    "crates/chelis-runtime/build.rs",
-    "crates/chelis-runtime/include/chelis_blas.h",
-    "crates/chelis-runtime/include/chelis_math.h",
-    "crates/chelis-runtime/include/chelis_runtime.h",
-    "crates/chelis-runtime/include/chelis_runtime_dtype.h",
-    "crates/chelis-runtime/include/chelis_runtime_views.h",
-    "crates/chelis-runtime/include/chelis_simd.h",
-    "crates/chelis-runtime/src/build_record.rs",
-    "crates/chelis-runtime/src/decimal_parse.rs",
-    "crates/chelis-runtime/src/dtype_header.rs",
-    "crates/chelis-runtime/src/element.rs",
-    "crates/chelis-runtime/src/format_shortest.rs",
-    "crates/chelis-runtime/src/fp_env.rs",
-    "crates/chelis-runtime/src/host_assert.rs",
-    "crates/chelis-runtime/src/host_clock.rs",
-    "crates/chelis-runtime/src/host_csv.rs",
-    "crates/chelis-runtime/src/host_process.rs",
-    "crates/chelis-runtime/src/host_round.rs",
-    "crates/chelis-runtime/src/ieee_narrow.rs",
-    "crates/chelis-runtime/src/lib.rs",
-    "crates/chelis-runtime/src/list.rs",
-    "crates/chelis-runtime/src/metadata.rs",
-    "crates/chelis-runtime/src/native_provider.rs",
-    "crates/chelis-runtime/src/ownership_ledger.rs",
-    "crates/chelis-runtime/src/public_headers.rs",
-    "crates/chelis-runtime/src/runtime_dtype_contract_tests.rs",
-    "crates/chelis-runtime/src/text_parse.rs",
-    "crates/chelis-vocab/src/lib.rs",)
 
 # Which phase deletes each seam class, from the design's Part III phase map.
 # Phase 1 closes the capacity and dtype-contract vocabulary, Phase 2 the device
@@ -674,9 +572,9 @@ SOURCE_REJECTED_FAILURE = FailureExpectation(
     "source.rejected",
     "fail-closed inventory scanner rejected",
 )
-SOURCE_LIST_FAILURE = FailureExpectation(
-    "inventory.unregistered_source",
-    "the frozen inventory source list is stale",
+DEPARTED_ROOT_FAILURE = FailureExpectation(
+    "inventory.departed_root",
+    "an inventory root names no existing directory",
 )
 
 
@@ -742,31 +640,35 @@ def _inventory_candidates(root: Path) -> tuple[str, ...]:
     return tuple(sorted(found - ignored))
 
 
-def _assert_source_list_current(root: Path) -> None:
-    """The frozen list must still equal its roots' tracked contents.
+def _root_directory(pattern: str) -> str:
+    """The directory a root lives in: its path without the file name or `**`."""
 
-    Without this the list would silently rot: a new file under an inventory
-    root would carry seams nobody scans. The failure names the exact sanctioned
-    action rather than inviting a workaround.
+    parts = pattern.split("/")[:-1]
+    while parts and parts[-1] == "**":
+        parts.pop()
+    return "/".join(parts)
+
+
+def inventory_sources(root: Path) -> tuple[str, ...]:
+    """The inventory's universe: every file on disk under a frozen root.
+
+    Nothing registers a file, so a new one is scanned the moment it exists.
+    A root may name a build script that does not exist yet, but its directory
+    must: a renamed or deleted crate would otherwise drop out of the universe
+    without a review.
     """
 
-    tracked = set(_inventory_candidates(root))
-    registered = set(INVENTORY_SOURCES)
-    unregistered = sorted(tracked - registered)
-    departed = sorted(registered - tracked)
-    if unregistered:
-        raise OracleFailure(
-            "the frozen inventory source list is stale; these tracked files under an "
-            "inventory root are not registered in INVENTORY_SOURCES: "
-            + ", ".join(unregistered[:5]),
-            code=SOURCE_LIST_FAILURE.code,
-        )
+    departed = [
+        pattern
+        for pattern in INVENTORY_ROOTS
+        if not any(path.is_dir() for path in root.glob(_root_directory(pattern)))
+    ]
     if departed:
         raise OracleFailure(
-            "the frozen inventory source list is stale; these registered files no "
-            "longer exist: " + ", ".join(departed[:5]),
-            code=SOURCE_LIST_FAILURE.code,
+            f"{DEPARTED_ROOT_FAILURE.reason_prefix}: " + ", ".join(departed),
+            code=DEPARTED_ROOT_FAILURE.code,
         )
+    return _inventory_candidates(root)
 
 
 _SCAN_GENERATION = 0
@@ -808,12 +710,13 @@ def _build_scanner() -> Path:
 
 
 def scan_sources(root: Path) -> tuple[dict[str, str], ...]:
-    """Run the structural scanner over the frozen source list."""
+    """Run the structural scanner over every file under the frozen roots."""
 
+    sources = inventory_sources(root)
     binary = _build_scanner()
     completed = subprocess.run(
         (str(binary), "--repo", str(root)),
-        input=json.dumps(list(INVENTORY_SOURCES)),
+        input=json.dumps(list(sources)),
         check=False,
         capture_output=True,
         text=True,
@@ -849,7 +752,6 @@ def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
     cached = _SCAN_CACHE.get(_SCAN_GENERATION)
     if cached is not None:
         return cached
-    _assert_source_list_current(root)
     seen: dict[str, InventoryRow] = {}
     for row in scan_sources(root):
         kind = row["kind"]
@@ -972,12 +874,26 @@ def frozen_mutation_rows(
     return mutation_manifest(probes)
 
 
+def frozen_source_inventory(
+    probes: Sequence[MutationProbe],
+) -> dict[str, object]:
+    """The digest-bound source contract: the mutation rows and the roots."""
+
+    return {
+        "mutations": frozen_mutation_rows(probes),
+        "roots": list(INVENTORY_ROOTS),
+    }
+
+
 def _validate_frozen_mutation_contract(
     source_inventory: dict[str, object],
     probes: Sequence[MutationProbe],
 ) -> None:
-    expected = {"mutations": frozen_mutation_rows(probes)}
-    if source_inventory != expected:
+    if source_inventory.get("roots") != list(INVENTORY_ROOTS):
+        raise OracleFailure(
+            "current inventory roots do not match the frozen source universe"
+        )
+    if source_inventory.get("mutations") != frozen_mutation_rows(probes):
         raise OracleFailure(
             "current Phase 0 probes do not match the frozen mutation contract"
         )
@@ -1028,7 +944,7 @@ def _coverage_manifest_from_configuration(
 
     return {
         "source_inventory": {
-            "artifact": "the frozen INVENTORY_SOURCES file list",
+            "artifact": "every file on disk under the frozen INVENTORY_ROOTS",
             "enumerator": (
                 "chelis-repr-inventory: syn for Rust; clang's front end under fixed "
                 "target lanes, a committed stub SDK, and a scrubbed environment for C "
@@ -1036,11 +952,11 @@ def _coverage_manifest_from_configuration(
                 "type-word lists"
             ),
             "universe": {
-                "registered_sources": len(INVENTORY_SOURCES),
                 "roots": list(INVENTORY_ROOTS),
                 "closure_rule": (
-                    "the registered list must equal its roots' tracked contents; a new "
-                    "file fails until it is registered"
+                    "the scanned sources are exactly the files on disk under the "
+                    "digest-bound roots; a new file is scanned without registration, "
+                    "and a root whose directory departed fails"
                 ),
             },
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
@@ -1154,7 +1070,7 @@ def build_foundation_baseline(
             active_ids.add(row.identity)
 
     return {
-        "schema_version": 7,
+        "schema_version": 8,
         "freeze_sha256": _freeze_digest(foundation, source_inventory),
         "source_inventory": json.loads(json.dumps(source_inventory)),
         "foundation_rows": foundation,
@@ -1229,8 +1145,8 @@ def _validate_baseline_schema(baseline: object) -> None:
         )
 
     schema_version = baseline["schema_version"]
-    if type(schema_version) is not int or schema_version != 7:
-        raise OracleFailure("schema_version must be the integer 7")
+    if type(schema_version) is not int or schema_version != 8:
+        raise OracleFailure("schema_version must be the integer 8")
     freeze_sha256 = baseline["freeze_sha256"]
     if (
         not isinstance(freeze_sha256, str)
@@ -1246,12 +1162,22 @@ def _validate_baseline_schema(baseline: object) -> None:
         raise OracleFailure("foundation_rows must be a list")
     source_inventory = _validate_exact_fields(
         source_inventory,
-        expected={"mutations"},
+        expected={"mutations", "roots"},
         location="source_inventory",
     )
     mutations = source_inventory["mutations"]
     if not isinstance(mutations, list):
         raise OracleFailure("source_inventory.mutations must be a list")
+    roots = source_inventory["roots"]
+    if (
+        not isinstance(roots, list)
+        or not roots
+        or any(not isinstance(pattern, str) or not pattern for pattern in roots)
+        or len(roots) != len(set(roots))
+    ):
+        raise OracleFailure(
+            "source_inventory.roots must be a nonempty list of distinct nonempty strings"
+        )
     if not isinstance(active, list):
         raise OracleFailure("active_debt must be a list")
 
@@ -2033,10 +1959,11 @@ def mutate_rust_path_module(source: str) -> str:
 
 
 def mutate_unregistered_subdirectory_source(_source: str) -> str:
-    """A seam in a SUBDIRECTORY of an inventory root.
+    """A seam in a new file in a SUBDIRECTORY of an inventory root.
 
     Cargo compiles it, so it is production source. A single-level glob did not
-    see it, which made the closure check evadable.
+    see it; the rejection must name the new file's owner, which proves the
+    derived universe scanned it.
     """
 
     return """//! Temporary Phase 0 detector probe.
@@ -2049,7 +1976,11 @@ pub fn runtime_representation_phase0_subdirectory(concrete: usize, value: usize)
 
 
 def mutate_unregistered_inventory_source(_source: str) -> str:
-    """A new file under an inventory root must fail until it is registered."""
+    """A seam in a new file under an inventory root, which nothing registers.
+
+    The rejection must name the new file's owner, which proves the derived
+    universe scanned it.
+    """
 
     return """//! Temporary Phase 0 detector probe.
 
@@ -2242,16 +2173,16 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             SOURCE_REJECTED_FAILURE,
         ),
         _probe(
-            "unregistered-inventory-source",
+            "raw-element-pointer",
             "crates/chelis-runtime/src/runtime_representation_phase0_probe.rs",
             mutate_unregistered_inventory_source,
-            SOURCE_LIST_FAILURE,
+            expected_owners=("runtime_representation_phase0_unregistered",),
         ),
         _probe(
-            "unregistered-inventory-source",
+            "normalized-key-arithmetic",
             "crates/chelis-ir/src/repr_probe/mod.rs",
             mutate_unregistered_subdirectory_source,
-            SOURCE_LIST_FAILURE,
+            expected_owners=("runtime_representation_phase0_subdirectory",),
         ),
     )
 

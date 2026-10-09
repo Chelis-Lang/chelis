@@ -1,9 +1,10 @@
-//! Emit the chelis#893 Phase 0 seam inventory for a registered source list.
+//! Emit the chelis#893 Phase 0 seam inventory for a derived source list.
 //!
-//! The oracle owns the frozen source list and passes it on stdin as JSON; this
-//! binary owns the structural derivation. Splitting it that way keeps one
-//! parser per language: Rust is read with `syn`, and C, C++, and Objective-C
-//! sources through clang's front end under a fixed target lane.
+//! The oracle derives the source list from its frozen roots and passes it on
+//! stdin as JSON; this binary owns the structural derivation. Splitting it
+//! that way keeps one parser per language: Rust is read with `syn`, and C,
+//! C++, and Objective-C sources through clang's front end under a fixed
+//! target lane.
 
 use std::env;
 use std::fs;

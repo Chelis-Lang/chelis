@@ -276,8 +276,8 @@ pub enum SourceClass {
 
 impl SourceClass {
     /// Classify a repository-relative path. An unrecognized path is not a
-    /// silent pass: the caller registers every inventory source explicitly, so
-    /// `None` here means the frozen source list and this function disagree.
+    /// silent pass: the caller derives every inventory source from its frozen
+    /// roots, so `None` here means a root and this function disagree.
     pub fn for_path(path: &str) -> Option<Self> {
         if path.starts_with("crates/chelis-runtime/") {
             Some(Self::Runtime)
@@ -1320,8 +1320,8 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
             if self.error.is_none() {
                 self.error = Some(ScanError::new(format!(
                     "`#[path]` in `{owner}` compiles a file the inventory roots do not \
-                     reach: register the target in INVENTORY_SOURCES, or move it under a \
-                     root"
+                     reach: move the target under a root in INVENTORY_ROOTS, or drop the \
+                     attribute"
                 )));
             }
         }
@@ -1717,8 +1717,9 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
             let owner = self.owner();
             if self.error.is_none() {
                 self.error = Some(ScanError::new(format!(
-                    "`include!` in `{owner}` splices an unscanned file into a registered \
-                     source: register the included file in INVENTORY_SOURCES, or inline it"
+                    "`include!` in `{owner}` splices a file into an inventory source, \
+                     but the scan of INVENTORY_ROOTS reads each file only on its own: \
+                     inline it"
                 )));
             }
             return;
@@ -1919,9 +1920,9 @@ fn demetavariable(stream: proc_macro2::TokenStream) -> proc_macro2::TokenStream 
 pub fn scan_rust_source(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError> {
     let Some(class) = SourceClass::for_path(path) else {
         return Err(ScanError::new(format!(
-            "`{path}` is not a registered runtime-representation inventory source; \
-             add it to INVENTORY_SOURCES in scripts/runtime_representation_oracle.py \
-             or remove the seam it carries"
+            "`{path}` is not a registered runtime-representation inventory source: no \
+             source class covers it, and a root added to INVENTORY_ROOTS in \
+             scripts/runtime_representation_oracle.py needs one"
         )));
     };
     let production = production_rust_source(source)?;

@@ -1361,17 +1361,24 @@ carrier. Only those two scanner identities receive this disposition; adjacent
 string accessors, constructors, and backend emitters remain unclassified unless
 they independently satisfy a final form.
 
-### The inventory's universe is a file list
+### The inventory's universe is the files under its roots
 
-The inventory's completeness claim is over an explicit, reviewed list of the
-repository files that can carry a seam, held in the oracle as
-`INVENTORY_SOURCES`. The oracle proves that list still equals the on-disk
-contents of its declared roots, so a new file fails until someone registers it,
-and it reads the filesystem rather than the git index because cargo compiles
-what is on disk.
+The inventory's completeness claim is over every file on disk under the
+oracle's declared roots, `INVENTORY_ROOTS`. The roots are reviewed and the
+freeze digest binds them; the files under them are derived, so a new file is
+scanned the moment it exists and a seam in it fails as an unclassified hit,
+exactly as a new seam in an existing file does. No per-file registration
+exists, because one would add review friction without adding a guarantee: the
+classifier, not a list, decides whether a file carries debt. The oracle reads
+the filesystem rather than the git index because cargo compiles what is on
+disk, so an untracked file is in the universe; a git-ignored file is not, and
+a file reached through a symbolic link under a root is scanned at the link's
+path. A root whose directory does not exist fails, so renaming or deleting a
+crate cannot shrink the universe without review, and adding, removing or
+reordering a root moves the freeze.
 
 Stating the claim over a *language* instead would not be dischargeable: a
-reviewer can always name one more construct. Stated over a file list it is
+reviewer can always name one more construct. Stated over a file set it is
 decidable, and every source in it is read by a real parser for its own
 language: the Rust files with `syn`, and the C and Objective-C headers through
 clang's front end (`clang -fsyntax-only -Xclang -ast-dump=json`). A seam's
@@ -1445,7 +1452,8 @@ returns:
 - replace exact product arithmetic with saturation;
 - add a fixed-rank device field or narrow one metadata field;
 - handwrite a second ABI field list;
-- register a source file's seam without registering the file;
+- plant a seam in a new source file under a root, and in a new file in a
+  subdirectory of one;
 - replace the exact arbitrary-precision product with primitive wrapping
   arithmetic;
 - recover capacity through a direct or aliased legacy capacity carrier;
@@ -1467,7 +1475,8 @@ execution tests prove its sanctioned replacements work.
 ## B1. Freeze points
 
 - Phase 0 freezes the immutable `foundation_rows`, including each identity's
-  owning deletion phase, and `source_inventory.mutations`. Each frozen mutation
+  owning deletion phase, `source_inventory.mutations`, and
+  `source_inventory.roots`. Each frozen mutation
   row binds its stable witness ID, exact implementation digest, target source
   path, expected seam kind, required owners, expected failure code and reason,
   and required command. Later phases may reduce raw
@@ -1479,9 +1488,9 @@ execution tests prove its sanctioned replacements work.
   reappearance rather than silently restoring it. A genuinely new identity
   outside the prior foundation may still be emitted with a changed digest for
   review. `coverage_manifest()` remains code-derived configuration rather than
-  a persisted baseline field: beyond the frozen mutation contract, it adds the
-  source universe, release reproducers, hardware probes, counts, and ordinary execution
-  configuration. At runtime the oracle verifies that live probes match the
+  a persisted baseline field: beyond the frozen mutation contract and roots, it
+  adds the closure rule, release reproducers, hardware probes, and ordinary
+  execution configuration. At runtime the oracle verifies that live probes match the
   frozen mutation rows, verifies that the richer manifest is the exact
   projection of the current configuration, and executes every non-hardware
   mutation and reproducer. Changes only to live-derived reproducers, hardware
@@ -1511,9 +1520,10 @@ change also requires a mutation that would have accepted the forbidden
 behavior. Adding a test already selected by a frozen command does not move the
 required floor.
 
-A Phase 0 source-universe, final-form, reproducer, or hardware registration that
-does not add or change a foundation row or frozen mutation row does not move the
-digest and does not require a B1 amendment paragraph. Its owning change still
+Adding, removing, or renaming a file under a frozen root, and a final-form,
+reproducer, or hardware registration, that does not add or change a foundation
+row or frozen mutation row does not move the digest and does not require a B1
+amendment paragraph. Changing a root does. Its owning change still
 updates code, focused positive and negative tests, and current documentation.
 Adding, removing, renaming, reimplementing, retargeting, or changing the
 expected seam kind, required owners, failure or command of a mutation does move
@@ -1762,12 +1772,12 @@ code-generation text test.
 ## Phase 0 — executable inventory and red controls
 
 **Delivers:** the derived inventory and exact shrink-only transition-debt
-manifest in C6, over the frozen source list; a structural seam scanner with its
+manifest in C6, over every file under its frozen roots; a structural seam scanner with its
 own positive and negative suite; release-profile reproducers for exact capacity
 collision, count/byte overflow, zero extents, and malformed foreign metadata,
 including a planner-level [#888] witness that shows the collision reaching slot
 reuse rather than only key equality; one detection mutation per classifier plus
-fail-closed controls for an unregistered source file and an unclassified
+fail-closed controls for a seam in a new source file and an unclassified
 arithmetic spelling; source-only and hardware probe harnesses; all landed
 receipts as positive controls.
 

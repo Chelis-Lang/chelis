@@ -1,8 +1,8 @@
 """Unit contracts for the chelis#893 Phase 0 acceptance oracle.
 
 These cover the parts of the oracle that are not proved by running it: that the
-frozen source list still equals its roots, that the freeze digest binds the
-finished foundation and reviewed mutation contracts, that the runtime manifest
+scanned universe is every file under the frozen roots, that the freeze digest
+binds the finished foundation, the roots, and the reviewed mutation contracts, that the runtime manifest
 exactly describes the configuration the oracle executes, and that every
 classifier has a controlled mutation.
 
@@ -14,6 +14,7 @@ they belong: they are Rust and C parsing decisions, not Python ones.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,47 +32,162 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SourceUniverseTests(unittest.TestCase):
-    """The completeness claim is over a file list, so the list must be honest."""
+    """The universe is every file on disk under the frozen roots."""
 
-    def test_the_frozen_source_list_equals_its_roots(self) -> None:
+    def test_the_universe_is_every_file_under_the_frozen_roots(self) -> None:
+        sources = oracle.inventory_sources(REPO_ROOT)
+        self.assertEqual(sources, oracle._inventory_candidates(REPO_ROOT))
         self.assertEqual(
-            sorted(oracle.INVENTORY_SOURCES),
-            sorted(oracle._inventory_candidates(REPO_ROOT)),
-            "INVENTORY_SOURCES has drifted from the tracked contents of its roots",
+            oracle.load_baseline()["source_inventory"]["roots"],
+            list(oracle.INVENTORY_ROOTS),
         )
+        real_run = subprocess.run
+        scanned: list[str] = []
+
+        def run(arguments, **kwargs):
+            if arguments[0] != "scanner":
+                return real_run(arguments, **kwargs)
+            scanned.extend(json.loads(kwargs["input"]))
+            return subprocess.CompletedProcess(arguments, 0, '{"rows": []}', "")
+
+        with (
+            mock.patch.object(oracle, "_build_scanner", return_value=Path("scanner")),
+            mock.patch.object(oracle.subprocess, "run", side_effect=run),
+        ):
+            oracle.scan_sources(REPO_ROOT)
+        self.assertEqual(scanned, list(sources))
 
     def test_every_registered_source_exists_exactly_once(self) -> None:
-        self.assertEqual(
-            len(oracle.INVENTORY_SOURCES),
-            len(set(oracle.INVENTORY_SOURCES)),
-            "duplicate entry in the frozen source list",
-        )
-        for relative in oracle.INVENTORY_SOURCES:
+        sources = oracle.inventory_sources(REPO_ROOT)
+        self.assertEqual(len(sources), len(set(sources)), "duplicate scanned source")
+        for relative in sources:
             self.assertTrue(
-                (REPO_ROOT / relative).is_file(), f"registered source missing: {relative}"
+                (REPO_ROOT / relative).is_file(), f"scanned source missing: {relative}"
             )
 
-    def test_an_unregistered_file_under_a_root_fails_closed(self) -> None:
-        with mock.patch.object(
-            oracle,
-            "_inventory_candidates",
-            return_value=(*oracle.INVENTORY_SOURCES, "crates/chelis-ir/src/invented.rs"),
+    def test_a_new_file_under_a_root_is_scanned_without_registration(self) -> None:
+        relative = "crates/chelis-ir/src/runtime_representation_new_source_probe.rs"
+        baseline = oracle.load_baseline()
+        with oracle.temporary_mutation(
+            REPO_ROOT / relative,
+            lambda _source: "//! A seam-free new source.\n\npub fn new_source_probe() {}\n",
         ):
-            with self.assertRaises(oracle.OracleFailure) as caught:
-                oracle._assert_source_list_current(REPO_ROOT)
-        self.assertEqual(caught.exception.code, oracle.SOURCE_LIST_FAILURE.code)
-        self.assertIn("invented.rs", str(caught.exception))
-        self.assertIn("INVENTORY_SOURCES", str(caught.exception))
+            self.assertIn(relative, oracle.inventory_sources(REPO_ROOT))
+            oracle.validate_baseline(baseline, oracle.inventory_rows(REPO_ROOT))
+        self.assertFalse((REPO_ROOT / relative).exists())
 
-    def test_a_departed_registered_file_fails_closed(self) -> None:
+    def test_a_seam_in_a_new_file_fails_as_unclassified(self) -> None:
+        probes = {probe.witness_id: probe for probe in oracle.phase0_mutation_probes()}
+        for witness, kind, owner in (
+            (
+                "phase0.mutate_unregistered_inventory_source",
+                "raw-element-pointer",
+                "runtime_representation_phase0_unregistered",
+            ),
+            (
+                "phase0.mutate_unregistered_subdirectory_source",
+                "normalized-key-arithmetic",
+                "runtime_representation_phase0_subdirectory",
+            ),
+        ):
+            probe = probes[witness]
+            with self.subTest(witness=witness):
+                self.assertFalse((REPO_ROOT / probe.path).exists())
+                self.assertIs(probe.expected_failure, oracle.UNCLASSIFIED_FAILURE)
+                self.assertEqual(probe.expected_kind, kind)
+                self.assertEqual(probe.expected_owners, (owner,))
+                oracle._expect_mutation_rejected(probe)
+
+    def test_a_symlinked_file_under_a_root_is_scanned_at_its_link_path(self) -> None:
+        relative = "crates/chelis-ir/src/runtime_representation_symlink_probe.rs"
+        link = REPO_ROOT / relative
+        self.assertFalse(link.exists() or link.is_symlink())
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "outside_the_roots.rs"
+            target.write_text(
+                oracle.mutate_unregistered_inventory_source(""), encoding="utf-8"
+            )
+            link.symlink_to(target)
+            oracle._invalidate_inventory_cache()
+            try:
+                self.assertIn(relative, oracle.inventory_sources(REPO_ROOT))
+                with self.assertRaises(oracle.OracleFailure) as caught:
+                    oracle.validate_baseline(
+                        oracle.load_baseline(), oracle.inventory_rows(REPO_ROOT)
+                    )
+                target.unlink()
+                # A dangling link is not a file, and cargo cannot compile it.
+                self.assertNotIn(relative, oracle.inventory_sources(REPO_ROOT))
+            finally:
+                link.unlink()
+                oracle._invalidate_inventory_cache()
+        self.assertEqual(caught.exception.code, oracle.UNCLASSIFIED_FAILURE.code)
+        self.assertIn(
+            f"kind=raw-element-pointer|path={relative}"
+            "|owner=runtime_representation_phase0_unregistered",
+            caught.exception.details,
+        )
+
+    def test_a_git_ignored_file_under_a_root_is_outside_the_universe(self) -> None:
+        directory = REPO_ROOT / "crates/chelis-ir/src/runtime_representation_ignored_probe"
+        relative = "crates/chelis-ir/src/runtime_representation_ignored_probe/generated.rs"
+        self.assertFalse(directory.exists())
+        directory.mkdir()
+        oracle._invalidate_inventory_cache()
+        try:
+            (directory / ".gitignore").write_text("*\n", encoding="utf-8")
+            (directory / "generated.rs").write_text(
+                oracle.mutate_unregistered_inventory_source(""), encoding="utf-8"
+            )
+            self.assertNotIn(relative, oracle.inventory_sources(REPO_ROOT))
+            oracle.validate_baseline(
+                oracle.load_baseline(), oracle.inventory_rows(REPO_ROOT)
+            )
+            (directory / ".gitignore").unlink()
+            # The same file, untracked but not ignored, is scanned.
+            self.assertIn(relative, oracle.inventory_sources(REPO_ROOT))
+        finally:
+            shutil.rmtree(directory)
+            oracle._invalidate_inventory_cache()
+
+    def test_a_root_whose_directory_departed_fails_closed(self) -> None:
+        departed = "crates/chelis-departed/src/**/*.rs"
         with mock.patch.object(
-            oracle,
-            "_inventory_candidates",
-            return_value=tuple(oracle.INVENTORY_SOURCES[1:]),
+            oracle, "INVENTORY_ROOTS", (*oracle.INVENTORY_ROOTS, departed)
         ):
             with self.assertRaises(oracle.OracleFailure) as caught:
-                oracle._assert_source_list_current(REPO_ROOT)
-        self.assertEqual(caught.exception.code, oracle.SOURCE_LIST_FAILURE.code)
+                oracle.inventory_sources(REPO_ROOT)
+        self.assertEqual(caught.exception.code, oracle.DEPARTED_ROOT_FAILURE.code)
+        self.assertEqual(
+            str(caught.exception),
+            f"an inventory root names no existing directory: {departed}",
+        )
+        # A build-script root names a file that may not exist yet; its crate
+        # directory is what must exist.
+        self.assertIn("crates/chelis-ir/build.rs", oracle.INVENTORY_ROOTS)
+        self.assertFalse((REPO_ROOT / "crates/chelis-ir/build.rs").exists())
+        oracle.inventory_sources(REPO_ROOT)
+
+    def test_a_changed_root_moves_the_freeze(self) -> None:
+        baseline = oracle.load_baseline()
+        rows = oracle.inventory_rows(REPO_ROOT)
+        for name, roots in (
+            ("removed", oracle.INVENTORY_ROOTS[1:]),
+            ("added", (*oracle.INVENTORY_ROOTS, "crates/chelis-vocab/tests/**/*.rs")),
+            ("reordered", tuple(reversed(oracle.INVENTORY_ROOTS))),
+        ):
+            with self.subTest(roots=name), mock.patch.object(
+                oracle, "INVENTORY_ROOTS", roots
+            ):
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    "inventory roots do not match the frozen source universe",
+                ):
+                    oracle.validate_baseline(baseline, rows)
+        mutated = json.loads(json.dumps(baseline))
+        mutated["source_inventory"]["roots"] = mutated["source_inventory"]["roots"][1:]
+        with self.assertRaisesRegex(oracle.OracleFailure, "freeze digest"):
+            oracle.validate_baseline(mutated, rows)
 
     def test_candidates_come_from_disk_not_the_git_index(self) -> None:
         # cargo compiles what is on disk, so an unstaged file is production
@@ -82,46 +198,21 @@ class SourceUniverseTests(unittest.TestCase):
         self.assertIn("root.glob(pattern)", candidates)
         self.assertNotIn("ls-files", candidates)
 
-    def test_integer_float_source_is_registered_and_removal_fails_closed(self) -> None:
-        source = "crates/chelis-backend-c/src/integer_float.rs"
-        self.assertIn(source, oracle.INVENTORY_SOURCES)
-        oracle._assert_source_list_current(REPO_ROOT)
-        with mock.patch.object(
-            oracle,
-            "INVENTORY_SOURCES",
-            tuple(path for path in oracle.INVENTORY_SOURCES if path != source),
-        ):
-            with self.assertRaises(oracle.OracleFailure) as caught:
-                oracle._assert_source_list_current(REPO_ROOT)
-        self.assertEqual(caught.exception.code, oracle.SOURCE_LIST_FAILURE.code)
-        self.assertIn(source, str(caught.exception))
-
-    def test_softmax_composition_source_is_registered_and_removal_fails_closed(self) -> None:
-        source = "crates/chelis-ir/src/compositions.rs"
-        self.assertIn(source, oracle.INVENTORY_SOURCES)
-        oracle._assert_source_list_current(REPO_ROOT)
-        with mock.patch.object(
-            oracle,
-            "INVENTORY_SOURCES",
-            tuple(path for path in oracle.INVENTORY_SOURCES if path != source),
-        ):
-            with self.assertRaises(oracle.OracleFailure) as caught:
-                oracle._assert_source_list_current(REPO_ROOT)
-        self.assertEqual(caught.exception.code, oracle.SOURCE_LIST_FAILURE.code)
-        self.assertIn(source, str(caught.exception))
-
     def test_the_universe_holds_the_phase2_owned_sources(self) -> None:
+        sources = oracle.inventory_sources(REPO_ROOT)
         for source in (
+            "crates/chelis-backend-c/src/integer_float.rs",
             "crates/chelis-backend-hip/runtime/chelis_device_descriptor.h",
             "crates/chelis-backend-hip/runtime/chelis_device_owner.cpp",
             "crates/chelis-backend-hip/runtime/chelis_device_owner.h",
             "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
             "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+            "crates/chelis-ir/src/compositions.rs",
             "crates/chelis-python/src/dlpack.rs",
             "crates/chelis-python/src/native_tensor.rs",
             "crates/chelis-runtime/include/chelis_runtime_views.h",
         ):
-            self.assertIn(source, oracle.INVENTORY_SOURCES)
+            self.assertIn(source, sources)
 
 
 class BaselineTests(unittest.TestCase):
@@ -185,7 +276,7 @@ class BaselineTests(unittest.TestCase):
         manifest = oracle.coverage_manifest()
         manifest["release_reproducers"] = []
         manifest["hardware_probes"] = []
-        manifest["source_inventory"]["universe"]["registered_sources"] = 0
+        manifest["source_inventory"]["universe"]["closure_rule"] = ""
         manifest["acceptance"] = "ALWAYS PASS"
         self.assertEqual(
             digest,
@@ -321,10 +412,17 @@ class BaselineTests(unittest.TestCase):
             oracle.validate_baseline(mutated, self.rows)
 
     def test_source_inventory_requires_the_exact_mutation_envelope(self) -> None:
+        roots = list(oracle.INVENTORY_ROOTS)
         cases = (
-            ("extra", {"mutations": [], "authority": "ignored"}),
+            ("extra", {"mutations": [], "roots": roots, "authority": "ignored"}),
             ("missing", {}),
-            ("mutations type", {"mutations": {}}),
+            ("roots missing", {"mutations": []}),
+            ("mutations type", {"mutations": {}, "roots": roots}),
+            ("roots type", {"mutations": [], "roots": "crates/**/*.rs"}),
+            ("roots empty", {"mutations": [], "roots": []}),
+            ("root type", {"mutations": [], "roots": [*roots, 7]}),
+            ("root empty", {"mutations": [], "roots": [*roots, ""]}),
+            ("root duplicate", {"mutations": [], "roots": [*roots, roots[0]]}),
         )
         for name, source_inventory in cases:
             with self.subTest(name=name):
@@ -724,7 +822,7 @@ class FrozenMutationContractTests(unittest.TestCase):
             probes = tuple(
                 replacement if probe is self.probe else probe for probe in self.probes
             )
-            projected = {"mutations": oracle.frozen_mutation_rows(probes)}
+            projected = oracle.frozen_source_inventory(probes)
             with self.subTest(drift=name, check="digest"):
                 self.assertNotEqual(
                     self.baseline["freeze_sha256"],
@@ -784,7 +882,6 @@ class FrozenMutationContractTests(unittest.TestCase):
         with (
             mock.patch.object(oracle, "phase0_legs", return_value=()),
             mock.patch.object(oracle, "hardware_probe_manifest", return_value=()),
-            mock.patch.object(oracle, "INVENTORY_SOURCES", ()),
         ):
             current = oracle.coverage_manifest(self.probes)
             self.assertNotEqual(original, current)
@@ -792,17 +889,27 @@ class FrozenMutationContractTests(unittest.TestCase):
                 self.baseline["freeze_sha256"],
                 oracle._freeze_digest(
                     self.baseline["foundation_rows"],
-                    {"mutations": oracle.frozen_mutation_rows(self.probes)},
+                    oracle.frozen_source_inventory(self.probes),
                 ),
             )
             oracle.validate_baseline(self.baseline, (), probes=self.probes)
 
     def test_schema_accepts_full_manifest_and_rejects_legacy_rows(self) -> None:
         baseline = json.loads(json.dumps(self.baseline))
-        baseline["schema_version"] = 7
-        baseline["source_inventory"]["mutations"] = oracle.mutation_manifest(self.probes)
+        baseline["schema_version"] = 8
+        baseline["source_inventory"] = oracle.frozen_source_inventory(self.probes)
         with self.subTest(schema="current"):
             oracle._validate_baseline_schema(baseline)
+        baseline["schema_version"] = 7
+        del baseline["source_inventory"]["roots"]
+        with self.subTest(schema="schema 7 without frozen roots"):
+            with self.assertRaisesRegex(oracle.OracleFailure, "schema_version"):
+                oracle._validate_baseline_schema(baseline)
+        baseline["schema_version"] = 8
+        with self.subTest(schema="schema 7 relabeled current"):
+            with self.assertRaisesRegex(oracle.OracleFailure, "source_inventory.*exact fields"):
+                oracle._validate_baseline_schema(baseline)
+        baseline["source_inventory"]["roots"] = list(oracle.INVENTORY_ROOTS)
         baseline["schema_version"] = 6
         for row in baseline["source_inventory"]["mutations"]:
             for field in ("path", "expected_kind", "expected_owners"):
@@ -810,7 +917,7 @@ class FrozenMutationContractTests(unittest.TestCase):
         with self.subTest(schema="legacy"):
             with self.assertRaisesRegex(oracle.OracleFailure, "schema_version"):
                 oracle._validate_baseline_schema(baseline)
-        baseline["schema_version"] = 7
+        baseline["schema_version"] = 8
         with self.subTest(schema="legacy rows relabeled current"):
             with self.assertRaisesRegex(oracle.OracleFailure, "mutations.*exact fields"):
                 oracle._validate_baseline_schema(baseline)
@@ -936,12 +1043,18 @@ class MutationContractTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_every_mutation_targets_a_registered_source(self) -> None:
+        sources = oracle.inventory_sources(REPO_ROOT)
         for probe in oracle.phase0_mutation_probes():
-            if probe.expected_failure is oracle.SOURCE_LIST_FAILURE:
-                # This one deliberately creates an UNregistered file.
-                self.assertNotIn(probe.path.as_posix(), oracle.INVENTORY_SOURCES)
+            relative = probe.path.as_posix()
+            if (REPO_ROOT / probe.path).exists():
+                self.assertIn(relative, sources)
                 continue
-            self.assertIn(probe.path.as_posix(), oracle.INVENTORY_SOURCES)
+            # A new-file witness: the file it creates must land inside the
+            # universe, or its rejection would prove nothing about the scan.
+            with self.subTest(witness=probe.witness_id), oracle.temporary_mutation(
+                REPO_ROOT / probe.path, probe.mutate
+            ):
+                self.assertIn(relative, oracle.inventory_sources(REPO_ROOT))
 
     def test_manifest_binds_exact_mutation_semantics_and_command(self) -> None:
         for entry in oracle.mutation_manifest(oracle.phase0_mutation_probes()):
@@ -1043,7 +1156,7 @@ class ManifestTests(unittest.TestCase):
 
     def test_checked_host_metadata_has_paired_profiles_and_exact_width_owners(self) -> None:
         path = "crates/chelis-runtime/src/metadata.rs"
-        self.assertIn(path, oracle.INVENTORY_SOURCES)
+        self.assertIn(path, oracle.inventory_sources(REPO_ROOT))
         owners = {"ElementCount::bytes", "ElementCount::scratch_len"}
         for owner in owners:
             self.assertTrue(oracle.owner_module_final_form("width-arithmetic", path, owner))
@@ -1515,8 +1628,14 @@ class ManifestTests(unittest.TestCase):
 
     def test_the_manifest_records_the_closed_universe_rule(self) -> None:
         universe = oracle.coverage_manifest()["source_inventory"]["universe"]
-        self.assertEqual(universe["registered_sources"], len(oracle.INVENTORY_SOURCES))
-        self.assertIn("must equal", str(universe["closure_rule"]))
+        self.assertEqual(set(universe), {"roots", "closure_rule"})
+        self.assertEqual(universe["roots"], list(oracle.INVENTORY_ROOTS))
+        self.assertEqual(
+            universe["closure_rule"],
+            "the scanned sources are exactly the files on disk under the "
+            "digest-bound roots; a new file is scanned without registration, "
+            "and a root whose directory departed fails",
+        )
 
     def test_no_libclang_or_configuration_enumeration_remains(self) -> None:
         # The front end is a `clang` subprocess reading one fixed configuration
@@ -1657,7 +1776,7 @@ class RedTeamRegressionTests(unittest.TestCase):
     def test_build_scripts_are_inside_the_universe(self) -> None:
         # A build script is compiled by cargo like any other source, so a root
         # that cannot see one is a closure hole.
-        self.assertIn("crates/chelis-runtime/build.rs", oracle.INVENTORY_SOURCES)
+        self.assertIn("crates/chelis-runtime/build.rs", oracle.inventory_sources(REPO_ROOT))
         self.assertTrue(
             any(root.endswith("build.rs") for root in oracle.INVENTORY_ROOTS),
             oracle.INVENTORY_ROOTS,
@@ -1669,13 +1788,3 @@ class RedTeamRegressionTests(unittest.TestCase):
             any(path.count("/") > 3 and path.endswith("mod.rs") for path in paths),
             f"no subdirectory closure witness among {sorted(paths)}",
         )
-
-    def test_the_docstring_source_counts_match_the_frozen_list(self) -> None:
-        rust = sum(1 for path in oracle.INVENTORY_SOURCES if path.endswith(".rs"))
-        native = len(oracle.INVENTORY_SOURCES) - rust
-        source = Path(oracle.__file__).read_text(encoding="utf-8")
-        self.assertIn(
-            "Ninety are Rust and eleven are C, C++, or Objective-C sources",
-            source,
-        )
-        self.assertEqual((rust, native), (90, 11))

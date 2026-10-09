@@ -45,7 +45,7 @@ fn an_unregistered_source_path_fails_rather_than_scanning_empty() {
         error.message
     );
     assert!(
-        error.message.contains("INVENTORY_SOURCES"),
+        error.message.contains("INVENTORY_ROOTS"),
         "the failure must name the exact sanctioned action: {}",
         error.message
     );
@@ -570,7 +570,7 @@ fn include_reopens_the_closed_universe_and_is_rejected() {
         .expect_err("include! splices an unscanned file and must fail closed");
     assert!(error.message.contains("include!"), "{}", error.message);
     assert!(
-        error.message.contains("INVENTORY_SOURCES"),
+        error.message.contains("INVENTORY_ROOTS"),
         "the failure must name the sanctioned action: {}",
         error.message
     );
@@ -606,7 +606,7 @@ fn a_path_attribute_reopens_the_closed_universe_and_is_rejected() {
         .expect_err("#[path] compiles a file outside the roots and must fail closed");
     assert!(error.message.contains("#[path]"), "{}", error.message);
     assert!(
-        error.message.contains("INVENTORY_SOURCES"),
+        error.message.contains("INVENTORY_ROOTS"),
         "{}",
         error.message
     );
