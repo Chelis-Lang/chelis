@@ -1,6 +1,7 @@
 {
   "schema": 1,
   "issues": [
+    { "number": 618, "kind": "issue", "state": "open" },
     { "number": 689, "kind": "issue", "state": "open" },
     { "number": 693, "kind": "issue", "state": "open" },
     { "number": 729, "kind": "issue", "state": "open" },
