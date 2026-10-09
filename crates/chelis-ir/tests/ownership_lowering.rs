@@ -2147,6 +2147,46 @@ fn mixed_raw_and_lowered_call_arguments_each_point_at_themselves() {
     );
 }
 
+/// chelis#3388: a runtime extent reaches a named tensor formal. The checker
+/// admits `*` against a named dimension as it admits a literal (spec/04
+/// section 4.1, section 4.7), so the ownership call-argument check must not
+/// reject the call the checker accepted. Both a concrete-named parameter and a
+/// generic def whose body fixes its binders to a free-dimension ADT's named
+/// field axes lower and verify.
+#[test]
+fn a_runtime_extent_argument_reaches_a_named_tensor_formal() {
+    let concrete_named = "def total(features: tensor[batch, feat, f32]) -> f32 =\n\
+                          \x20 tensor_to_scalar(sum(sum(features, 0i32), 0i32))\n\
+                          def run_main() -> f32 = {\n\
+                          \x20 rows = 2i64\n\
+                          \x20 x = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), [rows, rows])\n\
+                          \x20 total(x)\n\
+                          }\n";
+    let free_dimension_adt = "type Holder =\n\
+                              \x20 | Holder { features: tensor[n, d, f32], rows: i64 }\n\
+                              def hold[n, d](features: tensor[n, d, f32], rows: i64) -> Holder =\n\
+                              \x20 Holder { features, rows }\n\
+                              def total(h: Holder) -> f32 =\n\
+                              \x20 match h with {\n\
+                              \x20   | Holder { features, rows } => {\n\
+                              \x20   _ = rows\n\
+                              \x20   tensor_to_scalar(sum(sum(features, 0i32), 0i32))\n\
+                              \x20 }\n\
+                              \x20 }\n\
+                              def run_main() -> f32 = {\n\
+                              \x20 rows = 2i64\n\
+                              \x20 x = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), [rows, rows])\n\
+                              \x20 total(hold(x, rows))\n\
+                              }\n";
+    for source in [concrete_named, free_dimension_adt] {
+        let rendered = verified_source(source).render();
+        assert!(
+            rendered.contains("unit total Function"),
+            "the callee lowers beside its caller:\n{rendered}"
+        );
+    }
+}
+
 /// Resolve every `%owner…@surf:start..end` label in a rendered dump back to the
 /// source bytes the span points at, so tests assert on regions rather than on
 /// the presence of a span.
