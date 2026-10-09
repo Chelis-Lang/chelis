@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from zipfile import ZipFile
 
 from scripts import ci_candidate_identity as identity
@@ -325,6 +326,52 @@ class RebaseRepository:
 
 
 class RebaseReuseTests(unittest.TestCase):
+    def test_clarabel_feature_flag_follows_the_synthetic_delta(self) -> None:
+        ast = "crates/chelis-surf/src/ast.rs"
+        self.assertTrue(reuse._frontier_flags([], [], [ast])["run_clarabel"])
+        self.assertFalse(
+            reuse._frontier_flags(
+                [], [], ["crates/chelis-surf/src/parser.rs"]
+            )["run_clarabel"]
+        )
+        self.assertFalse(
+            reuse._frontier_flags([], [], ["docs/rebase.md"])["run_clarabel"]
+        )
+
+    def test_docs_only_pr_rebased_over_ast_selects_clarabel(self) -> None:
+        repository = RebaseRepository(
+            feature_path="docs/feature.md",
+            delta_path="crates/chelis-surf/src/ast.rs",
+        )
+        self.addCleanup(repository.close)
+        with mock.patch.object(
+            reuse,
+            "_interaction_frontier",
+            return_value={"packages": [], "owner_jobs": [], "unsafe_paths": []},
+        ):
+            decision = repository.evaluate()
+        self.assertEqual(decision["lane"], "targeted")
+        self.assertTrue(decision["current_patch_docs_only"])
+        self.assertEqual(decision["delta_paths"], ["crates/chelis-surf/src/ast.rs"])
+        self.assertTrue(decision["run_clarabel"])
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "github-output"
+            reuse.write_decision(
+                decision,
+                output=Path(temporary) / "decision.json",
+                github_output=output,
+            )
+            self.assertIn("rebase_run_clarabel=true", output.read_text())
+
+    def test_unmapped_ast_rebase_falls_back_to_full(self) -> None:
+        repository = RebaseRepository(
+            feature_path="docs/feature.md",
+            delta_path="crates/chelis-surf/src/ast.rs",
+        )
+        self.addCleanup(repository.close)
+        decision = repository.evaluate()
+        self.assertEqual(decision["lane"], "full")
+
     def test_shallow_candidate_reuses_prior_evidence_for_rebase_and_base_merge(self) -> None:
         for mode in ("base-rebase", "base-merge"):
             with self.subTest(mode=mode):

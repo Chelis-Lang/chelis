@@ -93,6 +93,7 @@ jobs:
       rebase_run_script_unit: ${{ steps.rebase-reuse.outputs.rebase_run_script_unit }}
       rebase_run_integration: ${{ steps.rebase-reuse.outputs.rebase_run_integration }}
       rebase_run_smt: ${{ steps.rebase-reuse.outputs.rebase_run_smt }}
+      rebase_run_clarabel: ${{ steps.rebase-reuse.outputs.rebase_run_clarabel }}
       rebase_run_backend: ${{ steps.rebase-reuse.outputs.rebase_run_backend }}
       rebase_run_diagnostic: ${{ steps.rebase-reuse.outputs.rebase_run_diagnostic }}
       rebase_run_hull: ${{ steps.rebase-reuse.outputs.rebase_run_hull }}
@@ -322,7 +323,7 @@ jobs:
           # are present and comparable, so this step reads a stated
           # property instead of inheriting whatever ran before it
           # (chelis#2228, chelis#2234).
-          git diff --name-only "$BASE..$HEAD" \
+          git diff --name-only --no-renames "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
       - name: Validate candidate lifecycle
@@ -374,6 +375,7 @@ jobs:
             echo "rebase_run_script_unit=false" >> "$GITHUB_OUTPUT"
             echo "rebase_run_integration=false" >> "$GITHUB_OUTPUT"
             echo "rebase_run_smt=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_clarabel=false" >> "$GITHUB_OUTPUT"
             echo "rebase_run_backend=false" >> "$GITHUB_OUTPUT"
             echo "rebase_run_diagnostic=false" >> "$GITHUB_OUTPUT"
             echo "rebase_run_hull=false" >> "$GITHUB_OUTPUT"
@@ -1498,7 +1500,7 @@ jobs:
         shell: chelis-ci-shell run {0}
     timeout-minutes: 55
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.clarabel_changed == 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_clarabel == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.clarabel_changed == 'true')) }}
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -1604,7 +1606,7 @@ jobs:
           change-owned-report=${{ needs.change-owned-report.result }}
 
       - name: Require selected Clarabel feature checks
-        if: needs.changes.outputs.clarabel_changed == 'true'
+        if: needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_clarabel == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.clarabel_changed == 'true')
         run: >-
           python3 scripts/ci_require_success.py
           clarabel-provider=${{ needs.clarabel-provider.result }}

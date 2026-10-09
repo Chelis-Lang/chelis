@@ -151,6 +151,7 @@ CLARABEL_PATHS: frozenset[str] = frozenset(
         "crates/chelis-runtime/include/chelis_runtime.h",
         "crates/chelis-runtime/src/lib.rs",
         "crates/chelis-runtime/src/native_provider.rs",
+        "crates/chelis-surf/src/ast.rs",
         "scripts/check_configuration_closure.py",
         "scripts/ci_detect_docs_only.py",
         "scripts/gate.py",

@@ -21,12 +21,12 @@ if __package__:
     from . import ci_candidate_identity as identity
     from . import ci_candidate_receipt as candidate_receipt
     from . import ci_change_owned
-    from .ci_detect_docs_only import is_docs_only
+    from .ci_detect_docs_only import clarabel_changed, is_docs_only
 else:
     import ci_candidate_identity as identity
     import ci_candidate_receipt as candidate_receipt
     import ci_change_owned
-    from ci_detect_docs_only import is_docs_only
+    from ci_detect_docs_only import clarabel_changed, is_docs_only
 
 
 SCHEMA = "chelis-ci-rebase-reuse/v1"
@@ -199,7 +199,9 @@ def _interaction_frontier(
 
 
 def _frontier_flags(
-    packages: Sequence[str], owner_jobs: Sequence[Mapping[str, str]]
+    packages: Sequence[str],
+    owner_jobs: Sequence[Mapping[str, str]],
+    delta_paths: Sequence[str],
 ) -> dict[str, bool]:
     package_set = set(packages)
     owners = {
@@ -214,6 +216,7 @@ def _frontier_flags(
         ),
         "run_integration": bool(package_set),
         "run_smt": "chelis-prove" in package_set,
+        "run_clarabel": clarabel_changed(list(delta_paths)),
         "run_backend": "chelis-backend-c" in package_set,
         "run_diagnostic": bool(
             {"chelis-types", "chelis-compiler-api"} & package_set
@@ -561,7 +564,7 @@ def evaluate_rebase(
     )
     frontier_packages = frontier["packages"] if lane == "targeted" else []
     frontier_owner_jobs = frontier["owner_jobs"] if lane == "targeted" else []
-    flags = _frontier_flags(frontier_packages, frontier_owner_jobs)
+    flags = _frontier_flags(frontier_packages, frontier_owner_jobs, delta_paths)
     return {
         "schema": SCHEMA,
         "lane": lane,
@@ -745,6 +748,7 @@ def write_decision(
                 "run_script_unit",
                 "run_integration",
                 "run_smt",
+                "run_clarabel",
                 "run_backend",
                 "run_diagnostic",
                 "run_hull",
