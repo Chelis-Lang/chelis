@@ -233,7 +233,7 @@ its own zero rule.
 | `relu` | dedicated `RiscOp::Relu`; forward equals stored-bit `max_elem(x, 0)` | `g` only where `0 < x`; exact +0 at both zeros and NaN |
 | `sigmoid` | `recip(add(1, exp(neg(x))))` | differentiable |
 | `tanh`,`silu`,`gelu`,`gelu_tanh`,`standard_normal_cdf` | `tier2.rs` decompositions; `standard_normal_cdf` is the standard normal CDF `Phi` over `erfc`, `gelu` is exact (`x*Phi(x)`), `gelu_tanh` the tanh approximation | differentiable |
-| `matmul` | `expand`+`mul`+`sum`, pattern-matched to BLAS (`spec/05` §4.1); optional `accumulator` | differentiable |
+| `matmul` | `expand`+`mul`+`sum` (`spec/05` §4.1); the C lane computes each product inside the canonical sum without storing the expanded operands or their product, and HIP and Metal pattern-match it to BLAS; optional `accumulator` | differentiable |
 | `mean` | float-only `sum` followed by division by the selected axis extent, in canonical multi-axis order | differentiable |
 | `softmax` | max-shift + `exp` + `sum` + `div` (`spec/05` §4.2) | differentiable |
 | `layer_norm` | explicit epsilon plus mean/var normalize + affine (`spec/05` §4.4) | differentiable |
