@@ -71,7 +71,7 @@ fn every_named_cast_rung_is_rejected_with_a_typed_diagnostic() {
             "{name}: {rendered}"
         );
         assert!(rendered.contains("codegen:hip"), "{name}: {rendered}");
-        assert!(rendered.contains("chelis#759"), "{name}: {rendered}");
+        assert!(rendered.contains("chelis#3411"), "{name}: {rendered}");
     }
 }
 

@@ -1,13 +1,10 @@
 {
   "schema": 1,
   "issues": [
-    { "number": 570, "kind": "issue", "state": "open" },
-    { "number": 600, "kind": "issue", "state": "open" },
     { "number": 689, "kind": "issue", "state": "open" },
     { "number": 693, "kind": "issue", "state": "open" },
     { "number": 729, "kind": "issue", "state": "open" },
     { "number": 730, "kind": "issue", "state": "open" },
-    { "number": 759, "kind": "issue", "state": "open" },
     { "number": 829, "kind": "issue", "state": "open" },
     { "number": 879, "kind": "issue", "state": "open" },
     { "number": 912, "kind": "issue", "state": "open" },
@@ -32,6 +29,8 @@
     { "number": 2583, "kind": "issue", "state": "open" },
     { "number": 2702, "kind": "issue", "state": "open" },
     { "number": 2740, "kind": "issue", "state": "open" },
-    { "number": 3366, "kind": "issue", "state": "open" }
+    { "number": 3366, "kind": "issue", "state": "open" },
+    { "number": 3410, "kind": "issue", "state": "open" },
+    { "number": 3411, "kind": "issue", "state": "open" }
   ]
 }

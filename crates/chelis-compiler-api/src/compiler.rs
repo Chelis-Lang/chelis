@@ -4742,7 +4742,7 @@ fn reject_unsized_named_dims(dag: &Dag, target: &'static str) -> Result<()> {
                     ),
                     target,
                     chelis_types::unimplemented_rejection!(
-                        600,
+                        1277,
                         "dynamic output shapes do not yet have a backend representation"
                     ),
                 ));
@@ -4800,7 +4800,7 @@ pub fn reject_symbolic_windowed_reduce(
                     ),
                     target,
                     chelis_types::unimplemented_rejection!(
-                        600,
+                        1277,
                         "the runtime-derived window output extent needs a dynamic output shape"
                     ),
                 ));
@@ -5650,7 +5650,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     ),
                     "hip",
                     chelis_types::unimplemented_rejection!(
-                        759,
+                        3411,
                         "the HIP cast kernels emit an unguarded device-side conversion, \
                          so the named cast traps have no device implementation; the C \
                          target is canonical for the named cast ladder"
@@ -8884,7 +8884,7 @@ mod tests {
             "unexpected message: {message}"
         );
         assert!(message.contains("`seq`"), "unexpected message: {message}");
-        assert!(message.contains("unimplemented chelis#600:"));
+        assert!(message.contains("unimplemented chelis#1277:"));
     }
 
     #[test]
