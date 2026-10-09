@@ -8,6 +8,208 @@ use chelis_types::{ScalarValue, dtype_semantics::scalar_from_f64, types::Prim};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 
+fn bind_pattern<'a>(pattern: &'a chelis_surf::ast::Pattern, locals: &mut BTreeSet<&'a str>) {
+    use chelis_surf::ast::Pattern;
+    match pattern {
+        Pattern::Var(name, _) => {
+            locals.insert(name);
+        }
+        Pattern::As(name, inner, _) => {
+            locals.insert(name);
+            bind_pattern(inner, locals);
+        }
+        Pattern::Constructor(_, patterns, _) | Pattern::Tuple(patterns, _) => {
+            for pattern in patterns {
+                bind_pattern(pattern, locals);
+            }
+        }
+        Pattern::Record(_, fields, _) => {
+            for (_, pattern) in fields {
+                bind_pattern(pattern, locals);
+            }
+        }
+        Pattern::Wildcard(_) | Pattern::Lit(_, _) => {}
+    }
+}
+
+fn bind_let_pattern<'a>(pattern: &'a chelis_surf::ast::LetPattern, locals: &mut BTreeSet<&'a str>) {
+    use chelis_surf::ast::LetPattern;
+    match pattern {
+        LetPattern::Var(name, _) => {
+            locals.insert(name);
+        }
+        LetPattern::Tuple(patterns, _) => {
+            for pattern in patterns {
+                bind_let_pattern(pattern, locals);
+            }
+        }
+        LetPattern::Wildcard(_) => {}
+    }
+}
+
+/// Enumerate value references from every Surf expression form, respecting
+/// lexical binders. The linker has already resolved package references to
+/// their declaration identities; no private-name suffix matching occurs.
+fn value_refs(
+    expr: &Expr,
+    locals: &BTreeSet<&str>,
+    names: &BTreeSet<String>,
+    out: &mut BTreeSet<String>,
+) {
+    match expr {
+        Expr::Var(name, _) => {
+            if !locals.contains(name.as_str()) && names.contains(name) {
+                out.insert(name.clone());
+            }
+        }
+        Expr::Apply(callee, args, _) => {
+            value_refs(callee, locals, names, out);
+            for arg in args {
+                value_refs(arg, locals, names, out);
+            }
+        }
+        Expr::Accumulate(call, _, _) => value_refs(call, locals, names, out),
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
+            for item in items {
+                value_refs(item, locals, names, out);
+            }
+        }
+        Expr::Record(_, fields, _) => {
+            for (_, value) in fields {
+                value_refs(value, locals, names, out);
+            }
+        }
+        Expr::RecordUpdate(base, fields, _) => {
+            value_refs(base, locals, names, out);
+            for (_, value) in fields {
+                value_refs(value, locals, names, out);
+            }
+        }
+        Expr::Access(inner, _, _)
+        | Expr::TupleGet(inner, _, _)
+        | Expr::Unary(_, inner, _)
+        | Expr::Cast(inner, _, _, _)
+        | Expr::Grad(inner, _, _)
+        | Expr::Vmap(inner, _, _)
+        | Expr::Jit(inner, _)
+        | Expr::Realize(inner, _)
+        | Expr::Copy(inner, _)
+        | Expr::Borrow(inner, _)
+        | Expr::Quote(inner, _)
+        | Expr::Unquote(inner, _)
+        | Expr::Splice(inner, _)
+        | Expr::Annotate(inner, _, _) => value_refs(inner, locals, names, out),
+        Expr::Binary(_, left, right, _) | Expr::WithDevice(left, right, _) => {
+            value_refs(left, locals, names, out);
+            value_refs(right, locals, names, out);
+        }
+        Expr::Pipe(seed, stages, _) => {
+            value_refs(seed, locals, names, out);
+            for stage in stages {
+                value_refs(&stage.expression, locals, names, out);
+            }
+        }
+        Expr::If(condition, yes, no, _) => {
+            value_refs(condition, locals, names, out);
+            value_refs(yes, locals, names, out);
+            value_refs(no, locals, names, out);
+        }
+        Expr::Match(value, arms, _) => {
+            value_refs(value, locals, names, out);
+            for arm in arms {
+                let mut arm_locals = locals.clone();
+                bind_pattern(&arm.pattern, &mut arm_locals);
+                if let Some(guard) = &arm.guard {
+                    value_refs(guard, &arm_locals, names, out);
+                }
+                value_refs(&arm.body, &arm_locals, names, out);
+            }
+        }
+        Expr::Lambda(params, body, _) => {
+            let mut body_locals = locals.clone();
+            body_locals.extend(params.iter().map(|param| param.name.as_str()));
+            value_refs(body, &body_locals, names, out);
+        }
+        Expr::Block(bindings, body, _) => {
+            let mut block_locals = locals.clone();
+            for binding in bindings {
+                value_refs(&binding.value, &block_locals, names, out);
+                bind_let_pattern(&binding.pattern, &mut block_locals);
+            }
+            value_refs(body, &block_locals, names, out);
+        }
+        Expr::Lit(_, _) | Expr::Constructor(_, _) => {}
+    }
+}
+
+/// The checked declarations and exact property expression that the compiler
+/// used to produce a scalar graph. The graph lowerer inlines calls, so its
+/// declaration table alone cannot identify the imported source function.
+/// This provenance is report data; the Beacon certificate still addresses
+/// the content-hashed graph and selected root.
+fn source_binding(
+    decls: &[Decl],
+    property: &Property,
+    expression: &Expr,
+) -> Result<serde_json::Value, String> {
+    let mut bindings = BTreeMap::new();
+    for decl in decls {
+        let name = match decl {
+            Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => name,
+            _ => continue,
+        };
+        if bindings.insert(name.as_str(), decl).is_some() {
+            return Err(format!(
+                "Beacon source has more than one value declaration named `{name}`"
+            ));
+        }
+    }
+    let names = bindings.keys().map(|name| (*name).to_string()).collect();
+    let property_params = property
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect();
+    let mut pending = BTreeSet::new();
+    value_refs(expression, &property_params, &names, &mut pending);
+    let mut selected = BTreeSet::new();
+    while let Some(name) = pending.pop_first() {
+        if !selected.insert(name.clone()) {
+            continue;
+        }
+        let decl = bindings
+            .get(name.as_str())
+            .ok_or("Beacon source reference has no checked declaration")?;
+        let (body, params) = match decl {
+            Decl::FunDef { body, params, .. } => (
+                body,
+                params.iter().map(|param| param.name.as_str()).collect(),
+            ),
+            Decl::LetDef { value, .. } => (value, BTreeSet::new()),
+            _ => unreachable!("binding map contains values only"),
+        };
+        value_refs(body, &params, &names, &mut pending);
+    }
+    let mut source_declarations = Vec::new();
+    for decl in decls {
+        let name = match decl {
+            Decl::FunDef { name, .. } | Decl::LetDef { name, .. } if selected.contains(name) => {
+                name
+            }
+            _ => continue,
+        };
+        let bytes = serde_json::to_vec(decl).map_err(|error| error.to_string())?;
+        source_declarations.push(
+            serde_json::json!({"name":name,"sha256":format!("{:x}", Sha256::digest(&bytes))}),
+        );
+    }
+    let expression_bytes = serde_json::to_vec(expression).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "expression_sha256":format!("{:x}", Sha256::digest(&expression_bytes)),
+        "declarations":source_declarations,
+    }))
+}
+
 fn literal(expr: &Expr) -> Result<f64, String> {
     let value = match expr {
         Expr::Lit(Literal::TypedFloat(value, LiteralSuffix::F64), _) => *value,
@@ -152,6 +354,7 @@ pub(super) fn prove(
         }
         let mut inputs = scalar_box(property)?;
         let (expression, upper) = upper_expression(property)?;
+        let source_binding = source_binding(decls, property, &expression)?;
         Goal::scalar_upper_bound(inputs.clone(), upper).map_err(|e| e.to_string())?;
         let body = chelis_surf::format::format_expression(&expression);
         // The goal graph is lowered from the declarations the property was
@@ -276,9 +479,10 @@ pub(super) fn prove(
             result,
             format!("({body}) - ({:?}f64) <= 0.0f64", upper.as_f64_lossy()),
             input_bindings,
+            source_binding,
         ))
     })();
-    let (discharge, folded_goal, input_bindings) = match prepared {
+    let (discharge, folded_goal, input_bindings, source_binding) = match prepared {
         Ok(value) => value,
         Err(reason) => return fail(reason),
     };
@@ -314,6 +518,48 @@ pub(super) fn prove(
     let mut evidence = discharge.evidence().clone();
     evidence["folded_goal"] = serde_json::json!(folded_goal);
     evidence["input_bindings"] = serde_json::json!(input_bindings);
+    evidence["source_binding"] = source_binding;
     outcome.engine_evidence = Some(evidence);
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chelis_surf::ast::{LetBinding, LetPattern};
+
+    #[test]
+    fn source_binding_follows_nested_calls_without_claiming_a_shadowed_definition() {
+        let span = chelis_deep::Span::new(0, 0);
+        let name = |name: &str| Expr::Var(name.into(), span);
+        let expr = Expr::Block(
+            vec![LetBinding {
+                pattern: LetPattern::Var("neuron".into(), span),
+                ty: None,
+                value: name("local_source"),
+            }],
+            Box::new(Expr::Apply(
+                Box::new(name("neuron")),
+                vec![Expr::If(
+                    Box::new(Expr::Lit(Literal::Bool(true), span)),
+                    Box::new(Expr::Apply(Box::new(name("model")), vec![name("x")], span)),
+                    Box::new(name("x")),
+                    span,
+                )],
+                span,
+            )),
+            span,
+        );
+        let names = ["neuron", "local_source", "model"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let locals = BTreeSet::from(["x"]);
+        let mut refs = BTreeSet::new();
+        value_refs(&expr, &locals, &names, &mut refs);
+        assert_eq!(
+            refs,
+            BTreeSet::from(["local_source".into(), "model".into()])
+        );
+    }
 }

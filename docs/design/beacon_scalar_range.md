@@ -8,9 +8,17 @@ The body is `tensor_to_scalar(output_expression) <= upper_f64_literal`.
 Missing, duplicate or unrecognized constraints are rejected;
 there is no SMT or fuzz fallback in this explicit lane.
 
-The source must be self-contained, with no imports or shadowing of the
-`tensor_to_scalar` bridge. The gallery build generates its network source before
-dispatch. [The executable example](../../examples/beacon_scalar_range.ch) is run
+For a standalone in-memory source, the source must be self-contained, with no
+imports or shadowing of the `tensor_to_scalar` bridge. The CLI's file path may
+resolve a Reef package first; an imported rank-zero tensor function then lowers
+from the checked linked declarations. The graph inlines that function, so the
+property result also records the selected linked source declarations and a
+digest of the exact authored output expression. These are provenance for the
+compiler's source-to-graph step. Beacon's certificate addresses the graph hash
+and root.
+
+The gallery build generates its network source before dispatch.
+[The executable example](../../examples/beacon_scalar_range.ch) is run
 with `CHELIS_BEACON_BIN=/absolute/path/to/chelis-beacon chelis prove
 examples/beacon_scalar_range.ch --tier beacon-only --beacon-budget 2000 --json`.
 

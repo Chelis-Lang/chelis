@@ -1,0 +1,1 @@
+`chelis prove --tier beacon-only` records the linked source declarations behind an imported rank-zero tensor goal alongside the exact Beacon graph evidence, so package proof records retain source-to-graph provenance. See [#506](https://github.com/Chelis-Lang/chelis/issues/506).
