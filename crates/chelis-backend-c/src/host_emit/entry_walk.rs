@@ -1135,7 +1135,7 @@ pub(super) fn nested_entry_step(
         )
     };
     lines.push(format!(
-        "__chelis_entry_claim_walk(&__chelis_entry_claim_{index}, {root}, (chelis_value){{ .tag = {tag}, .payload = {{ .handle = (void *){value} }} }}, &__chelis_entry_claim_path_{index}, {keys}, {states}, {count});"
+        "__chelis_entry_claim_walk(&__chelis_entry_claim_{index}, {root}, __chelis_claim_borrowed_value({tag}, {value}), &__chelis_entry_claim_path_{index}, {keys}, {states}, {count});"
     ));
     Ok(format!("{{ {} }}", lines.join(" ")))
 }

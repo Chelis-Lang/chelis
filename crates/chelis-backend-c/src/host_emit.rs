@@ -3538,6 +3538,18 @@ static void __chelis_host_recursive_call_guard(__chelis_host_result_origin_arena
 fn append_nested_claim_support(out: &mut Vec<String>) {
     out.push(
         r#"
+/* A borrowed view of a heap value for a claim walk. Every byte of the value
+   is zeroed before its tag and handle are set: the runtime rejects a payload
+   whose unused bytes are not zero, and neither C nor C++ initialization of
+   one union member zeroes the rest. The walk never releases this view. */
+static chelis_value __chelis_claim_borrowed_value(chelis_value_tag tag, const void *handle) {
+    chelis_value value;
+    memset(&value, 0, sizeof value);
+    value.tag = tag;
+    value.payload.handle = (void *)handle;
+    return value;
+}
+
 /* The pattern node a component of a value owes: `kind` as in a claim node,
    `ctor` the constructor tag of a nominal value, `field` its slot. */
 static int64_t __chelis_claim_child(const __chelis_claim_node *nodes, int64_t index, int64_t kind, const char *ctor, int64_t field) {
@@ -7925,7 +7937,7 @@ impl<'a> HostEmitter<'a> {
             // it: walk it along every pattern frame (runtime_extents.md C6.5).
             let origin = result_origin_name(target);
             self.lines.push(format!(
-                "{}if ({claims} != NULL) __chelis_check_host_result_value_claims({claims}, (chelis_value){{ .tag = {tag}, .payload = {{ .handle = (void *){target} }} }}, {origin});",
+                "{}if ({claims} != NULL) __chelis_check_host_result_value_claims({claims}, __chelis_claim_borrowed_value({tag}, {target}), {origin});",
                 self.indent
             ));
             return;

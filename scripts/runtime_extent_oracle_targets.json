@@ -1465,6 +1465,7 @@
         "mode": "all"
       },
       "expected": [
+        "agreeing_claim_walks_run_when_the_host_is_cxx",
         "c_absent_variant_owes_nothing",
         "c_alias_type_argument_claims_like_its_expansion",
         "c_aliased_nominal_claims_like_its_expansion",

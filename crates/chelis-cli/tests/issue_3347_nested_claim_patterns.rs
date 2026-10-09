@@ -807,3 +807,81 @@ fn non_closing_alias_recursion_terminates_on_both_lanes() {
         );
     }
 }
+
+/// The host program a claim walk is emitted into is compiled as C++ for the
+/// Metal (`.mm`) and HIP (`.cpp`) targets. C++ zeroes no union bytes past the
+/// member it initializes, and the runtime rejects a value whose unused
+/// payload bytes are not zero, so every borrowed value a walk builds must be
+/// zeroed whole. `program` builds on the C target and its host source is
+/// compiled, linked and run as C++.
+fn host_as_cxx(program: &str) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cxxhost.ch");
+    fs::write(&path, program).expect("fixture");
+    let out_dir = dir.path().join("c");
+    assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", "--emit-c", "--allow-style-violations"])
+        .arg(&path)
+        .args(["--target", "c", "-o"])
+        .arg(&out_dir)
+        .assert()
+        .success();
+    let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".to_string());
+    let compiled = std::process::Command::new(&compiler)
+        .current_dir(&out_dir)
+        .args(["-x", "c++", "-O1", "-c", "cxxhost.c", "-o", "host.o"])
+        .output()
+        .expect("C++ compiler runs");
+    assert!(
+        compiled.status.success(),
+        "the host source compiles as C++:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: false,
+            needs_blas: false,
+        },
+    );
+    let linked = std::process::Command::new(&compiler)
+        .current_dir(&out_dir)
+        .args(["host.o", "libchelis_runtime.a"])
+        .args(&toolchain.link_flags)
+        .args(["-o", "host"])
+        .output()
+        .expect("C++ linker runs");
+    assert!(
+        linked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    let run = std::process::Command::new(out_dir.join("host"))
+        .output()
+        .expect("host runs");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    )
+}
+
+const KINDED_NOMINAL_DIMENSIONS: &str =
+    include_str!("../../../examples/kinded_nominal_dimensions.ch");
+
+/// Agreeing nested result and entry claims, and the shipped example whose
+/// generic formal now walks its claim, run unchanged when the host is C++.
+#[test]
+fn agreeing_claim_walks_run_when_the_host_is_cxx() {
+    let input = tempfile::tempdir().expect("size input");
+    let size = input.path().join("size.txt");
+    fs::write(&size, "xxx").expect("size");
+    for case in [DIRECT, FORMAL, BOX_BINDER] {
+        let program = format!("{PRELUDE}{case}").replace("PATH", &size.display().to_string());
+        let output = host_as_cxx(&program);
+        assert!(output.contains("out = 3"), "{case}\n{output}");
+    }
+    let output = host_as_cxx(KINDED_NOMINAL_DIMENSIONS);
+    assert!(output.contains("out = ()"), "{output}");
+}
