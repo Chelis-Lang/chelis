@@ -370,6 +370,325 @@ def new (t : ThreadId) : Prog → State → State × List Ev × XRes
       match new t body s with
       | (s1, tr, r) => (s1, tr, r.resume)
 
+/-! ## Process hook installation
+
+These laws concern `old` and `new` only. RA-e links installation at `catch_lowering` to native behavior.
+A false installation lower bound does not determine the native process flag.
+Sequential state transfer does not claim native execution after an abort.
+-/
+
+/-- Guard entry preserves the process installation flag. -/
+theorem Guard.enter_installed (t : ThreadId) (g : Guard) (s : State) :
+
+    (g.enter t s).installed = s.installed := by
+
+  cases g
+
+  all_goals rfl
+
+/-- Guard exit preserves the process installation flag. -/
+theorem Guard.exit_installed (t : ThreadId) (g : Guard) (saved : Nat → Int) (s : State) :
+
+    (g.exit t saved s).installed = s.installed := by
+
+  cases g
+
+  all_goals rfl
+
+/-- Every old scope exit preserves installation, including a finalizer panic and an abort. -/
+theorem oldScopeExit_installed (t : ThreadId) (g : Guard) (saved : Nat → Int)
+
+    (fid : Nat) (fp : Option Payload) (s : State) (tr : List Ev) (r : NRes) :
+
+    (oldScopeExit t g saved fid fp s tr r).1.installed = s.installed := by
+
+  cases r
+
+  all_goals cases fp
+
+  all_goals simp only [oldScopeExit, Guard.exit_installed]
+
+/-- Every new scope exit preserves installation, including a finalizer panic and an abort. -/
+theorem newScopeExit_installed (t : ThreadId) (g : Guard) (saved : Nat → Int)
+
+    (fid : Nat) (fp : Option Payload) (s : State) (tr : List Ev) (r : XRes) :
+
+    (newScopeExit t g saved fid fp s tr r).1.installed = s.installed := by
+
+  cases r
+
+  all_goals cases fp
+
+  all_goals simp only [newScopeExit, Guard.exit_installed]
+
+/-- Every old program retains a true process installation flag, for every outcome. -/
+theorem old_installed_preserved (t : ThreadId) (p : Prog) (s : State)
+
+    (hs : s.installed = true) :
+
+    (old t p s).1.installed = true := by
+
+  induction p generalizing s with
+
+  | pure v => exact hs
+
+  | work e => exact hs
+
+  | setCell k v => exact hs
+
+  | bind p k ihp ihk =>
+
+    have h1 := ihp s hs
+
+    rcases hO : old t p s with ⟨s1, tr1, r⟩
+
+    rw [hO] at h1
+
+    dsimp only at h1
+
+    cases r with
+
+    | ok v =>
+
+      simp only [old, hO]
+
+      exact ihk v s1 h1
+
+    | unwind q =>
+
+      simp only [old, hO]
+
+      exact h1
+
+    | abort =>
+
+      simp only [old, hO]
+
+      exact h1
+
+  | scope g fid fp body ih =>
+
+    have hin : (g.enter t s).installed = true := (Guard.enter_installed t g s).trans hs
+
+    have h1 := ih (g.enter t s) hin
+
+    rcases hO : old t body (g.enter t s) with ⟨s1, tr1, r⟩
+
+    rw [hO] at h1
+
+    dsimp only at h1
+
+    simp only [old, hO, oldScopeExit_installed]
+
+    exact h1
+
+  | raise d => exact hs
+
+  | raiseFatal d => exact hs
+
+  | raiseUnrep => exact hs
+
+  | panic q => exact hs
+
+  | abort => exact hs
+
+  | catchL body onOk onErr ih ihOk ihErr =>
+
+    have h1 := ih ({ s with installed := true }.setOut t true) rfl
+
+    rcases hO : old t body ({ s with installed := true }.setOut t true) with ⟨s1, tr1, r⟩
+
+    rw [hO] at h1
+
+    dsimp only at h1
+
+    cases r with
+
+    | ok v =>
+
+      simp only [old, hO]
+
+      exact ihOk v (s1.setOut t false) h1
+
+    | unwind q =>
+
+      simp only [old, hO]
+
+      exact ihErr (convert q) (s1.setOut t false) h1
+
+    | abort =>
+
+      simp only [old, hO]
+
+      exact h1
+
+  | entry body ih => exact ih s hs
+
+/-- Every new program retains a true process installation flag, for every outcome. -/
+theorem new_installed_preserved (t : ThreadId) (p : Prog) (s : State)
+
+    (hs : s.installed = true) :
+
+    (new t p s).1.installed = true := by
+
+  induction p generalizing s with
+
+  | pure v => exact hs
+
+  | work e => exact hs
+
+  | setCell k v => exact hs
+
+  | bind p k ihp ihk =>
+
+    have h1 := ihp s hs
+
+    rcases hN : new t p s with ⟨s1, tr1, r⟩
+
+    rw [hN] at h1
+
+    dsimp only at h1
+
+    cases r with
+
+    | ok v =>
+
+      simp only [new, hN]
+
+      exact ihk v s1 h1
+
+    | err f =>
+
+      simp only [new, hN]
+
+      exact h1
+
+    | unwind q =>
+
+      simp only [new, hN]
+
+      exact h1
+
+    | abort =>
+
+      simp only [new, hN]
+
+      exact h1
+
+  | scope g fid fp body ih =>
+
+    have hin : (g.enter t s).installed = true := (Guard.enter_installed t g s).trans hs
+
+    have h1 := ih (g.enter t s) hin
+
+    rcases hN : new t body (g.enter t s) with ⟨s1, tr1, r⟩
+
+    rw [hN] at h1
+
+    dsimp only at h1
+
+    simp only [new, hN, newScopeExit_installed]
+
+    exact h1
+
+  | raise d => exact hs
+
+  | raiseFatal d => exact hs
+
+  | raiseUnrep => exact hs
+
+  | panic q => exact hs
+
+  | abort => exact hs
+
+  | catchL body onOk onErr ih ihOk ihErr =>
+
+    have h1 := ih ({ s with installed := true }.setOut t true) rfl
+
+    rcases hN : new t body ({ s with installed := true }.setOut t true) with ⟨s1, tr1, r⟩
+
+    rw [hN] at h1
+
+    dsimp only at h1
+
+    cases r with
+
+    | ok v =>
+
+      simp only [new, hN]
+
+      exact ihOk v (s1.setOut t false) h1
+
+    | err f =>
+
+      simp only [new, hN]
+
+      exact ihErr f.intoDiag (s1.setOut t false) h1
+
+    | unwind q =>
+
+      simp only [new, hN]
+
+      exact ihErr (convert q) (s1.setOut t false) h1
+
+    | abort =>
+
+      simp only [new, hN]
+
+      exact h1
+
+  | entry body ih =>
+
+    have h1 := ih s hs
+
+    rcases hN : new t body s with ⟨s1, tr, r⟩
+
+    rw [hN] at h1
+
+    dsimp only at h1
+
+    simp only [new, hN]
+
+    exact h1
+
+/-- An old catch installs the process hook for every body, continuation, and outcome. -/
+theorem old_catch_installed (t : ThreadId) (body : Prog)
+
+    (onOk : Nat → Prog) (onErr : Diag → Prog) (s : State) :
+
+    (old t (.catchL body onOk onErr) s).1.installed = true := by
+
+  simpa only [old, State.setOut, State.modFlags] using
+    old_installed_preserved t (.catchL body onOk onErr) { s with installed := true } rfl
+
+/-- A new catch installs the process hook for every body, continuation, and outcome. -/
+theorem new_catch_installed (t : ThreadId) (body : Prog)
+
+    (onOk : Nat → Prog) (onErr : Diag → Prog) (s : State) :
+
+    (new t (.catchL body onOk onErr) s).1.installed = true := by
+
+  simpa only [new, State.setOut, State.modFlags] using
+    new_installed_preserved t (.catchL body onOk onErr) { s with installed := true } rfl
+
+/-- The old catch state retains installation through any program on any thread. -/
+theorem old_catch_installation_other_thread (t u : ThreadId) (body : Prog)
+
+    (onOk : Nat → Prog) (onErr : Diag → Prog) (p : Prog) (s : State) :
+
+    (old u p (old t (.catchL body onOk onErr) s).1).1.installed = true := by
+
+  exact old_installed_preserved u p _ (old_catch_installed t body onOk onErr s)
+
+/-- The new catch state retains installation through any program on any thread. -/
+theorem new_catch_installation_other_thread (t u : ThreadId) (body : Prog)
+
+    (onOk : Nat → Prog) (onErr : Diag → Prog) (p : Prog) (s : State) :
+
+    (new u p (new t (.catchL body onOk onErr) s).1).1.installed = true := by
+
+  exact new_installed_preserved u p _ (new_catch_installed t body onOk onErr s)
+
 /-! ## The relation -/
 
 /-- How an old observer sees a new outcome: an `Err` still in flight corresponds to the unwind

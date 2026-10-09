@@ -508,6 +508,32 @@ def acceptedCommon : List Name := [
 
   ``ChelisBridge.Runtime.Unwind.replay_hook_installation,
 
+  ``ChelisBridge.Runtime.Unwind.old_installed_preserved,
+
+  ``ChelisBridge.Runtime.Unwind.new_installed_preserved,
+
+  ``ChelisBridge.Runtime.Unwind.old_catch_installed,
+
+  ``ChelisBridge.Runtime.Unwind.new_catch_installed,
+
+  ``ChelisBridge.Runtime.Unwind.old_catch_installation_other_thread,
+
+  ``ChelisBridge.Runtime.Unwind.new_catch_installation_other_thread,
+
+  ``ChelisBridge.Runtime.Scopes.preflight_body_nonempty,
+
+  ``ChelisBridge.Runtime.Scopes.preflight_restores_entry,
+
+  ``ChelisBridge.Runtime.Scopes.preflight_restores_entry_of_lawful,
+
+  ``ChelisBridge.Runtime.Scopes.preflight_restores_original,
+
+  ``ChelisBridge.Runtime.Scopes.preflight_preserves_stack,
+
+  ``ChelisBridge.Runtime.Scopes.preserves_stack_of_restores,
+
+  ``ChelisBridge.Runtime.Scopes.preserves_stack_seq,
+
   ``ChelisBridge.Runtime.IdsLink.matched_host_var_draws_distinct,
 
   ``ChelisBridge.Runtime.IdsLink.fresh_id_recorded_exhaustion,

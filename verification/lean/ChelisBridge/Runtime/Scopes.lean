@@ -164,6 +164,226 @@ theorem PreflightObligation.from_const {M : Type → Type} {σ F γ : Type}
   obtain ⟨rfl, rfl⟩ := hpre
   exact h body s
 
+/-! ## Independent preflight balance laws
+
+These laws need explicit stack preservation hypotheses for the entry step and the body.
+They do not prove those hypotheses for production bodies or public callers.
+The result type can contain diagnostic or native-unwind values.
+Only values visible through `ok` are within the scope of these laws.
+-/
+
+/-- Exact preservation of the pushed stack gives a non-empty input to the pop. -/
+
+theorem preflight_body_nonempty {M : Type → Type} {σ F γ : Type}
+
+    {ok : M (σ × γ) → Option (σ × γ)} {L : Lens σ (List F)}
+
+    {body : σ → M (σ × γ)} {s₀ : σ} {fr : F}
+
+    (hpush : L.get (L.set (fr :: L.get s₀) s₀) = fr :: L.get s₀)
+
+    (hbody : ∀ s₁ r, ok (body (L.set (fr :: L.get s₀) s₀)) = some (s₁, r) →
+
+      L.get s₁ = L.get (L.set (fr :: L.get s₀) s₀)) :
+
+    ∀ s₁ r, ok (body (L.set (fr :: L.get s₀) s₀)) = some (s₁, r) →
+
+      L.get s₁ ≠ [] := by
+  intro s₁ r hb
+
+  rw [hbody s₁ r hb, hpush]
+  exact List.cons_ne_nil _ _
+
+/-- A successful scope restores the entry-step stack and returns the same body result. -/
+
+theorem preflight_restores_entry {M : Type → Type} {σ F γ : Type}
+
+    {ok : M (σ × γ) → Option (σ × γ)} {L : Lens σ (List F)}
+
+    {pre : σ → Option (σ × F)} {comb : Combinator M σ γ}
+
+    (h : PreflightObligationFrom ok L pre comb) {body : σ → M (σ × γ)}
+
+    {s s₀ s' : σ} {fr : F} {r : γ} (hpre : pre s = some (s₀, fr))
+
+    (hpush : L.get (L.set (fr :: L.get s₀) s₀) = fr :: L.get s₀)
+
+    (hpop : ∀ s₁, L.get s₁ = fr :: L.get s₀ →
+
+      L.get (L.set (L.get s₀) s₁) = L.get s₀)
+
+    (hbody : ∀ s₁ r₁, ok (body (L.set (fr :: L.get s₀) s₀)) = some (s₁, r₁) →
+
+      L.get s₁ = L.get (L.set (fr :: L.get s₀) s₀))
+
+    (hc : ok (comb body s) = some (s', r)) :
+
+    ∃ s₁, ok (body (L.set (fr :: L.get s₀) s₀)) = some (s₁, r) ∧
+
+      L.get s₁ ≠ [] ∧ s' = L.set (L.get s₀) s₁ ∧ L.get s' = L.get s₀ := by
+
+  have hn := preflight_body_nonempty hpush hbody
+
+  rw [h body s s₀ fr hpre hn] at hc
+
+  cases hb : ok (body (L.set (fr :: L.get s₀) s₀)) with
+  | none =>
+    rw [hb] at hc
+    cases hc
+
+  | some x =>
+    rw [hb] at hc
+
+    simp only [Option.map_some, Option.some.injEq, Prod.mk.injEq] at hc
+
+    have hs : L.get x.1 = fr :: L.get s₀ := by
+      rw [hbody x.1 x.2 hb, hpush]
+
+    have he : s' = L.set (L.get s₀) x.1 := by
+      rw [← hc.1, hs]
+      rfl
+
+    refine ⟨x.1, ?_, hn x.1 x.2 hb, he, ?_⟩
+
+    · rw [← hc.2]
+
+    · rw [he]
+      exact hpop x.1 hs
+
+/-- A lawful lens supplies the local push and pop laws. -/
+
+theorem preflight_restores_entry_of_lawful {M : Type → Type} {σ F γ : Type}
+
+    {ok : M (σ × γ) → Option (σ × γ)} {L : Lens σ (List F)} (hL : L.Lawful)
+
+    {pre : σ → Option (σ × F)} {comb : Combinator M σ γ}
+
+    (h : PreflightObligationFrom ok L pre comb) {body : σ → M (σ × γ)}
+
+    {s s₀ s' : σ} {fr : F} {r : γ} (hpre : pre s = some (s₀, fr))
+
+    (hbody : ∀ s₁ r₁, ok (body (L.set (fr :: L.get s₀) s₀)) = some (s₁, r₁) →
+
+      L.get s₁ = L.get (L.set (fr :: L.get s₀) s₀))
+
+    (hc : ok (comb body s) = some (s', r)) :
+
+    ∃ s₁, ok (body (L.set (fr :: L.get s₀) s₀)) = some (s₁, r) ∧
+
+      L.get s₁ ≠ [] ∧ s' = L.set (L.get s₀) s₁ ∧ L.get s' = L.get s₀ :=
+
+  preflight_restores_entry h hpre (hL.get_set _ _) (fun s₁ _ => hL.get_set _ s₁) hbody hc
+
+/-- If entry preserves the stack, a successful scope restores the original stack. -/
+
+theorem preflight_restores_original {M : Type → Type} {σ F γ : Type}
+
+    {ok : M (σ × γ) → Option (σ × γ)} {L : Lens σ (List F)}
+
+    {pre : σ → Option (σ × F)} {comb : Combinator M σ γ}
+
+    (h : PreflightObligationFrom ok L pre comb) {body : σ → M (σ × γ)}
+
+    {s s₀ s' : σ} {fr : F} {r : γ} (hpre : pre s = some (s₀, fr))
+
+    (hentry : L.get s₀ = L.get s)
+
+    (hpush : L.get (L.set (fr :: L.get s₀) s₀) = fr :: L.get s₀)
+
+    (hpop : ∀ s₁, L.get s₁ = fr :: L.get s₀ →
+
+      L.get (L.set (L.get s₀) s₁) = L.get s₀)
+
+    (hbody : ∀ s₁ r₁, ok (body (L.set (fr :: L.get s₀) s₀)) = some (s₁, r₁) →
+
+      L.get s₁ = L.get (L.set (fr :: L.get s₀) s₀))
+
+    (hc : ok (comb body s) = some (s', r)) :
+
+    ∃ s₁, ok (body (L.set (fr :: L.get s₀) s₀)) = some (s₁, r) ∧
+
+      L.get s₁ ≠ [] ∧ s' = L.set (L.get s) s₁ ∧ L.get s' = L.get s := by
+
+  rcases preflight_restores_entry h hpre hpush hpop hbody hc with ⟨s₁, hb, hn, he, hs⟩
+
+  exact ⟨s₁, hb, hn, hentry ▸ he, hs.trans hentry⟩
+
+/-- A balanced preflight scope preserves the stack as a body of an outer scope. -/
+
+theorem preflight_preserves_stack {M : Type → Type} {σ F γ : Type}
+
+    {ok : M (σ × γ) → Option (σ × γ)} {L : Lens σ (List F)}
+
+    {pre : σ → Option (σ × F)} {comb : Combinator M σ γ}
+
+    (h : PreflightObligationFrom ok L pre comb) {body : σ → M (σ × γ)}
+
+    (hentry : ∀ s s' r, ok (comb body s) = some (s', r) →
+
+      ∃ s₀ fr, pre s = some (s₀, fr) ∧ L.get s₀ = L.get s ∧
+
+      L.get (L.set (fr :: L.get s₀) s₀) = fr :: L.get s₀ ∧
+
+      ∀ s₁, L.get s₁ = fr :: L.get s₀ →
+
+        L.get (L.set (L.get s₀) s₁) = L.get s₀)
+
+    (hbody : ∀ s s' r, ok (body s) = some (s', r) → L.get s' = L.get s) :
+
+    ∀ s s' r, ok (comb body s) = some (s', r) → L.get s' = L.get s := by
+
+  intro s s' r hc
+
+  rcases hentry s s' r hc with ⟨s₀, fr, hpre, he, hpush, hpop⟩
+
+  rcases preflight_restores_original h hpre he hpush hpop (hbody _) hc with ⟨_, _, _, _, hs⟩
+
+  exact hs
+
+/-- A restore scope preserves the stack when it serves as a nested body. -/
+
+theorem preserves_stack_of_restores {M : Type → Type} {σ F γ : Type}
+
+    {ok : M (σ × γ) → Option (σ × γ)} {L : Lens σ (List F)}
+
+    {comb : Combinator M σ γ} (h : RestoresOnExit ok L comb)
+
+    (body : σ → M (σ × γ)) :
+
+    ∀ s s' r, ok (comb body s) = some (s', r) → L.get s' = L.get s :=
+
+  h body
+
+/-- Sequential bodies preserve the stack under the explicit successful-bind equation. -/
+
+theorem preserves_stack_seq {M : Type → Type} {σ F γ : Type}
+
+    {ok : M (σ × γ) → Option (σ × γ)} {L : Lens σ (List F)}
+
+    {first seq : σ → M (σ × γ)} {next : γ → σ → M (σ × γ)}
+
+    (hseq : ∀ s, ok (seq s) = (ok (first s)).bind (fun x => ok (next x.2 x.1)))
+
+    (hfirst : ∀ s s' r, ok (first s) = some (s', r) → L.get s' = L.get s)
+
+    (hnext : ∀ r s s' r', ok (next r s) = some (s', r') → L.get s' = L.get s) :
+
+    ∀ s s' r, ok (seq s) = some (s', r) → L.get s' = L.get s := by
+
+  intro s s' r hc
+  rw [hseq s] at hc
+
+  cases hb : ok (first s) with
+  | none =>
+    rw [hb] at hc
+    cases hc
+
+  | some x =>
+    rw [hb] at hc
+    simp only [Option.bind_some] at hc
+
+    exact (hnext x.2 x.1 s' r hc).trans (hfirst s x.1 x.2 hb)
+
 /-- Suppression scopes (`with_suppress_unrepresentable_panic`, `catch_lowering`'s output guard):
 set at entry, CLEAR to `false` at exit. -/
 def SuppressionObligation {M : Type → Type} {σ γ : Type} (ok : M (σ × γ) → Option (σ × γ)) (flag : Lens σ Bool)

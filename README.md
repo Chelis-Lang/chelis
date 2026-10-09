@@ -468,15 +468,34 @@ Both extracted models compile and pass their existing Lean scenario checks.
 The fatal proof handles both diagnostic flag cases without changing its statement.
 These diagnostic fixtures do not discharge final production O6, O7, or whole-core acceptance.
 
-These checks use the frozen native model.
-Full extracted-module validation still needs the new fragment.
+These fixture checks use the frozen native model.
+Full extracted-module validation still needs the final production models.
+
+The round-44 independent Runtime proofs consume the fixed Aeneas library without a generated production model.
+`.work/diag/resume38-main/native44-o5-o9/audit-attempt2.log` accepts 944 theorems and 1,845 package constants.
+The allowed axioms remain `propext`, `Classical.choice`, and `Quot.sound`.
+The source and artifact identities are in `.work/diag/resume38-main/native44-o5-o9/report.json`.
+
+O5 has installation-preservation laws for every hand-model program and outcome.
+The catch laws transfer true installation evidence across thread identifiers.
+These laws do not turn a false CN installation lower bound into proof of native hook absence.
+Exact native suppression still needs process installation evidence or a justified true lower bound.
+
+O9 has conditional preflight balance laws for the entry stack, nested scopes, and body results.
+`.work/diag/resume38-main/native44-o5-o9/smoke.log` exercises success, diagnostic, and native-unwind values through the independent scope interface.
+The laws need explicit entry and body stack-preservation hypotheses.
+They do not prove whole-core preflight balance for production bodies.
 
 Acceptance selects layout scope and feature chain separately.
 The fragment audit cannot satisfy whole-core acceptance.
 The default chain keeps 27 applicable public entries.
 The lowering-trace chain keeps all 32 public entries.
 Each caller theorem needs its exact proposition and extracted inner function.
-The kernel rejects named `True` evidence and general laws without that caller.
+
+The archived O17 checks verified required theorem names, not caller propositions.
+A required-name `True` theorem does not establish caller correspondence.
+Current acceptance needs exact caller propositions, but those checks do not supply their proofs.
+O17 remains open until every listed entry has its actual inner-function correspondence theorem.
 
 These checks do not establish whole-entry profile noninterference or public-wrapper correspondence.
 Those statements need the final whole-core signatures and proof composition.
