@@ -396,6 +396,51 @@ fn host_lexically_binds(scope: &UnordMap<String, HostTypeTerm>, name: &str) -> b
     scope.contains_key(name) && !scope.contains_key(&callable_origin_key(name))
 }
 
+/// An application's callee, resolved once before any branch that consults
+/// the program's definitions (chelis#3484).
+mod app_callee {
+    use super::{HostTypeTerm, UnordMap, host_lexically_binds};
+
+    pub(super) enum HostAppCallee<'s> {
+        Lexical(LexicalCallee<'s>),
+        Program(ProgramCallee),
+    }
+
+    /// A lexical binding: it shadows every definition and builtin of its
+    /// spelling.
+    pub(super) struct LexicalCallee<'s> {
+        pub(super) name: String,
+        pub(super) binding: &'s HostTypeTerm,
+    }
+
+    /// A callee spelling that no lexical binding shadows. Only [`resolve`]
+    /// makes one, so a branch that takes it cannot consult a definition for
+    /// a lexically bound name.
+    pub(super) struct ProgramCallee(String);
+
+    impl ProgramCallee {
+        pub(super) fn into_name(self) -> String {
+            self.0
+        }
+    }
+
+    pub(super) fn resolve(
+        name: String,
+        scope: &UnordMap<String, HostTypeTerm>,
+    ) -> HostAppCallee<'_> {
+        // spec/01-nomenclature.md section 3.2: an applied uppercase head is
+        // a constructor head, even where a single-letter value binding
+        // shares its spelling.
+        let constructor_head = name.starts_with(|first: char| first.is_ascii_uppercase());
+        match scope.get(&name) {
+            Some(binding) if !constructor_head && host_lexically_binds(scope, &name) => {
+                HostAppCallee::Lexical(LexicalCallee { name, binding })
+            }
+            _ => HostAppCallee::Program(ProgramCallee(name)),
+        }
+    }
+}
+
 /// Give each free top-level value read the identity of its declaration
 /// before substituting a callee body into a different lexical scope. The
 /// linearity walk honors function parameters, block locals and patterns; a
@@ -12322,53 +12367,54 @@ fn lower_app_host_expr(
             }
         })
         .to_string();
-    // A lexical binding shadows every definition of its spelling, so neither
-    // the call's signature nor its result claims come from a def.
-    let callee_is_lexical = host_lexically_binds(scope, &name);
-    let fn_sig = scope
-        .get(&name)
-        .and_then(host_fn_signature)
-        .or_else(|| {
-            (!callee_is_lexical)
-                .then(|| lookup_declared_fn_type(program, &name))
-                .flatten()
-        })
-        .or_else(|| kids.first().and_then(expr_fn_type));
-    // Result claims belong to the callee's authored declaration. Keep that
-    // source separate from `fn_sig`: lexical and application metadata may
-    // carry an inferred/specialized result shape that must not manufacture a
-    // declaration-site obligation.
-    let declared_fn_sig = (!callee_is_lexical)
-        .then(|| lookup_declared_fn_type(program, &name))
-        .flatten();
-    // Ordinary lexical lookup precedes builtin callable routes. A
-    // function-typed parameter named `round_to` or `map` is a call through
-    // that parameter, not a builtin selected by spelling
-    // (spec/04-type-system.md §8.6; chelis#1076). Keep the override exact to
-    // `BUILTIN_NAMES`: applied uppercase heads retain constructor precedence
-    // under spec/01-nomenclature.md §3.2.
-    let callee_is_local_callable = callee_is_lexical
-        || scope
-            .get(&name)
-            .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
-    let callee_shadows_builtin = BUILTIN_NAMES.contains(&name.as_str()) && callee_is_local_callable;
-    let callee_is_builtin = BUILTIN_NAMES.contains(&name.as_str())
-        && !scope.contains_key(&name)
-        && program.def_named(&name).is_none();
-    let active_compiler_name = (!callee_shadows_builtin).then_some(name.as_str());
+    match app_callee::resolve(name, scope) {
+        app_callee::HostAppCallee::Lexical(callee) => lower_lexical_host_call(
+            app_expr,
+            list,
+            callee,
+            program,
+            scope,
+            tensor_helpers,
+            expected_ty,
+        ),
+        app_callee::HostAppCallee::Program(callee) => lower_program_host_app(
+            app_expr,
+            list,
+            callee,
+            program,
+            scope,
+            tensor_helpers,
+            expected_ty,
+        ),
+    }
+}
+
+/// A call through a lexical binding: the operation or function value the
+/// binding holds, never a definition or builtin of the same spelling.
+fn lower_lexical_host_call(
+    app_expr: &Expr,
+    list: &Node,
+    callee: app_callee::LexicalCallee<'_>,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+    expected_ty: Option<&HostTypeTerm>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let app_callee::LexicalCallee { name, binding } = callee;
+    let kids = list.children_slice();
     let checked_ty = expr_host_type(app_expr, program, scope);
     let explicit_ty = expected_ty
         .filter(|_| checked_ty.is_unresolved())
         .cloned()
         .unwrap_or(checked_ty);
-    if let Some(HostTypeTerm::KeyBuiltinCallable(op)) = scope.get(&name) {
+    let args = kids[1..]
+        .iter()
+        .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let HostTypeTerm::KeyBuiltinCallable(op) = binding {
         // This identity came from the resolved value's producer, including
         // aliases and tuple projections. The application metadata selects
         // its concrete result; the alias's spelling selects nothing.
-        let args = kids[1..]
-            .iter()
-            .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
-            .collect::<Result<Vec<_>, _>>()?;
         let ty = if explicit_ty.is_unresolved() {
             infer_builtin_host_type(op.symbol(), &args).ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "checked key call has no concrete result type")
@@ -12382,6 +12428,71 @@ fn lower_app_host_expr(
             ty,
         }));
     }
+    let (param_tys, ret_ty) = host_fn_signature(binding)
+        .or_else(|| kids.first().and_then(expr_fn_type))
+        .ok_or_else(|| {
+            host_expr_lowering_error(
+                app_expr,
+                format!("lexical callee `{name}` has no function type"),
+            )
+        })?;
+    // Unknown or unresolved application metadata takes the binding's
+    // result type, as an ordinary call takes its signature's.
+    let ty = if host_type_is_unresolved(&explicit_ty) {
+        ret_ty
+    } else {
+        explicit_ty
+    };
+    Ok(HostExpr::new(HostExprKind::Call {
+        function: name,
+        args,
+        arg_tys: param_tys,
+        ty,
+    }))
+}
+
+/// An application whose callee no lexical binding shadows: a definition, a
+/// builtin, a constructor, or a top-level callable a global initializer sees.
+fn lower_program_host_app(
+    app_expr: &Expr,
+    list: &Node,
+    callee: app_callee::ProgramCallee,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+    expected_ty: Option<&HostTypeTerm>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let kids = list.children_slice();
+    let name = callee.into_name();
+    let fn_sig = scope
+        .get(&name)
+        .and_then(host_fn_signature)
+        .or_else(|| lookup_declared_fn_type(program, &name))
+        .or_else(|| kids.first().and_then(expr_fn_type));
+    // Result claims belong to the callee's authored declaration. Keep that
+    // source separate from `fn_sig`: lexical and application metadata may
+    // carry an inferred/specialized result shape that must not manufacture a
+    // declaration-site obligation.
+    let declared_fn_sig = lookup_declared_fn_type(program, &name);
+    // Ordinary lexical lookup precedes builtin callable routes. A
+    // function-typed parameter named `round_to` or `map` is a call through
+    // that parameter, not a builtin selected by spelling
+    // (spec/04-type-system.md §8.6; chelis#1076). Keep the override exact to
+    // `BUILTIN_NAMES`: applied uppercase heads retain constructor precedence
+    // under spec/01-nomenclature.md §3.2.
+    let callee_is_local_callable = scope
+        .get(&name)
+        .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
+    let callee_shadows_builtin = BUILTIN_NAMES.contains(&name.as_str()) && callee_is_local_callable;
+    let callee_is_builtin = BUILTIN_NAMES.contains(&name.as_str())
+        && !scope.contains_key(&name)
+        && program.def_named(&name).is_none();
+    let active_compiler_name = (!callee_shadows_builtin).then_some(name.as_str());
+    let checked_ty = expr_host_type(app_expr, program, scope);
+    let explicit_ty = expected_ty
+        .filter(|_| checked_ty.is_unresolved())
+        .cloned()
+        .unwrap_or(checked_ty);
     // Std.Io.Json owns canonical object observation. Keep generic
     // `dict_entries` insertion-ordered and lower only this exact private
     // package identity to the generated-C-local sorter. The name is exact so
