@@ -677,7 +677,51 @@ g = grad(loss, wrt=wss)(to_tensor([1.0f32, 2.0f32]), [[to_tensor([3.0f32, 4.0f32
         "ad_fold_runtime_length_list",
     );
     assert!(
-        stderr.contains("`fold` under `grad` needs a List whose length is known"),
+        stderr.contains(&format!("unsupported: `fold` {UNSTAGED_LIST_REJECTION}")),
         "a runtime-length List must be a loud fold rejection, not a placeholder:\n{stderr}"
     );
+}
+
+const UNSTAGED_LIST_REJECTION: &str = "over a List that is not staged as known items on the \
+     List staging of a `grad` or `vmap` body (lowering); unimplemented chelis#3366";
+
+#[test]
+fn vmap_fold_over_runtime_length_list_names_the_vmap_context() {
+    let stderr = eval_failure(
+        "\
+def k(t: tensor[i64]) -> tensor[f32] = scalar_to_tensor(fold(fn (acc: f32, i: i64) -> acc + 1.0f32, 0.0f32, range(0i64, tensor_to_scalar(t))))
+v = vmap(k)(to_tensor([1i64, 2i64]))
+",
+        "vmap_fold_runtime_length_list",
+    );
+    assert!(
+        stderr.contains("could not lower `vmap(...)`")
+            && stderr.contains(&format!("unsupported: `fold` {UNSTAGED_LIST_REJECTION}")),
+        "the rejection must not claim a differentiated body under plain vmap:\n{stderr}"
+    );
+}
+
+#[test]
+fn eval_grad_through_fold_and_scan_over_range_is_the_unstaged_list_rejection() {
+    // A `range` source is not staged as known items, even with literal bounds;
+    // its recurrence needs the runtime trip count chelis#3366 tracks.
+    for (name, body) in [
+        (
+            "fold",
+            "fold(fn (acc: f32, i: i64) -> acc * x, 1.0f32, range(0i64, 3i64))",
+        ),
+        (
+            "scan",
+            "index(scan(fn (acc: f32, i: i64) -> acc * x, 1.0f32, range(0i64, 3i64)), 2i64)",
+        ),
+    ] {
+        let stderr = eval_failure(
+            &format!("def loss(x: f32) -> f32 = {body}\ng = grad(loss)(2.0f32)\n"),
+            &format!("ad_{name}_range"),
+        );
+        assert!(
+            stderr.contains(&format!("unsupported: `{name}` {UNSTAGED_LIST_REJECTION}")),
+            "`{name}` over a range must be the named rejection:\n{stderr}"
+        );
+    }
 }

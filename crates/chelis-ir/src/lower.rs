@@ -18210,7 +18210,7 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// [05-OP-55] `fold`/`scan` over a staged List inside a differentiated
+    /// [05-OP-55] `fold`/`scan` over a staged List inside a `grad` or `vmap`
     /// body: unroll the recurrence over the exact staged items so ordinary
     /// tensor AD reverses it. The accumulator keeps the callback's own
     /// lowered value (tensor, tuple or ADT), never a scalar funnel.
@@ -18244,14 +18244,20 @@ impl<'program> LowerCtx<'program> {
             adt_cons_chain_values(&list)
         };
         let Some(items) = items else {
-            raise_fatal_lowering_error(
-                format!(
-                    "`{name}` under `grad` needs a List whose length is known when the \
-                     differentiated body is lowered; this List's length is runtime data"
+            let unsupported = Unsupported::new(
+                UnsupportedKind::Construct(format!(
+                    "`{name}` over a List that is not staged as known items"
+                )),
+                "the List staging of a `grad` or `vmap` body",
+                Stage::Lowering,
+                chelis_types::unimplemented_rejection!(
+                    3366,
+                    "the staged recurrence unrolls only a List staged as known items; \
+                     a `range` source or a List whose length is runtime data needs a \
+                     runtime trip count, which is not implemented"
                 ),
-                Some(app_span),
-                self.current_span_id.clone(),
-            )
+            );
+            raise_fatal_unsupported(unsupported, Some(app_span), self.current_span_id.clone())
         };
         let mut acc = self.lower_expr(init);
         let mut states = Vec::with_capacity(items.len());
