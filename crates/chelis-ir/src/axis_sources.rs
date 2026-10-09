@@ -128,14 +128,14 @@ pub const ACTIVATION_DIM_PREFIX: &str = "_act_dim_";
 /// Whether a dimension name was minted by the compiler rather than written in
 /// a signature.
 ///
-/// Four minting vocabularies exist and all four name a FRESH extent that no
-/// signature declares: the lowerer's `_rt_<operation>_dim_<node>_<axis>` for
-/// an extent an operation computes, the C emitter's and DAG's
-/// `_anon_dim_<node>_<axis>` for an axis with no name at all, the lowerer's
-/// [`ACTIVATION_DIM_PREFIX`] identity for one activation's unbound checker
-/// variable, and the checker's `d<N>` for an unresolved dimension variable.
-/// An anonymous spelling is included, since it is the same fact with no
-/// spelling.
+/// It recognizes these minting vocabularies, each of which names a FRESH
+/// extent that no signature declares: the lowerer's
+/// `_rt_<operation>_dim_<node>_<axis>` for an extent an operation computes,
+/// the C emitter's and DAG's `_anon_dim_<node>_<axis>` for an axis with no
+/// name at all, the lowerer's [`ACTIVATION_DIM_PREFIX`] identity for one
+/// activation's unbound checker variable, and the checker's `d<N>` for an
+/// unresolved dimension variable. An anonymous spelling is included, since it
+/// is the same fact with no spelling.
 ///
 /// The distinction this draws is ownership, not cosmetics. A user-spelled
 /// name on an axis is a claim some signature makes about it, with its own

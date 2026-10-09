@@ -10,9 +10,12 @@
 //! function it differentiates included. A dimension-generic `gather` helper
 //! called from a generic loss therefore differentiates (#3462), and one
 //! helper used at two sizes inside one `grad` carries each use's own extents
-//! (#3415). Within one use, actuals that disagree still trap. Gradients are
-//! checked against their closed forms and a central difference, on the
-//! evaluator and, where it lowers the program, the C lane.
+//! (#3415). Within one use, actuals that disagree still trap. A helper's
+//! result takes a caller's label only where the checked type spells one, so
+//! a checker variable's binding never becomes a graph identity, while a
+//! spelled `d1` is a label like any other. Gradients are checked against
+//! their closed forms and a central difference, on the evaluator and, where
+//! it lowers the program, the C lane.
 use assert_cmd::Command;
 use tempfile::tempdir;
 #[path = "common/mod.rs"]
@@ -192,17 +195,15 @@ fn symmetric_mix(z: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// #3415 on both lanes, reduced: one spatially generic helper at 2x2 and at
-/// 1x1 inside one `grad`. The checker gives the `conv` result in `sub_block`
+/// #3415, reduced: one spatially generic helper at 2x2 and at 1x1 inside one
+/// `grad`. The checker gives the `conv` result in `sub_block`
 /// extents no binder constrains, and `y` carries them to `twice`. Both
 /// activations stamped the checker's one name for that height on their
 /// results, so the backward graph checked the 1x1 use against the 2x2 use's
 /// extent (``extent `d86`: claimed = 2, add axis 2 = 1``). `sub_block(x)` is
 /// `2 (k x + b)`, so the gradient of `wsum(sub_block(x), x)` at channel `c`
 /// is `2 sum_j (k[c][j] + k[j][c]) x_j + 2 b_c`.
-#[test]
-fn generic_helper_at_two_sizes_differentiates_on_both_lanes() {
-    let source = r#"
+const TWO_SIZES: &str = r#"
 def channel_bias[a, o, h, w](y: tensor[a, o, h, w, f32], b: &tensor[o, f32]) -> tensor[a, o, h, w, f32] = {
   bias = insert(insert(insert(b, 0i32, shape(&y, 0i32)), 2i32, shape(&y, 2i32)), 3i32, shape(&y, 3i32))
   add(y, bias)
@@ -224,6 +225,9 @@ g = grad(two_sub)(reshape(to_tensor([1.0f32, 2.0f32, 4.0f32, 8.0f32, 1.0f32, 3.0
 out2 = reshape(g.0, [8i64])
 out1 = reshape(g.1, [2i64])
 "#;
+
+/// [`TWO_SIZES`]'s gradients against their closed form on one lane's output.
+fn assert_two_sizes_gradient(lane: &str, stdout: &str) {
     let expected = |x: &[f64]| {
         let n = x.len() / 2;
         symmetric_mix(x)
@@ -232,21 +236,30 @@ out1 = reshape(g.1, [2i64])
             .map(|(index, mixed)| 2.0 * mixed + 2.0 * BIAS[index / n])
             .collect::<Vec<_>>()
     };
-    for (lane, stdout) in [
-        ("eval", eval_stdout(source, "two_sizes")),
-        ("C", build_and_run(source, "two_sizes")),
-    ] {
-        assert_eq!(
-            parse_tensor_data(&stdout, "out2"),
-            expected(&[1.0, 2.0, 4.0, 8.0, 1.0, 3.0, 5.0, 9.0]),
-            "{lane}: 2x2 use"
-        );
-        assert_eq!(
-            parse_tensor_data(&stdout, "out1"),
-            expected(&[1.0, 3.0]),
-            "{lane}: 1x1 use"
-        );
-    }
+    assert_eq!(
+        parse_tensor_data(stdout, "out2"),
+        expected(&[1.0, 2.0, 4.0, 8.0, 1.0, 3.0, 5.0, 9.0]),
+        "{lane}: 2x2 use"
+    );
+    assert_eq!(
+        parse_tensor_data(stdout, "out1"),
+        expected(&[1.0, 3.0]),
+        "{lane}: 1x1 use"
+    );
+}
+
+#[test]
+fn generic_helper_at_two_sizes_differentiates_on_eval() {
+    assert_two_sizes_gradient("eval", &eval_stdout(TWO_SIZES, "two_sizes"));
+}
+
+/// The C lane of [`TWO_SIZES`]. Its `conv` gradient emits about 2.5 MB of C,
+/// so `.config/ci-test-targets.toml` runs it in the nightly `module-oracles`
+/// job rather than per pull request; the bare-table `gather` test above keeps
+/// a C parity row per pull request.
+#[test]
+fn generic_helper_at_two_sizes_differentiates_on_c() {
+    assert_two_sizes_gradient("C", &build_and_run(TWO_SIZES, "two_sizes"));
 }
 
 const X8: [f64; 32] = [
@@ -427,6 +440,112 @@ out = reshape(grad(tloss, wrt=t)(t0(), ids0(), to_tensor([1.0f32, 2.0f32])), [12
     assert!(!build.status.success(), "C must refuse: {stderr}");
     assert!(
         stderr.contains("`mul` argument 2, axis 2: expected 3, got 2"),
+        "{stderr}"
+    );
+}
+
+/// A dimension a signature spells is a caller's label whatever it looks like:
+/// `d1` here, `fixed` in chelis#1889's own tests. Through a generic helper's
+/// result it still names the axis a later named reduction reads, in #1889's
+/// direct, mixed and bridge forms, on both lanes. Only a checker variable's
+/// binding, never a spelled name, is withheld from the helper's result.
+#[test]
+fn a_spelled_d1_dimension_keeps_its_label_through_a_helper_result() {
+    let source = r#"
+def aligned_left[d](x: tensor[d, f32], gain: tensor[d1, f32]) -> tensor[d, f32] = mul(x, gain)
+def aligned_matrix[d, rows](x: tensor[d, rows, f32], gain: tensor[d1, rows, f32]) -> tensor[d, rows, f32] = mul(x, gain)
+def scale[d](x: tensor[d, f32], gain: tensor[d1, f32]) -> tensor[d, f32] = mul(x, insert(sum(gain, d1), 0i32, shape(x, 0i32)))
+def direct() -> tensor[f32] = sum(aligned_left(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), d1)
+def mixed_axes() -> tensor[f32] = sum(sum(aligned_matrix(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), to_tensor([[1.0f32, 1.0f32], [1.0f32, 1.0f32]])), d1), 0i32)
+def scale_bridge(x: tensor[d1, f32]) -> tensor[d1, f32] = scale(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))
+a = direct()
+b = mixed_axes()
+c = scale_bridge(to_tensor([4.0f32, 5.0f32]))
+"#;
+    for (lane, stdout) in [
+        ("eval", eval_stdout(source, "spelled_d1")),
+        ("C", build_and_run(source, "spelled_d1")),
+    ] {
+        assert_eq!(parse_scalar(&stdout, "a"), 5.0, "{lane}: direct");
+        assert_eq!(parse_scalar(&stdout, "b"), 10.0, "{lane}: mixed axes");
+        assert_eq!(
+            parse_tensor_data(&stdout, "c"),
+            [24.0, 30.0],
+            "{lane}: bridge"
+        );
+    }
+}
+
+/// chelis#1895's caller-narrowing form with the caller spelling `d1`: the
+/// helper's result claim is reported under the caller's spelling, not the
+/// helper's binder `d`, on both lanes.
+#[test]
+fn a_spelled_d1_result_claim_is_reported_under_the_callers_spelling() {
+    let source = r#"
+def narrow[d, r](x: tensor[r, f32], gain: tensor[d, f32]) -> tensor[d, f32] = shrink(x, [[1i64, shape(x, 0i32)]])
+def caller[r](g: tensor[d1, f32], y: tensor[r, f32]) -> tensor[d1, f32] = narrow(y, g)
+out = caller(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))
+"#;
+    let needle = "extent `d1`: claimed = 2, shrink axis 0 = 3";
+    assert_refused_on_eval(source, needle, "narrow_d1");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("narrow_d1.ch");
+    let out = dir.path().join("out");
+    write_file(&path, source);
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("build")
+        .arg(&path)
+        .args(["--target", "c", "--output"])
+        .arg(&out)
+        .assert()
+        .success();
+    let run = std::process::Command::new(out.join("narrow_d1"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(!run.status.success(), "C must trap: {stderr}");
+    assert!(stderr.contains(needle), "{stderr}");
+}
+
+/// chelis#1895's caller-narrowing form with the caller's own binder `n`: the
+/// helper's `d` is bound to the name the caller's signature spelled, so the C
+/// lane, which lowers `caller` as its own function, reports the claim under
+/// `n`. The evaluator inlines `caller` with a literal actual and reports the
+/// helper's `d`, as before.
+#[test]
+fn a_caller_binder_result_claim_is_reported_under_the_callers_spelling() {
+    let source = r#"
+def narrow[d, r](x: tensor[r, f32], gain: tensor[d, f32]) -> tensor[d, f32] = shrink(x, [[1i64, shape(x, 0i32)]])
+def caller[n, r](g: tensor[n, f32], y: tensor[r, f32]) -> tensor[n, f32] = narrow(y, g)
+out = caller(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))
+"#;
+    assert_refused_on_eval(
+        source,
+        "extent `d`: claimed = 2, shrink axis 0 = 3",
+        "narrow_n",
+    );
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("narrow_n.ch");
+    let out = dir.path().join("out");
+    write_file(&path, source);
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("build")
+        .arg(&path)
+        .args(["--target", "c", "--output"])
+        .arg(&out)
+        .assert()
+        .success();
+    let run = std::process::Command::new(out.join("narrow_n"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(!run.status.success(), "C must trap: {stderr}");
+    assert!(
+        stderr.contains("extent `n`: claimed = 2, shrink axis 0 = 3"),
         "{stderr}"
     );
 }

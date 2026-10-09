@@ -3318,6 +3318,38 @@ fn checked_fn_type_expr(fn_expr: &Expr) -> Option<&Expr> {
     }
 }
 
+/// The dimension one axis of a checked type names
+/// ([`LowerCtx::checked_axis_names`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CheckedAxisName {
+    /// A `d-name`: a concrete named dimension a signature wrote.
+    Spelled(String),
+    /// A `d-var`: a binder or one of the checker's own variables.
+    Variable(String),
+}
+
+/// The names of the `d-name` and `d-var` nodes in the authored type `expr`.
+/// Metadata is not walked: it holds checked types, whose variables the
+/// checker named.
+fn collect_spelled_dimension_names(expr: &Expr, names: &mut UnordSet<String>) {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::DName | DeepTag::DVar, _, children) => {
+            if let Some(Expr::Atom(Atom::Name(name), _)) = children.first() {
+                names.insert(name.clone());
+            }
+        }
+        ExprCarrier::DecodedNode(_, _, children)
+        | ExprCarrier::UndecodableHead(_, _, children)
+        | ExprCarrier::StructuralList(children) => {
+            for child in children {
+                collect_spelled_dimension_names(child, names);
+            }
+        }
+        ExprCarrier::MetadataExpression(meta) => collect_spelled_dimension_names(&meta.expr, names),
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {}
+    }
+}
+
 /// The checker's dimension variables in the checked types of `body`'s
 /// nodes. A nested function's are not collected: its own activation
 /// instantiates them, and a variable it shares with this body is one this
@@ -8242,6 +8274,8 @@ struct LowerCtx<'program> {
     /// evidence. Shared with every sub-context whose nodes are spliced into
     /// this graph, so no two activations of one graph draw the same identity.
     activation_serial: Arc<AtomicU64>,
+    /// See [`Self::authored_dimension_names`]; computed on first use.
+    authored_dimension_names: std::cell::OnceCell<UnordSet<String>>,
     /// WS-A8: precision-tvar substitutions, keyed by the precision-var
     /// name (e.g. `p`) as it appears in `(t-var {} p)` precision slots
     /// of the polymorphic def's signature. Populated at call sites of
@@ -8368,6 +8402,7 @@ impl<'program> LowerCtx<'program> {
             dim_substitutions: UnordMap::new(),
             checked_dim_substitutions: UnordMap::new(),
             activation_serial: Arc::new(AtomicU64::new(0)),
+            authored_dimension_names: std::cell::OnceCell::new(),
             prec_substitutions: UnordMap::new(),
             rank_substitutions: UnordMap::new(),
             dim_axis_positions: UnordMap::new(),
@@ -9467,6 +9502,86 @@ impl<'program> LowerCtx<'program> {
             Expr::Atom(Atom::Int(n), _) => Some(DimInfo::Lit(*n as usize)),
             _ => None,
         }
+    }
+
+    /// The checked dimension each axis of the tensor type `expr` names,
+    /// aligned with the dims [`Self::type_from_type_expr_with_subst`] reads
+    /// from it: a `d-name`, a concrete named dimension a signature wrote, or a
+    /// `d-var`, a binder or one of the checker's own variables, whose meaning
+    /// is whatever the activation bound it to. A literal and an axis a rank
+    /// variable expands to name none. `None` when `expr` is not a tensor
+    /// type.
+    fn checked_axis_names(
+        expr: &Expr,
+        rank_subst: &UnordMap<String, Vec<DimInfo>>,
+    ) -> Option<Vec<Option<CheckedAxisName>>> {
+        if let Some(inner) = Self::try_extract_ref_type(expr) {
+            return Self::checked_axis_names(inner, rank_subst);
+        }
+        let Some((DeepTag::TTensor, _, children)) = stamped_parts(expr) else {
+            return None;
+        };
+        let (_, dims) = children.split_last()?;
+        let mut names = Vec::new();
+        for child in dims {
+            match stamped_parts(child) {
+                Some((DeepTag::DRank, _, kids)) => {
+                    let rank = match kids.first() {
+                        Some(Expr::Atom(Atom::Name(name), _)) => name.as_str(),
+                        _ => "?",
+                    };
+                    if let Some(expanded) = rank_subst.get(rank) {
+                        names.extend(std::iter::repeat_n(None, expanded.len()));
+                    }
+                }
+                Some((DeepTag::DName, _, [Expr::Atom(Atom::Name(name), _), ..])) => {
+                    names.push(Some(CheckedAxisName::Spelled(name.clone())));
+                }
+                Some((DeepTag::DVar, _, [Expr::Atom(Atom::Name(name), _), ..])) => {
+                    names.push(Some(CheckedAxisName::Variable(name.clone())));
+                }
+                _ => {
+                    if Self::try_extract_dim(child).is_some() {
+                        names.push(None);
+                    }
+                }
+            }
+        }
+        Some(names)
+    }
+
+    /// The caller-side name a checked call result transports onto one axis.
+    /// A `d-name` is transported whatever its spelling. A `d-var` is
+    /// transported only when the activation bound it to a dimension name
+    /// some signature spelled (`authored`), such as the caller's own binder;
+    /// a variable bound to an identity the lowerer minted, a fresh one for
+    /// this activation included, or left unbound names one instantiation's
+    /// extent and is never transported.
+    fn transported_axis_name(
+        name: &CheckedAxisName,
+        substitutions: &UnordMap<String, DimInfo>,
+        authored: &UnordSet<String>,
+    ) -> Option<String> {
+        match name {
+            CheckedAxisName::Spelled(name) => Some(name.clone()),
+            CheckedAxisName::Variable(variable) => match substitutions.get(variable) {
+                Some(DimInfo::Named(bound, _)) if authored.contains(bound) => Some(bound.clone()),
+                _ => None,
+            },
+        }
+    }
+
+    /// Every dimension name the program's declared signatures spell, binders
+    /// and named dimensions alike. A name the lowerer mints appears in no
+    /// signature.
+    fn authored_dimension_names(&self) -> &UnordSet<String> {
+        self.authored_dimension_names.get_or_init(|| {
+            let mut names = UnordSet::new();
+            for signature in self.program_signatures.values() {
+                collect_spelled_dimension_names(signature, &mut names);
+            }
+            names
+        })
     }
 
     fn dim_info_from_rt_dim(&self, size: &RtDim, inputs: &[NodeId]) -> Option<DimInfo> {
@@ -12245,11 +12360,15 @@ impl<'program> LowerCtx<'program> {
         let checked_result_precision = meta
             .ty()
             .and_then(|ty| self.resolved_type_precision(ty.expression()));
+        let checked_result_names = meta
+            .ty()
+            .and_then(|ty| Self::checked_axis_names(ty.expression(), &self.rank_substitutions));
         if let Some(lowered) = self.try_lower_callable_app(
             &kids[0],
             &kids[1..],
             &ty,
             checked_result_precision,
+            checked_result_names.as_deref(),
             app_span,
         ) {
             return lowered;
@@ -12272,6 +12391,7 @@ impl<'program> LowerCtx<'program> {
         args: &[Expr],
         ty: &TensorType,
         checked_result_precision: Option<Prim>,
+        checked_result_names: Option<&[Option<CheckedAxisName>]>,
         app_span: Span,
     ) -> Option<LoweredValue> {
         let callable = self.resolve_callable_expr(func)?;
@@ -12298,7 +12418,7 @@ impl<'program> LowerCtx<'program> {
                 args,
                 ty,
                 checked_result_precision,
-                app_span,
+                checked_result_names,
                 inlining_name,
             )),
             CallableExpr::KeyBuiltin(name) => Some(if name == "split_key" {
@@ -13433,7 +13553,7 @@ impl<'program> LowerCtx<'program> {
         args: &[Expr],
         expected_return_ty: &TensorType,
         checked_result_precision: Option<Prim>,
-        _app_span: Span,
+        checked_result_names: Option<&[Option<CheckedAxisName>]>,
         inlining_name: Option<String>,
     ) -> LoweredValue {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
@@ -13785,15 +13905,30 @@ impl<'program> LowerCtx<'program> {
         // is label transport, not a callee-authored equality: in particular,
         // do not resolve the caller spelling through this activation's
         // signature witnesses or import its checked optional extent.
-        if expected_return_ty != &Self::default_type()
+        //
+        // Only a name a signature spelled is caller-side
+        // ([`Self::transported_axis_name`]). A minted identity names one
+        // instantiation's extent, and a graph type that carried it would join
+        // that extent with every axis named the same, a sibling activation's
+        // included ([04-ADT-2]).
+        if let Some(names) = checked_result_names
             && let LoweredValue::Node(id) = &mut result
-            && expected_return_ty.dims.len()
-                == self.dag.get(*id).expect("result").output_type.dims.len()
+            && names.len() == self.dag.get(*id).expect("result").output_type.dims.len()
         {
-            for (axis, checked_dim) in expected_return_ty.dims.iter().enumerate() {
+            for (axis, name) in names.iter().enumerate() {
+                let Some(name) = name.as_ref().and_then(|name| {
+                    Self::transported_axis_name(
+                        name,
+                        &self.checked_dim_substitutions,
+                        self.authored_dimension_names(),
+                    )
+                }) else {
+                    continue;
+                };
+                let checked_dim = DimInfo::Named(name, None);
                 let produced = &self.dag.get(*id).expect("result").output_type;
-                if Self::is_distinct_checked_named_result_axis(produced, axis, checked_dim) {
-                    *id = self.refine_checked_result_axis_name(*id, axis, checked_dim);
+                if Self::is_distinct_checked_named_result_axis(produced, axis, &checked_dim) {
+                    *id = self.refine_checked_result_axis_name(*id, axis, &checked_dim);
                 }
             }
         }
@@ -20645,17 +20780,9 @@ impl<'program> LowerCtx<'program> {
     }
 
     /// A checked call type refines a produced result only when this exact
-    /// axis gained a concrete name a signature spelled. A known extent
-    /// attached to the same name is not a new name. Literals stay solely in
-    /// the authored result path, where their runtime obligations originate.
-    ///
-    /// A compiler-minted name is never transported. An activation's identity
-    /// for a callee variable no actual binds, or a checker variable no
-    /// activation instantiated, names nothing the caller can query; stamped
-    /// on a graph type it would join every axis spelled the same into one
-    /// extent class nobody claimed, a sibling activation's included
-    /// ([04-ADT-2]), and contradict an operation that derives the axis from an
-    /// operand, such as `gather`.
+    /// axis gained a concrete, non-wildcard name. A known extent attached to
+    /// the same name is not a new name. Literals stay solely in the authored
+    /// result path, where their runtime obligations originate.
     ///
     /// The comparison is with the label the produced axis carries, never with
     /// the callee's authored result: the checked name belongs to the caller's
@@ -20669,7 +20796,8 @@ impl<'program> LowerCtx<'program> {
         let DimInfo::Named(checked_binder, _) = checked else {
             return false;
         };
-        !crate::axis_sources::is_synthesized_dim_name(checked_binder)
+        !checked_binder.is_empty()
+            && checked_binder != "*"
             && !matches!(
                 produced.dims.get(axis),
                 Some(DimInfo::Named(produced_label, _)) if produced_label == checked_binder
@@ -24599,6 +24727,86 @@ mod fused_zero_tests {
 mod tests {
     use super::*;
     use crate::verify;
+
+    /// chelis#3462: a checked call result transports a `d-name` whatever it
+    /// looks like, `d1` included, and a `d-var` only when the activation bound
+    /// it to a name a signature spelled, such as the caller's binder `n`. A
+    /// variable bound to an identity of any minted vocabulary, a literal, or
+    /// nothing is never transported.
+    #[test]
+    fn only_spelled_dimension_names_are_transported() {
+        let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+        let rank = [(
+            "r".to_owned(),
+            vec![DimInfo::Lit(2), DimInfo::Named("q".to_owned(), None)],
+        )]
+        .into_iter()
+        .collect::<UnordMap<_, _>>();
+        let expr = parse(
+            "(t-ref {} (t-tensor {} (d-name {} d1) (d-name {} fixed) (d-var {} d17) \
+             (d-lit {} 3) (d-rank {} r) (t-prim {} f32)))",
+        );
+        let spelled = |name: &str| Some(CheckedAxisName::Spelled(name.to_owned()));
+        assert_eq!(
+            LowerCtx::checked_axis_names(&expr, &rank),
+            Some(vec![
+                spelled("d1"),
+                spelled("fixed"),
+                Some(CheckedAxisName::Variable("d17".to_owned())),
+                None,
+                None,
+                None,
+            ])
+        );
+        assert_eq!(
+            LowerCtx::checked_axis_names(&parse("(t-prim {} f32)"), &rank),
+            None
+        );
+
+        let authored = ["n", "d1", "fixed"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<UnordSet<_>>();
+        let variable = CheckedAxisName::Variable("d17".to_owned());
+        let bound_to = |dim: DimInfo| {
+            let substitutions = [("d17".to_owned(), dim)]
+                .into_iter()
+                .collect::<UnordMap<_, _>>();
+            LowerCtx::transported_axis_name(&variable, &substitutions, &authored)
+        };
+        assert_eq!(
+            bound_to(DimInfo::Named("n".to_owned(), Some(2))),
+            Some("n".to_owned())
+        );
+        for minted in [
+            "d52",
+            "_act_dim_0_d61",
+            "_rt_dim_3_1",
+            "_rt_shrink_dim_7_0",
+            "_anon_dim_2_1",
+            "_split_keys_4",
+            "_w320_axis_0",
+        ] {
+            assert_eq!(
+                bound_to(DimInfo::Named(minted.to_owned(), None)),
+                None,
+                "{minted}"
+            );
+        }
+        assert_eq!(bound_to(DimInfo::Lit(2)), None);
+        assert_eq!(
+            LowerCtx::transported_axis_name(&variable, &UnordMap::new(), &authored),
+            None
+        );
+        assert_eq!(
+            LowerCtx::transported_axis_name(
+                &CheckedAxisName::Spelled("d1".to_owned()),
+                &UnordMap::new(),
+                &UnordSet::new()
+            ),
+            Some("d1".to_owned())
+        );
+    }
 
     /// chelis#2434: preparing a lowering context must not copy a definition
     /// table that has no pipe to fold. The host runtime prepares one per
