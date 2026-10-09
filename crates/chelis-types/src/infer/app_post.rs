@@ -25,7 +25,7 @@ pub(super) fn finish_unified_app(
 ) -> Type {
     if let Some(message) = func_name
         .as_deref()
-        .filter(|_| spells_container_borrow(kids))
+        .filter(|_| kids.get(1).is_some_and(is_borrow_expression))
         .zip(arg_tys.first())
         .and_then(|(query, operand)| {
             explicit_container_borrow_refusal(query, &subst.apply(operand))

@@ -250,9 +250,13 @@ fn explicit_borrow_guidance_is_for_containers_only() {
 }
 
 #[test]
-fn explicit_borrow_through_a_function_value_is_refused() {
-    // The spelling belongs to the application, so a call of `len` or `index`
-    // through a function value carries it to the transported contract.
+fn a_call_through_a_function_value_is_decided_by_its_type() {
+    // spec/04 section 2.6: the explicit-borrow rule is keyed on the callee
+    // written `len` or `index`. A call through a function value bound to
+    // the query is decided by that value's type, so `f(&xs)` checks and the
+    // borrowed container is decided on its referent. A builtin used as a
+    // value does not run on eval or compiled C, exactly as the owned
+    // `f(xs)` does not (chelis#3204); that is independent of the borrow.
     for (parameter, call, ret) in [
         ("xs: List[tensor[2, f32]]", "f = len\n  f(&xs)", "i64"),
         ("xs: &List[tensor[2, f32]]", "f = len\n  f(&xs)", "i64"),
@@ -263,29 +267,58 @@ fn explicit_borrow_through_a_function_value_is_refused() {
             "tensor[2, f32]",
         ),
     ] {
-        let errors = check_errors(&format!(
-            "def probe({parameter}) -> {ret} = {{\n  {call}\n}}\n"
-        ));
-        assert!(
-            matches!(errors.as_slice(), [error]
-                if matches!(error.kind, CheckErrorKind::TypeMismatch)
-                    && error.message.contains("auto-borrows its")
-                    && error.message.contains("an explicit `&` is not a supported surface form")),
-            "{call} on {parameter}: expected the explicit-borrow refusal; got {errors:?}"
+        assert_checks(
+            &format!("def probe({parameter}) -> {ret} = {{\n  {call}\n}}\n"),
+            &format!("{call} on {parameter}"),
         );
     }
-    // Decided once a deferred operand settles, too: `ys` is unresolved when
-    // `f(&ys)` is inferred and is settled by the outer application.
-    let errors = check_errors(
-        "def apply_it(g: (List[tensor[2, f32]]) -> i64, t: List[tensor[2, f32]]) -> i64 = g(t)\n\
-         def probe(xs: List[tensor[2, f32]]) -> i64 = \
-         apply_it(fn (ys) -> {\n    f = len\n    f(&ys)\n  }, xs)\n",
-    );
+    // The transported contract still decides the referent: a non-container
+    // operand through the function value is the query's own type error.
+    let errors = check_errors("def probe(t: tensor[2, f32]) -> i64 = {\n  f = len\n  f(&t)\n}\n");
     assert!(
-        errors.iter().any(|error| error
-            .message
-            .contains("an explicit `&` is not a supported surface form")),
-        "deferred f(&ys): expected the explicit-borrow refusal; got {errors:?}"
+        errors
+            .iter()
+            .any(|error| error.message == "len expects List or Dict input, got &tensor[2, f32]"),
+        "f(&t) of a tensor through a function value bound to len; got {errors:?}"
+    );
+}
+
+#[test]
+fn the_explicit_borrow_rule_is_keyed_on_the_literal_callee() {
+    let q = "type Q =\n  | Q { f: (&List[tensor[2, f32]]) -> i64 }\n";
+    // A record field and a match-bound name that hold `len` are callees
+    // decided by their declared type.
+    assert_checks(
+        &format!(
+            "{q}def probe(xs: List[tensor[2, f32]]) -> i64 = {{\n  q = Q {{ f: len }}\n  (q.f)(&xs)\n}}\n"
+        ),
+        "a record field holding len",
+    );
+    assert_checks(
+        &format!(
+            "{q}def probe(xs: List[tensor[2, f32]]) -> i64 = match Q {{ f: len }} with {{\n  \
+             | Q {{ f }} => f(&xs)\n}}\n"
+        ),
+        "a match-bound name holding len",
+    );
+    // The callee written `len` or `index` refuses the explicit borrow, as a
+    // direct call or as a pipe stage.
+    for (source, what) in [
+        (
+            "def probe(xs: List[tensor[2, f32]]) -> i64 = len(&xs)\n",
+            "len(&xs)",
+        ),
+        (
+            "def probe(xs: List[tensor[2, f32]]) -> i64 = (&xs) |> len\n",
+            "(&xs) |> len",
+        ),
+    ] {
+        assert_single_mismatch(source, LEN_EXPLICIT_BORROW, what);
+    }
+    assert_single_mismatch(
+        "def probe(xs: List[tensor[2, f32]]) -> tensor[2, f32] = (&xs) |> index(0i64)\n",
+        INDEX_EXPLICIT_BORROW,
+        "(&xs) |> index(0i64)",
     );
 }
 

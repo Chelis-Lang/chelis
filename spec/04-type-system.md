@@ -846,9 +846,11 @@ tensor-carrying `List` or `Dict`: they auto-borrow their container argument
 and do not consume it, so reading a container's length or an element does not
 forbid a later reuse of the container. A container operand that is already
 borrowed, such as a `&List[T]` or `&Dict[K, V]` parameter, is decided on its
-referent; the unsupported surface form is only the explicit borrow expression
-`len(&xs)` or `index(&xs, i)`, written at a direct call or through a function
-value. See `spec/05-risc-primitives.md` §1.3.1.
+referent. An explicit borrow expression is a type error only as the container
+operand of a call whose callee is written `len` or `index`, a pipe stage
+included, as in `len(&xs)` or `(&xs) |> len`. A call through any other callee,
+a function value bound to `len` or `index` included, is decided by that
+callee's type. See `spec/05-risc-primitives.md` §1.3.1.
 
 ---
 

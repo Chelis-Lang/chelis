@@ -406,11 +406,6 @@ pub(crate) fn decide_collection_constraint(
         CollectionConstraint::Len { operand, .. } => match queried_container(operand) {
             Type::Var(_) | Type::Error(_) => Ok(None),
             Type::Adt(name, _) if name == "List" || name == "Dict" => {
-                if let Some(Some(refusal)) = spelled_borrow(evidence)
-                    .then(|| explicit_container_borrow_refusal("len", operand))
-                {
-                    return Err(refusal);
-                }
                 Ok(joined(vec![Type::Prim(Prim::Int64)]))
             }
             _ => Err(format!("len expects List or Dict input, got {operand}")),
@@ -424,11 +419,6 @@ pub(crate) fn decide_collection_constraint(
             match queried_container(list) {
                 Type::Var(_) | Type::Error(_) => Ok(None),
                 Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                    if let Some(Some(refusal)) = spelled_borrow(evidence)
-                        .then(|| explicit_container_borrow_refusal("index", list))
-                    {
-                        return Err(refusal);
-                    }
                     Ok(joined(vec![args[0].clone()]))
                 }
                 _ => Err(format!("index expects List input, got {list}")),
@@ -480,9 +470,9 @@ pub(crate) fn decide_collection_constraint(
 /// their container (spec/05 section 1.3.1), so one reached through a borrow,
 /// such as a `&List[T]` or `&Dict[K, V]` parameter, is decided on its
 /// referent. The explicit `len(&xs)` / `index(&xs, i)` spelling is refused
-/// from the application's spelling by [`explicit_container_borrow_refusal`],
-/// never by this type, because a borrow expression and a borrowed variable
-/// have the same type.
+/// from the call's source by [`explicit_container_borrow_refusal`], never by
+/// this type, because a borrow expression and a borrowed variable have the
+/// same type.
 pub(super) fn queried_container(ty: &Type) -> &Type {
     match ty {
         Type::Ref(referent) => referent,
@@ -490,21 +480,20 @@ pub(super) fn queried_container(ty: &Type) -> &Type {
     }
 }
 
-/// spec/05 section 1.3.1 and spec/04 section 2.6: `len` and `index` take
-/// their container only by auto-borrow, so the explicit borrow expression
-/// `len(&xs)` / `index(&xs, i)` is not a supported spelling. This is the one
-/// decision of that rule, for an application of `query` whose container
-/// operand the source spelled `&e` and whose operand type is `operand`.
+/// spec/04 section 2.6 and spec/05 section 1.3.1: `len` and `index` take
+/// their container only by auto-borrow, so an explicit borrow expression is
+/// a type error as the container operand of a call whose callee is written
+/// `len` or `index`, a pipe stage included. That is the whole rule: a call
+/// through any other callee, a function value bound to the query included,
+/// is decided by that callee's type, and every typing arm decides a borrowed
+/// container on its referent ([`queried_container`]).
 ///
-/// The spelling is the application's, so each application site supplies it:
-/// a direct call reads its own operand ([`spells_container_borrow`]), and a
-/// call through a function value carries it to the transported contract as
-/// [`CollectionCallEvidence::ExplicitBorrowOperand`]. A borrow expression
-/// and a borrowed variable have the same type, so no typing arm can supply
-/// it, and every arm decides a borrowed container on its referent
-/// ([`queried_container`]). The borrow node's own typing cannot decide it
-/// either, because `&xs` is an ordinary argument everywhere else, and Deep
-/// input never passes through the Surf desugarer.
+/// The rule reads the call's source, so its one site is the direct
+/// application, at the top of `finish_unified_app`. A borrow expression and
+/// a borrowed variable have the same type, so no typing arm can apply it;
+/// the borrow node's own typing cannot either, because `&xs` is an ordinary
+/// argument everywhere else, and Deep input never passes through the Surf
+/// desugarer.
 ///
 /// Returns the refusal once the referent is the query's container. A
 /// referent that is still unresolved is not decided yet, and one that is not
@@ -527,14 +516,8 @@ pub(super) fn explicit_container_borrow_refusal(query: &str, operand: &Type) -> 
     }
 }
 
-/// Whether an application spells its first operand, a query's container, as
-/// the borrow expression `&e`.
-pub(super) fn spells_container_borrow(kids: &[deep::Expr]) -> bool {
-    kids.get(1).is_some_and(is_borrow_expression)
-}
-
 /// Whether `expr` is the borrow expression `&e`, through metadata wrappers.
-fn is_borrow_expression(mut expr: &deep::Expr) -> bool {
+pub(super) fn is_borrow_expression(mut expr: &deep::Expr) -> bool {
     loop {
         match expr.carrier() {
             deep::ExprCarrier::DecodedNode(tag, _, _) => return tag == DeepTag::Borrow,
@@ -628,16 +611,6 @@ pub(crate) enum CollectionCallEvidence {
     /// [05-OP-71]: `split_keys`'s count, when its expression folds to a
     /// static integer.
     SplitKeysCount(Option<i64>),
-    /// spec/05 section 1.3.1: a `len` or `index` applied through a function
-    /// value spelled its container operand as the borrow expression `&e`.
-    ExplicitBorrowOperand,
-}
-
-fn spelled_borrow(evidence: Option<&CollectionCallEvidence>) -> bool {
-    matches!(
-        evidence,
-        Some(CollectionCallEvidence::ExplicitBorrowOperand)
-    )
 }
 
 /// The static count of one already-inferred `split_keys`-shaped application,
