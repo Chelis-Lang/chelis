@@ -227,3 +227,108 @@ fn the_issue_definitions_check_clean() {
         "drop",
     );
 }
+
+/// An explicit borrow in a host call. Inlining a rank-polymorphic callee
+/// substitutes its actual into `(borrow x)`, so the host lane meets a borrow
+/// whose operand the tensor-helper route declines; it lowers the borrow as its
+/// operand's value. Each spelling, with and without `&`, at `..r` and at
+/// concrete rank, prints the same on eval and compiled C.
+#[test]
+fn an_explicit_borrow_in_a_host_call_agrees_on_both_lanes() {
+    for (rank, binders, shape) in [("rank", "[r]", "..r"), ("concrete", "", "2")] {
+        for (spelling, borrow) in [("borrowed", "&"), ("bare", "")] {
+            let printed = format!(
+                "def g{binders}(x: tensor[{shape}, f32]) -> unit ! {{ IO }} = print({borrow}x)\n\
+                 out = g(to_tensor([1.0f32, 2.0f32]))\n"
+            );
+            let run = parity::assert_lanes_agree(&printed, &format!("print_{rank}_{spelling}"));
+            assert_eq!(run.status, Some(0), "{run:?}");
+            assert_eq!(run.stdout, "tensor(shape=[2], data=[1.0, 2.0])\nout = ()\n");
+
+            let asserted = format!(
+                "def g{binders}(x: tensor[{shape}, f32]) -> unit ! {{ Test }} = test_assert_eq_tensor({borrow}x, {borrow}x, \"same\")\n\
+                 out = g(to_tensor([1.0f32, 2.0f32]))\n"
+            );
+            let run = parity::assert_lanes_agree(&asserted, &format!("assert_{rank}_{spelling}"));
+            assert_eq!(run.status, Some(0), "{run:?}");
+            assert_eq!(run.stdout, "out = ()\n");
+        }
+    }
+}
+
+/// A borrow does not consume its operand: the inlined body borrows `x` for
+/// `print` and then returns it, and the caller's copy is evaluated once.
+#[test]
+fn a_borrowed_operand_is_still_owned_after_the_host_call() {
+    let source = "def g[r](x: tensor[..r, f32]) -> tensor[..r, f32] ! { IO } = {\n  _ = print(&x)\n  x\n}\n\
+                  def h(y: tensor[2, f32]) -> tensor[2, f32] ! { IO } = add(g(copy(y)), y)\n\
+                  out = h(to_tensor([1.0f32, 2.0f32]))\n";
+    let run = parity::assert_lanes_agree(source, "borrow_then_return");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    assert_eq!(
+        run.stdout,
+        "tensor(shape=[2], data=[1.0, 2.0])\nout = tensor(shape=[2], data=[2.0, 4.0])\n"
+    );
+}
+
+/// The same host-lane borrow at concrete rank over an ADT value: a local
+/// record borrowed into two calls in host position (the shape of #3415's
+/// `two_sub`). Eval and compiled C print the same, and the record stays live
+/// for its second borrow.
+#[test]
+fn a_borrowed_local_record_argument_agrees_on_both_lanes() {
+    let source = "type Pair =\n  | Pair { k: tensor[2, f32], b: tensor[2, f32] }\n\
+                  def mk() -> Pair = Pair { k: to_tensor([1.0f32, 2.0f32]), b: to_tensor([3.0f32, 4.0f32]) }\n\
+                  def use_pair(x: tensor[2, f32], c: &Pair) -> tensor[2, f32] =\n  match c with {\n    | Pair { k, b } => add(mul(x, k), b)\n  }\n\
+                  def two(a: tensor[2, f32]) -> tensor[2, f32] = {\n  c = mk()\n  ya = use_pair(copy(&a), &c)\n  yb = use_pair(a, &c)\n  add(ya, yb)\n}\n\
+                  out = two(to_tensor([1.0f32, 1.0f32]))\n";
+    let run = parity::assert_lanes_agree(source, "borrowed_record");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    assert!(
+        run.stdout
+            .ends_with("out = tensor(shape=[2], data=[8.0, 12.0])\n"),
+        "{}",
+        run.stdout
+    );
+}
+
+/// Negative parity: borrowing a value its body already consumed is still a
+/// check error at either rank, and `chelis build` refuses it.
+#[test]
+fn a_borrow_of_a_consumed_value_is_still_refused() {
+    for (binders, shape) in [("[r]", "..r"), ("", "2")] {
+        let source = format!(
+            "def g{binders}(x: tensor[{shape}, f32]) -> unit ! {{ IO }} = {{\n  _ = drop(x)\n  print(&x)\n}}\n"
+        );
+        let json = check_json(&source);
+        assert!(
+            json["errors"].as_array().is_some_and(|errors| errors
+                .iter()
+                .any(|error| error["kind"] == "UseAfterConsume")),
+            "tensor[{shape}]: expected UseAfterConsume, got {json}"
+        );
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("consumed.ch");
+        fs::write(&path, &source).expect("write source");
+        let build = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                dir.path().join("out").to_str().unwrap(),
+            ])
+            .output()
+            .expect("run chelis build");
+        assert!(
+            !build.status.success()
+                && String::from_utf8_lossy(&build.stderr).contains("already consumed"),
+            "tensor[{shape}]: the build must refuse a borrow after consumption: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+}

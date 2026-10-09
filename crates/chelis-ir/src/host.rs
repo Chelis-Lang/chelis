@@ -8715,6 +8715,25 @@ fn lower_host_expr_kind(
                 ty,
             })
         }
+        Expr::Node(list, _) if list.tag() == DeepTag::Borrow => {
+            // `(borrow {} x)` reads its operand without consuming it. The
+            // value is the operand's, as in the tensor lane's `lower_identity`;
+            // whether the operand is consumed is decided by the callee's
+            // declared parameter mode at ownership lowering, not by this node.
+            // A tensor-typed borrow of a name usually leaves through the
+            // tensor-helper route above; this arm covers every operand that
+            // route declines, such as a borrowed record or an inlined
+            // rank-polymorphic call's actual (chelis#3383).
+            lower_host_expr_with_expected_opt(
+                list.children_slice().first().ok_or_else(|| {
+                    host_expr_lowering_error(expr, "a `borrow` node has no operand")
+                })?,
+                program,
+                scope,
+                tensor_helpers,
+                expected_ty,
+            )?
+        }
         Expr::Node(list, _) if list.tag() == DeepTag::Realize => {
             // Passthrough for phase-0 semantics: realize is an identity in
             // host lane.
