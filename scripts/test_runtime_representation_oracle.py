@@ -134,11 +134,100 @@ class SourceUniverseTests(unittest.TestCase):
             (ignored / ".gitignore").write_text("*\n", encoding="utf-8")
             (ignored / "src/lib.rs").write_text("pub fn ignored() {}\n", encoding="utf-8")
             self.assertEqual(oracle.root_directories(REPO_ROOT), baseline["source_inventory"]["roots"])
+            self.assertNotIn(
+                "crates/chelis-backend-ignored-probe/src/lib.rs",
+                oracle.inventory_sources(REPO_ROOT),
+            )
             oracle.validate_baseline(baseline, rows)
         finally:
             shutil.rmtree(leftover, ignore_errors=True)
             shutil.rmtree(ignored, ignore_errors=True)
             oracle._invalidate_inventory_cache()
+
+    def test_an_untracked_crate_with_sources_is_a_new_root_directory(self) -> None:
+        # The scan sees an untracked file, so the directory rule must too.
+        crate = REPO_ROOT / "crates/chelis-backend-untracked-probe"
+        self.assertFalse(crate.exists())
+        baseline = oracle.load_baseline()
+        rows = oracle.inventory_rows(REPO_ROOT)
+        try:
+            (crate / "src").mkdir(parents=True)
+            (crate / "src/lib.rs").write_text("pub fn untracked() {}\n", encoding="utf-8")
+            oracle._invalidate_inventory_cache()
+            self.assertIn(
+                "crates/chelis-backend-untracked-probe/src/lib.rs",
+                oracle.inventory_sources(REPO_ROOT),
+            )
+            with self.assertRaises(oracle.OracleFailure) as caught:
+                oracle.validate_baseline(baseline, rows)
+        finally:
+            shutil.rmtree(crate, ignore_errors=True)
+            oracle._invalidate_inventory_cache()
+        self.assertEqual(
+            str(caught.exception),
+            "inventory root directories do not match the frozen source universe; "
+            "a new directory under a root is a freeze move: "
+            "crates/chelis-backend-untracked-probe, "
+            "crates/chelis-backend-untracked-probe/src",
+        )
+
+    def test_a_frozen_directory_untracked_in_the_index_stays_present(self) -> None:
+        # Its files stay on disk and visible, so they are still scanned and
+        # the directory has not departed.
+        directory = "crates/chelis-backend-metal"
+        baseline = oracle.load_baseline()
+        rows = oracle.inventory_rows(REPO_ROOT)
+        sources = oracle.inventory_sources(REPO_ROOT)
+        subprocess.run(
+            ("git", "rm", "-r", "-q", "--cached", directory),
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+        )
+        try:
+            oracle._invalidate_inventory_cache()
+            self.assertEqual(
+                oracle.root_directories(REPO_ROOT), baseline["source_inventory"]["roots"]
+            )
+            self.assertEqual(oracle.inventory_sources(REPO_ROOT), sources)
+            oracle.validate_baseline(baseline, rows)
+        finally:
+            subprocess.run(
+                ("git", "reset", "-q", "HEAD", "--", directory),
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+            )
+            oracle._invalidate_inventory_cache()
+        self.assertEqual(
+            subprocess.run(
+                ("git", "status", "--porcelain", "--", directory),
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout,
+            "",
+        )
+
+    def test_regeneration_prunes_unreferenced_retired_files(self) -> None:
+        stale = "crates/chelis-ir/src/runtime_representation_unreferenced_probe.rs"
+        baseline = oracle.load_baseline()
+        self.assertNotIn(stale, oracle.referenced_files(baseline))
+        recorded = json.loads(json.dumps(baseline))
+        recorded["retired_files"] = sorted([*recorded["retired_files"], stale])
+        with self.assertRaisesRegex(
+            oracle.OracleFailure,
+            f"retired_files names a file nothing references: {stale}",
+        ):
+            oracle.validate_baseline(recorded, oracle.inventory_rows(REPO_ROOT))
+        with tempfile.TemporaryDirectory() as directory:
+            copy = Path(directory) / "baseline.json"
+            copy.write_text(json.dumps(recorded), encoding="utf-8")
+            with mock.patch.object(oracle, "BASELINE_PATH", copy):
+                oracle.regenerate()
+            regenerated = json.loads(copy.read_text())
+        self.assertEqual(regenerated["retired_files"], baseline["retired_files"])
 
     def test_a_final_form_file_leaving_the_roots_fails(self) -> None:
         source = "crates/chelis-backend-c/src/fp_env.rs"
