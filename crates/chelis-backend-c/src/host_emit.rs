@@ -3867,12 +3867,28 @@ static void __chelis_check_claim_frame_value(const __chelis_host_result_claim *f
 }
 
 /* Check every pattern frame of `claims` against an already produced value,
-   in frame order. */
+   in the order every claim chain is checked: immediate frames in link order,
+   then outer-first frames in reverse link order. */
 static void __chelis_check_host_result_value_claims(const __chelis_host_result_claim *claims, chelis_value value, const __chelis_host_result_origin *origin) {
     if (claims == NULL) return;
-    if (claims->outer_claims_first) __chelis_check_host_result_value_claims(claims->next, value, origin);
-    if (claims->nodes != NULL) __chelis_check_claim_frame_value(claims, claims->node, value, origin);
-    if (!claims->outer_claims_first) __chelis_check_host_result_value_claims(claims->next, value, origin);
+    const __chelis_host_result_claim *first_deferred = NULL;
+    const __chelis_host_result_claim **deferred = NULL;
+    size_t length = 0, capacity = 0;
+    for (const __chelis_host_result_claim *claim = claims; claim != NULL; claim = claim->next) {
+        if (claim->outer_claims_first) {
+            __chelis_defer_host_result_claim(&first_deferred, &deferred, &length, &capacity, claim);
+        } else if (claim->nodes != NULL) {
+            __chelis_check_claim_frame_value(claim, claim->node, value, origin);
+        }
+    }
+    while (length != 0) {
+        const __chelis_host_result_claim *claim = deferred[--length];
+        if (claim->nodes != NULL) __chelis_check_claim_frame_value(claim, claim->node, value, origin);
+    }
+    if (first_deferred != NULL && first_deferred->nodes != NULL) {
+        __chelis_check_claim_frame_value(first_deferred, first_deferred->node, value, origin);
+    }
+    if (deferred != NULL) free(deferred);
 }
 "#
         .to_string(),
@@ -4056,12 +4072,27 @@ mod claim_stack_tests {
         int64_t source_axis;
     } __chelis_host_result_axis;
 
+    typedef struct __chelis_claim_node {
+        int64_t kind;
+        int64_t rank;
+        int64_t count;
+        const int64_t (*axes)[3];
+        const char *const *names;
+        const int64_t *offsets;
+        const int64_t *children;
+        const char *const *labels;
+    } __chelis_claim_node;
+
     typedef struct __chelis_host_result_claim {
         const struct __chelis_host_result_claim *next;
         int64_t rank;
         int64_t count;
         const __chelis_host_result_axis *axes;
         int outer_claims_first;
+        const __chelis_claim_node *nodes;
+        int64_t node;
+        const __chelis_host_result_axis *binders;
+        int64_t binder_count;
     } __chelis_host_result_claim;
 
     typedef struct chelis_tensor { volatile int64_t rank, extent; } chelis_tensor;
