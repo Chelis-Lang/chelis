@@ -856,7 +856,7 @@ pub struct DictEntryValue {
 /// Owned values release nested children iteratively. Rust callers can inspect
 /// variants by reference or take children through mutable references; a value
 /// with a `Drop` implementation cannot be destructured by value.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionValue {
     Tensor {
@@ -890,6 +890,124 @@ pub enum ExecutionValue {
         fields: Vec<ExecutionValue>,
     },
     Unit,
+}
+
+// These mirrors keep the derived wire format while the public value controls
+// each recursive entry's native stack budget. The exhaustive matches below
+// make adding or changing a public variant require a mirror update.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ExecutionValueRef<'a> {
+    Tensor {
+        value: &'a TensorValue,
+    },
+    Scalar {
+        value: &'a NumericScalar,
+    },
+    Bool {
+        value: bool,
+    },
+    Key {
+        bits: &'a chelis_types::KeyBits,
+    },
+    String {
+        value: &'a str,
+    },
+    List {
+        value: &'a [ExecutionValue],
+    },
+    Dict {
+        entries: &'a [DictEntryValue],
+    },
+    Tuple {
+        value: &'a [ExecutionValue],
+    },
+    Adt {
+        ctor: &'a str,
+        fields: &'a [ExecutionValue],
+    },
+    Unit,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ExecutionValueOwned {
+    Tensor {
+        value: TensorValue,
+    },
+    Scalar {
+        value: NumericScalar,
+    },
+    Bool {
+        value: bool,
+    },
+    Key {
+        bits: chelis_types::KeyBits,
+    },
+    String {
+        value: String,
+    },
+    List {
+        value: Vec<ExecutionValue>,
+    },
+    Dict {
+        entries: Vec<DictEntryValue>,
+    },
+    Tuple {
+        value: Vec<ExecutionValue>,
+    },
+    Adt {
+        ctor: String,
+        fields: Vec<ExecutionValue>,
+    },
+    Unit,
+}
+
+impl Serialize for ExecutionValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+            let value = match self {
+                Self::Tensor { value } => ExecutionValueRef::Tensor { value },
+                Self::Scalar { value } => ExecutionValueRef::Scalar { value },
+                Self::Bool { value } => ExecutionValueRef::Bool { value: *value },
+                Self::Key { bits } => ExecutionValueRef::Key { bits },
+                Self::String { value } => ExecutionValueRef::String { value },
+                Self::List { value } => ExecutionValueRef::List { value },
+                Self::Dict { entries } => ExecutionValueRef::Dict { entries },
+                Self::Tuple { value } => ExecutionValueRef::Tuple { value },
+                Self::Adt { ctor, fields } => ExecutionValueRef::Adt { ctor, fields },
+                Self::Unit => ExecutionValueRef::Unit,
+            };
+            value.serialize(serializer)
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ExecutionValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+            ExecutionValueOwned::deserialize(serde_stacker::Deserializer::new(deserializer)).map(
+                |value| match value {
+                    ExecutionValueOwned::Tensor { value } => Self::Tensor { value },
+                    ExecutionValueOwned::Scalar { value } => Self::Scalar { value },
+                    ExecutionValueOwned::Bool { value } => Self::Bool { value },
+                    ExecutionValueOwned::Key { bits } => Self::Key { bits },
+                    ExecutionValueOwned::String { value } => Self::String { value },
+                    ExecutionValueOwned::List { value } => Self::List { value },
+                    ExecutionValueOwned::Dict { entries } => Self::Dict { entries },
+                    ExecutionValueOwned::Tuple { value } => Self::Tuple { value },
+                    ExecutionValueOwned::Adt { ctor, fields } => Self::Adt { ctor, fields },
+                    ExecutionValueOwned::Unit => Self::Unit,
+                },
+            )
+        })
+    }
 }
 
 impl ExecutionValue {

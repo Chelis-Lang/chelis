@@ -8,6 +8,7 @@ codec obligations while the cache proof checks the changed shared value codecs.
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -412,6 +413,11 @@ def codec_specialization_owner(call, templates, serialize_trait, definitions):
     concrete = _codec_terms(call, parameters=False)
     matches = []
     for template in templates:
+        # A stack-grown custom Serialize body can call its mirror from a
+        # closure. That row has no trait implementation and is discharged by
+        # execution_value_closure_owner, not used as a derive specialization.
+        if template["caller"].get("implementation") is None:
+            continue
         if _codec_site(template, serialize_trait) != site:
             continue
         bindings = {}
@@ -487,7 +493,73 @@ def serialize_with_helper_owner(row, codec_calls, definitions):
     return next(iter(derived))
 
 
-def discharge_invocations(raw, definitions):
+def execution_value_closure_owner(row, document, definitions):
+    """Bind the stack-grown proxy call to ExecutionValue's real Serialize body.
+
+    `maybe_grow` puts the generic call in a closure, so that compiled caller has
+    no direct trait implementation. The compiler's parent identity and call
+    span must land inside the source-bound Serialize method in rustdoc; the
+    payload must be the one private mirror admitted by the schema adapter.
+    """
+    owner = "chelis_compiler_api::schema::ExecutionValue"
+    proxy = "chelis_compiler_api::schema::ExecutionValueRef"
+    if owner not in definitions:
+        return None
+    caller = row["caller"]
+    ancestors = caller.get("ancestors", ())
+    if len(ancestors) < 2 or caller.get("implementation") is not None:
+        return None
+    method, impl = ancestors[:2]
+    path = method.get("path", "")
+    if (
+        method.get("crate") != "chelis_compiler_api"
+        or method.get("item_name") != "serialize"
+        or not re.fullmatch(r"::schema::\{impl#[0-9]+\}::serialize", path)
+        or impl.get("path") != path.removesuffix("::serialize")
+        or caller["definition"].get("path") != path + "::{closure#0}"
+        or caller["definition"].get("crate") != method.get("crate")
+        or identity(row["callee"]) != "serde_core::ser::Serialize::serialize"
+        or len(row.get("payloads", ())) != 1
+        or identity(row["payloads"][0]["shape"]["definition"]) != proxy
+        or len(row.get("serializers", ())) != 1
+        or row["serializers"][0]["shape"] != {"tag": "parameter", "index": 0}
+    ):
+        return None
+    match = re.fullmatch(
+        r"(crates/chelis-compiler-api/src/schema\.rs):([0-9]+):([0-9]+): [0-9]+:[0-9]+",
+        row.get("source", {}).get("span", ""),
+    )
+    if match is None:
+        return None
+    source, line, column = match.group(1), int(match.group(2)), int(match.group(3))
+    for item_id, item in document["index"].items():
+        if (
+            document["paths"].get(item_id, {}).get("path")
+            != ["chelis_compiler_api", "schema", "ExecutionValue"]
+        ):
+            continue
+        for impl_id in item["inner"]["enum"]["impls"]:
+            body = document["index"].get(str(impl_id), {}).get("inner", {}).get("impl", {})
+            trait = body.get("trait") or {}
+            if document["paths"].get(str(trait.get("id")), {}).get("path") not in (
+                ["serde_core", "ser", "Serialize"],
+                ["serde", "ser", "Serialize"],
+                ["serde", "Serialize"],
+            ):
+                continue
+            for method_id in body.get("items", ()):
+                method_item = document["index"].get(str(method_id), {})
+                span = method_item.get("span") or {}
+                if (
+                    method_item.get("name") == "serialize"
+                    and span.get("filename") == source
+                    and tuple(span["begin"]) <= (line, column) <= tuple(span["end"])
+                ):
+                    return owner
+    return None
+
+
+def discharge_invocations(raw, definitions, document):
     from capacity_census_wire_schema_publication import (
         check_report_publisher_owner,
         resolve_schema_owners,
@@ -514,10 +586,15 @@ def discharge_invocations(raw, definitions):
 
     for row in raw["codec_calls"]:
         implementation = row["caller"].get("implementation")
-        if (
-            implementation is None
-            or implementation.get("trait") != raw["serialize_trait"]
-        ):
+        if implementation is None:
+            owner = execution_value_closure_owner(row, document, definitions)
+            if owner is None:
+                raise GraphError(
+                    "generic codec call has no actual Serialize implementation owner"
+                )
+            record("codec_calls", row, owner)
+            continue
+        if implementation.get("trait") != raw["serialize_trait"]:
             raise GraphError(
                 "generic codec call has no actual Serialize implementation owner"
             )
@@ -621,7 +698,9 @@ def verify_invocation_ownership(root, target, schema, caches):
         raise GraphError("missing actual binary publication owners")
     driver = build_driver(root, target / "wire-invocations")
     collected = collect_library(root, target, driver)
-    ownership = discharge_invocations(collected["evidence"], definitions)
+    ownership = discharge_invocations(
+        collected["evidence"], definitions, json.loads(schema.document)
+    )
     files = [(str(driver), collected["binary_sha256"])]
     files.extend((row["artifact"], row["sha256"]) for row in collected["provenance"])
     aggregate_identity = hashlib.sha256(

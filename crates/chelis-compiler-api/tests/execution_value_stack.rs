@@ -2,6 +2,7 @@
 
 use chelis_compiler_api::schema::{DictEntryValue, ExecutionValue};
 use chelis_compiler_api::{DecodeError, try_decode_adt_value};
+use serde::Deserialize;
 use std::process::Command;
 
 const CHILD_ENV: &str = "CHELIS_2601_EXECUTION_VALUE_CHILD";
@@ -23,6 +24,14 @@ fn nested_adt(depth: usize, leaf: ExecutionValue) -> ExecutionValue {
         };
     }
     value
+}
+
+fn nested_list_wire(depth: usize, leaf: &str) -> String {
+    format!(
+        "{}{leaf}{}",
+        "{\"type\":\"list\",\"value\":[".repeat(depth),
+        "]}".repeat(depth)
+    )
 }
 
 fn chain_program() -> Vec<chelis_deep::ast::Expr> {
@@ -98,6 +107,90 @@ fn shallow_list_has_the_canonical_recursive_wire_shape() {
     assert_eq!(
         encoded,
         serde_json::json!({"type":"list","value":[{"type":"unit"}]})
+    );
+}
+
+#[test]
+fn custom_serializer_preserves_every_execution_variant_wire_shape() {
+    let fixtures = [
+        serde_json::json!({"type":"tensor","value":{"shape":[1],"data":{"dtype":"f32","bits":["3f800000"]}}}),
+        serde_json::json!({"type":"scalar","value":{"dtype":"int64","value":7}}),
+        serde_json::json!({"type":"bool","value":true}),
+        serde_json::json!({"type":"key","bits":"0000000000000007"}),
+        serde_json::json!({"type":"string","value":"hello"}),
+        serde_json::json!({"type":"list","value":[{"type":"unit"}]}),
+        serde_json::json!({"type":"dict","entries":[{"key":{"type":"unit"},"value":{"type":"bool","value":false}}]}),
+        serde_json::json!({"type":"tuple","value":[{"type":"unit"}]}),
+        serde_json::json!({"type":"adt","ctor":"Link","fields":[{"type":"unit"}]}),
+        serde_json::json!({"type":"unit"}),
+    ];
+    for expected in fixtures {
+        let value: ExecutionValue =
+            serde_json::from_value(expected.clone()).expect("decode canonical value");
+        assert_eq!(
+            serde_json::to_value(&value).expect("encode canonical value"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn ordinary_serde_serialization_survives_a_deep_value_on_a_small_stack() {
+    run_on_small_stack_in_child(
+        "ordinary_serde_serialization_survives_a_deep_value_on_a_small_stack",
+        || {
+            let value = nested_list(5_000, ExecutionValue::Unit);
+            let wire = serde_json::to_vec(&value).expect("serialize deep value");
+            assert_eq!(wire.iter().filter(|byte| **byte == b'[').count(), 5_000);
+            assert_eq!(wire.iter().filter(|byte| **byte == b']').count(), 5_000);
+            assert!(
+                wire.windows(b"\"type\":\"unit\"".len())
+                    .any(|slice| slice == b"\"type\":\"unit\"")
+            );
+            drop(value);
+        },
+    );
+}
+
+#[test]
+fn ordinary_serde_deserialization_rejects_excessive_depth_without_aborting() {
+    run_on_small_stack_in_child(
+        "ordinary_serde_deserialization_rejects_excessive_depth_without_aborting",
+        || {
+            let wire = nested_list_wire(5_000, "{\"type\":\"unit\"}");
+            let error = serde_json::from_str::<ExecutionValue>(&wire)
+                .expect_err("ordinary JSON decoder must bound excessive depth");
+            assert!(
+                error.to_string().contains("recursion limit exceeded"),
+                "{error}"
+            );
+        },
+    );
+}
+
+#[test]
+fn unbounded_serde_deserialization_survives_deep_valid_and_invalid_values() {
+    run_on_small_stack_in_child(
+        "unbounded_serde_deserialization_survives_deep_valid_and_invalid_values",
+        || {
+            for (leaf, accepted) in [
+                ("{\"type\":\"unit\"}", true),
+                ("{\"type\":\"missing\"}", false),
+            ] {
+                let wire = nested_list_wire(5_000, leaf);
+                let mut decoder = serde_json::Deserializer::from_str(&wire);
+                decoder.disable_recursion_limit();
+                let result = ExecutionValue::deserialize(&mut decoder);
+                if accepted {
+                    let value = result.expect("decode deep valid value");
+                    decoder.end().expect("complete deep JSON");
+                    drop(value);
+                } else {
+                    let error = result.expect_err("reject deep invalid variant");
+                    assert!(error.to_string().contains("unknown variant"), "{error}");
+                }
+            }
+        },
     );
 }
 

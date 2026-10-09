@@ -122,6 +122,17 @@ class CodecSpecializations(unittest.TestCase):
         call["payloads"] = []
         self.owner(call, [template], trait, definitions)
 
+    def test_closure_owned_codec_call_is_not_a_specialization_template(self):
+        template, call, trait, definitions = codec_specialization()
+        closure = copy.deepcopy(template)
+        closure["caller"]["implementation"] = None
+        self.assertEqual(
+            self.owner(call, [closure, template], trait, definitions),
+            "wire-codec/chelis_compiler_api::schema::Envelope",
+        )
+        with self.assertRaisesRegex(GraphError, "missing or ambiguous"):
+            self.owner(call, [closure], trait, definitions)
+
     def test_specializations_reject_missing_duplicate_or_replaced_templates(self):
         template, call, trait, definitions = codec_specialization()
         for templates in ([], [template, copy.deepcopy(template)]):
@@ -307,6 +318,67 @@ class SerializeWithHelpers(unittest.TestCase):
 
 
 class InvocationOwnership(unittest.TestCase):
+    def test_stack_grown_execution_value_codec_binds_to_its_compiled_parent(self):
+        from capacity_census_wire_invocation_owners import execution_value_closure_owner
+
+        owner = "chelis_compiler_api::schema::ExecutionValue"
+        proxy = "chelis_compiler_api::schema::ExecutionValueRef"
+        source = "crates/chelis-compiler-api/src/schema.rs"
+        document = {
+            "index": {
+                "1": {"name": "ExecutionValue", "inner": {"enum": {"impls": [2]}}},
+                "2": {
+                    "span": {"filename": source, "begin": [10, 1], "end": [30, 2]},
+                    "inner": {"impl": {"trait": {"id": 4}, "items": [3]}},
+                },
+                "3": {
+                    "name": "serialize",
+                    "span": {"filename": source, "begin": [11, 5], "end": [29, 6]},
+                },
+            },
+            "paths": {
+                "1": {"path": ["chelis_compiler_api", "schema", "ExecutionValue"]},
+                "4": {"path": ["serde_core", "ser", "Serialize"]},
+            },
+        }
+        parent = definition("::schema::{impl#7}::serialize", 900, item_name="serialize")
+        row = {
+            "caller": {
+                "definition": definition(
+                    "::schema::{impl#7}::serialize::{closure#0}", 901
+                ),
+                "implementation": None,
+                "ancestors": [parent, definition("::schema::{impl#7}", 899)],
+            },
+            "callee": {"crate": "serde_core", "path": "::ser::Serialize::serialize"},
+            "payloads": [{"shape": {"tag": "nominal", "definition": {
+                "crate": "chelis_compiler_api", "path": "::schema::ExecutionValueRef"
+            }, "arguments": []}}],
+            "serializers": [{"shape": {"tag": "parameter", "index": 0}}],
+            "source": {"span": f"{source}:20:13: 20:40"},
+        }
+        self.assertEqual(execution_value_closure_owner(row, document, {owner: 0}), owner)
+        for change in ("line", "parent", "proxy", "serializer", "trait", "owner"):
+            changed = copy.deepcopy(row)
+            changed_doc = copy.deepcopy(document)
+            definitions = {owner: 0}
+            if change == "line":
+                changed["source"]["span"] = f"{source}:31:13: 31:40"
+            elif change == "parent":
+                changed["caller"]["ancestors"][0]["path"] = "::schema::elsewhere"
+            elif change == "proxy":
+                changed["payloads"][0]["shape"]["definition"]["path"] = "::schema::Other"
+            elif change == "serializer":
+                changed["serializers"][0]["shape"]["index"] = 1
+            elif change == "trait":
+                changed_doc["paths"]["4"]["path"] = ["serde_core", "de", "Deserialize"]
+            else:
+                definitions = {}
+            with self.subTest(change=change):
+                self.assertIsNone(
+                    execution_value_closure_owner(changed, changed_doc, definitions)
+                )
+
     def test_check_report_call_replays_exact_compiler_publisher_and_payload(self):
         from capacity_census_wire_invocation_owners import (
             check_report_call_owner,

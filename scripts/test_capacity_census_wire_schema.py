@@ -90,6 +90,80 @@ def diagnostic_artifacts():
 
 
 class SchemaCases(unittest.TestCase):
+    def test_execution_value_custom_codec_requires_its_exact_shape_and_provenance(self):
+        from capacity_census_wire_schema import _SchemaShapeGraph
+        from test_capacity_census_graph import Artifact, primitive, reference
+
+        api = Artifact("chelis_compiler_api")
+        source = "crates/chelis-compiler-api/src/schema.rs"
+        span = {"filename": source, "begin": [1, 1], "end": [2, 1]}
+        variants = []
+        names = (
+            ("Tensor", ("value",)),
+            ("Scalar", ("value",)),
+            ("Bool", ("value",)),
+            ("Key", ("bits",)),
+            ("String", ("value",)),
+            ("List", ("value",)),
+            ("Dict", ("entries",)),
+            ("Tuple", ("value",)),
+            ("Adt", ("ctor", "fields")),
+            ("Unit", ()),
+        )
+        for offset, (name, fields) in enumerate(names, 10):
+            kind = (
+                {"struct": {"fields": [api.field(field, primitive("bool")) for field in fields],
+                            "has_stripped_fields": False}}
+                if fields else "plain"
+            )
+            variants.append(api.add(offset, name, {"variant": {"kind": kind}}))
+        impls = []
+        for offset, trait in enumerate(("Serialize", "Deserialize"), 50):
+            trait_id = 900 if trait == "Serialize" else 901
+            api.external(
+                trait_id,
+                "serde_core::" + ("ser" if trait == "Serialize" else "de") + "::" + trait,
+            )
+            method = api.add(offset + 100, trait.lower(), {"function": {}})
+            api.doc["index"][str(method)]["span"] = dict(span)
+            implementation = api.add(
+                offset, None,
+                {"impl": {"trait": {"path": trait, "id": trait_id},
+                          "for": reference(1), "items": [method]}},
+                attrs=(),
+            )
+            api.doc["index"][str(implementation)]["span"] = dict(span)
+            impls.append(implementation)
+        identity = "chelis_compiler_api::schema::ExecutionValue"
+        api.add(
+            1, "ExecutionValue",
+            {"enum": {"generics": {"params": [], "where_predicates": []},
+                      "variants": variants, "has_stripped_variants": False,
+                      "impls": impls}},
+            path=identity.split("::"),
+            attrs=('#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]',),
+        )
+
+        def check(document):
+            graph = _SchemaShapeGraph([document], [])
+            graph._definition("chelis_compiler_api", "1", identity)
+            return graph.definitions[identity]
+
+        admitted = check(api.doc)
+        self.assertTrue(admitted.codec.startswith("execution-value-codec:"))
+        renamed = copy.deepcopy(api.doc)
+        renamed["index"][str(variants[0])]["name"] = "Other"
+        with self.assertRaisesRegex(GraphError, "admitted wire shape"):
+            check(renamed)
+        derived_encoder = copy.deepcopy(api.doc)
+        derived_encoder["index"][str(impls[0])]["attrs"] = ["automatically_derived"]
+        with self.assertRaisesRegex(GraphError, "implementation mode changed"):
+            check(derived_encoder)
+        derived_decoder = copy.deepcopy(api.doc)
+        derived_decoder["index"][str(impls[1])]["attrs"] = ["automatically_derived"]
+        with self.assertRaisesRegex(GraphError, "implementation mode changed"):
+            check(derived_decoder)
+
     def test_diagnostic_codec_selection_pairs_producer_omission_and_consumer_domains(
         self,
     ):

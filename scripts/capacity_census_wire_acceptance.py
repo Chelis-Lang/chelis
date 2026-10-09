@@ -23,6 +23,7 @@ MUTATION_CONTROLS = (
     "test_capacity_census_wire_schema.SchemaCases.test_diagnostic_projection_rejects_changed_omission_type_codec_and_decoder",
     "test_capacity_census_wire_schema.SchemaCases.test_diagnostic_projection_preserves_generic_skip_and_import_rejections",
     "test_capacity_census_wire_schema.SchemaCases.test_diagnostic_codec_selection_pairs_producer_omission_and_consumer_domains",
+    "test_capacity_census_wire_schema.SchemaCases.test_execution_value_custom_codec_requires_its_exact_shape_and_provenance",
     "test_capacity_census_wire_invocation_owners.CodecSpecializations.test_specializations_bind_owner_payload_and_serializer_shapes",
     "test_capacity_census_wire_invocation_owners.CodecSpecializations.test_specializations_reject_missing_duplicate_or_replaced_templates",
     "test_capacity_census_wire_invocation_owners.CodecSpecializations.test_specializations_reject_rebound_parameters_and_unknown_shapes",
@@ -31,6 +32,7 @@ MUTATION_CONTROLS = (
     "test_capacity_census_wire_publication.PublishedRoots.test_check_report_protocol_binds_existing_dto_producer_and_consumer",
     "test_capacity_census_wire_schema_publication.SchemaPublicationControls.test_check_report_publisher_requires_its_compiled_inherent_receiver",
     "test_capacity_census_wire_invocation_owners.InvocationOwnership.test_check_report_call_replays_exact_compiler_publisher_and_payload",
+    "test_capacity_census_wire_invocation_owners.InvocationOwnership.test_stack_grown_execution_value_codec_binds_to_its_compiled_parent",
     "test_capacity_census_wire_runner.LibtestReceipts.test_failed_native_execution_reports_its_actual_output",
     "test_capacity_census_wire_invocation_owners.InvocationOwnership.test_cache_load_and_save_bind_each_exact_owner_and_payload",
     "test_capacity_census_wire_invocation_owners.InvocationOwnership.test_lowered_library_comparison_owns_only_exact_local_ascription_slice",
@@ -166,6 +168,16 @@ HULL_CONSUMER_CONTROLS = tuple(
 )
 
 RUST_CONSUMER_CONTROLS = (
+    (
+        "chelis-compiler-api",
+        "execution_value_stack",
+        (
+            "custom_serializer_preserves_every_execution_variant_wire_shape",
+            "ordinary_serde_serialization_survives_a_deep_value_on_a_small_stack",
+            "ordinary_serde_deserialization_rejects_excessive_depth_without_aborting",
+            "unbounded_serde_deserialization_survives_deep_valid_and_invalid_values",
+        ),
+    ),
     (
         "chelis-compiler-api",
         "wire_extent_witness",

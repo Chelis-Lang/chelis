@@ -714,6 +714,49 @@ class _SchemaShapeGraph(_CodecShapeGraph):
             "schema-codec:" + canonical(codec),
         )
 
+    def _execution_value_definition(self, crate, item_id, identity):
+        """Bind the stack-aware encoder to the published recursive enum shape.
+
+        The Rust execution_value_stack oracle exercises the actual encoder and
+        decoder for every variant, including numeric descendants and recursive
+        children. The artifact graph still discovers every field and leaf.
+        """
+        item = self._item(crate, item_id)
+        body = item["inner"].get("enum")
+        _require(
+            body is not None and not self._parameters(body),
+            "execution value must remain a closed nongeneric enum",
+        )
+        codec = self._serde_implementations(
+            crate, body, {"Serialize", "Deserialize"}, _SCHEMA_SOURCE
+        )
+        self._codec_overrides[(crate, id(body))] = "execution-value-codec:" + codec
+        super()._definition(crate, item_id, identity)
+        actual = self.definitions[identity]
+        expected_layout = (
+            ("Tensor", (), ("struct", (("value", ()),))),
+            ("Scalar", (), ("struct", (("value", ()),))),
+            ("Bool", (), ("struct", (("value", ()),))),
+            ("Key", (), ("struct", (("bits", ()),))),
+            ("String", (), ("struct", (("value", ()),))),
+            ("List", (), ("struct", (("value", ()),))),
+            ("Dict", (), ("struct", (("entries", ()),))),
+            ("Tuple", (), ("struct", (("value", ()),))),
+            ("Adt", (), ("struct", (("ctor", ()), ("fields", ())))),
+            ("Unit", (), ("unit", ())),
+        )
+        _require(
+            actual.kind == "enum"
+            and dict(actual.serde)
+            == {
+                "tag": "type",
+                "rename_all": "snake_case",
+                "deny_unknown_fields": True,
+            }
+            and actual.layout == expected_layout,
+            "execution value declaration changed its admitted wire shape",
+        )
+
     def _artifact_definition(self, crate, item_id, identity):
         item = self._item(crate, item_id)
         if identity == _ARTIFACT + "ArtifactAbiVersion":
@@ -1441,6 +1484,8 @@ class _SchemaShapeGraph(_CodecShapeGraph):
     def _definition(self, crate, item_id, identity):
         if identity in self.definitions:
             return
+        if identity == _SCHEMA + "ExecutionValue":
+            return self._execution_value_definition(crate, item_id, identity)
         if identity == _SCHEMA + "Diagnostic":
             return self._diagnostic_definition(crate, item_id, identity)
         if identity in {
