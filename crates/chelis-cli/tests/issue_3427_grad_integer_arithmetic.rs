@@ -270,6 +270,30 @@ out = grad(loss)(to_tensor([1.5f32, 2.5f32]))
         "grad: cast is non-differentiable (piecewise constant)",
         "float_to_int_cast",
     );
+    // The round trip through integer arithmetic never becomes a silent zero:
+    // the float-to-integer cast stays on the live graph and rejects.
+    for (stem, expr) in [
+        ("round_trip_add", "add(cast(x, i32), one)"),
+        (
+            "round_trip_sum",
+            "insert(sum(mul(cast(x, i32), one), 0i32), 0i32, 2i64)",
+        ),
+        (
+            "round_trip_floor_div",
+            "floor_div(cast(x, i32), add(one, one))",
+        ),
+    ] {
+        assert_refused(
+            &format!(
+                r#"
+def loss(x: tensor[2, f32], one: tensor[2, i32]) -> tensor[f32] = sum(mul(&x, cast({expr}, f32)), 0i32)
+out = grad(loss, wrt=x)(to_tensor([1.5f32, 2.5f32]), to_tensor([1i32, 1i32]))
+"#
+            ),
+            "grad: cast is non-differentiable (piecewise constant)",
+            stem,
+        );
+    }
     assert_refused(
         r#"
 def loss(x: tensor[2, f32], d: tensor[2, f32]) -> tensor[f32] = sum(mul(&x, floor_div(x, d)), 0i32)
