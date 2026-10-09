@@ -1007,15 +1007,18 @@ A value depends on a `wrt` leaf when a path from the leaf reaches it through
 operand slots that carry dependence and through no `stop_gradient`. Every
 operand slot carries dependence, comparison and `is_*` operands, `where`,
 `if`, and `match` conditions and tags, indices, value-read bounds and sizes,
-keys, and dropout rates included, except two kinds whose operand cannot
-change the result's value:
+keys, and dropout rates included, except two kinds:
 
 - a metadata read: `shape`, an extent witness, a bound, size, or axis read
   from an operand's extent, the `uniform_like` template, and a List
-  combinator's length carrier;
+  combinator's length carrier. It never carries the dependence of its
+  operand's element values. It carries the dependence of its operand's
+  extent: the value-read bounds and sizes that determined that extent. (Not
+  fully implemented; see
+  [#3531](https://github.com/Chelis-Lang/chelis/issues/3531).)
 - a guard predicate: a guarded abort's firing condition and the extent
   witnesses a checked reshape extent or unit axis is checked against, which
-  can only trap.
+  can only trap and carry no dependence.
 
 An operation is active when one of its operands depends on a `wrt` leaf; this
 is the dependence [05-OP-47] names. Only an active operation whose result has

@@ -17,9 +17,12 @@ The same rejections also apply only to an active operation, one whose operands
 depend on a differentiated parameter. A conversion of data that is not
 differentiated is a constant, so `grad(f, wrt=x)` of `sum(mul(x, floor(m)))`
 returns `floor(m)` instead of rejecting. Dependence passes through every
-operand slot, indices included, except metadata reads such as `shape` and
-guard predicates, so a conversion of a value gathered by an index computed
-from `x` is active and rejects when used as data. See
+operand slot, indices included, so a conversion of a value gathered by an
+index computed from `x` is active and rejects when used as data. A guard
+predicate carries no dependence, and a metadata read such as `shape` carries
+only the dependence of its operand's extent, never of its element values; an
+extent computed from a value that depends on `x` is not yet tracked
+([#3531](https://github.com/Chelis-Lang/chelis/issues/3531)). See
 [#3487](https://github.com/Chelis-Lang/chelis/issues/3487).
 
 The structural `grad` rejections (piecewise constant, integer index or

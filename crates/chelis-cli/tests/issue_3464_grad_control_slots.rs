@@ -455,3 +455,18 @@ out = grad(loss, wrt=x)(to_tensor([1.0f32]), neg(to_tensor([0.0f32])), to_tensor
         );
     }
 }
+
+/// A `shape` read is a control slot, so a parameter read only by it is
+/// disconnected and its gradient is exact +0 on both lanes.
+#[test]
+fn shape_read_gradient_is_positive_zero() {
+    let source = r#"
+def loss(x: tensor[3, f32]) -> f32 = cast(shape(&x, 0i32), f32)
+out = grad(loss, wrt=x)(to_tensor([1.0f32, 2.0f32, 3.0f32]))
+"#;
+    assert_out(
+        source,
+        "shape_read",
+        "tensor(shape=[3], data=[0.0, 0.0, 0.0])",
+    );
+}
