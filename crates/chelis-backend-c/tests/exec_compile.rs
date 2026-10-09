@@ -666,6 +666,7 @@ fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
                 adt_layouts: Vec::new(),
                 functions: vec![HostFunction {
                     helper_result_claim_axes: Vec::new(),
+                    result_claim: None,
                     entry_contract: Default::default(),
                     name: "host_blas".into(),
                     params,
@@ -1256,6 +1257,7 @@ int main(void) {{
                     adt_layouts: Vec::new(),
                     functions: vec![HostFunction {
                         helper_result_claim_axes: Vec::new(),
+                        result_claim: None,
                         entry_contract: Default::default(),
                         name: "host_sparse_add".into(),
                         params,
@@ -7224,6 +7226,7 @@ fn host_binary_program(builtin: &str, lhs: Vec<usize>, rhs: Vec<usize>) -> HostP
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
             entry_contract: Default::default(),
             name: "the_fn".to_string(),
             params: vec![
@@ -8275,6 +8278,7 @@ fn host_scalar_relu_program(ty: HostType) -> HostProgram {
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
             entry_contract: Default::default(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
@@ -10335,6 +10339,7 @@ fn host_diagonal_program(operand: Vec<usize>, declared: usize) -> HostProgram {
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
             entry_contract: Default::default(),
             name: "the_fn".to_string(),
             params: vec![HostParam {

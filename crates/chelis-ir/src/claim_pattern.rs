@@ -163,8 +163,7 @@ impl ClaimPattern {
             registry,
             nodes: Vec::new(),
             memo: BTreeMap::new(),
-            non_regular: non_regular_declarations(registry),
-            carrying: carrying_declarations(registry),
+            analysis: std::cell::OnceCell::new(),
         };
         let root = builder.node(authored)?;
         Ok(builder.finish(root))
@@ -258,11 +257,29 @@ struct Builder<'a> {
     registry: &'a AdtRegistry,
     nodes: Vec<Option<ClaimNode>>,
     memo: BTreeMap<String, ClaimNodeId>,
-    non_regular: BTreeSet<String>,
-    carrying: BTreeSet<String>,
+    /// The non-regular and tensor-carrying declarations, computed only when
+    /// the walk first meets a nominal application.
+    analysis: std::cell::OnceCell<(BTreeSet<String>, BTreeSet<String>)>,
 }
 
 impl Builder<'_> {
+    fn non_regular(&self) -> &BTreeSet<String> {
+        &self.analysis().0
+    }
+
+    fn carrying(&self) -> &BTreeSet<String> {
+        &self.analysis().1
+    }
+
+    fn analysis(&self) -> &(BTreeSet<String>, BTreeSet<String>) {
+        self.analysis.get_or_init(|| {
+            (
+                non_regular_declarations(self.registry),
+                carrying_declarations(self.registry),
+            )
+        })
+    }
+
     fn push(&mut self, node: ClaimNode) -> ClaimNodeId {
         self.nodes.push(Some(node));
         ClaimNodeId(self.nodes.len() - 1)
@@ -334,10 +351,10 @@ impl Builder<'_> {
                 Ok(None)
             };
         };
-        if !self.carrying.contains(name) && !args.iter().any(|arg| self.may_carry(arg)) {
+        if !self.carrying().contains(name) && !args.iter().any(|arg| self.may_carry(arg)) {
             return Ok(None);
         }
-        if self.non_regular.contains(name) {
+        if self.non_regular().contains(name) {
             return Err(ClaimPatternError::NonRegularRecursion {
                 nominal: name.to_string(),
             });
@@ -382,7 +399,7 @@ impl Builder<'_> {
                 let own = children
                     .first()
                     .and_then(symbol)
-                    .is_some_and(|name| self.carrying.contains(name));
+                    .is_some_and(|name| self.carrying().contains(name));
                 own || children.iter().skip(1).any(|arg| self.may_carry(arg))
             }
             _ => children.iter().any(|child| self.may_carry(child)),

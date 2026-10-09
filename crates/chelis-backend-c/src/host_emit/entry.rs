@@ -538,6 +538,7 @@ mod tests {
         dag.add_root(sum);
         HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
             entry_contract: Default::default(),
             name: "entry".into(),
             params: ["a", "b"]

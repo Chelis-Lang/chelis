@@ -522,6 +522,7 @@ fn project_function(
     }
     Ok(HostAbiFunction {
         helper_result_claim_axes: function.helper_result_claim_axes().to_vec(),
+        result_claim: function.result_claim().cloned(),
         name: function.name().to_string(),
         entry_contract: function
             .entry_contract()

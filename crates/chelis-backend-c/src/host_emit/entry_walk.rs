@@ -1183,6 +1183,7 @@ mod entry_contract_tests {
             .unwrap();
         HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
             name: "f".into(),
             entry_contract,
             params: [

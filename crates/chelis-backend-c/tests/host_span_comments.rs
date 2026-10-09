@@ -29,6 +29,7 @@ fn make_program(body: HostExpr) -> HostProgram {
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
             entry_contract: Default::default(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
