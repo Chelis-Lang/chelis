@@ -57,6 +57,9 @@ agreement across the executable examples, the illustrative syntax examples,
 The C backend is the reference implementation.
 Its job is to turn the DAG into portable host code that can be compiled with the system
 toolchain.
+Sequential host bindings do not increase generated C block nesting with the
+number of bindings. Lexical shadowing and verified ownership actions retain
+their source order when those bindings share a generated block.
 
 Before a host call that can enter a recursive user-function cycle, the C
 backend checks the stack available to the current thread. The check uses the

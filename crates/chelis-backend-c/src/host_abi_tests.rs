@@ -368,6 +368,100 @@ fn authored_function_symbol(name: &str) -> String {
     symbol
 }
 
+fn sequential_host_let_source(bindings: usize) -> String {
+    let mut source = String::from(
+        "module Probe.HostLetDepth\n\
+         export (forward, Inp)\n\
+         type Inp =\n\
+           | Inp { x: i64 }\n\
+         sig forward: Inp -> i64\n\
+         def forward(inp: Inp) = {\n\
+           y0 = inp.x\n",
+    );
+    for index in 1..bindings {
+        source.push_str(&format!("  y{index} = add(y{}, 1i64)\n", index - 1));
+    }
+    source.push_str(&format!("  y{}\n}}\n", bindings - 1));
+    source
+}
+
+fn shadowed_host_let_source(bindings: usize) -> String {
+    let mut source = String::from(
+        "module Probe.HostLetShadowDepth\n\
+         export (forward, Inp)\n\
+         type Inp =\n\
+           | Inp { x: i64 }\n\
+         sig forward: Inp -> i64\n\
+         def forward(inp: Inp) = {\n\
+           x = inp.x\n",
+    );
+    for _ in 1..bindings {
+        source.push_str("  {\n    x = add(x, 1i64)\n");
+    }
+    source.push_str("  x\n");
+    for _ in 1..bindings {
+        source.push_str("  }\n");
+    }
+    source.push_str("}\n");
+    source
+}
+
+fn max_c_block_depth(body: &str) -> usize {
+    let mut depth = 0usize;
+    let mut maximum = 0usize;
+    for byte in body.bytes() {
+        match byte {
+            b'{' => {
+                depth += 1;
+                maximum = maximum.max(depth);
+            }
+            b'}' => depth -= 1,
+            _ => {}
+        }
+    }
+    assert_eq!(depth, 0, "emitted function body must balance its C blocks");
+    maximum
+}
+
+#[test]
+fn sequential_host_lets_have_bounded_c_block_depth() {
+    let depths = [32, 96].map(|bindings| {
+        chelis_types::run_on_grown_stack(|| {
+            let source = sequential_host_let_source(bindings);
+            let verified = verified_host_from_source(&source);
+            let emitted = crate::codegen_host_program(&verified, "host_let_depth")
+                .expect("emit host function")
+                .c_source;
+            let owned = format!("{}__chelis_owned_body", authored_function_symbol("forward"));
+            let body = emitted_function_body(&emitted, &owned);
+            max_c_block_depth(body)
+        })
+    });
+    assert!(
+        depths[1] <= depths[0] + 4,
+        "host let chain made C scope nesting grow with binding count: {depths:?}"
+    );
+}
+
+#[test]
+fn shadowed_host_lets_have_bounded_c_block_depth() {
+    let depths = [8, 24].map(|bindings| {
+        chelis_types::run_on_grown_stack(|| {
+            let source = shadowed_host_let_source(bindings);
+            let verified = verified_host_from_source(&source);
+            let emitted = crate::codegen_host_program(&verified, "host_let_shadow_depth")
+                .expect("emit shadowed host function")
+                .c_source;
+            let owned = format!("{}__chelis_owned_body", authored_function_symbol("forward"));
+            max_c_block_depth(emitted_function_body(&emitted, &owned))
+        })
+    });
+    assert!(
+        depths[1] <= depths[0] + 4,
+        "shadowed host lets made C scope nesting grow with binding count: {depths:?}"
+    );
+}
+
 #[test]
 fn recursive_calls_target_the_consuming_body_not_the_external_clone_adapter() {
     let source = include_str!(

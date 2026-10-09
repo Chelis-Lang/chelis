@@ -1439,6 +1439,12 @@ pub struct HostEmissionPayload {
     manifest: RootManifest,
 }
 
+impl Drop for HostEmissionPayload {
+    fn drop(&mut self) {
+        crate::host::drain_host_program_expressions(&mut self.program);
+    }
+}
+
 impl sealed::Sealed for HostEmissionPayload {}
 impl EmissionPayload for HostEmissionPayload {
     const KIND: PayloadKind = PayloadKind::Host;

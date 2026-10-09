@@ -96,6 +96,12 @@ pub(crate) struct ProjectedHostProgram<'a> {
     function_owner_bindings: Vec<Vec<(chelis_ir::ownership::VerifiedOwnerId, String)>>,
 }
 
+impl Drop for ProjectedHostProgram<'_> {
+    fn drop(&mut self) {
+        chelis_ir::host::drain_host_program_expressions(&mut self.program);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectedHostSite<'a> {
     pub(crate) id: HostSiteId,
@@ -645,10 +651,82 @@ fn project_callback(
     })
 }
 
+fn project_let_spine(
+    expr: ConcreteHostExpr,
+    allowed_callbacks: &UnordSet<String>,
+) -> Result<HostAbiExpr, Unsupported> {
+    let mut current = expr;
+    let mut source_frames = Vec::new();
+    loop {
+        let ConcreteHostExpr {
+            kind,
+            span_id,
+            merged_spans,
+        } = current;
+        let ConcreteHostExprKind::Let { bindings, body, ty } = kind else {
+            unreachable!("let projection cursor is a let expression")
+        };
+        source_frames.push((bindings, ty, span_id, merged_spans));
+        current = *body;
+        if !matches!(&current.kind, ConcreteHostExprKind::Let { .. }) {
+            break;
+        }
+    }
+    // Separate the whole direct tail first. A failed ABI conversion can then
+    // release the remaining frames independently instead of recursively
+    // dropping a deep, still-linked Let body on the error path.
+    let mut visible = allowed_callbacks.clone();
+    let mut frames = Vec::with_capacity(source_frames.len());
+    for (bindings, ty, span_id, merged_spans) in source_frames {
+        let mut projected = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            let admitted = matches!(binding.ty, ConcreteHostType::Function(_, _))
+                && match &binding.value.kind {
+                    ConcreteHostExprKind::Builtin { name, args, .. } => {
+                        args.is_empty()
+                            && matches!(
+                                name.as_str(),
+                                "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+                            )
+                    }
+                    ConcreteHostExprKind::Var(name, _) => visible.contains(name),
+                    _ => false,
+                };
+            let projected_binding = project_binding(binding, &visible)?;
+            if admitted {
+                visible.insert(projected_binding.name.clone());
+            }
+            projected.push(projected_binding);
+        }
+        frames.push((
+            projected,
+            HostAbiType::try_from_concrete(&ty)?,
+            span_id,
+            merged_spans,
+        ));
+    }
+    let mut result = project_expr(current, &visible)?;
+    for (bindings, ty, span_id, merged_spans) in frames.into_iter().rev() {
+        result = HostAbiExpr {
+            kind: HostAbiExprKind::Let {
+                bindings,
+                body: Box::new(result),
+                ty,
+            },
+            span_id,
+            merged_spans,
+        };
+    }
+    Ok(result)
+}
+
 fn project_expr(
     expr: ConcreteHostExpr,
     allowed_callbacks: &UnordSet<String>,
 ) -> Result<HostAbiExpr, Unsupported> {
+    if matches!(&expr.kind, ConcreteHostExprKind::Let { .. }) {
+        return project_let_spine(expr, allowed_callbacks);
+    }
     let kind = match expr.kind {
         ConcreteHostExprKind::ResultClaimScope { plan, body, ty } => {
             HostAbiExprKind::ResultClaimScope {
@@ -868,34 +946,7 @@ fn project_expr(
                 .transpose()?,
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
-        ConcreteHostExprKind::Let { bindings, body, ty } => {
-            let mut visible = allowed_callbacks.clone();
-            let mut projected = Vec::with_capacity(bindings.len());
-            for binding in bindings {
-                let admitted = matches!(binding.ty, ConcreteHostType::Function(_, _))
-                    && match &binding.value.kind {
-                        ConcreteHostExprKind::Builtin { name, args, .. } => {
-                            args.is_empty()
-                                && matches!(
-                                    name.as_str(),
-                                    "key_from_seed" | "split_key" | "split_keys" | "fold_in"
-                                )
-                        }
-                        ConcreteHostExprKind::Var(name, _) => visible.contains(name),
-                        _ => false,
-                    };
-                let projected_binding = project_binding(binding, &visible)?;
-                if admitted {
-                    visible.insert(projected_binding.name.clone());
-                }
-                projected.push(projected_binding);
-            }
-            HostAbiExprKind::Let {
-                bindings: projected,
-                body: Box::new(project_expr(*body, &visible)?),
-                ty: HostAbiType::try_from_concrete(&ty)?,
-            }
-        }
+        ConcreteHostExprKind::Let { .. } => unreachable!("let projection handled iteratively"),
         ConcreteHostExprKind::RetainedInvocation { bindings, body, ty } => {
             HostAbiExprKind::RetainedInvocation {
                 bindings: bindings
