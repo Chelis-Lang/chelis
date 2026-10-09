@@ -2953,6 +2953,7 @@ fn nested_claim_frame_lines(
     frame: &str,
     parent: &str,
     indent: &str,
+    outer_claims_first: bool,
 ) -> Vec<String> {
     let nodes = format!("{frame}_nodes");
     let mut lines = claim_pattern_table_lines(pattern, &nodes, indent);
@@ -2971,7 +2972,8 @@ fn nested_claim_frame_lines(
         .expect("a nested result claim owes an obligation")
         .index();
     lines.push(format!(
-        "{indent}const __chelis_host_result_claim {frame} = {{ {parent}, -1, 0, NULL, 0, {nodes}, {root}, {binder_table} }};"
+        "{indent}const __chelis_host_result_claim {frame} = {{ {parent}, -1, 0, NULL, {}, {nodes}, {root}, {binder_table} }};",
+        i32::from(outer_claims_first)
     ));
     lines
 }
@@ -3016,7 +3018,7 @@ fn nested_result_frame_lines(
                 .unwrap_or_else(|| UNWITNESSED_BINDER_SLOT.to_string())
         })
         .collect();
-    nested_claim_frame_lines(pattern, binders, frame, parent, indent)
+    nested_claim_frame_lines(pattern, binders, frame, parent, indent, false)
 }
 
 /// An inlined declaration's nested result frame, from its retained plan.
@@ -3025,6 +3027,7 @@ fn nested_plan_frame_lines(
     frame: &str,
     parent: &str,
     indent: &str,
+    outer_claims_first: bool,
 ) -> Vec<String> {
     use chelis_ir::host::NestedBinderWitness;
     let binders = plan
@@ -3046,7 +3049,14 @@ fn nested_plan_frame_lines(
             None => UNWITNESSED_BINDER_SLOT.to_string(),
         })
         .collect();
-    nested_claim_frame_lines(plan.pattern(), binders, frame, parent, indent)
+    nested_claim_frame_lines(
+        plan.pattern(),
+        binders,
+        frame,
+        parent,
+        indent,
+        outer_claims_first,
+    )
 }
 
 /// A C string literal spelling `text`. Binder labels and parameter names are
@@ -6833,6 +6843,7 @@ impl<'a> HostEmitter<'a> {
                         &frame,
                         parent,
                         &self.indent,
+                        plan.outer_claims_first(),
                     )),
                     None => self
                         .lines

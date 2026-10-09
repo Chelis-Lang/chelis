@@ -8176,6 +8176,51 @@ fn sequential_host_let_chain<'expr>(
     })
 }
 
+/// An explicit local ascription whose type nests tensors below a tuple or
+/// nominal type keeps its claim on the initializer's producers
+/// (runtime_extents.md C6.5), after the enclosing claims. A binder axis of
+/// such an ascription has no invocation witness in this scope and claims
+/// nothing; its literal axes are the obligation.
+fn retain_local_nested_ascription(
+    value: HostExpr,
+    initializer: &Expr,
+    program: &HostLoweringSession<'_>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let Some((_, metadata, _)) = stamped_parts(initializer) else {
+        return Ok(value);
+    };
+    if !metadata.surf_binding_type().is_some_and(|origin| {
+        *origin.value() == chelis_deep::annotations::BindingTypeOrigin::Explicit
+    }) {
+        return Ok(value);
+    }
+    let Some(authored) = metadata.ty().map(|ty| ty.expression().clone()) else {
+        return Ok(value);
+    };
+    let Some(pattern) = nested_claim_pattern(program, &authored)
+        .map_err(|error| host_expr_lowering_error(initializer, error))?
+    else {
+        return Ok(value);
+    };
+    let ty = host_expr_type(&value);
+    Ok(HostExpr::new(HostExprKind::ResultClaimScope {
+        plan: HostResultClaimPlan {
+            result: TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            },
+            axes: Vec::new(),
+            outer_claims_first: true,
+            nested: Some(NestedResultClaimPlan {
+                binders: vec![None; pattern.binders().len()],
+                pattern,
+            }),
+        },
+        body: Box::new(value),
+        ty,
+    }))
+}
+
 fn lower_checked_local_ascription_region(
     name: &str,
     initializer: &Expr,
@@ -8610,7 +8655,8 @@ fn lower_host_expr_kind(
                             tensor_helpers,
                         )?
                     } else {
-                        lower_host_expr(initializer, program, &scoped, tensor_helpers)?
+                        let value = lower_host_expr(initializer, program, &scoped, tensor_helpers)?;
+                        retain_local_nested_ascription(value, initializer, program)?
                     };
                     // The original `(bind {span: a} ...)` node wraps this
                     // value even when a cross-let local-ascription region

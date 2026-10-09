@@ -2944,6 +2944,14 @@ impl<'a> EvalContext<'a> {
                         region,
                         local_claims,
                     )?
+                } else if let Some(ascription) =
+                    self.local_nested_ascription_claim(binding.initializer)?
+                {
+                    // The enclosing claims precede the local annotation, in
+                    // declaration order.
+                    let mut ascribed = local_claims.to_vec();
+                    ascribed.push(ascription);
+                    self.eval_under_result_claim(binding.initializer, &ascribed)?
                 } else if guarded == Some(index) {
                     self.eval_under_result_claim(
                         binding.initializer,
@@ -3828,6 +3836,42 @@ impl<'a> EvalContext<'a> {
         } else {
             result
         }
+    }
+
+    /// The claim of an explicit local ascription whose type nests tensors
+    /// below a tuple or nominal type (runtime_extents.md C6.5): its literal
+    /// axes. A binder axis claims nothing here, as in compiled C, which has
+    /// no invocation witness for it at the ascription.
+    fn local_nested_ascription_claim(
+        &self,
+        initializer: &Expr,
+    ) -> Result<Option<DeclaredResultClaim>, String> {
+        let ExprCarrier::DecodedNode(_, metadata, _) = initializer.carrier() else {
+            return Ok(None);
+        };
+        if !metadata.surf_binding_type().is_some_and(|origin| {
+            *origin.value() == chelis_deep::annotations::BindingTypeOrigin::Explicit
+        }) {
+            return Ok(None);
+        }
+        let Some(authored) = metadata.ty().map(|ty| ty.expression()) else {
+            return Ok(None);
+        };
+        let authored = normalize_authored_entry_type(authored, self.session.as_ref())?;
+        let Some(pattern) = self.nested_claim_pattern(&authored)? else {
+            return Ok(None);
+        };
+        let Some(node) = pattern.nested_root() else {
+            return Ok(None);
+        };
+        Ok(Some(
+            NestedResultClaim {
+                pattern,
+                node,
+                binders: Arc::new(Vec::new()),
+            }
+            .claim(),
+        ))
     }
 
     /// The nested claim pattern of an authored claim-source type.
