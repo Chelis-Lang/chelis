@@ -93,6 +93,7 @@ fn box_goal() -> Goal {
 
 #[test]
 fn mutated_box_range_rejects_wrong_numeric_tag_before_subprocess() {
+    crate::support::isolate();
     let mut goal = box_goal();
     let GoalShape::BoxRange { inputs, .. } = &mut goal.shape else {
         panic!("box goal shape");
