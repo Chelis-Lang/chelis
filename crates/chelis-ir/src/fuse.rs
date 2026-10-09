@@ -884,7 +884,8 @@ mod tests {
 
     #[test]
     fn observed_or_trapping_products_are_not_inlined() {
-        let observed: [(&str, Prim, fn(&mut Dag, [NodeId; 5])); 6] = [
+        type Extra = fn(&mut Dag, [NodeId; 5]);
+        let observed: [(&str, Prim, Extra); 6] = [
             // Integer products trap on overflow before any sum addition.
             ("integer", Prim::Int64, |_, _| {}),
             ("product root", Prim::F32, |dag, ids| dag.add_root(ids[4])),

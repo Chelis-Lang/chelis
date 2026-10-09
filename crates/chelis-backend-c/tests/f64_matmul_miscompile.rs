@@ -1,6 +1,8 @@
 //! Primitive matmul preserves its dtype and canonical reduction tree in C.
 //! Enabling explicit BLAS-node emission does not authorize replacing a
-//! primitive contraction with a library-dependent arithmetic graph.
+//! primitive contraction with a library-dependent arithmetic graph, and
+//! computing the product inside the sum (chelis#3370) stores no rank-3
+//! intermediate.
 
 use chelis_backend_c::CodegenOptions;
 mod support;
@@ -179,4 +181,79 @@ fn f32_matmul_subgraph_preserves_canonical_arithmetic_in_c_backend() {
     assert!(!result.requirements.needs_blas);
     assert!(result.c_source.contains("CHELIS_DTYPE_F32"));
     assert!(result.c_source.contains("__sum_level_"));
+}
+
+/// spec/05 section 4.1's `[m,k] x [k,n]` graph; `observe_product` also
+/// returns the product, so nothing may skip storing it.
+fn matmul_dag(prim: Prim, [m, k, n]: [usize; 3], observe_product: bool) -> Dag {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        t(prim, vec![m, k]),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        t(prim, vec![k, n]),
+        None,
+    );
+    let expand = |axis, size| RiscOp::Expand {
+        axis,
+        size: chelis_ir::dag::RtDim::Lit(size),
+    };
+    let ea = dag.add_node(decl, expand(2, n), vec![a], t(prim, vec![m, k, n]), None);
+    let eb = dag.add_node(decl, expand(0, m), vec![b], t(prim, vec![m, k, n]), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], t(prim, vec![m, k, n]), None);
+    let sum = dag.add_node(
+        decl,
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: prim,
+        },
+        vec![mul],
+        t(prim, vec![m, n]),
+        None,
+    );
+    dag.add_root(sum);
+    if observe_product {
+        dag.add_root(mul);
+    }
+    dag
+}
+
+/// chelis#3370: the issue's 256x2304 by 2304x196 matmul stores neither the
+/// expanded operands nor their 256x2304x196 product. The sum reads both
+/// operands through the expansions' checked plans and folds the canonical
+/// tree; only the result is allocated.
+#[test]
+fn matmul_stores_no_rank_three_intermediate() {
+    for prim in [Prim::F32, Prim::F64] {
+        let dag = matmul_dag(prim, [256, 2304, 196], false);
+        let c = codegen_with_options(&dag, "issue_3370", CodegenOptions::default())
+            .unwrap()
+            .c_source;
+        assert!(!c.contains("chelis_alloc(3,"), "{prim:?}:\n{c}");
+        assert_eq!(c.matches("chelis_tensor_expand_plan(").count(), 2, "{c}");
+        assert_eq!(c.matches("chelis_movement_check_target(").count(), 2, "{c}");
+        assert_eq!(c.matches("chelis_movement_plan_release(").count(), 2, "{c}");
+        assert!(c.contains("chelis_shape_reduction_plan("), "{c}");
+        assert!(c.contains("__sum_level_"), "{c}");
+    }
+}
+
+/// Negative control: a product something else also reads is stored, and its
+/// sum reads the stored product.
+#[test]
+fn an_observed_matmul_product_is_still_stored() {
+    let dag = matmul_dag(Prim::F32, [4, 6, 3], true);
+    let c = codegen_with_options(&dag, "issue_3370_observed", CodegenOptions::default())
+        .unwrap()
+        .c_source;
+    assert_eq!(c.matches("chelis_alloc(3,").count(), 3, "{c}");
+    assert!(!c.contains("chelis_shape_reduction_plan("), "{c}");
 }
