@@ -1744,21 +1744,28 @@ active debt moves from 233 to 234, and the freeze digest moves.
 The schema 8 source-universe amendment (chelis#3474) derives the scanned files
 from the roots. A hand-kept list required to equal the roots would carry no
 information the roots do not, and would fail every change that adds, renames,
-or deletes a file under a root. The frozen `source_inventory` holds the roots,
-so the digest binds the universe's definition while its membership is derived,
-and a root whose directory does not exist fails. The unregistered-source and
-unregistered-subdirectory mutations keep their witness IDs, paths, and planted
-seams; each expects the unclassified-hit failure naming the new file's owner,
-`raw-element-pointer` at `runtime_representation_phase0_unregistered` and
-`normalized-key-arithmetic` at `runtime_representation_phase0_subdirectory`,
-which proves the derived universe scanned the file, and its implementation
-digest covers its documentation. The Phase 1 Python floor pins the derived
+or deletes a file under a root. The frozen `source_inventory.roots` holds each
+root pattern with the concrete directories it matches, so the digest binds the
+universe's definition while its membership is derived. A missing frozen
+directory fails as a departed root, and a file holding active debt, or a
+mutation target, that leaves the universe fails until regeneration names it
+for retirement. Each frozen mutation row gains `creates_file`, true only for
+the unregistered-source and unregistered-subdirectory witnesses. Those two keep
+their witness IDs, paths, and planted seams; each expects the unclassified-hit
+failure naming the new file's owner, `raw-element-pointer` at
+`runtime_representation_phase0_unregistered` and `normalized-key-arithmetic`
+at `runtime_representation_phase0_subdirectory`, which proves the derived
+universe scanned the file, and its implementation digest covers its
+documentation. Every other witness requires its target to exist rather than
+planting into a fresh file. The Phase 1 Python floor pins the derived
 universe, a new seam-free file, a seam in a new file, a symlinked file, a
-git-ignored file, a departed root, and a changed root in place of four
-identities that pinned a hand-kept list and its documented count. No
-foundation row, active-debt row, classifier, final form, or other mutation
-changes, and no numbered representation semantics move. The amendment moves
-`FREEZE_SHA256` and the Phase 1 `MANIFEST_SHA256`; accepting it
+symlinked directory, a git-ignored file, a departed root, a crate leaving a
+glob root, a changed root, a debt-bearing file leaving the roots, a mutation
+target leaving the roots, and retirement of a file still present, in place
+of four identities that pinned a hand-kept list and its documented count. No
+foundation row, active-debt row, classifier, final form, or mutation
+semantics change, and no numbered representation semantics move. The
+amendment moves `FREEZE_SHA256` and the Phase 1 `MANIFEST_SHA256`; accepting it
 re-acknowledges both.
 
 ## B2. Invariants at every phase boundary
