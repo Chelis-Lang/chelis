@@ -1255,6 +1255,26 @@ class ManifestTests(unittest.TestCase):
             for command in commands
         ))
 
+    def test_correctly_rounded_pow_c_owner_requires_exact_execution_controls(self) -> None:
+        path = "crates/chelis-backend-c/src/emit.rs"
+        kind = "backend-element-spelling"
+        owner = "CEmitter::emit_binary_kernel"
+        self.assertEqual(oracle.CORRECTLY_ROUNDED_POW_C_FINAL_FORMS, ((path, kind, owner),))
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+        self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+        self.assertFalse(oracle.owner_module_final_form(kind, path, "CEmitter::emit_binary_func"))
+        self.assertFalse(oracle.owner_module_final_form("load-store-template", path, owner))
+        self.assertFalse(
+            oracle.owner_module_final_form(kind, path.replace("chelis-backend-c", "chelis-backend-hip"), owner)
+        )
+        self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        self.assertIn(
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "pow_kernel_routes"),
+            commands,
+        )
+
     def test_key_callable_load_store_owner_requires_exact_execution_controls(self) -> None:
         path = "crates/chelis-backend-c/src/host_emit.rs"
         kind = "load-store-template"

@@ -484,6 +484,18 @@ CORRECTLY_ROUNDED_C_FINAL_FORMS = (
         "validate_generated_include_set::ALLOWED_INCLUDES",
     ),
 )
+# chelis#624: [05-OP-79]'s `pow`, the C lane's one two-operand correctly
+# rounded kernel. Its emitter spells the operand dtype's C element type, and
+# `uint16_t` storage for f16 and bf16, selected from the node's `Prim` beside
+# the unary `chelis_cr_*` emitters; the kernel itself is the carried
+# `chelis_cr_powf`/`chelis_cr_pow` text.
+CORRECTLY_ROUNDED_POW_C_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_binary_kernel",
+    ),
+)
 PHASE2_FINAL_FORMS = (
     ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::byte_capacity"),
     ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::count"),
@@ -595,6 +607,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         (path, kind, owner) in LIST_ENTRY_METADATA_FINAL_FORMS
     ) or (
         (path, kind, owner) in CORRECTLY_ROUNDED_C_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in CORRECTLY_ROUNDED_POW_C_FINAL_FORMS
     ) or (
         (path, kind, owner) in PHASE2_FINAL_FORMS
     )
@@ -983,6 +997,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *RESULT_CLAIM_METADATA_FINAL_FORMS,
         *LIST_ENTRY_METADATA_FINAL_FORMS,
         *CORRECTLY_ROUNDED_C_FINAL_FORMS,
+        *CORRECTLY_ROUNDED_POW_C_FINAL_FORMS,
         *((METADATA_OWNER, "width-arithmetic", owner) for owner in METADATA_FINAL_WIDTH_OWNERS),
         *((ELEMENT_OWNER, "dtype-contract", owner) for owner in ELEMENT_FINAL_CONTRACT_OWNERS),
         (ELEMENT_OWNER, "width-arithmetic", "assert_registration"),
@@ -2400,6 +2415,13 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "test(=direct_float_subtraction_finalizes_canonical_nan_bits_at_every_width) | "
                 "test(=direct_and_fused_float_arithmetic_finalizes_canonical_nan_at_every_width) | "
                 "test(=direct_extrema_preserve_nan_payloads_and_lhs_signed_zero_at_every_float_width)",
+            ),
+        ),
+        OracleLeg(
+            "correctly rounded C pow execution at every float width",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-backend-c",
+                "--test", "pow_kernel_routes",
             ),
         ),
         OracleLeg(

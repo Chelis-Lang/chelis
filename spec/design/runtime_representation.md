@@ -1839,6 +1839,19 @@ identities and the exact inherited command.
 The correctly rounded C leg is inherited the same way: the Phase 1 manifest
 freezes its seven selected test identities and the exact inherited command.
 
+[05-OP-79]'s `pow` (chelis#624) adds one scanner owner,
+`CEmitter::emit_binary_kernel`, the C lane's two-operand correctly rounded
+kernel emitter. It is an exact final form beside the correctly rounded C
+owners: it spells the node's C element type, or `uint16_t` storage for f16 and
+bf16, selected from the node's `Prim` as the unary `chelis_cr_*` emitters do,
+and calls the carried `chelis_cr_powf`/`chelis_cr_pow` kernel. It adds no
+public carrier or ABI and no transition debt. Its exact path, kind and owner
+identity has wrong-path, wrong-kind and wrong-owner negatives, and a Phase 0
+execution leg runs `chelis-backend-c`'s `pow_kernel_routes`, which compiles and
+runs the contiguous, strided and fused routes at every float width against the
+correctly rounded bits. The Phase 1 manifest freezes that leg's two selected
+test identities and the exact inherited command.
+
 The integer-unary typed-lane amendment retains two inherited Phase 0 execution
 legs in the Phase 1 manifest: integer-to-float finalization freezes two native
 C/UBSan positive and invalid-target controls; integer device lowering freezes
