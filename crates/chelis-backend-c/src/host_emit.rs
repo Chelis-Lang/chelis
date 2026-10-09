@@ -10737,15 +10737,13 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}{target} = {}({});",
             self.indent,
-            // A def resolves through the emitted-name map; anything else
-            // (a typed callback parameter, a local binding) was declared
-            // through `c_ident`, so the reference must take the same
-            // mapping or a reserved-word name diverges from its
-            // declarator (chelis#840 review, finding 1).
+            // A def resolves through the emitted-name map. A callback or
+            // local binding resolves through its lexical C alias, including
+            // the generated names used by flattened host let spines.
             self.emitted_names
                 .get(function)
                 .map(|name| std::borrow::Cow::Borrowed(name.as_str()))
-                .unwrap_or_else(|| c_ident(function)),
+                .unwrap_or_else(|| std::borrow::Cow::Owned(self.local_c_name(function))),
             arg_vars.join(", ")
         ));
         self.emit_recursive_call_end(guarded_recursive_call);
