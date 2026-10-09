@@ -48,6 +48,7 @@ pub mod span_merge;
 pub mod span_sanitize;
 pub mod specialize;
 pub mod tier2;
+pub mod tier2_ordered;
 pub mod verify;
 pub mod vmap;
 

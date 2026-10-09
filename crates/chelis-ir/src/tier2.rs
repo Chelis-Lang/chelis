@@ -36,7 +36,7 @@ pub const TIER2_SYNTH_MARKER: &str = "__synthesized_tier2__";
 /// the `__synthesized_tier2__` marker) onto every Tier 2 sub-node. All
 /// Tier 2 helpers route their `add_node` calls through this so the
 /// rule is applied uniformly.
-fn add_synth(
+pub(crate) fn add_synth(
     owner: Owner,
     dag: &mut Dag,
     op: RiscOp,

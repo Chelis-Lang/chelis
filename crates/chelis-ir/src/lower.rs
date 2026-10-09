@@ -773,6 +773,7 @@ use crate::dag::{
 use crate::grad::grad_dag_checked;
 use crate::load_store_name::LoadStoreName;
 use crate::tier2;
+use crate::tier2_ordered;
 use crate::vmap;
 
 /// Lower a checked Deep program into a RISC DAG.
@@ -5942,7 +5943,6 @@ fn app_var_name_and_args(expr: &Expr) -> Option<(&str, &[Expr])> {
     Some((name, &kids[1..]))
 }
 
-#[cfg(feature = "lowering-trace")]
 fn string_literal(expr: &Expr) -> Option<&str> {
     match expr.carrier() {
         ExprCarrier::Atom(Atom::Str(value)) => Some(value),
@@ -15109,6 +15109,14 @@ impl<'program> LowerCtx<'program> {
         Some((names, body))
     }
 
+    /// The lowered node's type, or `fallback` when the node is absent.
+    fn lowered_type_or(&self, node: NodeId, fallback: &TensorType) -> TensorType {
+        self.dag
+            .get(node)
+            .map(|n| n.output_type.clone())
+            .unwrap_or_else(|| fallback.clone())
+    }
+
     fn lower_builtin_app(
         &mut self,
         func_name: &str,
@@ -17249,6 +17257,83 @@ impl<'program> LowerCtx<'program> {
                     fallback_ty,
                     self.current_span_id.clone(),
                 )
+            }
+
+            // [05-OP-53] / [05-OP-33] / [05-OP-51]: inside a transform each
+            // operation needs an IR graph whose reverse derivative is the
+            // atom's adjoint (spec/05 §5). Untransformed programs keep the
+            // exact host kernels, so the graph exists only where AD or
+            // batching consumes it.
+            "diagonal" | "trace" | "cumsum" | "einsum"
+                if self.allow_host_list_ad_rewrites
+                    && args.len() == if func_name == "cumsum" { 2 } else { 3 } =>
+            {
+                let span = self.current_span_id.clone();
+                let lowered = match func_name {
+                    "diagonal" | "trace" => {
+                        let x = self.lower_expr_node(&args[0], "diagonal input");
+                        let x_ty = self.lowered_type_or(x, ty);
+                        let rank = x_ty.dims.len();
+                        let axis1 = self.extract_axis_raw(&args[1], func_name);
+                        let axis1 = self.normalize_axis(axis1, rank, func_name, &args[1]);
+                        let axis2 = self.extract_axis_raw(&args[2], func_name);
+                        let axis2 = self.normalize_axis(axis2, rank, func_name, &args[2]);
+                        let lower = if func_name == "trace" {
+                            tier2_ordered::lower_trace
+                        } else {
+                            tier2_ordered::lower_diagonal
+                        };
+                        lower(
+                            self.owner(),
+                            &mut self.dag,
+                            x,
+                            &x_ty,
+                            axis1,
+                            axis2,
+                            span.as_deref(),
+                        )
+                    }
+                    "cumsum" => {
+                        let x = self.lower_expr_node(&args[0], "cumsum input");
+                        let x_ty = self.lowered_type_or(x, ty);
+                        let axis = self.extract_axis_raw(&args[1], "cumsum");
+                        let axis = self.normalize_axis(axis, x_ty.dims.len(), "cumsum", &args[1]);
+                        tier2_ordered::lower_cumsum(
+                            self.owner(),
+                            &mut self.dag,
+                            x,
+                            &x_ty,
+                            axis,
+                            span.as_deref(),
+                        )
+                    }
+                    _ => match string_literal(&args[0]) {
+                        Some(equation) => {
+                            let a = self.lower_expr_node(&args[1], "einsum lhs");
+                            let b = self.lower_expr_node(&args[2], "einsum rhs");
+                            let a_ty = self.lowered_type_or(a, ty);
+                            let b_ty = self.lowered_type_or(b, ty);
+                            tier2_ordered::lower_einsum(
+                                self.owner(),
+                                &mut self.dag,
+                                equation,
+                                [(a, &a_ty), (b, &b_ty)],
+                                accumulator,
+                                span.as_deref(),
+                            )
+                        }
+                        None => Err("its equation is not a string literal".to_string()),
+                    },
+                };
+                lowered.unwrap_or_else(|reason| {
+                    self.reject_lowering_at(
+                        (Some(app_span), self.current_span_id.clone()),
+                        format!(
+                            "application of `{func_name}` has no numeric IR lowering ({reason}); \
+                             preserve its host execution (spec/05-risc-primitives.md [05-HOST-1])"
+                        ),
+                    )
+                })
             }
 
             // Exact argument values do not implement the operation. A fake
