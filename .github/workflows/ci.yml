@@ -801,9 +801,6 @@ jobs:
       - name: Install shared-skill validator dependency
         run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
 
-      - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
-
       - name: Script unit tests (scripts/test_*.py)
         run: python scripts/ci_script_tests.py pr
 
@@ -1216,9 +1213,6 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
-      - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
-
       - name: Gate (units and reviewed integrations)
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
@@ -1363,10 +1357,6 @@ jobs:
           prefix-key: rust-v1-${{ runner.environment }}
           shared-key: linux-workspace
           save-if: false
-
-      - name: Install Python binding dependencies
-        if: steps.shard-selection.outputs.has_targets == 'true'
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       # Cache restoration can replace target/; install the current plan last.
       - name: Download integration change plan

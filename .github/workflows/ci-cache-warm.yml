@@ -105,9 +105,6 @@ jobs:
           shared-key: linux-workspace
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
-
       - name: Gate (units and reviewed integrations)
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
@@ -374,9 +371,6 @@ jobs:
 
       - name: Set up project CI
         uses: ./.github/actions/setup-project-ci
-
-      - name: Install Python binding dependencies
-        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
       - name: Cache the Python distribution build
         uses: Swatinem/rust-cache@v2

@@ -78,3 +78,11 @@ runs:
       if: runner.environment == 'self-hosted'
       shell: chelis-ci-shell run {0}
       run: python scripts/ci_nix_cache_roots.py
+
+    # Any job that sets up the project can run chelis-python tests, which
+    # import the binding's declared dependencies at run time. Provisioning
+    # them here, from the bindings' own pyproject.toml, means no job or lane
+    # carries a copy to forget (chelis#3471).
+    - name: Install Python binding dependencies
+      shell: chelis-ci-shell run {0}
+      run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml

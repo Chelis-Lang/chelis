@@ -190,11 +190,18 @@ def _interaction_frontier(
     candidate_metadata = ci_change_owned.metadata_at(
         repository_path, current_candidate
     )
-    return ci_change_owned.targeted_rebase_frontier(
+    return ci_change_owned.trusted_rebase_frontier(
         delta_paths,
+        ci_change_owned.diff_at(repository_path, prior_candidate, current_candidate),
         base_metadata=base_metadata,
         candidate_metadata=candidate_metadata,
         config=config,
+        tracked_paths=ci_change_owned.tracked_paths_at(
+            repository_path, current_candidate
+        ),
+        base_tracked_paths=ci_change_owned.tracked_paths_at(
+            repository_path, prior_candidate
+        ),
     )
 
 

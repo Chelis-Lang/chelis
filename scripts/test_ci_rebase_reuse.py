@@ -432,6 +432,49 @@ class RebaseReuseTests(unittest.TestCase):
         self.assertFalse(decision["run_script_unit"])
         self.assertFalse(decision["run_hull"])
 
+    def test_frontier_runs_the_planners_selection_over_the_exact_delta(self) -> None:
+        repository = RebaseRepository(
+            delta_path="crates/fixture/src/rebase_delta.rs"
+        )
+        self.addCleanup(repository.close)
+        real = reuse.ci_change_owned.trusted_rebase_frontier
+        calls = []
+
+        def record(*arguments, **keywords):
+            calls.append((arguments, keywords))
+            return real(*arguments, **keywords)
+
+        with mock.patch.object(
+            reuse.ci_change_owned, "trusted_rebase_frontier", side_effect=record
+        ):
+            decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "targeted")
+        self.assertEqual(decision["frontier_packages"], ["fixture"])
+        self.assertEqual(len(calls), 1)
+        (delta_paths, records), keywords = calls[0]
+        self.assertEqual(delta_paths, ["crates/fixture/src/rebase_delta.rs"])
+        self.assertEqual(
+            records,
+            reuse.ci_change_owned.diff_at(
+                repository.path,
+                repository.old_candidate_sha,
+                repository.new_candidate_sha,
+            ),
+        )
+        self.assertEqual(
+            keywords["tracked_paths"],
+            reuse.ci_change_owned.tracked_paths_at(
+                repository.path, repository.new_candidate_sha
+            ),
+        )
+        self.assertEqual(
+            keywords["base_tracked_paths"],
+            reuse.ci_change_owned.tracked_paths_at(
+                repository.path, repository.old_candidate_sha
+            ),
+        )
+
     def test_disjoint_code_delta_uses_targeted_lane(self) -> None:
         repository = RebaseRepository(
             delta_path="crates/fixture/src/rebase_delta.rs"
