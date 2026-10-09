@@ -3493,7 +3493,11 @@ fn wire_dim_is_anonymous(dim: &WireDimInfo) -> bool {
 }
 
 fn wire_node_by_id(nodes: &[WireDagNode], id: u64) -> Option<&WireDagNode> {
-    nodes.iter().find(|node| node.id == id)
+    usize::try_from(id)
+        .ok()
+        .and_then(|index| nodes.get(index))
+        .filter(|node| node.id == id)
+        .or_else(|| nodes.iter().find(|node| node.id == id))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3515,6 +3519,7 @@ fn wire_rt_dim_origin(
     dim: &WireRtDim,
     fuel: usize,
     relevant_shape_sources: &[u64],
+    cache: &WireAxisOriginCache,
 ) -> Option<WireSemanticAxisOrigin> {
     match dim {
         WireRtDim::Lit { value } => Some(WireSemanticAxisOrigin::Literal(value.get())),
@@ -3526,13 +3531,14 @@ fn wire_rt_dim_origin(
         WireRtDim::InputAxis { tensor, axis } => {
             let source =
                 wire_node_by_id(nodes, *owner.inputs.get(usize::try_from(*tensor).ok()?)?)?;
-            wire_axis_origin(
+            wire_axis_origin_cached(
                 nodes,
                 source,
                 wire_rt_axis_index(axis)?,
                 fuel,
                 relevant_shape_sources,
                 true,
+                cache,
             )
         }
         WireRtDim::ToEnd | WireRtDim::Sym { .. } => None,
@@ -3545,6 +3551,7 @@ fn wire_witnessed_origin_equal(
     right: WireSemanticAxisOrigin,
     relevant_shape_sources: &[u64],
     require_witness: bool,
+    cache: &WireAxisOriginCache,
 ) -> bool {
     if left == right && !require_witness {
         return true;
@@ -3563,13 +3570,14 @@ fn wire_witnessed_origin_equal(
             return None;
         };
         let source = wire_node_by_id(nodes, *witness.inputs.first()?)?;
-        wire_axis_origin(
+        wire_axis_origin_cached(
             nodes,
             source,
             usize::try_from(axis).ok()?,
             nodes.len(),
             relevant_shape_sources,
             false,
+            cache,
         )
     };
     let mut edges = Vec::new();
@@ -3610,6 +3618,21 @@ fn wire_witnessed_origin_equal(
     false
 }
 
+#[cfg(test)]
+thread_local! {
+    static WIRE_AXIS_ORIGIN_VISITS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static WIRE_SEMANTIC_DIM_VISITS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+// Each query is scoped to one set of relevant shape sources. Validated DAG
+// edges point to earlier nodes, so fuel cannot expire on a path started with
+// nodes.len(); the memo key need only identify the node, axis, and agreement
+// mode. Keeping the cache per query prevents a different source set from
+// borrowing an answer.
+type WireAxisOriginCache =
+    std::cell::RefCell<BTreeMap<(u64, usize, bool), Option<WireSemanticAxisOrigin>>>;
+
+#[cfg(test)]
 fn wire_axis_origin(
     nodes: &[WireDagNode],
     node: &WireDagNode,
@@ -3618,9 +3641,68 @@ fn wire_axis_origin(
     relevant_shape_sources: &[u64],
     require_input_agreement: bool,
 ) -> Option<WireSemanticAxisOrigin> {
+    let cache = WireAxisOriginCache::default();
+    wire_axis_origin_cached(
+        nodes,
+        node,
+        axis,
+        fuel,
+        relevant_shape_sources,
+        require_input_agreement,
+        &cache,
+    )
+}
+
+fn wire_axis_origin_cached(
+    nodes: &[WireDagNode],
+    node: &WireDagNode,
+    axis: usize,
+    fuel: usize,
+    relevant_shape_sources: &[u64],
+    require_input_agreement: bool,
+    cache: &WireAxisOriginCache,
+) -> Option<WireSemanticAxisOrigin> {
+    #[cfg(test)]
+    WIRE_AXIS_ORIGIN_VISITS.with(|visits| {
+        if let Some(count) = visits.get() {
+            assert!(
+                count < 1_000,
+                "WireDag axis-origin work exceeded its test budget"
+            );
+            visits.set(Some(count + 1));
+        }
+    });
     if fuel == 0 {
         return None;
     }
+    let key = (node.id, axis, require_input_agreement);
+    if let Some(cached) = cache.borrow().get(&key).copied() {
+        return cached;
+    }
+    let result = stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+        wire_axis_origin_uncached(
+            nodes,
+            node,
+            axis,
+            fuel,
+            relevant_shape_sources,
+            require_input_agreement,
+            cache,
+        )
+    });
+    cache.borrow_mut().insert(key, result);
+    result
+}
+
+fn wire_axis_origin_uncached(
+    nodes: &[WireDagNode],
+    node: &WireDagNode,
+    axis: usize,
+    fuel: usize,
+    relevant_shape_sources: &[u64],
+    require_input_agreement: bool,
+    cache: &WireAxisOriginCache,
+) -> Option<WireSemanticAxisOrigin> {
     let dim = node.output_type.dims.get(axis)?;
     match dim {
         WireDimInfo::Lit { size }
@@ -3634,13 +3716,14 @@ fn wire_axis_origin(
 
     let input_axis = |input: usize, source_axis: usize| {
         let source = wire_node_by_id(nodes, *node.inputs.get(input)?)?;
-        wire_axis_origin(
+        wire_axis_origin_cached(
             nodes,
             source,
             source_axis,
             fuel - 1,
             relevant_shape_sources,
             require_input_agreement,
+            cache,
         )
     };
     // The origin every one of the first `operands` inputs agrees on; a
@@ -3654,13 +3737,14 @@ fn wire_axis_origin(
         if first_source.output_type.dims.len() != node.output_type.dims.len() {
             return None;
         }
-        let first = wire_axis_origin(
+        let first = wire_axis_origin_cached(
             nodes,
             first_source,
             axis,
             fuel - 1,
             relevant_shape_sources,
             require_input_agreement,
+            cache,
         )?;
         if !require_input_agreement {
             return Some(first);
@@ -3668,13 +3752,14 @@ fn wire_axis_origin(
         origins
             .all(|source| {
                 source.output_type.dims.len() == node.output_type.dims.len()
-                    && wire_axis_origin(
+                    && wire_axis_origin_cached(
                         nodes,
                         source,
                         axis,
                         fuel - 1,
                         relevant_shape_sources,
                         require_input_agreement,
+                        cache,
                     )
                     .is_some_and(|origin| {
                         wire_witnessed_origin_equal(
@@ -3683,6 +3768,7 @@ fn wire_axis_origin(
                             origin,
                             relevant_shape_sources,
                             false,
+                            cache,
                         )
                     })
             })
@@ -3701,13 +3787,14 @@ fn wire_axis_origin(
             let fallback = wire_node_by_id(nodes, *node.inputs.get(1)?)?;
             (fallback.output_type.dims.len() == node.output_type.dims.len())
                 .then(|| {
-                    wire_axis_origin(
+                    wire_axis_origin_cached(
                         nodes,
                         fallback,
                         axis,
                         fuel - 1,
                         relevant_shape_sources,
                         require_input_agreement,
+                        cache,
                     )
                 })
                 .flatten()
@@ -3717,25 +3804,27 @@ fn wire_axis_origin(
             let else_value = wire_node_by_id(nodes, *node.inputs.get(2)?)?;
             let then_origin = (then_value.output_type.dims.len() == node.output_type.dims.len())
                 .then(|| {
-                    wire_axis_origin(
+                    wire_axis_origin_cached(
                         nodes,
                         then_value,
                         axis,
                         fuel - 1,
                         relevant_shape_sources,
                         require_input_agreement,
+                        cache,
                     )
                 })
                 .flatten()?;
             let else_origin = (else_value.output_type.dims.len() == node.output_type.dims.len())
                 .then(|| {
-                    wire_axis_origin(
+                    wire_axis_origin_cached(
                         nodes,
                         else_value,
                         axis,
                         fuel - 1,
                         relevant_shape_sources,
                         require_input_agreement,
+                        cache,
                     )
                 })
                 .flatten()?;
@@ -3797,7 +3886,7 @@ fn wire_axis_origin(
             if axis < key_rank {
                 input_axis(0, axis)
             } else {
-                wire_rt_dim_origin(nodes, node, count, fuel - 1, relevant_shape_sources)
+                wire_rt_dim_origin(nodes, node, count, fuel - 1, relevant_shape_sources, cache)
             }
         }
         WireRiscOp::ListMapCapture { .. } => input_axis(1, axis),
@@ -3813,7 +3902,7 @@ fn wire_axis_origin(
                 .dims
                 .len();
             if axis == expanded {
-                wire_rt_dim_origin(nodes, node, size, fuel - 1, relevant_shape_sources)
+                wire_rt_dim_origin(nodes, node, size, fuel - 1, relevant_shape_sources, cache)
             } else if node.output_type.dims.len() == operand_rank + 1 && axis > expanded {
                 input_axis(0, axis - 1)
             } else {
@@ -3843,6 +3932,7 @@ fn wire_axis_origin(
             new_shape.get(axis)?,
             fuel - 1,
             relevant_shape_sources,
+            cache,
         ),
         WireRiscOp::Iota
         | WireRiscOp::Shrink { .. }
@@ -3875,13 +3965,14 @@ fn wire_axis_origin(
                 (source.id < node.id
                     && source.output_type.dims.len() == node.output_type.dims.len())
                 .then(|| {
-                    wire_axis_origin(
+                    wire_axis_origin_cached(
                         nodes,
                         source,
                         axis,
                         fuel - 1,
                         relevant_shape_sources,
                         require_input_agreement,
+                        cache,
                     )
                 })
                 .flatten()
@@ -3912,8 +4003,9 @@ fn wire_semantic_axis_origin(
     axis: usize,
     fuel: usize,
     relevant_shape_sources: &[u64],
+    cache: &WireAxisOriginCache,
 ) -> Option<WireSemanticAxisOrigin> {
-    wire_axis_origin(nodes, node, axis, fuel, relevant_shape_sources, true)
+    wire_axis_origin_cached(nodes, node, axis, fuel, relevant_shape_sources, true, cache)
 }
 
 fn wire_semantic_node_dim<'a>(
@@ -3923,42 +4015,56 @@ fn wire_semantic_node_dim<'a>(
     fuel: usize,
     relevant_shape_sources: &[u64],
 ) -> Option<&'a WireDimInfo> {
-    if fuel == 0 {
-        return None;
-    }
-    let dim = node.output_type.dims.get(axis)?;
-    if wire_dim_is_anonymous(dim) {
-        if let Some(resolved) = node.shape_deps.iter().find_map(|source_id| {
-            if !relevant_shape_sources.contains(source_id) {
-                return None;
+    // A shared Where branch can appear on both sides of many diamonds. Walk
+    // candidates in the same order as the recursive search while resolving
+    // each node at most once for a given remaining depth budget.
+    let mut pending = vec![(node, fuel)];
+    let mut seen_fuel = BTreeMap::<u64, usize>::new();
+    while let Some((current, remaining)) = pending.pop() {
+        #[cfg(test)]
+        WIRE_SEMANTIC_DIM_VISITS.with(|visits| {
+            if let Some(count) = visits.get() {
+                assert!(
+                    count < 1_000,
+                    "WireDag semantic-dimension work exceeded its test budget"
+                );
+                visits.set(Some(count + 1));
             }
-            let source = wire_node_by_id(nodes, *source_id)?;
-            (source.id < node.id && source.output_type.dims.len() == node.output_type.dims.len())
-                .then(|| {
-                    wire_semantic_node_dim(nodes, source, axis, fuel - 1, relevant_shape_sources)
-                })
-                .flatten()
-                .filter(|resolved| !wire_dim_is_anonymous(resolved))
-        }) {
-            return Some(resolved);
-        }
-        if matches!(node.op, WireRiscOp::Where { .. })
-            && let Some(resolved) = node.inputs.iter().skip(1).find_map(|source_id| {
-                let source = wire_node_by_id(nodes, *source_id)?;
-                (source.id < node.id
-                    && source.output_type.dims.len() == node.output_type.dims.len())
-                .then(|| {
-                    wire_semantic_node_dim(nodes, source, axis, fuel - 1, relevant_shape_sources)
-                })
-                .flatten()
-                .filter(|resolved| !wire_dim_is_anonymous(resolved))
-            })
+        });
+        if remaining == 0
+            || seen_fuel
+                .get(&current.id)
+                .is_some_and(|seen| *seen >= remaining)
         {
-            return Some(resolved);
+            continue;
         }
-        return None;
+        seen_fuel.insert(current.id, remaining);
+        let Some(dim) = current.output_type.dims.get(axis) else {
+            continue;
+        };
+        if !wire_dim_is_anonymous(dim) {
+            return Some(dim);
+        }
+        let mut push_source = |source_id: &u64| {
+            if let Some(source) = wire_node_by_id(nodes, *source_id)
+                && source.id < current.id
+                && source.output_type.dims.len() == current.output_type.dims.len()
+            {
+                pending.push((source, remaining - 1));
+            }
+        };
+        if matches!(current.op, WireRiscOp::Where { .. }) {
+            for source_id in current.inputs.iter().skip(1).rev() {
+                push_source(source_id);
+            }
+        }
+        for source_id in current.shape_deps.iter().rev() {
+            if relevant_shape_sources.contains(source_id) {
+                push_source(source_id);
+            }
+        }
     }
-    Some(dim)
+    None
 }
 
 fn wire_node_shape_equal(
@@ -3967,6 +4073,7 @@ fn wire_node_shape_equal(
     right: &WireDagNode,
     relevant_shape_sources: &[u64],
 ) -> bool {
+    let cache = WireAxisOriginCache::default();
     left.output_type.dims.len() == right.output_type.dims.len()
         && (0..left.output_type.dims.len()).all(|axis| {
             wire_semantic_node_dim(nodes, left, axis, nodes.len(), relevant_shape_sources)
@@ -3978,41 +4085,59 @@ fn wire_node_shape_equal(
                     relevant_shape_sources,
                 ))
                 .is_some_and(|(left, right)| wire_semantic_dim_info_equal(left, right))
-                || wire_semantic_axis_origin(nodes, left, axis, nodes.len(), relevant_shape_sources)
-                    .zip(wire_semantic_axis_origin(
+                || wire_semantic_axis_origin(
+                    nodes,
+                    left,
+                    axis,
+                    nodes.len(),
+                    relevant_shape_sources,
+                    &cache,
+                )
+                .zip(wire_semantic_axis_origin(
+                    nodes,
+                    right,
+                    axis,
+                    nodes.len(),
+                    relevant_shape_sources,
+                    &cache,
+                ))
+                .is_some_and(|(left, right)| {
+                    wire_witnessed_origin_equal(
                         nodes,
+                        left,
                         right,
-                        axis,
-                        nodes.len(),
                         relevant_shape_sources,
-                    ))
-                    .is_some_and(|(left, right)| {
-                        wire_witnessed_origin_equal(
-                            nodes,
-                            left,
-                            right,
-                            relevant_shape_sources,
-                            false,
-                        )
-                    })
-                || wire_axis_origin(
+                        false,
+                        &cache,
+                    )
+                })
+                || wire_axis_origin_cached(
                     nodes,
                     left,
                     axis,
                     nodes.len(),
                     relevant_shape_sources,
                     false,
+                    &cache,
                 )
-                .zip(wire_axis_origin(
+                .zip(wire_axis_origin_cached(
                     nodes,
                     right,
                     axis,
                     nodes.len(),
                     relevant_shape_sources,
                     false,
+                    &cache,
                 ))
                 .is_some_and(|(left, right)| {
-                    wire_witnessed_origin_equal(nodes, left, right, relevant_shape_sources, true)
+                    wire_witnessed_origin_equal(
+                        nodes,
+                        left,
+                        right,
+                        relevant_shape_sources,
+                        true,
+                        &cache,
+                    )
                 })
         })
 }
@@ -5235,6 +5360,191 @@ mod tests {
                 other => panic!("expected reduce_window_grad wire op, got {other:?}"),
             }
         }
+    }
+
+    fn shared_axis_diamond(levels: u64) -> Vec<WireDagNode> {
+        let ty = WireTensorType {
+            dims: vec![WireDimInfo::Named {
+                name: "*".to_string(),
+                size: None,
+            }],
+            precision: "f32".to_string(),
+        };
+        let mut nodes = vec![WireDagNode {
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
+            declaration: 0,
+            activation: None,
+            id: 0,
+            op: WireRiscOp::Load {
+                name: "x".to_string(),
+            },
+            inputs: vec![],
+            output_type: ty.clone(),
+        }];
+        for id in 1..=levels {
+            nodes.push(WireDagNode {
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
+                declaration: 0,
+                activation: None,
+                id,
+                op: WireRiscOp::Add,
+                inputs: vec![id - 1, id - 1],
+                output_type: ty.clone(),
+            });
+        }
+        nodes
+    }
+
+    fn shared_where_dimension_diamond(levels: u64) -> Vec<WireDagNode> {
+        let mut nodes = shared_axis_diamond(0);
+        for id in 1..=levels {
+            let mut node = nodes[0].clone();
+            node.id = id;
+            node.op = WireRiscOp::Where {};
+            node.inputs = vec![0, id - 1, id - 1];
+            nodes.push(node);
+        }
+        nodes
+    }
+
+    #[test]
+    fn shared_where_dimension_diamond_has_linear_resolution_work() {
+        let nodes = shared_where_dimension_diamond(20);
+        WIRE_SEMANTIC_DIM_VISITS.with(|visits| visits.set(Some(0)));
+        let dim = wire_semantic_node_dim(&nodes, nodes.last().unwrap(), 0, nodes.len(), &[]);
+        let visits = WIRE_SEMANTIC_DIM_VISITS.with(|visits| visits.replace(None).unwrap());
+        assert!(dim.is_none());
+        assert!(
+            visits <= nodes.len() * 4,
+            "shared Where DAG expanded to {visits} visits"
+        );
+    }
+
+    #[test]
+    fn deep_shared_where_dimension_resolves_on_a_small_thread_stack() {
+        let mut nodes = shared_where_dimension_diamond(5_000);
+        nodes[0].output_type.dims[0] = WireDimInfo::Named {
+            name: "n".to_string(),
+            size: None,
+        };
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                assert!(matches!(
+                    wire_semantic_node_dim(&nodes, nodes.last().unwrap(), 0, nodes.len(), &[]),
+                    Some(WireDimInfo::Named { name, size: None }) if name == "n"
+                ));
+            })
+            .expect("start bounded-stack shape worker")
+            .join()
+            .expect("deep shared Where resolves without a native stack abort");
+    }
+
+    fn shared_axis_comparison(levels: u64) -> WireDag {
+        let mut nodes = shared_axis_diamond(levels);
+        let source = nodes.last().unwrap().id;
+        let mut compare = nodes.last().unwrap().clone();
+        compare.id = source + 1;
+        compare.op = WireRiscOp::Compare {
+            comparison: WireComparisonKind::Eq,
+        };
+        compare.inputs = vec![source, source];
+        compare.shape_deps = vec![source];
+        compare.output_type.precision = "bool".to_string();
+        nodes.push(compare);
+        WireDag {
+            schema_version: WIRE_DAG_SCHEMA_VERSION,
+            declarations: vec!["entry".to_string()],
+            nodes,
+            roots: vec![source + 1],
+        }
+    }
+
+    #[test]
+    fn shared_axis_diamond_has_linear_origin_work() {
+        let nodes = shared_axis_diamond(20);
+        WIRE_AXIS_ORIGIN_VISITS.with(|visits| visits.set(Some(0)));
+        let origin = wire_axis_origin(&nodes, nodes.last().unwrap(), 0, nodes.len(), &[], true);
+        let visits = WIRE_AXIS_ORIGIN_VISITS.with(|visits| visits.replace(None).unwrap());
+        assert_eq!(
+            origin,
+            Some(WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 })
+        );
+        assert!(
+            visits <= nodes.len() * 4,
+            "shared DAG expanded to {visits} visits"
+        );
+    }
+
+    #[test]
+    fn shared_axis_origin_still_rejects_disagreeing_inputs() {
+        let mut nodes = shared_axis_diamond(0);
+        let mut other = nodes[0].clone();
+        other.id = 1;
+        other.op = WireRiscOp::Load {
+            name: "y".to_string(),
+        };
+        nodes.push(other);
+        let mut add = nodes[0].clone();
+        add.id = 2;
+        add.op = WireRiscOp::Add;
+        add.inputs = vec![0, 1];
+        nodes.push(add);
+        assert_eq!(
+            wire_axis_origin(&nodes, &nodes[2], 0, nodes.len(), &[], true),
+            None
+        );
+    }
+
+    #[test]
+    fn deep_shared_axis_diamond_validates_on_a_small_thread_stack() {
+        let nodes = shared_axis_diamond(5_000);
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                assert_eq!(
+                    wire_axis_origin(&nodes, nodes.last().unwrap(), 0, nodes.len(), &[], true),
+                    Some(WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 })
+                );
+            })
+            .expect("start bounded-stack validation worker")
+            .join()
+            .expect("deep shared DAG validates without a native stack abort");
+    }
+
+    #[test]
+    fn shared_axis_diamond_round_trips_through_validated_wire_ingress() {
+        let dag = shared_axis_comparison(20);
+        WIRE_AXIS_ORIGIN_VISITS.with(|visits| visits.set(Some(0)));
+        dag.validate_wire_contract()
+            .expect("shared diamond is a valid WireDag");
+        let visits = WIRE_AXIS_ORIGIN_VISITS.with(|visits| visits.replace(None).unwrap());
+        assert!(
+            visits <= dag.nodes.len() * 12,
+            "wire ingress made {visits} visits"
+        );
+        let json = serde_json::to_string(&dag).expect("serialize valid WireDag");
+        WireDag::from_validated_json(&json).expect("decode the same valid WireDag");
+
+        let mut malformed = dag;
+        malformed.nodes.last_mut().unwrap().inputs[1] = u64::MAX;
+        assert!(malformed.validate_wire_contract().is_err());
+    }
+
+    #[test]
+    fn deep_shared_axis_diamond_validates_through_wire_ingress_on_a_small_stack() {
+        let dag = shared_axis_comparison(5_000);
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || dag.validate_wire_contract())
+            .expect("start bounded-stack wire ingress worker")
+            .join()
+            .expect("wire ingress worker survives the deep DAG")
+            .expect("deep shared diamond is a valid WireDag");
     }
 }
 

@@ -1,0 +1,1 @@
+WireDag validation reuses shape-axis origins across shared input paths and checks deep graphs without exhausting the native stack. Repeated-input diamonds no longer expand into exponentially many origin visits. See [#3231](https://github.com/Chelis-Lang/chelis/issues/3231).
