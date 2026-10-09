@@ -2277,7 +2277,7 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/registry/c_tensor_runtime.md"
         original = path.read_text(encoding="utf-8")
         rows = [row for row in oracle.EXPECTED_OP_MANIFESTS["05-OP-33"] if "checked reduction" in row]
-        self.assertEqual(len(rows), 8)
+        self.assertEqual(len(rows), 9)
         for row in rows:
             with self.subTest(row=row):
                 self.assertIn(row, original)

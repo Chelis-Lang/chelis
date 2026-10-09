@@ -8711,6 +8711,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// projected index inside the other side, so the nested loops carry plain
     /// affine offsets and make no per-element runtime call.
     fn emit_movement_loop(&mut self, id: usize, rank: usize, index: &str, body: &str) {
+        let index_type = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
         let term = |field: &str, axis: usize| {
             format!(
                 "chelis_movement_term(t{id}_movement, CHELIS_PROJECTION_{field}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))"
@@ -8719,31 +8723,31 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line("{");
         self.indent += 1;
         self.line(&format!(
-            "const int64_t t{id}_base = chelis_movement_base(t{id}_movement);"
+            "const {index_type} t{id}_base = chelis_movement_base(t{id}_movement);"
         ));
         for axis in 0..rank {
             self.line(&format!(
-                "const int64_t t{id}_extent{axis} = {};",
+                "const {index_type} t{id}_extent{axis} = {};",
                 term("MODULUS", axis)
             ));
             self.line(&format!(
-                "const int64_t t{id}_scale{axis} = {};",
+                "const {index_type} t{id}_scale{axis} = {};",
                 term("SCALE", axis)
             ));
         }
-        self.line("int64_t i = 0;");
+        self.line(&format!("{index_type} i = 0;"));
         let mut offset = format!("t{id}_base");
         for axis in 0..rank {
             self.line(&format!(
-                "for (int64_t t{id}_c{axis} = 0; t{id}_c{axis} < t{id}_extent{axis}; t{id}_c{axis}++) {{"
+                "for ({index_type} t{id}_c{axis} = 0; t{id}_c{axis} < t{id}_extent{axis}; t{id}_c{axis}++) {{"
             ));
             self.indent += 1;
             self.line(&format!(
-                "const int64_t t{id}_o{axis} = {offset} + t{id}_c{axis} * t{id}_scale{axis};"
+                "const {index_type} t{id}_o{axis} = {offset} + t{id}_c{axis} * t{id}_scale{axis};"
             ));
             offset = format!("t{id}_o{axis}");
         }
-        self.line(&format!("const int64_t {index} = {offset};"));
+        self.line(&format!("const {index_type} {index} = {offset};"));
         self.line(body);
         self.line("i++;");
         for _ in 0..rank {
@@ -8760,6 +8764,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// inside the source, so the loops index it through
     /// [`Self::projection_index`] with no per-element runtime call.
     fn emit_projection_terms(&mut self, id: usize, term: &str, group: usize, leaf: usize) {
+        let index_type = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
         for (part, prefix, rank) in [("GROUP", "g", group), ("LEAF", "l", leaf)] {
             for k in 0..rank {
                 // The outermost coordinate needs no modulus and the innermost
@@ -8772,7 +8780,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     fields.push(("modulus", "MODULUS"));
                 }
                 for (name, field) in fields {
-                    self.line(&format!("const int64_t t{id}_{prefix}{k}_{name} = {term}CHELIS_PROJECTION_{part}, CHELIS_PROJECTION_{field}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {k}));"));
+                    self.line(&format!("const {index_type} t{id}_{prefix}{k}_{name} = {term}CHELIS_PROJECTION_{part}, CHELIS_PROJECTION_{field}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {k}));"));
                 }
             }
         }
