@@ -208,7 +208,13 @@ fn matmul_dag(prim: Prim, [m, k, n]: [usize; 3], observe_product: bool) -> Dag {
     };
     let ea = dag.add_node(decl, expand(2, n), vec![a], t(prim, vec![m, k, n]), None);
     let eb = dag.add_node(decl, expand(0, m), vec![b], t(prim, vec![m, k, n]), None);
-    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], t(prim, vec![m, k, n]), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        t(prim, vec![m, k, n]),
+        None,
+    );
     let sum = dag.add_node(
         decl,
         RiscOp::Sum {

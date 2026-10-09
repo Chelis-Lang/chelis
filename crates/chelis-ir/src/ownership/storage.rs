@@ -921,9 +921,7 @@ fn read_through_skipped(
             reads.push(input);
             continue;
         }
-        let node = dag
-            .get(input)
-            .expect("verified skipped input names a node");
+        let node = dag.get(input).expect("verified skipped input names a node");
         pending.extend(
             node.inputs
                 .iter()

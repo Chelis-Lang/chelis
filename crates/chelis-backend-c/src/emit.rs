@@ -7074,15 +7074,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         });
         let acc_et = Self::elem_type(ty);
         let operand_et = Self::elem_type(product_ty);
-        self.emit_reduction_plan(
-            id,
-            None,
-            product_ty,
-            &[axis],
-            ty,
-            "CHELIS_REDUCE_SUM",
-            true,
-        );
+        self.emit_reduction_plan(id, None, product_ty, &[axis], ty, "CHELIS_REDUCE_SUM", true);
         self.emit_slot_wrapper(id, ty);
         self.open_element_loop(
             id,

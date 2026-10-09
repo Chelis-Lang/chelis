@@ -524,9 +524,7 @@ pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
         }
     }
     let private = |node: &DagNode| {
-        consumer_count[node.id.0] == 1
-            && !dependency[node.id.0]
-            && node.owner.activation.is_none()
+        consumer_count[node.id.0] == 1 && !dependency[node.id.0] && node.owner.activation.is_none()
     };
     let mut found = Vec::new();
     for sum in dag.nodes() {
@@ -817,18 +815,27 @@ mod tests {
     /// spec/05 section 4.1's `[2,3] x [3,4]` matmul graph at `prim`, with
     /// `extra` applied before the sum's root is added. Returns the DAG, the
     /// two operand loads, both expansions, the product, and the sum.
-    fn matmul_graph(
-        prim: Prim,
-        extra: impl FnOnce(&mut Dag, [NodeId; 5]),
-    ) -> (Dag, [NodeId; 6]) {
+    fn matmul_graph(prim: Prim, extra: impl FnOnce(&mut Dag, [NodeId; 5])) -> (Dag, [NodeId; 6]) {
         let mut dag = Dag::new();
         let decl = dag.declare("test");
         let ty = |dims: &[usize]| TensorType {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision: prim,
         };
-        let a = dag.add_node(decl, RiscOp::Load { name: "a".into() }, vec![], ty(&[2, 3]), None);
-        let b = dag.add_node(decl, RiscOp::Load { name: "b".into() }, vec![], ty(&[3, 4]), None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty(&[2, 3]),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty(&[3, 4]),
+            None,
+        );
         let expand = |axis, size| RiscOp::Expand {
             axis,
             size: crate::dag::RtDim::Lit(size),
