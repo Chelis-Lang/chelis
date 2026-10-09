@@ -5,6 +5,7 @@
 
 use super::shape_honesty::*;
 use super::*;
+use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
 
 #[cfg(test)]
 thread_local! {
@@ -558,6 +559,58 @@ pub(super) fn parse_t_fn_parts(expr: &deep::Expr) -> Option<(Vec<deep::Expr>, de
     Some((args.iter().map(|e| (*e).clone()).collect(), (*ret).clone()))
 }
 
+/// Evaluate static Cons heads in source order without descending through the
+/// right spine. A noncanonical or shadowed tail remains an expression to
+/// validate once through the ordinary path.
+fn validate_static_cons_spine(
+    expr: &deep::Expr,
+    type_env: &ShapeTypeEnv,
+    static_env: &mut UnordMap<String, StaticValue>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<StaticValue> {
+    let mut spine = ConsSpine::new(expr);
+    let first = spine.next()?;
+    let mut heads = Vec::new();
+    let mut stopped_at = None;
+    for cell in std::iter::once(first).chain(spine.by_ref()) {
+        let active = matches!(
+            cell.node,
+            deep::Expr::Node(node, _)
+                if active_ir_builtin_name(node, static_env) == Some("Cons")
+        );
+        if !active {
+            if heads.is_empty() {
+                return None;
+            }
+            stopped_at = Some(cell.node);
+            break;
+        }
+        heads.push(validate_ir_expr(
+            cell.head,
+            type_env,
+            static_env,
+            declared_signatures,
+            errors,
+        ));
+    }
+    let tail = stopped_at.unwrap_or_else(|| {
+        match spine
+            .tail()
+            .expect("a drained canonical Cons spine has a terminal")
+        {
+            ConsSpineTail::Nil(tail) | ConsSpineTail::Other(tail) => tail,
+        }
+    });
+    let StaticValue::List(mut tail_values) =
+        validate_ir_expr(tail, type_env, static_env, declared_signatures, errors)
+    else {
+        return Some(StaticValue::Unknown);
+    };
+    heads.append(&mut tail_values);
+    Some(StaticValue::List(heads))
+}
+
 pub(super) fn validate_ir_expr(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
@@ -738,6 +791,18 @@ pub(super) fn validate_ir_expr(
                     .first()
                     .and_then(app_builtin_name)
                     .filter(|name| compiler_name_is_active(name, static_env));
+                if func_name == Some("Cons")
+                    && kids.len() == 3
+                    && let Some(value) = validate_static_cons_spine(
+                        expr,
+                        type_env,
+                        static_env,
+                        declared_signatures,
+                        errors,
+                    )
+                {
+                    return value;
+                }
                 let arg_values = kids
                     .iter()
                     .skip(1)

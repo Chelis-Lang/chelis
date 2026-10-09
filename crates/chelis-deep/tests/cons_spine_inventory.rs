@@ -1,6 +1,6 @@
-//! Structural guard for named canonical list readers and direct literal recursion.
+//! Structural guard for canonical list readers and helper-mediated recursion.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
@@ -20,6 +20,7 @@ const SHARED_READERS: &[&str] = &[
     "static_list_spine_items",
     "untyped_to_tensor_element",
     "lower_list_literal_items",
+    "validate_static_cons_spine",
 ];
 
 // Generic whole-expression evaluators recurse on every expression kind. They
@@ -30,6 +31,37 @@ const GENERIC_RECURSION: &[&str] = &[
     "validate_ir_expr",
     "pattern_matches_with_result_producer",
     "plan_host_pattern",
+];
+
+// A Cons spelling is not always a canonical spine recognizer. These sites
+// build a spine, inspect a fixed two-cell pair, or walk a generic pattern.
+// Keep file and function together so another same-named helper is not exempt.
+const NON_SPINE_CONS_SITES: &[(&str, &str)] = &[
+    (
+        "crates/chelis-surf/src/resugar.rs",
+        "resugar_declared_tensor_value",
+    ),
+    ("crates/chelis-ir/src/host.rs", "plan_host_pattern"),
+    ("crates/chelis-ir/src/lower.rs", "rebuild_cons_chain"),
+    ("crates/chelis-ir/src/lower.rs", "cons_two_int_pair"),
+];
+
+// These expression dispatch cycles recurse across arbitrary syntax. Their
+// canonical Cons branch routes through a named ConsSpine reader above.
+const GENERIC_DISPATCH_CYCLES: &[(&str, &str)] = &[
+    (
+        "crates/chelis-compiler-api/src/runtime/eval.rs",
+        "eval_expr_inner",
+    ),
+    (
+        "crates/chelis-ir/src/host.rs",
+        "lower_host_expr_with_expected",
+    ),
+    ("crates/chelis-ir/src/lower.rs", "lower_expr"),
+    (
+        "crates/chelis-types/src/infer/validate.rs",
+        "validate_ir_expr",
+    ),
 ];
 
 #[derive(Default)]
@@ -74,6 +106,199 @@ fn inspect<'a>(name: &'a str, body: &syn::Block) -> BodyScan<'a> {
     };
     scan.visit_block(body);
     scan
+}
+
+#[derive(Default)]
+struct CallScan {
+    cons_recognition: bool,
+    callees: BTreeSet<String>,
+    impl_type: Option<String>,
+}
+
+impl<'ast> Visit<'ast> for CallScan {
+    fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
+        self.cons_recognition |= lit.value() == "Cons";
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = call.func.as_ref() {
+            let segments = path.path.segments.iter().collect::<Vec<_>>();
+            if let [name] = segments.as_slice() {
+                self.callees.insert(format!("free::{}", name.ident));
+            } else if let [owner, name] = segments.as_slice() {
+                let owner = if owner.ident == "Self" {
+                    self.impl_type.clone()
+                } else {
+                    Some(owner.ident.to_string())
+                };
+                if let Some(owner) = owner {
+                    self.callees
+                        .insert(format!("impl::{owner}::{}", name.ident));
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.cons_recognition |= call.method == "cons_parts";
+        if matches!(call.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self"))
+            && let Some(owner) = &self.impl_type
+        {
+            self.callees
+                .insert(format!("impl::{owner}::{}", call.method));
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+struct FunctionFact {
+    key: String,
+    name: String,
+    scan: CallScan,
+}
+
+fn reaches_function(
+    start: usize,
+    target: usize,
+    functions: &[FunctionFact],
+    by_key: &BTreeMap<&str, Vec<usize>>,
+) -> bool {
+    let mut seen = BTreeSet::new();
+    let mut work = vec![start];
+    while let Some(index) = work.pop() {
+        if !seen.insert(index) {
+            continue;
+        }
+        if index == target {
+            return true;
+        }
+        for callee in &functions[index].scan.callees {
+            if let Some(targets) = by_key.get(callee.as_str()) {
+                work.extend(targets.iter().copied());
+            }
+        }
+    }
+    false
+}
+
+#[derive(Default)]
+struct CallGraph {
+    impl_type: Option<String>,
+    functions: Vec<FunctionFact>,
+}
+
+impl CallGraph {
+    fn record(&mut self, name: &str, body: &syn::Block) {
+        let mut scan = CallScan {
+            impl_type: self.impl_type.clone(),
+            ..CallScan::default()
+        };
+        scan.visit_block(body);
+        let key = match &self.impl_type {
+            Some(owner) => format!("impl::{owner}::{name}"),
+            None => format!("free::{name}"),
+        };
+        self.functions.push(FunctionFact {
+            key,
+            name: name.to_string(),
+            scan,
+        });
+    }
+
+    fn problems(&self, source: &str) -> Vec<String> {
+        let mut by_key: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (index, fact) in self.functions.iter().enumerate() {
+            by_key.entry(fact.key.as_str()).or_default().push(index);
+        }
+        let mut problems = Vec::new();
+        for (root, fact) in self.functions.iter().enumerate() {
+            if GENERIC_RECURSION.contains(&fact.name.as_str()) {
+                continue;
+            }
+            let mut seen = BTreeSet::new();
+            let mut work = vec![root];
+            let mut recursive = false;
+            while let Some(index) = work.pop() {
+                if !seen.insert(index) {
+                    continue;
+                }
+                let current = &self.functions[index];
+                for callee in &current.scan.callees {
+                    if let Some(targets) = by_key.get(callee.as_str()) {
+                        for &target in targets {
+                            recursive |= target == root;
+                            work.push(target);
+                        }
+                    }
+                }
+            }
+            // Generic expression evaluators and lowerers form large call
+            // cycles that dispatch Cons to the shared iterator. A new spine
+            // reader has a different shape: a recursive cycle asks an
+            // independent helper whether the current cell is Cons. Keep the
+            // direct literal/self-recursion rule above for that simpler case.
+            let generic_dispatch_cycle = GENERIC_DISPATCH_CYCLES.iter().any(|(path, anchor)| {
+                *path == source
+                    && seen.iter().copied().any(|candidate| {
+                        self.functions[candidate].name == *anchor
+                            && reaches_function(candidate, root, &self.functions, &by_key)
+                    })
+            });
+            let offending_recognizer = recursive
+                .then(|| {
+                    seen.iter().copied().find(|&candidate| {
+                        let helper = &self.functions[candidate];
+                        if !helper.scan.cons_recognition
+                            || NON_SPINE_CONS_SITES.contains(&(source, helper.name.as_str()))
+                        {
+                            return false;
+                        }
+                        !reaches_function(candidate, root, &self.functions, &by_key)
+                            || !generic_dispatch_cycle
+                    })
+                })
+                .flatten();
+            if let Some(helper) = offending_recognizer {
+                problems.push(format!(
+                    "{source}:{} recursively walks Cons via {}",
+                    fact.name, self.functions[helper].name
+                ));
+            }
+        }
+        problems
+    }
+}
+
+impl<'ast> Visit<'ast> for CallGraph {
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        self.record(&item.sig.ident.to_string(), &item.block);
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        let previous = self.impl_type.take();
+        self.impl_type = match item.self_ty.as_ref() {
+            syn::Type::Path(path) => path.path.segments.last().map(|part| part.ident.to_string()),
+            _ => None,
+        };
+        syn::visit::visit_item_impl(self, item);
+        self.impl_type = previous;
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        self.record(&item.sig.ident.to_string(), &item.block);
+    }
+}
+
+fn recursive_cons_walker_problems_in_file(parsed: &syn::File, source: &str) -> Vec<String> {
+    let mut graph = CallGraph::default();
+    graph.visit_file(parsed);
+    graph.problems(source)
+}
+
+fn recursive_cons_walker_problems(contents: &str, source: &str) -> Vec<String> {
+    let parsed = syn::parse_file(contents).expect("parse source for Cons inventory");
+    recursive_cons_walker_problems_in_file(&parsed, source)
 }
 
 #[derive(Default)]
@@ -142,6 +367,12 @@ fn canonical_cons_readers_share_the_iterator_and_no_direct_literal_reader_appear
             let contents = fs::read_to_string(&file).expect("read Rust source");
             let parsed = syn::parse_file(&contents).expect("parse Rust source");
             inventory.visit_file(&parsed);
+            inventory
+                .problems
+                .extend(recursive_cons_walker_problems_in_file(
+                    &parsed,
+                    &inventory.source,
+                ));
         }
     }
     for reader in SHARED_READERS {
@@ -179,4 +410,101 @@ fn inventory_does_not_call_another_types_same_named_method_self_recursion() {
     };
     let scan = inspect("new_reader", &function.block);
     assert!(scan.cons_literal && !scan.self_call);
+}
+
+#[test]
+fn inventory_detects_cons_recognition_and_recursion_split_across_helpers() {
+    let source = r#"
+        fn recognizes_cons(name: &str) -> bool { name == "Cons" }
+        fn walk(node: &str) {
+            if recognizes_cons(node) { continue_walk(node); }
+        }
+        fn continue_walk(node: &str) { walk(node); }
+    "#;
+    let problems = recursive_cons_walker_problems(source, "probe.rs");
+    assert!(
+        problems.iter().any(|problem| problem.contains("walk")),
+        "mutual recursion through a separate recognizer must fail: {problems:?}"
+    );
+}
+
+#[test]
+fn inventory_detects_cons_recognition_inside_a_mutual_recursion_cycle() {
+    let source = r#"
+        fn walk(name: &str) {
+            if name == "Cons" { continue_walk(name); }
+        }
+        fn continue_walk(name: &str) { walk(name); }
+    "#;
+    let problems = recursive_cons_walker_problems(source, "probe.rs");
+    assert!(
+        problems.iter().any(|problem| problem.contains("walk")),
+        "mutual recursion containing Cons recognition must fail: {problems:?}"
+    );
+}
+
+#[test]
+fn inventory_rejects_a_recursive_reader_even_if_it_mentions_the_shared_iterator() {
+    let source = r#"
+        fn recognizes_cons(name: &str) -> bool { name == "Cons" }
+        fn walk(name: &str) {
+            let _ = ConsSpine::new(name);
+            if recognizes_cons(name) { continue_walk(name); }
+        }
+        fn continue_walk(name: &str) { walk(name); }
+    "#;
+    let problems = recursive_cons_walker_problems(source, "probe.rs");
+    assert!(
+        problems.iter().any(|problem| problem.contains("walk")),
+        "mentioning ConsSpine cannot exempt a recursive walker: {problems:?}"
+    );
+}
+
+#[test]
+fn inventory_accepts_nonrecursive_cons_helper_and_unrelated_recursion() {
+    let source = r#"
+        fn recognizes_cons(name: &str) -> bool { name == "Cons" }
+        fn iterative_reader(name: &str) {
+            let mut current = name;
+            while recognizes_cons(current) { current = "Nil"; }
+        }
+        fn unrelated_recursion(value: usize) {
+            if value > 0 { unrelated_recursion(value - 1); }
+        }
+    "#;
+    assert!(
+        recursive_cons_walker_problems(source, "probe.rs").is_empty(),
+        "finite iteration and unrelated recursion are permitted"
+    );
+}
+
+#[test]
+fn inventory_detects_method_recursion_through_a_cons_helper() {
+    let source = r#"
+        struct Reader;
+        impl Reader {
+            fn recognizes(&self, name: &str) -> bool { name == "Cons" }
+            fn walk(&self, name: &str) {
+                if self.recognizes(name) { self.walk(name); }
+            }
+        }
+    "#;
+    let problems = recursive_cons_walker_problems(source, "probe.rs");
+    assert!(
+        problems.iter().any(|problem| problem.contains("walk")),
+        "method helper plus recursive method must fail: {problems:?}"
+    );
+}
+
+#[test]
+fn inventory_does_not_confuse_another_types_method_with_recursion() {
+    let source = r#"
+        struct Other;
+        impl Other { fn walk(name: &str) { let _ = name; } }
+        fn walk(name: &str) {
+            let _ = "Cons";
+            Other::walk(name);
+        }
+    "#;
+    assert!(recursive_cons_walker_problems(source, "probe.rs").is_empty());
 }
