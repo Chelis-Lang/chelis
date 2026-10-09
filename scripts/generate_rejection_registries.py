@@ -11,6 +11,10 @@ Run with the uv-managed interpreter:
 
     .venv/bin/python scripts/generate_rejection_registries.py --check
     .venv/bin/python scripts/generate_rejection_registries.py --write
+
+Write derives the artifacts from Cargo target metadata and the parser-confirmed
+production module graph. Check additionally verifies the independent rustc-read
+source closure and byte agreement; the always-running PR Docs oracle owns it.
 """
 
 from __future__ import annotations
@@ -810,12 +814,12 @@ def render_registry(atoms: list[str], issues: list[int]) -> str:
     return "\n".join(lines)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--write", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     root = Path(__file__).resolve().parent.parent
     workspace = discover_production_workspace(root)
@@ -829,7 +833,6 @@ def main() -> int:
     if args.write:
         manifest.write_text(rendered_manifest)
         output.write_text(rendered_registry)
-        verify_compiler_source_closure(root, sources, workspace)
         print(f"wrote {manifest.relative_to(root)}")
         print(f"wrote {output.relative_to(root)}")
         return 0

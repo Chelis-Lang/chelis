@@ -678,7 +678,8 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
 
 # The `--fast` inner-loop pass. Fix-in-place commands first, so the tree the
 # read-only checks see is already normalized: regenerate the tier-0 artifacts
-# (Python only, sub-second), then `cargo fmt --all` in write mode. The lint row
+# (including the parser-confirmed production graph), then `cargo fmt --all` in
+# write mode. The lint row
 # is shared with `--validation` and is also the `chelis` builder the tripwire
 # nextest reuses. Per-crate clippy and the tripwire run are appended by
 # `fast_command_list`.

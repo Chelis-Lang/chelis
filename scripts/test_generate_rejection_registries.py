@@ -7,6 +7,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import generate_rejection_registries as registries
 
 from generate_rejection_registries import (
     MANIFEST_REL,
@@ -33,6 +36,56 @@ from generate_rejection_registries import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+class RegistryWriterAndChecker(unittest.TestCase):
+    def test_write_regenerates_citations_and_check_requires_compiler_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "scripts").mkdir()
+            (root / MANIFEST_REL).parent.mkdir(parents=True)
+            (root / OUTPUT_REL).parent.mkdir(parents=True)
+            workspace = ProductionWorkspace(targets=())
+            source = ProductionSource(
+                Path("crates/example/src/lib.rs"),
+                'unimplemented_rejection!(1234, "not implemented");\n',
+            )
+            with (
+                mock.patch.object(registries, "__file__", str(root / "scripts/generate_rejection_registries.py")),
+                mock.patch.object(registries, "discover_production_workspace", return_value=workspace),
+                mock.patch.object(registries, "discover_production_sources", return_value=[source]) as discover,
+                mock.patch.object(registries, "discover_atoms", return_value=["[05-OP-1]"]),
+                mock.patch.object(registries, "verify_compiler_source_closure") as closure,
+            ):
+                self.assertEqual(registries.main(["--write"]), 0)
+                discover.assert_called_once_with(root.resolve(), workspace)
+                closure.assert_not_called()
+                self.assertEqual(registries.main(["--check"]), 0)
+                closure.assert_called_once()
+                closure.side_effect = RegistryError("compiler-only source omitted")
+                with self.assertRaisesRegex(RegistryError, "compiler-only source omitted"):
+                    registries.main(["--check"])
+                self.assertEqual(closure.call_count, 2)
+            self.assertEqual(load_issue_manifest(root / MANIFEST_REL), [1234])
+            self.assertIn("[05-OP-1]", (root / OUTPUT_REL).read_text())
+
+    def test_write_rejects_a_dynamic_production_citation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "scripts").mkdir()
+            source = ProductionSource(
+                Path("crates/example/src/lib.rs"),
+                'unimplemented_rejection!(issue, "dynamic");\n',
+            )
+            with (
+                mock.patch.object(registries, "__file__", str(root / "scripts/generate_rejection_registries.py")),
+                mock.patch.object(registries, "discover_production_workspace", return_value=ProductionWorkspace(targets=())),
+                mock.patch.object(registries, "discover_production_sources", return_value=[source]),
+                mock.patch.object(registries, "verify_compiler_source_closure") as closure,
+            ):
+                with self.assertRaisesRegex(RegistryError, "positive decimal integer literal"):
+                    registries.main(["--write"])
+                closure.assert_not_called()
 
 
 class DiscoverAtoms(unittest.TestCase):
