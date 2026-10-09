@@ -1,4 +1,5 @@
-//! [05-OP-33]/[05-MOV-1]: movement loops project indices without rank scratch.
+//! [05-OP-33]/[05-MOV-1]: movement loops project indices without rank scratch
+//! or a per-element runtime index call.
 const SOURCE: &str = include_str!("../src/emit.rs");
 fn method<'a>(source: &'a str, name: &str) -> &'a str {
     let start = source.find(&format!("    fn {name}(")).expect(name);
@@ -25,11 +26,7 @@ fn checked(source: &str) -> bool {
         let copy = body
             .contains("self.emit_movement_copy(")
             .then(|| method(source, "emit_movement_copy"));
-        for required in [
-            "chelis_movement_count(",
-            "chelis_movement_index(",
-            "chelis_movement_plan_release(",
-        ] {
+        for required in [".emit_movement_loop(", "chelis_movement_plan_release("] {
             if !body.contains(required) && !copy.is_some_and(|copy| copy.contains(required)) {
                 return false;
             }
@@ -41,13 +38,25 @@ fn checked(source: &str) -> bool {
             "chelis_tensor_unravel_index(",
             "chelis_tensor_flat_index(",
             "chelis_tensor_affine_index(",
+            "chelis_movement_index(",
         ] {
             if body.contains(retired) {
                 return false;
             }
         }
     }
-    true
+    // The loop reads the plan's checked projection once and makes no
+    // per-element runtime call.
+    let movement_loop = method(source, "emit_movement_loop");
+    [
+        "chelis_movement_base(",
+        "chelis_movement_term(",
+        "term(\"MODULUS\"",
+        "term(\"SCALE\"",
+    ]
+    .iter()
+    .all(|required| movement_loop.contains(required))
+        && !movement_loop.contains("chelis_movement_index(")
 }
 #[test]
 fn all_five_movement_emitters_use_checked_plans_without_rank_scratch() {
@@ -59,10 +68,17 @@ fn missing_movement_projection_or_release_fails_the_adoption_control() {
         "chelis_tensor_permute_plan(",
         "chelis_tensor_expand_plan(",
         "self.emit_affine_plan(",
-        "chelis_movement_count(",
-        "chelis_movement_index(",
+        ".emit_movement_loop(",
+        "chelis_movement_base(",
+        "chelis_movement_term(",
         "chelis_movement_plan_release(",
     ] {
         assert!(!checked(&SOURCE.replace(removed, "REMOVED(")), "{removed}");
     }
+    let movement_loop = method(SOURCE, "emit_movement_loop");
+    let per_element = movement_loop.replace(
+        "self.line(body);",
+        "self.line(\"int64_t probe = chelis_movement_index(plan, i);\"); self.line(body);",
+    );
+    assert!(!checked(&SOURCE.replace(movement_loop, &per_element)));
 }

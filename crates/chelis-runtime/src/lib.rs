@@ -33,8 +33,8 @@ mod list;
 mod metadata;
 use metadata::{
     AllocationBytes, AxisDecomposition, ByteCount, ElementCount, IterationSpace, MatmulDimension,
-    MatmulMetadata, MatmulPart, MetadataError, MovementMetadata, MovementOp, ReductionMetadata,
-    ShapeMetadata, SparseMetadata, StridedMetadata, WindowMetadata,
+    MatmulMetadata, MatmulPart, MetadataError, MovementMetadata, MovementOp, ProjectionPart,
+    ReductionMetadata, ShapeMetadata, SparseMetadata, StridedMetadata, WindowMetadata,
 };
 mod ownership_ledger;
 pub mod public_headers;
@@ -3115,6 +3115,53 @@ pub const CHELIS_MOVEMENT_STRIDE: chelis_movement_op = 4;
 pub type chelis_movement_side = c_int;
 pub const CHELIS_MOVEMENT_SOURCE: chelis_movement_side = 0;
 pub const CHELIS_MOVEMENT_RESULT: chelis_movement_side = 1;
+
+pub type chelis_projection_part = c_int;
+pub const CHELIS_PROJECTION_GROUP: chelis_projection_part = 0;
+pub const CHELIS_PROJECTION_LEAF: chelis_projection_part = 1;
+pub type chelis_projection_field = c_int;
+pub const CHELIS_PROJECTION_DIVISOR: chelis_projection_field = 0;
+pub const CHELIS_PROJECTION_MODULUS: chelis_projection_field = 1;
+pub const CHELIS_PROJECTION_SCALE: chelis_projection_field = 2;
+
+/// One field of one term of a plan's checked projection ([05-OP-33]).
+fn projection_term(
+    projection: &metadata::AffineProjection,
+    field: chelis_projection_field,
+    term: chelis_scalar,
+    op: &str,
+) -> i64 {
+    let term = affine_scalar(term, op);
+    let term = usize::try_from(term)
+        .ok()
+        .and_then(|term| projection.terms().get(term))
+        .unwrap_or_else(|| {
+            affine_result(
+                Err(MetadataError::Domain("projection term outside rank".into())),
+                op,
+            )
+        });
+    match field {
+        CHELIS_PROJECTION_DIVISOR => term.divisor,
+        CHELIS_PROJECTION_MODULUS => term.modulus,
+        CHELIS_PROJECTION_SCALE => term.scale,
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid projection field".into())),
+            op,
+        ),
+    }
+}
+
+fn projection_part(part: chelis_projection_part, op: &str) -> ProjectionPart {
+    match part {
+        CHELIS_PROJECTION_GROUP => ProjectionPart::Group,
+        CHELIS_PROJECTION_LEAF => ProjectionPart::Leaf,
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid projection part".into())),
+            op,
+        ),
+    }
+}
 #[allow(non_camel_case_types)]
 pub struct chelis_movement_plan {
     metadata: MovementMetadata,
@@ -3249,6 +3296,19 @@ pub unsafe extern "C" fn chelis_movement_index(
     affine_result(plan.metadata.index(affine_scalar(linear, plan.op)), plan.op)
 }
 #[no_mangle]
+pub unsafe extern "C" fn chelis_movement_term(
+    plan: *const chelis_movement_plan,
+    field: chelis_projection_field,
+    term: chelis_scalar,
+) -> i64 {
+    let plan = movement_plan(plan);
+    projection_term(plan.metadata.projection(), field, term, plan.op)
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_base(plan: *const chelis_movement_plan) -> i64 {
+    movement_plan(plan).metadata.projection().base()
+}
+#[no_mangle]
 pub unsafe extern "C" fn chelis_movement_check_target(
     plan: *const chelis_movement_plan,
     rank: chelis_scalar,
@@ -3349,6 +3409,17 @@ pub unsafe extern "C" fn chelis_window_index(
             .index(affine_scalar(group, plan.op), affine_scalar(leaf, plan.op)),
         plan.op,
     )
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_term(
+    plan: *const chelis_window_plan,
+    part: chelis_projection_part,
+    field: chelis_projection_field,
+    term: chelis_scalar,
+) -> i64 {
+    let plan = window_plan(plan);
+    let projection = plan.metadata.projection(projection_part(part, plan.op));
+    projection_term(projection, field, term, plan.op)
 }
 #[no_mangle]
 pub unsafe extern "C" fn chelis_window_check_tensor(
@@ -3887,6 +3958,18 @@ pub unsafe extern "C" fn chelis_reduction_index(
             .index(affine_scalar(outer, plan.op), affine_scalar(leaf, plan.op)),
         plan.op,
     )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_term(
+    plan: *const chelis_reduction_plan,
+    part: chelis_projection_part,
+    field: chelis_projection_field,
+    term: chelis_scalar,
+) -> i64 {
+    let plan = reduction_plan(plan);
+    let projection = plan.metadata.projection(projection_part(part, plan.op));
+    projection_term(projection, field, term, plan.op)
 }
 
 #[no_mangle]

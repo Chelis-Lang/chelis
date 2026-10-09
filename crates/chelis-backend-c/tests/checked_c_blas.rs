@@ -29,6 +29,9 @@ fn checked_dag(source: &str) -> bool {
                     && body.contains("chelis_matmul_plan_release(")
                     && !body.contains("malloc(")
                     && !body.contains("_offset +=")
+                    // A batch's matrix is one contiguous run: its checked first
+                    // index locates every element without a per-element call.
+                    && !body.contains("chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i)")
             })
 }
 #[test]
@@ -50,6 +53,14 @@ fn blas_domain_bypass_controls_are_rejected() {
             "{required}"
         );
     }
+    let body = method(DAG, "emit_blas_matmul_reduced_f");
+    let per_element = body.replacen(
+        "chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));",
+        "chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i));",
+        1,
+    );
+    assert_ne!(per_element, body);
+    assert!(!checked_dag(&DAG.replace(body, &per_element)));
 }
 #[test]
 fn blas_host_summary_uses_checked_submission_and_offsets() {

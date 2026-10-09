@@ -293,6 +293,7 @@ EXPECTED_OP_MANIFESTS = {
 | checked reduction reduction_count | `int64_t chelis_reduction_count(const chelis_reduction_plan *plan)` |
 | checked reduction reduction_extent | `int64_t chelis_reduction_extent(const chelis_reduction_plan *plan, chelis_scalar axis)` |
 | checked reduction reduction_index | `int64_t chelis_reduction_index(const chelis_reduction_plan *plan, chelis_scalar outer, chelis_scalar leaf)` |
+| checked reduction reduction_term | `int64_t chelis_reduction_term(const chelis_reduction_plan *plan, chelis_projection_part part, chelis_projection_field field, chelis_scalar term)` |
 | checked reduction reduction_check_target | `void chelis_reduction_check_target(const chelis_reduction_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
 | checked reduction reduction_check_scratch | `void chelis_reduction_check_scratch(const chelis_reduction_plan *plan, chelis_scalar exemplar)` |
 | checked reduction reduction_plan_release | `void chelis_reduction_plan_release(chelis_reduction_plan *plan)` |
@@ -319,12 +320,15 @@ EXPECTED_OP_MANIFESTS = {
 | checked movement chelis_movement_extent | `int64_t chelis_movement_extent(const chelis_movement_plan *plan, chelis_movement_side side, chelis_scalar axis)` |
 | checked movement chelis_movement_count | `int64_t chelis_movement_count(const chelis_movement_plan *plan)` |
 | checked movement chelis_movement_index | `int64_t chelis_movement_index(const chelis_movement_plan *plan, chelis_scalar linear)` |
+| checked movement chelis_movement_term | `int64_t chelis_movement_term(const chelis_movement_plan *plan, chelis_projection_field field, chelis_scalar term)` |
+| checked movement chelis_movement_base | `int64_t chelis_movement_base(const chelis_movement_plan *plan)` |
 | checked movement chelis_movement_check_target | `void chelis_movement_check_target(const chelis_movement_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
 | checked movement chelis_movement_plan_release | `void chelis_movement_plan_release(chelis_movement_plan *plan)` |
 | checked window tensor_window_plan | `chelis_window_plan *chelis_tensor_window_plan(const chelis_tensor *input, chelis_scalar count, const chelis_scalar *window, const chelis_scalar *steps, chelis_window_op operation)` |
 | checked window window_extent | `int64_t chelis_window_extent(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar axis)` |
 | checked window window_count | `int64_t chelis_window_count(const chelis_window_plan *plan)` |
 | checked window window_index | `int64_t chelis_window_index(const chelis_window_plan *plan, chelis_scalar group, chelis_scalar leaf)` |
+| checked window window_term | `int64_t chelis_window_term(const chelis_window_plan *plan, chelis_projection_part part, chelis_projection_field field, chelis_scalar term)` |
 | checked window window_check_tensor | `void chelis_window_check_tensor(const chelis_window_plan *plan, const chelis_tensor *tensor, chelis_window_side side)` |
 | checked window window_check_target | `void chelis_window_check_target(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar rank, const chelis_scalar *shape)` |
 | checked window window_plan_release | `void chelis_window_plan_release(chelis_window_plan *plan)` |

@@ -42,6 +42,22 @@ fn nontrailing_and_multiple_axes_have_exact_row_major_indices() {
         let p = plan(&[2, 3, 2], &[-1, -3]);
         assert_eq!(chelis_reduction_count(p), 4);
         assert_eq!(chelis_reduction_extent(p, int(-1)), 3);
+        // Each term is (divisor, modulus, scale): the group runs over the
+        // result axis and the leaf over the selected axes in axis order.
+        for (part, terms) in [
+            (CHELIS_PROJECTION_GROUP, &[(1, 3, 2)][..]),
+            (CHELIS_PROJECTION_LEAF, &[(2, 2, 6), (1, 2, 1)][..]),
+        ] {
+            for (k, &(divisor, modulus, scale)) in terms.iter().enumerate() {
+                for (field, value) in [
+                    (CHELIS_PROJECTION_DIVISOR, divisor),
+                    (CHELIS_PROJECTION_MODULUS, modulus),
+                    (CHELIS_PROJECTION_SCALE, scale),
+                ] {
+                    assert_eq!(chelis_reduction_term(p, part, field, int(k as i64)), value);
+                }
+            }
+        }
         for (outer, expected) in [[0, 1, 6, 7], [2, 3, 8, 9], [4, 5, 10, 11]]
             .iter()
             .enumerate()
@@ -241,6 +257,18 @@ fn invalid_metadata_child() {
                     CHELIS_REDUCE_COUNT,
                 );
             }
+            "term-part" => {
+                let p = plan(&[2, 3], &[1]);
+                chelis_reduction_term(p, 2, CHELIS_PROJECTION_SCALE, int(0));
+            }
+            "term-field" => {
+                let p = plan(&[2, 3], &[1]);
+                chelis_reduction_term(p, CHELIS_PROJECTION_LEAF, -1, int(0));
+            }
+            "term-range" => {
+                let p = plan(&[2, 3], &[1]);
+                chelis_reduction_term(p, CHELIS_PROJECTION_LEAF, CHELIS_PROJECTION_SCALE, int(1));
+            }
             "scalar-tag" => {
                 let p = plan(&[2], &[0]);
                 chelis_reduction_index(p, chelis_scalar_from_bits(CHELIS_DTYPE_F32, 0), int(0));
@@ -277,6 +305,9 @@ fn malformed_and_overflowing_domains_fail_with_the_owning_numeric_trap() {
         ("scratch-bytes", "overflow"),
         ("null-shape", "domain"),
         ("scalar-tag", "domain"),
+        ("term-part", "domain"),
+        ("term-field", "domain"),
+        ("term-range", "domain"),
     ] {
         let result = Command::new(env::current_exe().unwrap())
             .args(["--exact", "invalid_metadata_child", "--nocapture"])

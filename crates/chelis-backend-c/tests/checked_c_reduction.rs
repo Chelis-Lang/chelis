@@ -20,7 +20,7 @@ fn validate(source: &str) -> Result<(), String> {
         if check >= body.find("self.emit_slot_wrapper(").expect("allocation") {
             return Err(format!("{name}: late plan"));
         }
-        if !body.contains("chelis_reduction_index(")
+        if !body.contains("self.projection_index(id")
             || !body.contains("chelis_reduction_plan_release(")
         {
             return Err(format!("{name}: missing checked index or release"));
@@ -31,6 +31,7 @@ fn validate(source: &str) -> Result<(), String> {
             "malloc(",
             "full_indices[",
             "__count_n_{id} *=",
+            "chelis_reduction_index(",
         ] {
             if body.contains(raw) {
                 return Err(format!("{name}: raw metadata authority"));
@@ -64,6 +65,8 @@ fn validate(source: &str) -> Result<(), String> {
         "chelis_reduction_check_target(",
         "self.emit_runtime_dim_sites(",
         "chelis_reduction_check_scratch(",
+        "self.emit_projection_terms(",
+        "chelis_reduction_term(",
     ] {
         if !plan.contains(required) {
             return Err(format!("missing plan obligation {required}"));
@@ -92,7 +95,7 @@ fn bypassing_each_consumer_and_scratch_owner_is_rejected() {
         let body = method(source, name);
         for original in [
             "self.emit_reduction_plan(",
-            "chelis_reduction_index(",
+            "self.projection_index(id",
             "chelis_reduction_plan_release(",
         ] {
             assert!(
@@ -100,6 +103,16 @@ fn bypassing_each_consumer_and_scratch_owner_is_rejected() {
                 "{name}: {original}"
             );
         }
+        // A per-element runtime index call is rejected even beside the projection.
+        let per_element = body.replacen(
+            "self.projection_index(id",
+            "chelis_reduction_index(); self.projection_index(id",
+            1,
+        );
+        assert!(
+            validate(&source.replace(body, &per_element)).is_err(),
+            "{name}: per-element index"
+        );
     }
     let max = method(source, "emit_reduce_max");
     assert!(

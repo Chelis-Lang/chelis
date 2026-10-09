@@ -50,6 +50,24 @@ fn movement_plan_c_boundary_preserves_shapes_indices_and_independent_lifetime() 
             assert_eq!(chelis_movement_index(permute, int(4)), 2);
             assert_eq!(chelis_movement_index(insert, int(23)), 5);
             assert_eq!(chelis_movement_index(pad, int(5)), 16);
+            // Each term is (divisor, modulus, scale) over the counted domain.
+            for (plan, base, terms) in [
+                (permute, 0, &[(2, 3, 1), (1, 2, 3)][..]),
+                (insert, 0, &[(12, 2, 3), (3, 4, 0), (1, 3, 1)][..]),
+                (pad, 8, &[(3, 2, 6), (1, 3, 1)][..]),
+            ] {
+                assert_eq!(chelis_movement_base(plan), base);
+                for (k, &(divisor, modulus, scale)) in terms.iter().enumerate() {
+                    let term = int(k as i64);
+                    for (field, value) in [
+                        (CHELIS_PROJECTION_DIVISOR, divisor),
+                        (CHELIS_PROJECTION_MODULUS, modulus),
+                        (CHELIS_PROJECTION_SCALE, scale),
+                    ] {
+                        assert_eq!(chelis_movement_term(plan, field, term), value);
+                    }
+                }
+            }
             for plan in [permute, insert, pad] {
                 chelis_movement_plan_release(plan);
             }
@@ -123,6 +141,25 @@ fn invalid_movement_plan_child() {
             "null-plan" => {
                 chelis_movement_count(std::ptr::null());
             }
+            "term-field" => {
+                chelis_movement_term(p, 3, int(0));
+            }
+            "term-range" => {
+                chelis_movement_term(p, CHELIS_PROJECTION_SCALE, int(2));
+            }
+            "term-negative" => {
+                chelis_movement_term(p, CHELIS_PROJECTION_SCALE, int(-1));
+            }
+            "term-tag" => {
+                chelis_movement_term(
+                    p,
+                    CHELIS_PROJECTION_SCALE,
+                    chelis_scalar_from_bits(CHELIS_DTYPE_I32, 0),
+                );
+            }
+            "base-null" => {
+                chelis_movement_base(std::ptr::null());
+            }
             _ => panic!("invalid constructor returned"),
         }
         panic!("invalid observation returned");
@@ -147,6 +184,11 @@ fn invalid_movement_plan_metadata_fails_with_its_operation_identity() {
         ("side", "permute"),
         ("target", "permute"),
         ("null-plan", "movement"),
+        ("term-field", "permute"),
+        ("term-range", "permute"),
+        ("term-negative", "permute"),
+        ("term-tag", "permute"),
+        ("base-null", "movement"),
     ] {
         let output = Command::new(env::current_exe().unwrap())
             .args(["--exact", "invalid_movement_plan_child", "--nocapture"])
