@@ -401,7 +401,7 @@ fn typed_expr_constructor_produces_a_gated_node() {
         vec![Expr::Atom(Atom::Int(1), sp())],
         sp(),
     );
-    assert!(matches!(expr, Expr::Node(node, _) if node.tag() == DeepTag::Lit));
+    assert!(matches!(&expr, Expr::Node(node, _) if node.tag() == DeepTag::Lit));
 }
 
 #[test]

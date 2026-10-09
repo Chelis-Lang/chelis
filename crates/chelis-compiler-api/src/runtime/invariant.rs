@@ -598,10 +598,9 @@ fn strip_span_meta(expr: &mut Expr) {
             // and children, and rebuild it. Removing `span` keys cannot
             // invalidate a node, so the rebuild re-admits what it received.
             let placeholder = Expr::Atom(Atom::Bool(false), Span::new(0, 0));
-            let Expr::Node(node, span) = std::mem::replace(expr, placeholder) else {
-                unreachable!("matched Node above");
-            };
-            let (tag, mut metadata, mut children) = node.into_parts();
+            let (tag, mut metadata, mut children, span) = std::mem::replace(expr, placeholder)
+                .into_node_parts()
+                .unwrap_or_else(|_| unreachable!("matched Node above"));
             strip_annotation_spans(&mut metadata);
             for child in &mut children {
                 strip_span_meta(child);

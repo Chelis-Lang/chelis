@@ -203,7 +203,7 @@ fn assert_current_literal_result(library: &serde_json::Value) {
         "fixture must contain exactly one literal-result declaration"
     );
     let definition: Expr = serde_json::from_value(selected[0].1.clone()).unwrap();
-    let Expr::Node(definition, _) = definition else {
+    let Expr::Node(definition, _) = &definition else {
         panic!("the checked definition is a decoded node");
     };
     let signature = definition
