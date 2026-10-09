@@ -102,16 +102,20 @@ fn both_lanes(dir: &TempDir, stem: &str, source: &str) -> [(&'static str, LaneRe
 }
 
 fn assert_add_result_claim(dir: &TempDir, stem: &str, source: &str) {
-    let context = "extent `2`: claimed = 2, add axis 0 = 3";
-    let trap = "numeric trap: domain in add at i64";
+    assert_result_claim(dir, stem, source, "add");
+}
+
+fn assert_result_claim(dir: &TempDir, stem: &str, source: &str, op: &str) {
+    let context = format!("extent `2`: claimed = 2, {op} axis 0 = 3");
+    let trap = format!("numeric trap: domain in {op} at i64");
     for (lane, result) in both_lanes(dir, stem, source) {
         assert!(
             !result.success,
-            "{lane}: a declared extent 2 over add's extent 3 must trap: {}",
+            "{lane}: a declared extent 2 over {op}'s extent 3 must trap: {}",
             result.text
         );
         assert!(
-            result.text.contains(context),
+            result.text.contains(&context),
             "{lane}: the returned-value producer owns the context `{context}`: {}",
             result.text
         );
@@ -124,7 +128,7 @@ fn assert_add_result_claim(dir: &TempDir, stem: &str, source: &str) {
             !result
                 .text
                 .contains("numeric trap: domain in shrink at i64"),
-            "{lane}: operand order or origin traversal must not rename add's guard: {}",
+            "{lane}: operand order or origin traversal must not rename {op}'s guard: {}",
             result.text
         );
         assert!(
@@ -259,6 +263,19 @@ fn no_claim_capable_operand_origin_does_not_drop_the_result_claim() {
                   to_tensor([4.0f32, 5.0f32, 6.0f32]),\n\
                   )\n";
     assert_add_result_claim(&dir, "no_origin", source);
+}
+
+/// chelis#3428: `pow` is a same-shape producer ([05-OP-79]), so a declared
+/// result extent on a returned `pow` is checked at `pow` on both lanes.
+#[test]
+fn a_returned_pow_owns_its_result_claim() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(x: tensor[*, f32], y: tensor[*, f32]) -> tensor[2, f32] = pow(x, y)\n\
+                  out = f(\n  \
+                  to_tensor([1.0f32, 2.0f32, 3.0f32]),\n  \
+                  to_tensor([4.0f32, 5.0f32, 6.0f32]),\n\
+                  )\n";
+    assert_result_claim(&dir, "pow_claim", source, "pow");
 }
 
 /// Static contradiction remains a checker disposition; the runtime mechanism

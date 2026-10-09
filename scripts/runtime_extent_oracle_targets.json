@@ -557,6 +557,7 @@
         "mode": "all"
       },
       "expected": [
+        "a_returned_pow_owns_its_result_claim",
         "a_statically_refuted_same_shape_result_is_a_dimension_mismatch",
         "an_agreeing_same_shape_result_claim_executes_exactly",
         "distinct_candidate_paths_do_not_create_source_order_attribution",

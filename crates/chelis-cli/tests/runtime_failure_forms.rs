@@ -388,6 +388,12 @@ fn operand_shape_disagreements_trap_in_the_operation() {
             "{LENGTHS}def f(x: tensor[*, f32], y: tensor[*, f32]) -> tensor[*, bool] = cmplt(x, y)\n\
              out = f(to_tensor(v(3i64)), to_tensor(v({{value}})))\n"
         ),
+        // chelis#3428: `pow` is a same-shape elementwise op ([05-OP-79]), so
+        // the C lane runs the same operand guard as `add` and `cmplt`.
+        format!(
+            "{LENGTHS}def f(x: tensor[*, f32], y: tensor[*, f32]) -> tensor[*, f32] = pow(x, y)\n\
+             out = f(to_tensor(v(3i64)), to_tensor(v({{value}})))\n"
+        ),
         format!(
             "{LENGTHS}def f(b: tensor[*, f32], u: tensor[*, f32]) -> tensor[*, f32] = scatter_replace(b, to_tensor([0i64, 1i64]), u, 0i32)\n\
              out = f(to_tensor(v(4i64)), to_tensor(v({{value}})))\n"
@@ -419,6 +425,14 @@ fn operand_shape_disagreements_trap_in_the_operation() {
             "cmplt operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2",
             "cmplt",
             "out = tensor(shape=[3], data=[false, false, false])\n",
+        ),
+        (
+            "pow_operands",
+            "2i64",
+            "3i64",
+            "pow operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2",
+            "pow",
+            "out = tensor(shape=[3], data=[1.0, 1.0, 4.0])\n",
         ),
         (
             "scatter_replace_updates",
@@ -457,6 +471,23 @@ fn operand_shape_disagreements_trap_in_the_operation() {
             passing_out,
         });
     }
+}
+
+/// chelis#3428's witness: the rhs extent is computed at run time from the
+/// lhs's, so only the run time sees the disagreement, and the C lane must
+/// render the same `pow` trap as eval rather than a runtime index-step
+/// failure.
+#[test]
+fn a_runtime_extent_pow_disagreement_traps_in_pow() {
+    let source = "def pw_bad(x: tensor[*, f32]) -> tensor[*, f32] = pow(x, 2.0f32 |> scalar_to_tensor |> insert(0i32, add(shape(x, 0i32), 1i64)))\n\
+                  bad = pw_bad(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+    let run = parity::assert_lanes_agree(source, "pow_runtime_extent");
+    assert_eq!(run.status, Some(1), "{run:?}");
+    assert_eq!(
+        run.context, "pow operands disagree at axis 0: lhs [3] has 3, rhs [4] has 4",
+        "{run:?}"
+    );
+    assert_eq!(run.failure, "numeric trap: domain in pow at i64", "{run:?}");
 }
 
 /// The class lock behind the rows above: no runtime, emitter or evaluator

@@ -378,49 +378,93 @@ fn rt_dim_supplies_extent(dim: &WireRtDim) -> bool {
 }
 
 fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
-    matches!(
-        op,
+    // Exhaustive with no wildcard arm, like its IR twin
+    // `chelis_ir::axis_sources::is_same_shape_result_op`: a new wire
+    // operation does not compile until it states its membership.
+    match op {
         WireRiscOp::Add
-            | WireRiscOp::Sub
-            | WireRiscOp::Mul
-            | WireRiscOp::Div
-            | WireRiscOp::Pow
-            | WireRiscOp::FloorDiv
-            | WireRiscOp::TruncDiv
-            | WireRiscOp::Mod
-            | WireRiscOp::Bitwise { .. }
-            | WireRiscOp::Compare { .. }
-            | WireRiscOp::Logical { .. }
-            | WireRiscOp::Where { .. }
-            | WireRiscOp::MaxElem
-            | WireRiscOp::MinElem
-            | WireRiscOp::ExtremaAdjoint { .. }
-            | WireRiscOp::Relu
-            | WireRiscOp::Softmax { .. }
-            | WireRiscOp::ReluAdjoint
-            | WireRiscOp::Neg
-            | WireRiscOp::Recip
-            | WireRiscOp::Exp
-            | WireRiscOp::Log
-            | WireRiscOp::Sin
-            | WireRiscOp::Sqrt
-            | WireRiscOp::Cos
-            | WireRiscOp::Tan
-            | WireRiscOp::Atan
-            | WireRiscOp::Tanh
-            | WireRiscOp::Erf
-            | WireRiscOp::Erfc
-            | WireRiscOp::Abs
-            | WireRiscOp::Floor
-            | WireRiscOp::Ceil
-            | WireRiscOp::Round
-            | WireRiscOp::UniformLike {}
-            | WireRiscOp::Dropout {}
-            | WireRiscOp::DropoutReplay {}
-            | WireRiscOp::Cast { .. }
-            | WireRiscOp::NamedCast { .. }
-            | WireRiscOp::FusedElem { .. }
-    )
+        | WireRiscOp::Sub
+        | WireRiscOp::Mul
+        | WireRiscOp::Div
+        | WireRiscOp::Pow
+        | WireRiscOp::FloorDiv
+        | WireRiscOp::TruncDiv
+        | WireRiscOp::Mod
+        | WireRiscOp::Bitwise { .. }
+        | WireRiscOp::Compare { .. }
+        | WireRiscOp::Logical { .. }
+        | WireRiscOp::Where { .. }
+        | WireRiscOp::MaxElem
+        | WireRiscOp::MinElem
+        | WireRiscOp::ExtremaAdjoint { .. }
+        | WireRiscOp::Relu
+        | WireRiscOp::Softmax { .. }
+        | WireRiscOp::ReluAdjoint
+        | WireRiscOp::Neg
+        | WireRiscOp::Recip
+        | WireRiscOp::Exp
+        | WireRiscOp::Log
+        | WireRiscOp::Sin
+        | WireRiscOp::Sqrt
+        | WireRiscOp::Cos
+        | WireRiscOp::Tan
+        | WireRiscOp::Atan
+        | WireRiscOp::Tanh
+        | WireRiscOp::Erf
+        | WireRiscOp::Erfc
+        | WireRiscOp::Abs
+        | WireRiscOp::Floor
+        | WireRiscOp::Ceil
+        | WireRiscOp::Round
+        | WireRiscOp::UniformLike {}
+        | WireRiscOp::Dropout {}
+        | WireRiscOp::DropoutReplay {}
+        | WireRiscOp::Cast { .. }
+        | WireRiscOp::NamedCast { .. }
+        | WireRiscOp::FusedElem { .. } => true,
+        WireRiscOp::Copy
+        | WireRiscOp::Drop
+        | WireRiscOp::Realize
+        | WireRiscOp::Store { .. }
+        | WireRiscOp::KeyFromSeed {}
+        | WireRiscOp::Split { .. }
+        | WireRiscOp::FoldIn {}
+        | WireRiscOp::KeySelect {}
+        | WireRiscOp::SplitN { .. }
+        | WireRiscOp::UniformBoundAdjoint { .. }
+        | WireRiscOp::GuardedFail { .. }
+        | WireRiscOp::Iota
+        | WireRiscOp::ListMapCapture { .. }
+        | WireRiscOp::OrderedAdjointSum { .. }
+        | WireRiscOp::Sum { .. }
+        | WireRiscOp::Count { .. }
+        | WireRiscOp::MaxReduce { .. }
+        | WireRiscOp::MinReduce { .. }
+        | WireRiscOp::ProdReduce { .. }
+        | WireRiscOp::ReduceWindow { .. }
+        | WireRiscOp::ReduceWindowGrad { .. }
+        | WireRiscOp::Argmax { .. }
+        | WireRiscOp::Argmin { .. }
+        | WireRiscOp::Reshape { .. }
+        | WireRiscOp::Permute { .. }
+        | WireRiscOp::Expand { .. }
+        | WireRiscOp::OneHot { .. }
+        | WireRiscOp::Pad { .. }
+        | WireRiscOp::Shrink { .. }
+        | WireRiscOp::Stride { .. }
+        | WireRiscOp::Shape { .. }
+        | WireRiscOp::Const { .. }
+        | WireRiscOp::ConstTensor { .. }
+        | WireRiscOp::Load { .. }
+        | WireRiscOp::BlasMatmul { .. }
+        | WireRiscOp::Gather { .. }
+        | WireRiscOp::ScatterAdd { .. }
+        | WireRiscOp::Scatter { .. }
+        | WireRiscOp::ScatterElements { .. }
+        | WireRiscOp::ExtentWitness { .. }
+        | WireRiscOp::CheckedReshapeExtent { .. }
+        | WireRiscOp::CheckedUnitAxis { .. } => false,
+    }
 }
 
 /// Validate the complete positive-rank agreement relation carried by a

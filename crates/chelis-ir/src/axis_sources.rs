@@ -262,48 +262,97 @@ fn shape_preserving(dag: &Dag, node: &DagNode) -> Vec<AxisSource> {
 /// and a declared result extent on one is checked by it (chelis#2642). The
 /// WireDag admission set (`schema/dag_domains.rs`) lists them too.
 pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
-    matches!(
-        op,
+    // One exhaustive match with no wildcard arm: a new operation does not
+    // compile until it states whether it is a same-shape producer, so an
+    // elementwise primitive cannot silently lose its operand-agreement guard
+    // and its declared-result check in every lane that reads this set
+    // (chelis#3428).
+    match op {
         RiscOp::Add
-            | RiscOp::Sub
-            | RiscOp::Mul
-            | RiscOp::Div
-            | RiscOp::FloorDiv
-            | RiscOp::TruncDiv
-            | RiscOp::Mod
-            | RiscOp::Bitwise(_)
-            | RiscOp::Compare(_)
-            | RiscOp::Logical(_)
-            | RiscOp::Where
-            | RiscOp::MaxElem
-            | RiscOp::MinElem
-            | RiscOp::ExtremaAdjoint { .. }
-            | RiscOp::Relu
-            | RiscOp::Softmax { .. }
-            | RiscOp::ReluAdjoint
-            | RiscOp::Neg
-            | RiscOp::Exp
-            | RiscOp::Log
-            | RiscOp::Sin
-            | RiscOp::Sqrt
-            | RiscOp::Cos
-            | RiscOp::Tan
-            | RiscOp::Atan
-            | RiscOp::Tanh
-            | RiscOp::Erf
-            | RiscOp::Erfc
-            | RiscOp::Abs
-            | RiscOp::Floor
-            | RiscOp::Ceil
-            | RiscOp::Round
-            | RiscOp::Recip
-            | RiscOp::UniformLike
-            | RiscOp::Dropout
-            | RiscOp::DropoutReplay
-            | RiscOp::Cast { .. }
-            | RiscOp::NamedCast { .. }
-            | RiscOp::FusedElem { .. }
-    )
+        | RiscOp::Sub
+        | RiscOp::Mul
+        | RiscOp::Div
+        | RiscOp::Pow
+        | RiscOp::FloorDiv
+        | RiscOp::TruncDiv
+        | RiscOp::Mod
+        | RiscOp::Bitwise(_)
+        | RiscOp::Compare(_)
+        | RiscOp::Logical(_)
+        | RiscOp::Where
+        | RiscOp::MaxElem
+        | RiscOp::MinElem
+        | RiscOp::ExtremaAdjoint { .. }
+        | RiscOp::Relu
+        | RiscOp::Softmax { .. }
+        | RiscOp::ReluAdjoint
+        | RiscOp::Neg
+        | RiscOp::Exp
+        | RiscOp::Log
+        | RiscOp::Sin
+        | RiscOp::Sqrt
+        | RiscOp::Cos
+        | RiscOp::Tan
+        | RiscOp::Atan
+        | RiscOp::Tanh
+        | RiscOp::Erf
+        | RiscOp::Erfc
+        | RiscOp::Abs
+        | RiscOp::Floor
+        | RiscOp::Ceil
+        | RiscOp::Round
+        | RiscOp::Recip
+        | RiscOp::UniformLike
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay
+        | RiscOp::Cast { .. }
+        | RiscOp::NamedCast { .. }
+        | RiscOp::FusedElem { .. } => true,
+        // Everything else forwards an existing value, reshapes, reduces or
+        // indexes, or produces a shape its operands do not share.
+        RiscOp::Copy
+        | RiscOp::Drop
+        | RiscOp::Realize
+        | RiscOp::Store { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn
+        | RiscOp::KeySelect
+        | RiscOp::SplitN { .. }
+        | RiscOp::UniformBoundAdjoint { .. }
+        | RiscOp::GuardedFail { .. }
+        | RiscOp::Iota
+        | RiscOp::ListMapCapture { .. }
+        | RiscOp::OrderedAdjointSum { .. }
+        | RiscOp::Sum { .. }
+        | RiscOp::Count { .. }
+        | RiscOp::MaxReduce { .. }
+        | RiscOp::MinReduce { .. }
+        | RiscOp::ProdReduce { .. }
+        | RiscOp::ReduceWindow { .. }
+        | RiscOp::ReduceWindowGrad { .. }
+        | RiscOp::Argmax { .. }
+        | RiscOp::Argmin { .. }
+        | RiscOp::Reshape { .. }
+        | RiscOp::Permute { .. }
+        | RiscOp::Expand { .. }
+        | RiscOp::OneHot { .. }
+        | RiscOp::Pad { .. }
+        | RiscOp::Shrink { .. }
+        | RiscOp::Stride { .. }
+        | RiscOp::Shape { .. }
+        | RiscOp::Const { .. }
+        | RiscOp::ConstTensor { .. }
+        | RiscOp::Load { .. }
+        | RiscOp::BlasMatmul { .. }
+        | RiscOp::Gather { .. }
+        | RiscOp::ScatterAdd { .. }
+        | RiscOp::Scatter { .. }
+        | RiscOp::ScatterElements { .. }
+        | RiscOp::ExtentWitness { .. }
+        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedUnitAxis { .. } => false,
+    }
 }
 
 /// The complete positive-rank operand relation for a same-shape result.
