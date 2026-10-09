@@ -84,10 +84,10 @@ CLAUSES = {
     75: ("Both halves come from one host reading", "`nanoseconds` lies in `0..999999999`",
          "`seconds` lies in `-377705030401..253402214400`", "never runs backwards",
          "`<operation>: io: <detail>`", "No default, zero, clamped, or wrapped reading"),
-    79: ("the bytes are reinterpreted, never converted", "least significant byte first",
+    80: ("the bytes are reinterpreted, never converted", "least significant byte first",
          "NaN's payload and quiet or signaling bit", "A `bool` payload byte other than 0 or 1 traps `Domain` at `bool`",
          "no cotangent flows to the mapping"),
-    80: ("64 lowercase hexadecimal ASCII characters", "`mmap_text: invalid UTF-8 at byte <k>`",
+    81: ("64 lowercase hexadecimal ASCII characters", "`mmap_text: invalid UTF-8 at byte <k>`",
          "No replacement character", "structurally non-differentiable"),
 }
 

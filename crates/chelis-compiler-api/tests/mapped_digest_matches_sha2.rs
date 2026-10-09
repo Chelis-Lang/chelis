@@ -1,4 +1,4 @@
-//! [05-OP-80]: `chelis_abi::mapped::sha256_hex`, the written-out SHA-256 both
+//! [05-OP-81]: `chelis_abi::mapped::sha256_hex`, the written-out SHA-256 both
 //! lanes share, agrees with the `sha2` crate on every message length through
 //! several blocks, so each padding boundary (55, 56, 63, 64 bytes, and their
 //! multiples) is crossed.

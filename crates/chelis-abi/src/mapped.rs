@@ -1,6 +1,6 @@
 //! The mapped-range reads every lane shares: `mmap_read` ([05-OP-60]),
-//! `mmap_tensor` ([05-OP-79]), and `mmap_text` and `mmap_sha256`
-//! ([05-OP-80]).
+//! `mmap_tensor` ([05-OP-80]), and `mmap_text` and `mmap_sha256`
+//! ([05-OP-81]).
 //!
 //! The evaluator and the compiled runtime both select a range, check a
 //! `bool` payload, decode text, and compute a digest through these
@@ -37,7 +37,7 @@ pub fn mapped_range(
 }
 
 /// Every failure names the offset, the element count when there is one, the
-/// byte length, and the mapping length ([05-OP-79], [05-OP-80]).
+/// byte length, and the mapping length ([05-OP-80], [05-OP-81]).
 fn checked_range(
     op: &str,
     offset: i64,
@@ -71,7 +71,7 @@ fn checked_range(
 }
 
 /// The payload range of `mmap_tensor(mapped, offset, count, T)` at the
-/// runtime dtype of `T` ([05-OP-79]). The byte length comes from the
+/// runtime dtype of `T` ([05-OP-80]). The byte length comes from the
 /// checked element-count metadata, the one owner of element widths. A
 /// negative count traps `Domain`; a byte length outside i64 traps
 /// `Overflow`; the byte range then follows [`mapped_range`].
@@ -98,7 +98,7 @@ pub fn mapped_tensor_range(
     checked_range(OP, offset, Some(count), length.get(), mapped_len)
 }
 
-/// A `bool` payload holds only the bytes 0 and 1 ([05-OP-79]); any other
+/// A `bool` payload holds only the bytes 0 and 1 ([05-OP-80]); any other
 /// byte traps `Domain` at `bool`, naming the element and the byte.
 pub fn check_bool_payload(bytes: &[u8]) -> Result<(), String> {
     match bytes.iter().position(|byte| *byte > 1) {
@@ -119,7 +119,7 @@ pub fn check_bool_payload(bytes: &[u8]) -> Result<(), String> {
 }
 
 /// `mmap_text`'s exact UTF-8 decoding of `bytes`, which begin at mapping
-/// offset `start` ([05-OP-80]). Invalid UTF-8 fails with the mapping offset
+/// offset `start` ([05-OP-81]). Invalid UTF-8 fails with the mapping offset
 /// of the first byte that does not begin or continue a valid sequence.
 pub fn mapped_text(start: usize, bytes: &[u8]) -> Result<String, String> {
     match std::str::from_utf8(bytes) {
@@ -131,7 +131,7 @@ pub fn mapped_text(start: usize, bytes: &[u8]) -> Result<String, String> {
     }
 }
 
-/// `mmap_sha256`'s digest of `bytes` ([05-OP-80]): 64 lowercase hexadecimal
+/// `mmap_sha256`'s digest of `bytes` ([05-OP-81]): 64 lowercase hexadecimal
 /// characters, two per digest byte in digest order, high nibble first.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";

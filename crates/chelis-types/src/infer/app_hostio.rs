@@ -263,7 +263,7 @@ pub(super) fn check_csv_builtin_signature(
     }
 }
 
-/// [05-OP-79]: `mmap_tensor(mapped, offset, count, T)` borrows a mapped file,
+/// [05-OP-80]: `mmap_tensor(mapped, offset, count, T)` borrows a mapped file,
 /// takes an exact `i64` byte offset and element count, and returns a rank-one
 /// tensor of the dtype its type-node child `T` states (spec/03 §6.4). A
 /// literal count gives a literal extent; any other count a fresh extent.
@@ -293,7 +293,7 @@ pub(super) fn infer_mmap_tensor_app(
                 CheckErrorKind::ArityMismatch,
                 format!(
                     "mmap_tensor expects (mapped, offset, count, T) with a dtype `T` as its \
-                     fourth argument, got {} argument(s) ([05-OP-79])",
+                     fourth argument, got {} argument(s) ([05-OP-80])",
                     kids.len().saturating_sub(1)
                 ),
                 "(mapped, offset, count, T)".to_string(),
@@ -373,7 +373,7 @@ pub(super) fn infer_mmap_tensor_app(
                     CheckErrorKind::TypeMismatch,
                     format!(
                         "mmap_tensor's dtype argument must be an active data element dtype or \
-                         a dtype binder bounded by a dtype family or set, not {written} ([05-OP-79])"
+                         a dtype binder bounded by a dtype family or set, not {written} ([05-OP-80])"
                     ),
                     vec![],
                 ),

@@ -4757,7 +4757,7 @@ impl<'a> EvalContext<'a> {
                         .collect(),
                 ))
             }
-            // [05-OP-79]: the checked result type states the dtype; the
+            // [05-OP-80]: the checked result type states the dtype; the
             // payload bits become the element bits.
             "mmap_tensor" => {
                 let mapped = args
@@ -4773,7 +4773,7 @@ impl<'a> EvalContext<'a> {
                     .filter(|(tag, _)| *tag == DeepTag::TTensor)
                     .and_then(|(_, children)| children.last())
                     .and_then(|ty| checked_precision_leaf(ty, &self.precision_bindings))
-                    .ok_or("mmap_tensor requires a resolved checked element dtype [05-OP-79]")?;
+                    .ok_or("mmap_tensor requires a resolved checked element dtype [05-OP-80]")?;
                 let dtype = precision
                     .runtime_dtype()
                     .map_err(|error| format!("mmap_tensor dtype: {error}"))?;
@@ -4788,7 +4788,7 @@ impl<'a> EvalContext<'a> {
                     IrTensorValue::from_storage(vec![count as usize], storage),
                 )))
             }
-            // [05-OP-80].
+            // [05-OP-81].
             "mmap_text" | "mmap_sha256" => {
                 let mapped = args
                     .first()

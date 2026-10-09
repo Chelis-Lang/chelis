@@ -1,4 +1,4 @@
-//! [05-OP-79]: the evaluator's `mmap_tensor` storage holds each payload
+//! [05-OP-80]: the evaluator's `mmap_tensor` storage holds each payload
 //! element's exact bits, NaN payloads and signaling bits included, and
 //! refuses what no element dtype stores.
 

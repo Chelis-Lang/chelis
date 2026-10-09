@@ -1010,7 +1010,7 @@ bracket-literal `xs` carries `p` in its `type` metadata. An `mmap_tensor`
 call desugars to a five-child application,
 `(app {} (var {} mmap_tensor) m' o' n' (t-prim {} p))` or the same with
 `(t-var {} p)`, whose final child states the result dtype
-(`spec/05-risc-primitives.md` [05-OP-79]). A type node is an
+(`spec/05-risc-primitives.md` [05-OP-80]). A type node is an
 expression-position child only in these two applications.
 
 #### 6.4.1 Literal Suffixes

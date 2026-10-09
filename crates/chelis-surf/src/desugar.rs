@@ -3622,7 +3622,7 @@ impl<'a> DesugarCtx<'a> {
                 ],
             );
         }
-        // [05-OP-79]: `mmap_tensor(m, o, n, p)` keeps `p` as a fifth `app`
+        // [05-OP-80]: `mmap_tensor(m, o, n, p)` keeps `p` as a fifth `app`
         // child (spec/03 §6.4). A `p` that names no dtype was reported by
         // literal-site validation before desugaring.
         if let Some(call) = literal_sites::mmap_tensor_call(func, args)

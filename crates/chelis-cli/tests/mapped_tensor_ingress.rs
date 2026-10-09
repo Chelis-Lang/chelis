@@ -1,5 +1,5 @@
-//! CLI surface coverage for [05-OP-79] `mmap_tensor`, [05-OP-80] `mmap_text`
-//! and `mmap_sha256`, and [05-OP-81] `Std.Io.Tensors`.
+//! CLI surface coverage for [05-OP-80] `mmap_tensor`, [05-OP-81] `mmap_text`
+//! and `mmap_sha256`, and [05-OP-82] `Std.Io.Tensors`.
 //!
 //! Every accepted program runs through `chelis eval` and through a compiled C
 //! executable, and the two lanes' outputs must be byte-equal as well as equal
@@ -209,7 +209,7 @@ fn every_dtype_fixture() -> (Vec<u8>, Vec<DtypeRow>) {
     (bytes, rows)
 }
 
-/// [05-OP-79]: every active data element dtype reads its little-endian
+/// [05-OP-80]: every active data element dtype reads its little-endian
 /// payload bit for bit, at any offset, identically in both lanes.
 #[test]
 fn every_data_dtype_reads_its_payload_in_eval_and_c() {
@@ -283,7 +283,7 @@ fn a_declared_extent_guards_a_computed_count() {
     }
 }
 
-/// [05-OP-79]: a range outside the mapping, a negative or overflowing count,
+/// [05-OP-80]: a range outside the mapping, a negative or overflowing count,
 /// and a `bool` byte other than 0 or 1 trap identically in both lanes. The
 /// overflowing count is computed, so the trap is the run-time one.
 #[test]
@@ -378,7 +378,7 @@ fn a_byte_read_past_the_mapping_traps() {
     );
 }
 
-/// [05-OP-80]: exact UTF-8 text and the lowercase hexadecimal SHA-256 of a
+/// [05-OP-81]: exact UTF-8 text and the lowercase hexadecimal SHA-256 of a
 /// range, and the failures of an invalid range or invalid UTF-8.
 #[test]
 fn text_and_digests_of_a_range() {
@@ -592,7 +592,7 @@ fn archive_program(path: &Path, body: &str) -> String {
     )
 }
 
-/// [05-OP-81]: every hnw dtype reads back typed and shaped, identically in
+/// [05-OP-82]: every hnw dtype reads back typed and shaped, identically in
 /// both lanes.
 #[test]
 fn an_archive_reads_typed_tensors_in_eval_and_c() {
@@ -613,7 +613,7 @@ fn an_archive_reads_typed_tensors_in_eval_and_c() {
     );
 }
 
-/// [05-OP-81]: a reader fails, before it reads an element, for a wrong
+/// [05-OP-82]: a reader fails, before it reads an element, for a wrong
 /// dtype, a wrong shape, an absent name, and a corrupted payload; opening
 /// fails for a corrupted manifest, wrong magic, and a truncated file.
 #[test]
@@ -698,7 +698,7 @@ fn archive_mismatches_fail_with_a_named_reason() {
     }
 }
 
-/// [05-OP-81]: `open_hnw` refuses metadata it does not support or that cannot
+/// [05-OP-82]: `open_hnw` refuses metadata it does not support or that cannot
 /// describe a payload, and a reader refuses a byte length its shape
 /// disagrees with, each with its named reason.
 #[test]

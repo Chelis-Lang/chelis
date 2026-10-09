@@ -3003,7 +3003,7 @@ exact ADT identity by [05-OP-34].
 > `datetime/zone::*`
 > identities hold [05-OP-73]'s invariants, the opaque `decimal::Decimal`
 > identity holds [05-OP-76]'s, and the opaque `io/tensors::TensorArchive`
-> identity holds [05-OP-81]'s, by construction. There is no second prelude JSON
+> identity holds [05-OP-82]'s, by construction. There is no second prelude JSON
 > identity or constructor registry. Under spec/06 §2.1 and §2.10.1, an
 > ordinary constructor and the executed matching arm preserve the recursive
 > cotangent shape: differentiable float fields receive their corresponding
@@ -3034,7 +3034,7 @@ exact ADT identity by [05-OP-34].
 > `datetime/columns::*`, and `datetime/zone::*` identities follow [05-OP-73].
 > The `decimal::*`
 > identities follow [05-OP-76], and the `io/tensors::*` identities follow
-> [05-OP-81]. Index wrappers
+> [05-OP-82]. Index wrappers
 > follow [05-OP-32], sort wrappers follow [05-OP-33], and no tensor
 > constructor infers or casts an element dtype.
 > For a differentiable element type, `list_index(xs,i)` returns an input
@@ -4628,7 +4628,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Mapped tensor ingress
 
-> **[05-OP-79]** Signature: `mmap_tensor(mapped,offset,count,T)->tensor[n,T]`
+> **[05-OP-80]** Signature: `mmap_tensor(mapped,offset,count,T)->tensor[n,T]`
 > borrows a `MappedFile`, takes an exact i64 byte `offset` and an exact i64
 > element `count`, and states the result element dtype `T` as its final
 > argument, written in the dtype position spec/02 §P9 names. It is pure: the
@@ -4679,7 +4679,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Mapped byte text and digests
 
-> **[05-OP-80]** Signature: `mmap_text(mapped,offset,length)->string` and
+> **[05-OP-81]** Signature: `mmap_text(mapped,offset,length)->string` and
 > `mmap_sha256(mapped,offset,length)->string` borrow a `MappedFile` and
 > take an exact i64 byte `offset` and byte `length`. Both are pure: the IO
 > effect belongs to `mmap_file` ([05-OP-60]).
@@ -4701,7 +4701,7 @@ path even though bare `round` under `grad` remains a structural
 > `mmap_len(mapped)`, traps `Domain`, and an `offset + length` outside i64
 > traps `Overflow`; each trap is an [04-NUM-9] line whose `<op>` is the
 > operation's name and whose `<prim>` is `i64`, after the same context lines
-> [05-OP-79] requires. A range that is not valid UTF-8 fails `mmap_text`
+> [05-OP-80] requires. A range that is not valid UTF-8 fails `mmap_text`
 > loudly with the message `mmap_text: invalid UTF-8 at byte <k>`, where
 > `<k>` is the decimal mapping offset of the first byte that does not begin
 > or continue a valid sequence. No replacement character, truncation, or
@@ -4713,7 +4713,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Typed tensor archives
 
-> **[05-OP-81]** `tensor_archive(arguments...) -> result` governs exactly the
+> **[05-OP-82]** `tensor_archive(arguments...) -> result` governs exactly the
 > `io/tensors::*` identities: the opaque archive `TensorArchive`, its
 > entry record `TensorEntry`,
 > `open_hnw(path:string)->TensorArchive!{IO}`, and, for each active data
@@ -4739,7 +4739,7 @@ path even though bare `round` under `grad` remains a structural
 > entries are the manifest's tensors in manifest order, each with its
 > `offset` made absolute in the file. `read_T(archive,
 > name, dims)` selects the first entry whose `id` is `name` and returns
-> [05-OP-79]'s `mmap_tensor` of its payload at `T`, with `count` the
+> [05-OP-80]'s `mmap_tensor` of its payload at `T`, with `count` the
 > checked i64 product of `dims`: the stored elements in row-major order
 > as a rank-one tensor. A declared tensor type on a `reshape` of that
 > result by `dims` gives it the declared shape.
@@ -4758,7 +4758,7 @@ path even though bare `round` under `grad` remains a structural
 > SHA-256 differs from the recorded digest. `open_hnw` does not digest the
 > whole payload region: every byte a program can read through an archive
 > is digested by the reader that returns it. Range, JSON, and UTF-8
-> failures are those of [05-OP-79], [05-OP-2], and [05-OP-80].
+> failures are those of [05-OP-80], [05-OP-2], and [05-OP-81].
 >
 > Adjoint: Archive reads have no differentiable operand and are outside
 > AD.

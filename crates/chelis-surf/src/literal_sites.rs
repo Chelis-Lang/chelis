@@ -289,7 +289,7 @@ impl DtypeCall {
     }
 }
 
-/// A call of the reserved `mmap_tensor` ([05-OP-79]): its three value
+/// A call of the reserved `mmap_tensor` ([05-OP-80]): its three value
 /// arguments and the dtype argument that states the result element dtype.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MmapTensorCall<'a> {

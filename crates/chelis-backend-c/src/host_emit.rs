@@ -8476,7 +8476,7 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "mmap_tensor" => {
-                // [05-OP-79]: the checked result dtype is the dtype argument
+                // [05-OP-80]: the checked result dtype is the dtype argument
                 // the checker consumed. A non-tensor result is an IR/ABI
                 // disagreement, never an untyped fallback.
                 let HostType::Tensor(t) = ty else {

@@ -765,21 +765,21 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         "header-export",
         "chelis_runtime.h: chelis_string chelis_mmap_sha256 ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
         &["numeric-op"],
-        "[05-OP-80]",
+        "[05-OP-81]",
         "`mmap_text(mapped,offset,length)->string` and"
     ),
     final_numeric_row!(
         "header-export",
         "chelis_runtime.h: chelis_string chelis_mmap_text ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
         &["numeric-op"],
-        "[05-OP-80]",
+        "[05-OP-81]",
         "`mmap_text(mapped,offset,length)->string` and"
     ),
     final_numeric_row!(
         "header-export",
         "chelis_runtime.h: chelis_tensor * chelis_mmap_tensor ( const chelis_mapped_file * mapped , int64_t offset , int64_t count , chelis_dtype dtype ) ;",
         &["numeric-op"],
-        "[05-OP-79]",
+        "[05-OP-80]",
         "`mmap_tensor(mapped,offset,count,T)->tensor[n,T]`"
     ),
     final_numeric_row!(

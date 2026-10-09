@@ -1,4 +1,4 @@
-//! [05-OP-79] and [05-OP-80]: the signatures of the mapped-range reads.
+//! [05-OP-80] and [05-OP-81]: the signatures of the mapped-range reads.
 //!
 //! `mmap_tensor(mapped, offset, count, T)` returns a rank-one tensor of the
 //! dtype its reserved fourth argument states; `mmap_text` and `mmap_sha256`

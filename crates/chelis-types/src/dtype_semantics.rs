@@ -4557,7 +4557,7 @@ where
     Ok(out)
 }
 
-/// [05-OP-79]: storage whose element bits are the bits of a contiguous
+/// [05-OP-80]: storage whose element bits are the bits of a contiguous
 /// little-endian payload, least significant byte first. Insertion is not a
 /// numeric op: every float bit pattern, NaN payloads and signaling bits
 /// included, is stored as it is, and nothing is rounded or converted.

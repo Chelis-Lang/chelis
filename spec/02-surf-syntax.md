@@ -975,7 +975,7 @@ their call-like special form;
 `g = grad` is a parse error. Unary `realize` and `copy` additionally have a
 bare callable form, used canonically by stages such as `x |> realize`.
 
-The second argument of `cast`, the optional second argument of a call to the reserved name `to_tensor` (§P10b), and the fourth argument of a call to the reserved name `mmap_tensor` (spec/05 [05-OP-79]) is a dtype: a primitive (`f32`, `bf16`, etc.) or a dtype-bounded type binder in scope, written in expression position. The second argument of a named cast, and the value of a final `accumulator=<dtype>` argument (spec/04 §5.7), are likewise dtypes. These are the only argument positions that hold a dtype, and the identifier there always names a dtype, never a value, even where a value of the same name is in scope.
+The second argument of `cast`, the optional second argument of a call to the reserved name `to_tensor` (§P10b), and the fourth argument of a call to the reserved name `mmap_tensor` (spec/05 [05-OP-80]) is a dtype: a primitive (`f32`, `bf16`, etc.) or a dtype-bounded type binder in scope, written in expression position. The second argument of a named cast, and the value of a final `accumulator=<dtype>` argument (spec/04 §5.7), are likewise dtypes. These are the only argument positions that hold a dtype, and the identifier there always names a dtype, never a value, even where a value of the same name is in scope.
 
 ### P10: Numeric Literals
 

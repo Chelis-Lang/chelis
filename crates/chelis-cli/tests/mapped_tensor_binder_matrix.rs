@@ -1,4 +1,4 @@
-//! [05-OP-79]: a dtype binder in `mmap_tensor`'s dtype position resolves in
+//! [05-OP-80]: a dtype binder in `mmap_tensor`'s dtype position resolves in
 //! the scope that wrote it, in eval and in compiled C alike.
 //!
 //! The matrix crosses binder spelling (caller and callee spell their binders

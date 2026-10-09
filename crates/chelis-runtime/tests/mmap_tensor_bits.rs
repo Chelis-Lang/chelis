@@ -1,4 +1,4 @@
-//! [05-OP-79]: compiled `mmap_tensor` stores each payload element's exact
+//! [05-OP-80]: compiled `mmap_tensor` stores each payload element's exact
 //! bits. Rendering cannot show a NaN's payload or its quiet/signaling bit, so
 //! this reads the stored elements back through the runtime's read view.
 

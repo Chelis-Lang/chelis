@@ -13501,7 +13501,7 @@ fn actualize_retained_host_contract(
         }
     }
     // A binder that only the result mentions (a dtype binder stated by a
-    // body's dtype argument, [05-OP-79]) is bound by the call's checked
+    // body's dtype argument, [05-OP-80]) is bound by the call's checked
     // result type. Arguments bind first; the result only fills what they
     // leave open. Inside a generic caller the result still names the
     // caller's own binders, so it is read through the active caller
@@ -21476,10 +21476,10 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "mmap_file" => Some(HostTypeTerm::MappedFile),
         "mmap_read" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
         "mmap_len" => Some(HostTypeTerm::Int64),
-        // [05-OP-79]: the dtype argument is checked away before lowering, so
+        // [05-OP-80]: the dtype argument is checked away before lowering, so
         // the result type is the checker's stamped `tensor[n, T]`.
         "mmap_tensor" => Some(fresh_host_inference()),
-        // [05-OP-80].
+        // [05-OP-81].
         "mmap_text" | "mmap_sha256" => Some(HostTypeTerm::String),
         // spec/05 §2.6: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
         "process_run" => Some(HostTypeTerm::Tuple(vec![

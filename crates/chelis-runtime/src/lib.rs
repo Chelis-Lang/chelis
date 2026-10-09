@@ -8499,7 +8499,7 @@ pub unsafe extern "C" fn chelis_mmap_read(
     bytes_to_value_list(&mapped.mmap[range])
 }
 
-/// `mmap_tensor` in compiled host code ([05-OP-79]): a fresh rank-one
+/// `mmap_tensor` in compiled host code ([05-OP-80]): a fresh rank-one
 /// tensor whose element bits are the little-endian payload's bits. The range
 /// and `bool` checks are the evaluator's, through `chelis_abi::mapped`.
 #[no_mangle]
@@ -8545,7 +8545,7 @@ pub unsafe extern "C" fn chelis_mmap_tensor(
     out
 }
 
-/// `mmap_text` in compiled host code ([05-OP-80]): the range's exact UTF-8
+/// `mmap_text` in compiled host code ([05-OP-81]): the range's exact UTF-8
 /// text, decoded through the evaluator's definition.
 #[no_mangle]
 pub unsafe extern "C" fn chelis_mmap_text(
@@ -8567,7 +8567,7 @@ pub unsafe extern "C" fn chelis_mmap_text(
     new_runtime_string(text)
 }
 
-/// `mmap_sha256` in compiled host code ([05-OP-80]): the range's SHA-256 as
+/// `mmap_sha256` in compiled host code ([05-OP-81]): the range's SHA-256 as
 /// 64 lowercase hexadecimal characters, through the evaluator's definition.
 #[no_mangle]
 pub unsafe extern "C" fn chelis_mmap_sha256(

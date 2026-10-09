@@ -2150,7 +2150,7 @@ contents = read_file("dataset.txt")
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
-        // [05-OP-79] and [05-OP-80]: the reads of an open mapping are pure.
+        // [05-OP-80] and [05-OP-81]: the reads of an open mapping are pure.
         for root in ["weights", "text", "digest"] {
             assert!(
                 inferred.get(root).is_none_or(|effects| effects.is_empty()),

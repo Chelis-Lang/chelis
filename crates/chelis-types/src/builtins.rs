@@ -1917,7 +1917,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
-    // [05-OP-79]: the dtype argument states the result dtype, so the
+    // [05-OP-80]: the dtype argument states the result dtype, so the
     // result type is decided by the dedicated route, not by a scheme.
     BuiltinDecl {
         name: "mmap_tensor",
@@ -3909,7 +3909,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             Box::new(Type::Prim(Prim::Int64)),
         )),
     );
-    // [05-OP-80]: mapped-range text and digests take the handle and exact
+    // [05-OP-81]: mapped-range text and digests take the handle and exact
     // `i64` offsets and lengths, as `mmap_read` does.
     for name in ["mmap_text", "mmap_sha256"] {
         env.bind(
@@ -3924,7 +3924,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             )),
         );
     }
-    // [05-OP-79]: the dedicated route (`infer::app_mmap`) states the result
+    // [05-OP-80]: the dedicated route (`infer::app_mmap`) states the result
     // from the dtype argument; this scheme only names the operands.
     generic_triop("mmap_tensor", &mut env, &mut vg);
     generic_triop_second_third_borrow("einsum", &mut env, &mut vg);
