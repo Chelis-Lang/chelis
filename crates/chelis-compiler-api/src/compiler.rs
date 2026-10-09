@@ -7362,7 +7362,7 @@ mod tests {
         );
         dag.add_root(root);
         let wire = wire_dag(&dag).expect("IR producer has a wire form");
-        assert_eq!(wire.schema_version, 27);
+        assert_eq!(wire.schema_version, 28);
         assert!(
             matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
@@ -7675,7 +7675,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 27);
+        assert_eq!(json["schema_version"], 28);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()
