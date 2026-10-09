@@ -61,6 +61,9 @@ receipt that lacks the obligation. The ordinary PR selector and targeted
 rebase selector must agree on the same rule table. The selected jobs and
 rule-table digest enter the candidate plan and receipt, so evidence from a
 different routing table cannot authorize reuse.
+The selected feature job must still run when the PR patch itself is
+documentation-only but the synthetic-candidate delta changes its owner path;
+the PR patch's `docs_only` output cannot suppress that obligation.
 
 ## Surf AST example
 
@@ -108,7 +111,10 @@ match the exact AST path.
    Reject an unknown job, an untracked path, and a rule or workflow edit that
    removes required-context wiring. Include a rename/move whose old AST path
    must still select the job. Test the targeted-rebase projection against the
-   ordinary PR projection. Compare the old and new selectors over every
+   ordinary PR projection, including a documentation-only PR rebased over an
+   AST change: both the targeted and full-fallback paths must run and require
+   Clarabel despite the PR patch's `docs_only=true`. Compare the old and new
+   selectors over every
    tracked path: existing Clarabel owners must stay selected, and only the
    reviewed AST edge may expand selection.
 
