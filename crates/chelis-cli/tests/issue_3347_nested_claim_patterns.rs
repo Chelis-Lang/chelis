@@ -359,6 +359,13 @@ const LAMBDA_CALLBACKS: [&str; 6] = [
 "#,
 ];
 
+const LAMBDA_TUPLES: [&str; 2] = [
+    r#"out = fold(fn (a: i64, w: i64) -> add(a, w), 0i64, map(fn (p: (tensor[3, f32], i64)) -> shape(p.0, 0i32), [(produce(3i64), 1i64), (produce(size_from("PATH")), 2i64)]))
+"#,
+    r#"out = (fn (p: (tensor[3, f32], i64)) -> shape(p.0, 0i32))((produce(size_from("PATH")), 1i64))
+"#,
+];
+
 const CALLABLE_FORMAL: &str = r#"def apply(f: (Box[3]) -> i64, size: i64) -> i64 = f(make(size))
 out = apply(width, size_from("PATH"))
 "#;
@@ -1352,13 +1359,13 @@ fn c_deep_result_walk_reaches_the_last_link() {
     deep_result_walk(true);
 }
 
-/// A literal entry claim on `formal.v`, rendered as each lane renders a bare
+/// A literal entry claim at `path`, rendered as each lane renders a bare
 /// tensor formal's: Eval as an extent claim, C as an input check.
-fn literal_entry_context(native: bool, formal: &str) -> String {
+fn literal_entry_context(native: bool, path: &str) -> String {
     if native {
-        format!("input `{formal}.v` axis 0 expected 3, got 5")
+        format!("input `{path}` axis 0 expected 3, got 5")
     } else {
-        format!("extent `3`: claimed = 3, {formal}.v axis 0 = 5")
+        format!("extent `3`: claimed = 3, {path} axis 0 = 5")
     }
 }
 
@@ -1369,7 +1376,7 @@ fn lambda_formal_literal(native: bool) {
     assert_trap_and_control(
         LAMBDA_FOLD_BOX,
         native,
-        &literal_entry_context(native, "acc"),
+        &literal_entry_context(native, "acc.v"),
         "load",
         "out = 3",
     );
@@ -1439,7 +1446,7 @@ fn lambda_callbacks(native: bool) {
         assert_trap_and_control(
             case,
             native,
-            &literal_entry_context(native, "b"),
+            &literal_entry_context(native, "b.v"),
             "load",
             control,
         );
@@ -1462,7 +1469,7 @@ fn callable_formal(native: bool) {
     assert_trap_and_control(
         CALLABLE_FORMAL,
         native,
-        &literal_entry_context(native, "arg0"),
+        &literal_entry_context(native, "arg0.v"),
         "load",
         "out = 3",
     );
@@ -1476,4 +1483,28 @@ fn eval_callable_formal_claims_its_nested_parameter() {
 #[test]
 fn c_callable_formal_claims_its_nested_parameter() {
     callable_formal(true);
+}
+
+/// A tuple of tensors in a lambda formal is claimed at its fixed positions,
+/// as a named formal's tuple is: no signature entry observes them otherwise.
+fn lambda_tuples(native: bool) {
+    for (case, control) in LAMBDA_TUPLES.iter().zip(["out = 6", "out = 3"]) {
+        assert_trap_and_control(
+            case,
+            native,
+            &literal_entry_context(native, "p.0"),
+            "load",
+            control,
+        );
+    }
+}
+
+#[test]
+fn eval_lambda_tuple_formals_claim_their_positions() {
+    lambda_tuples(false);
+}
+
+#[test]
+fn c_lambda_tuple_formals_claim_their_positions() {
+    lambda_tuples(true);
 }
