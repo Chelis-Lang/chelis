@@ -928,3 +928,154 @@ def entry(s: i64, b: bool, w: bool) -> tensor[2, i64] = pick(s, b, w)\n";
 fn issue_2477_nested_arm_release_lands_on_the_block_that_jumps_to_the_join() {
     let _ = verified_host_from_source(NESTED_ARM_RELEASE);
 }
+
+/// The body of `name`'s private definition in emitted C, from a program
+/// whose top-level `out = name()` keeps it on the host lane.
+fn emitted_owned_body(source: &str, name: &str) -> String {
+    let verified = verified_host_from_source(source);
+    let emitted = crate::codegen_host_program(&verified, name)
+        .unwrap_or_else(|error| panic!("emit `{name}`: {error}"))
+        .c_source;
+    emitted_function_body(
+        &emitted,
+        &format!("{}__chelis_owned_body", authored_function_symbol(name)),
+    )
+    .to_string()
+}
+
+/// Whether `body` calls the C identifier `name` itself, not merely an
+/// identifier that ends with it.
+fn calls_c_identifier(body: &str, name: &str) -> bool {
+    body.match_indices(&format!("{name}(")).any(|(start, _)| {
+        !body[..start].ends_with(|byte: char| byte.is_ascii_alphanumeric() || byte == '_')
+    })
+}
+
+/// chelis#3440: a flattened let spine declares each binding under a
+/// generated C alias, so a call through a typed key-builtin alias must name
+/// that alias. The source spelling is undeclared in C, and gcc 13 accepts
+/// the implicit declaration with only a warning.
+#[test]
+fn typed_key_alias_chain_calls_the_declared_let_alias() {
+    let body = emitted_owned_body(
+        "def chain() -> key = {\n  \
+           first: i64 -> key = key_from_seed\n  \
+           second: i64 -> key = first\n  \
+           second(-1i64)\n\
+         }\n\
+         out = chain()\n",
+        "chain",
+    );
+    assert!(
+        body.contains("chelis_key (*__let_binding_1)(int64_t);")
+            && body.contains("__result = __let_binding_1(__call_arg0_2);"),
+        "the call must go through the second binding's declared alias:\n{body}"
+    );
+    for alias in ["first", "second"] {
+        assert!(
+            !calls_c_identifier(&body, alias),
+            "`{alias}` is not a C function:\n{body}"
+        );
+    }
+}
+
+/// chelis#3440: a named loop callback is a call through the same lexical
+/// binding, so map and fold name the declared alias too.
+#[test]
+fn named_loop_callbacks_call_the_declared_let_alias() {
+    let mapped = emitted_owned_body(
+        "def mapped() -> List[key] = {\n  \
+           seed: i64 -> key = key_from_seed\n  \
+           map(seed, [1i64, -1i64])\n\
+         }\n\
+         out = mapped()\n",
+        "mapped",
+    );
+    assert!(
+        mapped.contains("__map_result_9 = __let_binding_0(__map_item_10);"),
+        "map must call the declared alias:\n{mapped}"
+    );
+    assert!(!calls_c_identifier(&mapped, "seed"), "{mapped}");
+    let folded = emitted_owned_body(
+        "def folded() -> key = {\n  \
+           mix: key -> i64 -> key = fold_in\n  \
+           fold(mix, key_from_seed(7i64), [1i64, 2i64])\n\
+         }\n\
+         out = folded()\n",
+        "folded",
+    );
+    assert!(
+        folded.contains("__result = __let_binding_0(__fold_acc_8, __fold_item_10);"),
+        "fold must call the declared alias:\n{folded}"
+    );
+    assert!(!calls_c_identifier(&folded, "mix"), "{folded}");
+}
+
+/// A lexical key alias shadows a def of the same spelling. Ownership lowering
+/// resolves the call to the alias, so the emitted C must call the alias and
+/// never the def's private body, in a direct call and in a loop callback.
+#[test]
+fn key_alias_shadowing_a_def_calls_the_alias() {
+    let call = emitted_owned_body(
+        "def mix(k: key, n: i64) -> key = k\n\
+         def shadow_call() -> key = {\n  \
+           mix: key -> i64 -> key = fold_in\n  \
+           mix(key_from_seed(7i64), -1i64)\n\
+         }\n\
+         out = shadow_call()\n",
+        "shadow_call",
+    );
+    assert!(
+        call.contains("__result = __let_binding_0(__call_arg0_1, __call_arg1_3);"),
+        "the call must go through the alias:\n{call}"
+    );
+    let def = format!("{}__chelis_owned_body", authored_function_symbol("mix"));
+    assert!(!calls_c_identifier(&call, &def), "{call}");
+    let mapped = emitted_owned_body(
+        "def seed(x: i64) -> key = key_from_seed(0i64)\n\
+         def shadow_map() -> List[key] = {\n  \
+           seed: i64 -> key = key_from_seed\n  \
+           map(seed, [1i64, -1i64])\n\
+         }\n\
+         out = shadow_map()\n",
+        "shadow_map",
+    );
+    assert!(
+        mapped.contains("__map_result_9 = __let_binding_0(__map_item_10);"),
+        "map must call the alias:\n{mapped}"
+    );
+    let def = format!("{}__chelis_owned_body", authored_function_symbol("seed"));
+    assert!(!calls_c_identifier(&mapped, &def), "{mapped}");
+}
+
+/// Negative control: with no lexical binding of the spelling, the same
+/// direct call and loop callback still name the def's private body and pass
+/// it the invocation context.
+#[test]
+fn unshadowed_def_callees_call_the_private_body() {
+    let def = format!("{}__chelis_owned_body", authored_function_symbol("seed"));
+    let direct = emitted_owned_body(
+        "def seed(x: i64) -> key = key_from_seed(x)\n\
+         def direct() -> key = seed(5i64)\n\
+         out = direct()\n",
+        "direct",
+    );
+    assert!(
+        direct.contains(&format!(
+            "__result = {def}(__call_arg0_0, __chelis_origin_arena, NULL, __chelis_result_claims, &__chelis_result_origin___result);"
+        )),
+        "{direct}"
+    );
+    let mapped = emitted_owned_body(
+        "def seed(x: i64) -> key = key_from_seed(x)\n\
+         def mapped() -> List[key] = map(seed, [1i64, -1i64])\n\
+         out = mapped()\n",
+        "mapped",
+    );
+    assert!(
+        mapped.contains(&format!(
+            "__map_result_8 = {def}(__map_item_9, __chelis_origin_arena, NULL, NULL, &__chelis_result_origin___map_result_8);"
+        )),
+        "{mapped}"
+    );
+}
