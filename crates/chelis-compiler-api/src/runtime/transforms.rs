@@ -174,6 +174,9 @@ impl<'a> EvalContext<'a> {
         // or non-differentiable argument still marshals its placeholders
         // (the body may read it) but owns no gradient root.
         let mut arg_repacks: Vec<(usize, ArgRepack)> = Vec::with_capacity(args.len());
+        // Function-valued `grad` arguments, by position, staged as callables
+        // once the frame's closure conversion exists below.
+        let mut callable_arguments: Vec<(usize, &RuntimeValue)> = Vec::new();
         // wrt indices for this grad call, if narrowed (`grad(f, wrt=i)`).
         // `None` means differentiate every differentiable argument, exactly
         // as the checker's `grad_result_type` and the IR lowering's
@@ -333,6 +336,28 @@ impl<'a> EvalContext<'a> {
                 }
                 continue;
             }
+            // spec/06 sections 2.1 and 2.2: a function-valued argument is a
+            // constant of the differentiated call. Its gradient component is
+            // `unit`, so it owns no root; it is passed as the callable it is,
+            // staged below by the same closure conversion as the frame's own
+            // closures.
+            if matches!(
+                value,
+                RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }
+            ) {
+                if matches!(kind, TransformKind::Vmap) {
+                    return Err(format!(
+                        "host runtime: `vmap(...)` argument {index} is a function value. \
+                         spec/06-transformations.md section 3.6 broadcasts a non-tensor \
+                         argument unbatched to every row, and this lane does not yet carry a \
+                         function-valued `vmap` argument (chelis#3523); close over the function \
+                         inside the mapped function instead, as in `vmap(fn (x) -> f(g, x))`."
+                    ));
+                }
+                callable_arguments.push((arg_exprs.len(), value));
+                arg_exprs.push(make_unit_expr(span));
+                continue;
+            }
             let placeholder = format!("__chelis_xform_arg_{index}");
             let (tensor_value, mut tensor_type) =
                 runtime_value_to_dag_input_lossy(value, fn_expr, index)?;
@@ -386,6 +411,33 @@ impl<'a> EvalContext<'a> {
             None => arg_repacks.into_iter().map(|(_, plan)| plan).collect(),
         };
 
+        // chelis#2619: the target reads the caller's frame lexically, and each
+        // caller closure it reaches reads its own environment. Closure-convert
+        // them: every such read is respelled to a fresh name bound around the
+        // application (a placeholder for a value), so lowering resolves it in
+        // the right scope. A declaration the target inlines resolves its free
+        // names at top level, and no frame entry is served to it by spelling.
+        // A function-valued argument is staged the same way and read by the
+        // name it is bound to.
+        let mut captures = FrameCaptures {
+            argument_count: args.len(),
+            placeholder_names: &mut placeholder_names,
+            placeholder_types: &mut placeholder_types,
+            placeholder_tensors: &mut placeholder_tensors,
+            bindings: Vec::new(),
+            staged: UnordMap::new(),
+            fresh: 0,
+            span,
+        };
+        for (position, value) in callable_arguments {
+            let Some(staged) = captures.stage(value)? else {
+                return Err(format!(
+                    "grad argument {position} is a function value that could not be staged"
+                ));
+            };
+            arg_exprs[position] = var_expr(&staged, span);
+        }
+
         // Synthesize `(app {} <transform-expr> <arg-expr_0> ...)`. A transform
         // captured from a bind value carries that binding's origin, which the
         // callee slot does not admit (spec/03 section 1.1), so it stays behind.
@@ -402,22 +454,6 @@ impl<'a> EvalContext<'a> {
         app_children.push(callee);
         app_children.extend(arg_exprs);
         let application = empty_node(DeepTag::App, app_children, span);
-        // chelis#2619: the target reads the caller's frame lexically, and each
-        // caller closure it reaches reads its own environment. Closure-convert
-        // them: every such read is respelled to a fresh name bound around the
-        // application (a placeholder for a value), so lowering resolves it in
-        // the right scope. A declaration the target inlines resolves its free
-        // names at top level, and no frame entry is served to it by spelling.
-        let mut captures = FrameCaptures {
-            argument_count: args.len(),
-            placeholder_names: &mut placeholder_names,
-            placeholder_types: &mut placeholder_types,
-            placeholder_tensors: &mut placeholder_tensors,
-            bindings: Vec::new(),
-            staged: UnordMap::new(),
-            fresh: 0,
-            span,
-        };
         let application = captures.convert(&application, &captured_env)?;
         let capture_bindings = captures.bindings;
         let app_expr = if capture_bindings.is_empty() {

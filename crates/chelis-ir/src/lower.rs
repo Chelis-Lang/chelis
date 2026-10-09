@@ -7359,6 +7359,13 @@ enum HostConstant {
     String(String),
 }
 
+/// One argument of a `grad` application: the callable a function-valued
+/// argument resolves to, or any other argument's lowered value.
+enum GradActual {
+    Callable(CallableExpr),
+    Value(LoweredValue),
+}
+
 #[derive(Clone)]
 enum LoweredValue {
     HostConstant(HostConstant),
@@ -12777,22 +12784,31 @@ impl<'program> LowerCtx<'program> {
         args: &[Expr],
         app_span: Span,
     ) -> LoweredValue {
-        let actual_args: Vec<LoweredValue> = args.iter().map(|arg| self.lower_expr(arg)).collect();
+        // A function-valued argument is resolved in the caller's scope, as an
+        // ordinary call's is, and passed as the callable it is; every other
+        // argument is lowered to its value.
+        let actual_args: Vec<GradActual> = args
+            .iter()
+            .map(|arg| match self.resolve_callable_expr(arg) {
+                Some(callable) => GradActual::Callable(callable),
+                None => GradActual::Value(self.lower_expr(arg)),
+            })
+            .collect();
         self.lower_grad_callable_with_values(fn_expr, wrt_indices, &actual_args, app_span)
     }
 
-    /// Core lowering for `grad(fn)` applied to already-lowered argument
-    /// values. Used by both `lower_grad_callable_app` (which lowers
-    /// expression arguments first) and `lower_pipe` (which inherits the
-    /// argument from the previous pipe stage). A `Node` argument is the
-    /// scalar/tensor lane; tuple and ADT arguments recursively flatten their
-    /// differentiable float leaves and repack the resulting cotangent into
-    /// the exact primal structure required by spec/06 section 2.1.
+    /// Core lowering for `grad(fn)` applied to already-resolved arguments. A
+    /// `Node` argument is the scalar/tensor lane; tuple and ADT arguments
+    /// recursively flatten their differentiable float leaves and repack the
+    /// resulting cotangent into the exact primal structure required by
+    /// spec/06 section 2.1. A function-valued argument is a constant of the
+    /// differentiated call (spec/06 sections 2.1 and 2.2): it is bound as a
+    /// callable for the body to inline and owns no gradient root.
     fn lower_grad_callable_with_values(
         &mut self,
         fn_expr: &ResolvedFunction,
         wrt_indices: Option<&[usize]>,
-        actual_args: &[LoweredValue],
+        actual_args: &[GradActual],
         app_span: Span,
     ) -> LoweredValue {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
@@ -12813,6 +12829,7 @@ impl<'program> LowerCtx<'program> {
                 template: LoweredValue,
                 leaf_nodes: Vec<NodeId>,
             },
+            Callable(CallableExpr),
         }
         // A multi-argument grad call may mix structured and scalar/tensor
         // arguments. Each argument owns one result plan, so flat reverse
@@ -12820,14 +12837,17 @@ impl<'program> LowerCtx<'program> {
         let plans: Vec<GradArgPlan> = actual_args
             .iter()
             .map(|arg| match arg {
-                LoweredValue::HostConstant(_) => GradArgPlan::HostConstant(arg.clone()),
-                LoweredValue::Host { .. } => raise_lowering_error(
+                GradActual::Callable(callable) => GradArgPlan::Callable(callable.clone()),
+                GradActual::Value(arg @ LoweredValue::HostConstant(_)) => {
+                    GradArgPlan::HostConstant(arg.clone())
+                }
+                GradActual::Value(LoweredValue::Host { .. }) => raise_lowering_error(
                     "an opaque host value has no tensor gradient input",
                     None,
                     None,
                 ),
-                LoweredValue::Node(id) => GradArgPlan::Tensor(*id),
-                LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => {
+                GradActual::Value(LoweredValue::Node(id)) => GradArgPlan::Tensor(*id),
+                GradActual::Value(arg @ (LoweredValue::Tuple(_) | LoweredValue::Adt { .. })) => {
                     let leaf_nodes = recursive_list_leaf_nodes(arg);
                     GradArgPlan::Structured {
                         template: arg.clone(),
@@ -13035,6 +13055,18 @@ impl<'program> LowerCtx<'program> {
                         );
                     }
                     subctx.bindings.insert(name.clone(), value.clone());
+                }
+                Some(GradArgPlan::Callable(callable)) => {
+                    if wrt_indices.is_some_and(|indices| indices.contains(&index)) {
+                        raise_lowering_error(
+                            "a function is not a differentiable target (spec/06 section 2.7)",
+                            Some(app_span),
+                            self.current_span_id.clone(),
+                        );
+                    }
+                    subctx
+                        .local_callables
+                        .insert(name.clone(), callable.clone());
                 }
                 Some(GradArgPlan::Structured {
                     template,
@@ -13257,8 +13289,11 @@ impl<'program> LowerCtx<'program> {
             .zip(plans.iter())
             .filter_map(|(name, plan)| match plan {
                 GradArgPlan::Tensor(actual) => Some((name.clone(), *actual)),
-                // Structured params are served by their per-leaf entries.
-                GradArgPlan::Structured { .. } | GradArgPlan::HostConstant(_) => None,
+                // Structured params are served by their per-leaf entries; a
+                // constant or a callable has no Load to serve.
+                GradArgPlan::Structured { .. }
+                | GradArgPlan::HostConstant(_)
+                | GradArgPlan::Callable(_) => None,
             })
             .chain(adt_arg_map_entries)
             .chain(captured_bindings.into_sorted())
@@ -13446,7 +13481,9 @@ impl<'program> LowerCtx<'program> {
                     .iter()
                     .filter_map(|plan| match plan {
                         GradArgPlan::Tensor(actual) => Some(*actual),
-                        GradArgPlan::Structured { .. } | GradArgPlan::HostConstant(_) => None,
+                        GradArgPlan::Structured { .. }
+                        | GradArgPlan::HostConstant(_)
+                        | GradArgPlan::Callable(_) => None,
                     })
                     .collect();
                 if candidate_inputs.len() == plans.len() {
