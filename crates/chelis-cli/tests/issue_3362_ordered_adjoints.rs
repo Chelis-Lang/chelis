@@ -9,6 +9,12 @@
 //! the cotangent with the other operand in forward output-then-reduction
 //! order, and the diagonal adjoint is the scattered literal. The printed
 //! values are shortest round-trip spellings, so equal text is equal bits.
+//!
+//! The `es6`/`es7` and `fesw`/`fesw7` cases pin einsum's reduction order over
+//! two reduction labels: `es6` squares the contraction so its forward value
+//! reaches the gradient, and the `7` operands cancel `2048 * 8192` against
+//! its negation around a unit product, so reducing the labels in another
+//! order changes the result even at f16 and bf16.
 #[path = "common/mod.rs"]
 mod common;
 use assert_cmd::Command;
@@ -23,6 +29,11 @@ def es1(a: tensor[2, 3, P], b: tensor[3, 2, P], w: tensor[2, 2, P]) -> tensor[P]
 def es2(a: tensor[2, 3, P], b: tensor[2, 4, P], w: tensor[2, 4, P]) -> tensor[P] = sum(sum(mul(einsum("ij,kl->il", a, b), w), 1i32), 0i32)
 def es3(a: tensor[3, 3, P], b: tensor[3, P], w: tensor[3, P]) -> tensor[P] = sum(mul(einsum("ii,i->i", a, b), w), 0i32)
 def es4(a: tensor[2, 3, P], b: tensor[3, P]) -> tensor[P] = einsum("ij,j->", a, b)
+def es6(a: tensor[2, 2, 3, P], b: tensor[2, 3, P]) -> tensor[P] = {
+    y = einsum("ijk,jk->i", a, b)
+    sum(mul(y, y), 0i32)
+}
+def esw(a: tensor[2, 3, P], b: tensor[2, 3, P]) -> tensor[P] = einsum("jk,jk->", a, b)
 def es5(a: tensor[2, 3, P], b: tensor[3, 2, P]) -> tensor[P] = cast(sum(sum(einsum("ij,jk->ik", a, b, accumulator=f64), 1i32), 0i32), P)
 def dgv(x: tensor[3, 4, P]) -> tensor[3, P] = diagonal(x, 1i32, 0i32)
 def csv(x: tensor[7, P]) -> tensor[7, P] = cumsum(x, 0i32)
@@ -93,6 +104,22 @@ a_tr1 = grad(tr1, wrt=x)(x234, to_tensor([0.5P, -1.5P, 2.5P]))
 e_tr1 = to_tensor([[[0.5P, 0.0P, 0.0P, 0.0P], [-1.5P, 0.0P, 0.0P, 0.0P], [2.5P, 0.0P, 0.0P, 0.0P]], [[0.0P, 0.5P, 0.0P, 0.0P], [0.0P, -1.5P, 0.0P, 0.0P], [0.0P, 2.5P, 0.0P, 0.0P]]])
 a_ftr = vmap(trv)(x234)
 e_ftr = trace(x234, 2i32, 1i32)
+a223 = to_tensor([[[1000.5P, -0.0137P, 3.3P], [-999.25P, 0.71P, 1.0E-3P]], [[0.333P, 517.0P, -2.7P], [-516.75P, 0.0441P, 7.1P]]])
+b23 = to_tensor([[1.1P, 0.97P, -1.3P], [1.07P, 2.9P, 0.61P]])
+y6 = einsum("ijk,jk->i", a223, b23)
+a_es6 = grad(es6, wrt=a)(a223, b23)
+e_es6 = einsum("i,jk->ijk", add(y6, y6), b23)
+c223 = to_tensor([[[1.1P, 0.97P, -1.3P], [1.07P, 2.9P, 0.61P]], [[0.83P, -1.9P, 1.17P], [2.3P, 0.59P, -0.77P]]])
+a_fesw = vmap(esw)(a223, c223)
+e_fesw = einsum("zjk,zjk->z", a223, c223)
+a7 = to_tensor([[[2048.0P, 1.0P, 0.0P], [-2048.0P, 0.0P, 0.0P]], [[2048.0P, 1.0P, 0.0P], [-2048.0P, 0.0P, 0.0P]]])
+b7 = to_tensor([[8192.0P, 1.0P, 0.0P], [8192.0P, 0.0P, 0.0P]])
+c7 = to_tensor([[[8192.0P, 1.0P, 0.0P], [8192.0P, 0.0P, 0.0P]], [[8192.0P, 1.0P, 0.0P], [8192.0P, 0.0P, 0.0P]]])
+y7 = einsum("ijk,jk->i", a7, b7)
+a_es7 = grad(es6, wrt=a)(a7, b7)
+e_es7 = einsum("i,jk->ijk", add(y7, y7), b7)
+a_fesw7 = vmap(esw)(a7, c7)
+e_fesw7 = einsum("zjk,zjk->z", a7, c7)
 "#;
 
 fn eval_text(reef: &std::path::Path, app: &std::path::Path) -> std::process::Output {
@@ -127,6 +154,7 @@ fn root_pairs(stdout: &str) -> Vec<(String, String, String)> {
 
 #[test]
 fn ordered_adjoints_match_the_atoms_in_eval_and_c_at_every_float_width() {
+    let mut mismatches = Vec::new();
     for dtype in ["f16", "bf16", "f32", "f64"] {
         let (_dir, reef, app) = common::make_app("issue-3362");
         let program = format!("module Demo.Main\n{}", CASES.replace('P', dtype));
@@ -137,18 +165,20 @@ fn ordered_adjoints_match_the_atoms_in_eval_and_c_at_every_float_width() {
         let pairs = root_pairs(&evaluated);
         assert_eq!(
             pairs.len(),
-            19,
+            23,
             "{dtype}: every case is present\n{evaluated}"
         );
         for (case, actual, expected) in &pairs {
-            assert_eq!(actual, expected, "eval {dtype} `{case}`");
+            if actual != expected {
+                mismatches.push(format!("eval {dtype} `{case}`: {actual} != {expected}"));
+            }
         }
         let native = common::build_and_run_app(&reef, &app, "main");
-        assert_eq!(
-            native, evaluated,
-            "{dtype}: compiled C agrees with eval on every root"
-        );
+        if native != evaluated {
+            mismatches.push(format!("{dtype}: compiled C disagrees with eval"));
+        }
     }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
 fn scalar_root(stdout: &str, name: &str) -> f64 {
@@ -372,4 +402,20 @@ fn cumsum_adjoint_lowering_scales_near_linearly() {
         cpu[1],
         cpu[0]
     );
+}
+
+/// A runtime extent has no static graph yet; the rejection names the issue
+/// that owns it rather than the generic fallback.
+#[test]
+fn runtime_extents_inside_a_differentiated_body_cite_their_issue() {
+    let (_dir, reef, app) = common::make_app("issue-3362-runtime-extent");
+    common::write_file(
+        &app.join("src/main.ch"),
+        "module Demo.Main\ndef f[n](x: tensor[n, f32]) -> tensor[f32] = sum(cumsum(x, 0i32), 0i32)\ng = grad(f)(to_tensor([1.0f32, 2.0f32]))\n",
+    );
+    let output = eval_text(&reef, &app);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("chelis#3378"), "{stderr}");
+    assert!(!stderr.contains("has no numeric IR lowering"), "{stderr}");
 }

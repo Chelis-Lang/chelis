@@ -489,6 +489,10 @@ const FAMILY_DESIGNATED: &[(&str, &str)] = &[
     ("trunc_div", "floor and truncation operations"),
 ];
 
+/// Identities whose surface application is spelled differently from the
+/// identity: [05-OP-68]'s guarded abort is written `fail` in a branch.
+const SURFACE_SPELLING: &[(&str, &str)] = &[("guarded_fail", "fail")];
+
 const FALLBACK: &str = "has no numeric IR lowering";
 const FLOATS: [&str; 4] = ["f16", "bf16", "f32", "f64"];
 
@@ -861,6 +865,36 @@ fn no_float_adjoint_identity_can_be_reclassified_with_any_marker() {
     );
 }
 
+/// Every float-adjoint template applies its own identity, so an edit that
+/// drops the operation cannot leave the row passing vacuously.
+#[test]
+fn every_adjoint_template_applies_its_identity() {
+    let missing: Vec<&str> = CONTRACTS
+        .iter()
+        .filter_map(|(name, contract)| {
+            let Adjoint(_, body) = contract else {
+                return None;
+            };
+            let spelling = SURFACE_SPELLING
+                .iter()
+                .find(|(identity, _)| identity == name)
+                .map_or(*name, |(_, spelling)| *spelling);
+            let call = format!("{spelling}(");
+            let applied = body.match_indices(&call).any(|(at, _)| {
+                !body[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            });
+            (!applied).then_some(*name)
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "Adjoint templates that never apply their identity: {missing:?}"
+    );
+}
+
 fn adjoint_rows() -> Vec<&'static str> {
     CONTRACTS
         .iter()
@@ -904,12 +938,16 @@ fn recorded_gaps_still_fail_exactly_as_recorded() {
         }
     }
     for (name, issue, diagnostic) in C_WIDTH_GAPS {
-        let stderr = lower(&[name], "f64", true).err().unwrap_or_else(|| {
-            panic!("`{name}` now emits C at f64; remove it from C_WIDTH_GAPS (chelis#{issue})")
-        });
-        assert!(
-            stderr.contains(diagnostic) && !stderr.contains(FALLBACK),
-            "`{name}` fails differently at f64: {stderr}"
-        );
+        for dtype in FLOATS.into_iter().filter(|dtype| *dtype != "f32") {
+            let stderr = lower(&[name], dtype, true).err().unwrap_or_else(|| {
+                panic!(
+                    "`{name}` now emits C at {dtype}; remove it from C_WIDTH_GAPS (chelis#{issue})"
+                )
+            });
+            assert!(
+                stderr.contains(diagnostic) && !stderr.contains(FALLBACK),
+                "`{name}` fails differently at {dtype}: {stderr}"
+            );
+        }
     }
 }
