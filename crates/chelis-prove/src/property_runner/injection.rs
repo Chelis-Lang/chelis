@@ -394,34 +394,36 @@ pub(super) fn prove_with_injection(
         for binder in &binders {
             match sample_plan(&binder.plan, &binder.name, &mut rng, &sample_context) {
                 Ok((value, json)) => bindings.push(EvalBinding::new(&binder.name, value, json)),
-                Err((_, crate::opaque::GenerationFailure::ProbeRejected(reason))) => {
-                    return outcome_error(property_name, seed, reason);
-                }
-                Err((path, crate::opaque::GenerationFailure::Starved(diag))) => {
-                    if options.invariant_min_rate == 0.0 {
+                Err(error) => match *error {
+                    (_, crate::opaque::GenerationFailure::ProbeRejected(reason)) => {
+                        return outcome_error(property_name, seed, reason);
+                    }
+                    (path, crate::opaque::GenerationFailure::Starved(diag)) => {
+                        if options.invariant_min_rate == 0.0 {
+                            return outcome(
+                                property_name,
+                                PropertyStatus::Error,
+                                0,
+                                seed,
+                                None,
+                                Some(format!(
+                                    "generator exhausted for invariant binder `{}` of type `{}`",
+                                    path, diag.type_name
+                                )),
+                                Vec::new(),
+                            );
+                        }
                         return outcome(
                             property_name,
-                            PropertyStatus::Error,
+                            PropertyStatus::Unsupported,
                             0,
                             seed,
                             None,
-                            Some(format!(
-                                "generator exhausted for invariant binder `{}` of type `{}`",
-                                path, diag.type_name
-                            )),
+                            Some(diag.message()),
                             Vec::new(),
                         );
                     }
-                    return outcome(
-                        property_name,
-                        PropertyStatus::Unsupported,
-                        0,
-                        seed,
-                        None,
-                        Some(diag.message()),
-                        Vec::new(),
-                    );
-                }
+                },
             }
         }
 
@@ -776,7 +778,7 @@ fn sample_plan(
     path: &str,
     rng: &mut crate::opaque::GenRng,
     context: &SampleContext<'_>,
-) -> Result<(GeneratedValue, serde_json::Value), (String, crate::opaque::GenerationFailure)> {
+) -> Result<(GeneratedValue, serde_json::Value), Box<(String, crate::opaque::GenerationFailure)>> {
     match plan {
         ValuePlan::Scalar(prim) => {
             let value = sample_scalar(prim, rng);
@@ -813,7 +815,7 @@ fn sample_plan(
                 context.options.invariant_min_rate,
                 context.gen_budget,
             )
-            .map_err(|failure| (path.to_string(), failure))?;
+            .map_err(|failure| Box::new((path.to_string(), failure)))?;
             Ok((
                 GeneratedValue::Opaque {
                     type_name: inv.type_name.clone(),
