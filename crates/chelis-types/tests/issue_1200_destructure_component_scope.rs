@@ -43,8 +43,13 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_types::CopyRepairUseKind;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
+use copy_repair::assert_copy_repaired;
+
+#[path = "support/copy_repair.rs"]
+mod copy_repair;
 
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
     let decls = parse_str(source).expect("surf parse should succeed");
@@ -819,7 +824,10 @@ def f(s: tensor[4, f32]) -> tensor[4, f32] = {
 /// disappear. Both spellings must now report it.
 #[test]
 fn authored_destructure_temp_name_does_not_hide_an_outer_double_consume() {
-    let errors = linearity_errors(
+    // The authored `__chelis_tmp0` must not misroute `realize(y)`: the consume
+    // stays on `y`'s binding, so the later borrows of `y` are fan-out repaired at
+    // it (spec/04 section 8.3). A misrouted consume records no repair.
+    assert_copy_repaired(
         r#"
 def two(t: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = (t, t)
 def f(x: tensor[4, f32], w: tensor[4, f32]) -> tensor[4, f32] = {
@@ -832,10 +840,8 @@ def f(x: tensor[4, f32], w: tensor[4, f32]) -> tensor[4, f32] = {
   add(r, add(y, y))
 }
 "#,
-    );
-    assert!(
-        errors.iter().any(|error| error.message.contains("`y`")),
-        "the authored/synthesized collision must not hide `y`'s \
-         use-after-consume; got {errors:?}"
+        "y",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }

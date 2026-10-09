@@ -1,7 +1,12 @@
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_types::CopyRepairUseKind;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
+use copy_repair::assert_copy_repaired;
+
+#[path = "support/copy_repair.rs"]
+mod copy_repair;
 
 fn check_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let decls = parse_str(source).expect("surf parse should succeed");
@@ -19,8 +24,10 @@ fn typecheck_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckErr
 }
 
 #[test]
-fn detects_use_after_consume() {
-    let errors = check_surf(
+fn realize_then_borrow_is_copy_repaired() {
+    // spec/04 section 8.3: a borrow after an ordinary consume is fan-out; the
+    // consume receives an inserted copy.
+    assert_copy_repaired(
         r#"
 def bad(x: tensor[4, f32]) -> tensor[4, f32] =
   {
@@ -28,14 +35,10 @@ def bad(x: tensor[4, f32]) -> tensor[4, f32] =
     add(x, y)
   }
 "#,
-    )
-    .expect_err("linearity should reject reusing a consumed tensor");
-
-    assert!(errors.iter().any(|error| {
-        matches!(error.kind, CheckErrorKind::UseAfterConsume)
-            && error.message.contains("variable `x`")
-            && error.message.contains("realize")
-    }));
+        "x",
+        "realize",
+        CopyRepairUseKind::Borrow,
+    );
 }
 
 #[test]
@@ -109,8 +112,10 @@ def ok(x: tensor[4, f32]) -> tensor[4, f32] =
 /// second consume was an accepted implicit copy, so this is rejected only
 /// because `tanh` borrows.
 #[test]
-fn tanh_after_a_consuming_builtin_is_rejected() {
-    let errors = check_surf(
+fn tanh_after_a_consuming_builtin_is_copy_repaired() {
+    // spec/05 section 1.3.1: a read-only call after an ordinary consume of its
+    // operand is fan-out repaired at the consume.
+    assert_copy_repaired(
         r#"
 def bad(x: tensor[4, f32]) -> tensor[4, f32] =
   {
@@ -119,13 +124,10 @@ def bad(x: tensor[4, f32]) -> tensor[4, f32] =
     add(y, z)
   }
 "#,
-    )
-    .expect_err("tanh must not read a tensor realize consumed");
-    assert!(errors.iter().any(|error| {
-        matches!(error.kind, CheckErrorKind::UseAfterConsume)
-            && error.message.contains("variable `x`")
-            && error.message.contains("realize")
-    }));
+        "x",
+        "realize",
+        CopyRepairUseKind::Borrow,
+    );
 }
 
 #[test]
@@ -323,8 +325,8 @@ def ok(x: tensor[4, f32]) -> tensor[4, f32] =
 }
 
 #[test]
-fn to_list_still_flags_use_after_genuine_consume() {
-    let errors = check_surf(
+fn to_list_after_a_consume_is_copy_repaired() {
+    assert_copy_repaired(
         r#"
 def bad(x: tensor[4, f32]) -> tensor[4, f32] =
   {
@@ -333,13 +335,10 @@ def bad(x: tensor[4, f32]) -> tensor[4, f32] =
     y
   }
 "#,
-    )
-    .expect_err("to_list after a consuming use of x should still be rejected");
-
-    assert!(errors.iter().any(|error| {
-        matches!(error.kind, CheckErrorKind::UseAfterConsume)
-            && error.message.contains("variable `x`")
-    }));
+        "x",
+        "realize",
+        CopyRepairUseKind::Borrow,
+    );
 }
 
 #[test]
@@ -360,8 +359,8 @@ def ok(x: tensor[f32]) -> tensor[f32] =
 }
 
 #[test]
-fn tensor_to_scalar_still_flags_use_after_genuine_consume() {
-    let errors = check_surf(
+fn tensor_to_scalar_after_a_consume_is_copy_repaired() {
+    assert_copy_repaired(
         r#"
 def bad(x: tensor[f32]) -> tensor[f32] =
   {
@@ -370,13 +369,10 @@ def bad(x: tensor[f32]) -> tensor[f32] =
     y
   }
 "#,
-    )
-    .expect_err("tensor_to_scalar after a consuming use of x should still be rejected");
-
-    assert!(errors.iter().any(|error| {
-        matches!(error.kind, CheckErrorKind::UseAfterConsume)
-            && error.message.contains("variable `x`")
-    }));
+        "x",
+        "realize",
+        CopyRepairUseKind::Borrow,
+    );
 }
 
 #[test]

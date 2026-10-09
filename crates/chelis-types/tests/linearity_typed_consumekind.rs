@@ -4,8 +4,13 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_types::CopyRepairUseKind;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
+use copy_repair::assert_copy_repaired;
+
+#[path = "support/copy_repair.rs"]
+mod copy_repair;
 
 /// Run linearity and return the surfaced errors. Fixtures that
 /// expect a hard error call this.
@@ -42,8 +47,10 @@ def f(w: tensor[4, f32]) -> tensor[4, f32] =
 /// `realize(w)` consumes `w`; borrowing it in `add` reports
 /// `UseAfterConsume`.
 #[test]
-fn structural_consume_control_errors() {
-    let errors = linearity_errors(
+fn structural_consume_control_is_copy_repaired() {
+    // A structural consume, then a borrow: fan-out repaired at the consume
+    // (spec/04 section 8.3), where an aliasing bind records no copy.
+    assert_copy_repaired(
         r#"
 def f(w: tensor[4, f32]) -> tensor[4, f32] =
   {
@@ -51,15 +58,9 @@ def f(w: tensor[4, f32]) -> tensor[4, f32] =
     add(w, y)
   }
 "#,
-    );
-    assert!(
-        errors.iter().any(|e| {
-            matches!(e.kind, CheckErrorKind::UseAfterConsume)
-                && e.message.contains("variable `w`")
-                && e.message.contains("realize")
-        }),
-        "expected UseAfterConsume on `w` consumed by `realize` then borrowed by `add`; \
-         got {errors:?}"
+        "w",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }
 

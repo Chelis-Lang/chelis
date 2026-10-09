@@ -141,12 +141,12 @@ fn stamped_linearity_preserves_positive_and_negative_tensor_ownership() {
              (fn {}
                (params {} (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
                (let {}
-                 (bind {} y (realize {} (var {} x)))
-                 (app {} (var {} add) (var {} x) (var {} y)))))"#,
+                 (bind {} y (app {} (var {} drop) (var {} x)))
+                 (var {} x))))"#,
     )
     .expect("negative linearity fixture must stamp");
     let rejected = check_typed_program(&rejected).expect("negative fixture type-checks first");
-    check_linearity(&rejected).expect_err("use after tensor consumption must reject");
+    check_linearity(&rejected).expect_err("use after a tensor `drop` must reject");
 }
 
 #[test]

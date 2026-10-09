@@ -801,14 +801,15 @@ fn linearity_consume_once_body_agrees_accept() {
 #[test]
 fn linearity_use_after_consume_agrees_reject() {
     let module = render_deep(LINEARITY_MODULE);
-    // `realize(x)` consumes `x`; the later `add(x, y)` uses the consumed `x`:
-    // UseAfterConsume. The per-body linearity walk recurses into module-wrapped
-    // bodies, so the full check rejects on linearity.
+    // `drop(x)` ends `x`; the later `realize(x)` uses it, and no inserted copy
+    // repairs a use after a `drop`: UseAfterConsume. The per-body linearity walk
+    // recurses into module-wrapped bodies, so the full check rejects on
+    // linearity.
     let body = render_body(
         r#"module M
 def f(x: tensor[4, f32]) -> tensor[4, f32] = {
-  y = realize(x)
-  add(x, y)
+  y = drop(x)
+  realize(x)
 }
 "#,
         "f",

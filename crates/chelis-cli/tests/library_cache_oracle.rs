@@ -596,7 +596,7 @@ fn transitive_eval_only_effect_error_rejected_in_all_build_cache_modes() {
 
 #[test]
 fn transitive_eval_only_linearity_error_rejected_in_all_build_cache_modes() {
-    let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_runner(x: f64) -> f64 = round_to(x, cast(2, i32))\ndef dep_wrapper(x: f64) -> f64 = dep_runner(x)\ndef dep_outer(x: f64, t: tensor[4, f32]) -> tensor[4, f32] = {\n  rounded: f64 = dep_wrapper(x)\n  y: tensor[4, f32] = realize(t)\n  add(t, y)\n}\n";
+    let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_runner(x: f64) -> f64 = round_to(x, cast(2, i32))\ndef dep_wrapper(x: f64) -> f64 = dep_runner(x)\ndef dep_outer(x: f64, t: tensor[4, f32]) -> tensor[4, f32] = {\n  rounded: f64 = dep_wrapper(x)\n  _ = drop(t)\n  realize(t)\n}\n";
     assert_selected_semantic_error_in_all_build_modes(dependency, &["already consumed"], true);
 }
 

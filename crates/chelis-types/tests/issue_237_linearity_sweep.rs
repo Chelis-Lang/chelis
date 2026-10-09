@@ -44,8 +44,13 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_types::CopyRepairUseKind;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
+use copy_repair::assert_copy_repaired;
+
+#[path = "support/copy_repair.rs"]
+mod copy_repair;
 
 fn check_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let decls = parse_str(source).expect("surf parse should succeed");
@@ -264,12 +269,9 @@ def caller(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
 
 #[test]
 fn auto_borrow_pipe_stage_consuming_user_fn_keeps_param_owned() {
-    // Negative parity: if the pipe stage wraps a USER fn whose first
-    // param is owned-linear (so the pipe DOES consume `t`),
-    // pipe_consumes_param must report `t` as consumed. The inferencer
-    // then keeps `reader.t` owned, and `reader(x, k)` legitimately
-    // consumes `x`. A later `add(x, y)` IS a use-after-consume.
-    let errors = check_surf(
+    // `reader.t` stays owned, so `reader(x, k)` consumes `x` and the later
+    // borrow is fan-out repaired at that call (spec/04 section 8.3).
+    assert_copy_repaired(
         r#"
 def consume_two(t: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = t
 def reader(t, k: tensor[4, f32]) = t |> consume_two(k)
@@ -278,15 +280,8 @@ def caller(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
   add(x, y)
 }
 "#,
-    )
-    .expect_err(
-        "issue #229 fix must preserve detection: a pipe stage wrapping a \
-         user fn that consumes its first arg still consumes the piped value",
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::UseAfterConsume)),
-        "expected UseAfterConsume on `x`, got: {errors:?}"
+        "x",
+        "reader",
+        CopyRepairUseKind::Borrow,
     );
 }

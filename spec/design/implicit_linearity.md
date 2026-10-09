@@ -34,7 +34,7 @@ existing runtime or typed elementwise comparison arms.
 
 The regression oracle is `cargo test -p chelis-cli --test
 issue_1248_read_only_families`: family and operator reuse succeeds, reuse after
-`realize` fails, and host-produced tensor comparisons execute with eval/C parity
+`realize` is copy-repaired fan-out, reuse after `drop` fails, and host-produced tensor comparisons execute with eval/C parity
 while incompatible shape or dtype inputs fail checking.
 
 ## Drop Insertion
@@ -74,9 +74,15 @@ component out of the parent: an ordinary consume of that component is fan-out th
 same way, while a `drop` of it ends the component, so the parent is unusable as a
 whole afterwards and only the disjoint components remain usable.
 
-Borrows do not count as fan-out. Multiple `&T` uses share the same source. A value
-passed once to a consuming function after any number of borrows is not fan-out and does
-not receive a copy.
+Borrows before a consume do not count as fan-out. Multiple `&T` uses share the same
+source, and a value passed once to a consuming function after any number of borrows is
+not fan-out and does not receive a copy. A borrow after an earlier ordinary consume is
+fan-out like a later consume (spec/04 section 8.3): an `&T` argument, an auto-borrowed
+primitive operand, a borrowing closure capture, and a `grad(f)(..)` or `vmap(f)(..)`
+argument each give the earlier consume a copy. The checker's `read_or_error` accepts
+such a read on the same terms as `consume_var_expr` accepts a consume after an
+ordinary consume, so the two cannot disagree about which earlier consumes are
+repairable.
 
 Explicit source `copy()` lowers to the same `RiscOp::Copy` used for inserted copies.
 Cost and fitness signals intentionally do not distinguish explicit and inserted
@@ -275,6 +281,39 @@ and inserted copies are counted once.
 For tensors with symbolic dimensions, `bytes_copied` is omitted for that function and
 from `total_bytes_copied`; the human output prints the symbolic byte formula when
 available.
+
+The report also carries `copy_repairs`, always present and possibly empty: one entry per
+copy the linearity checker inserts to repair ordinary consuming fan-out in the entry
+program's declarations (spec/04 section 8.3).
+
+```json
+"copy_repairs": [
+  {
+    "declaration": "consume_then_borrow",
+    "binding": "x",
+    "copy_at": "surf:197..204",
+    "consumed_by": "call to `eats`",
+    "forced_by": [{ "at": "surf:219..220", "kind": "borrow" }]
+  }
+]
+```
+
+`copy_at` is the span identity of the earlier ordinary consume that receives the copy,
+the same identity a linearity diagnostic prints. `forced_by` lists every later use that
+needs the binding after that consume, in source order, each with its span identity and
+its `kind`: `consume`, `borrow`, `capture` or `drop`. When a later use is itself an
+ordinary consume, it becomes the next copy site, so a chain of consumes reports one entry
+per earlier consume. Entries are ordered by declaration name and then by source
+position; the report comes from the same walk `chelis check` runs, so it is a function of
+the program text. The human output prints one `copy_repair` line per entry.
+
+`copy_repairs` and `copy_count` answer different questions. A repair is a copy the
+language semantics place at a source consume. `copy_count` counts the `RiscOp::Copy`
+nodes of the lowered tensor DAG, where a call that never consumes its input in the
+lowered program pays nothing for the repair, so the two counts can differ. Copies the
+compiler inserts for reasons other than fan-out, at branch joins ([04-LIN-5]), root
+observation ([04-LIN-6]) and entry arguments ([04-LIN-7]), are not repairs and are not
+listed.
 
 ## Migration And Linting
 

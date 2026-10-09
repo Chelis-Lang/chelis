@@ -39,17 +39,20 @@ arithmetic family [05-OP-64] including `mod`, and the bitwise and shift family
 and `standard_normal_cdf`
 borrow their tensor operand, as do the read-only unary primitives composing
 them. Operator and function-call spellings have the same ownership disposition.
-A genuine consuming use still makes a later call in any of these families a
-use-after-consume.
+A call in any of these families after a consume of its operand follows the
+fan-out rule of `spec/04-type-system.md` §8.3: after an ordinary consume it is
+consuming fan-out, repaired by a copy inserted at the earlier consume; after any
+other consume, such as a `drop` ([04-LIN-11]), it is a use-after-consume.
 
 The same observational rule covers the read-only `List` / `Dict` queries `len` and
 `index`: they auto-borrow their container argument rather than consuming it, so the
 idiomatic "read a list's length / element, then reuse the list" pattern type-checks
 without a `copy()`. The runtime backings (`chelis_list_len`, `chelis_list_index`) take a
 `const` container pointer and never free it — `index` retains the element it returns — so
-the caller still owns the container afterwards. A genuine consume of the container (an
-explicit `drop`, or moving it into an owned parameter) still makes a later `len` / `index`
-read a use-after-consume. As with tensors, the borrow is auto-applied to the
+the caller still owns the container afterwards. A `len` / `index` read after a consume
+of the container follows the same §8.3 rule: after moving the container into an owned
+parameter, an ordinary consume, the read is consuming fan-out repaired by an inserted
+copy; after an explicit `drop` it is a use-after-consume. As with tensors, the borrow is auto-applied to the
 owned argument; writing the container query as `len(&xs)` is not a supported surface form.
 
 ### 1.4 Two Tiers

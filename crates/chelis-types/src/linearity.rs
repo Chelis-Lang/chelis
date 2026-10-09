@@ -99,7 +99,87 @@ struct ConsumeSite {
     /// `UseAfterConsume` rather than consuming fan-out repaired by copy
     /// insertion ([04-LIN-11]; chelis#3177).
     terminal: bool,
+    /// Where the consume is written; `None` for a consume with no source
+    /// node of its own, such as a root observation. A copy repair reports
+    /// this as the site that receives the inserted copy.
+    at: Option<SiteLocation>,
 }
+
+impl ConsumeSite {
+    /// spec/04 section 8.3: an *ordinary consume* is every consuming use
+    /// except a `drop`, a match scrutinee, a consuming closure capture, and a
+    /// consume of a key-carrying value or of a destructured component. A
+    /// later use of either kind, consume or borrow, after an ordinary consume
+    /// is consuming fan-out that an inserted copy repairs; after any other
+    /// consume it is rejected. The key-carrying and component exceptions are
+    /// properties of the binding, which the callers check.
+    fn is_ordinary(&self) -> bool {
+        matches!(self.kind, ConsumeKind::Structural)
+            && !self.terminal
+            && !self.description.contains("closure capture")
+            && !self.description.contains("match scrutinee")
+    }
+}
+
+/// A source location as the checker reports it: the node's span identity
+/// when it carries one, with its start offset for ordering.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct SiteLocation {
+    /// The top-level declaration whose body holds the site. A consume site
+    /// is stamped with it when the consume is recorded, so a copy repair
+    /// names the declaration that holds the copy even when the later use
+    /// sits in another one, as a later top-level initializer does.
+    declaration: Option<String>,
+    offset: usize,
+    id: String,
+}
+
+/// One compiler-inserted copy that repairs consuming fan-out (spec/04
+/// section 8.3): the ordinary consume at `copy_at` receives a copy so that
+/// the binding stays usable for each later use in `forced_by`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyRepair {
+    /// The top-level declaration whose body holds the copy, or `None` for
+    /// a bare top-level expression.
+    pub declaration: Option<String>,
+    /// The binding the copy duplicates, as the source spells it.
+    pub binding: String,
+    /// The earlier ordinary consume that receives the copy.
+    pub copy_at: String,
+    /// What that consume is, for example ``call to `eats` ``.
+    pub consumed_by: String,
+    /// Every later use that needs the binding after `copy_at`, in source
+    /// order.
+    pub forced_by: Vec<CopyRepairUse>,
+}
+
+/// A later use that forces a copy repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyRepairUse {
+    pub at: String,
+    pub kind: CopyRepairUseKind,
+}
+
+/// How a later use reads the binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyRepairUseKind {
+    /// A consuming use: an owned argument, `realize`, a binding.
+    Consume,
+    /// A borrow: an `&T` argument, an auto-borrowed operand, or an
+    /// argument of a `grad(f)(..)` or `vmap(f)(..)` call.
+    Borrow,
+    /// A closure capture, consuming or borrowing.
+    Capture,
+    /// An explicit `drop`, which takes the original owner.
+    Drop,
+}
+
+/// Copy repairs keyed by their copy site, so a site the checker walks more
+/// than once is reported once, and the report is ordered by declaration and
+/// then by source position rather than by walk order.
+type CopyRepairs =
+    BTreeMap<SiteLocation, (String, String, BTreeSet<(SiteLocation, CopyRepairUseKind)>)>;
 
 /// What a single binding generation was introduced by.  One record per
 /// `LinearScope::declare`, keyed by the generation's `BindingId`.
@@ -501,11 +581,62 @@ struct Checker {
     /// is inside that chain. Its root variable's read or consume there is a
     /// use of the projected component, not of the owner whole.
     projection_root: Option<BindingId>,
+    /// The top-level declaration whose body the walk is in, for
+    /// [`CopyRepair::declaration`].
+    current_def: Option<String>,
+    /// Every consuming fan-out the walk accepted on the strength of an
+    /// inserted copy.
+    repairs: CopyRepairs,
+    /// Set while the walk enters a function declaration's own `fn`, whose
+    /// captures are the declaration's free references to top-level values.
+    /// spec/04 section 8.3 rejects such a reference to a value an initializer
+    /// consumes, whatever the textual order, so no copy repairs it.
+    declaration_free_reads: bool,
 }
 
 impl Checker {
     fn push_diagnostic(&mut self, error: CheckError) {
         self.errors.push(error);
+    }
+
+    /// Record that the ordinary consume `earlier` of `name` receives an
+    /// inserted copy because of the later use `later`.
+    fn record_copy_repair(
+        &mut self,
+        name: &str,
+        earlier: &ConsumeSite,
+        later: &Expr,
+        kind: CopyRepairUseKind,
+    ) {
+        let Some(copy_at) = earlier.at.clone() else {
+            return;
+        };
+        let consumed_by = earlier
+            .description
+            .strip_suffix(&format!(" at {}", copy_at.id))
+            .unwrap_or(&earlier.description)
+            .to_string();
+        self.repairs
+            .entry(copy_at)
+            .or_insert_with(|| (name.to_string(), consumed_by, BTreeSet::new()))
+            .2
+            .insert((site_location(later), kind));
+    }
+
+    fn into_copy_repairs(self) -> Vec<CopyRepair> {
+        self.repairs
+            .into_iter()
+            .map(|(copy_at, (binding, consumed_by, uses))| CopyRepair {
+                declaration: copy_at.declaration,
+                binding,
+                copy_at: copy_at.id,
+                consumed_by,
+                forced_by: uses
+                    .into_iter()
+                    .map(|(at, kind)| CopyRepairUse { at: at.id, kind })
+                    .collect(),
+            })
+            .collect()
     }
 }
 
@@ -545,6 +676,29 @@ fn pre_declare_one(expr: &Expr, type_env: &BTreeMap<String, Expr>, scope: &mut L
 }
 
 pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<CheckError>> {
+    let checker = walk_linearity(program);
+    if checker.errors.is_empty() {
+        Ok(program.clone().with_linearity(checker.info))
+    } else {
+        Err(checker.errors)
+    }
+}
+
+/// The compiler-inserted copies that repair consuming fan-out in `program`
+/// (spec/04 section 8.3), ordered by declaration and then by copy site.
+///
+/// This runs the same walk as [`check_linearity`], so it reports exactly the
+/// fan-out that check accepts, and it fails with the same diagnostics.
+pub fn copy_repairs(program: &CheckedProgram) -> Result<Vec<CopyRepair>, Vec<CheckError>> {
+    let checker = walk_linearity(program);
+    if checker.errors.is_empty() {
+        Ok(checker.into_copy_repairs())
+    } else {
+        Err(checker.errors)
+    }
+}
+
+fn walk_linearity(program: &CheckedProgram) -> Checker {
     let tensor_carrying_adts = compute_tensor_carrying_adts(program.annotated_exprs());
     let key_carrying_adts = compute_key_carrying_adts(program.annotated_exprs());
     let mut checker = Checker {
@@ -556,6 +710,9 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         signature_inference: program.signature_inference().clone(),
         type_headers: program.type_headers().clone(),
         projection_root: None,
+        current_def: None,
+        repairs: CopyRepairs::new(),
+        declaration_free_reads: false,
     };
     let mut scope = LinearScope::default();
 
@@ -567,12 +724,7 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
     // program. Abandoning the walk proves nothing about the tail, so this is a
     // hard failure rather than a partial `Ok` (covered-or-rejected).
     checker.check_program_items(program.annotated_exprs(), &mut scope);
-
-    if checker.errors.is_empty() {
-        Ok(program.clone().with_linearity(checker.info))
-    } else {
-        Err(checker.errors)
-    }
+    checker
 }
 
 /// Phase E: check linearity of `new_program` against an outer-scope
@@ -685,6 +837,9 @@ pub fn check_linearity_with_context(
         signature_inference: merged_signature_inference,
         type_headers: merged_type_headers,
         projection_root: None,
+        current_def: None,
+        repairs: CopyRepairs::new(),
+        declaration_free_reads: false,
     };
 
     let mut scope = LinearScope::default();
@@ -823,6 +978,7 @@ impl Checker {
                 description: format!("the root observation of `{name}`"),
                 kind: ConsumeKind::Structural,
                 terminal: false,
+                at: None,
             },
         );
     }
@@ -844,7 +1000,11 @@ impl Checker {
             ExprCarrier::DecodedNode(DeepTag::Def, _, children) => {
                 if let Some(body) = function_declaration_body(children) {
                     let mut declaration_scope = scope.clone();
+                    self.current_def = children.first().and_then(symbol_name).map(str::to_string);
+                    self.declaration_free_reads = true;
                     self.check_expr(body, &mut declaration_scope);
+                    self.declaration_free_reads = false;
+                    self.current_def = None;
                 }
             }
             ExprCarrier::DecodedNode(_, _, _)
@@ -876,57 +1036,9 @@ impl Checker {
                     (children.first().and_then(symbol_name), children.get(1))
                     && !(is_var_expr(body) && var_name(body) == Some(name))
                 {
-                    if matches!(get_tag_expr(body), Some(DeepTag::Borrow)) {
-                        self.invalid_borrow(body, "borrow cannot be returned from a function");
-                        return;
-                    }
-                    // chelis#2549: a function declaration's body is checked by
-                    // `check_function_declarations` once every initializer
-                    // has been walked, never at the def's text position.
-                    if function_declaration_body(children).is_some() {
-                        return;
-                    }
-                    // A top-level `def name = x` shares the same lowered
-                    // node as `x`. Classify its var body as an aliasing
-                    // binding, as `check_let` does, so a later borrow of
-                    // `x` remains valid.
-                    if is_var_expr(body) && self.expr_holds_key(body, scope) {
-                        // [04-LIN-9]: `def a = b` of a key holder moves the
-                        // key into `a`; it is not an aliasing share.
-                        self.consume_var_expr(
-                            body,
-                            scope,
-                            ConsumeSite {
-                                description: format!("binding `{name}` {}", diag_site(body)),
-                                kind: ConsumeKind::Structural,
-                                terminal: false,
-                            },
-                        );
-                    } else if is_var_expr(body) && self.expr_is_owned_linear(body, scope) {
-                        // Resolve both generations by name here: top-level
-                        // defs are pre-declared exactly once each, so the
-                        // stacks are static during this walk and the lookup
-                        // is the record-time resolution chelis#1209 wants.
-                        // A `def a = (var b)` alias can point at a def
-                        // declared *later* in program order; that is fine —
-                        // the id is already minted by pre-declaration.
-                        let alias_link = var_name(body)
-                            .and_then(|source| Some((scope.top_id(name)?, scope.top_id(source)?)));
-                        self.consume_var_expr(
-                            body,
-                            scope,
-                            ConsumeSite {
-                                description: format!("binding `{name}` {}", diag_site(body)),
-                                kind: ConsumeKind::Aliasing,
-                                terminal: false,
-                            },
-                        );
-                        if let Some((alias_id, source_id)) = alias_link {
-                            scope.record_alias(alias_id, source_id);
-                        }
-                    } else {
-                        self.check_expr(body, scope);
-                    }
+                    self.current_def = Some(name.to_string());
+                    self.check_top_level_def(name, body, children, scope);
+                    self.current_def = None;
                 }
             }
             ExprCarrier::DecodedNode(tag, _, _) if is_runtime_expression_tag(tag) => {
@@ -938,6 +1050,68 @@ impl Checker {
             | ExprCarrier::Atom(_)
             | ExprCarrier::MetadataMap(_)
             | ExprCarrier::MetadataExpression(_) => self.check_expr(expr, scope),
+        }
+    }
+
+    fn check_top_level_def(
+        &mut self,
+        name: &str,
+        body: &Expr,
+        children: &[Expr],
+        scope: &mut LinearScope,
+    ) {
+        if matches!(get_tag_expr(body), Some(DeepTag::Borrow)) {
+            self.invalid_borrow(body, "borrow cannot be returned from a function");
+            return;
+        }
+        // chelis#2549: a function declaration's body is checked by
+        // `check_function_declarations` once every initializer
+        // has been walked, never at the def's text position.
+        if function_declaration_body(children).is_some() {
+            return;
+        }
+        // A top-level `def name = x` shares the same lowered
+        // node as `x`. Classify its var body as an aliasing
+        // binding, as `check_let` does, so a later borrow of
+        // `x` remains valid.
+        if is_var_expr(body) && self.expr_holds_key(body, scope) {
+            // [04-LIN-9]: `def a = b` of a key holder moves the
+            // key into `a`; it is not an aliasing share.
+            self.consume_var_expr(
+                body,
+                scope,
+                ConsumeSite {
+                    description: format!("binding `{name}` {}", diag_site(body)),
+                    kind: ConsumeKind::Structural,
+                    terminal: false,
+                    at: Some(site_location(body)),
+                },
+            );
+        } else if is_var_expr(body) && self.expr_is_owned_linear(body, scope) {
+            // Resolve both generations by name here: top-level
+            // defs are pre-declared exactly once each, so the
+            // stacks are static during this walk and the lookup
+            // is the record-time resolution chelis#1209 wants.
+            // A `def a = (var b)` alias can point at a def
+            // declared *later* in program order; that is fine —
+            // the id is already minted by pre-declaration.
+            let alias_link = var_name(body)
+                .and_then(|source| Some((scope.top_id(name)?, scope.top_id(source)?)));
+            self.consume_var_expr(
+                body,
+                scope,
+                ConsumeSite {
+                    description: format!("binding `{name}` {}", diag_site(body)),
+                    kind: ConsumeKind::Aliasing,
+                    terminal: false,
+                    at: Some(site_location(body)),
+                },
+            );
+            if let Some((alias_id, source_id)) = alias_link {
+                scope.record_alias(alias_id, source_id);
+            }
+        } else {
+            self.check_expr(body, scope);
         }
     }
 
@@ -1399,6 +1573,7 @@ impl Checker {
                             description: format!("binding `{name}` {}", diag_site(value)),
                             kind: ConsumeKind::Structural,
                             terminal: false,
+                            at: Some(site_location(value)),
                         },
                     );
                 } else if is_var_expr(value) && self.expr_is_owned_linear(value, scope) {
@@ -1420,6 +1595,7 @@ impl Checker {
                             description: format!("binding `{name}` {}", diag_site(value)),
                             kind: ConsumeKind::Aliasing,
                             terminal: false,
+                            at: Some(site_location(value)),
                         },
                     );
                 } else if matches!(get_tag_expr(value), Some(DeepTag::Borrow)) {
@@ -1454,6 +1630,8 @@ impl Checker {
             return;
         }
 
+        let declaration = std::mem::take(&mut self.declaration_free_reads);
+        let capture_use = (!declaration).then_some(CopyRepairUseKind::Capture);
         let params = param_names(&children[0]);
         let captured = free_vars(&children[1], &params);
         let mut inner_scope = outer_scope.clone();
@@ -1539,7 +1717,7 @@ impl Checker {
                 true
             });
             if body_consumes {
-                self.read_or_error(name.as_str(), expr, outer_scope);
+                self.read_or_error(name.as_str(), expr, outer_scope, capture_use);
                 // chelis#1200: forward the capture consume to a
                 // destructured component's carrier.
                 //
@@ -1582,6 +1760,7 @@ impl Checker {
                             description: format!("closure capture {}", diag_site(expr)),
                             kind: ConsumeKind::Structural,
                             terminal: false,
+                            at: Some(site_location(expr)),
                         },
                     );
                 }
@@ -1594,7 +1773,7 @@ impl Checker {
                 // the body's borrow-reads inside the closure resolve
                 // against the captured borrow rather than re-entering
                 // the outer binding state.
-                self.read_or_error(name.as_str(), expr, outer_scope);
+                self.read_or_error(name.as_str(), expr, outer_scope, capture_use);
                 outer_scope.borrow(name.as_str(), borrow_site(expr));
                 if let Some(use_id) = outer_scope.top_id(&name) {
                     let owner = outer_scope.resolve_alias_chain(use_id).unwrap_or(use_id);
@@ -1678,6 +1857,7 @@ impl Checker {
                     description: format!("match scrutinee {}", diag_site(&children[0])),
                     kind: ConsumeKind::Structural,
                     terminal: false,
+                    at: Some(site_location(&children[0])),
                 },
             );
         } else {
@@ -1769,6 +1949,7 @@ impl Checker {
             ),
             kind: ConsumeKind::Structural,
             terminal: false,
+            at: site.at.clone(),
         };
         for id in visible_ids {
             let Some(record) = arm_scope.record(*id) else {
@@ -1810,6 +1991,7 @@ impl Checker {
                         ),
                         kind: ConsumeKind::Structural,
                         terminal: false,
+                        at: None,
                     },
                 ));
             }
@@ -2170,7 +2352,10 @@ impl Checker {
         }
     }
 
-    fn consume_var_expr(&mut self, expr: &Expr, scope: &mut LinearScope, site: ConsumeSite) {
+    fn consume_var_expr(&mut self, expr: &Expr, scope: &mut LinearScope, mut site: ConsumeSite) {
+        if let Some(at) = site.at.as_mut() {
+            at.declaration = self.current_def.clone();
+        }
         let Some(name) = var_name(expr) else {
             return;
         };
@@ -2347,12 +2532,27 @@ impl Checker {
             // A `drop` still ends the owner after an earlier consume: copy
             // insertion gives the earlier use the copy, so a use after
             // `a = eat(x); c = drop(x)` is refused.
-            Some(BindingState::Consumed(_)) if site.terminal => scope.consume_id(target, site),
-            Some(BindingState::Consumed(_)) => {
-                // The implicit-linearity pass will insert a Copy for
-                // consuming fan-out.  Borrow-after-consume remains an
-                // error through `read_or_error`.
+            Some(BindingState::Consumed(earlier)) if site.terminal => {
+                if earlier.is_ordinary() {
+                    let earlier = earlier.clone();
+                    self.record_copy_repair(name, &earlier, expr, CopyRepairUseKind::Drop);
+                }
+                scope.consume_id(target, site)
             }
+            // Consuming fan-out: the implicit-linearity pass inserts a Copy at
+            // the earlier consume (spec/04 section 8.3). When this use is itself
+            // an ordinary consume, it becomes the latest one, so a still later
+            // use copies here.
+            Some(BindingState::Consumed(earlier)) if earlier.is_ordinary() => {
+                let earlier = earlier.clone();
+                self.record_copy_repair(name, &earlier, expr, CopyRepairUseKind::Consume);
+                if site.is_ordinary() {
+                    scope.consume_id(target, site);
+                }
+            }
+            // An aliasing record after an aliasing bind shares the value;
+            // nothing is copied.
+            Some(BindingState::Consumed(_)) => {}
             None => {}
         }
     }
@@ -2364,11 +2564,23 @@ impl Checker {
         if !self.expr_is_owned_linear(expr, scope) {
             return;
         }
-        self.read_or_error(name, expr, scope);
+        self.read_or_error(name, expr, scope, Some(CopyRepairUseKind::Borrow));
         scope.borrow(name, borrow_site(expr));
     }
 
-    fn read_or_error(&mut self, name: &str, expr: &Expr, scope: &LinearScope) {
+    /// Check a use of `name` that leaves its owner live, a read or a closure
+    /// capture, against the owner's consumed state. After an ordinary consume
+    /// the use is consuming fan-out, repaired by a copy inserted at that
+    /// consume exactly as a later consume is (spec/04 section 8.3); after any
+    /// other consume it is a use-after-consume. `kind` is `None` for a use no
+    /// copy repairs, a function declaration's free reference.
+    fn read_or_error(
+        &mut self,
+        name: &str,
+        expr: &Expr,
+        scope: &LinearScope,
+        kind: Option<CopyRepairUseKind>,
+    ) {
         // A structural consume of an alias is recorded on its source
         // generation. Check that generation so reads through either
         // name observe the same consumed state.
@@ -2401,6 +2613,13 @@ impl Checker {
                     diag_site(expr)
                 ),
             );
+            return;
+        }
+        if let Some(kind) = kind
+            && site.is_ordinary()
+            && !scope.is_destructured_id(resolved)
+        {
+            self.record_copy_repair(name, site, expr, kind);
             return;
         }
         let message = with_macro_provenance(
@@ -3716,9 +3935,26 @@ fn located_error(expr: &Expr, mut error: CheckError) -> CheckError {
 }
 
 fn diag_site(expr: &Expr) -> String {
+    format!("at {}", site_location(expr).id)
+}
+
+/// The location [`diag_site`] prints, with the start offset that orders it.
+fn site_location(expr: &Expr) -> SiteLocation {
     match span_metadata_id(expr) {
-        Some(id) => format!("at {id}"),
-        None => format!("at offset {}", expr.span().offset),
+        Some(id) => SiteLocation {
+            declaration: None,
+            offset: id
+                .strip_prefix("surf:")
+                .and_then(|id| id.split_once(".."))
+                .and_then(|(start, _)| start.parse().ok())
+                .unwrap_or(expr.span().offset),
+            id: id.to_string(),
+        },
+        None => SiteLocation {
+            declaration: None,
+            offset: expr.span().offset,
+            id: format!("offset {}", expr.span().offset),
+        },
     }
 }
 
@@ -4345,6 +4581,7 @@ fn app_site(expr: &Expr, children: &[Expr], builtin_callee: Option<&str>) -> Con
         description: format!("{name} {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
         terminal: builtin_callee == Some("drop"),
+        at: Some(site_location(expr)),
     }
 }
 
@@ -4353,6 +4590,7 @@ fn generic_site(expr: &Expr) -> ConsumeSite {
         description: format!("use {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
         terminal: false,
+        at: Some(site_location(expr)),
     }
 }
 
@@ -4361,6 +4599,7 @@ fn realize_site(expr: &Expr) -> ConsumeSite {
         description: format!("realize {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
         terminal: false,
+        at: Some(site_location(expr)),
     }
 }
 
@@ -4579,7 +4818,18 @@ mod tests {
 
     #[test]
     fn effect_handler_payload_retains_nested_ownership_traversal() {
-        let use_x = || node("realize", vec![], vec![node("var", vec![], vec![sym("x")])]);
+        // A `drop` ends `x`, so any later use is rejected whatever the fan-out
+        // rule (spec/04 section 8.3); the oracle needs only that the walk sees it.
+        let use_x = || {
+            node(
+                "app",
+                vec![],
+                vec![
+                    node("var", vec![], vec![sym("drop")]),
+                    node("var", vec![], vec![sym("x")]),
+                ],
+            )
+        };
         let handler = Expr::BareList(vec![use_x()], span());
         let program = CheckedProgram::unchecked_for_linearity_diagnostic_test(
             vec![
@@ -4712,7 +4962,16 @@ mod tests {
             head: "future-block".into(),
             meta: Metadata::default(),
             children: vec![
-                node("realize", vec![], vec![node("var", vec![], vec![sym("x")])]),
+                // A `drop`, so the later reads are rejected whatever the
+                // fan-out rule (spec/04 section 8.3).
+                node(
+                    "app",
+                    vec![],
+                    vec![
+                        node("var", vec![], vec![sym("drop")]),
+                        node("var", vec![], vec![sym("x")]),
+                    ],
+                ),
                 node(
                     "app",
                     vec![],
@@ -4837,7 +5096,18 @@ mod tests {
 
     #[test]
     fn redteam_malformed_match_arm_cannot_hide_nested_consume() {
-        let realize_x = || node("realize", vec![], vec![node("var", vec![], vec![sym("x")])]);
+        // A `drop` ends `x`, so any later use is rejected whatever the fan-out
+        // rule (spec/04 section 8.3); the oracle needs only that the walk sees it.
+        let realize_x = || {
+            node(
+                "app",
+                vec![],
+                vec![
+                    node("var", vec![], vec![sym("drop")]),
+                    node("var", vec![], vec![sym("x")]),
+                ],
+            )
+        };
         let malformed_arms = [
             node("params", vec![], vec![realize_x()]),
             node(
@@ -4875,7 +5145,7 @@ mod tests {
             );
             assert_eq!(
                 free_runtime_variables(&malformed_match),
-                vec!["x".to_string()],
+                vec!["drop".to_string(), "x".to_string()],
                 "a malformed arm must not hide a closure capture"
             );
             let body = node(
