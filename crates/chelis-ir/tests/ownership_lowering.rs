@@ -990,7 +990,7 @@ fn malformed_real_host_programs_fail_at_typed_boundaries() {
     let front = front("def id(p: i64) -> i64 = p\nout = id(1i64)\n");
     let mut wrong_arity = front.host.clone();
     wrong_arity.globals[0].value = HostExpr::new(HostExprKind::Call {
-        function: "id".to_string(),
+        callee: chelis_ir::host::HostCallee::Function("id".to_string()),
         args: Vec::new(),
         arg_tys: Vec::new(),
         ty: ConcreteHostType::Int64,

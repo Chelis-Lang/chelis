@@ -208,14 +208,14 @@ fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
     };
 
     let call_marker = program_with(HostExprKind::Call {
-        function: HOST_UNRESOLVED_CALLABLE_MARKER.into(),
+        callee: chelis_ir::host::HostCallee::Unresolved(HOST_UNRESOLVED_CALLABLE_MARKER.into()),
         args: Vec::new(),
         arg_tys: Vec::new(),
         ty: ConcreteHostType::Scalar(Prim::Int32),
     });
     let err = crate::host_abi::project_binding(
         call_marker.globals.into_iter().next().unwrap(),
-        &chelis_unord::UnordSet::new(),
+        &crate::host_abi::AllowedCallees::default(),
     )
     .expect_err("a callable marker in Call position must never project");
     let rendered = err.to_string();
@@ -229,7 +229,7 @@ fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
     });
     let err = crate::host_abi::project_binding(
         builtin_marker.globals.into_iter().next().unwrap(),
-        &chelis_unord::UnordSet::new(),
+        &crate::host_abi::AllowedCallees::default(),
     )
     .expect_err("a transform marker in Builtin position must never project");
     let rendered = err.to_string();

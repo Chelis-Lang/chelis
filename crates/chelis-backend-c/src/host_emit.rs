@@ -1,6 +1,6 @@
 use chelis_ir::host::{
-    HostBlasMatmulSummary, HostFunctionSpecialization, HostSparseOpSummary, HostTensorHelper,
-    HostTensorSpecialization,
+    HostBlasMatmulSummary, HostCallee, HostFunctionSpecialization, HostSparseOpSummary,
+    HostTensorHelper, HostTensorSpecialization,
 };
 mod entry;
 mod entry_walk;
@@ -4184,8 +4184,11 @@ fn emit_main(
                 let selected = binding.name == root.def_name
                     || matches!(
                         &binding.value.kind,
-                        HostExprKind::Call { function, args, .. }
-                            if function == &root.def_name && args.is_empty()
+                        HostExprKind::Call {
+                            callee: HostCallee::Function(function),
+                            args,
+                            ..
+                        } if function == &root.def_name && args.is_empty()
                     );
                 root.lane == Lane::Host
                     && selected
@@ -4337,8 +4340,10 @@ fn collect_called_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
             HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
                 walk(value, out)
             }
-            HostExprKind::Call { function, args, .. } => {
-                out.insert(function.clone());
+            HostExprKind::Call { callee, args, .. } => {
+                if let HostCallee::Function(function) = callee {
+                    out.insert(function.clone());
+                }
                 for arg in args {
                     walk(arg, out);
                 }
@@ -4438,8 +4443,10 @@ fn collect_called_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     }
     fn walk_callback(callback: &HostCallback, out: &mut UnordSet<String>) {
         match &callback.kind {
-            HostCallbackKind::Named { function, .. } => {
-                out.insert(function.clone());
+            HostCallbackKind::Named { callee, .. } => {
+                if let HostCallee::Function(function) = callee {
+                    out.insert(function.clone());
+                }
             }
             HostCallbackKind::Inline { body, .. } => walk(body, out),
         }
@@ -6231,18 +6238,18 @@ impl<'a> HostEmitter<'a> {
             .unwrap_or_else(|| c_ident(name).into_owned())
     }
 
-    /// The C callee of a verified call of `function`. Ownership lowering
-    /// resolved the spelling with lexical bindings first, and `kind` is that
-    /// resolution, so the spelling is not resolved again here: only a direct
-    /// call names a def, and any other callee is a lexical function value
-    /// whose C name may be a flattened let spine's generated alias.
+    /// The C callee of a verified call. Host lowering resolved the callee and
+    /// ownership lowering derived the call's apply kind from that identity,
+    /// so the two must agree; neither the spelling nor the kind is resolved
+    /// again here. A function names its private body, and a lexical binding
+    /// names its C name, which may be a flattened let spine's generated alias.
     fn verified_callee(
         &self,
-        function: &str,
+        callee: &HostCallee,
         kind: VerifiedApplyKind,
     ) -> Result<VerifiedCallee, Unsupported> {
-        match kind {
-            VerifiedApplyKind::DirectCall { .. } => self
+        match (kind, callee) {
+            (VerifiedApplyKind::DirectCall { .. }, HostCallee::Function(function)) => self
                 .emitted_names
                 .get(function)
                 .cloned()
@@ -6253,14 +6260,17 @@ impl<'a> HostEmitter<'a> {
                         "verified C host ownership emission",
                     )
                 }),
-            VerifiedApplyKind::KeyBuiltinCall(_) | VerifiedApplyKind::IndirectCall => {
-                Ok(VerifiedCallee::Value(self.local_c_name(function)))
+            (
+                VerifiedApplyKind::KeyBuiltinCall(_) | VerifiedApplyKind::IndirectCall,
+                HostCallee::Local(binding),
+            ) => Ok(VerifiedCallee::Value(self.local_c_name(binding))),
+            (VerifiedApplyKind::NativeProviderCall, HostCallee::NativeProvider(symbol)) => {
+                Ok(VerifiedCallee::Value(c_ident(symbol).into_owned()))
             }
-            VerifiedApplyKind::NativeProviderCall => {
-                Ok(VerifiedCallee::Value(c_ident(function).into_owned()))
-            }
-            VerifiedApplyKind::Intrinsic => Err(invalid_abi_shape(
-                format!("verified call of `{function}` has an intrinsic authority"),
+            (kind, callee) => Err(invalid_abi_shape(
+                format!(
+                    "verified {kind:?} authority disagrees with the resolved callee {callee:?}"
+                ),
                 "verified C host ownership emission",
             )),
         }
@@ -6506,7 +6516,7 @@ impl<'a> HostEmitter<'a> {
                 self.emit_result_claim_guard(target, ty, result_claims.as_deref());
             }
             HostExprKind::Call {
-                function,
+                callee,
                 args,
                 arg_tys,
                 ty: call_ty,
@@ -6514,7 +6524,7 @@ impl<'a> HostEmitter<'a> {
                 require_same_abi_type(ty, call_ty, "call expression")?;
                 self.assign_call(
                     (target, call_ty),
-                    function,
+                    callee,
                     args,
                     arg_tys,
                     site,
@@ -10882,7 +10892,7 @@ impl<'a> HostEmitter<'a> {
     fn assign_call(
         &mut self,
         destination: (&str, &HostType),
-        function: &str,
+        callee: &HostCallee,
         args: &[HostExpr],
         arg_tys: &[HostType],
         site: &ProjectedHostSite<'a>,
@@ -10893,9 +10903,11 @@ impl<'a> HostEmitter<'a> {
             span: call_span,
         } = reporting;
         let (target, ty) = destination;
+        let function = callee.name();
         let (_, call_kind) = verified_call_authority(site)?;
         // A def's selected summary replaces only a direct call of that def.
-        if let VerifiedApplyKind::DirectCall { .. } = call_kind
+        if let (VerifiedApplyKind::DirectCall { .. }, HostCallee::Function(function)) =
+            (call_kind, callee)
             && let Some(spec) = self.function_specializations.get(function).cloned()
         {
             match spec {
@@ -10971,7 +10983,7 @@ impl<'a> HostEmitter<'a> {
             ));
         }
         self.emit_pre_call_actions(site)?;
-        let callee = self.verified_callee(function, call_kind)?;
+        let verified = self.verified_callee(callee, call_kind)?;
         let verified_tail = matches!(call_kind, VerifiedApplyKind::DirectCall { tail: true, .. });
         let use_tail_loop = self.tail_loop.as_ref().is_some_and(|plan| {
             verified_tail
@@ -10995,10 +11007,10 @@ impl<'a> HostEmitter<'a> {
             self.tail_loop_used = true;
             return Ok(());
         }
-        let guarded_recursive_call = self.emit_recursive_call_guard(function, &callee, call_span);
+        let guarded_recursive_call = self.emit_recursive_call_guard(function, &verified, call_span);
         // Calls to declared functions use private bodies and inherit this
         // invocation. Function values retain their authored C signature.
-        if let VerifiedCallee::Definition(_) = callee {
+        if let VerifiedCallee::Definition(_) = verified {
             let forwards_receipt = self
                 .entry_group
                 .is_some_and(|group| self.entry_groups.get(function) == Some(&group))
@@ -11018,11 +11030,11 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}{target} = {}({});",
             self.indent,
-            callee.c_name(),
+            verified.c_name(),
             arg_vars.join(", ")
         ));
         self.emit_recursive_call_end(guarded_recursive_call);
-        if let VerifiedCallee::Value(_) = callee {
+        if let VerifiedCallee::Value(_) = verified {
             self.assign_interface_result_origin(target, ty);
             self.emit_result_claim_guard(target, ty, result_claims);
         }
@@ -12071,13 +12083,16 @@ impl<'a> HostEmitter<'a> {
         call_at: (&ProjectedHostSite<'a>, VerifiedBlockId),
     ) -> Result<(), Unsupported> {
         match &callback.kind {
-            HostCallbackKind::Named { function, .. } => {
+            HostCallbackKind::Named {
+                callee: resolved, ..
+            } => {
                 // chelis#840: the same verified resolution as `assign_call`,
                 // so a reserved-word callback parameter referenced by name
                 // matches its mangled declarator.
                 let (site, block) = call_at;
+                let function = resolved.name();
                 let callee =
-                    self.verified_callee(function, named_callback_call_kind(site, block)?)?;
+                    self.verified_callee(resolved, named_callback_call_kind(site, block)?)?;
                 let mut arg_vars = arg_vars.to_vec();
                 if let VerifiedCallee::Definition(_) = callee {
                     append_private_host_context_args(&mut arg_vars, "NULL");

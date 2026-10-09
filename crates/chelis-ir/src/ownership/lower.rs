@@ -16,8 +16,8 @@ use crate::anonymous_dims::is_anonymous;
 use crate::dag::{DimInfo, TensorType};
 use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
-    ConcreteHostFunction, ConcreteHostMatchArm, ConcreteHostProgram, HostBinding, HostDisplayRoot,
-    HostExpr, HostExprKind, HostFunctionOrigin, HostTensorHelper,
+    ConcreteHostFunction, ConcreteHostMatchArm, ConcreteHostProgram, HostBinding, HostCallee,
+    HostDisplayRoot, HostExpr, HostExprKind, HostFunctionOrigin, HostTensorHelper,
 };
 use crate::host_type_state::ConcreteHostType;
 
@@ -848,16 +848,6 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             .find_map(|scope| scope.names.get(name).copied())
     }
 
-    /// The signature of the def a call of `function` names. A lexical
-    /// binding of the spelling shadows every def, so a call through one never
-    /// resolves to a def.
-    fn definition_signature(&self, function: &str) -> Option<&Signature> {
-        if self.lookup(function).is_some() {
-            return None;
-        }
-        self.ctx.signatures.get(function)
-    }
-
     fn copy(&mut self, source: OwnerId) -> Result<OwnerId, OwnershipError> {
         let info = self.info(source)?;
         let ty = info.ty.clone();
@@ -1170,13 +1160,15 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             }
             ConcreteHostExprKind::Var(name, ty) => self.lower_var(name, ty),
             ConcreteHostExprKind::Call {
-                function,
+                callee,
                 args,
                 arg_tys,
                 ty,
             } => {
-                let native_specs = if let Some((linked_name, symbol)) = &self.ctx.native_provider
-                    && function == symbol
+                let function = &callee.name().to_owned();
+                let native_specs = if let HostCallee::NativeProvider(provider) = callee
+                    && let Some((linked_name, symbol)) = &self.ctx.native_provider
+                    && provider == symbol
                 {
                     let declarations =
                         declared_params(self.ctx.checked, linked_name, arg_tys.len()).ok_or_else(
@@ -1199,15 +1191,16 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 } else {
                     None
                 };
-                let direct_specs = if crate::host::is_host_unresolved_marker(function)
-                    || matches!(self.lookup(function), Some(Place::Callback(_)))
-                {
-                    None
-                } else {
-                    native_specs.clone().or_else(|| {
-                        self.definition_signature(function)
-                            .map(|signature| signature.params.clone())
-                    })
+                // Host lowering resolved the callee; only a function or a
+                // native provider has declared argument modes.
+                let direct_specs = match callee {
+                    HostCallee::Function(name) => self
+                        .ctx
+                        .signatures
+                        .get(name)
+                        .map(|signature| signature.params.clone()),
+                    HostCallee::NativeProvider(_) => native_specs.clone(),
+                    HostCallee::Local(_) | HostCallee::Unresolved(_) => None,
                 };
                 let values = if let Some(specs) = direct_specs {
                     if args.len() != specs.len() {
@@ -1262,7 +1255,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 };
-                self.lower_call(function, values, ty, tail, native_specs)
+                self.lower_call(callee, values, ty, tail, native_specs)
             }
             ConcreteHostExprKind::SignatureEntry {
                 plan, args, lists, ..
@@ -1711,76 +1704,93 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
 
     fn lower_call(
         &mut self,
-        function: &str,
+        callee: &HostCallee,
         values: Vec<Value>,
         ty: &ConcreteHostType,
         tail: Option<usize>,
         native_specs: Option<Vec<ParamSpec>>,
     ) -> Result<Value, OwnershipError> {
-        // These two unspellable placeholders are typed negative evidence for
-        // the target capability boundary. Ownership still has to account for
-        // their exact argument/result payload so the pre-emission verifier is
-        // total, but it must not turn any ordinary unknown callee into an
-        // admissible call. The C ABI projection rejects the retained marker
-        // before a raw call can be emitted.
-        if crate::host::is_host_unresolved_marker(function) {
-            let mut args = Vec::with_capacity(values.len());
-            for value in values {
-                args.push(self.borrow(value)?);
+        let function = callee.name();
+        // Host lowering resolved the callee. A local callee is the binding in
+        // scope and a function callee is the program's function; neither
+        // spelling is looked up in the other's namespace.
+        let (label, kind, specs) = match callee {
+            // These two unspellable placeholders are typed negative evidence
+            // for the target capability boundary. Ownership still has to
+            // account for their exact argument/result payload so the
+            // pre-emission verifier is total, but it must not turn any
+            // ordinary unknown callee into an admissible call. The C ABI
+            // projection rejects the retained marker before a raw call can be
+            // emitted.
+            HostCallee::Unresolved(_) => {
+                let mut args = Vec::with_capacity(values.len());
+                for value in values {
+                    args.push(self.borrow(value)?);
+                }
+                return self.apply(
+                    ty,
+                    "unresolved_call_placeholder".to_string(),
+                    vec![super::ir::OwnershipUse::Borrow; args.len()],
+                    args,
+                );
             }
-            return self.apply(
-                ty,
-                "unresolved_call_placeholder".to_string(),
-                vec![super::ir::OwnershipUse::Borrow; args.len()],
-                args,
-            );
-        }
-        let (label, kind, specs) = match self.lookup(function) {
-            Some(Place::Callback(owner)) => {
-                let params = match &self.info(owner)?.ty {
-                    ConcreteHostType::Function(params, _) => params.clone(),
-                    other => {
+            HostCallee::Local(_) => match self.lookup(function) {
+                Some(Place::Callback(owner)) => {
+                    let params = match &self.info(owner)?.ty {
+                        ConcreteHostType::Function(params, _) => params.clone(),
+                        other => {
+                            return Err(self.invariant(format!(
+                                "callback '{function}' has non-function type '{}'",
+                                render_type(other)
+                            )));
+                        }
+                    };
+                    let modes = self.callback_modes.get(&owner).cloned().ok_or_else(|| {
+                        self.invariant(format!("callback %{owner:?} has no parameter modes"))
+                    })?;
+                    if modes.len() != params.len() {
                         return Err(self.invariant(format!(
-                            "callback '{function}' has non-function type '{}'",
-                            render_type(other)
+                            "callback %{owner:?} has {} parameter modes for {} parameters",
+                            modes.len(),
+                            params.len()
                         )));
                     }
-                };
-                let modes = self.callback_modes.get(&owner).cloned().ok_or_else(|| {
-                    self.invariant(format!("callback %{owner:?} has no parameter modes"))
-                })?;
-                if modes.len() != params.len() {
-                    return Err(self.invariant(format!(
-                        "callback %{owner:?} has {} parameter modes for {} parameters",
-                        modes.len(),
-                        params.len()
-                    )));
+                    let specs = params
+                        .into_iter()
+                        .zip(modes)
+                        .map(|(ty, mode)| ParamSpec {
+                            mode,
+                            type_pattern: FormalTypePattern::nominal(&ty),
+                            ty,
+                            callback_modes: None,
+                        })
+                        .collect();
+                    (
+                        format!("call_callback:%{}", owner.0),
+                        self.key_callbacks
+                            .get(&owner)
+                            .copied()
+                            .map_or(ApplyKind::IndirectCall, ApplyKind::KeyBuiltinCall),
+                        specs,
+                    )
                 }
-                let specs = params
-                    .into_iter()
-                    .zip(modes)
-                    .map(|(ty, mode)| ParamSpec {
-                        mode,
-                        type_pattern: FormalTypePattern::nominal(&ty),
-                        ty,
-                        callback_modes: None,
-                    })
-                    .collect();
-                (
-                    format!("call_callback:%{}", owner.0),
-                    self.key_callbacks
-                        .get(&owner)
-                        .copied()
-                        .map_or(ApplyKind::IndirectCall, ApplyKind::KeyBuiltinCall),
-                    specs,
-                )
-            }
-            Some(Place::Owner(_)) | None if native_specs.is_some() => (
+                Some(Place::Owner(_)) | None => {
+                    return Err(OwnershipError::UnknownCallee {
+                        unit: self.unit_name.clone(),
+                        callee: function.to_string(),
+                    });
+                }
+            },
+            HostCallee::NativeProvider(_) => (
                 format!("native_provider:{function}"),
                 ApplyKind::NativeProviderCall,
-                native_specs.expect("native provider specs present"),
+                native_specs.ok_or_else(|| {
+                    self.invariant(format!(
+                        "native provider `{function}` has no declared parameter modes"
+                    ))
+                })?,
             ),
-            Some(Place::Owner(_)) | None => match self.definition_signature(function) {
+            HostCallee::Function(_) => match self.ctx.signatures.get(function) {
                 Some(signature) => {
                     let callee =
                         self.ctx
@@ -2170,9 +2180,9 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let depth = self.depth();
         match &callback.kind {
             ConcreteHostCallbackKind::Inline { body, .. } => self.lower_expr(body, Some(depth)),
-            ConcreteHostCallbackKind::Named { function, .. } => {
+            ConcreteHostCallbackKind::Named { callee, .. } => {
                 let values = params.iter().map(|owner| Value::Named(*owner)).collect();
-                self.lower_call(function, values, &callback.ret_ty, Some(depth), None)
+                self.lower_call(callee, values, &callback.ret_ty, Some(depth), None)
             }
         }
     }
@@ -2872,7 +2882,7 @@ pub(super) fn materialize_manifest_roots(
             display_roots: vec![display_root(root)],
             ty: ty.clone(),
             value: HostExpr::new(HostExprKind::Call {
-                function: function_name,
+                callee: HostCallee::Function(function_name),
                 args: Vec::new(),
                 arg_tys: Vec::new(),
                 ty,
@@ -2981,8 +2991,11 @@ fn lower_roots(
                 let selected = binding.name == root.def_name
                     || matches!(
                         &binding.value.kind,
-                        ConcreteHostExprKind::Call { function, args, .. }
-                            if function == &root.def_name && args.is_empty()
+                        ConcreteHostExprKind::Call {
+                            callee: HostCallee::Function(function),
+                            args,
+                            ..
+                        } if function == &root.def_name && args.is_empty()
                     );
                 root.lane == Lane::Host && selected && display_root(root) == *display
             });

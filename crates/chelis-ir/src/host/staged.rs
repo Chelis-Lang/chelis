@@ -458,48 +458,93 @@ pub(crate) fn scalar_type() -> TensorType {
     }
 }
 
+/// The callable aliases a staged expression may still name, and every name
+/// bound around the current point of the expression.
+#[derive(Clone)]
+pub(super) struct CallableAliasScope {
+    aliases: BTreeMap<String, String>,
+    bound: BTreeSet<String>,
+}
+
+impl CallableAliasScope {
+    /// `aliases` maps each staged alias to the function it names; `bound`
+    /// holds the names the staged expression's enclosing bindings introduce.
+    pub(super) fn new(
+        aliases: BTreeMap<String, String>,
+        bound: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            aliases,
+            bound: bound.into_iter().collect(),
+        }
+    }
+
+    fn binding<'n>(&self, names: impl IntoIterator<Item = &'n String>) -> Self {
+        let mut inner = self.clone();
+        for name in names {
+            inner.aliases.remove(name);
+            inner.bound.insert(name.clone());
+        }
+        inner
+    }
+}
+
 /// Static function references stay direct calls in C. The plan retains the
 /// reference at its original binding position; resolving that captured value
 /// does not create a first-class function object or guess from a later name.
+///
+/// A call through an alias becomes a call of the function's identity, which
+/// no binder can capture. A function value is still a name, so a reference
+/// through an alias whose function a surrounding binder shadows is refused
+/// rather than captured.
 pub(super) fn resolve_callable_aliases(
     expr: &mut super::HostExpr,
-    aliases: &BTreeMap<String, String>,
-) {
-    use super::{HostCallback, HostCallbackKind, HostExprKind};
-    fn callback(callback: &mut HostCallback, aliases: &BTreeMap<String, String>) {
-        match &mut callback.kind {
-            HostCallbackKind::Named { function, .. } => {
-                if let Some(resolved) = aliases.get(function) {
-                    *function = resolved.clone();
-                }
-            }
-            HostCallbackKind::Inline { params, body } => {
-                let mut inner = aliases.clone();
-                for param in params {
-                    inner.remove(&param.name);
-                }
-                resolve_callable_aliases(body, &inner);
+    scope: &CallableAliasScope,
+) -> Result<(), String> {
+    use super::{HostCallback, HostCallbackKind, HostCallee, HostExprKind};
+    fn local_alias<'s>(scope: &'s CallableAliasScope, callee: &HostCallee) -> Option<&'s String> {
+        match callee {
+            HostCallee::Local(name) => scope.aliases.get(name),
+            HostCallee::Function(_) | HostCallee::NativeProvider(_) | HostCallee::Unresolved(_) => {
+                None
             }
         }
     }
-    match &mut expr.kind {
-        HostExprKind::ResultClaimScope { body, .. } => {
-            resolve_callable_aliases(body, aliases);
+    fn callback(callback: &mut HostCallback, scope: &CallableAliasScope) -> Result<(), String> {
+        match &mut callback.kind {
+            HostCallbackKind::Named { callee, .. } => {
+                if let Some(resolved) = local_alias(scope, callee) {
+                    *callee = HostCallee::Function(resolved.clone());
+                }
+                Ok(())
+            }
+            HostCallbackKind::Inline { params, body } => resolve_callable_aliases(
+                body,
+                &scope.binding(params.iter().map(|param| &param.name)),
+            ),
         }
+    }
+    match &mut expr.kind {
+        HostExprKind::ResultClaimScope { body, .. } => resolve_callable_aliases(body, scope)?,
         HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
-            resolve_callable_aliases(value, aliases);
+            resolve_callable_aliases(value, scope)?;
         }
         HostExprKind::Var(name, _) => {
-            if let Some(resolved) = aliases.get(name) {
+            if let Some(resolved) = scope.aliases.get(name) {
+                if scope.bound.contains(resolved) {
+                    return Err(format!(
+                        "staged callable `{name}` names `{resolved}`, which a binding in scope shadows"
+                    ));
+                }
                 *name = resolved.clone();
             }
         }
-        HostExprKind::Call { function, args, .. } => {
-            if let Some(resolved) = aliases.get(function) {
-                *function = resolved.clone();
+        HostExprKind::Call { callee, args, .. } => {
+            if let Some(resolved) = local_alias(scope, callee) {
+                *callee = HostCallee::Function(resolved.clone());
             }
             for arg in args {
-                resolve_callable_aliases(arg, aliases);
+                resolve_callable_aliases(arg, scope)?;
             }
         }
         HostExprKind::Builtin { args, .. }
@@ -508,7 +553,7 @@ pub(super) fn resolve_callable_aliases(
         | HostExprKind::List(args, _)
         | HostExprKind::Tuple(args, _) => {
             for arg in args {
-                resolve_callable_aliases(arg, aliases);
+                resolve_callable_aliases(arg, scope)?;
             }
         }
         HostExprKind::SignatureEntry { args, lists, .. } => {
@@ -516,19 +561,19 @@ pub(super) fn resolve_callable_aliases(
                 .iter_mut()
                 .chain(lists.iter_mut().map(|entry| &mut entry.value))
             {
-                resolve_callable_aliases(arg, aliases);
+                resolve_callable_aliases(arg, scope)?;
             }
         }
-        HostExprKind::AdtFieldAccess { base, .. } => resolve_callable_aliases(base, aliases),
+        HostExprKind::AdtFieldAccess { base, .. } => resolve_callable_aliases(base, scope)?,
         HostExprKind::If {
             cond,
             then_expr,
             else_expr,
             ..
         } => {
-            resolve_callable_aliases(cond, aliases);
-            resolve_callable_aliases(then_expr, aliases);
-            resolve_callable_aliases(else_expr, aliases);
+            resolve_callable_aliases(cond, scope)?;
+            resolve_callable_aliases(then_expr, scope)?;
+            resolve_callable_aliases(else_expr, scope)?;
         }
         HostExprKind::MatchOption {
             scrutinee,
@@ -537,11 +582,9 @@ pub(super) fn resolve_callable_aliases(
             none_expr,
             ..
         } => {
-            resolve_callable_aliases(scrutinee, aliases);
-            resolve_callable_aliases(none_expr, aliases);
-            let mut inner = aliases.clone();
-            inner.remove(bind_name);
-            resolve_callable_aliases(some_expr, &inner);
+            resolve_callable_aliases(scrutinee, scope)?;
+            resolve_callable_aliases(none_expr, scope)?;
+            resolve_callable_aliases(some_expr, &scope.binding([&*bind_name]))?;
         }
         HostExprKind::MatchAdt {
             scrutinee,
@@ -549,26 +592,23 @@ pub(super) fn resolve_callable_aliases(
             default_expr,
             ..
         } => {
-            resolve_callable_aliases(scrutinee, aliases);
+            resolve_callable_aliases(scrutinee, scope)?;
             if let Some(default) = default_expr {
-                resolve_callable_aliases(default, aliases);
+                resolve_callable_aliases(default, scope)?;
             }
             for arm in arms {
-                let mut inner = aliases.clone();
-                for binding in &arm.bindings {
-                    inner.remove(&binding.name);
-                }
-                resolve_callable_aliases(&mut arm.expr, &inner);
+                let inner = scope.binding(arm.bindings.iter().map(|binding| &binding.name));
+                resolve_callable_aliases(&mut arm.expr, &inner)?;
             }
         }
         HostExprKind::Let { bindings, body, .. }
         | HostExprKind::RetainedInvocation { bindings, body, .. } => {
-            let mut inner = aliases.clone();
+            let mut inner = scope.clone();
             for binding in bindings {
-                resolve_callable_aliases(&mut binding.value, &inner);
-                inner.remove(&binding.name);
+                resolve_callable_aliases(&mut binding.value, &inner)?;
+                inner = inner.binding([&binding.name]);
             }
-            resolve_callable_aliases(body, &inner);
+            resolve_callable_aliases(body, &inner)?;
         }
         HostExprKind::Map {
             callback: cb, list, ..
@@ -582,8 +622,8 @@ pub(super) fn resolve_callable_aliases(
         | HostExprKind::FlatMap {
             callback: cb, list, ..
         } => {
-            callback(cb, aliases);
-            resolve_callable_aliases(list, aliases);
+            callback(cb, scope)?;
+            resolve_callable_aliases(list, scope)?;
         }
         HostExprKind::Fold {
             callback: cb,
@@ -597,9 +637,9 @@ pub(super) fn resolve_callable_aliases(
             list,
             ..
         } => {
-            callback(cb, aliases);
-            resolve_callable_aliases(init, aliases);
-            resolve_callable_aliases(list, aliases);
+            callback(cb, scope)?;
+            resolve_callable_aliases(init, scope)?;
+            resolve_callable_aliases(list, scope)?;
         }
         HostExprKind::Int(_)
         | HostExprKind::Float(_)
@@ -607,6 +647,7 @@ pub(super) fn resolve_callable_aliases(
         | HostExprKind::String(_)
         | HostExprKind::Unit => {}
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1224,5 +1265,48 @@ mod tests {
                 "{mutation}"
             );
         }
+    }
+
+    /// A call through a staged alias becomes a call of the function's
+    /// identity, which no binder in scope can capture. A function value
+    /// reference is still a name, so one that a binder would capture is
+    /// refused rather than rewritten.
+    #[test]
+    fn callable_alias_resolution_writes_identities_and_refuses_captured_values() {
+        use super::super::{HostCallee, HostExpr, HostExprKind};
+        let int = || HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64));
+        let aliases = BTreeMap::from([("g".to_string(), "halve".to_string())]);
+        let shadowed = CallableAliasScope::new(aliases.clone(), ["halve".to_string()]);
+
+        let mut call = HostExpr::new(HostExprKind::Call {
+            callee: HostCallee::Local("g".into()),
+            args: vec![HostExpr::new(HostExprKind::Var("halve".into(), int()))],
+            arg_tys: vec![int()],
+            ty: int(),
+        });
+        resolve_callable_aliases(&mut call, &shadowed).expect("a call resolves by identity");
+        let HostExprKind::Call { callee, args, .. } = &call.kind else {
+            unreachable!("resolution keeps the node kind");
+        };
+        assert_eq!(*callee, HostCallee::Function("halve".into()));
+        assert!(
+            matches!(&args[0].kind, HostExprKind::Var(name, _) if name == "halve"),
+            "the argument still reads the local binding"
+        );
+
+        let value = || HostExpr::new(HostExprKind::Var("g".into(), int()));
+        let error = resolve_callable_aliases(&mut value(), &shadowed)
+            .expect_err("a captured function value must be refused");
+        assert_eq!(
+            error,
+            "staged callable `g` names `halve`, which a binding in scope shadows"
+        );
+        let mut unshadowed = value();
+        resolve_callable_aliases(
+            &mut unshadowed,
+            &CallableAliasScope::new(aliases, std::iter::empty()),
+        )
+        .expect("an uncaptured function value resolves");
+        assert!(matches!(&unshadowed.kind, HostExprKind::Var(name, _) if name == "halve"));
     }
 }

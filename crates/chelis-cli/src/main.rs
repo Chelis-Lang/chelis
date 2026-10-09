@@ -12696,7 +12696,7 @@ fn apply_manifest_display_roots_to_globals(
             display_roots,
             ty: ty.clone(),
             value: HostExpr::new(HostExprKind::Call {
-                function: function_name,
+                callee: chelis_ir::host::HostCallee::Function(function_name),
                 args: Vec::new(),
                 arg_tys: Vec::new(),
                 ty,

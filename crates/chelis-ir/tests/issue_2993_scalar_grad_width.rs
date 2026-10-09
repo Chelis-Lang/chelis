@@ -219,11 +219,12 @@ fn host_collection_transform_body_keeps_its_rejection() {
     // declines to the unresolved-transform marker rather than a DAG.
     let src = "def f(x: f32) -> f32 = fold(fn (acc: f32, y: f32) -> add(acc, mul(y, x)), 0.0f32, [1.0f32, 2.0f32])\nout = grad(f)(0.5f32)\n";
     let (_, value, _) = lowered_out(src);
-    let HostExprKind::Call { function, .. } = &value.kind else {
+    let HostExprKind::Call { callee, .. } = &value.kind else {
         panic!("{src}: expected the unresolved-transform marker, got {value:?}");
     };
     assert!(
-        chelis_ir::host::is_host_unresolved_marker(function),
-        "{src}: {function}"
+        matches!(callee, chelis_ir::host::HostCallee::Unresolved(marker)
+            if chelis_ir::host::is_host_unresolved_marker(marker)),
+        "{src}: {callee:?}"
     );
 }

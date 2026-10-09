@@ -5,7 +5,7 @@ use chelis_types::types::{Lane, Prim};
 
 use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
-    ConcreteHostProgram, HostDisplayRoot, HostFunctionOrigin, HostTensorHelper,
+    ConcreteHostProgram, HostCallee, HostDisplayRoot, HostFunctionOrigin, HostTensorHelper,
 };
 use crate::host_type_state::ConcreteHostType;
 
@@ -643,7 +643,11 @@ fn census_host_payload<'a>(
                         let selected = binding.name == entry.def_name
                             || matches!(
                                 &binding.value.kind,
-                                ConcreteHostExprKind::Call { function, args, .. }
+                                ConcreteHostExprKind::Call {
+                                    callee: HostCallee::Function(function),
+                                    args,
+                                    ..
+                                }
                                     if function == &entry.def_name && args.is_empty()
                             );
                         entry.lane == Lane::Host
@@ -889,7 +893,11 @@ fn verify_materialized_roots(
                     let is_selected_binding = binding.name == entry.def_name
                         || matches!(
                             &binding.value.kind,
-                            ConcreteHostExprKind::Call { function, args, .. }
+                            ConcreteHostExprKind::Call {
+                                    callee: HostCallee::Function(function),
+                                    args,
+                                    ..
+                                }
                                 if function == &entry.def_name && args.is_empty()
                         );
                     is_selected_binding && independent_display_root(entry) == *display
@@ -923,7 +931,11 @@ fn verify_materialized_roots(
                         let is_selected_binding = binding.name == entry.def_name
                             || matches!(
                                 &binding.value.kind,
-                                ConcreteHostExprKind::Call { function, args, .. }
+                                ConcreteHostExprKind::Call {
+                                    callee: HostCallee::Function(function),
+                                    args,
+                                    ..
+                                }
                                     if function == &entry.def_name && args.is_empty()
                             );
                         is_selected_binding && independent_display_root(entry) == **display
@@ -950,7 +962,11 @@ fn verify_materialized_roots(
                 let is_selected_binding = binding.name == entry.def_name
                     || matches!(
                         &binding.value.kind,
-                        ConcreteHostExprKind::Call { function, args, .. }
+                        ConcreteHostExprKind::Call {
+                                    callee: HostCallee::Function(function),
+                                    args,
+                                    ..
+                                }
                             if function == &entry.def_name && args.is_empty()
                     );
                 is_selected_binding
