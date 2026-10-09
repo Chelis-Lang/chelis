@@ -23,6 +23,10 @@ thread_local! {
     /// unwinds into structured diagnostics. The panic hook stays quiet in
     /// that scope so users see only the returned diagnostic.
     static SUPPRESS_LOWERING_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
+    /// Set while [`catch_lowering_diagnostic`] encloses a post-lowering pass.
+    /// The hook stays quiet only for a lowering diagnostic's own unwind; any
+    /// other panic in that scope still prints, since it is resumed.
+    static SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
     /// Counts whole-program context preparations on this thread (chelis#2207).
     static PROGRAM_CONTEXT_PREPARATIONS: Cell<u64> = const { Cell::new(0) };
 }
@@ -691,6 +695,38 @@ pub(crate) fn catch_lowering_external<R>(
     catch_lowering(f)
 }
 
+/// Return the lowering diagnostic a post-lowering pass raises, and nothing
+/// else.
+///
+/// A pass that runs after a `try_lower_*` entry has returned (helper
+/// actualization, for one) raises its typed refusals through the same
+/// `panic_any` channel, but no entry's catch encloses it. Without this
+/// boundary such a refusal unwinds to whatever catches panics next and loses
+/// its message (chelis#3340). Unlike [`catch_lowering`], an unrelated panic is
+/// resumed rather than converted, so an internal fault is not laundered into
+/// a host-fallback diagnostic.
+pub(crate) fn catch_lowering_diagnostic<R>(
+    f: impl FnOnce() -> R + std::panic::UnwindSafe,
+) -> Result<R, LowerDiagnostic> {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0;
+            SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT.with(|cell| cell.set(previous));
+        }
+    }
+
+    install_chelis_panic_hook();
+    let _restore = Restore(SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT.with(|cell| cell.replace(true)));
+    match std::panic::catch_unwind(f) {
+        Ok(value) => Ok(value),
+        Err(payload) if payload.is::<LowerDiagnostic>() || payload.is::<UnrepresentableDag>() => {
+            Err(panic_payload_to_lower_diagnostic(&*payload))
+        }
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 static CHELIS_PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 
 /// Install a one-time global panic hook that suppresses panic output when the
@@ -704,6 +740,12 @@ pub fn install_chelis_panic_hook() {
                 return;
             }
             if SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.get()) {
+                return;
+            }
+            if SUPPRESS_DIAGNOSTIC_PANIC_OUTPUT.with(|cell| cell.get())
+                && (info.payload().is::<LowerDiagnostic>()
+                    || info.payload().is::<UnrepresentableDag>())
+            {
                 return;
             }
             prev(info);
@@ -20320,16 +20362,14 @@ impl<'program> LowerCtx<'program> {
         let refined = DimInfo::Named(name.clone(), known_extent);
 
         // A same-shape primitive's output type is part of its physical
-        // operand-agreement contract. A caller-side label is only a view, so
-        // stamping it directly on that producer can make a valid primitive
-        // internally inconsistent (for example, `relu` producing
-        // `Named("d", Some(2))` while its operand remains `Lit(2)`). Retain
-        // the exact producer and put the diagnostic-only refinement on an
-        // administrative carrier instead.
-        if matches!(
-            crate::axis_sources::same_shape_result_agreement(&self.dag, id),
-            Ok(Some(_))
-        ) {
+        // operand-agreement contract, and a guarded abort's is exactly its
+        // fallback's. A caller-side label is only a view, so stamping it
+        // directly on such a producer can make a valid primitive internally
+        // inconsistent (for example, `relu` producing `Named("d", Some(2))`
+        // while its operand remains `Lit(2)`). Retain the exact producer and
+        // put the diagnostic-only refinement on an administrative carrier
+        // instead.
+        if crate::axis_sources::result_type_is_operand_bound(&self.dag, id) {
             let source = self.dag.get(id).expect("result");
             let mut output_type = source.output_type.clone();
             output_type.dims[axis] = refined;
@@ -22260,6 +22300,12 @@ impl<'program> LowerCtx<'program> {
                 _ => {}
             }
         }
+        // A staged host region keeps every runtime branch as host control
+        // flow, a `fail` arm included: the guarded abort below exists for a
+        // DAG built for its value, and lowering past this branch in a staged
+        // region would commit the region to a static DAG for a body only the
+        // host interpreter can carry, such as a computed concat (chelis#3341).
+        self.retain_host_branch_control(cond_expr.span());
         let then_fail = match then_fail {
             Some(FailMessage::Usable(message)) => Some(message),
             _ => None,
@@ -22295,15 +22341,6 @@ impl<'program> LowerCtx<'program> {
                 return LoweredValue::Node(self.reject_total_fail_if(span));
             }
             (None, None) => {}
-        }
-        if self.host_program.is_some() {
-            self.host_stage_status
-                .set(crate::host::staged::StagingStatus::HostControlBoundary);
-            raise_lowering_error(
-                "dynamic tensor branches retain host control flow; scalar source stages cannot be hoisted out of a branch",
-                Some(cond_expr.span()),
-                self.current_span_id.clone(),
-            );
         }
         let saved_branch_path = self.branch_path_condition;
         // Carry the selected path through arm lowering rather than guessing
@@ -22872,6 +22909,22 @@ impl<'program> LowerCtx<'program> {
                  form outside the supported static slice (chelis#520 D1)"
             ),
         )
+    }
+
+    /// The `if` counterpart of [`Self::retain_host_match_control`]: a runtime
+    /// branch in a staged host region stays in host control, so the plan is
+    /// declined before either arm is visited. Transform lowerers have no host
+    /// program and lower the branch themselves.
+    fn retain_host_branch_control(&self, span: Span) {
+        if self.host_program.is_some() {
+            self.host_stage_status
+                .set(crate::host::staged::StagingStatus::HostControlBoundary);
+            raise_lowering_error(
+                "dynamic tensor branches retain host control flow; scalar source stages cannot be hoisted out of a branch",
+                Some(span),
+                self.current_span_id.clone(),
+            );
+        }
     }
 
     /// [04-PAT-2]: when selection needs a host value or guard, the staged
