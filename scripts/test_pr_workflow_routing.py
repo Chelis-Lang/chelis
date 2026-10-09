@@ -330,6 +330,7 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         "rebase_run_script_unit",
         "rebase_run_integration",
         "rebase_run_smt",
+        "rebase_run_clarabel",
         "rebase_run_backend",
         "rebase_run_diagnostic",
         "rebase_run_hull",
@@ -564,6 +565,24 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         ("smt-build-glibc231", "rebase_run_smt"),
     ):
         test.assertIn(flag, workflow["jobs"][job_id]["if"])
+    clarabel = workflow["jobs"]["clarabel-provider"]["if"]
+    test.assertEqual(
+        clarabel,
+        "${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' "
+        "&& (needs.changes.outputs.rebase_lane == 'full' || "
+        "(needs.changes.outputs.rebase_lane == 'targeted' && "
+        "needs.changes.outputs.rebase_run_clarabel == 'true') || "
+        "(needs.changes.outputs.rebase_lane == 'ordinary' && "
+        "needs.changes.outputs.docs_only != 'true' && "
+        "needs.changes.outputs.clarabel_changed == 'true')) }}",
+    )
+    selected = next(
+        step
+        for step in workflow["jobs"]["integration"]["steps"]
+        if step.get("name") == "Require selected Clarabel feature checks"
+    )
+    test.assertIn("needs.changes.outputs.rebase_lane == 'full'", selected["if"])
+    test.assertIn("needs.changes.outputs.rebase_run_clarabel == 'true'", selected["if"])
     lint_summary = workflow["jobs"]["lint-and-unit"]
     test.assertIn(
         "needs.changes.outputs.rebase_lane == 'targeted'", lint_summary["if"]

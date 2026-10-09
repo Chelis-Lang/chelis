@@ -150,6 +150,7 @@ class ClarabelChangeTests(unittest.TestCase):
             "crates/chelis-ir/src/ownership/lower.rs",
             "crates/chelis-backend-c/src/host_emit.rs",
             "crates/chelis-prove/src/property_runner/qp_ideal.rs",
+            "crates/chelis-surf/src/ast.rs",
             "crates/chelis-runtime/src/native_provider.rs",
             "crates/chelis-runtime-bundle/src/lib.rs",
             "crates/chelis-reef/src/lib.rs",
@@ -166,6 +167,9 @@ class ClarabelChangeTests(unittest.TestCase):
             "README.md",
             "Cargo.lock",
             "crates/chelis-types/src/infer.rs",
+            "crates/chelis-surf/src/ast.rs.bak",
+            "crates/chelis-surf/src/parser.rs",
+            "crates/chelis-surf/src/resugar.rs",
             "crates/chelis-cli/tests/check.rs",
             "scripts/ci_test_targets.py",
         ):
