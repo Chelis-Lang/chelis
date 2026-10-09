@@ -826,7 +826,13 @@ fn collect_nested_entry_actuals(
             if ctor == "Some"
                 && let Some(payload) = fields.first()
             {
-                collect_nested_entry_actuals(pattern, *child, payload, format!("{path}.Some"), out);
+                collect_nested_entry_actuals(
+                    pattern,
+                    *child,
+                    payload,
+                    format!("{path}.Some.value"),
+                    out,
+                );
             }
         }
         (
@@ -1032,7 +1038,7 @@ fn actualize_tensor_entry_parameters(
         // C6.5): signature order, then depth-first declared order.
         if !formal.pattern().has_tensor()
             && let Some(nested) = nested
-            && let Some(authored) = normalized_authored.get(index).and_then(Option::as_ref)
+            && let Some(authored) = authored_params.get(index).and_then(Option::as_ref)
             && let Some(pattern) = nested.pattern(authored)?
             && let Some(root) = pattern.nested_root()
         {
@@ -3660,7 +3666,9 @@ impl<'a> EvalContext<'a> {
                     //
                     // Frames retain distinct declarations even when the literal
                     // values agree. Forwarding a frame does not append it again.
-                    let nested_claim = match (&active_declaration, &authored_result) {
+                    // The authored spelling, aliases unexpanded: the
+                    // derivation keeps their nominal dimension arguments.
+                    let nested_claim = match (&active_declaration, &return_type) {
                         (Some(_), Some(authored)) => {
                             self.nested_claim_pattern(authored)?.and_then(|pattern| {
                                 let node = pattern.nested_root()?;
@@ -3857,8 +3865,7 @@ impl<'a> EvalContext<'a> {
         let Some(authored) = metadata.ty().map(|ty| ty.expression()) else {
             return Ok(None);
         };
-        let authored = normalize_authored_entry_type(authored, self.session.as_ref())?;
-        let Some(pattern) = self.nested_claim_pattern(&authored)? else {
+        let Some(pattern) = self.nested_claim_pattern(authored)? else {
             return Ok(None);
         };
         let Some(node) = pattern.nested_root() else {

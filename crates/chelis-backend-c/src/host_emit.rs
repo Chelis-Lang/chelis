@@ -7400,7 +7400,7 @@ impl<'a> HostEmitter<'a> {
                     site,
                     body_block,
                 )?;
-                self.stamp_combinator_result_origin(target, ty, "map");
+                self.finish_combinator(target, ty, "map", result_claims.as_deref());
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
@@ -7417,7 +7417,7 @@ impl<'a> HostEmitter<'a> {
                     site,
                     body_block,
                 )?;
-                self.stamp_combinator_result_origin(target, ty, "filter");
+                self.finish_combinator(target, ty, "filter", result_claims.as_deref());
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
@@ -7445,8 +7445,7 @@ impl<'a> HostEmitter<'a> {
                 // whichever iteration or seed supplied it, so it stamps and
                 // guards that value exactly as a builtin producer does. A
                 // tensor nested in an aggregate result is its too.
-                self.stamp_combinator_result_origin(target, ty, "fold");
-                self.emit_result_claim_guard(target, ty, result_claims.as_deref());
+                self.finish_combinator(target, ty, "fold", result_claims.as_deref());
                 self.emit_expression_site_excluding_blocks(
                     site,
                     target,
@@ -7474,7 +7473,7 @@ impl<'a> HostEmitter<'a> {
                     preheader_block,
                     body_block,
                 )?;
-                self.stamp_combinator_result_origin(target, ty, "scan");
+                self.finish_combinator(target, ty, "scan", result_claims.as_deref());
                 self.emit_expression_site_excluding_blocks(
                     site,
                     target,
@@ -7495,7 +7494,7 @@ impl<'a> HostEmitter<'a> {
                     site,
                     body_block,
                 )?;
-                self.stamp_combinator_result_origin(target, ty, "partition");
+                self.finish_combinator(target, ty, "partition", result_claims.as_deref());
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
@@ -7512,7 +7511,7 @@ impl<'a> HostEmitter<'a> {
                     site,
                     body_block,
                 )?;
-                self.stamp_combinator_result_origin(target, ty, "flat_map");
+                self.finish_combinator(target, ty, "flat_map", result_claims.as_deref());
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
@@ -7654,6 +7653,16 @@ impl<'a> HostEmitter<'a> {
             }
         }
         self.emit_expression_site(site, target)
+    }
+
+    /// A list combinator's result on the result spine: the combinator is the
+    /// producer of every tensor the result holds (spec/04 section 4.7), so it
+    /// stamps that provenance and checks the spine's claims against it,
+    /// nested ones included (runtime_extents.md C6.5). Every combinator arm
+    /// ends here.
+    fn finish_combinator(&mut self, target: &str, ty: &HostType, op: &str, claims: Option<&str>) {
+        self.stamp_combinator_result_origin(target, ty, op);
+        self.emit_result_claim_guard(target, ty, claims);
     }
 
     /// spec/04 section 4.7: a list combinator produces every tensor it

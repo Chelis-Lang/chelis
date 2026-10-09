@@ -159,6 +159,46 @@ def depth(n: Nest[tensor[3, f32]]) -> i64 =
 out = depth(deep(size_from("PATH")))
 "#;
 
+const MAP: &str = r#"def three(sizes: List[i64]) -> List[Box[3]] = map(fn (s: i64) -> make(s), sizes)
+out = fold(fn (acc: i64, b: Box[3]) -> add(acc, width(b)), 0i64, three([3i64, size_from("PATH")]))
+"#;
+
+const FLAT_MAP: &str = r#"def three(sizes: List[i64]) -> List[Box[3]] = flat_map(fn (s: i64) -> [make(s)], sizes)
+out = fold(fn (acc: i64, b: Box[3]) -> add(acc, width(b)), 0i64, three([3i64, size_from("PATH")]))
+"#;
+
+const SCAN: &str = r#"def three(sizes: List[i64]) -> List[(tensor[3, f32], i64)] = scan(fn (acc: (tensor[*, f32], i64), s: i64) -> (produce(s), s), (produce(3i64), 0i64), sizes)
+out = fold(fn (acc: i64, t: (tensor[*, f32], i64)) -> add(acc, shape(t.0, 0i32)), 0i64, three([3i64, size_from("PATH")]))
+"#;
+
+const FILTER: &str = r#"def three(sizes: List[i64]) -> List[tensor[3, f32]] = filter(fn (t: tensor[*, f32]) -> gt(shape(t, 0i32), 0i64), map(fn (s: i64) -> produce(s), sizes))
+out = fold(fn (acc: i64, t: tensor[*, f32]) -> add(acc, shape(t, 0i32)), 0i64, three([3i64, size_from("PATH")]))
+"#;
+
+const PARTITION: &str = r#"def three(sizes: List[i64]) -> (List[tensor[3, f32]], List[tensor[3, f32]]) = partition(fn (t: tensor[*, f32]) -> gt(shape(t, 0i32), 0i64), map(fn (s: i64) -> produce(s), sizes))
+out = fold(fn (acc: i64, t: tensor[*, f32]) -> add(acc, shape(t, 0i32)), 0i64, three([3i64, size_from("PATH")]).0)
+"#;
+
+const ALIAS_RESULT: &str = r#"type B3 = Box[3]
+def three(size: i64) -> B3 = make(size)
+out = width(three(size_from("PATH")))
+"#;
+
+const ALIAS_GENERIC: &str = r#"type BB[m] = Box[m]
+def three(size: i64) -> BB[3] = make(size)
+out = width(three(size_from("PATH")))
+"#;
+
+const ALIAS_TUPLE: &str = r#"type B3 = Box[3]
+def three(size: i64) -> (B3, i64) = (make(size), 1i64)
+out = width(three(size_from("PATH")).0)
+"#;
+
+const ALIAS_FORMAL: &str = r#"type B3 = Box[3]
+def claimed(b: B3) -> i64 = width(b)
+out = claimed(make(size_from("PATH")))
+"#;
+
 /// Run `case` after the shared declarations with `size` read from a file.
 fn run(case: &str, size: usize, native: bool) -> (bool, String) {
     let inputs = tempfile::tempdir().expect("runtime inputs");
@@ -504,4 +544,58 @@ fn non_regular_recursion_claim_is_refused_on_both_lanes() {
             lane(native)
         );
     }
+}
+
+/// A list combinator produces every tensor its result holds (spec/04 section
+/// 4.7), so a nested result claim on that result traps at the combinator.
+fn combinator(native: bool) {
+    for (case, op) in [
+        (MAP, "map"),
+        (FLAT_MAP, "flat_map"),
+        (SCAN, "scan"),
+        (FILTER, "filter"),
+        (PARTITION, "partition"),
+    ] {
+        assert_trap_and_control(
+            case,
+            native,
+            &format!("extent `3`: claimed = 3, {op} axis 0 = 5"),
+            op,
+            "out = 6",
+        );
+    }
+}
+
+#[test]
+fn eval_list_combinator_results_trap_at_the_combinator() {
+    combinator(false);
+}
+
+#[test]
+fn c_list_combinator_results_trap_at_the_combinator() {
+    combinator(true);
+}
+
+/// An alias is transparent: its nominal dimension argument claims exactly as
+/// the expanded spelling does, in a result, a tuple and a formal.
+fn alias(native: bool) {
+    insert_literal(native, ALIAS_RESULT);
+    insert_literal(native, ALIAS_GENERIC);
+    insert_literal(native, ALIAS_TUPLE);
+    let context = if native {
+        "input `b.v` axis 0 expected 3, got 5"
+    } else {
+        "extent `3`: claimed = 3, b.v axis 0 = 5"
+    };
+    assert_trap_and_control(ALIAS_FORMAL, native, context, "load", "out = 3");
+}
+
+#[test]
+fn eval_aliased_nominal_claims_like_its_expansion() {
+    alias(false);
+}
+
+#[test]
+fn c_aliased_nominal_claims_like_its_expansion() {
+    alias(true);
 }

@@ -4497,8 +4497,9 @@ pub fn nested_claim_pattern(
     program: &HostLoweringSession<'_>,
     authored: &Expr,
 ) -> Result<Option<Arc<crate::claim_pattern::ClaimPattern>>, String> {
-    let authored = program.normalized_authored_entry_type(authored)?;
-    let pattern = crate::claim_pattern::ClaimPattern::derive(&authored, program.adt_registry())
+    // The derivation expands aliases itself: reifying an aliased type
+    // through the host type erases its nominal dimension arguments.
+    let pattern = crate::claim_pattern::ClaimPattern::derive(authored, program.adt_registry())
         .map_err(|error| error.to_string())?;
     Ok(pattern.nested_root().is_some().then(|| Arc::new(pattern)))
 }

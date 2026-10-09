@@ -343,13 +343,16 @@ impl Builder<'_> {
             return Ok(Some(*id));
         }
         let Some(definition) = self.registry.lookup(name) else {
-            return if args.iter().any(|arg| self.may_carry(arg)) {
-                Err(ClaimPatternError::UnresolvedNominal {
-                    nominal: name.to_string(),
-                })
-            } else {
-                Ok(None)
-            };
+            // An alias is transparent: its claim is its body's, with the
+            // alias arguments substituted, nominal dimensions included.
+            if let Some(alias) = self.registry.resolve_alias(name) {
+                let substitution = parameter_substitution(name, &alias.param_args, args)?;
+                return self.node(&substitute(&type_to_deep_expr(&alias.body), &substitution));
+            }
+            // A name nothing declares cannot be shown to owe nothing.
+            return Err(ClaimPatternError::UnresolvedNominal {
+                nominal: name.to_string(),
+            });
         };
         if !self.carrying().contains(name) && !args.iter().any(|arg| self.may_carry(arg)) {
             return Ok(None);
@@ -359,7 +362,7 @@ impl Builder<'_> {
                 nominal: name.to_string(),
             });
         }
-        let substitution = parameter_substitution(definition, args)?;
+        let substitution = parameter_substitution(name, &definition.param_args, args)?;
         self.nodes.push(None);
         let id = ClaimNodeId(self.nodes.len() - 1);
         self.memo.insert(key, id);
@@ -573,19 +576,19 @@ fn canonical(expr: &Expr) -> String {
 /// The declared field types name a nominal's parameters by the checker's
 /// variables (`t7`, `d3`); map each to the application's argument.
 fn parameter_substitution(
-    definition: &AdtDef,
+    name: &str,
+    param_args: &[NominalArg],
     args: &[Expr],
 ) -> Result<BTreeMap<String, Expr>, ClaimPatternError> {
-    if definition.param_args.len() != args.len() {
+    if param_args.len() != args.len() {
         return Err(ClaimPatternError::Malformed(format!(
-            "`{}` applied to {} arguments, declared with {}",
-            definition.name,
+            "`{name}` applied to {} arguments, declared with {}",
             args.len(),
-            definition.param_args.len()
+            param_args.len()
         )));
     }
     let mut out = BTreeMap::new();
-    for (parameter, arg) in definition.param_args.iter().zip(args) {
+    for (parameter, arg) in param_args.iter().zip(args) {
         let (key, arg) = match parameter {
             NominalArg::Type(Type::Var(var)) => (format!("t{}", var.0), arg.clone()),
             // Surf spells a binder argument `Box[k]` as a type variable; in
@@ -595,8 +598,7 @@ fn parameter_substitution(
             }
             _ => {
                 return Err(ClaimPatternError::Malformed(format!(
-                    "`{}` has a parameter without a declaration variable",
-                    definition.name
+                    "`{name}` has a parameter without a declaration variable"
                 )));
             }
         };
