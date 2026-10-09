@@ -242,6 +242,14 @@ fn copy_of_a_key_carrying_value_is_refused() {
          once and has no read that leaves it live ([04-LIN-9])",
         "copy of a key-carrying ADT",
     );
+    // An operand that is not a variable is named as a value.
+    assert_single_error(
+        "def probe() -> i64 = {\n  k2 = copy(key_from_seed(1i64))\n  1i64\n}\n",
+        CheckErrorKind::KeyReuse,
+        "a key-carrying value cannot be copied at surf:35..54: a key is used at most once and \
+         has no read that leaves it live ([04-LIN-9])",
+        "copy of a key-carrying call",
+    );
     let errors = check_errors(
         "def probe() -> i64 = {\n  k = (key_from_seed(1i64), 2i64)\n  k2 = copy(k)\n  1i64\n}\n",
     );
