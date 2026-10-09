@@ -4,8 +4,8 @@
 //! their producers (for example a window-count `floor_div`) into a structural
 //! differentiability rejection"; [05-MOV-1] puts `expand` and `insert` sizes
 //! under that rule. So an integer `floor_div` that only sizes an `insert` is
-//! not rejected (#3382), while a `floor_div` whose value reaches the loss
-//! still is ([05-OP-64]). spec/05 §5 gives every comparison a zero cotangent,
+//! not rejected (#3382), and neither is one whose value reaches the loss
+//! only through a cast, which carries it no cotangent ([04-NUM-14]). spec/05 §5 gives every comparison a zero cotangent,
 //! and spec/04 §4.7.2 forbids rejecting an extent because of its provenance,
 //! so a comparison over a `range`-sized or wildcard extent differentiates
 //! (#3391), while operands whose extents disagree still trap. The masks an
@@ -102,20 +102,22 @@ out = reshape(grad(loss)(x0()), [8i64])
     );
 }
 
-/// Negative twin: the same integer `floor_div` also reaches the loss as data
-/// through a cast, so [05-OP-64]'s structural rejection still applies.
+/// The same integer `floor_div` also reaches the loss as data through a cast.
+/// [04-NUM-14] gives an integer source no cotangent, so the cast is a
+/// zero-cotangent boundary and the quotient is an exact coefficient
+/// (chelis#3426): `d/dx sum(x * nrest) = nrest = 2`.
 #[test]
-fn integer_floor_div_whose_value_reaches_the_loss_is_still_rejected() {
-    assert_refused(
+fn integer_floor_div_whose_value_reaches_the_loss_through_a_cast_differentiates() {
+    assert_gradient(
         r#"
 def loss(x: tensor[2, 4, f32], groups: i64) -> f32 = {
   nrest = floor_div(shape(&x, 1i32), groups)
   t = insert(insert(scalar_to_tensor(cast(nrest, f32)), 0i32, shape(&x, 0i32)), 1i32, mul(groups, nrest))
   tensor_to_scalar(sum(sum(mul(x, t), 1i32), 0i32))
 }
-out = grad(loss, wrt=x)(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]]), 2i64)
+out = reshape(grad(loss, wrt=x)(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]]), 2i64), [8i64])
 "#,
-        "floor_div is non-differentiable (piecewise constant)",
+        &[2.0; 8],
         "floor_div_data",
     );
 }

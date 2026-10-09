@@ -253,12 +253,12 @@ fn grad_dag_checked_impl(
     let reach = cotangent_reach(forward, output);
     let live = reach.iter().map(|&state| state != 0).collect::<Vec<_>>();
     let selected_data = selected_data_reach(forward, wrt);
+    let discrete_parameters = discrete_parameter_reach(forward, wrt);
     reject_random_selection_parameters(forward, &live, wrt)?;
     for node in forward.nodes() {
         if live[node.id.0]
             && let Some(rejection) = structural_rejection(node, forward, selected_data[node.id.0])
-            && (!is_zero_exempt_integer_arithmetic(node, &rejection)
-                || reach[node.id.0] & ACTIVE_COTANGENT != 0)
+            && !is_cotangent_free_integer_computation(node, discrete_parameters[node.id.0])
         {
             return Err(rejection);
         }
@@ -276,21 +276,125 @@ fn grad_dag_checked_impl(
 const ACTIVE_COTANGENT: u8 = 1;
 const ZERO_COTANGENT: u8 = 2;
 
-fn is_zero_exempt_integer_arithmetic(node: &DagNode, rejection: &AdError) -> bool {
-    matches!(
-        node.op,
-        RiscOp::Sub
-            | RiscOp::MaxElem
-            | RiscOp::MinElem
-            | RiscOp::MaxReduce { .. }
-            | RiscOp::MinReduce { .. }
-    ) && matches!(
-        rejection,
-        AdError::NotSupported {
-            reason: AdRejectionReason::IntegerArithmeticOutput,
-            ..
-        }
-    )
+/// [04-NUM-14]: "a bool or integer source is a discrete forward-only value and
+/// carries no cotangent", so [`cotangent_reach`] makes every edge into a bool
+/// or integer value a zero-cotangent edge, as a comparison's is, and no
+/// cotangent ever reaches an integer computation. Such a computation is an
+/// exact forward value and its structural rejection does not apply
+/// (chelis#3426, chelis#3427), unless it computes from a bool or integer
+/// parameter selected for differentiation: that value is itself
+/// differentiated and keeps its atom's rejection. Only a direct IR caller can
+/// select one; Surf rejects a discrete `wrt` as a type error.
+fn is_cotangent_free_integer_computation(node: &DagNode, discrete_parameter: bool) -> bool {
+    integer_computation(node).is_some() && !discrete_parameter
+}
+
+/// How `grad` treats a node whose signed-integer result it computes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IntegerComputation {
+    /// Integer arithmetic: [05-OP-64]'s `IntegerArithmeticOutput`.
+    Arithmetic,
+    /// An integer computation whose atom names its own reason (`floor_div`,
+    /// `trunc_div`, `mod`, the roundings, and `count` over a bool mask).
+    OwnReason,
+}
+
+/// [05-OP-64] and spec/06 §2.1 (chelis#3427): a signed-integer value carries
+/// no cotangent, so every integer computation has one disposition, decided by
+/// its output dtype and [`is_cotangent_free_integer_computation`]. The match
+/// is exhaustive so a new operation is classified when it is added. The
+/// bitwise operations follow [05-OP-47]'s selected-parameter rule instead;
+/// `argmax_reduce`, `argmin_reduce`, and the casts convert differentiable data
+/// and reject wherever they are live; sources, movement, selection, and
+/// ownership operations carry integer values without computing new ones.
+fn integer_computation(node: &DagNode) -> Option<IntegerComputation> {
+    if !node.output_type.precision.is_integer() {
+        return None;
+    }
+    match &node.op {
+        RiscOp::Add
+        | RiscOp::Sub
+        | RiscOp::Mul
+        | RiscOp::Div
+        | RiscOp::Pow
+        | RiscOp::MaxElem
+        | RiscOp::MinElem
+        | RiscOp::ExtremaAdjoint { .. }
+        | RiscOp::Relu
+        | RiscOp::Softmax { .. }
+        | RiscOp::ReluAdjoint
+        | RiscOp::Neg
+        | RiscOp::Recip
+        | RiscOp::Exp
+        | RiscOp::Log
+        | RiscOp::Sin
+        | RiscOp::Sqrt
+        | RiscOp::Cos
+        | RiscOp::Tan
+        | RiscOp::Atan
+        | RiscOp::Tanh
+        | RiscOp::Erf
+        | RiscOp::Erfc
+        | RiscOp::Abs
+        | RiscOp::Sum { .. }
+        | RiscOp::MaxReduce { .. }
+        | RiscOp::MinReduce { .. }
+        | RiscOp::ProdReduce { .. }
+        | RiscOp::ReduceWindow { .. }
+        | RiscOp::ReduceWindowGrad { .. }
+        | RiscOp::OrderedAdjointSum { .. }
+        | RiscOp::FusedElem { .. }
+        | RiscOp::BlasMatmul { .. }
+        | RiscOp::ScatterAdd { .. } => Some(IntegerComputation::Arithmetic),
+        RiscOp::FloorDiv
+        | RiscOp::TruncDiv
+        | RiscOp::Mod
+        | RiscOp::Floor
+        | RiscOp::Ceil
+        | RiscOp::Round
+        | RiscOp::Count { .. } => Some(IntegerComputation::OwnReason),
+        RiscOp::Bitwise(_)
+        | RiscOp::Argmax { .. }
+        | RiscOp::Argmin { .. }
+        | RiscOp::Cast { .. }
+        | RiscOp::NamedCast { .. }
+        | RiscOp::Compare(_)
+        | RiscOp::Logical(_)
+        | RiscOp::Iota
+        | RiscOp::ListMapCapture { .. }
+        | RiscOp::Where
+        | RiscOp::GuardedFail { .. }
+        | RiscOp::UniformLike
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay
+        | RiscOp::UniformBoundAdjoint { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn
+        | RiscOp::SplitN { .. }
+        | RiscOp::KeySelect
+        | RiscOp::Reshape { .. }
+        | RiscOp::Permute { .. }
+        | RiscOp::Expand { .. }
+        | RiscOp::OneHot { .. }
+        | RiscOp::Pad { .. }
+        | RiscOp::Shrink { .. }
+        | RiscOp::Stride { .. }
+        | RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
+        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedUnitAxis { .. }
+        | RiscOp::Const { .. }
+        | RiscOp::ConstTensor { .. }
+        | RiscOp::Load { .. }
+        | RiscOp::Store { .. }
+        | RiscOp::Copy
+        | RiscOp::Drop
+        | RiscOp::Realize
+        | RiscOp::Gather { .. }
+        | RiscOp::Scatter { .. }
+        | RiscOp::ScatterElements { .. } => None,
+    }
 }
 
 /// Track whether a forward value is derived from a selected parameter.
@@ -298,14 +402,33 @@ fn is_zero_exempt_integer_arithmetic(node: &DagNode, rejection: &AdError) -> boo
 /// though its cotangent is exact zero. Movement indices and random controls
 /// remain outside the selected data path, as in the AD operand contract.
 fn selected_data_reach(forward: &Dag, wrt: &[NodeId]) -> Vec<bool> {
+    data_reach(forward, wrt, |_| true)
+}
+
+/// The discrete values computed from a bool or integer parameter selected for
+/// differentiation, through discrete data edges only. Such a value is itself
+/// differentiated, so its integer computations keep their atoms' rejection
+/// even though a cast to float carries it no cotangent.
+fn discrete_parameter_reach(forward: &Dag, wrt: &[NodeId]) -> Vec<bool> {
+    let is_discrete = |node: &DagNode| !node.output_type.precision.is_float();
+    let discrete_wrt = wrt
+        .iter()
+        .copied()
+        .filter(|parameter| forward.get(*parameter).is_some_and(is_discrete))
+        .collect::<Vec<_>>();
+    data_reach(forward, &discrete_wrt, is_discrete)
+}
+
+/// Forward data reach from `seeds` into the nodes `admit` accepts.
+fn data_reach(forward: &Dag, seeds: &[NodeId], admit: impl Fn(&DagNode) -> bool) -> Vec<bool> {
     let mut reached = vec![false; forward.len()];
-    for parameter in wrt {
+    for parameter in seeds {
         if let Some(slot) = reached.get_mut(parameter.0) {
             *slot = true;
         }
     }
     for node in forward.nodes() {
-        if reached[node.id.0] {
+        if reached[node.id.0] || !admit(node) {
             continue;
         }
         reached[node.id.0] = node.inputs.iter().enumerate().any(|(slot, input)| {
@@ -350,8 +473,14 @@ fn cotangent_reach(forward: &Dag, output: NodeId) -> Vec<u8> {
         if reach[i] != 0 {
             let node = &forward.nodes()[i];
             let current = reach[i];
+            // [04-NUM-14] and spec/06 §2.1: a bool or integer value carries
+            // no cotangent, so every edge into one (a cast or `one_hot`
+            // source, or an integer operand) is a zero-cotangent edge.
             let mut mark = |input: NodeId, edge: u8| {
-                reach[input.0] |= edge;
+                let discrete = forward
+                    .get(input)
+                    .is_some_and(|value| !value.output_type.precision.is_float());
+                reach[input.0] |= if discrete { ZERO_COTANGENT } else { edge };
             };
             match &node.op {
                 RiscOp::Shrink { .. }
@@ -460,8 +589,10 @@ impl From<String> for BackwardFailure {
 /// The atom-owned structural AD disposition for a forward node. Both the
 /// live-node precheck and the actual backward walk use this table. A
 /// piecewise-constant conversion reached through exact zero retains its
-/// named reason; signed-integer arithmetic reached only through exact zero
-/// has no requested adjoint and passes that zero to its producers.
+/// named reason. A signed-integer computation is exempt unless it computes
+/// from a differentiated bool or integer parameter
+/// ([`is_cotangent_free_integer_computation`]): it has no requested adjoint
+/// and passes exact zero to its producers.
 fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> Option<AdError> {
     match &node.op {
         RiscOp::Bitwise(kind) if selected_data => {
@@ -476,17 +607,7 @@ fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> O
                 reason: AdRejectionReason::LogicalOperation,
             });
         }
-        RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem
-            if node.output_type.precision.is_integer() =>
-        {
-            return Some(AdError::NotSupported {
-                op: risc_op_name(&node.op),
-                reason: AdRejectionReason::IntegerArithmeticOutput,
-            });
-        }
-        RiscOp::MaxReduce { .. } | RiscOp::MinReduce { .. }
-            if node.output_type.precision.is_integer() =>
-        {
+        _ if integer_computation(node) == Some(IntegerComputation::Arithmetic) => {
             return Some(AdError::NotSupported {
                 op: risc_op_name(&node.op),
                 reason: AdRejectionReason::IntegerArithmeticOutput,
@@ -844,8 +965,8 @@ fn grad_dag_result(
     // spec/design/chelis_span_survival.md §2.3 AD row: "Forward nodes:
     // clone span_id and merged_spans."
     let mut dag = forward.clone();
-    let reach = cotangent_reach(forward, output);
     let selected_data = selected_data_reach(forward, wrt);
+    let discrete_parameters = discrete_parameter_reach(forward, wrt);
     let mut adjoints: UnordMap<NodeId, NodeId> = UnordMap::new();
     // Contributions wait here until reverse traversal reaches their input.
     // Keeping the consumer ordinal and input slot makes the normative order
@@ -981,12 +1102,10 @@ fn grad_dag_result(
 
         let node = forward.get(node_id).unwrap().clone();
         let rejection = structural_rejection(&node, forward, selected_data[node_id.0]);
-        let zero_only_integer_arithmetic = reach[node_id.0] == ZERO_COTANGENT
-            && rejection
-                .as_ref()
-                .is_some_and(|rejection| is_zero_exempt_integer_arithmetic(&node, rejection));
+        let cotangent_free =
+            is_cotangent_free_integer_computation(&node, discrete_parameters[node_id.0]);
         if let Some(rejection) = rejection
-            && !zero_only_integer_arithmetic
+            && !cotangent_free
         {
             return Err(BackwardFailure::Rejected(rejection));
         }
@@ -1001,26 +1120,29 @@ fn grad_dag_result(
         } else {
             grad_out
         };
-        let input_grads = if zero_only_integer_arithmetic {
-            // The node is forward-only for an active gradient, but it was
-            // reached solely by exact zero from a control operation. Pass
-            // that zero to its producers so a no-grad conversion beneath it
-            // still receives its required structural diagnostic.
-            node.inputs
+        let adjoint = compute_adjoints(&node, grad_out, forward, &mut dag);
+        let input_grads = match adjoint {
+            Some(input_grads) => input_grads,
+            // A cotangent-free integer computation whose atom defines no
+            // adjoint was reached solely by exact zero. Pass that zero to
+            // its producers so a no-grad conversion beneath it still
+            // receives its required structural diagnostic.
+            None if cotangent_free => node
+                .inputs
                 .iter()
                 .map(|&input_id| {
                     let zero = fill_like(&mut dag, node.owner, input_id, 0.0);
                     (input_id, zero)
                 })
-                .collect()
-        } else {
-            compute_adjoints(&node, grad_out, forward, &mut dag).ok_or_else(|| {
-                format!(
+                .collect(),
+            None => {
+                return Err(format!(
                     "grad: no reverse-mode adjoint is defined for `{}` (node {})",
                     risc_op_name(&node.op),
                     node.id.0
                 )
-            })?
+                .into());
+            }
         };
         let input_grads = input_grads
             .into_iter()
