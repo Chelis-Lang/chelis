@@ -16,7 +16,7 @@ use chelis_deep::Span;
 use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::{DeepTag, ExprCarrier};
-use chelis_surf::ast::{Decl, Param, TypeExpr};
+use chelis_surf::ast::{Decl, Param, TypeExpr, Variant, VariantFields};
 use chelis_types::types::Prim;
 use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64};
 
@@ -36,12 +36,196 @@ pub(super) fn property_has_opaque_invariant_binder(
     params: &[Param],
 ) -> Result<bool, String> {
     validate_property_path(decls, property_path)?;
-    let exprs = chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?;
-    let invariants = crate::opaque::collect_opaque_invariants(&exprs);
-    Ok(params.iter().any(|p| {
-        matches!(&p.ty, Some(TypeExpr::Named(name, _))
-            if invariants.iter().any(|inv| &inv.type_name == name))
-    }))
+    chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?;
+    let types = type_declarations(decls);
+    let scope = property_module(decls, property_path);
+    params.iter().try_fold(false, |found, parameter| {
+        if found {
+            return Ok(true);
+        }
+        let Some(ty) = &parameter.ty else {
+            return Ok(false);
+        };
+        type_contains_invariant(ty, scope.as_deref(), &types, &mut Vec::new())
+    })
+}
+
+struct TypeDeclaration<'a> {
+    name: &'a str,
+    module: Option<String>,
+    body: TypeBody<'a>,
+}
+
+enum TypeBody<'a> {
+    Definition {
+        variants: &'a [Variant],
+        invariant: bool,
+    },
+    Alias(&'a TypeExpr),
+}
+
+fn type_declarations(decls: &[Decl]) -> Vec<TypeDeclaration<'_>> {
+    fn collect<'a>(decls: &'a [Decl], module: Option<&str>, out: &mut Vec<TypeDeclaration<'a>>) {
+        for decl in decls {
+            match decl {
+                Decl::Module { name, decls, .. } => collect(decls, Some(name), out),
+                Decl::TypeDef {
+                    name,
+                    variants,
+                    opaque,
+                    invariant,
+                    ..
+                } => out.push(TypeDeclaration {
+                    name,
+                    module: module.map(str::to_string),
+                    body: TypeBody::Definition {
+                        variants,
+                        invariant: *opaque && invariant.is_some(),
+                    },
+                }),
+                Decl::TypeAlias { name, ty, .. } => out.push(TypeDeclaration {
+                    name,
+                    module: module.map(str::to_string),
+                    body: TypeBody::Alias(ty),
+                }),
+                _ => {}
+            }
+        }
+    }
+    let mut types = Vec::new();
+    collect(decls, None, &mut types);
+    types
+}
+
+fn property_module(decls: &[Decl], path: &[usize]) -> Option<String> {
+    let (&index, rest) = path.split_first()?;
+    let decl = decls.get(index)?;
+    match decl {
+        Decl::Module { name, decls, .. } => {
+            property_module(decls, rest).or_else(|| Some(name.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_type(
+    name: &str,
+    module: Option<&str>,
+    types: &[TypeDeclaration<'_>],
+) -> Result<Option<usize>, String> {
+    let (qualified_module, terminal) = match name.rsplit_once('.') {
+        Some((module, terminal)) => (Some(module), terminal),
+        None => (None, name),
+    };
+    let mut matches = types
+        .iter()
+        .enumerate()
+        .filter(|(_, declaration)| {
+            if let Some(qualified_module) = qualified_module {
+                declaration.module.as_deref() == Some(qualified_module)
+                    && declaration.name == terminal
+            } else {
+                declaration.name == name
+            }
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    if qualified_module.is_none()
+        && let Some(local) = matches
+            .iter()
+            .find(|&&index| types[index].module.as_deref() == module)
+    {
+        return Ok(Some(*local));
+    }
+    if matches.len() == 1 {
+        return Ok(matches.pop());
+    }
+    Err(format!(
+        "type `{name}` resolves to more than one declaration"
+    ))
+}
+
+fn type_contains_invariant(
+    ty: &TypeExpr,
+    module: Option<&str>,
+    types: &[TypeDeclaration<'_>],
+    visiting: &mut Vec<usize>,
+) -> Result<bool, String> {
+    match ty {
+        TypeExpr::Named(name, _) | TypeExpr::App(name, _, _) => {
+            if let Some(index) = resolve_type(name, module, types)? {
+                if visiting.contains(&index) {
+                    return Ok(false);
+                }
+                visiting.push(index);
+                let declaration = &types[index];
+                let found = match &declaration.body {
+                    TypeBody::Definition {
+                        invariant: true, ..
+                    } => Ok(true),
+                    TypeBody::Definition { variants, .. } => {
+                        let mut found = false;
+                        for variant in *variants {
+                            let fields = match &variant.fields {
+                                VariantFields::Positional(fields) => {
+                                    fields.iter().collect::<Vec<_>>()
+                                }
+                                VariantFields::Record(fields) => {
+                                    fields.iter().map(|(_, ty)| ty).collect::<Vec<_>>()
+                                }
+                            };
+                            for field in fields {
+                                found |= type_contains_invariant(
+                                    field,
+                                    declaration.module.as_deref(),
+                                    types,
+                                    visiting,
+                                )?;
+                            }
+                        }
+                        Ok(found)
+                    }
+                    TypeBody::Alias(alias) => type_contains_invariant(
+                        alias,
+                        declaration.module.as_deref(),
+                        types,
+                        visiting,
+                    ),
+                };
+                visiting.pop();
+                if found? {
+                    return Ok(true);
+                }
+                // An instantiated container can carry an invariant through
+                // a value type argument even when its declaration uses a
+                // generic field that this inventory cannot instantiate.
+                if let TypeExpr::App(_, args, _) = ty {
+                    return args.iter().try_fold(false, |found, arg| {
+                        Ok(found || type_contains_invariant(arg, module, types, visiting)?)
+                    });
+                }
+                return Ok(false);
+            }
+            if let TypeExpr::App(_, args, _) = ty {
+                return args.iter().try_fold(false, |found, arg| {
+                    Ok(found || type_contains_invariant(arg, module, types, visiting)?)
+                });
+            }
+            Ok(false)
+        }
+        TypeExpr::Tuple(items, _) => items.iter().try_fold(false, |found, item| {
+            Ok(found || type_contains_invariant(item, module, types, visiting)?)
+        }),
+        TypeExpr::Ref(inner, _) => type_contains_invariant(inner, module, types, visiting),
+        TypeExpr::Tensor(_, _, _)
+        | TypeExpr::Arrow(_, _, _)
+        | TypeExpr::DimensionLiteral(_, _)
+        | TypeExpr::Infer(_)
+        | TypeExpr::RankSpread(_, _) => Ok(false),
+    }
 }
 
 fn validate_property_path(decls: &[Decl], property_path: &[usize]) -> Result<(), String> {
@@ -70,6 +254,7 @@ fn validate_property_path(decls: &[Decl], property_path: &[usize]) -> Result<(),
 /// Returns the property status.
 pub(super) fn prove_with_injection(
     decls: &[Decl],
+    property_path: &[usize],
     property_name: &str,
     params: &[Param],
     preconditions: &[chelis_surf::ast::Expr],
@@ -96,13 +281,24 @@ pub(super) fn prove_with_injection(
     let invariants = crate::opaque::collect_opaque_invariants(&exprs);
     let consts = resolve_constants(&exprs, &invariants);
     let module_source = chelis_deep::printer::print_canonical(&exprs);
+    let types = type_declarations(decls);
+    let property_scope = property_module(decls, property_path);
 
     // Classify each binder.
     let mut binders = Vec::new();
     for p in params {
-        match classify_binder(p, &invariants) {
-            Some(b) => binders.push(b),
-            None => {
+        let plan = match p.ty.as_ref().map(|ty| {
+            classify_value(
+                ty,
+                property_scope.as_deref(),
+                &types,
+                &invariants,
+                &mut Vec::new(),
+            )
+        }) {
+            Some(Ok(Some(plan))) => plan,
+            Some(Err(reason)) => return outcome_error(property_name, seed, reason),
+            Some(Ok(None)) | None => {
                 return outcome(
                     property_name,
                     PropertyStatus::Unsupported,
@@ -116,7 +312,11 @@ pub(super) fn prove_with_injection(
                     Vec::new(),
                 );
             }
-        }
+        };
+        binders.push(Binder {
+            name: p.name.clone(),
+            plan,
+        });
     }
 
     // The desugared property body + preconditions (Deep).
@@ -160,14 +360,11 @@ pub(super) fn prove_with_injection(
         }
     };
 
-    // Keep the property probe in the first opaque binder's module. Each
-    // opaque value is constructed by a separate helper in its own module.
+    // A record binder's constructor belongs to its declaring module. Inner
+    // opaque values come from their own generated module-local helpers.
     let home_type = binders
         .iter()
-        .find_map(|binder| match binder {
-            Binder::Opaque { inv, .. } => Some(inv.type_name.clone()),
-            _ => None,
-        })
+        .find_map(|binder| binder.plan.home_type())
         .unwrap_or_default();
 
     let mut rng = crate::opaque::GenRng::new(seed);
@@ -186,81 +383,44 @@ pub(super) fn prove_with_injection(
         // (the injected assumption); on starvation, report. Each binding
         // carries its Deep value expr and a JSON repr for counterexamples.
         let mut bindings = Vec::new();
-        for b in &binders {
-            match b {
-                Binder::Scalar { name, prim } => {
-                    let v = sample_scalar(prim, &mut rng);
-                    bindings.push(EvalBinding::new(name, scalar_lit(prim, v), scalar_json(v)));
+        let sample_context = SampleContext {
+            exprs: &exprs,
+            invariants: &invariants,
+            consts: &consts,
+            module_source: &module_source,
+            options,
+            gen_budget,
+        };
+        for binder in &binders {
+            match sample_plan(&binder.plan, &binder.name, &mut rng, &sample_context) {
+                Ok((value, json)) => bindings.push(EvalBinding::new(&binder.name, value, json)),
+                Err((_, crate::opaque::GenerationFailure::ProbeRejected(reason))) => {
+                    return outcome_error(property_name, seed, reason);
                 }
-                Binder::Tensor {
-                    name,
-                    dims,
-                    precision,
-                } => {
-                    let count: usize = dims.iter().product::<usize>().max(1);
-                    let values = (0..count)
-                        .map(|_| sample_scalar(precision, &mut rng))
-                        .collect::<Vec<_>>();
-                    bindings.push(EvalBinding::new(
-                        name,
-                        crate::opaque::tensor_value_expr_typed(dims, precision, &values),
-                        crate::opaque::scalar_values_json(&values),
-                    ));
-                }
-                Binder::Opaque { name, inv } => {
-                    let mut grng = crate::opaque::GenRng::new(rng.next_u64());
-                    let producers = generation_producers(&exprs, &invariants, inv);
-                    match crate::opaque::generate_binder(
-                        inv,
-                        &consts,
-                        crate::opaque::GenModule {
-                            exprs: &exprs,
-                            source: &module_source,
-                            runtime: options.runtime,
-                        },
-                        &producers,
-                        &mut grng,
-                        options.invariant_min_rate,
-                        gen_budget,
-                    ) {
-                        Ok(generated) => {
-                            let json = crate::opaque::generated_env_json(&generated.env);
-                            bindings.push(EvalBinding {
-                                name: name.clone(),
-                                value: generated.value_expr,
-                                json,
-                                opaque_type: Some(inv.type_name.clone()),
-                            });
-                        }
-                        Err(crate::opaque::GenerationFailure::ProbeRejected(reason)) => {
-                            return outcome_error(property_name, seed, reason);
-                        }
-                        Err(crate::opaque::GenerationFailure::Starved(diag)) => {
-                            if options.invariant_min_rate == 0.0 {
-                                return outcome(
-                                    property_name,
-                                    PropertyStatus::Error,
-                                    0,
-                                    seed,
-                                    None,
-                                    Some(format!(
-                                        "generator exhausted for invariant binder `{}` of type `{}`",
-                                        name, diag.type_name
-                                    )),
-                                    Vec::new(),
-                                );
-                            }
-                            return outcome(
-                                property_name,
-                                PropertyStatus::Unsupported,
-                                0,
-                                seed,
-                                None,
-                                Some(diag.message()),
-                                Vec::new(),
-                            );
-                        }
+                Err((path, crate::opaque::GenerationFailure::Starved(diag))) => {
+                    if options.invariant_min_rate == 0.0 {
+                        return outcome(
+                            property_name,
+                            PropertyStatus::Error,
+                            0,
+                            seed,
+                            None,
+                            Some(format!(
+                                "generator exhausted for invariant binder `{}` of type `{}`",
+                                path, diag.type_name
+                            )),
+                            Vec::new(),
+                        );
                     }
+                    return outcome(
+                        property_name,
+                        PropertyStatus::Unsupported,
+                        0,
+                        seed,
+                        None,
+                        Some(diag.message()),
+                        Vec::new(),
+                    );
                 }
             }
         }
@@ -371,36 +531,59 @@ fn outcome_error(name: &str, seed: u64, reason: String) -> PropertyOutcome {
     )
 }
 
-enum Binder {
-    Scalar {
-        name: String,
-        prim: String,
-    },
+struct Binder {
+    name: String,
+    plan: ValuePlan,
+}
+
+enum ValuePlan {
+    Scalar(String),
     Tensor {
-        name: String,
         dims: Vec<usize>,
         precision: String,
     },
+    Opaque(crate::opaque::OpaqueInvariant),
+    Record {
+        type_name: String,
+        ctor_name: String,
+        fields: Vec<(String, ValuePlan)>,
+    },
+}
+
+impl ValuePlan {
+    fn home_type(&self) -> Option<String> {
+        match self {
+            Self::Opaque(inv) => Some(inv.type_name.clone()),
+            Self::Record { type_name, .. } => Some(type_name.clone()),
+            Self::Scalar(_) | Self::Tensor { .. } => None,
+        }
+    }
+}
+
+enum GeneratedValue {
+    Direct(Expr),
     Opaque {
-        name: String,
-        inv: crate::opaque::OpaqueInvariant,
+        type_name: String,
+        value: Expr,
+    },
+    Record {
+        ctor_name: String,
+        fields: Vec<(String, GeneratedValue)>,
     },
 }
 
 struct EvalBinding {
     name: String,
-    value: Expr,
+    value: GeneratedValue,
     json: serde_json::Value,
-    opaque_type: Option<String>,
 }
 
 impl EvalBinding {
-    fn new(name: &str, value: Expr, json: serde_json::Value) -> Self {
+    fn new(name: &str, value: GeneratedValue, json: serde_json::Value) -> Self {
         Self {
             name: name.to_string(),
             value,
             json,
-            opaque_type: None,
         }
     }
 }
@@ -415,68 +598,148 @@ fn injection_assumptions(
     // the source spellings so a package property's assumption matches the
     // same property's assumption as a bare file (chelis#2416).
     let property_name = chelis_types::demangle_ident(property_name);
-    binders
-        .iter()
-        .filter_map(|binder| match binder {
-            Binder::Opaque { name, inv } => Some({
+    fn collect(
+        plan: &ValuePlan,
+        path: &str,
+        property_name: &str,
+        samples: usize,
+        seed: u64,
+        out: &mut Vec<AssumptionRecord>,
+    ) {
+        match plan {
+            ValuePlan::Opaque(inv) => {
                 let type_name = chelis_types::demangle_ident(&inv.type_name);
-                AssumptionRecord::new(
-                    format!("invariant:{type_name}:binder:{name}"),
-                    Some(AssumptionDischarge::new(
-                        DischargeMethod::Fuzz,
-                        serde_json::json!({
-                            "status": "validated",
-                            "property": property_name,
-                            "binder": name,
-                            "source_type": type_name,
-                            "samples": samples,
+                out.push(
+                    AssumptionRecord::new(
+                        format!("invariant:{type_name}:binder:{path}"),
+                        Some(AssumptionDischarge::new(
+                            DischargeMethod::Fuzz,
+                            serde_json::json!({
+                                "status": "validated",
+                                "property": property_name,
+                                "binder": path,
+                                "source_type": type_name,
+                                "samples": samples,
+                                "seed": seed,
+                                "tolerance": FUZZ_TOLERANCE,
+                            }),
+                        )),
+                        Some(NonVacuityRecord::established(serde_json::json!({
+                            "method": "fuzz",
+                            "result": "sat",
+                            "accepted_samples": samples,
                             "seed": seed,
-                            "tolerance": FUZZ_TOLERANCE,
-                        }),
+                        }))),
+                    )
+                    .with_source(type_name.clone(), format!("binder:{path}"))
+                    // WI-8: stamp the prover-side discharge tier on the
+                    // binder-matched (injected) assumption. The injection path is
+                    // the fuzz sampler discharging the invariant of an opaque
+                    // binder, keyed to the binder's source identity.
+                    .with_discharge_tier(DischargeTier::new(
+                        DischargeMethod::Fuzz.engine(),
+                        DischargeMethod::Fuzz,
+                        Some(format!("invariant:{type_name}:binder:{path}")),
                     )),
-                    Some(NonVacuityRecord::established(serde_json::json!({
-                        "method": "fuzz",
-                        "result": "sat",
-                        "accepted_samples": samples,
-                        "seed": seed,
-                    }))),
-                )
-                .with_source(type_name.clone(), format!("binder:{name}"))
-                // WI-8: stamp the prover-side discharge tier on the
-                // binder-matched (injected) assumption. The injection path is
-                // the fuzz sampler discharging the invariant of an opaque
-                // binder, keyed to the binder's source identity.
-                .with_discharge_tier(DischargeTier::new(
-                    DischargeMethod::Fuzz.engine(),
-                    DischargeMethod::Fuzz,
-                    Some(format!("invariant:{type_name}:binder:{name}")),
-                ))
-            }),
-            _ => None,
-        })
-        .collect()
+                );
+            }
+            ValuePlan::Record { fields, .. } => {
+                for (field, child) in fields {
+                    collect(
+                        child,
+                        &format!("{path}.{field}"),
+                        property_name,
+                        samples,
+                        seed,
+                        out,
+                    );
+                }
+            }
+            ValuePlan::Scalar(_) | ValuePlan::Tensor { .. } => {}
+        }
+    }
+    let mut out = Vec::new();
+    for binder in binders {
+        collect(
+            &binder.plan,
+            &binder.name,
+            &property_name,
+            samples,
+            seed,
+            &mut out,
+        );
+    }
+    out
 }
 
-fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> Option<Binder> {
-    match p.ty.as_ref()? {
-        TypeExpr::Named(name, _) => {
-            // A scalar binder: f32/f64/bool, or ANY signed integer width
-            // recognized through the single-source `is_int_width` (review 5).
-            if matches!(name.as_str(), "f32" | "f64" | "bool") || crate::opaque::is_int_width(name)
-            {
-                Some(Binder::Scalar {
-                    name: p.name.clone(),
-                    prim: name.clone(),
-                })
-            } else {
-                invariants
-                    .iter()
-                    .find(|i| &i.type_name == name)
-                    .map(|inv| Binder::Opaque {
-                        name: p.name.clone(),
-                        inv: inv.clone(),
-                    })
+fn classify_value(
+    ty: &TypeExpr,
+    module: Option<&str>,
+    types: &[TypeDeclaration<'_>],
+    invariants: &[crate::opaque::OpaqueInvariant],
+    visiting: &mut Vec<usize>,
+) -> Result<Option<ValuePlan>, String> {
+    match ty {
+        TypeExpr::Named(name, _)
+            if matches!(name.as_str(), "f32" | "f64" | "bool")
+                || crate::opaque::is_int_width(name) =>
+        {
+            Ok(Some(ValuePlan::Scalar(name.clone())))
+        }
+        TypeExpr::Named(name, _) | TypeExpr::App(name, _, _) => {
+            if matches!(ty, TypeExpr::App(_, args, _) if !args.is_empty()) {
+                return Ok(None);
             }
+            let Some(index) = resolve_type(name, module, types)? else {
+                return Ok(None);
+            };
+            if visiting.contains(&index) {
+                return Ok(None);
+            }
+            visiting.push(index);
+            let declaration = &types[index];
+            let plan = match &declaration.body {
+                TypeBody::Definition { invariant: true, .. } => {
+                    invariants.iter().find(|inv| inv.type_name == declaration.name)
+                        .map(|inv| ValuePlan::Opaque(inv.clone()))
+                }
+                TypeBody::Definition { variants, .. } if variants.len() == 1 => {
+                    let variant = &variants[0];
+                    let VariantFields::Record(fields) = &variant.fields else {
+                        visiting.pop();
+                        return Ok(None);
+                    };
+                    let mut plans = Vec::new();
+                    for (field, ty) in fields {
+                        let Some(child) = classify_value(
+                            ty,
+                            declaration.module.as_deref(),
+                            types,
+                            invariants,
+                            visiting,
+                        )? else {
+                            visiting.pop();
+                            return Ok(None);
+                        };
+                        plans.push((field.clone(), child));
+                    }
+                    Some(ValuePlan::Record {
+                        type_name: declaration.name.to_string(),
+                        ctor_name: variant.name.clone(),
+                        fields: plans,
+                    })
+                }
+                TypeBody::Definition { .. } => None,
+                TypeBody::Alias(alias) => classify_value(
+                    alias,
+                    declaration.module.as_deref(),
+                    types,
+                    invariants,
+                    visiting,
+                )?,
+            };
+            visiting.pop();
+            Ok(plan)
         }
         TypeExpr::Tensor(dims, precision, _)
             // A sampled key tensor would be a key literal (spec/04 §1.1), so
@@ -490,13 +753,116 @@ fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> 
                     _ => None,
                 })
                 .collect();
-            lit.map(|dims| Binder::Tensor {
-                name: p.name.clone(),
+            Ok(lit.map(|dims| ValuePlan::Tensor {
                 dims,
                 precision: precision.to_string(),
-            })
+            }))
         }
-        _ => None,
+        _ => Ok(None),
+    }
+}
+
+struct SampleContext<'a> {
+    exprs: &'a [Expr],
+    invariants: &'a [crate::opaque::OpaqueInvariant],
+    consts: &'a crate::opaque::ConstEnv,
+    module_source: &'a str,
+    options: &'a PropertyRunOptions,
+    gen_budget: usize,
+}
+
+fn sample_plan(
+    plan: &ValuePlan,
+    path: &str,
+    rng: &mut crate::opaque::GenRng,
+    context: &SampleContext<'_>,
+) -> Result<(GeneratedValue, serde_json::Value), (String, crate::opaque::GenerationFailure)> {
+    match plan {
+        ValuePlan::Scalar(prim) => {
+            let value = sample_scalar(prim, rng);
+            Ok((
+                GeneratedValue::Direct(scalar_lit(prim, value)),
+                scalar_json(value),
+            ))
+        }
+        ValuePlan::Tensor { dims, precision } => {
+            let count = dims.iter().product::<usize>().max(1);
+            let values = (0..count)
+                .map(|_| sample_scalar(precision, rng))
+                .collect::<Vec<_>>();
+            Ok((
+                GeneratedValue::Direct(crate::opaque::tensor_value_expr_typed(
+                    dims, precision, &values,
+                )),
+                crate::opaque::scalar_values_json(&values),
+            ))
+        }
+        ValuePlan::Opaque(inv) => {
+            let mut grng = crate::opaque::GenRng::new(rng.next_u64());
+            let producers = generation_producers(context.exprs, context.invariants, inv);
+            let generated = crate::opaque::generate_binder(
+                inv,
+                context.consts,
+                crate::opaque::GenModule {
+                    exprs: context.exprs,
+                    source: context.module_source,
+                    runtime: context.options.runtime,
+                },
+                &producers,
+                &mut grng,
+                context.options.invariant_min_rate,
+                context.gen_budget,
+            )
+            .map_err(|failure| (path.to_string(), failure))?;
+            Ok((
+                GeneratedValue::Opaque {
+                    type_name: inv.type_name.clone(),
+                    value: generated.value_expr,
+                },
+                crate::opaque::generated_env_json(&generated.env),
+            ))
+        }
+        ValuePlan::Record {
+            ctor_name, fields, ..
+        } => {
+            let mut values = Vec::new();
+            let mut json = serde_json::Map::new();
+            for (field, child) in fields {
+                let (value, rendered) =
+                    sample_plan(child, &format!("{path}.{field}"), rng, context)?;
+                values.push((field.clone(), value));
+                json.insert(field.clone(), rendered);
+            }
+            Ok((
+                GeneratedValue::Record {
+                    ctor_name: ctor_name.clone(),
+                    fields: values,
+                },
+                serde_json::Value::Object(json),
+            ))
+        }
+    }
+}
+
+fn materialize_value(program: &mut Vec<Expr>, value: &GeneratedValue) -> Expr {
+    match value {
+        GeneratedValue::Direct(expr) => expr.clone(),
+        GeneratedValue::Opaque { type_name, value } => {
+            let (with_helper, helper) =
+                inject_owned_value_helper(program, type_name, value.clone());
+            *program = with_helper;
+            var_node(&helper)
+        }
+        GeneratedValue::Record { ctor_name, fields } => {
+            let mut children = vec![sym(ctor_name)];
+            for (field, child) in fields {
+                children.push(node(
+                    "kv",
+                    vec![sym(field), materialize_value(program, child)],
+                ));
+            }
+            node("record", children)
+        }
     }
 }
 
@@ -515,14 +881,7 @@ fn eval_bool_in_module(
     // Bind all binders via a let-chain around the body.
     let mut wrapped = body.clone();
     for binding in bindings.iter().rev() {
-        let value = if let Some(type_name) = &binding.opaque_type {
-            let (with_helper, helper) =
-                inject_owned_value_helper(&program, type_name, binding.value.clone());
-            program = with_helper;
-            var_node(&helper)
-        } else {
-            binding.value.clone()
-        };
+        let value = materialize_value(&mut program, &binding.value);
         wrapped = node(
             "let",
             vec![node("bind", vec![sym(&binding.name), value]), wrapped],
@@ -1042,7 +1401,7 @@ def bound() -> i64 = 9007199254740993i64
                 _ => None,
             })
             .expect("fixture has the requested property");
-        (module_decls, vec![property_index], params)
+        (parsed, vec![0, property_index], params)
     }
 
     #[test]

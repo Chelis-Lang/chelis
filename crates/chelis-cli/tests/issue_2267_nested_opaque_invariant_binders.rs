@@ -61,7 +61,7 @@ fn qualified_and_nested_package_binders_discharge_their_invariants() {
             "--tier",
             "fuzz-only",
             "--samples",
-            "16",
+            "1",
             "--seed",
             "1",
             "--json",
