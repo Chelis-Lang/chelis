@@ -3654,9 +3654,18 @@ pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> UnordMap<NodeId, Vec<(Strin
 /// alive for consumers that need the extent at run time even when the
 /// declarer's VALUE is dead (e.g. a backward `Expand` over a runtime reshape
 /// extent whose forward result the gradient never reads).
+///
+/// A synthesized adjoint never declares: each of its axes is the extent of a
+/// forward value, so it introduces no extent. Electing one, when no forward
+/// operation declares the symbol because a parameter binds it, would make
+/// every later user of that extent keep an adjoint the gradient never reads
+/// alive, such as a `Where` condition's Bool cotangent chain (chelis#3389).
 pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
     let mut declarers: UnordMap<String, NodeId> = UnordMap::new();
     for node in dag.nodes() {
+        if node.span_id.as_deref() == Some(crate::grad::GRAD_SYNTH_MARKER) {
+            continue;
+        }
         for (symbol, _) in op_declared_output_axes(dag, node) {
             declarers.entry(symbol).or_insert(node.id);
         }
@@ -4468,6 +4477,56 @@ mod tests {
         assert_eq!(dag.len(), 3);
         let node = dag.get(c).unwrap();
         assert_eq!(node.inputs, vec![NodeId(0), NodeId(1)]);
+    }
+
+    /// chelis#3389: a synthesized adjoint producing a parameter's extent `n`
+    /// is not `n`'s declarer, so a later user of `n` does not keep it alive.
+    /// The same forward `Shrink` still declares `n`.
+    #[test]
+    fn a_synthesized_adjoint_declares_no_extent() {
+        for (span, declared) in [(Some(crate::grad::GRAD_SYNTH_MARKER), false), (None, true)] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let dims = |name: &str| TensorType {
+                dims: vec![DimInfo::Named(name.into(), None)],
+                precision: Prim::F32,
+            };
+            let x = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                dims("n"),
+                None,
+            );
+            let end = dag.add_node(
+                decl,
+                RiscOp::Const {
+                    value: chelis_types::scalar_from_i64("test", Prim::Int64, 1).unwrap(),
+                },
+                vec![],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::Int64,
+                },
+                None,
+            );
+            let shrunk = dag.add_node(
+                decl,
+                RiscOp::Shrink {
+                    bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
+                },
+                vec![x, end],
+                dims("n"),
+                span.map(ToOwned::to_owned),
+            );
+            let user = dag.add_node(decl, RiscOp::Neg, vec![x], dims("n"), None);
+            record_runtime_dim_shape_deps(&mut dag);
+            assert_eq!(
+                dag.get(user).unwrap().shape_deps.contains(&shrunk),
+                declared,
+                "span {span:?}"
+            );
+        }
     }
 
     #[test]

@@ -289,6 +289,73 @@ fn a_batched_fill_pads_and_differentiates_under_vmap() {
     );
 }
 
+/// A padded axis whose extent comes from a parameter: the `[n]` operand and a
+/// runtime padding amount `k`, with respect to `x`, the fill, and both.
+#[test]
+fn symbolic_extents_differentiate_in_both_lanes() {
+    let source = "def sym1[n](x: tensor[n, f32], f: f32) -> f32 = tensor_to_scalar(sum(pad(x, [[1i64, 3i64]], f), 0i32))\n\
+         def dyn1[n](x: tensor[n, f32], k: i64, f: f32) -> f32 = tensor_to_scalar(sum(pad(x, [[1i64, k]], f), 0i32))\n\
+         sym_dx = grad(sym1, wrt=x)(to_tensor([1.0f32, 2.0f32]), 0.5f32)\n\
+         sym_dfill = grad(sym1, wrt=f)(to_tensor([1.0f32, 2.0f32]), 0.5f32)\n\
+         sym_joint = grad(sym1)(to_tensor([1.0f32, 2.0f32]), 0.5f32)\n\
+         dyn_dx = grad(dyn1, wrt=x)(to_tensor([1.0f32, 2.0f32]), 3i64, 0.5f32)\n\
+         dyn_dfill = grad(dyn1, wrt=f)(to_tensor([1.0f32, 2.0f32]), 3i64, 0.5f32)\n\
+         dyn_joint = grad(dyn1, wrt=(x, f))(to_tensor([1.0f32, 2.0f32]), 3i64, 0.5f32)\n";
+    let ones = "tensor(shape=[2], data=[1.0, 1.0])";
+    assert_lanes(
+        source,
+        "symbolic",
+        &[
+            ("sym_dx", ones),
+            ("sym_dfill", "4.0"),
+            ("sym_joint.0", ones),
+            ("sym_joint.1", "4.0"),
+            ("dyn_dx", ones),
+            ("dyn_dfill", "4.0"),
+            ("dyn_joint.0", ones),
+            ("dyn_joint.1", "4.0"),
+        ],
+    );
+}
+
+/// The issue's attention-with-sink shape, `[q, k]` scores padded with a
+/// learned sink column. The C lane does not yet build these gradients: the
+/// sink's leaves a runtime extent undeclared (chelis#3412), and the scores'
+/// stops at a rank-2 shrink emission panic a literal fill reaches too
+/// (chelis#3511).
+#[test]
+fn a_rank_two_symbolic_sink_differentiates_on_eval() {
+    let source = "def att[q, k](s: tensor[q, k, f32], sink: f32) -> f32 = tensor_to_scalar(sum(sum(pad(s, [[0i64, 0i64], [0i64, 1i64]], sink), 1i32), 0i32))\n\
+         ds = grad(att, wrt=s)(reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]), [2i64, 3i64]), 0.5f32)\n\
+         dsink = grad(att, wrt=sink)(reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]), [2i64, 3i64]), 0.5f32)\n\
+         joint = grad(att)(reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]), [2i64, 3i64]), 0.5f32)\n";
+    let ones = "tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0])";
+    let eval = eval_stdout(source);
+    for (name, value) in [
+        ("ds", ones),
+        ("dsink", "2.0"),
+        ("joint.0", ones),
+        ("joint.1", "2.0"),
+    ] {
+        assert_eq!(printed(&eval, name), value, "eval `{name}`");
+    }
+}
+
+/// The cause was not the runtime fill: a hand-written Bool mask padded after
+/// the operand made the Bool cotangent's `Shrink` the first operation to
+/// produce the parameter's extent `n`, and the backward graph kept that
+/// never-read Bool chain alive as `n`'s declarer.
+#[test]
+fn a_hand_written_mask_over_a_parameter_extent_differentiates() {
+    let source = "def masked[n](x: tensor[n, f32]) -> f32 = {\n    p = pad(x, [[1i64, 3i64]], 0.0f32)\n    q = pad(mul(x, x), [[1i64, 3i64]], 0.5f32)\n    mask = pad(lt(x, x), [[1i64, 3i64]], true)\n    tensor_to_scalar(sum(where(mask, q, p), 0i32))\n}\n\
+         dx = grad(masked)(to_tensor([1.0f32, 2.0f32]))\n";
+    assert_lanes(
+        source,
+        "masked",
+        &[("dx", "tensor(shape=[2], data=[1.0, 1.0])")],
+    );
+}
+
 #[test]
 fn grad_of_grad_differentiates_the_fill_cotangent() {
     // sum(w * pad(x, P, fill)^2) over the one padded cell is 3 * fill^2:

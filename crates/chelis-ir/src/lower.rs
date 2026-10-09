@@ -29511,8 +29511,9 @@ mod regression_tests {
     // statically-resolvable value-carrying wrappers a numeric argument can
     // arrive in — a float-cast and a unary minus — instead of silently
     // defaulting a dropped `uniform_like` range to [0,1) (dropout rate to 0,
-    // pad fill to 0); and it must fail loudly, never substitute a default,
-    // for anything it cannot fold. Negative-parity is asserted alongside the
+    // pad fill to 0). Anything it cannot fold is an ordinary runtime operand
+    // (a draw's bounds and rate, chelis#2413; a pad fill, chelis#3389), never
+    // a substituted default. Negative-parity is asserted alongside the
     // positive cases for each fixed site.
 
     /// A rank-1 f32 template literal for the wrapped-bound uniform_like /
