@@ -360,16 +360,16 @@ mod tests {
 
     #[test]
     fn fitness_rejects_box_range_goal() {
-        use crate::discharge::{IntervalBox, OutputRange};
+        use crate::discharge::{IntervalBox, OutputRange, test_dims, test_f64};
         let engine = ClarabelSosEngine::unwired();
         let box_goal = Goal::box_range(
             IntervalBox {
-                dims: vec![("s".to_string(), 0.0, 1.0)],
+                dims: test_dims(vec![("s".to_string(), 0.0, 1.0)]),
             },
             OutputRange {
                 output: "p".to_string(),
-                lo: 0.0,
-                hi: 1.0,
+                lo: test_f64(0.0),
+                hi: test_f64(1.0),
             },
         )
         .expect("well-formed box goal");
