@@ -9,8 +9,9 @@
 //! the cotangent with the other operand in forward output-then-reduction
 //! order, and the diagonal adjoint is the scattered literal. The printed
 //! values are shortest round-trip spellings, so equal text is equal bits.
-//! einsum's reduction order is pinned separately by a deterministic
-//! generator over label structures (`order_equations`).
+//! einsum's forward and adjoint orders are pinned separately by a
+//! deterministic generator over label structures (`order_equations`,
+//! `adjoint_equations`).
 #[path = "common/mod.rs"]
 mod common;
 use assert_cmd::Command;
@@ -461,52 +462,94 @@ fn mix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// A batched operand literal (batch extent 2) for `labels`, valued so that
-/// the reduction order is visible in the finalized bits at every width.
+/// Equations whose left operand misses two or three reduction labels (all
+/// owned by the right operand, in every order there), alone or after a
+/// missing output label. Each also runs with its operands swapped, so the
+/// right operand's adjoint meets the same structures.
+fn adjoint_equations() -> Vec<String> {
+    let mut equations = Vec::new();
+    for b in ["jkl", "jlk", "kjl", "klj", "ljk", "lkj"] {
+        equations.push(format!("ij,{b}->i"));
+    }
+    for b in ["jkln", "jnlk", "kjnl", "lnjk", "nklj", "lkjn"] {
+        equations.push(format!("ij,{b}->i"));
+    }
+    for (b, out) in [
+        ("jmkl", "im"),
+        ("jmkl", "mi"),
+        ("ljmk", "im"),
+        ("kmlj", "mi"),
+        ("mlkj", "im"),
+        ("jlkm", "mi"),
+    ] {
+        equations.push(format!("ij,{b}->{out}"));
+    }
+    let swapped: Vec<String> = equations
+        .iter()
+        .map(|equation| {
+            let (inputs, output) = equation.split_once("->").unwrap();
+            let (a, b) = inputs.split_once(',').unwrap();
+            format!("{b},{a}->{output}")
+        })
+        .collect();
+    equations.extend(swapped);
+    equations
+}
+
+/// An operand literal for `labels` (with a leading batch axis `z` of extent
+/// 2 when `batched`), valued so that a reduction order is visible in the
+/// finalized bits at every width.
 ///
-/// The left operand's (`negates`) large cells negate across the reduction
-/// label `sign` while its small cells repeat, and the right operand ignores
-/// `sign`, so the
-/// near-2^24 products cancel pairwise and leave a small total whose low
-/// bits depend on which small terms each rounded large partial sum
-/// absorbed. `tiny` scales the small cells below the rounding of those
-/// partial sums at the operand's accumulator: 2^-6 for the f32 accumulator,
-/// 2^-31 for f64. Every value is exact at its width.
-fn order_operand(seed: u64, labels: &[char], sign: char, negates: bool, tiny: f64) -> String {
+/// A `negates` operand's large cells negate across the label `sign` while
+/// its small cells repeat; a plain operand ignores `sign`. Their near-2^24
+/// products therefore cancel pairwise and leave a small total whose low bits
+/// depend on which small terms each rounded large partial sum absorbed.
+/// `tiny` scales the small cells below the rounding of those partial sums at
+/// the accumulator: 2^-6 for f32, 2^-31 for f64. Every value is exact at its
+/// width.
+fn order_operand(
+    seed: u64,
+    labels: &[char],
+    sign: Option<char>,
+    negates: bool,
+    tiny: f64,
+    batched: bool,
+) -> String {
     fn nest(
         seed: u64,
         labels: &[char],
-        (sign, negates, tiny): (char, bool, f64),
+        (sign, negates, tiny): (Option<char>, bool, f64),
         coords: &mut Vec<(char, usize)>,
         depth: usize,
     ) -> String {
         if depth == labels.len() {
-            let coord = |label: char| {
-                coords
-                    .iter()
-                    .find(|(l, _)| *l == label)
-                    .map(|(_, c)| *c)
-                    .expect("label coordinate")
-            };
             let key = mix(coords.iter().fold(seed, |acc, (label, c)| {
-                if *label == sign {
+                if Some(*label) == sign {
                     acc
                 } else {
                     mix(acc ^ ((*label as u64) << 8) ^ *c as u64)
                 }
             }));
-            let value = if !negates {
-                [4096.0, -4096.0, 2048.0, -2048.0, 1.0, -1.0, 0.5][(key % 7) as usize]
-            } else if key.is_multiple_of(2) {
-                let big = [1024.0, 1536.0, 2048.0, 3072.0][(key / 2 % 4) as usize]
-                    * if (key / 8).is_multiple_of(2) {
-                        1.0
-                    } else {
-                        -1.0
-                    };
-                if coord(sign) == 0 { big } else { -big }
-            } else {
-                [tiny, -2.0 * tiny, 4.0 * tiny][(key / 2 % 3) as usize]
+            let negated = sign.filter(|_| negates).map(|sign| {
+                coords
+                    .iter()
+                    .find(|(l, _)| *l == sign)
+                    .map(|(_, c)| *c)
+                    .expect("sign coordinate")
+                    != 0
+            });
+            let value = match negated {
+                None => [4096.0, -4096.0, 2048.0, -2048.0, 1.0, -1.0, 0.5][(key % 7) as usize],
+                Some(negated) if key.is_multiple_of(2) => {
+                    let big = [1024.0, 1536.0, 2048.0, 3072.0][(key / 2 % 4) as usize]
+                        * if (key / 8).is_multiple_of(2) {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                    if negated { -big } else { big }
+                }
+                Some(_) => [tiny, -2.0 * tiny, 4.0 * tiny][(key / 2 % 3) as usize],
             };
             return format!("{value:?}P").replace('e', "E");
         }
@@ -528,61 +571,183 @@ fn order_operand(seed: u64, labels: &[char], sign: char, negates: bool, tiny: f6
             .collect();
         format!("[{}]", cells.join(", "))
     }
-    let mut batched = vec!['z'];
-    batched.extend_from_slice(labels);
-    nest(seed, &batched, (sign, negates, tiny), &mut Vec::new(), 0)
+    let mut all = if batched { vec!['z'] } else { Vec::new() };
+    all.extend_from_slice(labels);
+    let literal = nest(seed, &all, (sign, negates, tiny), &mut Vec::new(), 0);
+    if all.is_empty() {
+        format!("scalar_to_tensor({literal})")
+    } else {
+        format!("to_tensor({literal})")
+    }
 }
 
-/// One equation's batched roots at a small-cell scale.
+/// A case's roots at a small-cell scale.
 type RootsAtScale = Box<dyn Fn(f64) -> String>;
 
-/// [05-OP-33]'s einsum reduction order over enumerated label structures:
-/// each generated contraction runs under `vmap`, which lowers it to the
-/// transform graph, and must equal the host contraction of the batched
-/// equation bit for bit in eval at every float width, and compiled C
-/// agrees with eval on one equation per family at f16.
-#[test]
-fn einsum_reduction_order_matches_the_host_over_enumerated_label_structures() {
-    let equations = order_equations();
-    // (def, roots at a small-cell scale) per equation, so the C slice can
-    // take a subset.
-    let mut programs: Vec<(String, RootsAtScale)> = Vec::new();
-    for (n, equation) in equations.iter().enumerate() {
-        let (inputs, output) = equation.split_once("->").unwrap();
-        let (lhs, rhs) = inputs.split_once(',').unwrap();
-        let lhs: Vec<char> = lhs.chars().collect();
-        let rhs: Vec<char> = rhs.chars().collect();
-        let shape = |labels: &[char]| {
-            labels
-                .iter()
-                .map(|&l| label_extent(l).to_string())
-                .chain(["P".to_string()])
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let out: Vec<char> = output.chars().collect();
-        let sign = lhs
-            .iter()
-            .copied()
-            .find(|l| !out.contains(l) && label_extent(*l) == 2)
-            .expect("the left operand holds a two-extent reduction label");
-        let def = format!(
-            "def e{n}(a: tensor[{}], b: tensor[{}]) -> tensor[{}] = einsum(\"{equation}\", a, b)\n",
-            shape(&lhs),
-            shape(&rhs),
-            shape(&out),
-        );
-        let output = output.to_string();
-        let roots = move |tiny: f64| {
+struct OrderCase {
+    /// The `a_`/`e_` root suffix.
+    root: String,
+    what: String,
+    /// Whether compiled C can print the reference: C host emission does
+    /// not lower `insert` ([04-TOT-2]).
+    c_emits: bool,
+    def: String,
+    roots: RootsAtScale,
+}
+
+fn tensor_type(labels: &[char]) -> String {
+    let dims: Vec<String> = labels
+        .iter()
+        .map(|&l| label_extent(l).to_string())
+        .chain(["P".to_string()])
+        .collect();
+    format!("tensor[{}]", dims.join(", "))
+}
+
+/// `vmap` of `equation` against the host contraction of the batched
+/// equation: the forward reduction order.
+fn forward_case(n: usize, equation: &str) -> OrderCase {
+    let (inputs, output) = equation.split_once("->").unwrap();
+    let (lhs, rhs) = inputs.split_once(',').unwrap();
+    let (lhs, rhs, out): (Vec<char>, Vec<char>, Vec<char>) = (
+        lhs.chars().collect(),
+        rhs.chars().collect(),
+        output.chars().collect(),
+    );
+    let sign = lhs
+        .iter()
+        .copied()
+        .find(|l| !out.contains(l) && label_extent(*l) == 2);
+    let def = format!(
+        "def e{n}(a: {}, b: {}) -> {} = einsum(\"{equation}\", a, b)\n",
+        tensor_type(&lhs),
+        tensor_type(&rhs),
+        tensor_type(&out),
+    );
+    let (equation, output) = (equation.to_string(), output.to_string());
+    OrderCase {
+        root: format!("o{n}"),
+        what: format!("vmap `{equation}`"),
+        c_emits: true,
+        def,
+        roots: Box::new(move |tiny| {
             format!(
-                "a{n} = to_tensor({})\nb{n} = to_tensor({})\na_o{n} = vmap(e{n})(a{n}, b{n})\ne_o{n} = einsum(\"z{}z{}->z{output}\", a{n}, b{n})\n",
-                order_operand(2 * n as u64, &lhs, sign, true, tiny),
-                order_operand(2 * n as u64 + 1, &rhs, sign, false, tiny),
-                lhs.iter().collect::<String>() + ",",
+                "a{n} = {}\nb{n} = {}\na_o{n} = vmap(e{n})(a{n}, b{n})\ne_o{n} = einsum(\"z{},z{}->z{output}\", a{n}, b{n})\n",
+                order_operand(2 * n as u64, &lhs, sign, true, tiny, true),
+                order_operand(2 * n as u64 + 1, &rhs, sign, false, tiny, true),
+                lhs.iter().collect::<String>(),
                 rhs.iter().collect::<String>(),
             )
-        };
-        programs.push((def, Box::new(roots)));
+        }),
+    }
+}
+
+/// `grad` of `sum(einsum(equation, a, b) * w)` with respect to one operand
+/// against [05-OP-51]'s adjoint: the host contraction of the cotangent `w`
+/// with the other operand onto the operand's labels, whose reduction runs
+/// over the operand's missing labels in forward output-then-reduction order,
+/// broadcast along labels only that operand holds. `None` when the operand
+/// repeats a label (its diagonal scatter is pinned by `es3`).
+fn adjoint_case(n: usize, equation: &str, wrt_left: bool) -> Option<OrderCase> {
+    let (inputs, output) = equation.split_once("->").unwrap();
+    let (lhs, rhs) = inputs.split_once(',').unwrap();
+    let (lhs, rhs, out): (Vec<char>, Vec<char>, Vec<char>) = (
+        lhs.chars().collect(),
+        rhs.chars().collect(),
+        output.chars().collect(),
+    );
+    let (me, other) = if wrt_left { (&lhs, &rhs) } else { (&rhs, &lhs) };
+    if (1..me.len()).any(|i| me[..i].contains(&me[i])) {
+        return None;
+    }
+    let side = if wrt_left { "a" } else { "b" };
+    // The cotangent or the other operand carries the cancelling sign over a
+    // label the operand lacks; the operand itself does not reach its own
+    // adjoint under this linear loss.
+    let sign = other
+        .iter()
+        .chain(&out)
+        .copied()
+        .find(|l| !me.contains(l) && label_extent(*l) == 2);
+    let other_negates = sign.is_some_and(|s| other.contains(&s));
+    let kept: Vec<char> = me
+        .iter()
+        .copied()
+        .filter(|l| out.contains(l) || other.contains(l))
+        .collect();
+    let mut reference = format!(
+        "einsum(\"{},{}->{}\", w{side}{n}, {}{side}{n})",
+        out.iter().collect::<String>(),
+        other.iter().collect::<String>(),
+        kept.iter().collect::<String>(),
+        if wrt_left { "y" } else { "x" },
+    );
+    for (i, label) in me.iter().enumerate() {
+        if !kept.contains(label) {
+            reference = format!("insert({reference}, {i}i32, {}i64)", label_extent(*label));
+        }
+    }
+    let mut loss = "mul(einsum(\"EQ\", a, b), w)".replace("EQ", equation);
+    for axis in (0..out.len()).rev() {
+        loss = format!("sum({loss}, {axis}i32)");
+    }
+    let def = format!(
+        "def l{side}{n}(a: {}, b: {}, w: {}) -> tensor[P] = {loss}\n",
+        tensor_type(&lhs),
+        tensor_type(&rhs),
+        tensor_type(&out),
+    );
+    let equation = equation.to_string();
+    let (lhs, rhs, me) = (lhs.clone(), rhs.clone(), me.clone());
+    Some(OrderCase {
+        root: format!("g{side}{n}"),
+        what: format!("grad wrt {side} `{equation}`"),
+        c_emits: !reference.contains("insert("),
+        def,
+        roots: Box::new(move |tiny| {
+            let seed = 1000 + 4 * n as u64 + u64::from(wrt_left) * 2;
+            let (x_negates, y_negates) = if wrt_left {
+                (false, other_negates)
+            } else {
+                (other_negates, false)
+            };
+            let _ = &me;
+            format!(
+                "x{side}{n} = {}\ny{side}{n} = {}\nw{side}{n} = {}\na_g{side}{n} = grad(l{side}{n}, wrt={side})(x{side}{n}, y{side}{n}, w{side}{n})\ne_g{side}{n} = {reference}\n",
+                order_operand(seed, &lhs, sign, x_negates, tiny, false),
+                order_operand(seed + 1, &rhs, sign, y_negates, tiny, false),
+                order_operand(
+                    seed + 2,
+                    &out,
+                    sign,
+                    !other_negates && sign.is_some(),
+                    tiny,
+                    false
+                ),
+            )
+        }),
+    })
+}
+
+/// [05-OP-33]/[05-OP-51]'s einsum orders over enumerated label structures.
+/// Every generated contraction runs under `vmap` against the host
+/// contraction of the batched equation (forward reduction order), and under
+/// `grad` with respect to each operand against the host contraction of the
+/// cotangent with the other operand (adjoint order). Each must match bit for
+/// bit in eval at every float width; compiled C agrees with eval on a slice
+/// of every family at f16.
+#[test]
+fn einsum_orders_match_the_host_over_enumerated_label_structures() {
+    let mut cases = Vec::new();
+    let forward = order_equations();
+    for (n, equation) in forward.iter().enumerate() {
+        cases.push(forward_case(n, equation));
+    }
+    let adjoint_first = forward.len();
+    for (n, equation) in forward.iter().chain(&adjoint_equations()).enumerate() {
+        for wrt_left in [true, false] {
+            cases.extend(adjoint_case(n, equation, wrt_left));
+        }
     }
     let program = |indices: &mut dyn Iterator<Item = usize>, dtype: &str| {
         let tiny = if dtype == "f64" {
@@ -591,45 +756,51 @@ fn einsum_reduction_order_matches_the_host_over_enumerated_label_structures() {
             2f64.powi(-6)
         };
         let (defs, roots): (String, String) = indices
-            .map(|n| (programs[n].0.clone(), (programs[n].1)(tiny)))
+            .map(|i| (cases[i].def.clone(), (cases[i].roots)(tiny)))
             .unzip();
         format!("module Demo.Main\n{defs}{roots}").replace('P', dtype)
     };
     let mut mismatches = Vec::new();
     for dtype in ["f16", "bf16", "f32", "f64"] {
         let (_dir, reef, app) = common::make_app("issue-3362-einsum-order");
-        let source = program(&mut (0..equations.len()), dtype);
-        common::write_file(&app.join("src/main.ch"), &source);
+        common::write_file(
+            &app.join("src/main.ch"),
+            &program(&mut (0..cases.len()), dtype),
+        );
         let output = eval_text(&reef, &app);
         assert!(output.status.success(), "{dtype}: {output:?}");
         let evaluated = String::from_utf8(output.stdout).unwrap();
         let pairs = root_pairs(&evaluated);
-        assert_eq!(
-            pairs.len(),
-            equations.len(),
-            "{dtype}: every equation is present"
-        );
-        for (case, actual, expected) in &pairs {
+        assert_eq!(pairs.len(), cases.len(), "{dtype}: every case is present");
+        for (root, actual, expected) in &pairs {
             if actual != expected {
-                let n: usize = case.trim_start_matches('o').parse().unwrap();
+                let case = cases.iter().find(|case| case.root == *root).unwrap();
                 mismatches.push(format!(
-                    "eval {dtype} `{}`: {actual} != {expected}",
-                    equations[n]
+                    "eval {dtype} {}: {actual} != {expected}",
+                    case.what
                 ));
             }
         }
     }
-    // Compiled C lowers the same transform graph; one equation per family
-    // at f16 checks the lane agrees without emitting all of them.
+    // Compiled C lowers the same transform graph; a slice of every family at
+    // f16 checks the lane agrees without emitting every case.
     let (_dir, reef, app) = common::make_app("issue-3362-einsum-order-c");
-    let slice = [0, 12, 30, 48, 50, 54, 58, 62];
-    let source = program(&mut slice.into_iter(), "f16");
-    common::write_file(&app.join("src/main.ch"), &source);
+    let mut slice = [0, 12, 30, 48, 50, 54, 58, 62].into_iter().chain(
+        (adjoint_first..cases.len())
+            .filter(|&i| cases[i].c_emits)
+            .step_by(24),
+    );
+    common::write_file(&app.join("src/main.ch"), &program(&mut slice, "f16"));
     let output = eval_text(&reef, &app);
     assert!(output.status.success(), "C slice: {output:?}");
     let evaluated = String::from_utf8(output.stdout).unwrap();
     if common::build_and_run_app(&reef, &app, "main") != evaluated {
         mismatches.push("f16: compiled C disagrees with eval on the family slice".to_string());
     }
-    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    assert!(
+        mismatches.is_empty(),
+        "{} mismatches:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
 }
