@@ -12,3 +12,12 @@ read only through control slots also no longer contaminates the gradient
 through its adjoint: `if lt(mul(x, y), 1.0f32) then x else mul(x, x)` at
 `y = inf` returned a NaN gradient and now returns `2x`. See
 [#3464](https://github.com/Chelis-Lang/chelis/issues/3464).
+
+The same rejections also apply only to an active operation, one whose operands
+depend on a differentiated parameter. A conversion of data that is not
+differentiated is a constant, so `grad(f, wrt=x)` of `sum(mul(x, floor(m)))`
+returns `floor(m)` instead of rejecting. Dependence passes through every
+operand slot, indices included, except metadata reads such as `shape` and
+guard predicates, so a conversion of a value gathered by an index computed
+from `x` is active and rejects when used as data. See
+[#3487](https://github.com/Chelis-Lang/chelis/issues/3487).

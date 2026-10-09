@@ -268,8 +268,9 @@ and therefore do not block a surrounding differentiable graph. Extrema use
 their exact tie/NaN subgradient rules, not a generic zero-at-ties convention.
 Piecewise-constant numeric conversions and roundings whose atoms specify
 `AdRejectionReason::PiecewiseConstant` reject the transformed graph wherever
-their result has a data path to the differentiated output (§7.5), even though
-their forward execution is legal; they never silently return zero.
+they are active and their result has a data path to the differentiated output
+(§7.5), even though their forward execution is legal; they never silently
+return zero.
 Structural analysis does not cross a control slot (§7.5) or [05-OP-42]'s
 `stop_gradient` barrier. The barrier's argument subgraph is outside adjoint
 construction and rejection analysis, its forward value passes through
@@ -993,23 +994,41 @@ operand dtype is a control slot: comparison and `is_*` operands, the `where`,
 `if`, or `match` condition or tag, a guard's firing predicate, indices,
 movement bounds, sizes, and axes, `shape` reads, and random controls. A data
 path is a path to the differentiated output that enters no control slot and no
-`stop_gradient`; only an operation whose result has one is checked for
-structural rejection. A slot that is zero only because its operand is bool or
+`stop_gradient`. A slot that is zero only because its operand is bool or
 integer ([04-NUM-14]) is not a control slot. An operation whose result
 reaches the output only through control slots executes forward, with its
 traps, and contributes nothing: its adjoint is not constructed, so no value
 its forward evaluation computes, finite or not, enters a cotangent, and each
 operand it reads receives exact positive zero from it.
 
-When traversal encounters, on a data path, an operation whose atom requires
-structural rejection, construction stops with that atom's exact
-`AdRejectionReason`.
-This includes piecewise-constant float-to-integer conversion and rounding; it
-does not silently insert `Const(0)`. Float-to-float precision casts use their
-declared cast adjoint. A [05-OP-42] `stop_gradient` node is a barrier:
-traversal contributes the shape-preserving exact zero for its argument and
-does not enter the argument's subgraph, so a structurally rejected operation
-inside it does not stop construction.
+A value depends on a `wrt` leaf when a path from the leaf reaches it through
+operand slots that carry dependence and through no `stop_gradient`. Every
+operand slot carries dependence, comparison and `is_*` operands, `where`,
+`if`, and `match` conditions and tags, indices, value-read bounds and sizes,
+keys, and dropout rates included, except two kinds whose operand cannot
+change the result's value:
+
+- a metadata read: `shape`, an extent witness, a bound, size, or axis read
+  from an operand's extent, the `uniform_like` template, and a List
+  combinator's length carrier;
+- a guard predicate: a guarded abort's firing condition and the extent
+  witnesses a checked reshape extent or unit axis is checked against, which
+  can only trap.
+
+An operation is active when one of its operands depends on a `wrt` leaf; this
+is the dependence [05-OP-47] names. Only an active operation whose result has
+a data path is checked for structural rejection. An inactive operation is a constant with
+respect to `wrt`: no cotangent is owed to its operands, and it executes
+forward with its traps.
+
+When traversal encounters an active operation on a data path whose atom
+requires structural rejection, construction stops with that atom's exact
+`AdRejectionReason`. This includes piecewise-constant float-to-integer
+conversion and rounding; it does not silently insert `Const(0)`. Float-to-float
+precision casts use their declared cast adjoint. A [05-OP-42] `stop_gradient`
+node is a barrier: traversal contributes the shape-preserving exact zero for
+its argument and does not enter the argument's subgraph, so a structurally
+rejected operation inside it does not stop construction.
 
 A signed-integer operation whose atom assigns the `IntegerArithmeticOutput`
 structural rejection passes exact zero to its operands when reached only by
@@ -1018,8 +1037,8 @@ forward-only adjoint. Its operands stay on the data paths that reach it, so a
 structural rejection such as a float-to-integer cast beneath the operation is
 reported. If any path reaches that same operation with another cotangent,
 its `IntegerArithmeticOutput` rejection applies. Other operations retain
-their own atom's disposition, including a structural rejection on every data
-path.
+their own atom's disposition, including a structural rejection wherever they
+are active on a data path.
 
 ### 7.6 Verification
 

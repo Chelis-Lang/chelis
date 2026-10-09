@@ -490,7 +490,8 @@ Each target checks whether it can lower the selected source function.
   casts `cast_trunc`, `cast_saturate` and `cast_wrap` are piecewise constant; `count` and argument reductions have discrete
   outputs; replace-scatter variants reject duplicate-sensitive gradients.
   Integer arithmetic is forward-only where its atom says so. A rejection
-  applies only when the operation's result has a data path to the
+  applies only when the operation is active, its operands depending on a
+  differentiated parameter, and its result has a data path to the
   differentiated output (`spec/06` §7.5): a comparison operand, a
   `where`/`if`/`match` condition, an index, a movement bound or size, and a
   `shape` read are control slots, so an operation read only there runs

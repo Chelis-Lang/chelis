@@ -322,3 +322,78 @@ out = grad(loss, wrt=x)(2.0f32, div(1.0f32, 0.0f32))
 "#;
     assert_out(source, "control_zero", "4.0");
 }
+
+/// chelis#3487: a conversion of a parameter that is not differentiated is
+/// inactive, a constant with respect to `x`, so the gradient of
+/// `sum(x * conversion(m))` is `conversion(m)`.
+#[test]
+fn undifferentiated_conversion_is_a_constant() {
+    for (stem, conversion, expected) in [
+        (
+            "floor",
+            "floor(m)",
+            "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+        ),
+        (
+            "round",
+            "round(m)",
+            "tensor(shape=[3], data=[2.0, 2.0, 4.0])",
+        ),
+        (
+            "cast_trunc",
+            "cast(cast_trunc(m, i32), f32)",
+            "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+        ),
+    ] {
+        let source = format!(
+            r#"
+def loss(x: tensor[3, f32], m: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, {conversion}), 0i32))
+out = grad(loss, wrt=x)(to_tensor([1.5f32, 2.5f32, 3.5f32]), to_tensor([1.5f32, 2.5f32, 3.5f32]))
+"#
+        );
+        assert_out(&source, &format!("inactive_{stem}"), expected);
+    }
+}
+
+/// Negative parity: the same conversion of a value that depends on `x` is
+/// active and rejects.
+#[test]
+fn conversion_of_a_differentiated_value_rejects() {
+    let source = r#"
+def loss(x: tensor[3, f32], m: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, floor(add(m, x))), 0i32))
+out = grad(loss, wrt=x)(to_tensor([1.5f32, 2.5f32, 3.5f32]), to_tensor([1.5f32, 2.5f32, 3.5f32]))
+"#;
+    assert_refused(
+        source,
+        "active_floor",
+        "grad: floor is non-differentiable (piecewise constant)",
+    );
+}
+
+/// Negative parity, spec/06 §7.5: a value gathered by an index computed from
+/// `x` depends on `x`. The index is a control slot, so its cast never
+/// rejects, but a conversion of the gathered value used as data is active and
+/// rejects.
+#[test]
+fn conversion_of_an_index_dependent_value_rejects() {
+    for (stem, conversion, needle) in [
+        (
+            "gathered_floor",
+            "floor(gather(v, cast(lt(x, t), i64), 0i32))",
+            "grad: floor is non-differentiable (piecewise constant)",
+        ),
+        (
+            "gathered_bitand",
+            "cast(bitand(gather(w, cast(lt(x, t), i64), 0i32), to_tensor([3i32, 3i32])), f32)",
+            "grad: bitand is non-differentiable (signed-integer arithmetic output)",
+        ),
+    ] {
+        let source = format!(
+            r#"
+def loss(x: tensor[2, f32], t: tensor[2, f32], v: tensor[2, f32], w: tensor[2, i32]) -> f32 = tensor_to_scalar(sum(mul(x, {conversion}), 0i32))
+out = grad(loss, wrt=x)(to_tensor([1.5f32, -2.5f32]), to_tensor([0.0f32, 0.0f32]), to_tensor([10.5f32, 20.5f32]), to_tensor([5i32, 6i32]))
+"#
+        );
+        assert_refused(&source, stem, needle);
+    }
+}

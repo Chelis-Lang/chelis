@@ -245,14 +245,18 @@ fn grad_dag_checked_impl(
     // [05-MOV-1]) reads its producer's value without carrying a cotangent,
     // so a conversion read only there executes forward and contributes
     // nothing (chelis#3464). A producer that is ALSO reached through a data
-    // slot keeps that data path and is checked.
+    // slot keeps that data path and is checked. The operation must also be
+    // active ([`active_reach`]): a conversion of values that do not depend on
+    // `wrt` is a constant, and no cotangent is owed to its input
+    // (chelis#3487).
     let data_path = data_path_reach(forward, output);
-    let selected_data = selected_data_reach(forward, wrt);
+    let active = active_reach(forward, wrt);
     let discrete_parameters = discrete_parameter_reach(forward, wrt);
     reject_random_selection_parameters(forward, &data_path, wrt)?;
     for node in forward.nodes() {
         if data_path[node.id.0]
-            && let Some(rejection) = structural_rejection(node, forward, selected_data[node.id.0])
+            && active[node.id.0]
+            && let Some(rejection) = structural_rejection(node, forward)
             && !is_cotangent_free_integer_computation(node, discrete_parameters[node.id.0])
         {
             return Err(rejection);
@@ -295,10 +299,11 @@ enum IntegerComputation {
 /// no cotangent, so every integer computation has one disposition, decided by
 /// its output dtype and [`is_cotangent_free_integer_computation`]. The match
 /// is exhaustive so a new operation is classified when it is added. The
-/// bitwise operations follow [05-OP-47]'s selected-parameter rule instead;
+/// bitwise operations follow [05-OP-47]'s activity rule instead;
 /// `argmax_reduce`, `argmin_reduce`, and the casts convert differentiable data
-/// and reject wherever they are live; sources, movement, selection, and
-/// ownership operations carry integer values without computing new ones.
+/// and reject wherever they are active on a data path; sources, movement,
+/// selection, and ownership operations carry integer values without computing
+/// new ones.
 fn integer_computation(node: &DagNode) -> Option<IntegerComputation> {
     if !node.output_type.precision.is_integer() {
         return None;
@@ -389,11 +394,11 @@ fn integer_computation(node: &DagNode) -> Option<IntegerComputation> {
     }
 }
 
-/// Track whether a forward value is derived from a selected parameter.
-/// A comparison or `where` condition still depends on its operands even
-/// though its cotangent is exact zero. Movement indices and random controls
-/// remain outside the selected data path, as in the AD operand contract.
-fn selected_data_reach(forward: &Dag, wrt: &[NodeId]) -> Vec<bool> {
+/// spec/06 §7.5 activity (chelis#3487): whether each forward value depends
+/// on a `wrt` leaf through slots that carry dependence
+/// ([`carries_dependence`]), the dependence [05-OP-47] names for a bitwise
+/// operation. Only an active operation's structural rejection applies.
+fn active_reach(forward: &Dag, wrt: &[NodeId]) -> Vec<bool> {
     data_reach(forward, wrt, |_| true)
 }
 
@@ -412,7 +417,7 @@ fn discrete_parameter_reach(forward: &Dag, wrt: &[NodeId]) -> Vec<bool> {
 }
 
 /// Forward reach from `seeds` into the nodes `admit` accepts, through every
-/// operand slot except index math ([`OperandSlot::Index`]).
+/// slot that carries value dependence ([`carries_dependence`]).
 fn data_reach(forward: &Dag, seeds: &[NodeId], admit: impl Fn(&DagNode) -> bool) -> Vec<bool> {
     let mut reached = vec![false; forward.len()];
     for parameter in seeds {
@@ -424,17 +429,43 @@ fn data_reach(forward: &Dag, seeds: &[NodeId], admit: impl Fn(&DagNode) -> bool)
         if reached[node.id.0] || !admit(node) {
             continue;
         }
-        reached[node.id.0] = node.inputs.iter().enumerate().any(|(slot, input)| {
-            operand_slot(&node.op, slot) != OperandSlot::Index && reached[input.0]
-        });
+        reached[node.id.0] = node
+            .inputs
+            .iter()
+            .enumerate()
+            .any(|(slot, input)| carries_dependence(&node.op, slot) && reached[input.0]);
     }
     reached
 }
 
+/// spec/06 §7.5: whether the value read through input `slot` of an `op` node
+/// can change the result's value. Every slot carries that dependence, a
+/// comparison operand, a condition, an index, a value-read bound, a key, and a
+/// dropout rate included, except a metadata read and a guard predicate. The
+/// metadata reads are verify.rs's extent slots ([`crate::verify::slot_read`],
+/// the one table the key rules also read) together with the uniform template
+/// and the List-map length carrier, whose values the result never reads. The
+/// guard predicates are a guarded abort's condition and the extent witnesses a
+/// checked reshape extent or unit axis is checked against: they can only trap.
+fn carries_dependence(op: &RiscOp, slot: usize) -> bool {
+    if crate::verify::slot_read(op, slot) != crate::verify::SlotRead::Value {
+        return false;
+    }
+    match op {
+        RiscOp::UniformLike | RiscOp::UniformBoundAdjoint { .. } => slot != 0,
+        RiscOp::ListMapCapture { .. } => slot == 0,
+        RiscOp::GuardedFail { .. } => slot != 0,
+        RiscOp::CheckedReshapeExtent { .. } | RiscOp::CheckedUnitAxis { .. } => slot == 0,
+        RiscOp::ExtentWitness { .. } => false,
+        _ => true,
+    }
+}
+
 /// How an operation's atom treats one operand slot under `grad` (spec/05 §5,
-/// spec/06 §7.5). Every reach the checked transform takes reads this one
-/// classification, so the data path, the selected-parameter dependence, and
-/// the random-rate reach cannot disagree about a slot.
+/// spec/06 §7.5). The data path, the random-rate reach, and the backward
+/// walk's exact-zero pass-through all read this one classification, so they
+/// cannot disagree about a slot. Value dependence is a separate question
+/// ([`carries_dependence`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OperandSlot {
     /// The atom gives the slot an adjoint or a structural rejection at a
@@ -444,13 +475,13 @@ enum OperandSlot {
     Data,
     /// A control slot whose operand selects the result's value: a comparison
     /// operand or a `where` condition. Its cotangent is exact zero for every
-    /// operand dtype, and its operand still carries [05-OP-47]'s dependence
-    /// on a selected parameter.
+    /// operand dtype, and the backward walk passes that zero to it, so a
+    /// parameter read only there still receives its exact zero gradient.
     Selector,
     /// A control slot of index math or metadata: an index, a movement bound,
     /// size or axis, a `shape` read, a random control or dropout rate, or a
     /// guard's firing predicate. Its cotangent is exact zero for every
-    /// operand dtype, and its operand carries no dependence.
+    /// operand dtype, and the backward walk never enters it.
     Index,
 }
 
@@ -612,14 +643,15 @@ impl From<String> for BackwardFailure {
 
 /// The atom-owned structural AD disposition for a forward node. Both the
 /// data-path precheck and the actual backward walk use this table, and both
-/// apply it only to a node with a data path ([`data_path_reach`]). A
+/// apply it only to an active node ([`active_reach`]) with a data path
+/// ([`data_path_reach`]). A
 /// signed-integer computation is exempt unless it computes from a
 /// differentiated bool or integer parameter
 /// ([`is_cotangent_free_integer_computation`]): it has no requested adjoint
 /// and passes exact zero to its producers.
-fn structural_rejection(node: &DagNode, forward: &Dag, selected_data: bool) -> Option<AdError> {
+fn structural_rejection(node: &DagNode, forward: &Dag) -> Option<AdError> {
     match &node.op {
-        RiscOp::Bitwise(kind) if selected_data => {
+        RiscOp::Bitwise(kind) => {
             return Some(AdError::NotSupported {
                 op: kind.name(),
                 reason: AdRejectionReason::IntegerArithmeticOutput,
@@ -969,7 +1001,7 @@ fn grad_dag_result(
     // clone span_id and merged_spans."
     let mut dag = forward.clone();
     let data_path = data_path_reach(forward, output);
-    let selected_data = selected_data_reach(forward, wrt);
+    let active = active_reach(forward, wrt);
     let discrete_parameters = discrete_parameter_reach(forward, wrt);
     let mut adjoints: UnordMap<NodeId, NodeId> = UnordMap::new();
     // Contributions wait here until reverse traversal reaches their input.
@@ -1105,13 +1137,15 @@ fn grad_dag_result(
         adjoints.insert(node_id, grad_out);
 
         let node = forward.get(node_id).unwrap().clone();
-        let rejection = structural_rejection(&node, forward, selected_data[node_id.0]);
+        let rejection = structural_rejection(&node, forward);
         // spec/06 §7.5: a node with no data path was reached only through
         // control slots. Its cotangent is exact zero, so it contributes exact
         // zero without constructing its adjoint, and its structural
-        // rejection does not apply.
+        // rejection does not apply. Nor does an inactive node's: no cotangent
+        // is owed to its operands.
         let off_data_path = !data_path[node_id.0];
         let cotangent_free = off_data_path
+            || !active[node_id.0]
             || is_cotangent_free_integer_computation(&node, discrete_parameters[node_id.0]);
         if let Some(rejection) = rejection
             && !cotangent_free
@@ -1136,13 +1170,15 @@ fn grad_dag_result(
         };
         let input_grads = match adjoint {
             Some(input_grads) => input_grads,
-            // A cotangent-free node off every data path, or one whose atom
-            // defines no adjoint, was reached solely by exact zero. Pass that
-            // zero through every slot but index math, as a comparison passes
-            // it to its operands: a parameter read only through control slots
-            // still receives its exact zero, and a no-grad conversion beneath
-            // an integer computation on a data path still receives its
-            // required structural diagnostic.
+            // A cotangent-free node without a built adjoint passes exact zero
+            // through every slot but index math, as a comparison passes it to
+            // its operands: off every data path its own cotangent is exact
+            // zero, an inactive node owes its operands none, and an integer
+            // computation receives only an integer value's exact zero. So a
+            // parameter read only through control slots still receives its
+            // exact zero, and a no-grad conversion beneath an integer
+            // computation on a data path still receives its required
+            // structural diagnostic.
             None if cotangent_free => node
                 .inputs
                 .iter()
@@ -3670,8 +3706,12 @@ mod tests {
         }
     }
 
+    /// [05-OP-47], spec/06 §7.5 (chelis#3487): the value scattered by an
+    /// index computed from `x` depends on `x`, so a bitwise operation on it is
+    /// active and rejects on a data path, although the index itself carries
+    /// no cotangent and its cast does not reject.
     #[test]
-    fn bitwise_coefficient_index_dependencies_do_not_request_an_adjoint() {
+    fn bitwise_of_an_index_dependent_value_rejects() {
         let mut dag = Dag::new();
         let owner = dag.declare("test");
         let vector = |precision| TensorType {
@@ -3726,10 +3766,18 @@ mod tests {
             vec![weighted],
             scalar_f32(),
         );
-        let result = grad_dag_checked(&dag, output, &[x]).expect("indices carry no cotangent");
-        let inputs = UnordMap::from([("x".into(), TensorValue::from_vec(vec![1], vec![0.0]))]);
-        let actual = crate::eval::eval_tensor(&result.dag, &inputs).unwrap();
-        assert_eq!(actual[&result.grad_nodes[&x]].to_f64_lossy_vec(), vec![1.0]);
+        let bitand = chelis_types::BitwiseKind::And.name();
+        assert!(
+            matches!(
+                grad_dag_checked(&dag, output, &[x]),
+                Err(AdError::NotSupported {
+                    op,
+                    reason: AdRejectionReason::IntegerArithmeticOutput,
+                }) if op == bitand
+            ),
+            "a bitwise operation on an index-dependent value must reject"
+        );
+        assert!(grad_dag(&dag, output, &[x]).is_none());
     }
 
     #[test]
@@ -5028,6 +5076,92 @@ mod tests {
             assert_eq!(values[&result.grad_nodes[&x]], sign * -4.0, "y = {y0}");
             let dy = values[&result.grad_nodes[&y]];
             assert_eq!(dy.to_bits(), 0.0f64.to_bits(), "y = {y0}: {dy}");
+        }
+    }
+
+    /// `mul(x, conversion(m))` over f32 scalars, where `conversion` is
+    /// `floor`, `ceil`, `round`, or the round trip `cast(cast(m, i32), f32)`.
+    fn product_with_converted(conversion: &str) -> (Dag, NodeId, NodeId, NodeId) {
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("test"));
+        let load = |dag: &mut Dag, name: &str| {
+            dag.add_node(
+                owner,
+                RiscOp::Load { name: name.into() },
+                vec![],
+                scalar_f32(),
+                None,
+            )
+        };
+        let x = load(&mut dag, "x");
+        let m = load(&mut dag, "m");
+        let converted = match conversion {
+            "floor" => dag.add_node(owner, RiscOp::Floor, vec![m], scalar_f32(), None),
+            "ceil" => dag.add_node(owner, RiscOp::Ceil, vec![m], scalar_f32(), None),
+            "round" => dag.add_node(owner, RiscOp::Round, vec![m], scalar_f32(), None),
+            "cast" => {
+                let discrete = dag.add_node(
+                    owner,
+                    RiscOp::Cast {
+                        new_precision: Prim::Int32,
+                    },
+                    vec![m],
+                    TensorType {
+                        dims: vec![],
+                        precision: Prim::Int32,
+                    },
+                    None,
+                );
+                dag.add_node(
+                    owner,
+                    RiscOp::Cast {
+                        new_precision: Prim::F32,
+                    },
+                    vec![discrete],
+                    scalar_f32(),
+                    None,
+                )
+            }
+            other => panic!("no conversion {other}"),
+        };
+        let out = dag.add_node(owner, RiscOp::Mul, vec![x, converted], scalar_f32(), None);
+        (dag, x, m, out)
+    }
+
+    /// chelis#3487: a conversion of a parameter that is not differentiated is
+    /// inactive, a constant with respect to `wrt`, so `grad` returns the
+    /// converted value. Differentiating that parameter too makes the same
+    /// conversion active, and it rejects.
+    #[test]
+    fn grad_inactive_conversion_is_a_constant() {
+        for (conversion, m0, expected) in [
+            ("floor", 2.5, 2.0),
+            ("ceil", 2.5, 3.0),
+            ("round", 2.5, 2.0),
+            ("cast", -3.0, -3.0),
+        ] {
+            let (dag, x, m, out) = product_with_converted(conversion);
+            let result = match grad_dag_checked(&dag, out, &[x]) {
+                Ok(result) => result,
+                Err(error) => panic!("inactive {conversion} must not reject: {error}"),
+            };
+            let values = eval_scalar(
+                &result.dag,
+                &UnordMap::from([("x".to_string(), 1.5), ("m".to_string(), m0)]),
+            );
+            assert_eq!(values[&result.grad_nodes[&x]], expected, "{conversion}");
+            let error = match grad_dag_checked(&dag, out, &[x, m]) {
+                Ok(_) => panic!("active {conversion} must reject"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                AdError::NotSupported {
+                    op: conversion,
+                    reason: AdRejectionReason::PiecewiseConstant,
+                }
+            );
+            assert!(grad_dag(&dag, out, &[x, m]).is_none());
         }
     }
 
