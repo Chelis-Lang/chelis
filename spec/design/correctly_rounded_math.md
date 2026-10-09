@@ -708,3 +708,66 @@ C host helpers against the evaluator (every finite f16 input and the witnesses a
 other widths), and the f16/bf16 bounds above as a manual gate. The prove discharges in
 `crates/chelis-prove/data/standard_contract_discharges.json` and the standard graph digest
 regenerate.
+
+## 13. `pow`
+
+[05-OP-79] makes `pow(x, y)` a correctly rounded Tier 1 primitive under the same
+rules as [05-OP-46]. It is a primitive because nothing composes it: `exp(y * log(x))`
+is NaN for every `x < 0` and for `pow(0, 0)`, and rounds twice. A correct signed power
+needs a per-element branch on the exponent's integer parity, which libm and CORE-MATH
+both take inside the kernel.
+
+### 13.1 Kernels and vendoring
+
+CORE-MATH ships `binary32/pow/powf.c` and `binary64/pow/pow.c` at the pinned commit
+(`284b3b0e`), with `powf.wc` and `pow.wc` worst-case corpora. binary64 `pow` includes
+`pow.h`, which includes its own `dint.h` and `qint.h`, so §3.3's local-include splice
+is recursive and inlines each header once. Beyond §3.3's reduction, the `pow` kernels
+need four more value-preserving steps in `scripts/vendor_core_math.py`:
+
+- both kernels save the inexact status flag on entry and restore it on their exact
+  paths; the save becomes a constant and the restore a no-op, because status flags are
+  not observable;
+- binary64 `pow` takes `NAN` and `INFINITY` from `<math.h>`; they become
+  `__builtin_nan ("")` and `__builtin_inf ()`, and `<math.h>`, `<errno.h>`, and
+  `<stdlib.h>` leave the unit;
+- binary64 `pow` ends its third Ziv iteration with a report-and-`exit` arm for an input
+  outside upstream's proof that the 240-bit approximation always rounds correctly; it
+  returns that approximation instead, so no built program carries a process exit;
+- `qint.h` spells the `_BitInt(128)` conditional without the width clause, and the
+  portable `__int128` arm is kept as for `dint.h`.
+
+The rounding-mode switches in `pow.h` end with a `FE_TOWARDZERO` case that has no
+`break`, or with a comment; §3.3's reduction accepts any directed-rounding cases after
+the round-to-nearest one and rejects any other label.
+
+### 13.2 Signaling NaN
+
+IEEE 754's `pow(x, +-0) = 1` and `pow(+1, y) = 1` exceptions name quiet NaNs; a
+signaling-NaN operand is an invalid operation and gives NaN. [05-OP-79] decides that at
+the operand's own dtype. The C lanes widen an f16 or bf16 operand by shifting its bits,
+which keeps a signaling NaN signaling, so the binary32 kernel returns NaN. The `half`
+crate's widening quiets a signaling NaN, so `chelis_crmath::pow_f16` and `pow_bf16`
+test for one before widening. Every other primitive maps every NaN to NaN, so the
+distinction is new with `pow`.
+
+### 13.3 Verification
+
+There is no exhaustive binary32 gate: the input space is 2^64 pairs. Correct rounding
+is checked on 96 pairs per width sampled from upstream's `powf.wc` and `pow.wc`, each
+also with its base negated, against MPFR (`tests/fixtures/pow_worst_cases.txt`); the
+IEEE special cases, the subnormal and overflow edges, and both signaling-NaN cases are
+profile obligation rows, so the compiler canary carries them. The C tensor lane is
+checked at every float dtype on its contiguous, strided, and fused routes
+(`crates/chelis-backend-c/tests/pow_kernel_routes.rs`), and the host lane through the
+NaN inventory oracle in `crates/chelis-cli/tests/native_build.rs`.
+
+### 13.4 Gradients and device lanes
+
+The adjoint is [05-OP-79]'s: `where(y == 0, 0, g*(y*pow(x, y-1)))` for the base and
+`where(x == 0, 0, g*(r*log(x)))` for the exponent. The selections replace the `0 * inf`
+and `inf * log(0)` products at a zero exponent and a zero base with the exact zero of a
+function that is constant there. A negative base gives the exponent a NaN cotangent.
+`pow` has no verifier bound transformer, so `is_verifier_targetable` excludes it. The
+HIP and Metal lanes reject `pow`, directly or as a fused step, through §4.3's fence
+with [05-OP-79] as its authority.
