@@ -176,8 +176,6 @@ pub enum OwnershipError {
     },
     #[error("last-use scheduling for `{unit}` does not support {feature}")]
     LastUseSchedulingUnsupported { unit: String, feature: &'static str },
-    #[error("verified live-byte bound overflow while {context}")]
-    LiveByteBoundOverflow { context: String },
     #[error("verified live-byte bound for `{unit}` owner %{owner} cannot size dtype `{dtype}`")]
     LiveByteBoundDType {
         unit: String,

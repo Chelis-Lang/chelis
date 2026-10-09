@@ -592,7 +592,7 @@ fn build_storage_plan(
         &requirements,
         &destructively_dropped,
     )?;
-    let max_live_bytes = physical_live_byte_bound(&slots)?;
+    let max_live_bytes = physical_live_byte_bound(&slots);
     Ok((
         placements.into_boxed_slice(),
         slots.into_boxed_slice(),
@@ -1142,7 +1142,7 @@ fn exact_shape_equal(
         }))
 }
 
-fn physical_live_byte_bound(slots: &[StorageSlotPlan]) -> Result<LiveByteBound, OwnershipError> {
+fn physical_live_byte_bound(slots: &[StorageSlotPlan]) -> LiveByteBound {
     // Logical death permits reuse; it does not release physical storage. HIP
     // retains its entire slot pool through cleanup, and C retains descriptors
     // unless explicitly dropped. Count every distinct slot once, including dead
@@ -1151,15 +1151,16 @@ fn physical_live_byte_bound(slots: &[StorageSlotPlan]) -> Result<LiveByteBound, 
     let mut total = 0u64;
     for slot in slots {
         let Some(bytes) = slot.capacity.allocation_bytes else {
-            return Ok(LiveByteBound::Unknown);
+            return LiveByteBound::Unknown;
         };
-        total = total
-            .checked_add(bytes)
-            .ok_or_else(|| OwnershipError::LiveByteBoundOverflow {
-                context: "summing distinct physical DAG slots".to_string(),
-            })?;
+        // A total beyond u64 has no finite representable bound; each slot's
+        // allocation keeps its own checked admission (chelis#3418).
+        let Some(sum) = total.checked_add(bytes) else {
+            return LiveByteBound::Unbounded;
+        };
+        total = sum;
     }
-    Ok(LiveByteBound::Exact(total))
+    LiveByteBound::Exact(total)
 }
 
 #[cfg(test)]

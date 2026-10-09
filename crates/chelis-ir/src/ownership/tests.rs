@@ -1351,8 +1351,12 @@ fn verified_live_byte_bound_marks_runtime_tensor_dimensions_unknown() {
     );
 }
 
+/// A tensor whose byte size exceeds u64 has no finite representable bound.
+/// The summary says so; it is never a build failure, because the bound is an
+/// analysis result and the allocation's own checked admission owns the trap
+/// (chelis#3418).
 #[test]
-fn verified_live_byte_bound_overflow_fails_closed() {
+fn verified_live_byte_bound_overflow_is_unbounded() {
     let too_large = value_info(
         ConcreteHostType::Tensor(TensorType {
             dims: vec![DimInfo::Lit(usize::MAX)],
@@ -1375,17 +1379,16 @@ fn verified_live_byte_bound_overflow_fails_closed() {
         BTreeMap::from([(OwnerId(0), too_large)]),
     );
 
-    assert!(matches!(
-        super::verify::verify(&program),
-        Err(OwnershipError::LiveByteBoundOverflow { .. })
-    ));
+    let verified = super::verify::verify(&program).unwrap();
+    assert_eq!(
+        verified.live_set_bound().max_live_bytes,
+        LiveByteBound::Unbounded
+    );
 }
 
-/// chelis#2331 deferred the `add_live_byte_bounds` diagnostic context behind a
-/// closure so the success path stops formatting a string it discards. That
-/// text is part of the ownership error surface, so pin its exact bytes on the
-/// path that builds it: two owned heap tensors whose byte costs each convert
-/// and whose sum does not.
+/// Two owned heap tensors whose byte costs each fit u64 and whose sum does
+/// not: every allocation is representable, so the program is valid and the
+/// summary is unbounded rather than an error (chelis#3418).
 ///
 /// The summation inside `live_byte_cost` is what overflows here, rather than
 /// the per-operation transient accounting, because a `DirectCall` destination
@@ -1393,7 +1396,7 @@ fn verified_live_byte_bound_overflow_fails_closed() {
 /// The post-operation live-set sum is therefore the first addition to see both
 /// owners.
 #[test]
-fn verified_live_byte_summation_overflow_names_the_unit() {
+fn verified_live_byte_summation_overflow_is_unbounded() {
     // 2^61 f32 elements is 2^63 bytes: each owner converts, the pair does not.
     let half = 1usize << 61;
     let body = block(
@@ -1444,11 +1447,11 @@ fn verified_live_byte_summation_overflow_names_the_unit() {
         ],
     };
 
-    let error = super::verify::verify(&program).expect_err("the live-set sum must overflow");
-    let OwnershipError::LiveByteBoundOverflow { context } = error else {
-        panic!("expected a live-byte overflow, got {error:?}");
-    };
-    assert_eq!(context, "summing live owners in `summed`");
+    let verified = super::verify::verify(&program).unwrap();
+    assert_eq!(
+        verified.live_set_bound().max_live_bytes,
+        LiveByteBound::Unbounded
+    );
 }
 
 #[test]
