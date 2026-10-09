@@ -342,6 +342,21 @@ RESULT_CLAIM_METADATA_FINAL_FORMS = (
         "load-store-template",
         "append_host_result_interface_origin_support",
     ),
+    # chelis#3347 (runtime_extents.md C6.5): a nested claim's pattern tables
+    # are `int64_t` axis positions, binder slots, node indices and constructor
+    # offsets, and its projection and value walks index those tables and read
+    # tensor shape metadata through the runtime accessors. No form reads or
+    # writes tensor element storage or carries a number across an interface.
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "backend-element-spelling",
+        "claim_pattern_table_lines",
+    ),
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "append_nested_claim_support",
+    ),
 )
 # chelis#2627: these generated-C forms carry only private entry metadata.
 # The count indexes a bounded result-axis array; the List loops fetch typed
