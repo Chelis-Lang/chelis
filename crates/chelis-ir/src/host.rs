@@ -4489,6 +4489,9 @@ struct HostDefSignature {
     /// Per formal, the nested claim of its authored type (see
     /// `HostFunction::entry_claims`), or the refusal its derivation raised.
     entry_claims: Result<Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>, String>,
+    /// Per formal, the authored parameter types of a function-typed formal
+    /// whose parameters nest claims, which every call through it owes.
+    callable_claims: Result<Vec<Option<Vec<Expr>>>, String>,
 }
 
 /// The nested claim pattern of an authored claim-source type, or `None` when
@@ -4502,6 +4505,72 @@ pub fn nested_claim_pattern(
     let pattern = crate::claim_pattern::ClaimPattern::derive(authored, program.adt_registry())
         .map_err(|error| error.to_string())?;
     Ok(pattern.nested_root().is_some().then(|| Arc::new(pattern)))
+}
+
+/// The nested claim of each formal, from its authored type, aligned with
+/// `params`, or no claims when no formal nests one (runtime_extents.md C6.5).
+/// A tensor or List-of-tensor formal keeps its established entry pattern,
+/// and a tensor at a fixed tuple position is already an ordinary signature
+/// observation of the entry plan; the nested pattern owns every other
+/// carrier. Named declarations and inline lambdas share this derivation.
+fn formal_nested_claims<'a>(
+    program: &HostLoweringSession<'_>,
+    authored: impl Iterator<Item = Option<&'a Expr>>,
+    params: &[HostParam],
+) -> Result<Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>, String> {
+    let claims = authored
+        .zip(params)
+        .map(|(formal, param)| {
+            let Some(formal) = formal else {
+                return Ok(None);
+            };
+            if EntryContract::from_params(std::slice::from_ref(param)).formals()[0]
+                .pattern()
+                .has_tensor()
+            {
+                return Ok(None);
+            }
+            let pattern = nested_claim_pattern(program, formal)?;
+            Ok(pattern.filter(|pattern| {
+                !pattern.nodes().iter().all(|node| {
+                    matches!(
+                        node,
+                        crate::claim_pattern::ClaimNode::Tuple(_)
+                            | crate::claim_pattern::ClaimNode::Tensor(_)
+                    )
+                })
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(
+        if claims.iter().any(Option::is_some) && claims.len() == params.len() {
+            claims
+        } else {
+            Vec::new()
+        },
+    )
+}
+
+/// The authored parameter types of a function-typed formal when any of them
+/// nests a claim: a call through the formal checks them on its arguments, as
+/// a lambda formal's declared type is checked (runtime_extents.md C6.5).
+fn callable_formal_claims(
+    program: &HostLoweringSession<'_>,
+    formal: &Expr,
+) -> Result<Option<Vec<Expr>>, String> {
+    let Some((params, _)) = parse_fn_type_expr_parts(formal) else {
+        return Ok(None);
+    };
+    let host_params = params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| HostParam {
+            name: format!("arg{index}"),
+            ty: decode_expanded_host_type_expr(program, ty).unwrap_or_else(fresh_host_inference),
+        })
+        .collect::<Vec<_>>();
+    let claims = formal_nested_claims(program, params.iter().map(Some), &host_params)?;
+    Ok((!claims.is_empty()).then_some(params))
 }
 
 /// A tensor-only helper drops List parameters that the body does not read.
@@ -6028,39 +6097,15 @@ fn host_def_signature(
     let entry_claims = authored_parts
         .as_ref()
         .map_or(Ok(Vec::new()), |(formals, _)| {
-            // A tensor or List-of-tensor formal keeps its established entry
-            // pattern; the nested pattern owns every other carrier.
-            let claims = formals
+            formal_nested_claims(program, formals.iter().map(Some), &params)
+        });
+    let callable_claims = authored_parts
+        .as_ref()
+        .map_or(Ok(Vec::new()), |(formals, _)| {
+            formals
                 .iter()
-                .zip(&params)
-                .map(|(formal, param)| {
-                    if EntryContract::from_params(std::slice::from_ref(param)).formals()[0]
-                        .pattern()
-                        .has_tensor()
-                    {
-                        return Ok::<_, String>(None);
-                    }
-                    // A tensor at a fixed tuple position is already an ordinary
-                    // signature observation of the entry plan.
-                    let pattern = nested_claim_pattern(program, formal)?;
-                    Ok(pattern.filter(|pattern| {
-                        !pattern.nodes().iter().all(|node| {
-                            matches!(
-                                node,
-                                crate::claim_pattern::ClaimNode::Tuple(_)
-                                    | crate::claim_pattern::ClaimNode::Tensor(_)
-                            )
-                        })
-                    }))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(
-                if claims.iter().any(Option::is_some) && claims.len() == params.len() {
-                    claims
-                } else {
-                    Vec::new()
-                },
-            )
+                .map(|formal| callable_formal_claims(program, formal))
+                .collect()
         });
     Some(HostDefSignature {
         name: name.to_string(),
@@ -6070,6 +6115,7 @@ fn host_def_signature(
         body_expr: inline_local_callable_lets(&body_expr),
         result_claim,
         entry_claims,
+        callable_claims,
     })
 }
 
@@ -6552,6 +6598,7 @@ fn lower_host_body_with_record_locals(
         body_expr: rewritten.clone(),
         result_claim: signature.result_claim.clone(),
         entry_claims: signature.entry_claims.clone(),
+        callable_claims: signature.callable_claims.clone(),
     };
     let body = match lower_def_body_kernel(program, &rewritten_signature, tensor_helpers)? {
         Some(kernel_call) => kernel_call,
@@ -14328,6 +14375,9 @@ struct RetainedHostInvocation<'a> {
     name: Option<&'a str>,
     /// Per formal, the nested claim of its authored type (C6.5).
     entry_claims: Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>,
+    /// Per formal, the authored parameter types of a function-typed formal
+    /// whose parameters nest claims (C6.5).
+    callable_claims: Vec<Option<Vec<Expr>>>,
 }
 
 impl<'a> RetainedHostInvocation<'a> {
@@ -14390,6 +14440,7 @@ impl<'a> RetainedHostInvocation<'a> {
             callable_entries,
             name: None,
             entry_claims: Vec::new(),
+            callable_claims: Vec::new(),
         }
     }
 }
@@ -14573,6 +14624,7 @@ fn host_type_syntax(ty: &HostTypeTerm, span: chelis_deep::Span) -> Option<Expr> 
 fn retain_callable_entry_contract(
     actual: &Expr,
     formal: &HostTypeTerm,
+    authored: Option<&[Expr]>,
     formal_index: usize,
     reserved: &mut UnordSet<String>,
     span: chelis_deep::Span,
@@ -14599,8 +14651,14 @@ fn retain_callable_entry_contract(
     let declarations = param_names
         .iter()
         .zip(param_tys)
-        .map(|(name, ty)| {
-            let type_syntax = host_type_syntax(ty, span);
+        .enumerate()
+        .map(|(index, (name, ty))| {
+            // The authored parameter type keeps a nominal type's dimension
+            // arguments, which the adapter's entry then claims.
+            let type_syntax = authored
+                .and_then(|authored| authored.get(index))
+                .cloned()
+                .or_else(|| host_type_syntax(ty, span));
             Expr::BareList(
                 vec![
                     Expr::Atom(Atom::Name(name.clone()), span),
@@ -14703,9 +14761,20 @@ fn lower_inline_host_invocation(
     }
     let signature =
         expr_fn_type(callee).map(|signature| expand_host_fn_type_aliases(program, signature));
+    let mut invocation = RetainedHostInvocation::new(&params, body);
+    // A lambda formal's declared type claims its nested tensors on every
+    // invocation, as a named formal's does (runtime_extents.md C6.5).
+    let declared = declarations
+        .children_slice()
+        .iter()
+        .map(param_declared_type_expr)
+        .collect::<Vec<_>>();
+    invocation.entry_claims =
+        formal_nested_claims(program, declared.iter().map(Option::as_ref), &params)
+            .map_err(|error| claim_pattern_refusal(expr, format!("lambda formal: {error}")))?;
     lower_retained_host_invocation(
         expr,
-        RetainedHostInvocation::new(&params, body),
+        invocation,
         expected,
         program,
         scope,
@@ -14796,6 +14865,17 @@ fn lower_named_retained_host_invocation(
         .entry_claims
         .clone()
         .map_err(|error| claim_pattern_refusal(expr, format!("`{name}` formal: {error}")))?;
+    invocation.callable_claims = signature
+        .callable_claims
+        .clone()
+        .map_err(|error| claim_pattern_refusal(expr, format!("`{name}` formal: {error}")))?;
+    for (entry, claims) in invocation
+        .callable_entries
+        .iter_mut()
+        .zip(&invocation.callable_claims)
+    {
+        *entry |= claims.is_some();
+    }
     let actualized_expected = result_claim
         .as_ref()
         .map(result_claim_body_type)
@@ -14883,9 +14963,20 @@ fn lower_retained_host_invocation(
         .enumerate()
     {
         if *callable_entry {
+            let authored = invocation
+                .callable_claims
+                .get(index)
+                .and_then(Option::as_deref);
             substitutions.insert(
                 formal.name.clone(),
-                retain_callable_entry_contract(arg, &formal.ty, index, &mut reserved, *span),
+                retain_callable_entry_contract(
+                    arg,
+                    &formal.ty,
+                    authored,
+                    index,
+                    &mut reserved,
+                    *span,
+                ),
             );
             continue;
         }
@@ -17496,8 +17587,32 @@ fn lower_host_callback(
                 })
                 .collect::<Vec<_>>();
             let contract = EntryContract::from_params(&declared_params);
+            // A formal whose declared type nests its tensors below a nominal
+            // type claims them on every invocation, as a named formal's
+            // does (runtime_extents.md C6.5).
+            let authored = params_list
+                .children_slice()
+                .iter()
+                .map(param_declared_type_expr)
+                .collect::<Vec<_>>();
+            let nested = formal_nested_claims(
+                program,
+                authored.iter().map(Option::as_ref),
+                &declared_params,
+            )
+            .map_err(|error| claim_pattern_refusal(expr, format!("lambda formal: {error}")))?;
             for (position, (declared, param)) in declared_params.iter().zip(&params).enumerate() {
                 let value = HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone()));
+                if let Some(Some(claim)) = nested.get(position) {
+                    lists.push(HostListEntry {
+                        position,
+                        name: param.name.clone(),
+                        ty: declared.ty.clone(),
+                        value,
+                        claim: Some(claim.clone()),
+                    });
+                    continue;
+                }
                 match contract.formals()[position].pattern() {
                     EntryPattern::Tensor(HostTypeTerm::Tensor(ty)) => {
                         inputs.push(HostTensorInput {
