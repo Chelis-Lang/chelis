@@ -146,20 +146,21 @@ fn fn_params_as_bare_list_rejection(
         .iter()
         .position(|expr| expr.tag() == Some(chelis_deep::DeepTag::Def))
         .expect("fixture contains a property def");
-    let chelis_deep::Expr::Node(def, _) = program.remove(def_index) else {
-        panic!("property def is a stamped node");
-    };
-    let (def_tag, def_meta, mut def_children) = def.into_parts();
-    let chelis_deep::Expr::Node(function, function_span) = def_children.remove(1) else {
-        panic!("property body is a stamped fn");
-    };
-    let (function_tag, function_meta, mut function_children) = function.into_parts();
-    let chelis_deep::Expr::Node(params, params_span) = function_children.remove(0) else {
-        panic!("function params are a stamped node");
-    };
+    let (def_tag, def_meta, mut def_children, _) = program
+        .remove(def_index)
+        .into_node_parts()
+        .expect("property def is a stamped node");
+    let (function_tag, function_meta, mut function_children, function_span) = def_children
+        .remove(1)
+        .into_node_parts()
+        .expect("property body is a stamped fn");
+    let (_, _, params_children, params_span) = function_children
+        .remove(0)
+        .into_node_parts()
+        .expect("function params are a stamped node");
     function_children.insert(
         0,
-        chelis_deep::Expr::BareList(params.children_slice().to_vec(), params_span),
+        chelis_deep::Expr::BareList(params_children, params_span),
     );
     let function = chelis_deep::node::Node::try_new(function_tag, function_meta, function_children)
         .expect("a fn node admits a structural params list");
