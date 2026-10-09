@@ -1372,14 +1372,21 @@ as a new seam in an existing file does. A frozen root directory that is
 missing fails even while its glob still matches other directories, and a
 directory that joins a root, like any change to a root, moves the freeze.
 
-A file the baseline references stays in the universe. A file holding active
-debt, or a frozen mutation's target, that leaves the universe fails the
-oracle, and regeneration drops such a file's debt only when the file is named
-for retirement (`--retire-departed-file`). A retired foundation identity may
-name a deleted file. A file that holds no active debt and leaves the universe
-is not reported, because it carries no seam the inventory tracks. A mutation
-targets a file that must exist, except a declared new-file witness, whose
-file must not; a missing target fails instead of being planted afresh.
+A file that a path-keyed registration of the oracle names stays in the
+universe unless the baseline records it as retired: the file of any
+foundation identity, active or retired, since the reappearance check needs it
+scanned; an owner-module final form's file; and the target of a mutation that
+edits an existing file. Such a file leaving the universe fails the oracle.
+Regeneration records it in `retired_files`, and drops its active debt, only
+when the file is named with `--retire-departed-file`; a recorded file that
+returns to the universe fails until regeneration drops the stale record. A
+file that no registration names is not reported when it leaves the universe;
+after it leaves, it sits outside the roots like any other file there. A
+mutation targets a file that must exist, except a declared new-file witness,
+whose file must not; a missing target fails instead of being planted afresh.
+A root directory counts while it exists and the git index holds a file under
+it, so a leftover or git-ignored directory is neither a new nor a departed
+root directory.
 
 The oracle reads the filesystem rather than the git index because cargo
 compiles what is on disk, so an untracked file is in the universe and a
@@ -1747,10 +1754,13 @@ information the roots do not, and would fail every change that adds, renames,
 or deletes a file under a root. The frozen `source_inventory.roots` holds each
 root pattern with the concrete directories it matches, so the digest binds the
 universe's definition while its membership is derived. A missing frozen
-directory fails as a departed root, and a file holding active debt, or a
-mutation target, that leaves the universe fails until regeneration names it
-for retirement. Each frozen mutation row gains `creates_file`, true only for
-the unregistered-source and unregistered-subdirectory witnesses. Those two keep
+directory fails as a departed root, and a file a path-keyed registration
+names (a foundation identity, an owner-module final form, or an
+existing-file mutation target) that leaves the universe fails until
+regeneration names it for retirement; the baseline's `retired_files` records
+each named departure outside the digest, as active debt is. Each frozen
+mutation row gains `creates_file`, true only for the unregistered-source and
+unregistered-subdirectory witnesses. Those two keep
 their witness IDs, paths, and planted seams; each expects the unclassified-hit
 failure naming the new file's owner, `raw-element-pointer` at
 `runtime_representation_phase0_unregistered` and `normalized-key-arithmetic`
@@ -1759,10 +1769,12 @@ universe scanned the file, and its implementation digest covers its
 documentation. Every other witness requires its target to exist rather than
 planting into a fresh file. The Phase 1 Python floor pins the derived
 universe, a new seam-free file, a seam in a new file, a symlinked file, a
-symlinked directory, a git-ignored file, a departed root, a crate leaving a
-glob root, a changed root, a debt-bearing file leaving the roots, a mutation
-target leaving the roots, and retirement of a file still present, in place
-of four identities that pinned a hand-kept list and its documented count. No
+symlinked directory, a git-ignored file, an untracked or ignored directory, a
+departed root, a crate leaving a glob root, a changed root, a debt-bearing
+file, a final-form file, a retired-identity file and a mutation target
+leaving the roots, a recorded departure, and retirement of a file still
+present, in place of four identities that pinned a hand-kept list and its
+documented count. No
 foundation row, active-debt row, classifier, final form, or mutation
 semantics change, and no numbered representation semantics move. The
 amendment moves `FREEZE_SHA256` and the Phase 1 `MANIFEST_SHA256`; accepting it

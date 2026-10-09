@@ -475,6 +475,7 @@ class BaselineTests(unittest.TestCase):
                 "foundation_rows",
                 "source_inventory",
                 "active_debt",
+                "retired_files",
             },
         )
         self.assertNotIn("coverage_manifest", self.baseline)
@@ -1866,9 +1867,9 @@ class ManifestTests(unittest.TestCase):
             universe["closure_rule"],
             "the scanned sources are exactly the files on disk under the "
             "digest-bound roots; a new file is scanned without registration, "
-            "a frozen root directory that departed fails, and a file "
-            "holding active debt or a mutation target that left the "
-            "universe fails until it is retired",
+            "a frozen root directory that departed fails, and a file a "
+            "path-keyed registration names that left the universe fails "
+            "until it is retired",
         )
 
     def test_no_libclang_or_configuration_enumeration_remains(self) -> None:

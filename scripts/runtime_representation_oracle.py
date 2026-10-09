@@ -658,20 +658,45 @@ def _root_directory(pattern: str) -> str:
     return "/".join(parts)
 
 
+def _tracked_directories(root: Path) -> set[str]:
+    """Every directory that holds at least one file in the git index."""
+
+    completed = subprocess.run(
+        ("git", "ls-files", "-z"),
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise OracleFailure("could not list the tracked inventory directories")
+    return {
+        parent.as_posix()
+        for path in completed.stdout.split("\0")
+        if path
+        for parent in Path(path).parents
+        if parent != Path(".")
+    }
+
+
 def root_directories(root: Path) -> list[dict[str, object]]:
-    """Each root with the concrete directories its directory part matches.
+    """Each root with the tracked directories its directory part matches.
 
     The baseline freezes this expansion, so a crate that leaves a glob such
     as `crates/chelis-backend-*` fails even while other crates still match.
+    A directory counts only while it exists and the git index holds a file
+    under it, so a leftover or git-ignored directory is not a new root.
     """
 
+    tracked = _tracked_directories(root)
     return [
         {
             "pattern": pattern,
             "directories": sorted(
-                path.relative_to(root).as_posix()
+                relative
                 for path in root.glob(_root_directory(pattern))
                 if path.is_dir()
+                and (relative := path.relative_to(root).as_posix()) in tracked
             ),
         }
         for pattern in INVENTORY_ROOTS
@@ -941,21 +966,21 @@ def _validate_frozen_root_directories(
     current = {
         row["pattern"]: set(row["directories"]) for row in root_directories(root)
     }
-    departed: list[str] = []
-    added: list[str] = []
+    departed: set[str] = set()
+    added: set[str] = set()
     for row in source_inventory["roots"]:
         frozen = set(row["directories"])
-        departed.extend(sorted(frozen - current[row["pattern"]]))
-        added.extend(sorted(current[row["pattern"]] - frozen))
+        departed |= frozen - current[row["pattern"]]
+        added |= current[row["pattern"]] - frozen
     if departed:
         raise OracleFailure(
-            f"{DEPARTED_ROOT_FAILURE.reason_prefix}: " + ", ".join(departed),
+            f"{DEPARTED_ROOT_FAILURE.reason_prefix}: " + ", ".join(sorted(departed)),
             code=DEPARTED_ROOT_FAILURE.code,
         )
     if added:
         raise OracleFailure(
             "inventory root directories do not match the frozen source universe; "
-            "a new directory under a root is a freeze move: " + ", ".join(added)
+            "a new directory under a root is a freeze move: " + ", ".join(sorted(added))
         )
 
 
@@ -963,48 +988,66 @@ def _identity_path(identity: str) -> str:
     return identity.split("|", 2)[1].removeprefix("path=")
 
 
-def _departed_referenced_files(
-    baseline: dict[str, object], root: Path
-) -> tuple[set[str], list[str]]:
-    """Active-debt files and existing-file mutation targets outside the universe.
+def referenced_files(baseline: dict[str, object]) -> set[str]:
+    """Every file a path-keyed registration of the oracle names.
 
-    A retired foundation identity may name a deleted file; active debt and
-    the frozen mutation targets may not. A new-file witness's target is
-    checked where it is planted.
+    These are the files of foundation identities, retired ones included,
+    whose reappearance check needs the file scanned; owner-module final
+    forms; and the targets of mutations that edit an existing file. A new-file
+    witness's target is checked where it is planted.
     """
 
-    universe = set(inventory_sources(root))
-    debt_files = {
-        _identity_path(str(row["identity"])) for row in baseline["active_debt"]
-    }
-    targets = [
-        str(row["path"])
-        for row in baseline["source_inventory"]["mutations"]
-        if not row["creates_file"] and str(row["path"]) not in universe
-    ]
-    return debt_files - universe, targets
+    return (
+        {
+            _identity_path(str(row["identity"]))
+            for row in (*baseline["foundation_rows"], *baseline["active_debt"])
+        }
+        | set(_owner_module_final_forms_manifest())
+        | {
+            str(row["path"])
+            for row in baseline["source_inventory"]["mutations"]
+            if not row["creates_file"]
+        }
+    )
 
 
 def _validate_referenced_files(
     baseline: dict[str, object],
     root: Path,
     *,
-    retired_files: Sequence[str] = (),
-) -> None:
-    departed_debt, targets = _departed_referenced_files(baseline, root)
-    stray = sorted(set(retired_files) - departed_debt)
+    regenerating: bool = False,
+    retiring: Sequence[str] = (),
+) -> list[str]:
+    """Fail on a referenced file outside the universe that is not retired.
+
+    Returns the retired-file record regeneration writes: the recorded
+    retirements plus `retiring`, without any file that is back in the
+    universe. Validation fails on such a returned file instead, because a
+    stale record would let the file depart again unnoticed.
+    """
+
+    universe = set(inventory_sources(root))
+    recorded = set(baseline["retired_files"])
+    returned = sorted(recorded & universe)
+    if returned and not regenerating:
+        raise OracleFailure(
+            "a retired file is back in the inventory universe: "
+            + ", ".join(returned)
+            + "; regenerate to drop it from retired_files"
+        )
+    departed = referenced_files(baseline) - universe - recorded
+    stray = sorted(set(retiring) - departed)
     if stray:
         raise OracleFailure(
-            "only a departed file holding active debt can be retired: "
-            + ", ".join(stray)
+            "only a departed referenced file can be retired: " + ", ".join(stray)
         )
-    unretired = sorted(departed_debt - set(retired_files))
-    if unretired or targets:
+    unretired = sorted(departed - set(retiring))
+    if unretired:
         raise OracleFailure(
-            f"{DEPARTED_FILE_FAILURE.reason_prefix}: "
-            + ", ".join([*unretired, *targets]),
+            f"{DEPARTED_FILE_FAILURE.reason_prefix}: " + ", ".join(unretired),
             code=DEPARTED_FILE_FAILURE.code,
         )
+    return sorted((recorded | set(retiring)) - universe)
 
 
 def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
@@ -1064,9 +1107,9 @@ def _coverage_manifest_from_configuration(
                 "closure_rule": (
                     "the scanned sources are exactly the files on disk under the "
                     "digest-bound roots; a new file is scanned without registration, "
-                    "a frozen root directory that departed fails, and a file "
-                    "holding active debt or a mutation target that left the "
-                    "universe fails until it is retired"
+                    "a frozen root directory that departed fails, and a file a "
+                    "path-keyed registration names that left the universe fails "
+                    "until it is retired"
                 ),
             },
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
@@ -1121,6 +1164,7 @@ def build_foundation_baseline(
     foundation_rows: Sequence[dict[str, object]] | None = None,
     source_inventory: dict[str, object],
     active_debt_rows: Sequence[dict[str, object]] | None = None,
+    retired_files: Sequence[str] = (),
 ) -> dict[str, object]:
     """Build the shrink-only ledger without forgetting reviewed contracts.
 
@@ -1185,6 +1229,7 @@ def build_foundation_baseline(
         "source_inventory": json.loads(json.dumps(source_inventory)),
         "foundation_rows": foundation,
         "active_debt": active,
+        "retired_files": sorted(retired_files),
     }
 
 
@@ -1245,6 +1290,7 @@ def _validate_baseline_schema(baseline: object) -> None:
         "foundation_rows",
         "source_inventory",
         "active_debt",
+        "retired_files",
     }
     if not isinstance(baseline, dict):
         raise OracleFailure("Phase 0 inventory baseline must be a JSON object")
@@ -1307,6 +1353,15 @@ def _validate_baseline_schema(baseline: object) -> None:
         raise OracleFailure("duplicate pattern in source_inventory.roots")
     if not isinstance(active, list):
         raise OracleFailure("active_debt must be a list")
+    retired_files = baseline["retired_files"]
+    if (
+        not isinstance(retired_files, list)
+        or any(not isinstance(path, str) or not path for path in retired_files)
+        or retired_files != sorted(set(retired_files))
+    ):
+        raise OracleFailure(
+            "retired_files must be a sorted list of distinct nonempty strings"
+        )
 
     foundation_ids: list[str] = []
     for index, untyped_row in enumerate(foundation):
@@ -2926,8 +2981,9 @@ def regenerate(retired_files: Sequence[str] = ()) -> None:
     `FREEZE_SHA256` in this file still has to be moved by hand, which is the
     design's B1 freeze move rather than a regeneration step. It also preserves
     the reviewed mutation rows and refuses to run when current probe code has
-    drifted from them. A file holding active debt that left the universe is
-    dropped only when named in `retired_files`, never silently.
+    drifted from them. A referenced file that left the universe is recorded
+    as retired, and its active debt dropped, only when named in
+    `retired_files`, never silently.
     """
 
     existing = load_baseline()
@@ -2940,12 +2996,15 @@ def regenerate(retired_files: Sequence[str] = ()) -> None:
         phase0_mutation_probes(),
     )
     _validate_frozen_root_directories(source_inventory, REPO_ROOT)
-    _validate_referenced_files(existing, REPO_ROOT, retired_files=retired_files)
+    record = _validate_referenced_files(
+        existing, REPO_ROOT, regenerating=True, retiring=retired_files
+    )
     baseline = build_foundation_baseline(
         inventory_rows(REPO_ROOT),
         foundation_rows=foundation,
         source_inventory=source_inventory,
         active_debt_rows=active_debt,
+        retired_files=record,
     )
     BASELINE_PATH.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
     print(
