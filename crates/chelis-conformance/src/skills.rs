@@ -29,6 +29,13 @@ pub const SHARED_SKILLS: &[&str] = &[
     "spec-sync",
 ];
 
+/// Skills for work on the compiler repository alone, such as cutting a
+/// compiler release. They live in its `agent-skills/` beside the shared ones but
+/// are never embedded, so no shell receives them: the counterpart of a shell's
+/// `[conform] local_skills`. Keep in lockstep with
+/// `scripts/regenerate_conformance_assets.py::LOCAL_SKILLS`.
+pub const LOCAL_SKILLS: &[&str] = &["release"];
+
 /// Shared skills authored beside the package they teach rather than under the
 /// compiler repository's `agent-skills/`, as `(name, repo-relative SKILL.md)`.
 /// They guide work in a shell, not on the compiler, so the compiler repository

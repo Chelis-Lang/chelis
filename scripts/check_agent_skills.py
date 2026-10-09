@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate shared skill metadata, discovery links, embedded copies, and wrappers.
+"""Validate agent skill metadata, discovery links, embedded copies, and wrappers.
 
 CI runs this on documentation-only changes as well as code changes. The
 Rust asset-drift and skill-uniformity tests separately exercise the compiled
@@ -17,6 +17,7 @@ import yaml
 
 try:
     from .regenerate_conformance_assets import (
+        LOCAL_SKILLS,
         REPO_SKILLS,
         agent_surface_layout_reasons,
         is_stale,
@@ -24,6 +25,7 @@ try:
     )
 except ImportError:
     from regenerate_conformance_assets import (
+        LOCAL_SKILLS,
         REPO_SKILLS,
         agent_surface_layout_reasons,
         is_stale,
@@ -98,12 +100,18 @@ def check(root: Path) -> list[str]:
     source = root / "agent-skills"
     try:
         names = {path.name for path in source.iterdir() if path.is_dir()}
-        if names != set(REPO_SKILLS):
-            errors.append("agent-skills directory differs from the registered shared skill set")
+        if set(LOCAL_SKILLS) & set(REPO_SKILLS):
+            errors.append("a compiler-local skill is also registered as a shared skill")
+        if names != set(REPO_SKILLS) | set(LOCAL_SKILLS):
+            errors.append(
+                "agent-skills directory differs from the registered shared and local skill sets"
+            )
         pairs = planned_skill_copies(root)
         for src, dest in pairs:
             errors.extend(validate_skill(src))
             errors.extend(validate_skill(dest))
+        for name in LOCAL_SKILLS:
+            errors.extend(validate_skill(source / name / "SKILL.md"))
         errors.extend(
             is_stale(
                 pairs,

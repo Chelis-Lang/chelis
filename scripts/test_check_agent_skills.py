@@ -5,9 +5,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from scripts import check_agent_skills as check
-from scripts.regenerate_conformance_assets import PACKAGE_SKILLS, REPO_SKILLS, SHARED_SKILLS
+from scripts.regenerate_conformance_assets import (
+    LOCAL_SKILLS,
+    PACKAGE_SKILLS,
+    REPO_SKILLS,
+    SHARED_SKILLS,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +24,9 @@ class SkillContractTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        sources = [self.root / "agent-skills" / name / "SKILL.md" for name in REPO_SKILLS]
+        sources = [
+            self.root / "agent-skills" / name / "SKILL.md" for name in REPO_SKILLS + LOCAL_SKILLS
+        ]
         sources += [self.root / rel for _, rel in PACKAGE_SKILLS]
         sources += [
             self.root / "crates/chelis-conformance/assets/skills" / name / "SKILL.md"
@@ -127,6 +135,30 @@ class SkillContractTests(unittest.TestCase):
         self.assertTrue(check.check(self.root))
         (self.root / "agent-skills/unregistered").mkdir()
         self.assertTrue(check.check(self.root))
+
+    def test_local_skill_is_validated_but_never_embedded(self):
+        self.assertTrue(LOCAL_SKILLS)
+        local = self.root / "agent-skills" / LOCAL_SKILLS[0] / "SKILL.md"
+        original = local.read_text()
+        local.write_text("---\nname: other-skill\ndescription: valid\n---\n")
+        self.assertTrue(check.check(self.root))
+        local.write_text(original)
+        embedded = self.root / "crates/chelis-conformance/assets/skills" / LOCAL_SKILLS[0] / "SKILL.md"
+        embedded.parent.mkdir(parents=True)
+        embedded.write_text(original)
+        self.assertTrue(check.check(self.root))
+        embedded.unlink()
+        self.assertEqual(check.check(self.root), [])
+        local.unlink()
+        local.parent.rmdir()
+        self.assertTrue(check.check(self.root))
+
+    def test_local_skill_may_not_shadow_a_shared_skill(self):
+        with mock.patch.object(check, "LOCAL_SKILLS", LOCAL_SKILLS + [REPO_SKILLS[0]]):
+            self.assertIn(
+                "a compiler-local skill is also registered as a shared skill",
+                check.check(self.root),
+            )
 
     def test_missing_or_different_command_wrapper_is_rejected(self):
         path = self.root / ".codex/commands/red-team.md"

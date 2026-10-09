@@ -147,25 +147,10 @@ Current downstream state:
 - Patch bumps (`v0.1.1`, `v0.1.2`, ...) are reserved for bug fixes that
   do not change documented behavior.
 
-## Release Checklist
+## Release Procedure
 
-For each new tag:
-
-1. Workspace gates pass locally: `cargo build --workspace --all-targets`,
-   `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D
-   warnings`, `cargo fmt --all -- --check`.
-2. Workspace version in root `Cargo.toml` matches the intended tag.
-3. The owning phase plan lists a concrete acceptance oracle that is
-   green.
-4. `git tag -a vX.Y.Z -m "<phase> release"` and `git push origin
-   vX.Y.Z`.
-5. Confirm `gh release view vX.Y.Z` shows the tarball and checksum
-   attached.
-6. The Release E2E workflow runs on the published release; check its
-   summary table.
-
-Before tagging, a release author can run the same checks on a candidate:
-dispatch `release.yml` on the release branch, then run
-`gh workflow run release-e2e.yml -f candidate_run=<that run's id>`. Every host
-installs the run's unpublished artifacts and runs every step except the
-bootstrap and the GitHub install, which need a published release.
+The [`release` skill](../../agent-skills/release/SKILL.md) owns the procedure: the
+release PR produced by `scripts/bump_compiler_pins.py` and `scripts/changelog.py`, the
+squash merge, the annotated tag on that merge commit, and the checks on the
+`release.yml` and Release E2E runs that follow. It is a compiler-repository skill and is
+not sent to shells.

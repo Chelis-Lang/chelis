@@ -461,6 +461,60 @@ class CompileFailFixtureLockTests(unittest.TestCase):
         self.assertIn("does-not-exist", str(caught.exception))
 
 
+class WorkspaceLockTests(unittest.TestCase):
+    """The root `Cargo.lock` records the workspace crates at the workspace
+    version, and CI builds with `--locked`, so a bump that leaves it behind
+    fails every locked build of the release change set.
+    """
+
+    def test_regeneration_updates_only_the_workspace_packages(self):
+        with mock.patch.object(
+            bump_mod.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ) as runner:
+            bump_mod.regenerate_workspace_lock(dry_run=False)
+        self.assertEqual(
+            [call.args[0] for call in runner.call_args_list],
+            [
+                [
+                    "cargo",
+                    "update",
+                    "--workspace",
+                    "--manifest-path",
+                    str(bump_mod.WORKSPACE_CARGO_TOML),
+                ]
+            ],
+        )
+
+    def test_dry_run_reports_without_invoking_cargo(self):
+        with mock.patch.object(bump_mod.subprocess, "run") as runner:
+            bump_mod.regenerate_workspace_lock(dry_run=True)
+        runner.assert_not_called()
+
+    def test_nonzero_cargo_exit_is_fatal(self):
+        with mock.patch.object(
+            bump_mod.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 101),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                bump_mod.regenerate_workspace_lock(dry_run=False)
+        self.assertIn("Cargo.lock", str(caught.exception))
+
+    def test_committed_lock_pins_every_workspace_package_to_the_workspace_version(self):
+        version = _workspace_version()
+        pinned = _lock_path_packages((bump_mod.REPO_ROOT / "Cargo.lock").read_text())
+        self.assertTrue(pinned, "Cargo.lock records no workspace path packages to check")
+        stale = sorted(f"{name} @ {found}" for name, found in pinned.items() if found != version)
+        self.assertEqual(
+            stale,
+            [],
+            f"Cargo.lock has workspace packages behind {version}: {stale}. "
+            "Re-run `scripts/bump_compiler_pins.py <version>`.",
+        )
+
+
 class ConformanceAssetRegenerationTests(unittest.TestCase):
     """Category 6: a release PR must embed the agent surface its sources say."""
 
@@ -476,6 +530,9 @@ class ConformanceAssetRegenerationTests(unittest.TestCase):
         with mock.patch.multiple(
             bump_mod,
             **{name: mock.Mock(return_value=value) for name, value in stubs.items()},
+            regenerate_workspace_lock=mock.Mock(
+                side_effect=lambda _dry: order.append("workspace lock")
+            ),
             regenerate_compile_fail_fixture_locks=mock.Mock(
                 side_effect=lambda _dry: order.append("compile-fail locks")
             ),
@@ -494,7 +551,7 @@ class ConformanceAssetRegenerationTests(unittest.TestCase):
         self.assertEqual(
             argv, [[sys.executable, str(bump_mod.REGEN_CONFORMANCE_ASSETS_SCRIPT)]]
         )
-        self.assertEqual(order, ["compile-fail locks", argv[0]])
+        self.assertEqual(order, ["workspace lock", "compile-fail locks", argv[0]])
 
     def test_the_retired_dist_rebuild_flag_is_rejected(self):
         with contextlib.redirect_stderr(io.StringIO()):

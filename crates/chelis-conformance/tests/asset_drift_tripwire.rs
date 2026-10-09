@@ -10,7 +10,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use chelis_conformance::skills::{EMBEDDED_SKILLS, PACKAGE_SKILLS, SHARED_SKILLS, source_path};
+use chelis_conformance::skills::{
+    EMBEDDED_SKILLS, LOCAL_SKILLS, PACKAGE_SKILLS, SHARED_SKILLS, source_path,
+};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -33,7 +35,8 @@ fn embedded_skills_match_repo() {
     );
 
     // 2. The live agent-skills/ directory contains exactly the shared skills
-    //    that are not authored beside a package.
+    //    that are not authored beside a package, plus the compiler-local
+    //    skills, which are never shared.
     let skills_dir = root.join("agent-skills");
     let on_disk: BTreeSet<String> = std::fs::read_dir(&skills_dir)
         .unwrap_or_else(|e| panic!("read {skills_dir:?}: {e}"))
@@ -41,16 +44,24 @@ fn embedded_skills_match_repo() {
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
-    let shared_owned: BTreeSet<String> = SHARED_SKILLS
+    for local in LOCAL_SKILLS {
+        assert!(
+            !SHARED_SKILLS.contains(local),
+            "compiler-local skill {local:?} is also a shared skill"
+        );
+    }
+    let repo_owned: BTreeSet<String> = SHARED_SKILLS
         .iter()
         .filter(|s| !PACKAGE_SKILLS.iter().any(|(p, _)| p == *s))
+        .chain(LOCAL_SKILLS)
         .map(|s| s.to_string())
         .collect();
     assert_eq!(
-        on_disk, shared_owned,
-        "agent-skills/ directory does not match SHARED_SKILLS. If the shared skill \
-         set changed, update SHARED_SKILLS (src/skills.rs + build.rs + the regenerate \
-         script) and run `{regen}`."
+        on_disk, repo_owned,
+        "agent-skills/ directory does not match SHARED_SKILLS plus LOCAL_SKILLS. If \
+         the skill set changed, update SHARED_SKILLS (src/skills.rs + build.rs + the \
+         regenerate script) or LOCAL_SKILLS (src/skills.rs + the regenerate script) \
+         and run `{regen}`."
     );
 
     // 3. Every embedded body byte-equals its one authored source file.
