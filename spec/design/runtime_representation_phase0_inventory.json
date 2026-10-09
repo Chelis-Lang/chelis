@@ -3114,5 +3114,8 @@
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=activation_body",
       "sample": "double"
     }
+  ],
+  "retired_files": [
+    "crates/chelis-backend-c/src/random_observer.rs"
   ]
 }
