@@ -8,8 +8,8 @@
 //!
 //! # One real parser per language
 //!
-//! The inventory's universe is a frozen list of repository files, not a
-//! language. Rust is read with `syn`, a total parser for the language. The C,
+//! The inventory's universe is the set of repository files under frozen
+//! roots, not a language. Rust is read with `syn`, a total parser for the language. The C,
 //! C++, and Objective-C sources are read through clang's front
 //! end by the [`c_ast`] module: the compiler supplies every declaration and
 //! its enclosing owner, so the declaration forms a hand-written token walk
@@ -1319,9 +1319,9 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
             let owner = self.owner();
             if self.error.is_none() {
                 self.error = Some(ScanError::new(format!(
-                    "`#[path]` in `{owner}` compiles a file the inventory roots do not \
-                     reach: move the target under a root in INVENTORY_ROOTS, or drop the \
-                     attribute"
+                    "`#[path]` in `{owner}` names the file cargo compiles, which the scan \
+                     of INVENTORY_ROOTS cannot follow: drop the attribute and use the \
+                     default module path"
                 )));
             }
         }
@@ -1709,10 +1709,10 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
     }
 
     fn visit_macro(&mut self, macro_call: &'ast syn::Macro) {
-        // `include!` splices a file cargo compiles into a registered source.
-        // Admitting one silently would reopen the closed universe through the
-        // back door, so it fails until the target is registered and scanned in
-        // its own right.
+        // `include!` splices a file cargo compiles into an inventory source,
+        // where the scan of that source never reads it. Admitting one silently
+        // would reopen the closed universe through the back door, so it fails
+        // and the spliced text must be inlined.
         if macro_call.path.is_ident("include") {
             let owner = self.owner();
             if self.error.is_none() {

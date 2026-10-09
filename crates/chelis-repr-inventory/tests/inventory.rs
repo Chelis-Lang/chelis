@@ -2,9 +2,9 @@
 //!
 //! Every rule that admits a row has a control that proves it admits, and one
 //! that proves the neighbouring shape is rejected or ignored. The scanner's
-//! completeness claim is over a frozen list of repository files, so the
-//! controls that matter most are the ones proving an unregistered file and an
-//! unclassifiable type word both fail rather than disappearing.
+//! completeness claim is over the repository files under frozen roots, so the
+//! controls that matter most are the ones proving a path outside every source
+//! class and an unclassifiable type word both fail rather than disappearing.
 
 use chelis_repr_inventory::c_ast::{
     ConditionalArms, DEVICE_CXX_LANE, HIP_LANE, OBJECTIVE_C_LANE, PUBLIC_C_LANE,

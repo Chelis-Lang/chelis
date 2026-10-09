@@ -162,10 +162,9 @@ class SourceUniverseTests(unittest.TestCase):
     def test_the_universe_is_every_file_under_the_frozen_roots(self) -> None:
         sources = oracle.inventory_sources(REPO_ROOT)
         self.assertEqual(sources, oracle._inventory_candidates(REPO_ROOT))
-        self.assertEqual(
-            oracle.load_baseline()["source_inventory"]["roots"],
-            list(oracle.INVENTORY_ROOTS),
-        )
+        frozen = oracle.load_baseline()["source_inventory"]["roots"]
+        self.assertEqual(frozen, oracle.root_directories(REPO_ROOT))
+        self.assertEqual([row["pattern"] for row in frozen], list(oracle.INVENTORY_ROOTS))
         real_run = subprocess.run
         scanned: list[str] = []
 
@@ -196,6 +195,7 @@ class SourceUniverseTests(unittest.TestCase):
         with oracle.temporary_mutation(
             REPO_ROOT / relative,
             lambda _source: "//! A seam-free new source.\n\npub fn new_source_probe() {}\n",
+            creates_file=True,
         ):
             self.assertIn(relative, oracle.inventory_sources(REPO_ROOT))
             oracle.validate_baseline(baseline, oracle.inventory_rows(REPO_ROOT))
@@ -218,6 +218,7 @@ class SourceUniverseTests(unittest.TestCase):
             probe = probes[witness]
             with self.subTest(witness=witness):
                 self.assertFalse((REPO_ROOT / probe.path).exists())
+                self.assertTrue(probe.creates_file)
                 self.assertIs(probe.expected_failure, oracle.UNCLASSIFIED_FAILURE)
                 self.assertEqual(probe.expected_kind, kind)
                 self.assertEqual(probe.expected_owners, (owner,))
@@ -537,7 +538,8 @@ class BaselineTests(unittest.TestCase):
             oracle.validate_baseline(mutated, self.rows)
 
     def test_source_inventory_requires_the_exact_mutation_envelope(self) -> None:
-        roots = list(oracle.INVENTORY_ROOTS)
+        roots = oracle.root_directories(REPO_ROOT)
+        first = roots[0]
         cases = (
             ("extra", {"mutations": [], "roots": roots, "authority": "ignored"}),
             ("missing", {}),
@@ -545,9 +547,15 @@ class BaselineTests(unittest.TestCase):
             ("mutations type", {"mutations": {}, "roots": roots}),
             ("roots type", {"mutations": [], "roots": "crates/**/*.rs"}),
             ("roots empty", {"mutations": [], "roots": []}),
-            ("root type", {"mutations": [], "roots": [*roots, 7]}),
-            ("root empty", {"mutations": [], "roots": [*roots, ""]}),
-            ("root duplicate", {"mutations": [], "roots": [*roots, roots[0]]}),
+            ("root type", {"mutations": [], "roots": [*roots, "crates/**/*.rs"]}),
+            ("root field", {"mutations": [], "roots": [*roots, {"pattern": "x"}]}),
+            ("pattern empty", {"mutations": [], "roots": [{**first, "pattern": ""}]}),
+            ("directories empty", {"mutations": [], "roots": [{**first, "directories": []}]}),
+            (
+                "directories unsorted",
+                {"mutations": [], "roots": [{**first, "directories": ["b", "a"]}]},
+            ),
+            ("pattern duplicate", {"mutations": [], "roots": [*roots, first]}),
         )
         for name, source_inventory in cases:
             with self.subTest(name=name):
@@ -576,6 +584,7 @@ class BaselineTests(unittest.TestCase):
             ("owners entry type", "expected_owners", [7]),
             ("owners empty entry", "expected_owners", [""]),
             ("command type", "command", ["phase", "0"]),
+            ("creates file type", "creates_file", "yes"),
             ("failure extra", "failure_extra", "ignored"),
             ("failure code type", "failure_code", 7),
             ("failure reason type", "failure_reason", 7),
@@ -1034,7 +1043,7 @@ class FrozenMutationContractTests(unittest.TestCase):
         with self.subTest(schema="schema 7 relabeled current"):
             with self.assertRaisesRegex(oracle.OracleFailure, "source_inventory.*exact fields"):
                 oracle._validate_baseline_schema(baseline)
-        baseline["source_inventory"]["roots"] = list(oracle.INVENTORY_ROOTS)
+        baseline["source_inventory"]["roots"] = oracle.root_directories(REPO_ROOT)
         baseline["schema_version"] = 6
         for row in baseline["source_inventory"]["mutations"]:
             for field in ("path", "expected_kind", "expected_owners"):
@@ -1171,13 +1180,15 @@ class MutationContractTests(unittest.TestCase):
         sources = oracle.inventory_sources(REPO_ROOT)
         for probe in oracle.phase0_mutation_probes():
             relative = probe.path.as_posix()
-            if (REPO_ROOT / probe.path).exists():
-                self.assertIn(relative, sources)
+            if not probe.creates_file:
+                self.assertIn(relative, sources, probe.witness_id)
                 continue
-            # A new-file witness: the file it creates must land inside the
-            # universe, or its rejection would prove nothing about the scan.
+            # A new-file witness: the file it creates must not exist yet and
+            # must land inside the universe, or its rejection would prove
+            # nothing about the scan.
+            self.assertFalse((REPO_ROOT / probe.path).exists(), probe.witness_id)
             with self.subTest(witness=probe.witness_id), oracle.temporary_mutation(
-                REPO_ROOT / probe.path, probe.mutate
+                REPO_ROOT / probe.path, probe.mutate, creates_file=True
             ):
                 self.assertIn(relative, oracle.inventory_sources(REPO_ROOT))
 
@@ -1193,9 +1204,11 @@ class MutationContractTests(unittest.TestCase):
                     "expected_failure",
                     "expected_owners",
                     "command",
+                    "creates_file",
                 },
             )
             self.assertEqual(entry["command"], oracle.PHASE0_COMMAND)
+            self.assertIs(type(entry["creates_file"]), bool)
             self.assertRegex(str(entry["implementation_sha256"]), r"^[0-9a-f]{64}$")
 
     def test_mutation_body_change_moves_the_runtime_manifest_and_frozen_projection(
@@ -1253,9 +1266,18 @@ class MutationContractTests(unittest.TestCase):
     def test_a_created_probe_file_is_removed_not_left_behind(self) -> None:
         path = REPO_ROOT / "crates/chelis-ir/src/runtime_representation_unit_probe.rs"
         self.assertFalse(path.exists())
-        with oracle.temporary_mutation(path, lambda _: "// probe\n"):
+        with oracle.temporary_mutation(path, lambda _: "// probe\n", creates_file=True):
             self.assertTrue(path.exists())
         self.assertFalse(path.exists())
+        with self.assertRaisesRegex(oracle.OracleFailure, "mutation target does not exist"):
+            with oracle.temporary_mutation(path, lambda _: "// probe\n"):
+                pass
+        existing = REPO_ROOT / "crates/chelis-runtime/src/decimal_parse.rs"
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "new-file mutation target already exists"
+        ):
+            with oracle.temporary_mutation(existing, lambda _: "// probe\n", creates_file=True):
+                pass
 
 
 class ManifestTests(unittest.TestCase):
@@ -1759,7 +1781,9 @@ class ManifestTests(unittest.TestCase):
             universe["closure_rule"],
             "the scanned sources are exactly the files on disk under the "
             "digest-bound roots; a new file is scanned without registration, "
-            "and a root whose directory departed fails",
+            "a frozen root directory that departed fails, and a file "
+            "holding active debt or a mutation target that left the "
+            "universe fails until it is retired",
         )
 
     def test_no_libclang_or_configuration_enumeration_remains(self) -> None:

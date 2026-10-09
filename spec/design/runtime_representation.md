@@ -1364,18 +1364,28 @@ they independently satisfy a final form.
 ### The inventory's universe is the files under its roots
 
 The inventory's completeness claim is over every file on disk under the
-oracle's declared roots, `INVENTORY_ROOTS`. The roots are reviewed and the
-freeze digest binds them; the files under them are derived, so a new file is
-scanned the moment it exists and a seam in it fails as an unclassified hit,
-exactly as a new seam in an existing file does. No per-file registration
-exists, because one would add review friction without adding a guarantee: the
-classifier, not a list, decides whether a file carries debt. The oracle reads
-the filesystem rather than the git index because cargo compiles what is on
-disk, so an untracked file is in the universe; a git-ignored file is not, and
-a file reached through a symbolic link under a root is scanned at the link's
-path. A root whose directory does not exist fails, so renaming or deleting a
-crate cannot shrink the universe without review, and adding, removing or
-reordering a root moves the freeze.
+oracle's declared roots, `INVENTORY_ROOTS`. The freeze digest binds each root
+together with the concrete directories it matches, so the universe's
+definition is reviewed while its membership is derived: a new file is scanned
+the moment it exists, and a seam in it fails as an unclassified hit, exactly
+as a new seam in an existing file does. A frozen root directory that is
+missing fails even while its glob still matches other directories, and a
+directory that joins a root, like any change to a root, moves the freeze.
+
+A file the baseline references stays in the universe. A file holding active
+debt, or a frozen mutation's target, that leaves the universe fails the
+oracle, and regeneration drops such a file's debt only when the file is named
+for retirement (`--retire-departed-file`). A retired foundation identity may
+name a deleted file. A file that holds no active debt and leaves the universe
+is not reported, because it carries no seam the inventory tracks. A mutation
+targets a file that must exist, except a declared new-file witness, whose
+file must not; a missing target fails instead of being planted afresh.
+
+The oracle reads the filesystem rather than the git index because cargo
+compiles what is on disk, so an untracked file is in the universe and a
+git-ignored file is not. A symbolically linked file under a root is scanned at
+the link's path; a symbolic link to a directory is not traversed, so a file
+reached only through one is outside the universe.
 
 Stating the claim over a *language* instead would not be dischargeable: a
 reviewer can always name one more construct. Stated over a file set it is
@@ -1523,7 +1533,8 @@ required floor.
 Adding, removing, or renaming a file under a frozen root, and a final-form,
 reproducer, or hardware registration, that does not add or change a foundation
 row or frozen mutation row does not move the digest and does not require a B1
-amendment paragraph. Changing a root does. Its owning change still
+amendment paragraph. Changing a root, or the set of directories a root
+matches, does. Its owning change still
 updates code, focused positive and negative tests, and current documentation.
 Adding, removing, renaming, reimplementing, retargeting, or changing the
 expected seam kind, required owners, failure or command of a mutation does move
