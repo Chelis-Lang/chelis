@@ -323,6 +323,13 @@ impl CallTypeInstantiation {
                     return true;
                 }
                 match self.dimensions.get(key) {
+                    // A binder bound only to an anonymous runtime extent
+                    // takes the first concrete dimension it later meets, so
+                    // two distinct names after it disagree in either order.
+                    Some(DimInfo::Named(bound, None)) if is_anonymous(bound) => {
+                        self.dimensions.insert(key.clone(), actual.clone());
+                        true
+                    }
                     Some(bound) => dimensions_compatible(bound, actual),
                     None => {
                         self.dimensions.insert(key.clone(), actual.clone());
@@ -3252,7 +3259,35 @@ mod call_type_instantiation_tests {
         assert!(!CallTypeInstantiation::default().admits(
             &pattern,
             &formal,
-            &tensor(vec![batch, seq], Prim::F32)
+            &tensor(vec![batch.clone(), seq.clone()], Prim::F32)
+        ));
+    }
+
+    #[test]
+    fn a_binder_first_met_by_a_runtime_extent_still_rejects_two_distinct_names() {
+        let formal = tensor(vec![DimInfo::Named("n".into(), None); 3], Prim::F32);
+        let pattern = FormalTypePattern::Tensor(vec![FormalDimension::Quantified("n".into()); 3]);
+        let wildcard = DimInfo::Named("*".into(), None);
+        let batch = DimInfo::Named("batch".into(), None);
+        let seq = DimInfo::Named("seq".into(), None);
+
+        for order in [
+            vec![wildcard.clone(), batch.clone(), seq.clone()],
+            vec![batch.clone(), wildcard.clone(), seq.clone()],
+        ] {
+            assert!(
+                !CallTypeInstantiation::default().admits(
+                    &pattern,
+                    &formal,
+                    &tensor(order.clone(), Prim::F32)
+                ),
+                "{order:?}"
+            );
+        }
+        assert!(CallTypeInstantiation::default().admits(
+            &pattern,
+            &formal,
+            &tensor(vec![wildcard, batch.clone(), batch], Prim::F32)
         ));
     }
 

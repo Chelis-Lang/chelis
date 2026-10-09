@@ -1667,9 +1667,9 @@ pub(super) fn check_rank_body_discipline(
                     CheckErrorKind::DimensionMismatch,
                     format!(
                         "rank-polymorphic def `{def_name}` may not call user-defined `{name}`: \
-                         only shape-identity builtins are proven rank-safe in a `..r` body, and a \
-                         user `def` (even one shadowing a builtin name) is not (spec/04-type-system.md \
-                         \u{00a7}4.2)."
+                         a `..r` body admits only shape-identity, named-axis, ordered-prefix, and \
+                         inert builtins, and a user `def` (even one shadowing a builtin name) is \
+                         none of these (spec/04-type-system.md \u{00a7}4.5.3)."
                     ),
                     vec![],
                 ));
@@ -1717,10 +1717,11 @@ pub(super) fn check_rank_body_discipline(
                     errors.push(CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "rank-polymorphic def `{def_name}` may not call `{name}`: only \
-                                 shape-identity builtins are proven rank-safe in a `..r` body \
-                                 (spec/04-type-system.md \u{00a7}4.2). Calling a user-defined \
-                                 function from a rank-polymorphic body is not supported."
+                            "rank-polymorphic def `{def_name}` may not call `{name}`: a `..r` \
+                                 body admits only shape-identity, named-axis, ordered-prefix, and \
+                                 inert builtins (spec/04-type-system.md \u{00a7}4.5.3). Calling a \
+                                 user-defined function from a rank-polymorphic body is not \
+                                 supported."
                         ),
                         vec![],
                     ));
@@ -1734,8 +1735,9 @@ pub(super) fn check_rank_body_discipline(
                     CheckErrorKind::DimensionMismatch,
                     format!(
                         "rank-polymorphic def `{def_name}` may not apply a computed or \
-                         non-builtin callee in a `..r` body: only shape-identity builtins are \
-                         proven rank-safe (spec/04-type-system.md \u{00a7}4.2)."
+                         non-builtin callee in a `..r` body: a `..r` body admits only \
+                         shape-identity, named-axis, ordered-prefix, and inert builtins \
+                         (spec/04-type-system.md \u{00a7}4.5.3)."
                     ),
                     vec![],
                 ));
