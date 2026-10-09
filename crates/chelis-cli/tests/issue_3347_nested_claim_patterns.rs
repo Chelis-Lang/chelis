@@ -266,17 +266,6 @@ def f(g: G[tensor[3, f32]]) -> i64 = 1i64
 out = f(None)
 "#;
 
-const LET_BOUND_RESULT: &str = r#"def pass3(size: i64) -> (Box[3], i64) = {
-  b = make(size)
-  (b, 1i64)
-}
-def ident3(size: i64) -> Box[3] = {
-  b = make(size)
-  b
-}
-out = add(width(pass3(size_from("PATH")).0), width(ident3(size_from("PATH"))))
-"#;
-
 const DEEP_CLAIMED: &str = r#"type Wrap[n] =
   | W { inner: Wrap[n] }
   | B { v: tensor[n, f32] }
@@ -882,32 +871,46 @@ fn non_closing_alias_recursion_terminates_on_both_lanes() {
 /// Metal (`.mm`) and HIP (`.cpp`) targets. C++ zeroes no union bytes past the
 /// member it initializes, and the runtime rejects a value whose unused
 /// payload bytes are not zero, so every borrowed value a walk builds must be
-/// zeroed whole. `program` builds on the C target and its host source is
-/// compiled, linked and run as C++, unoptimized: an optimizer can zero the
-/// unused bytes by accident and hide a partial value.
+/// zeroed whole. `program` is emitted for the HIP target, and its C++ host is
+/// compiled with the platform's C++ compiler, unoptimized (an optimizer can
+/// zero the unused bytes by accident and hide a partial value), linked
+/// against the runtime archive that build staged, and run.
 fn host_as_cxx(program: &str) -> String {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cxxhost.ch");
     fs::write(&path, program).expect("fixture");
-    let out_dir = dir.path().join("c");
-    assert_cmd::Command::cargo_bin("chelis")
+    let out_dir = dir.path().join("hip");
+    let built = assert_cmd::Command::cargo_bin("chelis")
         .expect("chelis")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["build", "--emit-c", "--allow-style-violations"])
         .arg(&path)
-        .args(["--target", "c", "-o"])
+        .args(["--target", "hip", "-o"])
         .arg(&out_dir)
-        .assert()
-        .success();
+        .output()
+        .expect("build");
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(built.status.success(), "{report}");
+    // The exact archive the build staged, as it reports it.
+    let archive = report
+        .lines()
+        .find_map(|line| line.strip_prefix("Staged runtime "))
+        .and_then(|rest| rest.split(" (sha256").next())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| panic!("the build reports the runtime it staged:\n{report}"));
     let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".to_string());
     let compiled = std::process::Command::new(&compiler)
         .current_dir(&out_dir)
-        .args(["-x", "c++", "-O0", "-c", "cxxhost.c", "-o", "host.o"])
+        .args(["-x", "c++", "-O0", "-c", "cxxhost_hip.cpp", "-o", "host.o"])
         .output()
         .expect("C++ compiler runs");
     assert!(
         compiled.status.success(),
-        "the host source compiles as C++:\n{}",
+        "the HIP host source compiles as C++:\n{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
@@ -918,7 +921,8 @@ fn host_as_cxx(program: &str) -> String {
     );
     let linked = std::process::Command::new(&compiler)
         .current_dir(&out_dir)
-        .args(["host.o", "libchelis_runtime.a"])
+        .arg("host.o")
+        .arg(&archive)
         .args(&toolchain.link_flags)
         .args(["-o", "host"])
         .output()
@@ -938,6 +942,32 @@ fn host_as_cxx(program: &str) -> String {
     )
 }
 
+/// Agreeing claims on both walk sites: the entry walk of a nominal formal,
+/// and the result-value walk of a let-bound claimed aggregate the activation
+/// did not construct (`pass3`). Its tensors come from a host producer, so
+/// the HIP host holds only code the claims add to an ordinary host program.
+const CXX_HOST_CLAIMS: &str = r#"type Box[n] =
+  | Box { v: tensor[n, f32] }
+def size_from(path: string) -> i64 ! { IO } = string_len(read_file(path))
+def fill(size: i64) -> tensor[*, f32] = to_tensor(map(fn (i: i64) -> 0.0f32, range(0i64, size)))
+def make[n](size: i64) -> Box[n] = Box { v: fill(size) }
+def width[n](b: Box[n]) -> i64 =
+  match b with {
+    | Box { v } => shape(v, 0i32)
+  }
+def three(size: i64) -> Box[3] = Box { v: fill(size) }
+def claimed(b: Box[3]) -> i64 = width(b)
+def pass3(size: i64) -> (Box[3], i64) = {
+  b = make(size)
+  (b, 1i64)
+}
+def ident3(size: i64) -> Box[3] = {
+  b = make(size)
+  b
+}
+out = add(add(width(three(size_from("PATH"))), claimed(make(size_from("PATH")))), add(width(pass3(size_from("PATH")).0), width(ident3(size_from("PATH")))))
+"#;
+
 const KINDED_NOMINAL_DIMENSIONS: &str =
     include_str!("../../../examples/kinded_nominal_dimensions.ch");
 
@@ -948,19 +978,9 @@ fn agreeing_claim_walks_run_when_the_host_is_cxx() {
     let input = tempfile::tempdir().expect("size input");
     let size = input.path().join("size.txt");
     fs::write(&size, "xxx").expect("size");
-    // LET_BOUND_RESULT's `pass3` reaches the result-value walk with a value
-    // its activation did not construct; the others reach the entry walk and
-    // the producer-owned result check.
-    for case in [DIRECT, FORMAL, BOX_BINDER, LET_BOUND_RESULT] {
-        let program = format!("{PRELUDE}{case}").replace("PATH", &size.display().to_string());
-        let output = host_as_cxx(&program);
-        let expected = if case == LET_BOUND_RESULT {
-            "out = 6"
-        } else {
-            "out = 3"
-        };
-        assert!(output.contains(expected), "{case}\n{output}");
-    }
+    let program = CXX_HOST_CLAIMS.replace("PATH", &size.display().to_string());
+    let output = host_as_cxx(&program);
+    assert!(output.contains("out = 12"), "{output}");
     let output = host_as_cxx(KINDED_NOMINAL_DIMENSIONS);
     assert!(output.contains("out = ()"), "{output}");
 }
