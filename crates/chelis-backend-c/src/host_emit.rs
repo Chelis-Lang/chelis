@@ -4908,17 +4908,24 @@ pub(crate) fn direct_call_action_index(site: &ProjectedHostSite<'_>) -> Result<u
 }
 
 fn verified_call_action_index(site: &ProjectedHostSite<'_>) -> Result<usize, Unsupported> {
+    verified_call_authority(site).map(|(index, _)| index)
+}
+
+/// The one call authority at a host `Call` site: its action index and its
+/// apply kind.
+fn verified_call_authority(
+    site: &ProjectedHostSite<'_>,
+) -> Result<(usize, VerifiedApplyKind), Unsupported> {
     let mut call = None;
     for (index, action) in site.directives.iter().enumerate() {
-        if matches!(
-            action,
-            VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
-                kind: VerifiedApplyKind::DirectCall { .. }
-                    | VerifiedApplyKind::KeyBuiltinCall(_)
-                    | VerifiedApplyKind::NativeProviderCall,
-                ..
-            })
-        ) && call.replace(index).is_some()
+        if let VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+            kind:
+                kind @ (VerifiedApplyKind::DirectCall { .. }
+                | VerifiedApplyKind::KeyBuiltinCall(_)
+                | VerifiedApplyKind::NativeProviderCall),
+            ..
+        }) = action
+            && call.replace((index, *kind)).is_some()
         {
             return Err(invalid_abi_shape(
                 "verified call site contains multiple call authorities".to_string(),
@@ -4932,6 +4939,53 @@ fn verified_call_action_index(site: &ProjectedHostSite<'_>) -> Result<usize, Uns
             "verified C host ownership emission",
         )
     })
+}
+
+/// The apply kind of a named loop callback's one call, among the actions of
+/// the loop body block that calls it.
+fn named_callback_call_kind(
+    site: &ProjectedHostSite<'_>,
+    block: VerifiedBlockId,
+) -> Result<VerifiedApplyKind, Unsupported> {
+    let mut call = None;
+    for action in &site.directives {
+        if let VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+            block: owner_block,
+            kind,
+            ..
+        }) = action
+            && *owner_block == block
+            && !matches!(kind, VerifiedApplyKind::Intrinsic)
+            && call.replace(*kind).is_some()
+        {
+            return Err(invalid_abi_shape(
+                "verified named callback body contains multiple call authorities".to_string(),
+                "verified C host ownership emission",
+            ));
+        }
+    }
+    call.ok_or_else(|| {
+        invalid_abi_shape(
+            "verified named callback body has no call authority".to_string(),
+            "verified C host ownership emission",
+        )
+    })
+}
+
+/// The C function a verified call invokes.
+enum VerifiedCallee {
+    /// A def's private body, which takes the invocation context arguments.
+    Definition(String),
+    /// A function value with its authored C signature.
+    Value(String),
+}
+
+impl VerifiedCallee {
+    fn c_name(&self) -> &str {
+        match self {
+            Self::Definition(name) | Self::Value(name) => name,
+        }
+    }
 }
 
 impl<'a> HostEmitter<'a> {
@@ -6175,6 +6229,41 @@ impl<'a> HostEmitter<'a> {
             .get(name)
             .cloned()
             .unwrap_or_else(|| c_ident(name).into_owned())
+    }
+
+    /// The C callee of a verified call of `function`. Ownership lowering
+    /// resolved the spelling with lexical bindings first, and `kind` is that
+    /// resolution, so the spelling is not resolved again here: only a direct
+    /// call names a def, and any other callee is a lexical function value
+    /// whose C name may be a flattened let spine's generated alias.
+    fn verified_callee(
+        &self,
+        function: &str,
+        kind: VerifiedApplyKind,
+    ) -> Result<VerifiedCallee, Unsupported> {
+        match kind {
+            VerifiedApplyKind::DirectCall { .. } => self
+                .emitted_names
+                .get(function)
+                .cloned()
+                .map(VerifiedCallee::Definition)
+                .ok_or_else(|| {
+                    invalid_abi_shape(
+                        format!("verified direct call of `{function}` names no emitted body"),
+                        "verified C host ownership emission",
+                    )
+                }),
+            VerifiedApplyKind::KeyBuiltinCall(_) | VerifiedApplyKind::IndirectCall => {
+                Ok(VerifiedCallee::Value(self.local_c_name(function)))
+            }
+            VerifiedApplyKind::NativeProviderCall => {
+                Ok(VerifiedCallee::Value(c_ident(function).into_owned()))
+            }
+            VerifiedApplyKind::Intrinsic => Err(invalid_abi_shape(
+                format!("verified call of `{function}` has an intrinsic authority"),
+                "verified C host ownership emission",
+            )),
+        }
     }
 
     fn assign_let_spine(
@@ -10804,7 +10893,11 @@ impl<'a> HostEmitter<'a> {
             span: call_span,
         } = reporting;
         let (target, ty) = destination;
-        if let Some(spec) = self.function_specializations.get(function).cloned() {
+        let (_, call_kind) = verified_call_authority(site)?;
+        // A def's selected summary replaces only a direct call of that def.
+        if let VerifiedApplyKind::DirectCall { .. } = call_kind
+            && let Some(spec) = self.function_specializations.get(function).cloned()
+        {
             match spec {
                 HostFunctionSpecialization::BlasMatmul(summary) => {
                     self.assign_blas_matmul_summary(target, &summary, args, ty)?;
@@ -10878,16 +10971,8 @@ impl<'a> HostEmitter<'a> {
             ));
         }
         self.emit_pre_call_actions(site)?;
-        let call_index = verified_call_action_index(site)?;
-        let verified_tail = matches!(
-            site.directives.get(call_index),
-            Some(VerifiedHostAction::Operation(
-                VerifiedHostOperation::Apply {
-                    kind: VerifiedApplyKind::DirectCall { tail: true, .. },
-                    ..
-                }
-            ))
-        );
+        let callee = self.verified_callee(function, call_kind)?;
+        let verified_tail = matches!(call_kind, VerifiedApplyKind::DirectCall { tail: true, .. });
         let use_tail_loop = self.tail_loop.as_ref().is_some_and(|plan| {
             verified_tail
                 && target == "__result"
@@ -10910,10 +10995,10 @@ impl<'a> HostEmitter<'a> {
             self.tail_loop_used = true;
             return Ok(());
         }
-        let guarded_recursive_call = self.emit_recursive_call_guard(function, call_span);
+        let guarded_recursive_call = self.emit_recursive_call_guard(function, &callee, call_span);
         // Calls to declared functions use private bodies and inherit this
-        // invocation. Callback parameters retain their authored C signature.
-        if self.emitted_names.contains_key(function) {
+        // invocation. Function values retain their authored C signature.
+        if let VerifiedCallee::Definition(_) = callee {
             let forwards_receipt = self
                 .entry_group
                 .is_some_and(|group| self.entry_groups.get(function) == Some(&group))
@@ -10933,26 +11018,25 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}{target} = {}({});",
             self.indent,
-            // A def resolves through the emitted-name map. A callback or
-            // local binding resolves through its lexical C alias, including
-            // the generated names used by flattened host let spines.
-            self.emitted_names
-                .get(function)
-                .map(|name| std::borrow::Cow::Borrowed(name.as_str()))
-                .unwrap_or_else(|| std::borrow::Cow::Owned(self.local_c_name(function))),
+            callee.c_name(),
             arg_vars.join(", ")
         ));
         self.emit_recursive_call_end(guarded_recursive_call);
-        if !self.emitted_names.contains_key(function) {
+        if let VerifiedCallee::Value(_) = callee {
             self.assign_interface_result_origin(target, ty);
             self.emit_result_claim_guard(target, ty, result_claims);
         }
         Ok(())
     }
 
-    fn emit_recursive_call_guard(&mut self, function: &str, span: Option<&str>) -> bool {
-        let guarded = self.recursive_functions.contains(function)
-            && self.emitted_names.contains_key(function);
+    fn emit_recursive_call_guard(
+        &mut self,
+        function: &str,
+        callee: &VerifiedCallee,
+        span: Option<&str>,
+    ) -> bool {
+        let guarded = matches!(callee, VerifiedCallee::Definition(_))
+            && self.recursive_functions.contains(function);
         if guarded {
             let span = chelis_ir::span_sanitize::sanitize_for_comment(span.unwrap_or("<unknown>"));
             self.lines.push(format!(
@@ -11394,6 +11478,7 @@ impl<'a> HostEmitter<'a> {
             std::slice::from_ref(&arg_var),
             &result_var,
             callback_span,
+            (site, body_block),
         )?;
         let pushed = self.box_value_expr(&result_var, &callback.ret_ty)?;
         self.emit_loop_step_block_actions(
@@ -11471,6 +11556,7 @@ impl<'a> HostEmitter<'a> {
             std::slice::from_ref(&arg_var),
             &keep_var,
             callback_span,
+            (site, body_block),
         )?;
         // `filter_step` moves the item: a kept item moves into the result
         // and a rejected one is released here.
@@ -11597,7 +11683,13 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
         self.declare_result_origin(&item_arg, &params[1].ty, Some("load"));
         self.bind_loop_item(site, &item_arg)?;
-        self.emit_callback_assign(callback, &[acc_arg, item_arg], target, callback_span)?;
+        self.emit_callback_assign(
+            callback,
+            &[acc_arg, item_arg],
+            target,
+            callback_span,
+            (site, body_block),
+        )?;
         self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
@@ -11718,7 +11810,13 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
         self.declare_result_origin(&item_arg, &params[1].ty, Some("load"));
         self.bind_loop_item(site, &item_arg)?;
-        self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var, callback_span)?;
+        self.emit_callback_assign(
+            callback,
+            &[acc_arg, item_arg],
+            &acc_var,
+            callback_span,
+            (site, body_block),
+        )?;
         let pushed = self.box_value_expr(&acc_var, &acc_ty)?;
         self.emit_loop_step_block_actions(
             site,
@@ -11836,6 +11934,7 @@ impl<'a> HostEmitter<'a> {
             std::slice::from_ref(&arg_var),
             &keep_var,
             callback_span,
+            (site, body_block),
         )?;
         self.emit_loop_step_block_actions(
             site,
@@ -11939,6 +12038,7 @@ impl<'a> HostEmitter<'a> {
             std::slice::from_ref(&arg_var),
             &result_var,
             callback_span,
+            (site, body_block),
         )?;
         self.emit_loop_step_block_actions(
             site,
@@ -11960,38 +12060,40 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
+    /// Emit one invocation of a loop callback. `call_at` is the loop site and
+    /// the body block whose verified actions include a named callback's call.
     fn emit_callback_assign(
         &mut self,
         callback: &HostCallback,
         arg_vars: &[String],
         target: &str,
         callback_span: Option<&str>,
+        call_at: (&ProjectedHostSite<'a>, VerifiedBlockId),
     ) -> Result<(), Unsupported> {
         match &callback.kind {
             HostCallbackKind::Named { function, .. } => {
+                // chelis#840: the same verified resolution as `assign_call`,
+                // so a reserved-word callback parameter referenced by name
+                // matches its mangled declarator.
+                let (site, block) = call_at;
+                let callee =
+                    self.verified_callee(function, named_callback_call_kind(site, block)?)?;
                 let mut arg_vars = arg_vars.to_vec();
-                if self.emitted_names.contains_key(function) {
+                if let VerifiedCallee::Definition(_) = callee {
                     append_private_host_context_args(&mut arg_vars, "NULL");
                     arg_vars.push("NULL".to_string());
                     arg_vars.push(format!("&{}", result_origin_name(target)));
                 }
                 let guarded_recursive_call =
-                    self.emit_recursive_call_guard(function, callback_span);
+                    self.emit_recursive_call_guard(function, &callee, callback_span);
                 self.lines.push(format!(
                     "{}{target} = {}({});",
                     self.indent,
-                    // chelis#840: same original-to-emitted mapping as
-                    // `assign_call`, with the same `c_ident` fallback so a
-                    // reserved-word callback PARAMETER referenced by name
-                    // matches its mangled declarator.
-                    self.emitted_names
-                        .get(function)
-                        .map(|name| std::borrow::Cow::Borrowed(name.as_str()))
-                        .unwrap_or_else(|| c_ident(function)),
+                    callee.c_name(),
                     arg_vars.join(", ")
                 ));
                 self.emit_recursive_call_end(guarded_recursive_call);
-                if !self.emitted_names.contains_key(function) {
+                if let VerifiedCallee::Value(_) = callee {
                     self.assign_interface_result_origin(target, &callback.ret_ty);
                 }
             }
