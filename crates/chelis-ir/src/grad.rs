@@ -4232,20 +4232,51 @@ mod tests {
             let inf = f64::INFINITY;
             for y0 in [limit - 2.0, limit, 2.0 * limit] {
                 let label = format!("{precision:?} y = {y0}");
-                assert_eq!(pow_grads_at(precision, inf, y0).0, inf, "+inf base, {label}");
+                assert_eq!(
+                    pow_grads_at(precision, inf, y0).0,
+                    inf,
+                    "+inf base, {label}"
+                );
                 // y even: y - 1 odd, so (-inf)^(y-1) is -inf.
-                assert_eq!(pow_grads_at(precision, -inf, y0).0, -inf, "-inf base, {label}");
+                assert_eq!(
+                    pow_grads_at(precision, -inf, y0).0,
+                    -inf,
+                    "-inf base, {label}"
+                );
                 // y even and negative: (+-inf)^(y-1) is a zero, so the
                 // cotangent is a zero rather than the NaN of `inf / inf`.
-                assert_eq!(pow_grads_at(precision, inf, -y0).0, 0.0, "+inf base, -{label}");
-                assert_eq!(pow_grads_at(precision, -inf, -y0).0, 0.0, "-inf base, -{label}");
+                assert_eq!(
+                    pow_grads_at(precision, inf, -y0).0,
+                    0.0,
+                    "+inf base, -{label}"
+                );
+                assert_eq!(
+                    pow_grads_at(precision, -inf, -y0).0,
+                    0.0,
+                    "-inf base, -{label}"
+                );
             }
-            assert_eq!(pow_grads_at(precision, -inf, 3.0).0, inf, "{precision:?} (-inf)^2 * 3");
-            assert_eq!(pow_grads_at(precision, inf, 1.0).0, 1.0, "{precision:?} y = 1");
+            assert_eq!(
+                pow_grads_at(precision, -inf, 3.0).0,
+                inf,
+                "{precision:?} (-inf)^2 * 3"
+            );
+            assert_eq!(
+                pow_grads_at(precision, inf, 1.0).0,
+                1.0,
+                "{precision:?} y = 1"
+            );
             for y0 in [-2.0, 0.0, 0.5, 2.0, limit] {
                 let dy = pow_grads_at(precision, inf, y0).1;
-                assert_eq!(dy.to_bits(), 0.0f64.to_bits(), "{precision:?} d/dy at (+inf, {y0})");
-                assert!(pow_grads_at(precision, -inf, y0).1.is_nan(), "{precision:?} (-inf, {y0})");
+                assert_eq!(
+                    dy.to_bits(),
+                    0.0f64.to_bits(),
+                    "{precision:?} d/dy at (+inf, {y0})"
+                );
+                assert!(
+                    pow_grads_at(precision, -inf, y0).1.is_nan(),
+                    "{precision:?} (-inf, {y0})"
+                );
             }
         }
     }
