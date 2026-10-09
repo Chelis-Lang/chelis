@@ -76,6 +76,19 @@ class RenameTests(unittest.TestCase):
         self.assertIn("<src/binary64/log/dint.h>", out)
         self.assertNotIn('#include "dint.h"', out)
 
+    def test_nested_local_includes_are_inlined_once(self):
+        kernel = next(k for k in vcm.KERNELS if k.function == "pow" and k.width == 64)
+        headers = {
+            "src/binary64/pow/pow.h": '#include "dint.h"\n#include "qint.h"\nP\n',
+            "src/binary64/pow/qint.h": '#include "dint.h"\nQ\n',
+            "src/binary64/pow/dint.h": "D\n",
+        }
+        out = vcm.inline_local_includes('#include "pow.h"\nx\n', kernel, headers.__getitem__)
+        self.assertEqual(out.count("\nD\n"), 1)
+        self.assertIn("src/binary64/pow/dint.h already inlined", out)
+        self.assertLess(out.index("\nD\n"), out.index("Q\n"))
+        self.assertNotIn("#include", out)
+
 
 class ContractCleanTests(unittest.TestCase):
     """The reduction to the generated-C contract that `chelis build` units satisfy."""
@@ -96,6 +109,43 @@ class ContractCleanTests(unittest.TestCase):
         self.assertIn("  hi += lo ? md : hi & md;\n", out)
         self.assertNotIn("FE_", out)
         self.assertNotIn("fegetround", out)
+
+    def test_rounding_switch_with_a_trailing_comment_or_fallthrough_keeps_the_nearest_case(self):
+        for tail in ("  // for rounding towards zero, don't do anything\n", "  case FE_TOWARDZERO:\n    hi = 0;\n"):
+            text = (
+                "  switch (fegetround()) {\n  case FE_TONEAREST:\n    hi += md;\n    break;\n"
+                "  case FE_UPWARD:\n    hi += b;\n    break;\n" + tail + "  }\nnext;\n"
+            )
+            out = vcm.contract_clean(text, "t")
+            self.assertIn("  hi += md;\nnext;\n", out)
+            self.assertNotIn("FE_", out)
+
+    def test_rounding_switch_with_another_case_is_rejected(self):
+        text = (
+            "  switch (fegetround()) {\n  case FE_TONEAREST:\n    hi += md;\n    break;\n"
+            "  case FE_UPWARD:\n    hi += b;\n    break;\n  default:\n    hi = 0;\n  }\n"
+        )
+        with self.assertRaisesRegex(vcm.VendorError, "case other than the four modes"):
+            vcm.contract_clean(text, "t")
+
+    def test_pow_environment_reduction_requires_the_upstream_shapes(self):
+        with self.assertRaisesRegex(vcm.VendorError, "inexact-flag management"):
+            vcm.drop_pow_environment("static FLAG_T\nget_flag (void) { return 0; }\n", "t")
+
+    def test_pow_environment_reduction_rewrites_libm_macros_outside_comments(self):
+        text = (
+            "#ifdef __x86_64__\n#include <x86intrin.h>\n#define FLAG_T uint32_t\n#else\n#define FLAG_T fexcept_t\n#endif\n"
+            "static FLAG_T\nget_flag (void)\n{\n#if defined(__x86_64__)\n  return _mm_getcsr ();\n#else\n  x;\n#endif\n}\n"
+            "static void\nset_flag (FLAG_T flag)\n{\n#if defined(__x86_64__)\n  _mm_setcsr (flag);\n#else\n  y;\n#endif\n}\n"
+            "#include <math.h> // needed for NAN and INFINITY\n/* NAN */ double z = NAN + INFINITY;\n"
+        )
+        out = vcm.drop_pow_environment(text, "t")
+        self.assertIn("#define FLAG_T int\n", out)
+        self.assertIn("/* NAN */ double z = __builtin_nan (\"\") + __builtin_inf ();", out)
+        self.assertNotIn("_mm_", out)
+        self.assertNotIn("math.h", out)
+        with self.assertRaisesRegex(vcm.VendorError, "calls `exit`"):
+            vcm.drop_pow_environment(text + "exit (1);\n", "t")
 
     def test_attributes_pragmas_raises_and_fenv_are_dropped(self):
         text = (
@@ -235,15 +285,19 @@ class RepositoryTests(unittest.TestCase):
         text = vcm.AMALGAMATION.read_text(encoding="utf-8")
         vcm.require_inline_roundeven(text, "amalgamation")
         kernels = {m.group(1) for m in vcm._ROUNDEVEN_DEFINITION.finditer(text)}
-        self.assertEqual(kernels, {f"chelis_cr_{name}__" for name in ("sinf", "cosf", "tanf", "exp", "sin", "erfc")})
+        self.assertEqual(kernels, {f"chelis_cr_{name}__" for name in ("sinf", "cosf", "tanf", "powf", "exp", "sin", "erfc", "pow")})
         self.assertIn("chelis_cr_sin__roundeven_finite (invpi * ax)", text)
 
     def test_manifest_round_trips(self):
         self.assertEqual(vcm.render_manifest(vcm.load_manifest()), vcm.MANIFEST.read_text(encoding="utf-8"))
 
-    def test_kernel_matrix_is_the_op46_transcendentals_at_both_widths(self):
-        pairs = {(k.function, k.width) for k in vcm.KERNELS}
-        self.assertEqual(pairs, {(f, w) for f in ("exp", "log", "sin", "cos", "tan", "atan", "tanh", "erf", "erfc") for w in (32, 64)})
+    def test_kernel_matrix_is_the_op46_transcendentals_and_op79_pow_at_both_widths(self):
+        unary = ("exp", "log", "sin", "cos", "tan", "atan", "tanh", "erf", "erfc")
+        triples = {(k.function, k.width, k.arity) for k in vcm.KERNELS}
+        self.assertEqual(
+            triples,
+            {(f, w, 1) for f in unary for w in (32, 64)} | {("pow", w, 2) for w in (32, 64)},
+        )
 
     def test_amalgamation_opens_with_the_guards(self):
         text = vcm.AMALGAMATION.read_text(encoding="utf-8")
@@ -256,11 +310,15 @@ class RepositoryTests(unittest.TestCase):
         code = re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.DOTALL)
         for k in vcm.KERNELS:
             inner = k.prefix + k.upstream_entry
-            self.assertIn(f"static {k.ctype} {inner}({k.ctype});", text)
-            self.assertIn(f"static {k.ctype} {k.entry}({k.ctype} x)", text)
+            params = ", ".join([k.ctype] * k.arity)
+            self.assertIn(f"static {k.ctype} {inner}({params});", text)
+            entry_params = f"{k.ctype} x" if k.arity == 1 else f"{k.ctype} x, {k.ctype} y"
+            self.assertIn(f"static {k.ctype} {k.entry}({entry_params})", text)
             # No upstream entry name survives unprefixed in code.
             self.assertIsNone(re.search(rf"(?<![\w]){k.upstream_entry}\s*\(", code), k.name)
-        self.assertEqual(text.count("return y != y ? chelis_cr_canonical_nan"), len(vcm.KERNELS))
+        unary = [k for k in vcm.KERNELS if k.arity == 1]
+        self.assertEqual(text.count("return y != y ? chelis_cr_canonical_nan"), len(unary))
+        self.assertEqual(text.count("return r != r ? chelis_cr_canonical_nan"), len(vcm.KERNELS) - len(unary))
         # Every function definition at file scope is static or carries a static prototype.
         for m in re.finditer(r"^(float|double) (\w+)\(", code, flags=re.MULTILINE):
             self.assertIn(f"static {m.group(1)} {m.group(2)}(", text, m.group(2))

@@ -252,7 +252,7 @@ _ROUNDING_SWITCH = re.compile(
 # its statements, and comments (binary64 `pow` ends with a `FE_TOWARDZERO` case
 # without a `break`, or with a comment naming it).
 _DIRECTED_CASES = re.compile(
-    r"(?:[ \t]*case FE_(?:DOWNWARD|UPWARD|TOWARDZERO):\n(?:(?![ \t]*case )(?!.*\bswitch\b).*\n)*?)+"
+    r"(?:[ \t]*case FE_(?:DOWNWARD|UPWARD|TOWARDZERO):\n(?:(?![ \t]*(?:case|default)\b)(?!.*\bswitch\b).*\n)*?)+"
 )
 _ATTRIBUTE = re.compile(r"__attribute__\(\((?:cold|noinline|unused)(?:,(?:cold|noinline|unused))*\)\)[ \t]*")
 _RAISE = re.compile(r"^[ \t]*feraiseexcept[ \t]*\([A-Z_]+\);[^\n]*\n", re.MULTILINE)
@@ -364,15 +364,15 @@ def contract_clean(text: str, origin: str) -> str:
     return text
 
 
-# Six kernels round a reduced argument to an integer, ties to even: binary32 `sin`,
-# `cos`, and `tan`, and binary64 `exp` and `erfc` through an upstream
+# Eight kernels round to an integer, ties to even: binary32 `sin`, `cos`, `tan`, and
+# `pow`, and binary64 `exp`, `erfc`, and `pow` through an upstream
 # `roundeven_finite` helper, and binary64 `sin` (`cr_sin_moderate`) through a direct
 # `__builtin_roundeven` call. Upstream's helper is that builtin on GCC 10 and Clang 17
 # and a `round`-based fallback elsewhere. On baseline x86-64, and on aarch64 with
 # GCC 10 and 11, the builtin becomes a call to the C library's `roundeven`. musl
 # and glibc before 2.25 do not have it. `chelis build` compiles every kernel into
 # its compiler canary, so one such call stops every native build there.
-# `inline_roundeven` and `route_sin_roundeven` give all six `ROUNDEVEN_FINITE`
+# `inline_roundeven` and `route_sin_roundeven` give all eight `ROUNDEVEN_FINITE`
 # instead.
 #
 # `rint` rounds to an integer in the current rounding mode. Chelis pins
