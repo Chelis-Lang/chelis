@@ -284,6 +284,10 @@ const CONTRACTS: &[(&str, Contract)] = &[
         ),
     ),
     (
+        "pow",
+        Adjoint("tensor[2, 2, P]", "sum(sum(pow(mul(x, x), x), 1i32), 0i32)"),
+    ),
+    (
         "prod_reduce",
         Adjoint("tensor[2, 2, P]", "sum(prod_reduce(x, 1i32), 0i32)"),
     ),
