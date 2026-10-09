@@ -843,6 +843,44 @@ fn nested_block_shadowing_a_binding_name_does_not_reclaim_it_twice() {
     assert_line_matches_eval(source, "alias_shadowed_name", &stdout, "b");
 }
 
+#[test]
+fn host_let_alias_does_not_capture_an_option_pattern_binding() {
+    if skip_without_cc() {
+        return;
+    }
+    let source = "type Inp = | Inp { x: i64 }\n\
+                  sig forward: Inp -> i64\n\
+                  def forward(inp: Inp) = {\n\
+                    x = inp.x\n\
+                    option = Some(5i64)\n\
+                    selected = match option with {\n\
+                      | Some(x) => x\n\
+                      | None => 0i64\n\
+                    }\n\
+                    add(x, selected)\n\
+                  }\n\
+                  out = forward(Inp { x: 1i64 })\n";
+    let (stdout, _) = build_run_and_emit(source, "host_let_option_shadow");
+    assert!(stdout.contains("out = 6"), "{stdout}");
+}
+
+#[test]
+fn host_let_alias_does_not_capture_an_inline_callback_parameter() {
+    if skip_without_cc() {
+        return;
+    }
+    let source = "type Inp = | Inp { x: i64 }\n\
+                  sig forward: Inp -> i64\n\
+                  def forward(inp: Inp) = {\n\
+                    x = inp.x\n\
+                    selected = index(map(fn (x: i64) -> x, [7i64]), 0i64)\n\
+                    add(x, selected)\n\
+                  }\n\
+                  out = forward(Inp { x: 1i64 })\n";
+    let (stdout, _) = build_run_and_emit(source, "host_let_callback_shadow");
+    assert!(stdout.contains("out = 8"), "{stdout}");
+}
+
 // ---------------------------------------------------------------------------
 // 6b. The ledger inside a compiled function body.
 //

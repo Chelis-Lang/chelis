@@ -2196,6 +2196,112 @@ pub enum HostExprKind<T = HostTypeTerm> {
     Unit,
 }
 
+/// Release expression trees without a native call frame for every nested
+/// host expression. Verified payloads and ABI projections retain the source
+/// shape after emission, so their ordinary derived drop can exhaust a small
+/// stack even when lowering and emission themselves are iterative.
+pub fn drain_host_program_expressions<T>(program: &mut HostProgram<T>) {
+    let mut pending = Vec::new();
+    for binding in &mut program.globals {
+        pending.push(std::mem::replace(
+            &mut binding.value,
+            HostExpr::new(HostExprKind::Unit),
+        ));
+    }
+    for function in &mut program.functions {
+        pending.push(std::mem::replace(
+            &mut function.body,
+            HostExpr::new(HostExprKind::Unit),
+        ));
+    }
+    while let Some(expr) = pending.pop() {
+        match expr.kind {
+            HostExprKind::SignatureEntry { args, lists, .. } => {
+                pending.extend(args);
+                pending.extend(lists.into_iter().map(|entry| entry.value));
+            }
+            HostExprKind::ResultClaimScope { body, .. }
+            | HostExprKind::FormalIngress { value: body, .. }
+            | HostExprKind::ExtentSites { value: body, .. }
+            | HostExprKind::AdtFieldAccess { base: body, .. } => pending.push(*body),
+            HostExprKind::List(items, _)
+            | HostExprKind::Tuple(items, _)
+            | HostExprKind::Call { args: items, .. }
+            | HostExprKind::Builtin { args: items, .. }
+            | HostExprKind::AdtConstruct { fields: items, .. }
+            | HostExprKind::TensorCall { args: items, .. } => pending.extend(items),
+            HostExprKind::If {
+                cond,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                pending.push(*cond);
+                pending.push(*then_expr);
+                pending.push(*else_expr);
+            }
+            HostExprKind::MatchOption {
+                scrutinee,
+                some_expr,
+                none_expr,
+                ..
+            } => {
+                pending.push(*scrutinee);
+                pending.push(*some_expr);
+                pending.push(*none_expr);
+            }
+            HostExprKind::MatchAdt {
+                scrutinee,
+                arms,
+                default_expr,
+                ..
+            } => {
+                pending.push(*scrutinee);
+                pending.extend(arms.into_iter().map(|arm| arm.expr));
+                pending.extend(default_expr.map(|expr| *expr));
+            }
+            HostExprKind::Let { bindings, body, .. }
+            | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+                pending.extend(bindings.into_iter().map(|binding| binding.value));
+                pending.push(*body);
+            }
+            HostExprKind::Map { callback, list, .. }
+            | HostExprKind::Filter { callback, list, .. }
+            | HostExprKind::Partition { callback, list, .. }
+            | HostExprKind::FlatMap { callback, list, .. } => {
+                pending.push(*list);
+                if let HostCallbackKind::Inline { body, .. } = callback.kind {
+                    pending.push(*body);
+                }
+            }
+            HostExprKind::Fold {
+                callback,
+                init,
+                list,
+                ..
+            }
+            | HostExprKind::Scan {
+                callback,
+                init,
+                list,
+                ..
+            } => {
+                pending.push(*init);
+                pending.push(*list);
+                if let HostCallbackKind::Inline { body, .. } = callback.kind {
+                    pending.push(*body);
+                }
+            }
+            HostExprKind::Int(_)
+            | HostExprKind::Float(_)
+            | HostExprKind::Bool(_)
+            | HostExprKind::String(_)
+            | HostExprKind::Var(_, _)
+            | HostExprKind::Unit => {}
+        }
+    }
+}
+
 pub type ConcreteHostCallback = HostCallback<ConcreteHostType>;
 pub type ConcreteHostMatchArm = HostMatchArm<ConcreteHostType>;
 pub type ConcreteHostPatternBinding = HostPatternBinding<ConcreteHostType>;

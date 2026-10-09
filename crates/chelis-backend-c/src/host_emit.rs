@@ -4390,6 +4390,10 @@ struct HostEmitter<'a> {
     /// Rebuild their aggregate load tree at each reference instead of reading
     /// an origin pointer retained by the cached/global value.
     interface_reload_names: UnordSet<String>,
+    /// C names for lexically visible host `let` bindings. Sequential let
+    /// tails share one C block, so shadowed source names need distinct C
+    /// declarations while references still resolve to the nearest binder.
+    local_aliases: UnordMap<String, String>,
     pre_emitted_clone_sites: UnordSet<HostSiteId>,
     pre_emitted_terminals: UnordSet<(HostSiteId, VerifiedOperationId)>,
     owner_vars: UnordMap<VerifiedOwnerId, String>,
@@ -4757,6 +4761,7 @@ impl<'a> HostEmitter<'a> {
             entry_projection: entry::Projection::default(),
             external_helpers: UnordSet::new(),
             interface_reload_names: UnordSet::new(),
+            local_aliases: UnordMap::new(),
             pre_emitted_clone_sites: UnordSet::new(),
             pre_emitted_terminals: UnordSet::new(),
             owner_vars: UnordMap::new(),
@@ -5962,6 +5967,102 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
+    fn local_c_name(&self, name: &str) -> String {
+        self.local_aliases
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| c_ident(name).into_owned())
+    }
+
+    fn assign_let_spine(
+        &mut self,
+        target: &str,
+        expr: &HostExpr,
+        ty: &HostType,
+        first_site: &ProjectedHostSite<'a>,
+        on_result_spine: bool,
+    ) -> Result<(), Unsupported> {
+        // A sequential source block is a tail chain of HostExpr::Let nodes.
+        // Emit that chain in one C scope and consume its verified sites in
+        // preorder, then discharge them from the innermost let outward.
+        // Distinct C aliases preserve lexical shadowing without nested C
+        // declarations or a recursive Rust emission frame per binding.
+        let mut current = expr;
+        let mut site = first_site.clone();
+        let mut spine = on_result_spine;
+        let mut frames = Vec::new();
+        self.lines.push(format!("{}{{", self.indent));
+        let nested_indent = format!("{}    ", self.indent);
+        let previous_indent = std::mem::replace(&mut self.indent, nested_indent);
+        loop {
+            let HostExprKind::Let {
+                bindings,
+                body,
+                ty: expr_ty,
+            } = &current.kind
+            else {
+                unreachable!("let spine cursor is a let expression")
+            };
+            require_same_abi_type(ty, expr_ty, "let expression")?;
+            let spine_binding = spine
+                .then(|| host_result_binding_index(bindings, body))
+                .flatten();
+            let mut aliases = Vec::with_capacity(bindings.len());
+            let mut shadowed_interface_globals = Vec::new();
+            for (index, binding) in bindings.iter().enumerate() {
+                // The value still sees the previous lexical binding. Install
+                // the new alias only after that value has been emitted.
+                let temp = self.next_temp("let");
+                self.claim_on_spine = spine_binding == Some(index);
+                self.emit_expr_to_var(&binding.value, &temp, &binding.ty)?;
+                let alias = self.next_temp("let_binding");
+                self.lines
+                    .push(format!("{}{};", self.indent, c_decl(&binding.ty, &alias)?));
+                self.declare_result_origin(&alias, &binding.ty, None);
+                self.lines
+                    .push(format!("{}{} = {};", self.indent, alias, temp));
+                self.lines.push(format!(
+                    "{}{} = {};",
+                    self.indent,
+                    result_origin_name(&alias),
+                    result_origin_name(&temp)
+                ));
+                let old = self.local_aliases.insert(binding.name.clone(), alias);
+                aliases.push((binding.name.clone(), old));
+                if self.interface_reload_names.remove(&binding.name) {
+                    shadowed_interface_globals.push(binding.name.clone());
+                }
+            }
+            let next_spine = spine && spine_binding.is_none();
+            frames.push((site, aliases, shadowed_interface_globals));
+            if matches!(&body.kind, HostExprKind::Let { .. }) {
+                site = self.next_expression_site()?;
+                self.emit_span_comments(body);
+                current = body;
+                spine = next_spine;
+            } else {
+                self.claim_on_spine = next_spine;
+                self.assign_expr(target, body, ty)?;
+                break;
+            }
+        }
+        for (site, aliases, shadowed_interface_globals) in frames.into_iter().rev() {
+            self.emit_expression_site(&site, target)?;
+            self.interface_reload_names
+                .extend(shadowed_interface_globals);
+            for (name, previous) in aliases.into_iter().rev() {
+                if let Some(previous) = previous {
+                    self.local_aliases.insert(name, previous);
+                } else {
+                    self.local_aliases.remove(&name);
+                }
+            }
+        }
+        self.indent = previous_indent;
+        self.lines.push(format!("{}}}", self.indent));
+        Ok(())
+    }
+
     fn assign_expr(
         &mut self,
         target: &str,
@@ -6087,18 +6188,26 @@ impl<'a> HostEmitter<'a> {
                     // #379: route the referenced name through `c_ident` so a
                     // binding/param/let spelled like a C keyword resolves to
                     // the same mangled identifier its declaration used.
+                    let source = self.local_c_name(name);
                     self.lines
-                        .push(format!("{}{target} = {};", self.indent, c_ident(name)));
+                        .push(format!("{}{target} = {source};", self.indent));
                     let target_origin = result_origin_name(target);
                     if self.interface_reload_names.contains(name) {
                         let load = Self::interface_result_origin_expr(ty);
                         self.lines
                             .push(format!("{}{target_origin} = {load};", self.indent));
                     } else {
+                        // `result_origin_name` performs C escaping itself.
+                        // A local alias is already a compiler C name; an
+                        // ordinary source name must remain unescaped here.
+                        let source_origin = self
+                            .local_aliases
+                            .get(name)
+                            .map_or(name.as_str(), String::as_str);
                         self.lines.push(format!(
                             "{}{target_origin} = {};",
                             self.indent,
-                            result_origin_name(name)
+                            result_origin_name(source_origin)
                         ));
                     }
                 }
@@ -6285,6 +6394,7 @@ impl<'a> HostEmitter<'a> {
                     result_origin_name(&option_var)
                 ));
                 let shadowed_interface_global = self.interface_reload_names.remove(bind_name);
+                let shadowed_alias = self.local_aliases.remove(bind_name);
                 self.bind_match_payload(site, some_edge.target(), "option_payload", bind_name)?;
                 // chelis#1222: the binder shadows any enclosing name it
                 // reuses. Its key carries no outgoing edge, because the
@@ -6299,6 +6409,9 @@ impl<'a> HostEmitter<'a> {
                 self.emit_expression_block_actions(site, arm_blocks.0, target)?;
                 if shadowed_interface_global {
                     self.interface_reload_names.insert(bind_name.clone());
+                }
+                if let Some(alias) = shadowed_alias {
+                    self.local_aliases.insert(bind_name.clone(), alias);
                 }
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
@@ -6331,62 +6444,11 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             HostExprKind::Let {
-                bindings,
-                body,
-                ty: expr_ty,
+                bindings: _,
+                body: _,
+                ty: _,
             } => {
-                require_same_abi_type(ty, expr_ty, "let expression")?;
-                // chelis#1771: when this let is on the result spine, the guard
-                // belongs at the binding whose value the let returns, not at
-                // the let's own end, so an effect bound after that binding runs
-                // only when the guard passes.
-                let spine_binding = on_result_spine
-                    .then(|| host_result_binding_index(bindings, body))
-                    .flatten();
-                self.lines.push(format!("{}{{", self.indent));
-                let nested_indent = format!("{}    ", self.indent);
-                let previous = std::mem::replace(&mut self.indent, nested_indent);
-                let mut shadowed_interface_globals = Vec::new();
-                for (index, binding) in bindings.iter().enumerate() {
-                    // Compute the value into a temp before declaring the binding name.
-                    // If the compiler inlines a recursive call that reuses a binding
-                    // name from the outer scope (e.g. two nested `let jtj_new = ...`),
-                    // declaring the inner name first would shadow the outer variable
-                    // before its value is read, yielding a NULL pointer at runtime.
-                    let temp = self.next_temp("let");
-                    self.claim_on_spine = spine_binding == Some(index);
-                    self.emit_expr_to_var(&binding.value, &temp, &binding.ty)?;
-                    self.lines.push(format!(
-                        "{}{};",
-                        self.indent,
-                        c_decl(&binding.ty, &binding.name)?
-                    ));
-                    self.declare_result_origin(&binding.name, &binding.ty, None);
-                    // #379: assign to the same mangled identifier the
-                    // declaration used (both route through `c_ident`).
-                    self.lines.push(format!(
-                        "{}{} = {};",
-                        self.indent,
-                        c_ident(&binding.name),
-                        temp
-                    ));
-                    self.lines.push(format!(
-                        "{}{} = {};",
-                        self.indent,
-                        result_origin_name(&binding.name),
-                        result_origin_name(&temp)
-                    ));
-                    if self.interface_reload_names.remove(&binding.name) {
-                        shadowed_interface_globals.push(binding.name.clone());
-                    }
-                }
-                self.claim_on_spine = on_result_spine && spine_binding.is_none();
-                self.assign_expr(target, body, ty)?;
-                self.emit_expression_site(site, target)?;
-                self.interface_reload_names
-                    .extend(shadowed_interface_globals);
-                self.indent = previous;
-                self.lines.push(format!("{}}}", self.indent));
+                self.assign_let_spine(target, expr, ty, site, on_result_spine)?;
                 return Ok(());
             }
             HostExprKind::RetainedInvocation {
@@ -6399,6 +6461,7 @@ impl<'a> HostEmitter<'a> {
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 let mut shadowed_interface_globals = Vec::new();
+                let mut shadowed_aliases = Vec::new();
                 for binding in bindings {
                     let temp = self.next_temp("retained_actual");
                     // A callee result contract never constrains actual
@@ -6426,12 +6489,21 @@ impl<'a> HostEmitter<'a> {
                     if self.interface_reload_names.remove(&binding.name) {
                         shadowed_interface_globals.push(binding.name.clone());
                     }
+                    shadowed_aliases.push((
+                        binding.name.clone(),
+                        self.local_aliases.remove(&binding.name),
+                    ));
                 }
                 self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, body, ty)?;
                 self.emit_expression_site(site, target)?;
                 self.interface_reload_names
                     .extend(shadowed_interface_globals);
+                for (name, alias) in shadowed_aliases.into_iter().rev() {
+                    if let Some(alias) = alias {
+                        self.local_aliases.insert(name, alias);
+                    }
+                }
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
                 return Ok(());
@@ -10854,6 +10926,7 @@ impl<'a> HostEmitter<'a> {
             // independently retained handle, so the arm binding is not a
             // copy of anything this scope already owns.
             let mut shadowed_interface_globals = Vec::new();
+            let mut shadowed_aliases = Vec::new();
             for binding in &arm.bindings {
                 let field_var = self.next_temp(&format!("{}_field", binding.name));
                 self.lines.push(format!(
@@ -10884,6 +10957,10 @@ impl<'a> HostEmitter<'a> {
                 if self.interface_reload_names.remove(&binding.name) {
                     shadowed_interface_globals.push(binding.name.clone());
                 }
+                shadowed_aliases.push((
+                    binding.name.clone(),
+                    self.local_aliases.remove(&binding.name),
+                ));
             }
             self.emit_region_entry_terminals(site, arm_edges[index].target(), arm_blocks[index])?;
             self.claim_on_spine = on_result_spine;
@@ -10891,6 +10968,11 @@ impl<'a> HostEmitter<'a> {
             self.emit_expression_block_actions(site, arm_blocks[index], target)?;
             self.interface_reload_names
                 .extend(shadowed_interface_globals);
+            for (name, alias) in shadowed_aliases.into_iter().rev() {
+                if let Some(alias) = alias {
+                    self.local_aliases.insert(name, alias);
+                }
+            }
             self.indent = previous;
             self.lines.push(format!("{}}}", self.indent));
         }
@@ -11706,6 +11788,7 @@ impl<'a> HostEmitter<'a> {
             }
             HostCallbackKind::Inline { params, body } => {
                 let mut shadowed_interface_globals = Vec::new();
+                let mut shadowed_aliases = Vec::new();
                 for (param, arg_var) in params.iter().zip(arg_vars.iter()) {
                     self.lines.push(format!(
                         "{}{} {} = {};",
@@ -11727,10 +11810,17 @@ impl<'a> HostEmitter<'a> {
                     if self.interface_reload_names.remove(&param.name) {
                         shadowed_interface_globals.push(param.name.clone());
                     }
+                    shadowed_aliases
+                        .push((param.name.clone(), self.local_aliases.remove(&param.name)));
                 }
                 self.assign_expr(target, body, &callback.ret_ty)?;
                 self.interface_reload_names
                     .extend(shadowed_interface_globals);
+                for (name, alias) in shadowed_aliases.into_iter().rev() {
+                    if let Some(alias) = alias {
+                        self.local_aliases.insert(name, alias);
+                    }
+                }
             }
         }
         Ok(())
