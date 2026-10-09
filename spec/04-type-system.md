@@ -636,7 +636,7 @@ invariant that prevents a hand-authored mangled name from self-keying
 to a victim module on any surface.
 
 **Names in diagnostics.** Because the linker output is private, a
-diagnostic of `chelis check`, `eval`, `build` or `test` does not show a
+diagnostic of `chelis check`, `eval`, `build`, `test` or `prove` does not show a
 linker name that the linker assigned to one declaration. It names that
 declaration by the name its author wrote, taken from the linker's own
 name assignment rather than from the encoded string (an authored name
@@ -661,9 +661,14 @@ may itself contain `__`):
   in `Demo.Main.My` link alike); a linker name assigned to more than one
   declaration is shown as linked, since no one authored name is it.
 
-No two distinct linker names are shown alike. The rule governs the
-human-readable text of a compile-time diagnostic: its kind, span and
-span identity are unchanged, and the text of an evaluation-time failure
+No two distinct linker names are shown alike. Prove property and obligation
+names, goals, reasons and diagnostics use the same source-name rendering.
+Rendering does not alter stable declaration IDs, proof evidence identities,
+or dependency-graph declaration names. Literal values within a goal remain
+the program's data and are not renamed.
+
+The rule governs the human-readable text of a compile-time diagnostic: its
+kind, span and span identity are unchanged, and the text of an evaluation-time failure
 is the program's own data and is shown as the program produced it. A
 diagnostic whose own contract spells the names it reports keeps that
 spelling: the opaque-type violation message names its type, def,

@@ -584,6 +584,7 @@ fn prove_surf_file(
                             &reachable_stdlib,
                             prepared.stdlib_source_digest,
                             &reachable_non_stdlib,
+                            &prepared.diagnostic_names,
                             options,
                             totals,
                         );
@@ -605,6 +606,7 @@ fn prove_surf_file(
                         )
                     }
                     Err(message) => {
+                        let message = prepared.diagnostic_names.render(&message);
                         totals.errors += 1;
                         if options.json {
                             println!(

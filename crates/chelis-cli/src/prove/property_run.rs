@@ -102,11 +102,25 @@ pub(super) fn run_surf_linked_properties_shared(
         let graph =
             match chelis_reef::prepare_reef_graph(root, &chelis_std_bundle::EMBEDDED_RUNTIME) {
                 Ok(graph) => graph,
-                Err(message) => return emit_discovery_error(path, &message, options, totals),
+                Err(message) => {
+                    return emit_discovery_error(
+                        path,
+                        &source.diagnostic_names.render(&message),
+                        options,
+                        totals,
+                    );
+                }
             };
         match chelis_prove::property_runner::with_registered_clarabel_contract(&graph, run) {
             Ok(result) => result,
-            Err(message) => return emit_discovery_error(path, &message, options, totals),
+            Err(message) => {
+                return emit_discovery_error(
+                    path,
+                    &source.diagnostic_names.render(&message),
+                    options,
+                    totals,
+                );
+            }
         }
     } else {
         run()
@@ -118,9 +132,27 @@ pub(super) fn run_surf_linked_properties_shared(
     };
     let mut outcomes = match run_result {
         Ok(PropertyRunResult::Ran(o)) => o,
-        Err(message) => return emit_discovery_error(path, &message, options, totals),
+        Err(message) => {
+            return emit_discovery_error(
+                path,
+                &source.diagnostic_names.render(&message),
+                options,
+                totals,
+            );
+        }
     };
     for outcome in &mut outcomes {
+        // Goal text is canonical Surf: replace identifier tokens only, never
+        // literal data. Diagnostics are prose and use the text renderer.
+        if let Some(goal) = &mut outcome.goal {
+            match render_goal(goal, source.diagnostic_names) {
+                Ok(rendered) => *goal = rendered,
+                Err(error) => return emit_discovery_error(path, &error, options, totals),
+            }
+        }
+        if let Some(reason) = &mut outcome.reason {
+            source.diagnostic_names.render_in_place(reason);
+        }
         if let Some(display_name) = display_names.get(&outcome.name) {
             outcome.name = display_name.clone();
         }
@@ -145,6 +177,29 @@ pub(super) fn run_surf_linked_properties_shared(
         }
     }
     render_all(path, &outcomes, "surf", options, totals)
+}
+
+/// Render a generated Surf proposition without changing string literals or
+/// reformatting its expression. A malformed generated goal is an error, never
+/// permission to publish an unrendered private spelling.
+fn render_goal(goal: &str, names: &chelis_reef::DiagnosticNames) -> Result<String, String> {
+    use chelis_surf::token::TokenKind;
+
+    let tokens = chelis_surf::lexer::lex(goal)
+        .map_err(|error| format!("cannot render source names in generated goal: {error}"))?;
+    let mut rendered = String::with_capacity(goal.len());
+    let mut copied = 0;
+    for token in tokens {
+        if let TokenKind::Ident(name) | TokenKind::TypeIdent(name) = &token.kind
+            && let Some(spelling) = names.source_name(name)
+        {
+            rendered.push_str(&goal[copied..token.span.offset]);
+            rendered.push_str(spelling);
+            copied = token.span.end();
+        }
+    }
+    rendered.push_str(&goal[copied..]);
+    Ok(rendered)
 }
 
 /// Discover and run every USER `@property` in Deep `source` through the

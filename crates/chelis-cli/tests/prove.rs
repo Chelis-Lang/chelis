@@ -3887,3 +3887,209 @@ fn legacy_property_marker_is_data_and_has_no_discovery_authority() {
     assert!(!records.iter().any(|v| v["kind"] == "property"), "{text}");
     assert!(records.iter().any(|v| v["kind"] == "summary"), "{text}");
 }
+
+// spec/04 §2.5: rendering uses the linker's source ownership; proof results
+// and dependency identities are independent of display spellings.
+#[cfg(feature = "chelis-prove")]
+fn source_name_package(source: &str) -> tempfile::TempDir {
+    let dir = tempdir().expect("tempdir");
+    write_file(
+        &dir.path().join("reef.toml"),
+        &format!(
+            "[package]\nname = \"names-app\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Demo\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(&dir.path().join("src/main.ch"), source);
+    dir
+}
+
+#[cfg(feature = "chelis-prove")]
+fn source_name_prove(path: &std::path::Path, json: bool) -> std::process::Output {
+    let mut cmd = Command::cargo_bin("chelis").expect("binary");
+    cmd.arg("prove").arg(path).args([
+        "--tier",
+        "fuzz-only",
+        "--samples",
+        "1",
+        "--seed",
+        "1",
+        "--max-attempts",
+        "1",
+    ]);
+    if json {
+        cmd.arg("--json");
+    }
+    cmd.output().expect("prove")
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_source_names_check_failure_matches_standalone() {
+    let source = "module Demo.Main\nout: i32 = true\n@property trivial forall(x: f32): x == x\n";
+    let package = source_name_package(source);
+    let standalone = write_prop(source);
+    let package_output = source_name_prove(&package.path().join("src/main.ch"), true);
+    let standalone_output = source_name_prove(&standalone.path().join("prop.ch"), true);
+    assert_eq!(package_output.status.code(), Some(3));
+    assert_eq!(standalone_output.status.code(), Some(3));
+    let first = |output: &[u8]| -> Value {
+        serde_json::from_str(
+            String::from_utf8_lossy(output)
+                .lines()
+                .next()
+                .expect("error"),
+        )
+        .expect("json")
+    };
+    let package_error = first(&package_output.stdout);
+    assert_eq!(package_error, first(&standalone_output.stdout));
+    assert_eq!(package_error["stage"], "check");
+    assert!(
+        package_error["diagnostics"][0]
+            .as_str()
+            .unwrap()
+            .contains("def 'out'")
+    );
+    let text = source_name_prove(&package.path().join("src/main.ch"), false);
+    assert_eq!(text.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&text.stderr);
+    assert!(stderr.contains("def 'out'"), "{stderr}");
+    assert!(!stderr.contains("pkg__"), "{stderr}");
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_source_names_goals_qualify_external_module_and_preserve_graph() {
+    let source = "module Demo.Main\nimport Demo.Util (other)\ndef local__value(x: f32) -> f32 = x\n@property true_goal forall(x: f32): local__value(x) == other(x)\n@property false_goal forall(x: f32): local__value(x) != other(x)\n";
+    let dir = source_name_package(source);
+    write_file(
+        &dir.path().join("src/util.ch"),
+        "module Demo.Util\nexport (other)\ndef other(x: f32) -> f32 = x\n",
+    );
+    let entry = dir.path().join("src/main.ch");
+    let output = source_name_prove(&entry, true);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["name"], "true_goal");
+    assert_eq!(records[0]["status"], "passed");
+    assert_eq!(
+        records[0]["goal"],
+        "(local__value(x) == Demo.Util.other(x))"
+    );
+    assert_eq!(records[1]["status"], "failed");
+    assert_eq!(
+        records[1]["goal"],
+        "(local__value(x) != Demo.Util.other(x))"
+    );
+    let graph = property_summary(&output.stdout)["dependency_graph"].clone();
+    assert_eq!(graph["status"], "complete");
+    let nodes = graph["declarations"].as_array().unwrap();
+    let other = nodes
+        .iter()
+        .find(|node| node["name"] == "other")
+        .expect("authored graph name");
+    assert_eq!(other["module"], "Demo.Util");
+    assert!(other["id"].as_str().unwrap().starts_with("decl:"));
+    assert_eq!(
+        graph,
+        property_summary(&source_name_prove(&entry, true).stdout)["dependency_graph"]
+    );
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_source_names_generator_reason_and_goal_use_authored_names() {
+    let source = "module Demo.Main\nexport (norm, prob_value)\n@opaque\n@invariant(p) ((p.value >= 0.4995f32) && (p.value <= 0.5005f32))\ntype T =\n  | T { value: f32 }\ndef norm(x: f32) -> T = T { value: 0.5f32 }\ndef prob_value(p: T) -> f32 = p.value\n@property bounded forall(p: T): prob_value(p) <= 0.5005f32\n@property false_bound forall(p: T): prob_value(p) <= 0.4f32\n";
+    let dir = source_name_package(source);
+    let output = source_name_prove(&dir.path().join("src/main.ch"), true);
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 2, "{output:?}");
+    assert_eq!(records[0]["goal"], "(prob_value(p) <= 0.5005f32)");
+    for record in &records {
+        let reason = record["reason"].as_str().unwrap_or("");
+        assert!(
+            !reason.contains("pkg__") && !reason.contains("Pkg__"),
+            "{record}"
+        );
+    }
+    // An impossible invariant and no producer guarantees a diagnostic without
+    // depending on the independent package constructor-probe implementation.
+    let rejected = source_name_package(
+        "module Demo.Main\n@opaque\n@invariant(p) ((p.value > 1.0f32) && (p.value < 0.0f32))\ntype Impossible =\n  | Impossible { value: f32 }\n@property unavailable forall(p: Impossible): true\n",
+    );
+    let output = source_name_prove(&rejected.path().join("src/main.ch"), true);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["status"], "unsupported");
+    let reason = records[0]["reason"]
+        .as_str()
+        .expect("generation diagnostic");
+    assert!(reason.contains("Impossible"), "{reason}");
+    assert!(
+        !reason.contains("pkg__") && !reason.contains("Pkg__"),
+        "{reason}"
+    );
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_source_names_standalone_tide_parity_for_true_and_false_goals() {
+    let source = "module Demo.Main\ndef local__value(x: f32) -> f32 = x\n@property true_goal forall(x: f32): local__value(x) == x\n@property false_goal forall(x: f32): local__value(x) != x\n";
+    let dir = write_prop(source);
+    let output = source_name_prove(&dir.path().join("prop.ch"), true);
+    assert_eq!(output.status.code(), Some(1));
+    let cli = property_records(&output.stdout);
+    let response = chelis_tide::mcp::handle_message(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "chelis_prove", "arguments": {
+            "source": source, "source_kind": "surf", "tier": "fuzz-only", "samples": 1, "seed": 1
+        }}
+    }), &chelis_std_bundle::EMBEDDED_RUNTIME).expect("response");
+    let tide = response["result"]["structuredContent"]["properties"]
+        .as_array()
+        .expect("properties");
+    assert_eq!(cli.len(), 2);
+    assert_eq!(tide.len(), 2);
+    for (cli, tide) in cli.iter().zip(tide) {
+        for key in [
+            "name",
+            "goal",
+            "reason",
+            "status",
+            "composite_verdict",
+            "samples",
+            "seed",
+        ] {
+            assert_eq!(cli[key], tide[key], "{key}: {response}");
+        }
+        assert!(cli["goal"].as_str().unwrap().contains("local__value(x)"));
+    }
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_source_names_goal_preserves_string_literal_data() {
+    let source = r#"module Demo.Main
+def text(x: i32) -> string = "pkg__names__app__Demo__Main__text"
+@property literal forall(x: i32): text(x) == "pkg__names__app__Demo__Main__text"
+"#;
+    let package = source_name_package(source);
+    let standalone = write_prop(source);
+    let package_output = source_name_prove(&package.path().join("src/main.ch"), true);
+    let standalone_output = source_name_prove(&standalone.path().join("prop.ch"), true);
+    assert_eq!(
+        package_output.status.code(),
+        standalone_output.status.code()
+    );
+    let package_records = property_records(&package_output.stdout);
+    let standalone_records = property_records(&standalone_output.stdout);
+    assert_eq!(package_records.len(), 1, "{package_output:?}");
+    assert_eq!(package_records[0]["goal"], standalone_records[0]["goal"]);
+    assert_eq!(
+        package_records[0]["goal"],
+        "(text(x) == \"pkg__names__app__Demo__Main__text\")"
+    );
+}
