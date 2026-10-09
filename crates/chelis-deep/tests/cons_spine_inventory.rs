@@ -64,6 +64,72 @@ const GENERIC_DISPATCH_CYCLES: &[(&str, &str)] = &[
     ),
 ];
 
+// These existing functions form audited generic-expression dispatch cycles.
+// A new helper that joins one of those cycles is not exempt merely because it
+// can reach a dispatcher: it must be reviewed and added here explicitly.
+const AUDITED_GENERIC_DISPATCH_MEMBERS: &[(&str, &str)] = &[
+    (
+        "crates/chelis-compiler-api/src/runtime/eval.rs",
+        r#"
+        apply_def_kernel apply_resolved_callable apply_resolved_callable_under_result_claim
+        apply_resolved_callable_with_arg_types apply_resolved_callable_with_arg_types_impl
+        apply_staged_host_plan eval_access eval_app eval_app_under_result_claim eval_builtin
+        eval_cast eval_checked_local_ascription_region eval_cons_spine eval_decoded eval_expr
+        eval_if eval_if_condition eval_let eval_let_under_result_claim eval_let_with_claims
+        eval_match eval_match_guard eval_match_under_result_claim eval_record eval_tuple_get
+        eval_under_result_claim eval_var initialize_reached_values resolve_top_level
+        "#,
+    ),
+    (
+        "crates/chelis-ir/src/host.rs",
+        r#"
+        def_body_decision ensure_mono_specialization expr_calls_summary_rejecting_top_level_fn
+        hoist_host_lane_tensor_bindings lower_access_host_expr lower_app_host_expr
+        lower_checked_local_ascription_region lower_def_body_kernel
+        lower_host_body_with_record_locals lower_host_callback lower_host_expr
+        lower_host_expr_kind lower_host_expr_with_expected_opt lower_host_function
+        lower_host_match_arm lower_inline_host_invocation lower_list_literal_items
+        lower_match_host_expr lower_mono_specialized_function
+        lower_named_retained_host_invocation lower_record_host_expr lower_recursive_generic_call
+        lower_retained_host_invocation lower_staged_host_plan prepare_retained_payload_actuals
+        top_level_fn_helper_summary_rejects
+        "#,
+    ),
+    (
+        "crates/chelis-ir/src/lower.rs",
+        r#"
+        extract_reshape_dim_list fold_shape_derived_static_size inline_initializer
+        inline_program_value inline_trapping_value inline_value_reference
+        input_axis_source_from_shape_arg lower_access lower_app lower_atom lower_block
+        lower_branch_with_path lower_builtin_app lower_cast lower_copy lower_def
+        lower_expr_node lower_expr_unclaimed lower_expr_with_claim lower_fn lower_grad
+        lower_grad_callable_app lower_grad_callable_with_values lower_handle_effect
+        lower_host_list_filter lower_host_list_fold lower_host_list_map lower_host_list_to_tensor
+        lower_host_list_zip_map lower_identity lower_if lower_initializer lower_jit lower_let
+        lower_match lower_node lower_one_bound lower_pair_bounds lower_par
+        lower_plain_callable_app lower_plain_callable_with_values lower_realize lower_record
+        lower_resolved_body lower_sequence_fallthrough lower_split_key lower_stride_bounds
+        lower_tensor_concat lower_tuple lower_tuple_get lower_unrepresentable lower_var
+        lower_vmap_callable_app lower_vmap_callable_with_nodes lower_vmap_grad_callable_app
+        lower_vmap_grad_callable_with_nodes static_i64_from_expr_or_binding
+        try_lower_callable_app try_lower_list_producer try_lower_staged_list_recurrence
+        try_lower_staged_list_selection try_lower_static_list_concat
+        "#,
+    ),
+    (
+        "crates/chelis-types/src/infer/validate.rs",
+        "validate_expression_metadata validate_static_cons_spine",
+    ),
+];
+
+fn is_audited_generic_dispatch_member(source: &str, name: &str) -> bool {
+    AUDITED_GENERIC_DISPATCH_MEMBERS
+        .iter()
+        .any(|(path, members)| {
+            *path == source && members.split_whitespace().any(|member| member == name)
+        })
+}
+
 #[derive(Default)]
 struct BodyScan<'a> {
     function: &'a str,
@@ -238,8 +304,10 @@ impl CallGraph {
             // reader has a different shape: a recursive cycle asks an
             // independent helper whether the current cell is Cons. Keep the
             // direct literal/self-recursion rule above for that simpler case.
-            let generic_dispatch_cycle = GENERIC_DISPATCH_CYCLES.iter().any(|(path, anchor)| {
+            let audited_generic_dispatch = GENERIC_DISPATCH_CYCLES.iter().any(|(path, anchor)| {
                 *path == source
+                    && (fact.name == *anchor
+                        || is_audited_generic_dispatch_member(source, &fact.name))
                     && seen.iter().copied().any(|candidate| {
                         self.functions[candidate].name == *anchor
                             && reaches_function(candidate, root, &self.functions, &by_key)
@@ -255,7 +323,7 @@ impl CallGraph {
                             return false;
                         }
                         !reaches_function(candidate, root, &self.functions, &by_key)
-                            || !generic_dispatch_cycle
+                            || !audited_generic_dispatch
                     })
                 })
                 .flatten();
@@ -304,6 +372,7 @@ fn recursive_cons_walker_problems(contents: &str, source: &str) -> Vec<String> {
 #[derive(Default)]
 struct Inventory {
     seen_shared: BTreeSet<String>,
+    seen_audited_generic: BTreeSet<(String, String)>,
     problems: Vec<String>,
     source: String,
 }
@@ -317,6 +386,10 @@ impl Inventory {
                 self.problems
                     .push(format!("{}:{name} must use ConsSpine", self.source));
             }
+        }
+        if is_audited_generic_dispatch_member(&self.source, name) {
+            self.seen_audited_generic
+                .insert((self.source.clone(), name.to_string()));
         }
         if scan.cons_literal && scan.self_call && !GENERIC_RECURSION.contains(&name) {
             self.problems
@@ -380,6 +453,18 @@ fn canonical_cons_readers_share_the_iterator_and_no_direct_literal_reader_appear
             inventory
                 .problems
                 .push(format!("missing shared reader: {reader}"));
+        }
+    }
+    for (source, members) in AUDITED_GENERIC_DISPATCH_MEMBERS {
+        for name in members.split_whitespace() {
+            if !inventory
+                .seen_audited_generic
+                .contains(&(source.to_string(), name.to_string()))
+            {
+                inventory.problems.push(format!(
+                    "stale audited generic dispatch member: {source}:{name}"
+                ));
+            }
         }
     }
     assert!(
@@ -457,6 +542,26 @@ fn inventory_rejects_a_recursive_reader_even_if_it_mentions_the_shared_iterator(
     assert!(
         problems.iter().any(|problem| problem.contains("walk")),
         "mentioning ConsSpine cannot exempt a recursive walker: {problems:?}"
+    );
+}
+
+#[test]
+fn inventory_rejects_a_reader_hidden_inside_an_audited_dispatch_cycle() {
+    let source = r#"
+        fn validate_ir_expr(node: &str) {
+            if node == "Cons" { recursive_reader(node); }
+        }
+        fn recursive_reader(node: &str) {
+            validate_ir_expr(node);
+        }
+    "#;
+    let problems =
+        recursive_cons_walker_problems(source, "crates/chelis-types/src/infer/validate.rs");
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("recursive_reader")),
+        "an audited dispatcher cannot exempt a new recursive reader: {problems:?}"
     );
 }
 
