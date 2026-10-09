@@ -620,6 +620,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "serde_stacker",
  "sha2",
  "stacker",
  "syn 2.0.117",
