@@ -8918,7 +8918,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// binding position `i` and its projected index `index` for `body`. The
     /// plan's projection is read once: construction proved every reachable
     /// projected index inside the other side, so the nested loops carry plain
-    /// affine offsets and make no per-element runtime call.
+    /// affine offsets and make no per-element runtime call. A domain with a
+    /// zero extent holds no element, so the nest is entered only when every
+    /// extent is positive: otherwise the loops outside the zero axis would
+    /// still visit the product of their extents, which need not be
+    /// representable (chelis#3437).
     fn emit_movement_loop(&mut self, id: usize, rank: usize, index: &str, body: &str) {
         let index_type = Self::elem_type(&TensorType {
             dims: vec![],
@@ -8927,6 +8931,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line("{");
         self.indent += 1;
         self.emit_movement_terms(id, rank);
+        let nonempty = (0..rank)
+            .map(|axis| format!("t{id}_extent{axis} > 0"))
+            .collect::<Vec<_>>();
+        let guarded = !nonempty.is_empty();
+        if guarded {
+            self.line(&format!("if ({}) {{", nonempty.join(" && ")));
+            self.indent += 1;
+        }
         self.line(&format!("{index_type} i = 0;"));
         let mut offset = format!("t{id}_base");
         for axis in 0..rank {
@@ -8943,6 +8955,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(body);
         self.line("i++;");
         for _ in 0..rank {
+            self.indent -= 1;
+            self.line("}");
+        }
+        if guarded {
             self.indent -= 1;
             self.line("}");
         }
@@ -10622,6 +10638,38 @@ mod tests {
         assert!(!c.contains("chelis_movement_index("));
         assert!(c.contains("t1_axes[2] = { chelis_scalar_from_bits(CHELIS_DTYPE_I64, (1)), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (0)) }"));
         assert!(!c.contains("t1->strides[0] ="));
+    }
+
+    /// chelis#3437: a movement nest is entered only when every extent is
+    /// positive, so an empty domain does not visit the product of the
+    /// extents outside its zero axis.
+    #[test]
+    fn movement_loop_skips_an_empty_domain() {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
+        dag.add_node(
+            decl,
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![a],
+            mat_f32(3, 2),
+            None,
+        );
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
+        let guard = c
+            .find("if (t1_extent0 > 0 && t1_extent1 > 0) {")
+            .expect("empty-domain guard");
+        let outer = c
+            .find("for (int64_t t1_c0 = 0; t1_c0 < t1_extent0; t1_c0++)")
+            .expect("outer movement loop");
+        assert!(guard < outer, "the guard must precede the nest:\n{c}");
+        assert!(c[..guard].contains("const int64_t t1_extent1 ="));
     }
 
     #[test]
