@@ -4401,6 +4401,9 @@ struct HostEmitter<'a> {
     entry_groups: UnordMap<String, usize>,
     entry_proof_owners: Vec<(usize, VerifiedOwnerId)>,
     temp_counter: usize,
+    /// Let aliases occupy a separate namespace, so inserting one does not
+    /// renumber the producer temporaries and their result-claim guards.
+    let_alias_counter: usize,
     /// Immutable invocation context. Only the expression on the returned-value
     /// spine receives it; nested arguments and sibling bindings get no context.
     result_claims: Option<String>,
@@ -4769,6 +4772,7 @@ impl<'a> HostEmitter<'a> {
             entry_groups: UnordMap::new(),
             entry_proof_owners: Vec::new(),
             temp_counter: 0,
+            let_alias_counter: 0,
             result_claims: None,
             claim_on_spine: false,
             first_site_frames: None,
@@ -6015,7 +6019,7 @@ impl<'a> HostEmitter<'a> {
                 let temp = self.next_temp("let");
                 self.claim_on_spine = spine_binding == Some(index);
                 self.emit_expr_to_var(&binding.value, &temp, &binding.ty)?;
-                let alias = self.next_temp("let_binding");
+                let alias = self.next_let_alias();
                 self.lines
                     .push(format!("{}{};", self.indent, c_decl(&binding.ty, &alias)?));
                 self.declare_result_origin(&alias, &binding.ty, None);
@@ -12273,6 +12277,12 @@ impl<'a> HostEmitter<'a> {
     fn next_temp(&mut self, prefix: &str) -> String {
         let name = format!("__{prefix}_{}", self.temp_counter);
         self.temp_counter += 1;
+        name
+    }
+
+    fn next_let_alias(&mut self) -> String {
+        let name = format!("__let_binding_{}", self.let_alias_counter);
+        self.let_alias_counter += 1;
         name
     }
 
