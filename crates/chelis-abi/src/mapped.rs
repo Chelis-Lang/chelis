@@ -173,7 +173,12 @@ fn sha256(message: &[u8]) -> [u8; 32] {
     }
     tail.extend_from_slice(&bit_length.to_be_bytes());
     let whole = &message[..message.len() - message.len() % 64];
-    for block in whole.as_chunks::<64>().0.iter().chain(tail.as_chunks::<64>().0) {
+    for block in whole
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .chain(tail.as_chunks::<64>().0)
+    {
         let mut schedule = [0u32; 64];
         for (word, bytes) in schedule.iter_mut().zip(block.as_chunks::<4>().0) {
             *word = u32::from_be_bytes(*bytes);

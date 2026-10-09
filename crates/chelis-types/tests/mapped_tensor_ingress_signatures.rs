@@ -190,3 +190,17 @@ fn an_unbounded_binder_is_not_a_dtype_argument() {
         &["mmap_tensor's dtype argument must be an active data element dtype"],
     );
 }
+
+/// A literal count whose byte length has no i64 image makes the result type
+/// unrepresentable, so it is a type error on every lane rather than a
+/// run-time trap in one and a build failure in the other (spec/04 §4.7).
+#[test]
+fn an_unrepresentable_literal_count_is_a_type_error() {
+    rejects_with(
+        "def bad(m: MappedFile) -> tensor[*, f32] = mmap_tensor(m, 0i64, 4611686018427387904i64, f32)",
+        &["DimensionMismatch", "is not representable"],
+    );
+    accepts(
+        "def ok(m: MappedFile) -> tensor[*, f32] = mmap_tensor(m, 0i64, 2305843009213693951i64, f32)",
+    );
+}
