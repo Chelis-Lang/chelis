@@ -23,6 +23,23 @@ pub(super) fn finish_unified_app(
     expected_result: Option<&Type>,
     defer_result_replay: bool,
 ) -> Type {
+    if let Some(message) = func_name
+        .as_deref()
+        .filter(|_| kids.get(1).is_some_and(is_borrow_expression))
+        .zip(arg_tys.first())
+        .and_then(|(query, operand)| {
+            explicit_container_borrow_refusal(query, &subst.apply(operand))
+        })
+    {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_node_provenance(node, message),
+                vec![],
+            ),
+        );
+    }
     if let Some(rule) = func_name
         .as_deref()
         .and_then(builtins::builtin_decl)
@@ -1339,7 +1356,8 @@ pub(super) fn finish_unified_app(
             }
             "len" => {
                 if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
+                    let operand = subst.apply(first_arg);
+                    match queried_container(&operand) {
                         Type::Adt(name, _) if name == "List" || name == "Dict" => {
                             return Type::Prim(Prim::Int64);
                         }
@@ -1352,31 +1370,14 @@ pub(super) fn finish_unified_app(
                                 Type::Prim(Prim::Int64),
                             );
                         }
-                        Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List" || name == "Dict") =>
-                        {
+                        _ => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     with_node_provenance(
                                         node,
-                                        format!(
-                                            "len auto-borrows its List/Dict argument, so an explicit `&` is not a \
-                                         supported surface form: write `len(xs)`, not `len(&xs)` (got &{inner})"
-                                        ),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_node_provenance(
-                                        node,
-                                        format!("len expects List or Dict input, got {other}"),
+                                        format!("len expects List or Dict input, got {operand}"),
                                     ),
                                     vec![],
                                 ),
@@ -1419,38 +1420,22 @@ pub(super) fn finish_unified_app(
                         );
                     }
                 }
-                match list_arg {
-                    Type::Adt(name, mut args) if name == "List" && args.len() == 1 => {
-                        return args.remove(0);
+                match queried_container(&list_arg) {
+                    Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                        return args[0].clone();
                     }
                     Type::Error(_) => return result_ty,
                     Type::Var(_) => {
                         return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
-                    Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List") => {
+                    _ => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 with_node_provenance(
                                     node,
-                                    format!(
-                                        "index auto-borrows its List argument, so an explicit `&` is not a \
-                                     supported surface form: write `index(xs, i)`, not `index(&xs, i)` (got &{inner})"
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                    other => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_node_provenance(
-                                    node,
-                                    format!("index expects List input, got {other}"),
+                                    format!("index expects List input, got {list_arg}"),
                                 ),
                                 vec![],
                             ),
