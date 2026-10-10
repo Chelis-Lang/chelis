@@ -3917,7 +3917,9 @@ named operations if introduced. Behaviors are named operations, never modes.
 > An exact same-float-dtype cast is the identity in both directions. A float
 > source cast to an integer or bool target is piecewise constant and
 > structurally rejects `grad` with
-> `AdRejectionReason::PiecewiseConstant`; it never contributes a silent zero.
+> `AdRejectionReason::PiecewiseConstant` wherever it is active and its result
+> has a data path to the differentiated output (spec/06 §7.5); it never
+> contributes a silent zero.
 > A bool or integer source is a discrete forward-only value and carries no
 > cotangent, irrespective of target. These rules apply equally to explicit
 > default casts introduced inside another authored operation.

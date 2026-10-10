@@ -336,6 +336,32 @@ fn single_target_gradient_is_one_goal() {
     ));
 }
 
+/// spec/06 §7.5 (chelis#3464): a barrier `b` read only through a comparison
+/// receives no contribution, so its gradient is the exact positive zero. It
+/// is still a gradient target with its own goal, never an unknown one.
+#[test]
+fn predicate_only_gradient_target_is_a_goal() {
+    let request = AdRailRequest {
+        source: "x = (x : tensor[f32])\n\
+                 b = (b : tensor[f32])\n\
+                 loss = (mul(x, cast(lt(x, b), f32)) : tensor[f32])\n"
+            .to_string(),
+        source_kind: SourceKind::Surf,
+        output_name: "loss".to_string(),
+        wrt_names: vec!["x".to_string(), "b".to_string()],
+        input_box: input_box(&[("b", -1.0, 1.0), ("x", -1.0, 1.0)]),
+        target_ranges: vec![target_range("b", -1.0, 1.0)],
+    };
+    let goals = grad_goals_from_request(&request)
+        .unwrap_or_else(|error| panic!("a predicate-only target is a goal: {error:?}"));
+    assert_eq!(goals.len(), 1);
+    assert_eq!(goals[0].target, "b");
+    assert!(matches!(
+        goals[0].extracted.goal.shape,
+        GoalShape::BoxRange { .. }
+    ));
+}
+
 // ===========================================================================
 // No-fit: each in-tree-dispatched gradient goal is Unsupported, never green.
 // ===========================================================================

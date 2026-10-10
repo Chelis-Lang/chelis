@@ -523,10 +523,12 @@ fn scatter_replace_eval_out_of_bounds_index_traps_fail_closed() {
     );
 }
 
-/// Scatter AD must reject regardless of `wrt`. The brief specifies the
-/// pinned error shape; existing tests cover wrt=[target, updates]. Lock
-/// the case where wrt=[target] only — the same structured rejection
-/// must fire because the scatter is on the live forward graph.
+/// Scatter AD must reject whenever either differentiated input reaches it.
+/// The brief specifies the pinned error shape; existing tests cover
+/// wrt=[target, updates]. Lock the cases where wrt=[target] or
+/// wrt=[updates] only: the same structured rejection must fire because the
+/// scatter is active on a data path. With nothing differentiated it is
+/// inactive (spec/06 §7.5, chelis#3487) and owes no cotangent.
 #[test]
 fn scatter_ad_rejects_regardless_of_wrt_subset() {
     let mut dag = Dag::new();
@@ -606,9 +608,12 @@ fn scatter_ad_rejects_regardless_of_wrt_subset() {
     assert_rejects(grad_dag_checked(&dag, out, &[target]), "wrt=[target]");
     // wrt = [updates] only — same.
     assert_rejects(grad_dag_checked(&dag, out, &[updates]), "wrt=[updates]");
-    // wrt = [] — empty subset. Must still detect Scatter on the live
-    // forward graph and reject.
-    assert_rejects(grad_dag_checked(&dag, out, &[]), "wrt=[]");
+    // wrt = [] — empty subset. No operation is active, so nothing rejects
+    // and no gradient is returned.
+    match grad_dag_checked(&dag, out, &[]) {
+        Ok(result) => assert!(result.grad_nodes.is_empty(), "wrt=[]"),
+        Err(error) => panic!("wrt=[]: an inactive scatter must not reject: {error}"),
+    }
 }
 
 /// The Display rendering of the pinned AD-rejection variant must include
@@ -630,7 +635,7 @@ fn scatter_ad_error_display_contains_canonical_language() {
         "non-deterministic",
         "duplicate",
         "scatter_add",
-        "stop-gradient",
+        "data path",
     ];
     for phrase in must_contain {
         assert!(

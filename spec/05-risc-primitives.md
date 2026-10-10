@@ -4029,8 +4029,9 @@ path even though bare `round` under `grad` remains a structural
 > interpretation differs from an unbounded arithmetic result.
 >
 > Adjoint: These discrete operations structurally reject differentiation.
-> A bitwise expression independent of the selected differentiated parameters
-> remains an executed forward coefficient; no adjoint is demanded of it.
+> A bitwise expression independent of the selected differentiated parameters,
+> under spec/06 §7.5's dependence rule, remains an executed forward
+> coefficient; no adjoint is demanded of it.
 >
 > Accumulator: None.
 
@@ -4973,9 +4974,15 @@ from a backend fallback.
 `is_finite`, `is_infinite`, `const`, `load`, and `shape` contributes zero
 cotangent. This permits a predicate or metadata read to participate in a
 differentiable guard without pretending that the predicate itself has a useful
-derivative.
+derivative. An operand slot to which its atom assigns exact zero cotangent for
+every operand dtype is a control slot: these predicates' operands, the `where`
+condition, indices, and [05-MOV-1] bounds and sizes are control slots. An
+operation whose result reaches the differentiated output only through control
+slots executes forward, contributes nothing, and does not reject `grad`.
 
-**Structural rejections.** On float operands, `floor`, `ceil`, and `round` are
+**Structural rejections.** Each rejection below applies when the operation is
+active and its result has a data path to the differentiated output (spec/06
+§7.5). On float operands, `floor`, `ceil`, and `round` are
 piecewise constant and `grad` rejects them with an
 `AdRejectionReason::PiecewiseConstant` error rather than silently returning a
 zero gradient. [05-OP-1] `round_to` and [04-NUM-14] float-to-integer or

@@ -1361,9 +1361,10 @@ pub enum RiscOp {
     /// AD policy: `no_grad`. Reverse-mode AD over `Scatter` is
     /// structurally rejected via `AdError::NotSupported { op:
     /// "scatter_replace", reason:
-    /// AdRejectionReason::NonDeterministicAtDuplicateIndices }`. Wrap
-    /// in a stop-gradient or restructure the program to use
-    /// `ScatterAdd` (whose adjoint is well-defined as `Gather`).
+    /// AdRejectionReason::NonDeterministicAtDuplicateIndices }` when it is
+    /// active on a data path (spec/06 §7.5). Restructure the program to use
+    /// `ScatterAdd` (whose adjoint is well-defined as `Gather`), or keep the
+    /// scatter off every data path to the differentiated output.
     Scatter {
         axis: usize,
         batch_rank: usize,
