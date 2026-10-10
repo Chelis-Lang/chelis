@@ -18,6 +18,19 @@ SKILL_COMMANDS = (
     f"{PYTHON} -m unittest scripts.test_check_agent_skills scripts.test_hosted_validation",
     "cargo test -p chelis-conformance --test asset_drift_tripwire --test skill_set_uniformity",
 )
+MACOS_CENSUS_SELECTOR = (
+    "binary_id(/^chelis-python::capacity_census_bindings$/) & "
+    "test(/^registered_pyfunctions_match_the_reviewed_rustdoc_signatures$/)"
+)
+MACOS_WORKSPACE_COMMAND = (
+    "cargo nextest run --workspace --profile ci-full "
+    f"-E 'not ({MACOS_CENSUS_SELECTOR})' "
+    "--partition hash:${{ matrix.shard }}/2"
+)
+MACOS_CENSUS_COMMAND = (
+    "cargo nextest run -p chelis-python --test capacity_census_bindings "
+    f"--profile ci-full --no-tests=fail -E '{MACOS_CENSUS_SELECTOR}'"
+)
 
 
 def ledger_run(command):
@@ -51,6 +64,41 @@ def assert_hosted_coverage(test, workflow, nightly):
     test.assertEqual(macos["timeout-minutes"], 120)
     test.assertFalse(macos.get("continue-on-error", False))
     test.assertIn(1, macos["strategy"]["matrix"]["shard"])
+    workspace_steps = [
+        step for step in macos["steps"]
+        if "cargo nextest run --workspace" in step.get("run", "")
+    ]
+    test.assertEqual([step.get("run") for step in workspace_steps], [MACOS_WORKSPACE_COMMAND])
+    test.assertNotIn("if", workspace_steps[0])
+    test.assertFalse(workspace_steps[0].get("continue-on-error", False))
+    test.assertIn("macos-binding-census", jobs)
+    census = jobs["macos-binding-census"]
+    test.assertEqual(census["runs-on"], "macos-latest")
+    test.assertEqual(census["timeout-minutes"], 90)
+    test.assertNotIn("if", census)
+    test.assertFalse(census.get("continue-on-error", False))
+    census_steps = [
+        step for step in census["steps"] if "cargo nextest run" in step.get("run", "")
+    ]
+    test.assertEqual([step.get("run") for step in census_steps], [MACOS_CENSUS_COMMAND])
+    test.assertNotIn("if", census_steps[0])
+    test.assertFalse(census_steps[0].get("continue-on-error", False))
+    test.assertEqual(
+        census_steps[0].get("env", {}).get("CHELIS_CI_TIMING_DIR"),
+        "${{ github.workspace }}/target/census-timings",
+    )
+    uploads = {
+        step.get("with", {}).get("name"): step
+        for step in census["steps"]
+        if step.get("uses", "").startswith("actions/upload-artifact@")
+    }
+    for name, path in (
+        ("junit-macos-binding-census", "target/nextest/ci-full/junit.xml"),
+        ("macos-binding-census-timing", "target/census-timings/"),
+    ):
+        test.assertIn(name, uploads)
+        test.assertEqual(uploads[name].get("if"), "always()")
+        test.assertEqual(uploads[name]["with"]["path"], path)
     toolchains = [step for step in macos["steps"] if step.get("uses", "").startswith("dtolnay/rust-toolchain@")]
     test.assertEqual(len(toolchains), 1)
     test.assertIn("clippy", toolchains[0].get("with", {}).get("components", "").split(","))
@@ -94,12 +142,14 @@ def assert_hosted_coverage(test, workflow, nightly):
         test.assertFalse(step.get("continue-on-error", False))
     aggregate = jobs["macos-smoke"]
     test.assertIn("macos-workspace-shard", aggregate["needs"])
+    test.assertIn("macos-binding-census", aggregate["needs"])
     test.assertIn("macos-ownership-ledger", aggregate["needs"])
     test.assertEqual(aggregate.get("if"), "always()")
     test.assertFalse(aggregate.get("continue-on-error", False))
     command = (
         "python3 scripts/ci_require_success.py"
         " macos-workspace-shard=${{ needs.macos-workspace-shard.result }}"
+        " macos-binding-census=${{ needs.macos-binding-census.result }}"
         " macos-ownership-ledger=${{ needs.macos-ownership-ledger.result }}"
     )
     steps = [step for step in aggregate["steps"] if step.get("run") == command]
@@ -115,6 +165,28 @@ class HostedCoverageTests(unittest.TestCase):
 
     def test_current_workflow_preserves_hosted_coverage(self):
         assert_hosted_coverage(self, self.workflow, self.nightly)
+
+    def test_macos_census_cannot_be_dropped_from_its_dedicated_job(self):
+        for change in ("remove-job", "skip-job", "skip-step", "wrong-selector", "no-workspace-exclusion", "no-aggregate", "no-timing"):
+            with self.subTest(change=change):
+                workflow = copy.deepcopy(self.nightly)
+                jobs = workflow["jobs"]
+                if change == "remove-job":
+                    del jobs["macos-binding-census"]
+                elif change == "skip-job":
+                    jobs["macos-binding-census"]["if"] = "false"
+                elif change == "skip-step":
+                    next(step for step in jobs["macos-binding-census"]["steps"] if "cargo nextest run" in step.get("run", ""))["if"] = "false"
+                elif change == "wrong-selector":
+                    next(step for step in jobs["macos-binding-census"]["steps"] if "cargo nextest run" in step.get("run", ""))["run"] = MACOS_CENSUS_COMMAND.replace("registered_pyfunctions", "unregistered_pyfunctions")
+                elif change == "no-workspace-exclusion":
+                    next(step for step in jobs["macos-workspace-shard"]["steps"] if "cargo nextest run --workspace" in step.get("run", ""))["run"] = "cargo nextest run --workspace --profile ci-full --partition hash:${{ matrix.shard }}/2"
+                elif change == "no-aggregate":
+                    jobs["macos-smoke"]["needs"].remove("macos-binding-census")
+                else:
+                    next(step for step in jobs["macos-binding-census"]["steps"] if step.get("with", {}).get("name") == "macos-binding-census-timing")["if"] = "false"
+                with self.assertRaises(AssertionError):
+                    assert_hosted_coverage(self, self.workflow, workflow)
 
     def test_ordinary_events_cannot_trigger_macos_nightly(self):
         for event in ("push", "pull_request", "pull_request_target", "workflow_run"):
@@ -256,7 +328,7 @@ class HostedCoverageTests(unittest.TestCase):
             assert_hosted_coverage(self, self.workflow, workflow)
 
     def test_macos_producer_and_aggregate_cannot_be_skipped_or_made_nonblocking(self):
-        for job_name in ("macos-workspace-shard", "macos-ownership-ledger", "macos-smoke"):
+        for job_name in ("macos-workspace-shard", "macos-binding-census", "macos-ownership-ledger", "macos-smoke"):
             for key, value in (("if", "false"), ("continue-on-error", True)):
                 with self.subTest(job=job_name, key=key):
                     workflow = copy.deepcopy(self.nightly)
