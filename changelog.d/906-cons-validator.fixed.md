@@ -1,1 +1,0 @@
-The semantic checker now validates canonical `Cons` list spines iteratively, so long list literals avoid recursive validation and preserve source-order checks. See [#906](https://github.com/Chelis-Lang/chelis/issues/906).

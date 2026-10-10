@@ -1,1 +1,0 @@
-Deep expression trees release their owned nodes, expression-valued annotations, and embedded raw source arguments without exhausting a worker's native stack. This covers long generated list spines and partial diagnostic trees. See [#3394](https://github.com/Chelis-Lang/chelis/issues/3394).

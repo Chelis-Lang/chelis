@@ -1,1 +1,0 @@
-`chelis prove` can generate invariant-valid opaque binders in a Reef package through a constructor in the type's defining module. Package properties now receive the same constructor-based fuzz verdicts as standalone files. See [#3298](https://github.com/Chelis-Lang/chelis/issues/3298).
