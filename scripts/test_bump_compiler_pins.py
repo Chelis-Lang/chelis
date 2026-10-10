@@ -196,6 +196,40 @@ class BumpHullManifestPinTests(unittest.TestCase):
 class PinnedTomlInventoryTests(unittest.TestCase):
     """Guard the real-manifest inventory the bump rewrites (category 2)."""
 
+    def test_pinned_toml_inventory_covers_all_tracked_reef_manifests(self):
+        tracked = subprocess.check_output(
+            ["git", "ls-files", "-z"], cwd=bump_mod.REPO_ROOT
+        ).split(b"\0")
+        pinned = set()
+        for raw_path in tracked:
+            if not raw_path:
+                continue
+            relative = Path(raw_path.decode())
+            if relative.name != "reef.toml":
+                continue
+            manifest = tomllib.loads((bump_mod.REPO_ROOT / relative).read_text())
+            if isinstance(manifest.get("package", {}).get("compiler"), str):
+                pinned.add(relative.as_posix())
+
+        declared = {
+            path.relative_to(bump_mod.REPO_ROOT).as_posix()
+            for path in bump_mod.PINNED_REAL_TOML_FILES
+            + bump_mod.PINNED_FIXTURE_TOML_FILES
+        }
+        self.assertEqual(pinned, declared)
+
+    def test_rust_tripwire_covers_the_same_real_manifests(self):
+        source = (
+            bump_mod.REPO_ROOT
+            / "crates/chelis-cli/tests/compiler_pin_tripwire.rs"
+        ).read_text()
+        tripwire = set(re.findall(r'root\.join\("([^"]+reef\.toml)"\)', source))
+        declared = {
+            path.relative_to(bump_mod.REPO_ROOT).as_posix()
+            for path in bump_mod.PINNED_REAL_TOML_FILES
+        }
+        self.assertEqual(tripwire, declared)
+
     def test_pinned_toml_inventory_covers_executable_package_examples(self):
         relative = {
             path.relative_to(bump_mod.REPO_ROOT).as_posix()

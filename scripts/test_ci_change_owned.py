@@ -1696,15 +1696,31 @@ class SchemaTests(unittest.TestCase):
         paths = bump.PINNED_REAL_TOML_FILES
         example_paths = {str(path.relative_to(root)) for path in paths
                          if path.is_relative_to(root / "examples")}
-        self.assertEqual(len(example_paths), 3)
+        self.assertEqual(example_paths, {
+            "examples/clarabel_qp/reef.toml",
+            "examples/illustrative/io_pipeline/reef.toml",
+            "examples/nautilus_quantile_contract/reef.toml",
+            "examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml",
+        })
         for path in sorted(example_paths):
             with self.subTest(path=path):
                 rules = [rule for rule in config.path_rules if rule.matches(path)]
                 self.assertEqual(len(rules), 1, path)
                 rule = rules[0]
+                if path == "examples/clarabel_qp/reef.toml":
+                    self.assertEqual(rule.prefix, "examples/clarabel_qp/")
+                    self.assertEqual(rule.disposition, "packages")
+                    self.assertEqual(rule.packages, ("chelis-cli",))
+                    continue
                 self.assertEqual(rule.prefix, path)
                 self.assertEqual(rule.disposition, "owner")
                 self.assertEqual((rule.owner.workflow, rule.owner.job), ("ci.yml", "ci-fast"))
+        clarabel_package = "packages/chelis-clarabel/reef.toml"
+        rules = [rule for rule in config.path_rules if rule.matches(clarabel_package)]
+        self.assertEqual(len(rules), 1, clarabel_package)
+        self.assertEqual(rules[0].prefix, "packages/chelis-clarabel/")
+        self.assertEqual(rules[0].disposition, "packages")
+        self.assertEqual(rules[0].packages, ("chelis-cli",))
         self.assertIn(owned.Identity("chelis-cli", "compiler_pin_tripwire"), config.standing_targets)
         hull = str(bump.HULL_MANIFEST.relative_to(root))
         rules = [rule for rule in config.path_rules if rule.matches(hull)]
