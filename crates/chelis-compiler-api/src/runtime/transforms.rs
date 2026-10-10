@@ -136,22 +136,54 @@ fn repack_scalar_gradient(value: RuntimeValue, prim: Prim) -> Result<RuntimeValu
     ))
 }
 
+fn stage_callable_argument<'v>(
+    kind: &TransformKind,
+    index: usize,
+    value: &'v RuntimeValue,
+    arg_exprs: &mut Vec<Expr>,
+    callable_arguments: &mut Vec<(usize, &'v RuntimeValue)>,
+    span: Span,
+) -> Result<bool, String> {
+    if !matches!(
+        value,
+        RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }
+    ) {
+        return Ok(false);
+    }
+    if matches!(kind, TransformKind::Vmap) {
+        return Err(format!(
+            "host runtime: `vmap(...)` argument {index} is a function value. \
+             spec/06-transformations.md section 3.6 broadcasts a non-tensor \
+             argument unbatched to every row, and this lane does not yet carry a \
+             function-valued `vmap` argument (chelis#3523); close over the function \
+             inside the mapped function instead, as in `vmap(fn (x) -> f(g, x))`."
+        ));
+    }
+    callable_arguments.push((arg_exprs.len(), value));
+    arg_exprs.push(make_unit_expr(span));
+    Ok(true)
+}
+
+struct StagedTransformActuals<'v> {
+    placeholder_names: Vec<String>,
+    placeholder_types: Vec<TensorType>,
+    placeholder_tensors: UnordMap<String, IrTensorValue>,
+    arg_exprs: Vec<Expr>,
+    arg_repacks: Vec<ArgRepack>,
+    callable_arguments: Vec<(usize, &'v RuntimeValue)>,
+}
+
 impl<'a> EvalContext<'a> {
-    /// Bucket 1 entry point: evaluate `(grad f)(args...)` /
-    /// `(vmap f)(args...)` in the host runtime. Synthesizes a Deep
-    /// `(app {} <transform-expr> (var __chelis_xform_arg_k))` form and
-    /// routes it through `chelis_ir::lower::lower_subexpr_program` +
-    /// `chelis_ir::eval::eval_tensor_*`. The IR pipeline already
-    /// implements grad and vmap (it's what the C backend uses); we just
-    /// reuse it instead of writing a parallel reverse-mode evaluator
-    /// inside the host-runtime tree.
-    pub(super) fn apply_transform(
-        &mut self,
-        kind: TransformKind,
-        transform_expr: &Expr,
-        captured_env: Frame,
-        args: Vec<RuntimeValue>,
-    ) -> Result<RuntimeValue, String> {
+    fn stage_transform_actuals<'v>(
+        &self,
+        kind: &TransformKind,
+        args: &'v [RuntimeValue],
+        fn_expr: Option<&Expr>,
+        grad_formals: Option<&Expr>,
+        vmap_formals: Option<(&Expr, Option<usize>)>,
+        grad_wrt: &Option<Vec<usize>>,
+    ) -> Result<StagedTransformActuals<'v>, String> {
+        let span = Span::new(0, 0);
         // Allocate placeholder names for the call's actual arguments. We
         // synthesize `(var {type: ...} __chelis_xform_arg_K)` inside the
         // app form and feed the corresponding tensor values via the
@@ -174,6 +206,179 @@ impl<'a> EvalContext<'a> {
         // or non-differentiable argument still marshals its placeholders
         // (the body may read it) but owns no gradient root.
         let mut arg_repacks: Vec<(usize, ArgRepack)> = Vec::with_capacity(args.len());
+        // Function-valued `grad` arguments, by position, staged as callables
+        // once the frame's closure conversion exists below.
+        let mut callable_arguments: Vec<(usize, &RuntimeValue)> = Vec::new();
+        for (index, value) in args.iter().enumerate() {
+            // A handled grad must allocate Random ordinals along the branch
+            // actually selected by a concrete discrete argument. Keeping a
+            // bool behind a synthetic Load makes `lower_if` lower both arms,
+            // so an untaken Random arm advances the stream. The evaluator
+            // already has the exact runtime value at this boundary: embed it
+            // as a typed literal so the lowering context can prune the
+            // untaken arm before it allocates Random nodes or ordinals.
+            if matches!(kind, TransformKind::Grad)
+                && let RuntimeValue::Bool(value) = value
+            {
+                arg_exprs.push(make_bool_literal_with_type(*value, span));
+                continue;
+            }
+            if matches!(kind, TransformKind::Grad)
+                && let RuntimeValue::String(value) = value
+            {
+                arg_exprs.push(make_string_literal_with_type(value, span));
+                continue;
+            }
+            // A grad body may use an integer scalar as a discrete selector
+            // (for example list_index/take_list/skip_list). A synthetic Load
+            // preserves its dtype but erases its exact runtime value before
+            // the staged List spine is selected. Embed that non-differentiable
+            // argument as an exact typed literal instead; float/tensor
+            // arguments still use Loads so the AD roots remain connected.
+            if matches!(kind, TransformKind::Grad)
+                && let RuntimeValue::Scalar(payload) = value
+                && payload.dtype().is_integer()
+            {
+                let precision = fn_expr
+                    .and_then(|expr| param_precision_at(expr, index))
+                    .unwrap_or(payload.dtype());
+                if precision.is_integer() {
+                    arg_exprs.push(make_integer_literal_with_type(
+                        payload.as_i64(),
+                        precision,
+                        span,
+                    ));
+                    continue;
+                }
+            }
+            if matches!(kind, TransformKind::Grad)
+                && matches!(
+                    value,
+                    RuntimeValue::List(_) | RuntimeValue::Tuple(_) | RuntimeValue::Adt { .. }
+                )
+            {
+                let mut leaf_index = 0;
+                let (expr, shape, differentiable) = stage_grad_list_value(
+                    value,
+                    index,
+                    &mut leaf_index,
+                    &mut placeholder_names,
+                    &mut placeholder_types,
+                    &mut placeholder_tensors,
+                    span,
+                )?;
+                arg_exprs.push(expr);
+                // A finite executed constructor can have no float leaves
+                // even though another variant of its checked nominal type
+                // does. Default and explicit `wrt` selection are type-based,
+                // not guessed from that one runtime value.
+                let statically_differentiable = grad_formals
+                    .and_then(|function| param_type_expr_at(function, index))
+                    .is_some_and(|ty| {
+                        grad_type_expr_has_float(ty, &self.adt_registry, &mut Vec::new())
+                    });
+                let selected = (differentiable || statically_differentiable)
+                    && grad_wrt
+                        .as_ref()
+                        .is_none_or(|indices| indices.contains(&index));
+                if selected {
+                    arg_repacks.push((index, ArgRepack::Structured { shape }));
+                }
+                continue;
+            }
+            // spec/06 sections 2.1 and 2.2: a function-valued argument is a
+            // constant of the differentiated call. Its gradient component is
+            // `unit`, so it owns no root; it is passed as the callable it is,
+            // staged below by the same closure conversion as the frame's own
+            // closures.
+            if stage_callable_argument(
+                kind,
+                index,
+                value,
+                &mut arg_exprs,
+                &mut callable_arguments,
+                span,
+            )? {
+                continue;
+            }
+            let placeholder = format!("__chelis_xform_arg_{index}");
+            let (tensor_value, mut tensor_type) =
+                runtime_value_to_dag_input_lossy(value, fn_expr, index)?;
+            if let (Some((callee_fn, Some(axis))), RuntimeValue::Tensor(tensor)) =
+                (&vmap_formals, value)
+                && let Some(formal) = param_type_expr_at(callee_fn, index)
+                && let Ok(refined) = vmap_lane_placeholder_type(formal, tensor, *axis)
+            {
+                tensor_type = refined;
+            }
+            arg_exprs.push(make_var_with_type(&placeholder, &tensor_type, span));
+            placeholder_tensors.insert(placeholder.clone(), tensor_value);
+            placeholder_names.push(placeholder);
+            placeholder_types.push(tensor_type.clone());
+            // chelis#520 D2: a wrt-selected float tensor/scalar argument owns
+            // one gradient root, packed back with its original carrier. A
+            // non-float or non-selected argument owns none (matching the IR lowering's
+            // `is_selected_wrt`), so it gets no repack slot even though its
+            // placeholder is still marshalled (the body may read it).
+            if matches!(kind, TransformKind::Grad) {
+                let differentiable = tensor_type.precision.is_float();
+                let selected = differentiable
+                    && grad_wrt
+                        .as_ref()
+                        .is_none_or(|indices| indices.contains(&index));
+                if selected {
+                    arg_repacks.push((
+                        index,
+                        match value {
+                            RuntimeValue::Scalar(payload) => ArgRepack::Scalar(payload.dtype()),
+                            _ => ArgRepack::Tensor,
+                        },
+                    ));
+                }
+            }
+        }
+
+        // IR emits complete cotangent groups in written `wrt` order.
+        // Restore carriers in that same order; argument staging above must
+        // stay in primal order, including non-selected argument values.
+        let arg_repacks: Vec<ArgRepack> = match grad_wrt.as_ref() {
+            Some(indices) => indices
+                .iter()
+                .filter_map(|index| {
+                    arg_repacks
+                        .iter()
+                        .find(|(parameter, _)| parameter == index)
+                        .map(|(_, plan)| plan.clone())
+                })
+                .collect(),
+            None => arg_repacks.into_iter().map(|(_, plan)| plan).collect(),
+        };
+
+        Ok(StagedTransformActuals {
+            placeholder_names,
+            placeholder_types,
+            placeholder_tensors,
+            arg_exprs,
+            arg_repacks,
+            callable_arguments,
+        })
+    }
+
+    /// Bucket 1 entry point: evaluate `(grad f)(args...)` /
+    /// `(vmap f)(args...)` in the host runtime. Synthesizes a Deep
+    /// `(app {} <transform-expr> (var __chelis_xform_arg_k))` form and
+    /// routes it through `chelis_ir::lower::lower_subexpr_program` +
+    /// `chelis_ir::eval::eval_tensor_*`. The IR pipeline already
+    /// implements grad and vmap (it's what the C backend uses); we just
+    /// reuse it instead of writing a parallel reverse-mode evaluator
+    /// inside the host-runtime tree.
+    pub(super) fn apply_transform(
+        &mut self,
+        kind: TransformKind,
+        transform_expr: &Expr,
+        captured_env: Frame,
+        args: Vec<RuntimeValue>,
+    ) -> Result<RuntimeValue, String> {
         // wrt indices for this grad call, if narrowed (`grad(f, wrt=i)`).
         // `None` means differentiate every differentiable argument, exactly
         // as the checker's `grad_result_type` and the IR lowering's
@@ -256,135 +461,41 @@ impl<'a> EvalContext<'a> {
         };
 
         let span = Span::new(0, 0);
-        for (index, value) in args.iter().enumerate() {
-            // A handled grad must allocate Random ordinals along the branch
-            // actually selected by a concrete discrete argument. Keeping a
-            // bool behind a synthetic Load makes `lower_if` lower both arms,
-            // so an untaken Random arm advances the stream. The evaluator
-            // already has the exact runtime value at this boundary: embed it
-            // as a typed literal so the lowering context can prune the
-            // untaken arm before it allocates Random nodes or ordinals.
-            if matches!(kind, TransformKind::Grad)
-                && let RuntimeValue::Bool(value) = value
-            {
-                arg_exprs.push(make_bool_literal_with_type(*value, span));
-                continue;
-            }
-            if matches!(kind, TransformKind::Grad)
-                && let RuntimeValue::String(value) = value
-            {
-                arg_exprs.push(make_string_literal_with_type(value, span));
-                continue;
-            }
-            // A grad body may use an integer scalar as a discrete selector
-            // (for example list_index/take_list/skip_list). A synthetic Load
-            // preserves its dtype but erases its exact runtime value before
-            // the staged List spine is selected. Embed that non-differentiable
-            // argument as an exact typed literal instead; float/tensor
-            // arguments still use Loads so the AD roots remain connected.
-            if matches!(kind, TransformKind::Grad)
-                && let RuntimeValue::Scalar(payload) = value
-                && payload.dtype().is_integer()
-            {
-                let precision = fn_expr
-                    .and_then(|expr| param_precision_at(expr, index))
-                    .unwrap_or(payload.dtype());
-                if precision.is_integer() {
-                    arg_exprs.push(make_integer_literal_with_type(
-                        payload.as_i64(),
-                        precision,
-                        span,
-                    ));
-                    continue;
-                }
-            }
-            if matches!(kind, TransformKind::Grad)
-                && matches!(
-                    value,
-                    RuntimeValue::List(_) | RuntimeValue::Tuple(_) | RuntimeValue::Adt { .. }
-                )
-            {
-                let mut leaf_index = 0;
-                let (expr, shape, differentiable) = stage_grad_list_value(
-                    value,
-                    index,
-                    &mut leaf_index,
-                    &mut placeholder_names,
-                    &mut placeholder_types,
-                    &mut placeholder_tensors,
-                    span,
-                )?;
-                arg_exprs.push(expr);
-                // A finite executed constructor can have no float leaves
-                // even though another variant of its checked nominal type
-                // does. Default and explicit `wrt` selection are type-based,
-                // not guessed from that one runtime value.
-                let statically_differentiable = grad_formals
-                    .and_then(|function| param_type_expr_at(function, index))
-                    .is_some_and(|ty| {
-                        grad_type_expr_has_float(ty, &self.adt_registry, &mut Vec::new())
-                    });
-                let selected = (differentiable || statically_differentiable)
-                    && grad_wrt
-                        .as_ref()
-                        .is_none_or(|indices| indices.contains(&index));
-                if selected {
-                    arg_repacks.push((index, ArgRepack::Structured { shape }));
-                }
-                continue;
-            }
-            let placeholder = format!("__chelis_xform_arg_{index}");
-            let (tensor_value, mut tensor_type) =
-                runtime_value_to_dag_input_lossy(value, fn_expr, index)?;
-            if let (Some((callee_fn, Some(axis))), RuntimeValue::Tensor(tensor)) =
-                (&vmap_formals, value)
-                && let Some(formal) = param_type_expr_at(callee_fn, index)
-                && let Ok(refined) = vmap_lane_placeholder_type(formal, tensor, *axis)
-            {
-                tensor_type = refined;
-            }
-            arg_exprs.push(make_var_with_type(&placeholder, &tensor_type, span));
-            placeholder_tensors.insert(placeholder.clone(), tensor_value);
-            placeholder_names.push(placeholder);
-            placeholder_types.push(tensor_type.clone());
-            // chelis#520 D2: a wrt-selected float tensor/scalar argument owns
-            // one gradient root, packed back with its original carrier. A
-            // non-float or non-selected argument owns none (matching the IR lowering's
-            // `is_selected_wrt`), so it gets no repack slot even though its
-            // placeholder is still marshalled (the body may read it).
-            if matches!(kind, TransformKind::Grad) {
-                let differentiable = tensor_type.precision.is_float();
-                let selected = differentiable
-                    && grad_wrt
-                        .as_ref()
-                        .is_none_or(|indices| indices.contains(&index));
-                if selected {
-                    arg_repacks.push((
-                        index,
-                        match value {
-                            RuntimeValue::Scalar(payload) => ArgRepack::Scalar(payload.dtype()),
-                            _ => ArgRepack::Tensor,
-                        },
-                    ));
-                }
-            }
-        }
+        let StagedTransformActuals {
+            mut placeholder_names,
+            mut placeholder_types,
+            mut placeholder_tensors,
+            mut arg_exprs,
+            arg_repacks,
+            callable_arguments,
+        } = self.stage_transform_actuals(
+            &kind,
+            &args,
+            fn_expr,
+            grad_formals,
+            vmap_formals,
+            &grad_wrt,
+        )?;
 
-        // IR emits complete cotangent groups in written `wrt` order.
-        // Restore carriers in that same order; argument staging above must
-        // stay in primal order, including non-selected argument values.
-        let arg_repacks: Vec<ArgRepack> = match grad_wrt.as_ref() {
-            Some(indices) => indices
-                .iter()
-                .filter_map(|index| {
-                    arg_repacks
-                        .iter()
-                        .find(|(parameter, _)| parameter == index)
-                        .map(|(_, plan)| plan.clone())
-                })
-                .collect(),
-            None => arg_repacks.into_iter().map(|(_, plan)| plan).collect(),
+        // chelis#2619: the target reads the caller's frame lexically, and each
+        // caller closure it reaches reads its own environment. Closure-convert
+        // them: every such read is respelled to a fresh name bound around the
+        // application (a placeholder for a value), so lowering resolves it in
+        // the right scope. A declaration the target inlines resolves its free
+        // names at top level, and no frame entry is served to it by spelling.
+        // A function-valued argument is staged the same way and read by the
+        // name it is bound to.
+        let mut captures = FrameCaptures {
+            argument_count: args.len(),
+            placeholder_names: &mut placeholder_names,
+            placeholder_types: &mut placeholder_types,
+            placeholder_tensors: &mut placeholder_tensors,
+            bindings: Vec::new(),
+            staged: UnordMap::new(),
+            fresh: 0,
+            span,
         };
+        captures.stage_callable_arguments(callable_arguments, &mut arg_exprs)?;
 
         // Synthesize `(app {} <transform-expr> <arg-expr_0> ...)`. A transform
         // captured from a bind value carries that binding's origin, which the
@@ -402,22 +513,6 @@ impl<'a> EvalContext<'a> {
         app_children.push(callee);
         app_children.extend(arg_exprs);
         let application = empty_node(DeepTag::App, app_children, span);
-        // chelis#2619: the target reads the caller's frame lexically, and each
-        // caller closure it reaches reads its own environment. Closure-convert
-        // them: every such read is respelled to a fresh name bound around the
-        // application (a placeholder for a value), so lowering resolves it in
-        // the right scope. A declaration the target inlines resolves its free
-        // names at top level, and no frame entry is served to it by spelling.
-        let mut captures = FrameCaptures {
-            argument_count: args.len(),
-            placeholder_names: &mut placeholder_names,
-            placeholder_types: &mut placeholder_types,
-            placeholder_tensors: &mut placeholder_tensors,
-            bindings: Vec::new(),
-            staged: UnordMap::new(),
-            fresh: 0,
-            span,
-        };
         let application = captures.convert(&application, &captured_env)?;
         let capture_bindings = captures.bindings;
         let app_expr = if capture_bindings.is_empty() {
@@ -1209,6 +1304,22 @@ struct FrameCaptures<'a> {
 }
 
 impl FrameCaptures<'_> {
+    fn stage_callable_arguments(
+        &mut self,
+        callable_arguments: Vec<(usize, &RuntimeValue)>,
+        arg_exprs: &mut [Expr],
+    ) -> Result<(), String> {
+        for (position, value) in callable_arguments {
+            let Some(staged) = self.stage(value)? else {
+                return Err(format!(
+                    "grad argument {position} is a function value that could not be staged"
+                ));
+            };
+            arg_exprs[position] = var_expr(&staged, self.span);
+        }
+        Ok(())
+    }
+
     fn fresh_name(&mut self) -> String {
         let name = format!("__chelis_xform_capture_{}", self.fresh);
         self.fresh += 1;

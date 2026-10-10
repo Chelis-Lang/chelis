@@ -11963,11 +11963,16 @@ fn try_lower_general_list_grad_app(
     let mut rewritten_children = kids.to_vec();
     let mut parameter_plans = UnordMap::new();
     for (param_index, param) in params.iter().enumerate() {
-        let Some(param_ty) = param_host_type(param) else {
-            return Ok(None);
-        };
         let actual_index = param_index + 1;
         let Some(actual) = kids.get(actual_index) else {
+            return Ok(None);
+        };
+        // A formal of a type-generic target is instantiated by this call's
+        // actual, as the differentiated body is.
+        let Some(param_ty) = param_host_type(param).or_else(|| {
+            let actual_ty = expr_host_type(actual, program, scope);
+            (!actual_ty.is_unresolved()).then_some(actual_ty)
+        }) else {
             return Ok(None);
         };
         let mut rewritten_actual = actual.clone();
@@ -12222,6 +12227,45 @@ fn try_lower_general_list_grad_app(
         body: Box::new(body),
         ty: result_ty,
     })))
+}
+
+/// The argument whose type a `grad` application's helper result takes: the
+/// first target the application differentiates that is not a function. The
+/// targets are the parameters its `wrt` names, in written order, or, without
+/// `wrt`, every argument. A function-valued argument is a constant of the
+/// differentiated call (spec/06 sections 2.1 and 2.2), never its target.
+fn grad_target_argument<'a>(
+    grad_list: &Node,
+    args: &'a [Expr],
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> Option<&'a Expr> {
+    let not_a_function =
+        |arg: &&Expr| !matches!(expr_host_type(arg, program, scope), HostTypeTerm::Fn(..));
+    let Some(targets) = grad_list.meta().wrt() else {
+        return args.iter().find(not_a_function);
+    };
+    let defs = cached_program_defs(program);
+    let fn_name = grad_list
+        .children_slice()
+        .first()
+        .and_then(direct_var_name)?;
+    let Some((DeepTag::Fn, _, fn_kids)) =
+        lookup_program_def(&defs, fn_name).and_then(stamped_parts)
+    else {
+        return args.first();
+    };
+    let params = fn_kids.first().and_then(as_node)?.children_slice();
+    targets
+        .variables()
+        .filter_map(|var| {
+            let name = var.name().value();
+            params
+                .iter()
+                .position(|param| param_name(param).as_ref() == Some(name))
+        })
+        .filter_map(|position| args.get(position))
+        .find(not_a_function)
 }
 
 /// Read the `wrt` meta off a `grad` list and resolve it to a list of
@@ -12926,8 +12970,8 @@ fn lower_program_host_app(
             if callee.tag() != DeepTag::Grad {
                 return None;
             }
-            kids.get(1)
-                .and_then(|first_arg| expr_tensor_type(first_arg, program, scope))
+            grad_target_argument(callee, &kids[1..], program, scope)
+                .and_then(|target| expr_tensor_type(target, program, scope))
         });
     let (helper_expr, helper_scope, helper_bindings) = hoist_host_lane_tensor_bindings(
         app_expr,
@@ -12951,9 +12995,19 @@ fn lower_program_host_app(
     // so the inline path wins; otherwise the call monomorphizes against
     // the concrete arg shapes. This restores the lowering altitude the
     // over-broad recursion classification used to force.
-    let has_callable_params = fn_sig
-        .as_ref()
-        .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostTypeTerm::Fn(..))));
+    //
+    // A `grad` application is the exception: it has no inline path here, and
+    // its tensor helper binds a function-valued argument as a callable of the
+    // differentiated body, a constant of the call (spec/06 sections 2.1 and
+    // 2.2), so the helper represents it without a fn-pointer input.
+    let callee_is_grad = kids
+        .first()
+        .and_then(as_node)
+        .is_some_and(|callee| callee.tag() == DeepTag::Grad);
+    let has_callable_params = !callee_is_grad
+        && fn_sig
+            .as_ref()
+            .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostTypeTerm::Fn(..))));
     // A function-valued formal has no tensor-helper representation. Probing
     // its standalone summary before the call-site inline path also erases the
     // concrete callable captured by a nested transform target (chelis#676).
