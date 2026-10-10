@@ -10765,9 +10765,9 @@ where
     )?;
     let prepared_eval = prepare_rewritten_batch_in_exec_context(exec_context, &rewritten)?;
 
-    for (manifest_index, rel_display, test_name) in selected {
+    for (index, (manifest_index, rel_display, test_name)) in selected.iter().enumerate() {
         let root = rewritten
-            .exact_root(manifest_index, &test_name)
+            .exact_root(*manifest_index, test_name)
             .ok_or_else(|| {
                 format!("isolated test entry {manifest_index} lost selected root `{test_name}`")
             })?
@@ -10776,12 +10776,16 @@ where
         let outcome = run_test_with_timeout(
             move || Ok(handle.eval_root(BTreeMap::new(), &root)),
             timeout,
-            &format!("timeout after {}s", timeout.as_secs()),
         );
 
+        let unquiesced = matches!(&outcome, TestTimeoutOutcome::TimedOut { stopped: false });
         let (status, message) = match outcome {
-            Err(msg) => (TestStatus::Fail, Some(msg)),
-            Ok(result) => match result {
+            TestTimeoutOutcome::TimedOut { .. } => (
+                TestStatus::Fail,
+                Some(format!("timeout after {}s", timeout.as_secs())),
+            ),
+            TestTimeoutOutcome::Complete(Err(msg)) => (TestStatus::Fail, Some(msg)),
+            TestTimeoutOutcome::Complete(Ok(result)) => match result {
                 Ok(_) => (TestStatus::Pass, None),
                 Err(err) => {
                     let message = err
@@ -10796,11 +10800,22 @@ where
         };
 
         on_row(&TestRow {
-            file: rel_display,
-            test: test_name,
+            file: rel_display.clone(),
+            test: test_name.clone(),
             status,
             message,
         });
+        if unquiesced {
+            for (_, rel_display, test_name) in &selected[index + 1..] {
+                on_row(&TestRow {
+                    file: rel_display.clone(),
+                    test: test_name.clone(),
+                    status: TestStatus::Fail,
+                    message: Some("unrun after timed-out test did not stop".to_string()),
+                });
+            }
+            break;
+        }
     }
 
     Ok(())
@@ -11026,9 +11041,8 @@ where
     // shared handle. The single shared compile eliminates the
     // ~2.3s-per-test overhead per-test recompilation paid.
     //
-    // Timeout semantics: each per-test eval runs under its own worker
-    // thread with a per-test budget. An infinite-looping test fires its
-    // own budget and is reported as timed-out without poisoning siblings.
+    // Each per-test eval gets a worker and a per-test budget. A timed-out
+    // worker is cancelled and must stop before another test uses this process.
     let synth_test_names: Vec<String> = (0..matched_tests.len())
         .map(|i| format!("__chelis_test_{i}"))
         .collect();
@@ -11060,18 +11074,26 @@ where
         }
     };
 
-    for (test, synth_name) in matched_tests.iter().zip(synth_test_names.iter()) {
+    for (index, (test, synth_name)) in matched_tests
+        .iter()
+        .zip(synth_test_names.iter())
+        .enumerate()
+    {
         let root = synth_name.clone();
         let handle = prepared_eval.clone();
         let outcome = run_test_with_timeout(
             move || Ok(handle.eval_root(BTreeMap::new(), &root)),
             timeout,
-            &format!("timeout after {}s", timeout.as_secs()),
         );
 
+        let unquiesced = matches!(&outcome, TestTimeoutOutcome::TimedOut { stopped: false });
         let (status, message) = match outcome {
-            Err(msg) => (TestStatus::Fail, Some(msg)),
-            Ok(result) => match result {
+            TestTimeoutOutcome::TimedOut { .. } => (
+                TestStatus::Fail,
+                Some(format!("timeout after {}s", timeout.as_secs())),
+            ),
+            TestTimeoutOutcome::Complete(Err(msg)) => (TestStatus::Fail, Some(msg)),
+            TestTimeoutOutcome::Complete(Ok(result)) => match result {
                 Ok(_) => (TestStatus::Pass, None),
                 Err(err) => {
                     let message = err
@@ -11091,6 +11113,17 @@ where
             status,
             message,
         });
+        if unquiesced {
+            for test in &matched_tests[index + 1..] {
+                on_row(&TestRow {
+                    file: rel_display.to_string(),
+                    test: test.name.clone(),
+                    status: TestStatus::Fail,
+                    message: Some("unrun after timed-out test did not stop".to_string()),
+                });
+            }
+            break;
+        }
     }
     Ok(())
 }
@@ -11317,34 +11350,57 @@ fn is_unit_type(ty: &chelis_surf::ast::TypeExpr) -> bool {
 /// recurse through the evaluator's AST walker; 32 MB is a pragmatic v1 upper
 /// bound. Pathological recursion beyond that still aborts the whole process
 /// because Rust's stack-overflow handler is `abort()`, not `panic()`. Full
-/// subprocess isolation is tracked as a follow-up.
+/// subprocess isolation is tracked as a follow-up. A cancelled worker gets
+/// bounded cleanup time; callers must stop using the process if it survives.
+enum TestTimeoutOutcome<T> {
+    Complete(Result<T, String>),
+    TimedOut { stopped: bool },
+}
+
 fn run_test_with_timeout<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, String> + Send + std::panic::UnwindSafe + 'static,
     timeout: Duration,
-    timeout_msg: &str,
-) -> Result<T, String> {
+) -> TestTimeoutOutcome<T> {
     use std::sync::mpsc;
+    const CANCEL_GRACE: Duration = Duration::from_secs(5);
     let (tx, rx) = mpsc::channel::<Result<T, String>>();
+    let token = chelis_compiler_api::CancelToken::new();
+    let worker_token = token.clone();
     let builder = std::thread::Builder::new()
         .name("chelis-test-worker".to_string())
         .stack_size(32 * 1024 * 1024);
-    if builder
-        .spawn(move || {
-            let result = std::panic::catch_unwind(f);
-            let payload = match result {
-                Ok(inner) => inner,
-                Err(panic_payload) => {
-                    Err(format!("panic: {}", test_panic_message(&*panic_payload)))
-                }
-            };
-            let _ = tx.send(payload);
-        })
-        .is_err()
-    {
-        return Err("failed to spawn test worker thread".to_string());
+    let Ok(worker) = builder.spawn(move || {
+        let _cancel_guard = chelis_compiler_api::install_cancel_token(worker_token);
+        let result = std::panic::catch_unwind(f);
+        let payload = match result {
+            Ok(inner) => inner,
+            Err(panic_payload) => Err(format!("panic: {}", test_panic_message(&*panic_payload))),
+        };
+        let _ = tx.send(payload);
+    }) else {
+        return TestTimeoutOutcome::Complete(Err("failed to spawn test worker thread".to_string()));
+    };
+    match rx.recv_timeout(timeout) {
+        Ok(result) => {
+            let _ = worker.join();
+            TestTimeoutOutcome::Complete(result)
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = worker.join();
+            TestTimeoutOutcome::Complete(Err("test worker disconnected".to_string()))
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            token.cancel();
+            let stopped = !matches!(
+                rx.recv_timeout(CANCEL_GRACE),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            );
+            if stopped {
+                let _ = worker.join();
+            }
+            TestTimeoutOutcome::TimedOut { stopped }
+        }
     }
-    rx.recv_timeout(timeout)
-        .unwrap_or_else(|_| Err(timeout_msg.to_string()))
 }
 
 /// The text of a panic that escaped a test body. A lowering diagnostic is a
@@ -11452,15 +11508,17 @@ fn eval_module_init(
             .map(|_| ()))
         },
         timeout,
-        &format!("module-init timeout after {}s", timeout.as_secs()),
     );
 
     match outcome {
-        Err(msg) => Some(msg),
-        Ok(Ok(_)) => None,
+        TestTimeoutOutcome::TimedOut { .. } => {
+            Some(format!("module-init timeout after {}s", timeout.as_secs()))
+        }
+        TestTimeoutOutcome::Complete(Err(msg)) => Some(msg),
+        TestTimeoutOutcome::Complete(Ok(Ok(_))) => None,
         // chelis#3269: compile diagnostics name declarations as their author
         // wrote them; a failure while evaluating is left as it is.
-        Ok(Err(err)) => Some(
+        TestTimeoutOutcome::Complete(Ok(Err(err))) => Some(
             err.with_source_names(&diagnostic_names)
                 .errors
                 .iter()
