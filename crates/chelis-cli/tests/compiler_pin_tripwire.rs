@@ -37,10 +37,12 @@ fn repo_root() -> PathBuf {
 fn pinned_real_toml_files() -> Vec<PathBuf> {
     let root = repo_root();
     vec![
+        root.join("packages/chelis-clarabel/reef.toml"),
         root.join("packages/chelis-std/reef.toml"),
         root.join("crates/chelis-cli/tests/fixtures/pseudo_nautilus/reef.toml"),
         root.join("crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.toml"),
         root.join("examples/illustrative/io_pipeline/reef.toml"),
+        root.join("examples/clarabel_qp/reef.toml"),
         root.join("examples/nautilus_quantile_contract/reef.toml"),
         root.join("examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml"),
     ]
