@@ -1361,17 +1361,59 @@ carrier. Only those two scanner identities receive this disposition; adjacent
 string accessors, constructors, and backend emitters remain unclassified unless
 they independently satisfy a final form.
 
-### The inventory's universe is a file list
+### The inventory's universe is the files under its roots
 
-The inventory's completeness claim is over an explicit, reviewed list of the
-repository files that can carry a seam, held in the oracle as
-`INVENTORY_SOURCES`. The oracle proves that list still equals the on-disk
-contents of its declared roots, so a new file fails until someone registers it,
-and it reads the filesystem rather than the git index because cargo compiles
-what is on disk.
+The inventory's completeness claim is over every file on disk under the
+oracle's declared roots, `INVENTORY_ROOTS`. The freeze digest binds each root
+together with the concrete directories it matches, so the universe's
+definition is reviewed while its membership is derived: a new file is scanned
+the moment it exists, and a seam in it fails as an unclassified hit, exactly
+as a new seam in an existing file does. A frozen root directory that holds
+no visible file fails even while its glob still matches other directories,
+and a directory that joins a root, like any change to a root, moves the
+freeze.
+
+A file that a path-keyed registration of the oracle names stays in the
+universe unless the baseline records it as retired: the file of any
+foundation identity, active or retired, since the reappearance check needs it
+scanned; an owner-module final form's file; and the target of a mutation that
+edits an existing file. Such a file leaving the universe fails the oracle.
+Regeneration records it in `retired_files`, and drops its active debt, only
+when the file is named with `--retire-departed-file`. A tree cannot tell a
+deleted file from one moved outside the roots, so both fail until retired,
+and retiring asserts that the file and its identities are gone: a file moved
+outside the roots is never retired, but moved back or brought in by a root
+change. A recorded file that returns to the universe, or that nothing
+references, fails until regeneration drops the stale record. A file that no
+registration names is not reported when it leaves the universe, unlike a file
+in a hand-kept list; after it leaves, it sits outside the roots like any
+other file there. A mutation targets a file that must exist, except a
+declared new-file witness, whose file must not; a missing target fails
+instead of being planted afresh.
+
+One visibility rule decides both the scanned files and the root directories.
+A file is visible when it is on disk, or is a link to a file on disk, and is
+not git-ignored; git never ignores a tracked file. The oracle reads it from a
+single NUL-delimited `git ls-files` of tracked and unignored untracked files,
+so a name's spelling never changes the answer. The scan reads every visible
+file under a root, and a root directory counts while it holds a visible
+file. The oracle reads the disk rather than only the git index because cargo
+compiles what is on disk: an untracked file is in the universe, a tracked
+file deleted from disk is not, and a git-ignored file is not. Consequently:
+
+- an untracked crate with sources is a new root directory at once;
+- a frozen directory whose files remain on disk stays present even when
+  untracked;
+- a frozen directory left empty, or holding only ignored files, departs;
+- a directory that is not frozen and holds no visible file is not a new
+  root directory;
+- a symbolically linked file under a root is scanned at the link's path;
+- a symbolic link to a directory, a nested git repository and a submodule
+  are each one entry that is never descended into, at any depth, so no file
+  inside one is visible and none is a root directory.
 
 Stating the claim over a *language* instead would not be dischargeable: a
-reviewer can always name one more construct. Stated over a file list it is
+reviewer can always name one more construct. Stated over a file set it is
 decidable, and every source in it is read by a real parser for its own
 language: the Rust files with `syn`, and the C and Objective-C headers through
 clang's front end (`clang -fsyntax-only -Xclang -ast-dump=json`). A seam's
@@ -1445,7 +1487,8 @@ returns:
 - replace exact product arithmetic with saturation;
 - add a fixed-rank device field or narrow one metadata field;
 - handwrite a second ABI field list;
-- register a source file's seam without registering the file;
+- plant a seam in a new source file under a root, and in a new file in a
+  subdirectory of one;
 - replace the exact arbitrary-precision product with primitive wrapping
   arithmetic;
 - recover capacity through a direct or aliased legacy capacity carrier;
@@ -1467,7 +1510,8 @@ execution tests prove its sanctioned replacements work.
 ## B1. Freeze points
 
 - Phase 0 freezes the immutable `foundation_rows`, including each identity's
-  owning deletion phase, and `source_inventory.mutations`. Each frozen mutation
+  owning deletion phase, `source_inventory.mutations`, and
+  `source_inventory.roots`. Each frozen mutation
   row binds its stable witness ID, exact implementation digest, target source
   path, expected seam kind, required owners, expected failure code and reason,
   and required command. Later phases may reduce raw
@@ -1479,9 +1523,9 @@ execution tests prove its sanctioned replacements work.
   reappearance rather than silently restoring it. A genuinely new identity
   outside the prior foundation may still be emitted with a changed digest for
   review. `coverage_manifest()` remains code-derived configuration rather than
-  a persisted baseline field: beyond the frozen mutation contract, it adds the
-  source universe, release reproducers, hardware probes, counts, and ordinary execution
-  configuration. At runtime the oracle verifies that live probes match the
+  a persisted baseline field: beyond the frozen mutation contract and roots, it
+  adds the closure rule, release reproducers, hardware probes, and ordinary
+  execution configuration. At runtime the oracle verifies that live probes match the
   frozen mutation rows, verifies that the richer manifest is the exact
   projection of the current configuration, and executes every non-hardware
   mutation and reproducer. Changes only to live-derived reproducers, hardware
@@ -1511,9 +1555,11 @@ change also requires a mutation that would have accepted the forbidden
 behavior. Adding a test already selected by a frozen command does not move the
 required floor.
 
-A Phase 0 source-universe, final-form, reproducer, or hardware registration that
-does not add or change a foundation row or frozen mutation row does not move the
-digest and does not require a B1 amendment paragraph. Its owning change still
+Adding, removing, or renaming a file under a frozen root, and a final-form,
+reproducer, or hardware registration, that does not add or change a foundation
+row or frozen mutation row does not move the digest and does not require a B1
+amendment paragraph. Changing a root, or the set of directories a root
+matches, does. Its owning change still
 updates code, focused positive and negative tests, and current documentation.
 Adding, removing, renaming, reimplementing, retargeting, or changing the
 expected seam kind, required owners, failure or command of a mutation does move
@@ -1720,6 +1766,34 @@ exactly as the owners they come from, so Phase 4's typed lane renderer deletes
 them with the rest. The append-only foundation extends from 372 to 374 rows,
 active debt moves from 233 to 234, and the freeze digest moves.
 
+The schema 8 source-universe amendment (chelis#3474) derives the scanned files
+from the roots. A hand-kept list required to equal the roots would carry no
+information the roots do not, and would fail every change that adds, renames,
+or deletes a file under a root. The frozen `source_inventory.roots` holds each
+root pattern with the concrete directories it matches, so the digest binds the
+universe's definition while its membership is derived. A frozen directory
+that holds no visible file fails as a departed root, and a file a path-keyed
+registration names (a foundation identity, an owner-module final form, or an
+existing-file mutation target) that leaves the universe fails until
+regeneration names it for retirement; the baseline's `retired_files` records
+each named departure outside the digest, as active debt is. Each frozen
+mutation row gains `creates_file`, true only for the unregistered-source and
+unregistered-subdirectory witnesses. Those two keep
+their witness IDs, paths, and planted seams; each expects the unclassified-hit
+failure naming the new file's owner, `raw-element-pointer` at
+`runtime_representation_phase0_unregistered` and `normalized-key-arithmetic`
+at `runtime_representation_phase0_subdirectory`, which proves the derived
+universe scanned the file, and its implementation digest covers its
+documentation. Every other witness requires its target to exist rather than
+planting into a fresh file. The Phase 1 Python floor replaces four
+identities that pinned a hand-kept list and its documented count with every
+identity of `SourceUniverseTests`, which a Phase 1 test checks against the
+floor. No
+foundation row, active-debt row, classifier, final form, or mutation
+semantics change, and no numbered representation semantics move. The
+amendment moves `FREEZE_SHA256` and the Phase 1 `MANIFEST_SHA256`; accepting it
+re-acknowledges both.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and
@@ -1762,12 +1836,12 @@ code-generation text test.
 ## Phase 0 — executable inventory and red controls
 
 **Delivers:** the derived inventory and exact shrink-only transition-debt
-manifest in C6, over the frozen source list; a structural seam scanner with its
+manifest in C6, over every file under its frozen roots; a structural seam scanner with its
 own positive and negative suite; release-profile reproducers for exact capacity
 collision, count/byte overflow, zero extents, and malformed foreign metadata,
 including a planner-level [#888] witness that shows the collision reaching slot
 reuse rather than only key equality; one detection mutation per classifier plus
-fail-closed controls for an unregistered source file and an unclassified
+fail-closed controls for a seam in a new source file and an unclassified
 arithmetic spelling; source-only and hardware probe harnesses; all landed
 receipts as positive controls.
 

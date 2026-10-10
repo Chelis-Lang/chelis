@@ -11,15 +11,16 @@ kernel behavior. It proves three things and nothing more:
    invert rather than be deleted; and
 3. a new unlisted seam is detected.
 
-# The universe is a file list, not a language
+# The universe is a file set, not a language
 
-The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
-reviewed list of the repository files that can carry a representation seam.
-Ninety are Rust and eleven are C, C++, or Objective-C sources. A completeness
-claim stated over a *language* instead cannot be discharged, because a reviewer
-can always name one more construct; stated over a file list it is decidable,
-and `_assert_source_list_current` proves the list still equals the tracked
-contents of its roots, so a new file fails until someone registers it.
+The inventory's completeness claim is over every file on disk under
+`INVENTORY_ROOTS`, the reviewed roots the baseline's freeze digest binds. A
+completeness claim stated over a *language* instead cannot be discharged,
+because a reviewer can always name one more construct; stated over a file set
+it is decidable. The scanned list is derived, never registered: a new file
+under a root is scanned as soon as it exists, and a seam in it fails as an
+unclassified hit like any other. Changing a root moves the freeze, and a root
+whose directory has departed fails rather than silently shrinking the set.
 
 Every source is read by a real parser for its language. Rust is read with
 `syn`. The headers are read through clang's front end (`-fsyntax-only -Xclang
@@ -50,12 +51,13 @@ import argparse
 import hashlib
 import inspect
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory.json"
@@ -65,15 +67,15 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # design amendment when the finished foundation or a mutation binding changes.
 # Release reproducers, hardware probes, counts, and ordinary configuration are
 # deliberately outside this digest.
-FREEZE_SHA256 = "7a24b73e809011eb0511e3584045f656333b57e04ef0d7e28b70a7e49f23e306"
+FREEZE_SHA256 = "18641a6b120ec86ea788314f9261c73fdea401165049343961ca64f1e1a12670"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
 )
 
-# The roots whose tracked contents the frozen source list must equal. Keeping
-# the roots beside the list is what makes the list checkable rather than
-# aspirational.
+# The roots whose on-disk contents are the inventory's universe. The baseline
+# freezes this exact tuple inside the reviewed digest, so adding, removing, or
+# reordering a root is a B1 freeze move; the files under the roots are derived.
 INVENTORY_ROOTS = (
     "crates/chelis-runtime/src/**/*.rs",
     "crates/chelis-runtime/include/**/*.h",
@@ -91,109 +93,6 @@ INVENTORY_ROOTS = (
     # a seam; a root that cannot see it is a closure hole.
     "crates/chelis-backend-*/build.rs",
 )
-
-INVENTORY_SOURCES: tuple[str, ...] = (
-    "crates/chelis-backend-c/src/blas.rs",
-    "crates/chelis-backend-c/src/crmath_kernels.rs",
-    "crates/chelis-backend-c/src/emit.rs",
-    "crates/chelis-backend-c/src/emitted_expr.rs",
-    "crates/chelis-backend-c/src/fp_env.rs",
-    "crates/chelis-backend-c/src/generated_header.rs",
-    "crates/chelis-backend-c/src/host_abi.rs",
-    "crates/chelis-backend-c/src/host_abi_tests.rs",
-    "crates/chelis-backend-c/src/host_emit.rs",
-    "crates/chelis-backend-c/src/host_emit/entry.rs",
-    "crates/chelis-backend-c/src/host_emit/entry_walk.rs",
-    "crates/chelis-backend-c/src/integer_float.rs",
-    "crates/chelis-backend-c/src/lib.rs",
-    "crates/chelis-backend-c/src/memory.rs",
-    "crates/chelis-backend-c/src/toolchain.rs",
-    "crates/chelis-backend-hip/runtime/chelis_device_descriptor.h",
-    "crates/chelis-backend-hip/runtime/chelis_device_owner.cpp",
-    "crates/chelis-backend-hip/runtime/chelis_device_owner.h",
-    "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
-    "crates/chelis-backend-hip/src/blas.rs",
-    "crates/chelis-backend-hip/src/emit.rs",
-    "crates/chelis-backend-hip/src/fusion.rs",
-    "crates/chelis-backend-hip/src/kernels.rs",
-    "crates/chelis-backend-hip/src/launch.rs",
-    "crates/chelis-backend-hip/src/lib.rs",
-    "crates/chelis-backend-hip/src/memory.rs",
-    "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-    "crates/chelis-backend-metal/src/blas.rs",
-    "crates/chelis-backend-metal/src/dtype.rs",
-    "crates/chelis-backend-metal/src/emit.rs",
-    "crates/chelis-backend-metal/src/kernels.rs",
-    "crates/chelis-backend-metal/src/lib.rs",
-    "crates/chelis-ir/src/analysis.rs",
-    "crates/chelis-ir/src/anonymous_dims.rs",
-    "crates/chelis-ir/src/axis_sources.rs",
-    "crates/chelis-ir/src/capacity_key.rs",
-    "crates/chelis-ir/src/compositions.rs",
-    "crates/chelis-ir/src/dag.rs",
-    "crates/chelis-ir/src/eval.rs",
-    "crates/chelis-ir/src/fuse.rs",
-    "crates/chelis-ir/src/grad.rs",
-    "crates/chelis-ir/src/host.rs",
-    "crates/chelis-ir/src/host/signature_entry.rs",
-    "crates/chelis-ir/src/host/staged.rs",
-    "crates/chelis-ir/src/host_type_state.rs",
-    "crates/chelis-ir/src/lib.rs",
-    "crates/chelis-ir/src/load_store_name.rs",
-    "crates/chelis-ir/src/lower.rs",
-    "crates/chelis-ir/src/lowering_trace.rs",
-    "crates/chelis-ir/src/optimize.rs",
-    "crates/chelis-ir/src/ownership/classify.rs",
-    "crates/chelis-ir/src/ownership/error.rs",
-    "crates/chelis-ir/src/ownership/ir.rs",
-    "crates/chelis-ir/src/ownership/last_use.rs",
-    "crates/chelis-ir/src/ownership/lower.rs",
-    "crates/chelis-ir/src/ownership/mod.rs",
-    "crates/chelis-ir/src/ownership/render.rs",
-    "crates/chelis-ir/src/ownership/storage.rs",
-    "crates/chelis-ir/src/ownership/tests.rs",
-    "crates/chelis-ir/src/ownership/verify.rs",
-    "crates/chelis-ir/src/pipeline.rs",
-    "crates/chelis-ir/src/span_merge.rs",
-    "crates/chelis-ir/src/span_sanitize.rs",
-    "crates/chelis-ir/src/specialize.rs",
-    "crates/chelis-ir/src/tier2.rs",
-    "crates/chelis-ir/src/tier2_ordered.rs",
-    "crates/chelis-ir/src/verify.rs",
-    "crates/chelis-ir/src/vmap.rs",
-    "crates/chelis-python/src/compiler_json.rs",
-    "crates/chelis-python/src/dlpack.rs",
-    "crates/chelis-python/src/lib.rs",
-    "crates/chelis-python/src/native_tensor.rs",
-    "crates/chelis-python/src/source_json.rs",
-    "crates/chelis-runtime/build.rs",
-    "crates/chelis-runtime/include/chelis_blas.h",
-    "crates/chelis-runtime/include/chelis_math.h",
-    "crates/chelis-runtime/include/chelis_runtime.h",
-    "crates/chelis-runtime/include/chelis_runtime_dtype.h",
-    "crates/chelis-runtime/include/chelis_runtime_views.h",
-    "crates/chelis-runtime/include/chelis_simd.h",
-    "crates/chelis-runtime/src/build_record.rs",
-    "crates/chelis-runtime/src/decimal_parse.rs",
-    "crates/chelis-runtime/src/dtype_header.rs",
-    "crates/chelis-runtime/src/element.rs",
-    "crates/chelis-runtime/src/format_shortest.rs",
-    "crates/chelis-runtime/src/fp_env.rs",
-    "crates/chelis-runtime/src/host_assert.rs",
-    "crates/chelis-runtime/src/host_clock.rs",
-    "crates/chelis-runtime/src/host_csv.rs",
-    "crates/chelis-runtime/src/host_process.rs",
-    "crates/chelis-runtime/src/host_round.rs",
-    "crates/chelis-runtime/src/ieee_narrow.rs",
-    "crates/chelis-runtime/src/lib.rs",
-    "crates/chelis-runtime/src/list.rs",
-    "crates/chelis-runtime/src/metadata.rs",
-    "crates/chelis-runtime/src/native_provider.rs",
-    "crates/chelis-runtime/src/ownership_ledger.rs",
-    "crates/chelis-runtime/src/public_headers.rs",
-    "crates/chelis-runtime/src/runtime_dtype_contract_tests.rs",
-    "crates/chelis-runtime/src/text_parse.rs",
-    "crates/chelis-vocab/src/lib.rs",)
 
 # Which phase deletes each seam class, from the design's Part III phase map.
 # Phase 1 closes the capacity and dtype-contract vocabulary, Phase 2 the device
@@ -674,9 +573,23 @@ SOURCE_REJECTED_FAILURE = FailureExpectation(
     "source.rejected",
     "fail-closed inventory scanner rejected",
 )
-SOURCE_LIST_FAILURE = FailureExpectation(
-    "inventory.unregistered_source",
-    "the frozen inventory source list is stale",
+DEPARTED_ROOT_FAILURE = FailureExpectation(
+    "inventory.departed_root",
+    "an inventory root directory holds no visible file",
+)
+DEPARTED_FILE_FAILURE = FailureExpectation(
+    "inventory.departed_file",
+    "a file the frozen baseline references is outside the inventory universe",
+)
+# The sanctioned next action each departure message names.
+ROOT_CHANGE_ACTION = (
+    "if the change is intended, set source_inventory.roots in the baseline to "
+    "root_directories(), regenerate with --phase 0 --regenerate, and move "
+    "FREEZE_SHA256 with a B1 amendment"
+)
+DEPARTED_FILE_ACTION = (
+    "if the file was deleted, regenerate with --retire-departed-file PATH; "
+    "a file moved outside the roots is never retired"
 )
 
 
@@ -690,6 +603,9 @@ class MutationProbe:
     # Owners the rejection must name, for a witness whose point is that one
     # declaration yields several identities.
     expected_owners: tuple[str, ...] = ()
+    # A new-file witness plants a file that must not exist yet; every other
+    # witness mutates a file that must exist, and is never planted afresh.
+    creates_file: bool = False
 
 
 def _probe(
@@ -698,6 +614,7 @@ def _probe(
     mutate: Callable[[str], str],
     expected_failure: FailureExpectation = UNCLASSIFIED_FAILURE,
     expected_owners: tuple[str, ...] = (),
+    creates_file: bool = False,
 ) -> MutationProbe:
     return MutationProbe(
         witness_id=f"phase0.{mutate.__name__}",
@@ -706,67 +623,120 @@ def _probe(
         mutate=mutate,
         expected_failure=expected_failure,
         expected_owners=expected_owners,
+        creates_file=creates_file,
+    )
+
+
+def _visible_files(root: Path, pathspecs: Sequence[str]) -> list[str]:
+    """Every visible file matching the glob pathspecs.
+
+    A file is visible when it is on disk and not git-ignored. One
+    NUL-delimited `git ls-files` lists tracked files, which git never
+    ignores, and the untracked files no ignore rule matches, with no quoting
+    whatever `core.quotePath` says; a listed path counts only while it is a
+    file on disk, or a link to one. git lists a link to a directory, a nested
+    repository and a submodule as one entry and never descends into it, so a
+    file inside any of them is not visible, at any depth.
+    """
+
+    completed = subprocess.run(
+        (
+            "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+            "--", *(f":(glob){pathspec}" for pathspec in pathspecs),
+        ),
+        cwd=root,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise OracleFailure(
+            "could not list the visible inventory files: "
+            + completed.stderr.decode(errors="replace").strip()
+        )
+    return sorted(
+        {
+            path
+            for raw in completed.stdout.split(b"\0")
+            if raw and (root / (path := os.fsdecode(raw))).is_file()
+        }
     )
 
 
 def _inventory_candidates(root: Path) -> tuple[str, ...]:
-    """Every file on disk under an inventory root, minus ignored ones.
+    """Every visible file under an inventory root.
 
-    This reads the filesystem rather than the git index on purpose: cargo
-    compiles what is on disk, so an unstaged new file in a crate's `src/` is
-    production source and can carry a seam. Enumerating the index instead would
-    let a file be invisible to the inventory right up until someone staged it.
+    This reads the filesystem rather than only the git index on purpose:
+    cargo compiles what is on disk, so an unstaged new file in a crate's
+    `src/` is production source and can carry a seam, and a tracked file
+    deleted from disk is not.
     """
 
-    found = {
-        path.relative_to(root).as_posix()
-        for pattern in INVENTORY_ROOTS
-        for path in root.glob(pattern)
-        if path.is_file()
-    }
-    if not found:
-        return ()
-    completed = subprocess.run(
-        ("git", "check-ignore", "--stdin"),
-        cwd=root,
-        input="\n".join(sorted(found)),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    # Exit 0 means some paths matched, 1 means none did; anything else is a
-    # real failure rather than an empty ignore set.
-    if completed.returncode not in (0, 1):
-        raise OracleFailure("could not resolve ignored inventory candidates")
-    ignored = {line for line in completed.stdout.split("\n") if line}
-    return tuple(sorted(found - ignored))
+    return tuple(_visible_files(root, INVENTORY_ROOTS))
 
 
-def _assert_source_list_current(root: Path) -> None:
-    """The frozen list must still equal its roots' tracked contents.
+def _root_directory(pattern: str) -> str:
+    """The directory a root lives in: its path without the file name or `**`."""
 
-    Without this the list would silently rot: a new file under an inventory
-    root would carry seams nobody scans. The failure names the exact sanctioned
-    action rather than inviting a workaround.
+    parts = pattern.split("/")[:-1]
+    while parts and parts[-1] == "**":
+        parts.pop()
+    return "/".join(parts)
+
+
+def root_directories(root: Path) -> list[dict[str, object]]:
+    """Each root with the directories its directory part matches.
+
+    The baseline freezes this expansion, so a crate that leaves a glob such
+    as `crates/chelis-backend-*` fails even while other crates still match.
+    A directory counts while it holds a visible file, by the one rule the
+    scan applies to files: an untracked crate with sources is a new directory
+    at once, while a directory left empty, a git-ignored one, a nested
+    repository and a link to a directory are not root directories.
     """
 
-    tracked = set(_inventory_candidates(root))
-    registered = set(INVENTORY_SOURCES)
-    unregistered = sorted(tracked - registered)
-    departed = sorted(registered - tracked)
-    if unregistered:
-        raise OracleFailure(
-            "the frozen inventory source list is stale; these tracked files under an "
-            "inventory root are not registered in INVENTORY_SOURCES: "
-            + ", ".join(unregistered[:5]),
-            code=SOURCE_LIST_FAILURE.code,
+    parts = {pattern: _root_directory(pattern) for pattern in INVENTORY_ROOTS}
+    files = _visible_files(root, sorted({f"{part}/**" for part in parts.values()}))
+    rows = []
+    for pattern, part in parts.items():
+        depth = len(part.split("/"))
+        rows.append(
+            {
+                "pattern": pattern,
+                "directories": sorted(
+                    {
+                        prefix
+                        for path in files
+                        if PurePosixPath(
+                            prefix := "/".join(path.split("/")[:depth])
+                        ).match(part)
+                        and len(path.split("/")) > depth
+                    }
+                ),
+            }
         )
+    return rows
+
+
+def inventory_sources(root: Path) -> tuple[str, ...]:
+    """The inventory's universe: every file on disk under a frozen root.
+
+    Nothing registers a file, so a new one is scanned the moment it exists.
+    A root may name a build script that does not exist yet, but its directory
+    must exist. The baseline check then requires every frozen root directory
+    and every file the baseline references to remain in the universe.
+    """
+
+    departed = [
+        row["pattern"] for row in root_directories(root) if not row["directories"]
+    ]
     if departed:
         raise OracleFailure(
-            "the frozen inventory source list is stale; these registered files no "
-            "longer exist: " + ", ".join(departed[:5]),
-            code=SOURCE_LIST_FAILURE.code,
+            f"{DEPARTED_ROOT_FAILURE.reason_prefix}: "
+            + ", ".join(departed)
+            + f"; {ROOT_CHANGE_ACTION}",
+            code=DEPARTED_ROOT_FAILURE.code,
         )
+    return _inventory_candidates(root)
 
 
 _SCAN_GENERATION = 0
@@ -808,12 +778,13 @@ def _build_scanner() -> Path:
 
 
 def scan_sources(root: Path) -> tuple[dict[str, str], ...]:
-    """Run the structural scanner over the frozen source list."""
+    """Run the structural scanner over every file under the frozen roots."""
 
+    sources = inventory_sources(root)
     binary = _build_scanner()
     completed = subprocess.run(
         (str(binary), "--repo", str(root)),
-        input=json.dumps(list(INVENTORY_SOURCES)),
+        input=json.dumps(list(sources)),
         check=False,
         capture_output=True,
         text=True,
@@ -849,7 +820,6 @@ def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
     cached = _SCAN_CACHE.get(_SCAN_GENERATION)
     if cached is not None:
         return cached
-    _assert_source_list_current(root)
     seen: dict[str, InventoryRow] = {}
     for row in scan_sources(root):
         kind = row["kind"]
@@ -959,6 +929,7 @@ def mutation_manifest(probes: Sequence[MutationProbe]) -> list[dict[str, object]
             },
             "expected_owners": list(probe.expected_owners),
             "command": PHASE0_COMMAND,
+            "creates_file": probe.creates_file,
         }
         for probe in probes
     ]
@@ -972,15 +943,139 @@ def frozen_mutation_rows(
     return mutation_manifest(probes)
 
 
+def frozen_source_inventory(
+    probes: Sequence[MutationProbe],
+    root: Path = REPO_ROOT,
+) -> dict[str, object]:
+    """The digest-bound source contract: the mutation rows and the roots."""
+
+    return {
+        "mutations": frozen_mutation_rows(probes),
+        "roots": root_directories(root),
+    }
+
+
 def _validate_frozen_mutation_contract(
     source_inventory: dict[str, object],
     probes: Sequence[MutationProbe],
 ) -> None:
-    expected = {"mutations": frozen_mutation_rows(probes)}
-    if source_inventory != expected:
+    frozen_roots = source_inventory.get("roots")
+    if not isinstance(frozen_roots, list) or [
+        row.get("pattern") if isinstance(row, dict) else None for row in frozen_roots
+    ] != list(INVENTORY_ROOTS):
+        raise OracleFailure(
+            "current inventory roots do not match the frozen source universe"
+        )
+    if source_inventory.get("mutations") != frozen_mutation_rows(probes):
         raise OracleFailure(
             "current Phase 0 probes do not match the frozen mutation contract"
         )
+
+
+def _validate_frozen_root_directories(
+    source_inventory: dict[str, object], root: Path
+) -> None:
+    """Every frozen root directory must exist, and no unreviewed one may join."""
+
+    current = {
+        row["pattern"]: set(row["directories"]) for row in root_directories(root)
+    }
+    departed: set[str] = set()
+    added: set[str] = set()
+    for row in source_inventory["roots"]:
+        frozen = set(row["directories"])
+        departed |= frozen - current[row["pattern"]]
+        added |= current[row["pattern"]] - frozen
+    if departed:
+        raise OracleFailure(
+            f"{DEPARTED_ROOT_FAILURE.reason_prefix}: "
+            + ", ".join(sorted(departed))
+            + f"; {ROOT_CHANGE_ACTION}",
+            code=DEPARTED_ROOT_FAILURE.code,
+        )
+    if added:
+        raise OracleFailure(
+            "inventory root directories do not match the frozen source universe; "
+            "a new directory under a root is a freeze move: "
+            + ", ".join(sorted(added))
+            + f"; {ROOT_CHANGE_ACTION}"
+        )
+
+
+def _identity_path(identity: str) -> str:
+    return identity.split("|", 2)[1].removeprefix("path=")
+
+
+def referenced_files(baseline: dict[str, object]) -> set[str]:
+    """Every file a path-keyed registration of the oracle names.
+
+    These are the files of foundation identities, retired ones included,
+    whose reappearance check needs the file scanned; owner-module final
+    forms; and the targets of mutations that edit an existing file. A new-file
+    witness's target is checked where it is planted.
+    """
+
+    return (
+        {
+            _identity_path(str(row["identity"]))
+            for row in (*baseline["foundation_rows"], *baseline["active_debt"])
+        }
+        | set(_owner_module_final_forms_manifest())
+        | {
+            str(row["path"])
+            for row in baseline["source_inventory"]["mutations"]
+            if not row["creates_file"]
+        }
+    )
+
+
+def _validate_referenced_files(
+    baseline: dict[str, object],
+    root: Path,
+    *,
+    regenerating: bool = False,
+    retiring: Sequence[str] = (),
+) -> list[str]:
+    """Fail on a referenced file outside the universe that is not retired.
+
+    Returns the retired-file record regeneration writes: the recorded
+    retirements plus `retiring`, without any file that is back in the
+    universe or that nothing references. Validation fails on such a stale
+    entry instead, because it would let a file depart unnoticed later.
+    """
+
+    universe = set(inventory_sources(root))
+    referenced = referenced_files(baseline)
+    recorded = set(baseline["retired_files"])
+    returned = sorted(recorded & universe)
+    if returned and not regenerating:
+        raise OracleFailure(
+            "a retired file is back in the inventory universe: "
+            + ", ".join(returned)
+            + "; regenerate to drop it from retired_files"
+        )
+    unreferenced = sorted(recorded - referenced)
+    if unreferenced and not regenerating:
+        raise OracleFailure(
+            "retired_files names a file nothing references: "
+            + ", ".join(unreferenced)
+            + "; regenerate to drop it from retired_files"
+        )
+    departed = referenced - universe - recorded
+    stray = sorted(set(retiring) - departed)
+    if stray:
+        raise OracleFailure(
+            "only a departed referenced file can be retired: " + ", ".join(stray)
+        )
+    unretired = sorted(departed - set(retiring))
+    if unretired:
+        raise OracleFailure(
+            f"{DEPARTED_FILE_FAILURE.reason_prefix}: "
+            + ", ".join(unretired)
+            + f"; {DEPARTED_FILE_ACTION}",
+            code=DEPARTED_FILE_FAILURE.code,
+        )
+    return sorted(((recorded | set(retiring)) & referenced) - universe)
 
 
 def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
@@ -1028,7 +1123,7 @@ def _coverage_manifest_from_configuration(
 
     return {
         "source_inventory": {
-            "artifact": "the frozen INVENTORY_SOURCES file list",
+            "artifact": "every file on disk under the frozen INVENTORY_ROOTS",
             "enumerator": (
                 "chelis-repr-inventory: syn for Rust; clang's front end under fixed "
                 "target lanes, a committed stub SDK, and a scrubbed environment for C "
@@ -1036,11 +1131,13 @@ def _coverage_manifest_from_configuration(
                 "type-word lists"
             ),
             "universe": {
-                "registered_sources": len(INVENTORY_SOURCES),
                 "roots": list(INVENTORY_ROOTS),
                 "closure_rule": (
-                    "the registered list must equal its roots' tracked contents; a new "
-                    "file fails until it is registered"
+                    "the scanned sources are exactly the files on disk under the "
+                    "digest-bound roots; a new file is scanned without registration, "
+                    "a frozen root directory that departed fails, and a file a "
+                    "path-keyed registration names that left the universe fails "
+                    "until it is retired"
                 ),
             },
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
@@ -1095,6 +1192,7 @@ def build_foundation_baseline(
     foundation_rows: Sequence[dict[str, object]] | None = None,
     source_inventory: dict[str, object],
     active_debt_rows: Sequence[dict[str, object]] | None = None,
+    retired_files: Sequence[str] = (),
 ) -> dict[str, object]:
     """Build the shrink-only ledger without forgetting reviewed contracts.
 
@@ -1154,11 +1252,12 @@ def build_foundation_baseline(
             active_ids.add(row.identity)
 
     return {
-        "schema_version": 7,
+        "schema_version": 8,
         "freeze_sha256": _freeze_digest(foundation, source_inventory),
         "source_inventory": json.loads(json.dumps(source_inventory)),
         "foundation_rows": foundation,
         "active_debt": active,
+        "retired_files": sorted(retired_files),
     }
 
 
@@ -1219,6 +1318,7 @@ def _validate_baseline_schema(baseline: object) -> None:
         "foundation_rows",
         "source_inventory",
         "active_debt",
+        "retired_files",
     }
     if not isinstance(baseline, dict):
         raise OracleFailure("Phase 0 inventory baseline must be a JSON object")
@@ -1229,8 +1329,8 @@ def _validate_baseline_schema(baseline: object) -> None:
         )
 
     schema_version = baseline["schema_version"]
-    if type(schema_version) is not int or schema_version != 7:
-        raise OracleFailure("schema_version must be the integer 7")
+    if type(schema_version) is not int or schema_version != 8:
+        raise OracleFailure("schema_version must be the integer 8")
     freeze_sha256 = baseline["freeze_sha256"]
     if (
         not isinstance(freeze_sha256, str)
@@ -1246,14 +1346,50 @@ def _validate_baseline_schema(baseline: object) -> None:
         raise OracleFailure("foundation_rows must be a list")
     source_inventory = _validate_exact_fields(
         source_inventory,
-        expected={"mutations"},
+        expected={"mutations", "roots"},
         location="source_inventory",
     )
     mutations = source_inventory["mutations"]
     if not isinstance(mutations, list):
         raise OracleFailure("source_inventory.mutations must be a list")
+    roots = source_inventory["roots"]
+    if not isinstance(roots, list) or not roots:
+        raise OracleFailure("source_inventory.roots must be a nonempty list")
+    patterns: list[object] = []
+    for index, untyped_root in enumerate(roots):
+        location = f"source_inventory.roots[{index}]"
+        root_row = _validate_exact_fields(
+            untyped_root,
+            expected={"pattern", "directories"},
+            location=location,
+        )
+        directories = root_row["directories"]
+        if not isinstance(root_row["pattern"], str) or not root_row["pattern"]:
+            raise OracleFailure(f"{location}.pattern must be a nonempty string")
+        if (
+            not isinstance(directories, list)
+            or not directories
+            or any(not isinstance(path, str) or not path for path in directories)
+            or directories != sorted(set(directories))
+        ):
+            raise OracleFailure(
+                f"{location}.directories must be a nonempty sorted list of "
+                "distinct nonempty strings"
+            )
+        patterns.append(root_row["pattern"])
+    if len(patterns) != len(set(patterns)):
+        raise OracleFailure("duplicate pattern in source_inventory.roots")
     if not isinstance(active, list):
         raise OracleFailure("active_debt must be a list")
+    retired_files = baseline["retired_files"]
+    if (
+        not isinstance(retired_files, list)
+        or any(not isinstance(path, str) or not path for path in retired_files)
+        or retired_files != sorted(set(retired_files))
+    ):
+        raise OracleFailure(
+            "retired_files must be a sorted list of distinct nonempty strings"
+        )
 
     foundation_ids: list[str] = []
     for index, untyped_row in enumerate(foundation):
@@ -1284,9 +1420,12 @@ def _validate_baseline_schema(baseline: object) -> None:
                 "implementation_sha256",
                 "expected_failure",
                 "command",
+                "creates_file",
             },
             location=location,
         )
+        if type(row["creates_file"]) is not bool:
+            raise OracleFailure(f"{location}.creates_file must be a boolean")
         witness_id = row["witness_id"]
         implementation_sha256 = row["implementation_sha256"]
         expected_failure = _validate_exact_fields(
@@ -1388,6 +1527,7 @@ def validate_baseline(
         source_inventory,
         phase0_mutation_probes() if probes is None else probes,
     )
+    _validate_frozen_root_directories(source_inventory, REPO_ROOT)
 
     foundation_ids = [row.get("identity") for row in foundation]
     active_ids = [row.get("identity") for row in active]
@@ -1400,6 +1540,7 @@ def validate_baseline(
             "active transition debt contains an identity outside the frozen foundation: "
             + ", ".join(sorted(outside)[:5])
         )
+    _validate_referenced_files(baseline, REPO_ROOT)
 
     observed_by_id = {row.identity: row for row in rows}
     if len(observed_by_id) != len(rows):
@@ -2033,10 +2174,11 @@ def mutate_rust_path_module(source: str) -> str:
 
 
 def mutate_unregistered_subdirectory_source(_source: str) -> str:
-    """A seam in a SUBDIRECTORY of an inventory root.
+    """A seam in a new file in a SUBDIRECTORY of an inventory root.
 
     Cargo compiles it, so it is production source. A single-level glob did not
-    see it, which made the closure check evadable.
+    see it; the rejection must name the new file's owner, which proves the
+    derived universe scanned it.
     """
 
     return """//! Temporary Phase 0 detector probe.
@@ -2049,7 +2191,11 @@ pub fn runtime_representation_phase0_subdirectory(concrete: usize, value: usize)
 
 
 def mutate_unregistered_inventory_source(_source: str) -> str:
-    """A new file under an inventory root must fail until it is registered."""
+    """A seam in a new file under an inventory root, which nothing registers.
+
+    The rejection must name the new file's owner, which proves the derived
+    universe scanned it.
+    """
 
     return """//! Temporary Phase 0 detector probe.
 
@@ -2242,28 +2388,39 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             SOURCE_REJECTED_FAILURE,
         ),
         _probe(
-            "unregistered-inventory-source",
+            "raw-element-pointer",
             "crates/chelis-runtime/src/runtime_representation_phase0_probe.rs",
             mutate_unregistered_inventory_source,
-            SOURCE_LIST_FAILURE,
+            expected_owners=("runtime_representation_phase0_unregistered",),
+            creates_file=True,
         ),
         _probe(
-            "unregistered-inventory-source",
+            "normalized-key-arithmetic",
             "crates/chelis-ir/src/repr_probe/mod.rs",
             mutate_unregistered_subdirectory_source,
-            SOURCE_LIST_FAILURE,
+            expected_owners=("runtime_representation_phase0_subdirectory",),
+            creates_file=True,
         ),
     )
 
 
 @contextmanager
-def temporary_mutation(path: Path, mutate: Callable[[str], str]) -> Iterator[None]:
+def temporary_mutation(
+    path: Path, mutate: Callable[[str], str], *, creates_file: bool = False
+) -> Iterator[None]:
     """Apply a mutation to tracked source and restore it byte for byte.
 
     The dirty-source check lives HERE rather than in the runner so no caller,
-    unit tests included, can plant a mutation over uncommitted work.
+    unit tests included, can plant a mutation over uncommitted work. Only a
+    declared new-file witness may create its file; any other mutation whose
+    target is missing fails rather than planting into a fresh file.
     """
 
+    relative = path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
+    if creates_file and path.exists():
+        raise OracleFailure(f"new-file mutation target already exists: {relative}")
+    if not creates_file and not path.exists():
+        raise OracleFailure(f"mutation target does not exist: {relative}")
     _assert_source_clean(path)
     existed = path.exists()
     original = path.read_bytes() if existed else None
@@ -2309,7 +2466,9 @@ def _assert_source_clean(path: Path) -> None:
 
 def _expect_mutation_rejected(probe: MutationProbe) -> None:
     baseline = load_baseline()
-    with temporary_mutation(REPO_ROOT / probe.path, probe.mutate):
+    with temporary_mutation(
+        REPO_ROOT / probe.path, probe.mutate, creates_file=probe.creates_file
+    ):
         try:
             validate_baseline(baseline, inventory_rows(REPO_ROOT))
         except OracleFailure as error:
@@ -2843,14 +3002,16 @@ def run_phase0(*, run_mutations: bool = True) -> None:
     print("RUNTIME REPRESENTATION PHASE 0: PASS")
 
 
-def regenerate() -> None:
+def regenerate(retired_files: Sequence[str] = ()) -> None:
     """Rewrite the baseline from the current tree.
 
     Regeneration cannot bless growth: it rewrites the artifact, and the reviewed
     `FREEZE_SHA256` in this file still has to be moved by hand, which is the
     design's B1 freeze move rather than a regeneration step. It also preserves
     the reviewed mutation rows and refuses to run when current probe code has
-    drifted from them.
+    drifted from them. A referenced file that left the universe is recorded
+    as retired, and its active debt dropped, only when named in
+    `retired_files`, never silently.
     """
 
     existing = load_baseline()
@@ -2862,11 +3023,16 @@ def regenerate() -> None:
         source_inventory,
         phase0_mutation_probes(),
     )
+    _validate_frozen_root_directories(source_inventory, REPO_ROOT)
+    record = _validate_referenced_files(
+        existing, REPO_ROOT, regenerating=True, retiring=retired_files
+    )
     baseline = build_foundation_baseline(
         inventory_rows(REPO_ROOT),
         foundation_rows=foundation,
         source_inventory=source_inventory,
         active_debt_rows=active_debt,
+        retired_files=record,
     )
     BASELINE_PATH.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
     print(
@@ -2885,6 +3051,16 @@ def _parse_args() -> argparse.Namespace:
         "--regenerate",
         action="store_true",
         help="rewrite the frozen baseline from the current tree",
+    )
+    parser.add_argument(
+        "--retire-departed-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "with --regenerate, drop the active debt of a file that left the "
+            "universe; every such file must be named"
+        ),
     )
     parser.add_argument(
         "--skip-mutations",
@@ -2915,8 +3091,10 @@ def main() -> int:
     if args.phase != 0:
         raise OracleFailure("only runtime-representation Phases 0, 1, and 2 are implemented")
     if args.regenerate:
-        regenerate()
+        regenerate(retired_files=args.retire_departed_file)
         return 0
+    if args.retire_departed_file:
+        raise OracleFailure("--retire-departed-file requires --regenerate")
     run_phase0(run_mutations=not args.skip_mutations)
     return 0
 

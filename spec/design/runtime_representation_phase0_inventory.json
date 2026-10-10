@@ -1,6 +1,6 @@
 {
-  "schema_version": 7,
-  "freeze_sha256": "7a24b73e809011eb0511e3584045f656333b57e04ef0d7e28b70a7e49f23e306",
+  "schema_version": 8,
+  "freeze_sha256": "18641a6b120ec86ea788314f9261c73fdea401165049343961ca64f1e1a12670",
   "source_inventory": {
     "mutations": [
       {
@@ -13,7 +13,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_descriptor_field",
@@ -25,7 +26,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_direct_data_access",
@@ -37,7 +39,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_direct_data_access_after_test_module",
@@ -49,7 +52,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_incomplete_dtype",
@@ -61,7 +65,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_incomplete_arithmetic_repr",
@@ -73,7 +78,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_element_binding",
@@ -88,7 +94,8 @@
           "Storage for UnregisteredElement",
           "private :: Sealed for UnregisteredElement"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_fixed_rank_metadata",
@@ -100,7 +107,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_load_store_template",
@@ -112,7 +120,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_narrow_metadata",
@@ -124,7 +133,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_normalized_key_arithmetic",
@@ -136,7 +146,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_retired_capacity_normalizer",
@@ -150,7 +161,8 @@
         "expected_owners": [
           "DimExpr::normalized_key"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_capacity_owner_saturation",
@@ -162,7 +174,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_capacity_owner_wrapping_product",
@@ -174,7 +187,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_capacity_owner_legacy_key",
@@ -186,7 +200,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_raw_element_pointer",
@@ -198,7 +213,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_width_arithmetic",
@@ -210,7 +226,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_metadata_owner_width",
@@ -222,7 +239,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_unknown_c_arithmetic_spelling",
@@ -234,7 +252,8 @@
           "reason_prefix": "fail-closed inventory scanner rejected"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_public_element_pointer_export",
@@ -246,7 +265,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_body_direct_data_access",
@@ -258,7 +278,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_extern_element_data",
@@ -270,7 +291,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_non_descriptor_struct_field",
@@ -282,7 +304,8 @@
           "reason_prefix": "unclassified inventory hit"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_tagged_struct_field",
@@ -296,7 +319,8 @@
         "expected_owners": [
           "runtime_representation_phase0_probe_pool::slab"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_union_field",
@@ -310,7 +334,8 @@
         "expected_owners": [
           "runtime_representation_phase0_probe_slot::d"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_macro_typed_carrier",
@@ -324,7 +349,8 @@
         "expected_owners": [
           "runtime_representation_phase0_probe_slab"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_multi_declarator_data",
@@ -339,7 +365,8 @@
           "runtime_representation_phase0_probe_pair_a",
           "runtime_representation_phase0_probe_pair_b"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_enum_width",
@@ -353,7 +380,8 @@
         "expected_owners": [
           "RUNTIME_REPRESENTATION_PHASE0_PROBE_WIDTH"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_objc_element_pointer_parameter",
@@ -367,7 +395,8 @@
         "expected_owners": [
           "runtime_representation_phase0_probe_fill"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_carrier_in_simd_arm",
@@ -381,7 +410,8 @@
         "expected_owners": [
           "runtime_representation_phase0_probe_avx"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_undeclared_conditional",
@@ -393,7 +423,8 @@
           "reason_prefix": "fail-closed inventory scanner rejected"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_objc_method_carrier",
@@ -407,7 +438,8 @@
         "expected_owners": [
           "RuntimeRepresentationPhase0Probe::elements"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_unclassified_cast_spelling",
@@ -419,7 +451,8 @@
           "reason_prefix": "fail-closed inventory scanner rejected"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_pointer_to_element_array",
@@ -433,7 +466,8 @@
         "expected_owners": [
           "runtime_representation_phase0_probe_rows"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_include_outside_universe",
@@ -445,7 +479,8 @@
           "reason_prefix": "fail-closed inventory scanner rejected"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_include_in_dead_arm",
@@ -457,7 +492,8 @@
           "reason_prefix": "fail-closed inventory scanner rejected"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_objc_block_parameter",
@@ -471,7 +507,8 @@
         "expected_owners": [
           "runtime_representation_phase0_probe_block"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_sizeof_in_array_bound",
@@ -485,7 +522,8 @@
         "expected_owners": [
           "runtime_representation_phase0_probe_scratch"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_rust_cast_turbofish",
@@ -499,7 +537,8 @@
         "expected_owners": [
           "runtime_representation_phase0_turbofish"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_int8_element_pointer",
@@ -513,7 +552,8 @@
         "expected_owners": [
           "runtime_representation_phase0_probe_i8"
         ],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_c_elifdef_arm",
@@ -525,7 +565,8 @@
           "reason_prefix": "fail-closed inventory scanner rejected"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_rust_path_module",
@@ -537,31 +578,124 @@
           "reason_prefix": "fail-closed inventory scanner rejected"
         },
         "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": false
       },
       {
         "witness_id": "phase0.mutate_unregistered_inventory_source",
-        "expected_kind": "unregistered-inventory-source",
+        "expected_kind": "raw-element-pointer",
         "path": "crates/chelis-runtime/src/runtime_representation_phase0_probe.rs",
-        "implementation_sha256": "61a6a9e86484fe59ba32eb608c9df980c1fae09489882378276285647ba25b4f",
+        "implementation_sha256": "774f94373458bfdd8b6bf011c7a404270ae6c5548540110d5ec16038fd0f7d42",
         "expected_failure": {
-          "code": "inventory.unregistered_source",
-          "reason_prefix": "the frozen inventory source list is stale"
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
         },
-        "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "expected_owners": [
+          "runtime_representation_phase0_unregistered"
+        ],
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": true
       },
       {
         "witness_id": "phase0.mutate_unregistered_subdirectory_source",
-        "expected_kind": "unregistered-inventory-source",
+        "expected_kind": "normalized-key-arithmetic",
         "path": "crates/chelis-ir/src/repr_probe/mod.rs",
-        "implementation_sha256": "1a8bdbc2a124cc88e29c9b317aa9e92c5f42b0914f1636bb1a448fb6a03f70c0",
+        "implementation_sha256": "df33515eb9b83e3663f7cf6c5a720f7214b3ffe28fb3a7e7e5cf57f161ab3099",
         "expected_failure": {
-          "code": "inventory.unregistered_source",
-          "reason_prefix": "the frozen inventory source list is stale"
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
         },
-        "expected_owners": [],
-        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        "expected_owners": [
+          "runtime_representation_phase0_subdirectory"
+        ],
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+        "creates_file": true
+      }
+    ],
+    "roots": [
+      {
+        "pattern": "crates/chelis-runtime/src/**/*.rs",
+        "directories": [
+          "crates/chelis-runtime/src"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-runtime/include/**/*.h",
+        "directories": [
+          "crates/chelis-runtime/include"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-runtime/build.rs",
+        "directories": [
+          "crates/chelis-runtime"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-vocab/src/**/*.rs",
+        "directories": [
+          "crates/chelis-vocab/src"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-vocab/build.rs",
+        "directories": [
+          "crates/chelis-vocab"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-ir/src/**/*.rs",
+        "directories": [
+          "crates/chelis-ir/src"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-ir/build.rs",
+        "directories": [
+          "crates/chelis-ir"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-python/src/**/*.rs",
+        "directories": [
+          "crates/chelis-python/src"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-python/build.rs",
+        "directories": [
+          "crates/chelis-python"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-backend-*/src/**/*.rs",
+        "directories": [
+          "crates/chelis-backend-c/src",
+          "crates/chelis-backend-hip/src",
+          "crates/chelis-backend-metal/src"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-backend-*/runtime/**/*.h",
+        "directories": [
+          "crates/chelis-backend-hip/runtime",
+          "crates/chelis-backend-metal/runtime"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-backend-*/runtime/**/*.cpp",
+        "directories": [
+          "crates/chelis-backend-hip/runtime",
+          "crates/chelis-backend-metal/runtime"
+        ]
+      },
+      {
+        "pattern": "crates/chelis-backend-*/build.rs",
+        "directories": [
+          "crates/chelis-backend-c",
+          "crates/chelis-backend-hip",
+          "crates/chelis-backend-metal"
+        ]
       }
     ]
   },
@@ -2980,5 +3114,8 @@
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=activation_body",
       "sample": "double"
     }
+  ],
+  "retired_files": [
+    "crates/chelis-backend-c/src/random_observer.rs"
   ]
 }
