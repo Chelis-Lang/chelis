@@ -733,7 +733,7 @@ impl DischargeEngine for Z3Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discharge::{IntervalBox, OutputRange, Qualifier};
+    use crate::discharge::{IntervalBox, OutputRange, Qualifier, test_dims, test_f64};
 
     fn real_var_prop(post: SmtExpr) -> SmtProperty {
         SmtProperty {
@@ -1024,12 +1024,12 @@ mod tests {
 
         let box_goal = Goal::box_range(
             IntervalBox {
-                dims: vec![("s".to_string(), 0.0, 100.0)],
+                dims: test_dims(vec![("s".to_string(), 0.0, 100.0)]),
             },
             OutputRange {
                 output: "price".to_string(),
-                lo: 0.0,
-                hi: 50.0,
+                lo: test_f64(0.0),
+                hi: test_f64(50.0),
             },
         )
         .expect("well-formed box goal");
@@ -1081,12 +1081,12 @@ mod tests {
         let engine = Z3Engine::new();
         let goal = Goal::box_range(
             IntervalBox {
-                dims: vec![("s".to_string(), 0.0, 1.0)],
+                dims: test_dims(vec![("s".to_string(), 0.0, 1.0)]),
             },
             OutputRange {
                 output: "price".to_string(),
-                lo: 0.0,
-                hi: 1.0,
+                lo: test_f64(0.0),
+                hi: test_f64(1.0),
             },
         )
         .expect("well-formed box goal");
