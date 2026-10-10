@@ -796,6 +796,39 @@ async fn replace_function_body_endpoint_locks_effect_and_linearity_envelopes() {
 }
 
 #[tokio::test]
+async fn authoring_endpoints_accept_copy_repaired_tensor_reuse() {
+    let (status, replaced) = post_json(
+        router(),
+        "/replace_function_body",
+        json!({
+            "module": replace_fixtures::TENSOR_DEEP,
+            "function_name": "passthrough",
+            "new_body": replace_fixtures::TENSOR_COPY_REPAIRED_BODY,
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        replaced["ok"], true,
+        "copy-repaired replacement: {replaced}"
+    );
+    assert!(replaced["result"]["module_deep"].as_str().is_some());
+
+    let (status, added) = post_json(
+        router(),
+        "/add_function",
+        json!({
+            "module": replace_fixtures::TENSOR_DEEP,
+            "new_decls": replace_fixtures::ADD_TENSOR_COPY_REPAIRED,
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(added["ok"], true, "copy-repaired addition: {added}");
+    assert!(added["result"]["module_deep"].as_str().is_some());
+}
+
+#[tokio::test]
 async fn add_function_endpoint_accepts_well_typed_function_bundle() {
     let (status, ok) = post_json(
         router(),
