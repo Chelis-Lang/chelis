@@ -25,6 +25,25 @@ use std::path::{Path, PathBuf};
 mod stage;
 
 fn main() {
+    // On musl, the process main thread reports only its mapped stack to
+    // stacker::remaining_stack(). The checker can then reject an unchanged
+    // effects-only reannotation while packing the standard library. A sized
+    // worker thread reports its full stack, as the musl CLI entry does.
+    #[cfg(target_env = "musl")]
+    {
+        std::thread::Builder::new()
+            .name("chelis-std-bundle-pack".to_owned())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(pack_main)
+            .expect("start the musl bundle packing thread")
+            .join()
+            .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+    }
+    #[cfg(not(target_env = "musl"))]
+    pack_main();
+}
+
+fn pack_main() {
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"),
     );
