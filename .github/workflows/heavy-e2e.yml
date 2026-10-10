@@ -79,22 +79,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # Devenv-backed jobs retain their execution budget plus 25 minutes for cold setup.
-  #
-  # Execution jobs selected on main use the self-hosted warm runners, which
-  # substitute from the private Nix/Kache caches instead of rebuilding from
-  # source. The warm broker admits them only from refs/heads/main, so candidate
-  # dispatches stay GitHub-hosted. It also admits only jobs that have a
-  # reviewed member route, and module-oracles has none (chelis#3070), so
-  # module-oracles, test-telemetry and the scope receipt use GitHub-hosted
-  # runners on every ref.
-  #
-  # On main those warm jobs also share the linux-extended-warm-x64 concurrency
-  # group, so a run holds at most one runner of the two-runner pool and leaves
-  # the other free for the pool's other jobs: GitHub Actions has no job
-  # priority (chelis#2543). `queue: max` keeps the waiting jobs pending in
-  # order; the default queue would cancel all but one of them. Off main each
-  # job has its own group, so hosted candidate validation stays parallel.
+  # Hosted execution preserves the full selection without warm-runner queueing.
   module-oracles-plan:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Plan module oracles
@@ -183,10 +168,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-full-workspace-{1}', github.run_id, matrix.shard) }}
-      queue: max
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -240,10 +222,7 @@ jobs:
   script-nightly:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Script Integration Tests (Linux)
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-script-nightly', github.run_id) }}
-      queue: max
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -287,10 +266,7 @@ jobs:
   dtype-phase3-oracle:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.validation_scope == 'all' || inputs.validation_scope == 'dtype-phase3')) }}
     name: Dtype Phase 0-3 Oracle
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-dtype-phase3-oracle', github.run_id) }}
-      queue: max
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -356,10 +332,7 @@ jobs:
   faithful-observation-phase2-oracle:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Faithful Observation Phase 2 Oracle
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-faithful-observation-phase2-oracle', github.run_id) }}
-      queue: max
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -395,10 +368,7 @@ jobs:
   compiled-value-ownership-phase0-oracle:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Compiled Value Ownership Phase 2 Oracle
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-compiled-value-ownership-phase0-oracle', github.run_id) }}
-      queue: max
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -435,10 +405,7 @@ jobs:
   runtime-representation-phase0-oracle:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.validation_scope == 'all' || inputs.validation_scope == 'runtime-representation')) }}
     name: Runtime Representation Phase 2 Oracle
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-runtime-representation-phase0-oracle', github.run_id) }}
-      queue: max
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -487,10 +454,7 @@ jobs:
   runtime-extent-oracle:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.validation_scope == 'all' || inputs.validation_scope == 'runtime-extent')) }}
     name: Runtime Extent Oracle (chelis#1277)
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-runtime-extent-oracle', github.run_id) }}
-      queue: max
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -545,10 +509,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-generalize-sweep-oracle-shard-{1}', github.run_id, matrix.shard) }}
-      queue: max
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -603,10 +564,7 @@ jobs:
   generalize-sweep-oracle:
     if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all')) }}
     name: Typecheck Level Generalization Oracle
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-generalize-sweep-oracle', github.run_id) }}
-      queue: max
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     needs: [generalize-sweep-oracle-shard]
@@ -623,10 +581,7 @@ jobs:
       fail-fast: false
       matrix:
         slice: [frontend, domain]
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-integration-support-{1}', github.run_id, matrix.slice) }}
-      queue: max
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -661,10 +616,7 @@ jobs:
   backend-sanitizers-full:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all') }}
     name: Backend Sanitizers (Full)
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-backend-sanitizers-full', github.run_id) }}
-      queue: max
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -792,10 +744,7 @@ jobs:
     name: Surface nightly status
     needs: [dispatch-scope, script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, runtime-extent-oracle, generalize-sweep-oracle-shard, full-workspace, module-oracles-plan, module-oracles, integration-support, backend-sanitizers-full]
     if: always() && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.validation_scope == 'all'))
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    concurrency:
-      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-report', github.run_id) }}
-      queue: max
+    runs-on: ubuntu-latest
     permissions:
       issues: write
     steps:
