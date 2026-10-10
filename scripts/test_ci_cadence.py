@@ -29,12 +29,10 @@ MOVED = {
     "runtime-representation-phase0-oracle": "chelis-gate runtime-representation",
     "generalize-sweep-oracle-shard": "cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle",
 }
-# chelis#2543: the nightly shares this two-runner pool with every other warm
-# job, and GitHub Actions has no job priority.
+# Negative control for a main-only warm route on a hosted nightly job.
 WARM_LABEL = "chelis-ci-warm-x64"
 MAIN_REF = "refs/heads/main"
-# The one expression shape a nightly `runs-on` or lane group may take: the ref
-# predicate selects the first operand, every other ref the second.
+# Decode a ref switch so the module-oracle route guard checks both refs.
 REF_SWITCH = re.compile(
     r"\$\{\{ github\.ref == '(?P<ref>[^']+)' && '(?P<then>[^']+)' \|\| "
     r"(?:'(?P<otherwise>[^']+)'"
@@ -196,10 +194,8 @@ def assert_extended(test, pr, nightly):
                 else:
                     test.assertNotIn("if", step)
     full = jobs["full-workspace"]
-    # Main runs these jobs on the self-hosted pool, which keeps its Kache
-    # compiler cache and never saves a GitHub cache; hosted branch runs
-    # restore only the Rust families ci-cache-warm.yml writes. An explicit
-    # target-directory cache here would have no writer.
+    # Hosted jobs restore only the Rust families ci-cache-warm.yml writes.
+    # An explicit target-directory cache here would have no writer.
     for job_id, job in jobs.items():
         for step in job.get("steps", []):
             test.assertFalse(
@@ -419,48 +415,6 @@ def resolve_ref_switch(test: unittest.TestCase, value, ref, leg):
         return switch["otherwise"]
     axis = switch["axis"]
     return switch["format"].format("<run_id>", *([leg[axis]] if axis else []))
-
-
-def assert_one_warm_lane(test, nightly):
-    """chelis#2543: the nightly holds at most one warm runner at a time.
-
-    Every job routed to the warm pool on main waits in one concurrency group,
-    so at most one of them holds a runner and the other stays free for the
-    pool's other jobs. `queue: max` keeps the lane's waiting jobs pending; the
-    default queue cancels all but one of them. Off main the jobs run hosted,
-    where a group per job keeps candidate validation parallel. Returns the
-    lane.
-    """
-    lanes = {}
-    hosted = {}
-    for name, job in nightly["jobs"].items():
-        if WARM_LABEL not in str(job["runs-on"]):
-            continue
-        concurrency = job.get("concurrency") or {}
-        test.assertEqual(
-            concurrency.get("queue"),
-            "max",
-            f"{name} can reach the warm pool outside the queued nightly lane",
-        )
-        for leg in matrix_legs(job):
-            instance = name + "".join(f" {axis}={value}" for axis, value in leg.items())
-            for ref in (MAIN_REF, "refs/heads/candidate"):
-                runner = resolve_ref_switch(test, job["runs-on"], ref, leg)
-                group = resolve_ref_switch(test, concurrency.get("group"), ref, leg)
-                if runner == WARM_LABEL:
-                    lanes.setdefault(group, []).append(f"{instance} on {ref}")
-                    continue
-                test.assertNotIn(
-                    group,
-                    hosted,
-                    f"{instance} would wait behind {hosted.get(group)} on {ref}",
-                )
-                hosted[group] = instance
-    test.assertEqual(
-        len(lanes), 1, f"the nightly may hold one warm runner at a time: {lanes}"
-    )
-    (lane,) = lanes
-    return lane
 
 
 def unattended_nextest_profiles():
@@ -751,53 +705,50 @@ class ExtendedCadenceTests(unittest.TestCase):
             assert_extended(self, self.pr, nightly)
 
 
-class WarmLaneTests(unittest.TestCase):
-    """chelis#2543: the nightly leaves the second warm runner free."""
+class HostedNightlyRoutingTests(unittest.TestCase):
+    """chelis#3554: the scheduled lane has no warm-runner queue dependency."""
 
     def setUp(self):
         self.nightly = yaml.safe_load((ROOT / ".github/workflows/heavy-e2e.yml").read_text())
 
-    def test_nightly_holds_at_most_one_warm_runner(self):
-        assert_one_warm_lane(self, self.nightly)
+    def assert_hosted_parallel_routing(self, nightly):
+        self.assertEqual(
+            nightly.get("concurrency"),
+            {
+                "group": "linux-extended-${{ github.ref }}",
+                "cancel-in-progress": False,
+            },
+        )
+        for name, job in nightly["jobs"].items():
+            self.assertEqual(job["runs-on"], "ubuntu-latest", name)
+            self.assertNotIn("concurrency", job, name)
+            if "timeout-minutes" in job:
+                self.assertLessEqual(job["timeout-minutes"], 360, name)
 
-    def test_no_other_workflow_waits_in_the_nightly_lane(self):
-        # Concurrency groups are repository-wide: a pull-request job in this
-        # group would wait for the whole nightly, not for one of its jobs.
-        lane = assert_one_warm_lane(self, self.nightly)
-        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
-            if path.name != "heavy-e2e.yml":
-                with self.subTest(workflow=path.name):
-                    self.assertNotIn(lane, path.read_text())
+    def test_every_job_is_hosted_and_runs_share_only_a_per_ref_workflow_lane(self):
+        self.assert_hosted_parallel_routing(self.nightly)
 
-    def test_a_second_warm_runner_or_a_serialized_candidate_is_rejected(self):
-        lane = assert_one_warm_lane(self, self.nightly)
-        for mutation in ("outside", "single", "second-lane", "constant", "every-ref"):
+    def test_warm_route_or_wrong_concurrency_is_rejected(self):
+        for mutation in ("warm", "serial", "no-workflow-group", "constant-workflow-group"):
             nightly = copy.deepcopy(self.nightly)
             job = nightly["jobs"]["dtype-phase3-oracle"]
-            if mutation == "outside":
-                del job["concurrency"]
-            elif mutation == "single":
-                job["concurrency"]["queue"] = "single"
-            elif mutation == "second-lane":
-                job["concurrency"]["group"] = job["concurrency"]["group"].replace(
-                    f"'{lane}'", f"'{lane}-second'"
-                )
-            elif mutation == "constant":
-                # One group on every ref: hosted candidate jobs run one by one.
-                for other in nightly["jobs"].values():
-                    if "concurrency" in other:
-                        other["concurrency"]["group"] = lane
-            else:
-                # Warm on every ref while the lane still covers main only.
+            if mutation == "warm":
                 job["runs-on"] = WARM_LABEL
+            elif mutation == "serial":
+                job["concurrency"] = {
+                    "group": "linux-extended-warm-x64",
+                    "queue": "max",
+                }
+            elif mutation == "no-workflow-group":
+                del nightly["concurrency"]
+            else:
+                nightly["concurrency"]["group"] = "linux-extended-main"
             with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
-                assert_one_warm_lane(self, nightly)
+                self.assert_hosted_parallel_routing(nightly)
 
 
-# chelis#3070: the warm broker admits a job only by a reviewed member route,
-# and these jobs have none, so on main the hosts refuse them with no steps
-# and no log. They run GitHub-hosted on every ref; the module-oracles shard
-# limit stays inside the hosted six-hour job limit.
+# The module-oracle shards run GitHub-hosted on every ref, with their shard
+# limit inside the hosted six-hour job limit.
 HOSTED_ONLY_JOBS = ("module-oracles-plan", "module-oracles")
 HOSTED_RUNNER = "ubuntu-latest"
 HOSTED_JOB_MINUTES = 360
@@ -820,7 +771,7 @@ def assert_hosted_on_every_ref(test, nightly, name):
 
 
 class HostedModuleOraclesTests(unittest.TestCase):
-    """chelis#3070: module oracles never wait on a warm route they lack."""
+    """Module oracles retain their hosted route and bounded job limit."""
 
     def setUp(self):
         self.nightly = yaml.safe_load((ROOT / ".github/workflows/heavy-e2e.yml").read_text())
@@ -831,8 +782,7 @@ class HostedModuleOraclesTests(unittest.TestCase):
                 assert_hosted_on_every_ref(self, self.nightly, name)
 
     def test_a_warm_route_or_an_over_long_shard_is_rejected(self):
-        # The negative twin: #3005's nightly-wide expression, which picked
-        # the warm pool on main, and a shard budget past the hosted limit.
+        # Reject both a warm route on main and a budget past the hosted limit.
         warm = (
             "${{ github.ref == 'refs/heads/main' && "
             f"'{WARM_LABEL}' || 'ubuntu-latest' }}}}"
