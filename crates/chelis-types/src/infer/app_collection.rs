@@ -404,7 +404,7 @@ pub(crate) fn decide_collection_constraint(
             }))
         }
         CollectionConstraint::Len { operand, .. } => match queried_container(operand) {
-            Type::Var(_) | Type::Error(_) => Ok(None),
+            Type::Var(_) => Ok(None),
             Type::Adt(name, _) if name == "List" || name == "Dict" => {
                 Ok(joined(vec![Type::Prim(Prim::Int64)]))
             }
@@ -417,7 +417,7 @@ pub(crate) fn decide_collection_constraint(
                 other => return Err(format!("index expects i64 index, got {other}")),
             }
             match queried_container(list) {
-                Type::Var(_) | Type::Error(_) => Ok(None),
+                Type::Var(_) => Ok(None),
                 Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                     Ok(joined(vec![args[0].clone()]))
                 }
