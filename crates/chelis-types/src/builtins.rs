@@ -938,7 +938,7 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 ///     name: "x",
 ///     capability: BuiltinCapabilityDecl::NUMERIC_ONLY,
 ///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-///     shape_class: ShapeClass::Rewriting,
+///     shape_class: ShapeClass::Untracked,
 ///     axis_arguments: AxisArgumentLayout::NoAxes,
 /// };
 /// ```
@@ -962,7 +962,7 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 ///     name: "x",
 ///     capability: BuiltinCapabilityDecl::NUMERIC_ONLY,
 ///     realizability: Realizability::Universal,
-///     shape_class: ShapeClass::Rewriting,
+///     shape_class: ShapeClass::Untracked,
 ///     axis_arguments: AxisArgumentLayout::NoAxes,
 /// };
 /// ```
@@ -975,7 +975,7 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 ///     capability: BuiltinCapabilityDecl::NUMERIC_ONLY,
 ///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
 ///     realizability: Realizability::Universal,
-///     shape_class: ShapeClass::Rewriting,
+///     shape_class: ShapeClass::Untracked,
 /// };
 /// ```
 ///
@@ -986,7 +986,7 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 ///     name: "x",
 ///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
 ///     realizability: Realizability::Universal,
-///     shape_class: ShapeClass::Rewriting,
+///     shape_class: ShapeClass::Untracked,
 ///     axis_arguments: AxisArgumentLayout::NoAxes,
 /// };
 /// ```
@@ -1326,8 +1326,8 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
-    // [05-OP-37]: the keyed dropout draw. Its shape class keeps the
-    // `shape_class` default it had before it was declared here.
+    // [05-OP-37]: the keyed dropout draw. Its result has its operand's
+    // shape, element for element, like `uniform_like`.
     BuiltinDecl {
         name: "dropout",
         capability: NUMERIC_CAPABILITY,
@@ -1335,7 +1335,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // [05-OP-69]..[05-OP-72]: schemes carry the scalar/tensor relation;
@@ -1528,7 +1528,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
@@ -1601,7 +1601,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1609,7 +1609,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1617,7 +1617,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1625,7 +1625,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Shape ops (Universal, Rewriting) ────────────────────────────
@@ -1634,7 +1634,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1642,7 +1642,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::NameTracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1650,7 +1650,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1658,7 +1658,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1666,7 +1666,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
@@ -1690,7 +1690,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1698,7 +1698,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1706,7 +1706,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1714,7 +1714,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[2]),
     },
     BuiltinDecl {
@@ -1722,7 +1722,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[3]),
     },
     BuiltinDecl {
@@ -1730,7 +1730,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[3]),
     },
     BuiltinDecl {
@@ -1738,7 +1738,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[3]),
     },
     BuiltinDecl {
@@ -1746,7 +1746,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1754,7 +1754,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, SplitTensor),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
@@ -1762,7 +1762,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
@@ -1770,7 +1770,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
@@ -1778,7 +1778,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[1, 2]),
     },
     BuiltinDecl {
@@ -1786,7 +1786,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[1, 2]),
     },
     // ─── IO / effects (HostOnly) ─────────────────────────────────────
@@ -1795,7 +1795,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, PrintRecursive),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Inert,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1803,7 +1803,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, FailString),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Inert,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1811,7 +1811,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, DebugRecursive),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Inert,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1821,7 +1821,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1831,7 +1831,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Inert,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1841,7 +1841,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1851,7 +1851,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1861,7 +1861,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1871,7 +1871,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1881,7 +1881,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1891,7 +1891,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1901,7 +1901,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1911,7 +1911,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // [05-OP-75]: the host clock reads. Each takes no argument, so its exact
@@ -1923,7 +1923,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the exact nullary signature fully determines this builtin type",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1933,7 +1933,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the exact nullary signature fully determines this builtin type",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1941,7 +1941,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Host-lane CSV I/O (chelis#903, HostOnly) ─────────
@@ -1950,7 +1950,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ParseCsv),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1958,7 +1958,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ToCsv),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1966,7 +1966,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvF64s),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1974,7 +1974,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvInts),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1982,7 +1982,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvStrs),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1990,7 +1990,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvNrows),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1998,7 +1998,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvCols),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2006,7 +2006,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvF64),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2014,7 +2014,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvInt),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2022,7 +2022,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvStr),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── String ops (HostOnly) ───────────────────────────────────────
@@ -2033,7 +2033,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2043,7 +2043,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2051,7 +2051,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringLen),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2059,7 +2059,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringConcat),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2067,7 +2067,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringSlice),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2077,7 +2077,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2087,7 +2087,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2097,7 +2097,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2105,7 +2105,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringTrim),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2113,7 +2113,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: TO_STRING_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2121,7 +2121,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ToInt),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2129,7 +2129,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ToFloat),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Tensor introspection (HostOnly at scalar type) ──────────────
@@ -2138,7 +2138,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2146,7 +2146,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
@@ -2154,7 +2154,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2162,7 +2162,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2170,7 +2170,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── List ops (HostOnly) ─────────────────────────────────────────
@@ -2191,7 +2191,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         },
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2199,7 +2199,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, IndexList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2207,7 +2207,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, AppendList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2227,7 +2227,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         },
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
@@ -2235,7 +2235,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, TakeList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2243,7 +2243,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, SkipList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // `drop` is the one-argument linearity consume of [05-OP-67]. It kept
@@ -2259,7 +2259,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, DropValue),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Inert,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2267,7 +2267,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, ChunkList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2275,7 +2275,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, RangeList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2283,7 +2283,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, MapList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2291,7 +2291,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, FilterList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2299,7 +2299,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, FoldList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2307,7 +2307,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, ScanList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2315,7 +2315,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, TensorScan),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2323,7 +2323,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, PartitionList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2331,7 +2331,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, FlatMapList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2339,7 +2339,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, FlattenList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2347,7 +2347,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, ZipList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2355,7 +2355,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, EnumerateList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Dict ops (HostOnly) ─────────────────────────────────────────
@@ -2364,7 +2364,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictOf),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2372,7 +2372,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictGet),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2380,7 +2380,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictContains),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2388,7 +2388,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictRemove),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2396,7 +2396,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictInsert),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2404,7 +2404,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictMerge),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2412,7 +2412,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictKeys),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2420,7 +2420,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictValues),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2428,7 +2428,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictEntries),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Tensor conversion (HostOnly) ────────────────────────────────
@@ -2437,7 +2437,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ToTensorList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2445,7 +2445,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ToListTensor),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2453,7 +2453,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, PadSequences),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2461,7 +2461,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: sibling_capability!(CONTAINER_DOMAIN, Container, PadSequencesTo),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Test builtins (HostOnly) ────────────────────────────────────
@@ -2472,7 +2472,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the polymorphic signature fully determines this builtin type",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Inert,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2482,7 +2482,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the polymorphic signature fully determines this builtin type",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Inert,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2492,7 +2492,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Inert,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2502,7 +2502,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the polymorphic signature fully determines this builtin type",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Inert,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
 ];
@@ -2586,126 +2586,51 @@ pub fn realizability(name: &str) -> Option<Realizability> {
     builtin_decl(name).map(|b| b.realizability)
 }
 
-/// Shape semantics of a builtin for the Tier-2 rank-polymorphism
-/// Body-Discipline check (`spec/design/rank_polymorphism.md` §Soundness
-/// Boundary). Keyed on SHAPE SEMANTICS, **not** the HM scheme: `relu`,
-/// `reshape`, and `permute` all share `&tv -> tv`, but only `relu` is
-/// shape-identity.
+/// Shape semantics of a builtin for the rank-polymorphism Body-Discipline
+/// check (`spec/04-type-system.md` section 4.5.3). Keyed on SHAPE SEMANTICS,
+/// **not** the HM scheme: `relu`, `reshape`, and `permute` all share
+/// `&tv -> tv`, but only `relu` is shape-identity. Each [`BuiltinDecl`] row
+/// declares its class; there is no default, and [`shape_class`] reads only
+/// the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeClass {
     /// Output shape provably equals an input shape with no axis reordering —
-    /// pure elementwise ops (the precision may change, e.g. comparisons).
-    /// Always admitted inside a rank-polymorphic (`..r`) body.
+    /// pure elementwise ops (the precision may change, e.g. comparisons) and
+    /// the keyed elementwise draws. No axis is addressed, explicitly or
+    /// implicitly. Always admitted inside a rank-polymorphic (`..r`) body.
     Identity,
-    /// Shape-changing but *name-tracked*: the op addresses axes by name and the
-    /// procedural inference arm computes a symbolic output that carries the
-    /// surviving named axes through (named-axis reductions, Tier-3 §4.5.3).
-    /// Admitted inside a rank-poly body — the procedural arm is the real gate:
-    /// it rejects a non-existent/ambiguous axis or a positional index at
-    /// symbolic rank, so no transposition can slip past.
+    /// *Name-tracked*: every axis the op removes, inserts, or normalizes is
+    /// located by name, and the procedural inference arm computes a symbolic
+    /// output that carries the surviving named axes through (named-axis
+    /// reductions, named-axis `expand`/`insert`, and `layer_norm`'s trailing
+    /// named axis). Admitted inside a rank-poly body — the procedural arm is
+    /// the real gate: it rejects a non-existent/ambiguous axis, a positional
+    /// index at symbolic rank, or an axis inside an opaque spread, so no
+    /// transposition can slip past.
     NameTracked,
     /// Every tensor result retains the complete operand shape in order,
     /// possibly appending trailing axes. Checked operation relations own
     /// the exact output surface, including tuples of same-shaped tensors.
     OrderedPrefix,
-    /// Rewrites/reorders the shape positionally, is shape-parameterized, or is a
-    /// non-tensor/host op whose output shape is *not* name-trackable at symbolic
-    /// rank. Forbidden inside a rank-poly body: against an opaque spread there
-    /// are no named axes left to catch a transposition/reshape (§4.2).
-    Rewriting,
+    /// The call's result is exactly one of three cases: unit, its operand
+    /// returned unchanged, or none because the call never returns. It states
+    /// no shape a transposition could hide in, so it is admitted inside a
+    /// rank-poly body; its operands are still checked by unification against
+    /// their rows. A builtin returning any other value is not inert.
+    Inert,
+    /// Not one of the admitted kinds, so forbidden inside a rank-poly body:
+    /// positional shape rewriters (`permute`, `reshape`, `matmul`, positional
+    /// `gather`) and axis-indexed ops, whose result could hide a transposition
+    /// against an opaque spread, and builtins that return another value, such
+    /// as a string or a scalar, which no admitted kind covers.
+    Untracked,
 }
 
-/// Classify a builtin's shape semantics for the Body-Discipline check.
-///
-/// `Identity`, `NameTracked`, and `OrderedPrefix` are explicit allowlists; other ops fall
-/// through to `Rewriting`. That default is the safe direction — a builtin that
-/// is not proven to preserve symbolic axis order is rejected inside a
-/// rank-poly body, so a missed classification can only over-reject, never open
-/// a §4.2 hole. The `shape_class_identity_set_is_pinned` test pins the sets so
-/// any change is deliberate.
-pub fn shape_class(name: &str) -> ShapeClass {
-    match name {
-        "key_from_seed" | "split_key" | "split_keys" | "fold_in" => ShapeClass::OrderedPrefix,
-        // Pure elementwise — output shape == input shape (precision may change
-        // for comparisons/logical). No axis argument, no reordering.
-        "add"
-        | "mul"
-        | "sub"
-        | "div"
-        | "pow"
-        | "floor_div"
-        | "trunc_div"
-        | "mod"
-        | "max_elem"
-        | "min_elem"
-        | "neg"
-        | "recip"
-        | "exp"
-        | "log"
-        | "sin"
-        | "sqrt"
-        | "cos"
-        | "tan"
-        | "atan"
-        | "abs"
-        | "floor"
-        | "ceil"
-        | "round"
-        | "relu"
-        | "sigmoid"
-        | "tanh"
-        | "erf"
-        | "erfc"
-        | "silu"
-        | "gelu"
-        | "gelu_tanh"
-        | "standard_normal_cdf"
-        | "not"
-        | "clamp"
-        | "uniform_like"
-        | "where"
-        | "eq"
-        | "neq"
-        | "lt"
-        | "gt"
-        | "lte"
-        | "gte"
-        | "cmplt"
-        | "bitand"
-        | "bitor"
-        | "bitxor"
-        | "shl"
-        | "shr"
-        | "and"
-        | "or" => ShapeClass::Identity,
-        // Named-axis reductions: address the reduced axis by name and drop
-        // exactly it, carrying the surviving named axes through (Tier-3 §4.5.3).
-        // The whole reduction family is name-tracked: each lowers through the
-        // tensor-DAG backend (`resolve_reduce_axis` resolves the named axis to
-        // a positional index against the operand's named dims) and builds+runs
-        // end-to-end. chelis#340 closed the host-lane gap that had restricted
-        // this to `sum`/`mean`: a rank-poly named-reduce def whose return type
-        // is a tensor routes through `try_lower_tensor_helper_call`, and the
-        // host-type inference (`infer_app_expr_host_type` /
-        // `infer_builtin_host_type_from_arg_tys`) now types
-        // `max_reduce`/`min_reduce`/`prod_reduce`/`argmax_reduce`/
-        // `argmin_reduce` over a named axis so a *host-lane* occurrence keeps
-        // its tensor type instead of falling through to the
-        // "unsupported builtin" host emit. `argmax_reduce`/`argmin_reduce`
-        // return an i64 index tensor (no-grad). All remain usable at
-        // concrete rank.
-        //
-        // Named-axis expand (chelis#339, the R+1 inverse): `expand` addresses
-        // its insertion point by name (trailing end, or before a named anchor)
-        // and the procedural arm (`check_expand_signature`) computes the
-        // symbolic output row, rejecting positional axes at symbolic rank —
-        // the same gate structure as the reductions.
-        "sum" | "count" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce"
-        | "argmax_reduce" | "argmin_reduce" | "expand" | "insert" => ShapeClass::NameTracked,
-        // Positional reshapes/permutes, matmul/conv, axis-indexed ops,
-        // gather/scatter, and every non-tensor/host builtin.
-        _ => ShapeClass::Rewriting,
-    }
+/// A builtin's declared shape class, or `None` when `name` is not a builtin.
+/// The [`BUILTINS`] row is the only source: there is no fallback class, so a
+/// builtin's admission inside a rank-poly body is always its row's decision.
+pub fn shape_class(name: &str) -> Option<ShapeClass> {
+    builtin_decl(name).map(|decl| decl.shape_class)
 }
 
 /// Operand-family contract shared by builtin schemes and direct-call diagnostics.
@@ -4128,126 +4053,82 @@ mod tests {
         assert!(env.lookup("add").is_some());
     }
 
-    // chelis#258 Tier-2 rank polymorphism: shape-class classification lock.
+    // Rank-polymorphism Body-Discipline classes (spec/04-type-system.md
+    // section 4.5.3). Each BUILTINS row declares its class and `shape_class`
+    // reads only that row, so these tests lock what the spec names and the
+    // relation between a row's class and its other declared fields rather
+    // than a second copy of the table.
 
-    /// Pin the exact shape-identity allowlist. A change here is the one place
-    /// where a builtin becomes admissible inside a rank-polymorphic `..r`
-    /// body, so it must be deliberate: misclassifying a shape-rewriting op as
-    /// Identity is a §4.2 soundness hole. Every other builtin must be
-    /// `Rewriting` (the safe default).
+    /// The operations section 4.5.3 names keep the class it gives them.
     #[test]
-    fn shape_class_identity_set_is_pinned() {
-        let identity: &[&str] = &[
-            "add",
-            "mul",
-            "sub",
-            "div",
-            "pow",
-            "floor_div",
-            "trunc_div",
-            "mod",
-            "max_elem",
-            "min_elem",
-            "neg",
-            "recip",
-            "exp",
-            "log",
-            "sin",
-            "sqrt",
-            "cos",
-            "tan",
-            "atan",
-            "abs",
-            "floor",
-            "ceil",
-            "round",
-            "relu",
-            "sigmoid",
-            "tanh",
-            "erf",
-            "erfc",
-            "silu",
-            "gelu",
-            "gelu_tanh",
-            "standard_normal_cdf",
-            "not",
-            "clamp",
-            "uniform_like",
-            "where",
-            "eq",
-            "neq",
-            "lt",
-            "gt",
-            "lte",
-            "gte",
-            "cmplt",
-            "bitand",
-            "bitor",
-            "bitxor",
-            "shl",
-            "shr",
-            "and",
-            "or",
+    fn shape_classes_named_by_the_rank_polymorphism_soundness_rule() {
+        let named: &[(&[&str], ShapeClass)] = &[
+            (
+                &["permute", "reshape", "matmul", "gather"],
+                ShapeClass::Untracked,
+            ),
+            (
+                &["key_from_seed", "split_key", "split_keys", "fold_in"],
+                ShapeClass::OrderedPrefix,
+            ),
+            (
+                &[
+                    "sum",
+                    "count",
+                    "mean",
+                    "max_reduce",
+                    "min_reduce",
+                    "prod_reduce",
+                    "argmax_reduce",
+                    "argmin_reduce",
+                    "expand",
+                    "insert",
+                    "layer_norm",
+                ],
+                ShapeClass::NameTracked,
+            ),
+            (&["uniform_like", "dropout"], ShapeClass::Identity),
+            (
+                &[
+                    "drop",
+                    "print",
+                    "write_file",
+                    "test_assert",
+                    "test_assert_eq",
+                    "test_assert_close_tensor",
+                    "test_assert_eq_tensor",
+                    "debug",
+                    "fail",
+                ],
+                ShapeClass::Inert,
+            ),
         ];
-        // Named-axis reductions and named-axis expand are NameTracked
-        // (admitted in a `..r` body — the procedural arm is the gate);
-        // everything else outside `identity` is Rewriting. chelis#340 added
-        // the full reduction family (`max_reduce`/`min_reduce`/
-        // `prod_reduce`/`argmax_reduce`/`argmin_reduce`) here: they route
-        // through the tensor-DAG kernel lane like `sum`/`mean` and build+run
-        // end-to-end in a rank-poly body.
-        let name_tracked: &[&str] = &[
-            "sum",
-            "count",
-            "mean",
-            "max_reduce",
-            "min_reduce",
-            "prod_reduce",
-            "argmax_reduce",
-            "argmin_reduce",
-            "expand",
-            "insert",
-        ];
-        for name in BUILTIN_NAMES {
-            let expected = if identity.contains(name) {
-                ShapeClass::Identity
-            } else if ["key_from_seed", "split_key", "split_keys", "fold_in"].contains(name) {
-                ShapeClass::OrderedPrefix
-            } else if name_tracked.contains(name) {
-                ShapeClass::NameTracked
-            } else {
-                ShapeClass::Rewriting
-            };
-            assert_eq!(
-                shape_class(name),
-                expected,
-                "builtin `{name}` shape-class drifted from the pinned set"
-            );
+        for (names, class) in named {
+            for name in *names {
+                assert_eq!(shape_class(name), Some(*class), "builtin `{name}`");
+            }
         }
-        // Spot-check the positional shape-rewriters stay Rewriting (the §4.2
-        // traps): a positional index is meaningless at symbolic rank.
-        for op in ["permute", "reshape", "matmul", "gather", "conv"] {
-            assert_eq!(
-                shape_class(op),
-                ShapeClass::Rewriting,
-                "`{op}` must be Rewriting"
-            );
+        assert_eq!(shape_class("not_a_builtin"), None);
+    }
+
+    /// An axis argument addresses an axis, so a builtin that takes one is
+    /// name-tracked or untracked, never shape-identity, ordered-prefix, or
+    /// inert.
+    #[test]
+    fn a_builtin_with_an_axis_argument_is_name_tracked_or_untracked() {
+        for decl in BUILTINS {
+            if decl.axis_arguments != AxisArgumentLayout::NoAxes {
+                assert!(
+                    matches!(
+                        decl.shape_class,
+                        ShapeClass::NameTracked | ShapeClass::Untracked
+                    ),
+                    "builtin `{}` takes an axis argument but is {:?}",
+                    decl.name,
+                    decl.shape_class
+                );
+            }
         }
-        // And the named-axis ops are admitted as NameTracked. `expand`
-        // moved from Rewriting in chelis#339: its procedural arm now
-        // rejects positional axes at symbolic rank, so admitting it in a
-        // `..r` body cannot hide a transposition.
-        assert_eq!(shape_class("sum"), ShapeClass::NameTracked);
-        assert_eq!(shape_class("count"), ShapeClass::NameTracked);
-        assert_eq!(shape_class("mean"), ShapeClass::NameTracked);
-        assert_eq!(shape_class("expand"), ShapeClass::NameTracked);
-        assert_eq!(shape_class("insert"), ShapeClass::NameTracked);
-        // chelis#340: the rest of the reduction family is name-tracked too.
-        assert_eq!(shape_class("max_reduce"), ShapeClass::NameTracked);
-        assert_eq!(shape_class("min_reduce"), ShapeClass::NameTracked);
-        assert_eq!(shape_class("prod_reduce"), ShapeClass::NameTracked);
-        assert_eq!(shape_class("argmax_reduce"), ShapeClass::NameTracked);
-        assert_eq!(shape_class("argmin_reduce"), ShapeClass::NameTracked);
     }
 
     /// Lock the §4 "Complete closed vocabulary" block of
@@ -4616,20 +4497,6 @@ mod tests {
                     builtin.name
                 );
             }
-        }
-    }
-
-    /// Issue #912: every BUILTINS entry's shape_class must match the existing
-    /// shape_class() function (consistency during migration).
-    #[test]
-    fn builtins_table_shape_class_consistent() {
-        for decl in super::BUILTINS {
-            assert_eq!(
-                super::shape_class(decl.name),
-                decl.shape_class,
-                "shape_class mismatch for builtin `{}`",
-                decl.name
-            );
         }
     }
 

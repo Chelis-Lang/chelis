@@ -1723,19 +1723,42 @@ anchored → the anchor's index), mirroring named-axis reduction.
 **Soundness (§4.2).** Order is preserved (shapes stay ordered positional
 sequences — never unordered "rows"); the reduced axis is a retained name; and a
 rank-poly def body is restricted by the §4.2 Body-Discipline check to
-*name-trackable* operations only — shape-identity (elementwise) ops,
-named-axis reductions, named-axis insert, and the key derivations
-[05-OP-69]–[05-OP-72]. Each tensor result of a key derivation preserves
-the complete operand shape as an ordered prefix; only `split_keys` appends
-an axis, at the trailing end, with the count extent. No derivation reorders
-or removes an axis, including inside an opaque spread. A *positional* shape-rewriter
-(`permute`, `reshape`, `matmul`, positional `gather`) is rejected inside a
-`..r` body: its output shape is not name-trackable at symbolic rank, so it
-could hide an untracked transposition. For the name-tracked ops the procedural
-inference arm is the real gate: it rejects a positional index at symbolic rank
-and a non-existent/ambiguous/duplicate axis name, so no transposition can slip
-past. This is what keeps the §4.5.1 transposition-safety guarantee intact while
-admitting reductions and named-axis expansion at symbolic rank.
+*name-trackable* builtins only. A builtin is name-trackable, and admitted in
+a `..r` body, exactly when it is one of these four kinds:
+
+- *Shape-identity*: it addresses no axis, explicitly or implicitly, and each
+  tensor result has the complete shape of its tensor operand, in order. The
+  elementwise operations are shape-identity, and so are the keyed draws
+  `uniform_like` and `dropout` ([05-OP-37]).
+- *Named-axis*: each axis it removes, inserts, or normalizes is located by a
+  name in the operand row. These are the named-axis reductions, named-axis
+  `insert` and `expand`, and `layer_norm`, whose normalized axis is the
+  operand's trailing axis (spec/05 §4.4). At symbolic rank that row must end
+  in a named anchor; a row that ends in a spread is rejected, because the
+  trailing axis lies inside the spread and no name relates it to `gamma` and
+  `beta`.
+- *Ordered-prefix*: the key derivations [05-OP-69]–[05-OP-72]. Each tensor
+  result of a key derivation preserves the complete operand shape as an
+  ordered prefix; only `split_keys` appends an axis, at the trailing end, with
+  the count extent. No derivation reorders or removes an axis, including
+  inside an opaque spread.
+- *Inert*: the call's result is one of exactly three cases: unit (`drop`,
+  `print`, `write_file`, and the `test_assert` family), its operand returned
+  unchanged (`debug`), or no result because the call never returns (`fail`).
+  An inert call's operands are still unified with their declared rows.
+
+Every other builtin is rejected inside a `..r` body. A *positional*
+shape-rewriter (`permute`, `reshape`, `matmul`, positional `gather`) is
+rejected because its output shape is not determined by name at symbolic rank,
+so it could hide an untracked transposition. A builtin that returns some other
+value, such as a string or a scalar (`string_len`, `to_string`, the clock
+reads), is rejected because it is none of the four kinds above: this section
+admits no such builtin. For the named-axis ops the procedural inference arm
+is the real gate: it rejects a positional index at symbolic rank, a
+non-existent/ambiguous/duplicate axis name, and an implied axis inside a
+spread, so no transposition can slip past. This is what keeps the §4.5.1
+transposition-safety guarantee intact while admitting reductions and
+named-axis expansion at symbolic rank.
 
 #### 4.5.4 Concat Result Typing
 

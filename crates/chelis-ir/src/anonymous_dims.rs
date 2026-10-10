@@ -28,7 +28,7 @@ pub enum AnonymousAxisName {
     Fresh,
 }
 
-fn is_anonymous(name: &str) -> bool {
+pub(crate) fn is_anonymous(name: &str) -> bool {
     name.is_empty() || name == "*"
 }
 

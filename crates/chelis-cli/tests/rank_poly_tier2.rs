@@ -78,7 +78,9 @@ fn assert_body_discipline_rejected(json: &Value, op: &str, label: &str) {
     );
     let has = errors.iter().any(|e| {
         e["message"].as_str().is_some_and(|m| {
-            m.contains("rank-polymorphic def") && m.contains(op) && m.contains("shape-rewriting")
+            m.contains("rank-polymorphic def")
+                && m.contains(&format!("builtin `{op}`"))
+                && m.contains("not name-trackable")
         })
     });
     assert!(

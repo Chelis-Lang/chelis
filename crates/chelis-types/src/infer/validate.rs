@@ -1431,7 +1431,7 @@ pub(super) fn derive_ir_builtin_output_type(
         // `max_elem` and `min_elem` are direct Tier-1 identities; the same
         // registry-owned path preserves their inferred shapes without
         // restoring a second spelling list here.
-        _ if crate::shape_class(func_name) == crate::ShapeClass::Identity => {
+        _ if crate::shape_class(func_name) == Some(crate::ShapeClass::Identity) => {
             derive_identity_shape_passthrough(node, type_env, static_env)
         }
         _ => None,

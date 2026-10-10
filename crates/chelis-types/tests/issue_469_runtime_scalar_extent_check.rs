@@ -441,7 +441,7 @@ fn a_precision_or_rank_binder_shares_its_name_with_a_value_unambiguously() {
     let msgs = messages(&rep);
     assert!(
         msgs.iter()
-            .any(|m| m.contains("may not call shape-rewriting builtin `shape`")),
+            .any(|m| m.contains("may not call builtin `shape`")),
         "a rank binder: expected the section 4.2 rejection, got {msgs:?}"
     );
     assert!(

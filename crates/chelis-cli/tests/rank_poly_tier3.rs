@@ -346,7 +346,7 @@ fn reshape_in_rank_poly_body_rejected() {
     let json = check_json(
         "def evil[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = reshape(x, [2i64, 3i64])\n",
     );
-    assert_rejected_with(&json, "shape-rewriting", "reshape in a ..r body");
+    assert_rejected_with(&json, "name-trackable", "reshape in a ..r body");
 }
 
 /// A duplicate spread name in one tensor shape is a parse error (it would bind

@@ -20,12 +20,12 @@ What landed vs. the plan below, with two deliberate divergences:
 - **Identity tier is shipped and sound.** `..r` lexer/parser (Tier-3 adjacency
   rejected at parse time), `(d-rank {} r)` deep node, `Dim::Rank` + `Scheme.rvars`
   + a unitary rank-unification arm, the `Dim::Rank`-free monomorphization
-  assertion at IR lowering, and the Body-Discipline check (an explicit
-  shape-class allowlist over every builtin). The current classes follow
-  spec/04 §4.5.3: shape identity, named-axis operations, and ordered-prefix
-  key derivations. The latter retain each operand axis in order and let
-  `split_keys` append its count axis; their checked operation relations own
-  the result shapes. Calling a user-defined function from a rank-poly body
+  assertion at IR lowering, and the Body-Discipline check (each builtin's
+  `BuiltinDecl` row declares its shape class, with no default). The classes
+  follow spec/04 §4.5.3: shape identity, named-axis operations,
+  ordered-prefix key derivations, and inert operations. Ordered-prefix
+  derivations retain each operand axis in order and let `split_keys` append
+  its count axis; their checked operation relations own the result shapes. Calling a user-defined function from a rank-poly body
   remains conservatively rejected.
 - **Erasure tier is deferred.** `&tensor[..r, p] -> tensor[p]` requires a
   genuine order-invariant *all-reduce-to-scalar* primitive; Chelis's `sum`/`mean`
@@ -661,10 +661,10 @@ of the oracle is manual; it joins the default `scripts/gate.py` run.
 ## Risks / Open Questions
 
 - **Body Discipline completeness.** The classification table must cover every
-  builtin; a missed shape-rewriting op = a silent §4.2 hole. Mitigation: drive
-  the table from a single source and assert exhaustiveness (every builtin is
-  classified identity/erasing/rewriting, closed-set test like the `Prim`
-  enumeration lock in `types.rs:484`).
+  builtin; a missed shape-rewriting op = a silent §4.2 hole. Mitigation: the
+  `BUILTINS` row is the single source, each row declares one of the spec/04
+  §4.5.3 kinds (identity, named-axis, ordered-prefix, inert) or untracked, and
+  the check matches every class with no default.
 - **§4.5.1 consistency.** Tier 2 must not let `List[tensor[..r, f32]]` become
   expressible (would reopen the deferred shape-vector variable). Enforced by
   "no `R` inside ADT/List elements" (scope-out + negative test).

@@ -12,6 +12,7 @@ use chelis_types::CheckedProgram;
 use chelis_types::manifest::RootManifest;
 use chelis_types::types::{Lane, Prim};
 
+use crate::anonymous_dims::is_anonymous;
 use crate::dag::{DimInfo, TensorType};
 use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
@@ -322,6 +323,13 @@ impl CallTypeInstantiation {
                     return true;
                 }
                 match self.dimensions.get(key) {
+                    // A binder bound only to an anonymous runtime extent
+                    // takes the first concrete dimension it later meets, so
+                    // two distinct names after it disagree in either order.
+                    Some(DimInfo::Named(bound, None)) if is_anonymous(bound) => {
+                        self.dimensions.insert(key.clone(), actual.clone());
+                        true
+                    }
                     Some(bound) => dimensions_compatible(bound, actual),
                     None => {
                         self.dimensions.insert(key.clone(), actual.clone());
@@ -329,25 +337,22 @@ impl CallTypeInstantiation {
                     }
                 }
             }
-            FormalDimension::Nominal => nominal_dimension_accepts(formal, actual),
+            FormalDimension::Nominal => dimensions_compatible(formal, actual),
         }
     }
 }
 
-fn nominal_dimension_accepts(formal: &DimInfo, actual: &DimInfo) -> bool {
-    match (formal, actual) {
-        (DimInfo::Named(name, None), _) if name.is_empty() || name == "*" => true,
-        (DimInfo::Named(formal, None), DimInfo::Named(actual, _)) => formal == actual,
-        (DimInfo::Named(_, None), DimInfo::Lit(_)) => true,
-        _ => dimensions_compatible(formal, actual),
-    }
-}
-
+/// Whether two dimensions can denote one extent under checker unification
+/// ([04-TY] section 4.1): equal literals, equal names, a name beside a
+/// literal, and an anonymous runtime extent beside any dimension, whichever
+/// side carries it (section 4.7). The relation is symmetric because a call
+/// slot and its formal are unified, not ordered: an unknown extent admits a
+/// named formal exactly as a literal does (chelis#3388).
 fn dimensions_compatible(left: &DimInfo, right: &DimInfo) -> bool {
     match (left, right) {
         (DimInfo::Lit(left), DimInfo::Lit(right)) => left == right,
         (DimInfo::Named(left, left_size), DimInfo::Named(right, right_size)) => {
-            left == right
+            (left == right || is_anonymous(left) || is_anonymous(right))
                 && match (left_size, right_size) {
                     (Some(left), Some(right)) => left == right,
                     _ => true,
@@ -3219,6 +3224,71 @@ mod call_type_instantiation_tests {
         assert!(CallTypeInstantiation::default().admits(&pattern, &batch, &literal_four));
         assert!(!CallTypeInstantiation::default().admits(&pattern, &batch, &seq));
         assert!(CallTypeInstantiation::default().admits(&pattern, &wildcard, &seq));
+        // chelis#3388: a runtime extent is an unknown extent, which checker
+        // unification admits against a named slot as it admits a literal.
+        assert!(CallTypeInstantiation::default().admits(&pattern, &batch, &wildcard));
+    }
+
+    #[test]
+    fn a_runtime_extent_instantiates_a_dimension_variable_beside_a_named_one() {
+        let formal = tensor(
+            vec![
+                DimInfo::Named("n".into(), None),
+                DimInfo::Named("n".into(), None),
+            ],
+            Prim::F32,
+        );
+        let pattern = FormalTypePattern::Tensor(vec![
+            FormalDimension::Quantified("n".into()),
+            FormalDimension::Quantified("n".into()),
+        ]);
+        let wildcard = DimInfo::Named("*".into(), None);
+        let batch = DimInfo::Named("batch".into(), None);
+        let seq = DimInfo::Named("seq".into(), None);
+
+        assert!(CallTypeInstantiation::default().admits(
+            &pattern,
+            &formal,
+            &tensor(vec![wildcard.clone(), batch.clone()], Prim::F32)
+        ));
+        assert!(CallTypeInstantiation::default().admits(
+            &pattern,
+            &formal,
+            &tensor(vec![batch.clone(), wildcard], Prim::F32)
+        ));
+        assert!(!CallTypeInstantiation::default().admits(
+            &pattern,
+            &formal,
+            &tensor(vec![batch.clone(), seq.clone()], Prim::F32)
+        ));
+    }
+
+    #[test]
+    fn a_binder_first_met_by_a_runtime_extent_still_rejects_two_distinct_names() {
+        let formal = tensor(vec![DimInfo::Named("n".into(), None); 3], Prim::F32);
+        let pattern = FormalTypePattern::Tensor(vec![FormalDimension::Quantified("n".into()); 3]);
+        let wildcard = DimInfo::Named("*".into(), None);
+        let batch = DimInfo::Named("batch".into(), None);
+        let seq = DimInfo::Named("seq".into(), None);
+
+        for order in [
+            vec![wildcard.clone(), batch.clone(), seq.clone()],
+            vec![batch.clone(), wildcard.clone(), seq.clone()],
+        ] {
+            assert!(
+                !CallTypeInstantiation::default().admits(
+                    &pattern,
+                    &formal,
+                    &tensor(order.clone(), Prim::F32)
+                ),
+                "{order:?}"
+            );
+        }
+        assert!(CallTypeInstantiation::default().admits(
+            &pattern,
+            &formal,
+            &tensor(vec![wildcard, batch.clone(), batch], Prim::F32)
+        ));
     }
 
     #[test]

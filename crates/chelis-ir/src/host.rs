@@ -817,7 +817,7 @@ pub fn host_elementwise_loop_admits(builtin: &str, precision: Prim) -> Option<bo
 /// host-evaluated operands without changing what it computes or where its
 /// randomness is drawn (chelis#2734, chelis#2318).
 fn elementwise_function_of_operands(builtin: &str) -> bool {
-    chelis_types::shape_class(builtin) == chelis_types::ShapeClass::Identity
+    chelis_types::shape_class(builtin) == Some(chelis_types::ShapeClass::Identity)
         && chelis_types::key_admission::KeyPrimitive::of_builtin(builtin).is_none()
         && !chelis_types::COMPARISON_OPS.contains(&builtin)
 }
@@ -4908,11 +4908,7 @@ impl UncarriableWalk<'_> {
         {
             return ConcatInputFact::Tensor(output);
         }
-        if !matches!(
-            chelis_types::builtin_decl(name).map(|decl| decl.shape_class),
-            Some(chelis_types::ShapeClass::Identity)
-        ) || chelis_types::shape_class(name) != chelis_types::ShapeClass::Identity
-        {
+        if chelis_types::shape_class(name) != Some(chelis_types::ShapeClass::Identity) {
             return ConcatInputFact::Unknown;
         }
         // Shape-identity is an operation contract, but its source geometry
@@ -8718,6 +8714,25 @@ fn lower_host_expr_kind(
                 args: vec![inner],
                 ty,
             })
+        }
+        Expr::Node(list, _) if list.tag() == DeepTag::Borrow => {
+            // `(borrow {} x)` reads its operand without consuming it. The
+            // value is the operand's, as in the tensor lane's `lower_identity`;
+            // whether the operand is consumed is decided by the callee's
+            // declared parameter mode at ownership lowering, not by this node.
+            // A tensor-typed borrow of a name usually leaves through the
+            // tensor-helper route above; this arm covers every operand that
+            // route declines, such as a borrowed record or an inlined
+            // rank-polymorphic call's actual (chelis#3383).
+            lower_host_expr_with_expected_opt(
+                list.children_slice().first().ok_or_else(|| {
+                    host_expr_lowering_error(expr, "a `borrow` node has no operand")
+                })?,
+                program,
+                scope,
+                tensor_helpers,
+                expected_ty,
+            )?
         }
         Expr::Node(list, _) if list.tag() == DeepTag::Realize => {
             // Passthrough for phase-0 semantics: realize is an identity in

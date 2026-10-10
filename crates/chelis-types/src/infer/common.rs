@@ -1616,11 +1616,13 @@ pub(super) fn collect_user_def_names(items: &[&deep::Expr]) -> UnordSet<String> 
 }
 
 /// Walk a rank-polymorphic def's body and reject any call whose output shape is
-/// not *name-trackable* at symbolic rank. Admitted: shape-identity (elementwise)
-/// builtins and named-axis reductions (the procedural arm verifies those drop a
-/// named axis and carry the rest through), and checked ordered-prefix key
-/// derivations. Rejected: positional shape-rewriting
-/// builtins (`permute`/`reshape`/`matmul`/…), and any user/non-builtin/computed
+/// not *name-trackable* at symbolic rank (spec/04-type-system.md section
+/// 4.5.3). Admitted: shape-identity builtins, named-axis builtins (the
+/// procedural arm verifies each addressed axis is a located name and carries
+/// the rest through), checked ordered-prefix key derivations, and inert
+/// builtins, which produce no new tensor. Rejected: every untracked builtin,
+/// the positional shape rewriters (`permute`/`reshape`/`matmul`/…) among
+/// them, and any user/non-builtin/computed
 /// callee not proven rank-safe — against a spread `..r` there are no named axes
 /// left to catch an untracked transposition/reshape, so admitting one would
 /// silently break §4.2 transposition safety (spec/design/rank_polymorphism.md
@@ -1665,63 +1667,66 @@ pub(super) fn check_rank_body_discipline(
                     CheckErrorKind::DimensionMismatch,
                     format!(
                         "rank-polymorphic def `{def_name}` may not call user-defined `{name}`: \
-                         only shape-identity builtins are proven rank-safe in a `..r` body, and a \
-                         user `def` (even one shadowing a builtin name) is not (spec/04-type-system.md \
-                         \u{00a7}4.2)."
+                         a `..r` body admits only shape-identity, named-axis, ordered-prefix, and \
+                         inert builtins, and a user `def` (even one shadowing a builtin name) is \
+                         none of these (spec/04-type-system.md \u{00a7}4.5.3)."
                     ),
                     vec![],
                 ));
             }
-            // OrderedPrefix relations retain every operand axis and may only
-            // append trailing axes, including in each tuple result component.
-            // Identity (elementwise) or NameTracked (named-axis reduction /
-            // named-axis expand) builtin — admissible. For a NameTracked op
-            // the procedural inference arm (`check_reduction_signature` /
-            // `check_expand_signature`) is the real gate: it verifies the
-            // addressed axis is name-anchored against the operand and
-            // computes a symbolic output that carries the surviving named axes
-            // through, rejecting a positional index at symbolic rank or a
-            // non-existent/ambiguous/duplicate axis name. So no untracked
-            // transposition can slip past.
-            Some(name)
-                if builtins::BUILTIN_NAMES.contains(&name)
-                    && matches!(
-                        builtins::shape_class(name),
-                        builtins::ShapeClass::Identity
-                            | builtins::ShapeClass::NameTracked
-                            | builtins::ShapeClass::OrderedPrefix
-                    ) => {}
-            // A named builtin that rewrites shape positionally (not name-tracked).
-            Some(name) if builtins::BUILTIN_NAMES.contains(&name) => {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "rank-polymorphic def `{def_name}` may not call shape-rewriting builtin \
-                         `{name}`: it is not name-trackable at symbolic rank, so against a spread \
-                         `..r` there are no named axes left to catch a transposition or reshape \
-                         (spec/04-type-system.md \u{00a7}4.2). A `..r` body may call shape-identity \
-                         (elementwise) operations, named-axis reductions, and the named-axis \
-                         `expand` and `insert` forms, and ordered-prefix key derivations only."
-                    ),
-                    vec![format!(
-                        "remove the `{name}` call from the rank-polymorphic body, or use \
-                         concrete-rank `def`s instead of a `..r` signature"
-                    )],
-                ));
-            }
-            // A named user-defined function — not proven rank-safe.
-            Some(name) => {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "rank-polymorphic def `{def_name}` may not call `{name}`: only \
-                         shape-identity builtins are proven rank-safe in a `..r` body \
-                         (spec/04-type-system.md \u{00a7}4.2). Calling a user-defined function \
-                         from a rank-polymorphic body is not supported."
-                    ),
-                    vec![],
-                ));
-            }
+            // A builtin's declared shape class decides. The match names every
+            // class, so a new class cannot be admitted or rejected by omission
+            // (spec/04-type-system.md section 4.5.3).
+            Some(name) => match builtins::shape_class(name) {
+                // Identity (elementwise), Inert (unit, operand, or no return), and
+                // OrderedPrefix (key derivations retain every operand axis
+                // and may only append trailing ones) state their result
+                // at symbolic rank. For a NameTracked op the procedural
+                // inference arm (`check_reduction_signature` /
+                // `check_expand_signature` / `check_layer_norm_signature`)
+                // is the real gate: it verifies the addressed axis is
+                // name-anchored against the operand and computes a
+                // symbolic output that carries the surviving named axes
+                // through, rejecting a positional index at symbolic rank
+                // or a non-existent/ambiguous/duplicate axis name. So no
+                // untracked transposition can slip past.
+                Some(
+                    builtins::ShapeClass::Identity
+                    | builtins::ShapeClass::NameTracked
+                    | builtins::ShapeClass::OrderedPrefix
+                    | builtins::ShapeClass::Inert,
+                ) => {}
+                Some(builtins::ShapeClass::Untracked) => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "rank-polymorphic def `{def_name}` may not call builtin `{name}`: \
+                                 it is not name-trackable. A `..r` body admits only shape-identity, \
+                                 named-axis, ordered-prefix, and inert builtins, where an inert \
+                                 builtin returns unit, returns its operand unchanged, or never \
+                                 returns (spec/04-type-system.md \u{00a7}4.5.3)."
+                        ),
+                        vec![format!(
+                            "remove the `{name}` call from the rank-polymorphic body, or use \
+                                 concrete-rank `def`s instead of a `..r` signature"
+                        )],
+                    ));
+                }
+                // A named user-defined function — not proven rank-safe.
+                None => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "rank-polymorphic def `{def_name}` may not call `{name}`: a `..r` \
+                                 body admits only shape-identity, named-axis, ordered-prefix, and \
+                                 inert builtins (spec/04-type-system.md \u{00a7}4.5.3). Calling a \
+                                 user-defined function from a rank-polymorphic body is not \
+                                 supported."
+                        ),
+                        vec![],
+                    ));
+                }
+            },
             // A computed callee (a transform result like `grad(f)(x)`, a
             // first-class function value, or an applied lambda's non-inline
             // form): cannot be proven rank-safe.
@@ -1730,8 +1735,9 @@ pub(super) fn check_rank_body_discipline(
                     CheckErrorKind::DimensionMismatch,
                     format!(
                         "rank-polymorphic def `{def_name}` may not apply a computed or \
-                         non-builtin callee in a `..r` body: only shape-identity builtins are \
-                         proven rank-safe (spec/04-type-system.md \u{00a7}4.2)."
+                         non-builtin callee in a `..r` body: a `..r` body admits only \
+                         shape-identity, named-axis, ordered-prefix, and inert builtins \
+                         (spec/04-type-system.md \u{00a7}4.5.3)."
                     ),
                     vec![],
                 ));

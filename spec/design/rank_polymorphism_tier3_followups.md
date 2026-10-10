@@ -136,7 +136,7 @@ type in hand, a rank-poly reduce wrapper extracts a `__tensor_` DAG helper
 operand's named dims) instead of falling through to the host-emit
 "unsupported builtin" path. The family is re-admitted as `NameTracked` in
 `shape_class` (`crates/chelis-types/src/builtins.rs`); the `shape_class` pin
-test and the body-discipline negatives (`permute`/`reshape` still Rewriting)
+test and the body-discipline negatives (`permute`/`reshape` still rejected)
 are updated. `host_emit.rs` is unchanged: there is no runtime reduction helper
 and the host scalar lane never emitted `sum`/`mean` reductions either, so the
 whole family routes through the tensor-DAG kernel lane. The variadic form

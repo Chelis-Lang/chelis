@@ -176,6 +176,32 @@ pub(super) fn check_layer_norm_signature(
     }
 
     let hidden_dim = x_dims.last().cloned().expect("checked non-empty");
+    // The normalized axis is the input's trailing axis (spec/05 section 4.4).
+    // At symbolic rank only a named trailing anchor locates it; a row that
+    // ends in a spread has its trailing axis inside the spread, where no name
+    // relates it to gamma and beta (spec/04-type-system.md section 4.5.3).
+    if matches!(hidden_dim, Dim::Rank(_)) {
+        let got = hidden_dim.to_string();
+        return report_at_check_site(
+            errors,
+            CheckError::with_types(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "layer_norm argument 1 (input), last axis: expected a named trailing axis \
+                     at symbolic rank, got the rank spread {got}; the normalized axis cannot be \
+                     located inside an opaque spread (spec/04-type-system.md \u{00a7}4.5.3)"
+                ),
+                "a named trailing axis".to_string(),
+                got,
+                vec![
+                    "end the operand's rank-polymorphic row in a named axis, as in \
+                     `tensor[..r, hidden, f32]`"
+                        .to_string(),
+                ],
+            ),
+            site,
+        );
+    }
     if subst.observe_dim(&hidden_dim).known_extent() == Some(0) {
         return report_at_check_site(
             errors,
