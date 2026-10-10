@@ -11959,6 +11959,7 @@ fn try_lower_general_list_grad_app(
         return Ok(None);
     };
     let has_explicit_wrt = callee.meta().wrt().is_some();
+    let declared_param_types = lookup_declared_fn_type(program, fn_name).map(|(params, _)| params);
 
     let mut rewritten_children = kids.to_vec();
     let mut parameter_plans = UnordMap::new();
@@ -11969,10 +11970,23 @@ fn try_lower_general_list_grad_app(
         };
         // A formal of a type-generic target is instantiated by this call's
         // actual, as the differentiated body is.
-        let Some(param_ty) = param_host_type(param).or_else(|| {
-            let actual_ty = expr_host_type(actual, program, scope);
-            (!actual_ty.is_unresolved()).then_some(actual_ty)
-        }) else {
+        let Some(param_ty) = param_host_type(param)
+            .or_else(|| {
+                let actual_ty = expr_host_type(actual, program, scope);
+                (!actual_ty.is_unresolved()).then_some(actual_ty)
+            })
+            .or_else(|| {
+                // A recursive tuple actual can have an unresolved host
+                // inference slot even when the target's checked parameter
+                // has a complete tuple type. Use that checked signature for
+                // the cotangent reconstruction plan.
+                declared_param_types
+                    .as_ref()
+                    .and_then(|params| params.get(param_index))
+                    .filter(|ty| !ty.is_unresolved())
+                    .cloned()
+            })
+        else {
             return Ok(None);
         };
         let mut rewritten_actual = actual.clone();
