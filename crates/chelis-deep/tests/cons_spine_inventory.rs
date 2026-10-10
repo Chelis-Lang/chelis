@@ -34,7 +34,7 @@ const REVIEWED_CONS_LITERALS: &[(&str, &str, usize)] = &[
         1,
     ),
     ("crates/chelis-ir/src/host.rs", "plan_host_pattern", 1),
-    ("crates/chelis-ir/src/host.rs", "lower_app_host_expr", 1),
+    ("crates/chelis-ir/src/host.rs", "lower_program_host_app", 1),
     (
         "crates/chelis-ir/src/lower.rs",
         "expr_requires_host_runtime_with_ctx",
