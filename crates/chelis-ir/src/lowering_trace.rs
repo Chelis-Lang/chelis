@@ -44,8 +44,9 @@ pub struct Gradient {
     pub wrt: Vec<NodeId>,
     pub backward: Dag,
     pub backward_output: NodeId,
-    /// Missing entries retain the raw AD pass's result. Source-level zero
-    /// materialization happens later and is not silently attributed to this pass.
+    /// Copied from the raw AD result, including shaped zeros for disconnected
+    /// float `wrt` leaves. Genuinely absent entries, such as discrete leaves,
+    /// stay absent in this trace.
     pub gradients: BTreeMap<NodeId, NodeId>,
     /// Filled after this invocation is spliced and its result packed. `None`
     /// is an incomplete observation, never evidence of a completed application.
