@@ -197,15 +197,12 @@ fn structurally_distinct_adjoints_get_distinct_roots_sharing_one_gradient_dag_ha
 }
 
 #[test]
-fn equal_adjoints_keep_distinct_exact_zero_roots() {
-    // d/dx and d/dy of mean(x + y) are both 1/4 and share their contribution
-    // tail. spec/06 §2.4 nevertheless requires each forward value's canonical
-    // accumulation tree to begin with its own exact positive-zero base leaf.
-    // A tensor base reads its physical axes through Expand; the Const leaf is
-    // scalar even when the resulting zero has a fixed declared shape.
-    // The two GradGoals therefore have distinct final Add roots while sharing
-    // the one gradient-DAG hash. This pins the semantic tree, not an incidental
-    // node count.
+fn equal_adjoints_share_their_one_contribution_root() {
+    // d/dx and d/dy of mean(x + y) are both 1/4. Each target receives one
+    // contribution, the same node, and spec/06 §2.4's tree has no base leaf,
+    // so both adjoints ARE that node: the two goals address one root index.
+    // Goals stay keyed by target NAME; neither equality nor distinctness of
+    // root indices follows from the target count.
     let request = AdRailRequest {
         source: "x = (x : tensor[4, f32])\n\
                  y = (y : tensor[4, f32])\n\
@@ -220,7 +217,7 @@ fn equal_adjoints_keep_distinct_exact_zero_roots() {
     let goals = grad_goals_from_request(&request)
         .expect("a two-target gradient with equal adjoints still fans out");
 
-    // Two goals -- one per target NAME -- even though the adjoints are equal.
+    // Two goals -- one per target NAME -- even though the adjoints are one node.
     assert_eq!(goals.len(), 2, "still one goal per gradient target name");
     assert_eq!(
         goals.iter().map(|g| g.target.as_str()).collect::<Vec<_>>(),
@@ -228,7 +225,6 @@ fn equal_adjoints_keep_distinct_exact_zero_roots() {
         "goals are still keyed by distinct target names"
     );
 
-    // DISTINCT canonical roots: each target owns its exact-zero accumulation.
     let x_root = goals[0]
         .extracted
         .goal
@@ -241,9 +237,9 @@ fn equal_adjoints_keep_distinct_exact_zero_roots() {
         .ir
         .root_index()
         .expect("y root index");
-    assert_ne!(
+    assert_eq!(
         x_root, y_root,
-        "equal adjoints retain distinct target-specific exact-zero roots"
+        "a single shared contribution is both adjoints, with no per-target base leaf"
     );
     // SHARED hash: still the one gradient-DAG artifact (lowered once).
     assert_eq!(
@@ -251,64 +247,22 @@ fn equal_adjoints_keep_distinct_exact_zero_roots() {
         "both goals address the one gradient-DAG artifact"
     );
 
-    // Both roots are real gradient roots with distinct exact-zero leaves and a
-    // shared contribution tail. This is the required canonical accumulation
-    // shape, not just a changed root count.
+    // The root is the contribution itself, not an `add(+0, contribution)`.
     let parsed: WireDag = serde_json::from_slice(&goals[0].extracted.wire_dag_bytes)
         .expect("the gradient bytes parse back as a WireDag");
     assert!(
         parsed.roots.contains(&x_root),
-        "x root is in the gradient DAG"
+        "the shared root is in the gradient DAG"
     );
+    let root = &parsed.nodes[usize::try_from(x_root).unwrap()];
     assert!(
-        parsed.roots.contains(&y_root),
-        "y root is in the gradient DAG"
-    );
-    let x_node = &parsed.nodes[usize::try_from(x_root).unwrap()];
-    let y_node = &parsed.nodes[usize::try_from(y_root).unwrap()];
-    assert!(matches!(x_node.op, WireRiscOp::Add));
-    assert!(matches!(y_node.op, WireRiscOp::Add));
-    assert_eq!(x_node.inputs.len(), 2);
-    assert_eq!(y_node.inputs.len(), 2);
-    assert_ne!(
-        x_node.inputs[0], y_node.inputs[0],
-        "each target has its own exact-zero leaf"
-    );
-    for zero in [x_node.inputs[0], y_node.inputs[0]] {
-        let expanded = &parsed.nodes[usize::try_from(zero).unwrap()];
-        let WireRiscOp::Expand {
-            axis: 0,
-            size:
-                chelis_compiler_api::schema::WireRtDim::InputAxis {
-                    tensor: 1,
-                    axis: chelis_compiler_api::schema::WireRtAxis::Lit { value: 0 },
-                },
-        } = &expanded.op
-        else {
-            panic!(
-                "tensor zero must read its primal's physical axis: {:?}",
-                expanded.op
-            );
-        };
-        assert_eq!(expanded.inputs.len(), 2);
-        let scalar = &parsed.nodes[usize::try_from(expanded.inputs[0]).unwrap()];
-        assert!(scalar.output_type.dims.is_empty());
-        let WireRiscOp::Const { value } = &scalar.op else {
-            panic!("adjoint accumulation base must have a scalar Const leaf");
-        };
-        assert_eq!(
-            value.as_f64_lossy().to_bits(),
-            0.0f64.to_bits(),
-            "adjoint accumulation base must be exact positive zero"
-        );
-    }
-    assert_eq!(
-        x_node.inputs[1], y_node.inputs[1],
-        "equal adjoints share the numeric contribution tail"
+        !matches!(root.op, WireRiscOp::Add),
+        "a single contribution is not added to a base leaf: {:?}",
+        root.op
     );
 
     // Still no in-tree fit: each equal-adjoint goal is no-fit -> Unsupported, never
-    // green. The collapse does not change the dispatch outcome.
+    // green. Sharing the root does not change the dispatch outcome.
     let registry = DischargeRegistry::with_builtin_engines();
     for (_, discharge) in dispatch_grad_goals(&registry, &goals, 1_000) {
         assert_no_fit_lattice_membership(&discharge);

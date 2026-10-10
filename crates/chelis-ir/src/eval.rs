@@ -4399,14 +4399,7 @@ where
                 )
             }
             RiscOp::OrderedAdjointSum { groups } => {
-                let mut leaves = vec![
-                    finalize_tensor(
-                        "adjoint",
-                        node.output_type.precision,
-                        RawTensor::Float(vec![0.0]),
-                    )
-                    .map_err(|e| e.to_string())?,
-                ];
+                let mut leaves = Vec::new();
                 let mut offset = 0;
                 for &width in groups {
                     let inputs = &node.inputs[offset..offset + width];
@@ -4434,7 +4427,17 @@ where
                         })
                         .collect::<Result<Vec<_>, String>>()?;
                 }
-                TensorValue::from_storage(vec![], leaves.pop().expect("positive-zero base"))
+                // spec/06 §2.4: no contribution is the exact positive zero.
+                let adjoint = match leaves.pop() {
+                    Some(adjoint) => adjoint,
+                    None => finalize_tensor(
+                        "adjoint",
+                        node.output_type.precision,
+                        RawTensor::Float(vec![0.0]),
+                    )
+                    .map_err(|e| e.to_string())?,
+                };
+                TensorValue::from_storage(vec![], adjoint)
             }
             RiscOp::Iota => {
                 let endpoint = |slot| {

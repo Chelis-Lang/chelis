@@ -34,15 +34,14 @@
 //!
 //! ## Equal gradients still have named canonical roots
 //!
-//! Numerical equality does not imply root-index equality. The canonical
-//! accumulation tree in `spec/06` §2.4 gives each forward value's adjoint its
-//! own exact positive-zero base leaf. For example, d/dx and d/dy of
-//! `mean(x + y)` are both `1/4`, and they share the same contribution tail, but
-//! their final `add(+0, contribution)` nodes are distinct roots associated with
-//! `x` and `y`. A later semantics-preserving pass may share structure where its
-//! own contract permits that, so consumers must key goals by target NAME and
-//! follow `grad_nodes_by_name`; they must not infer either equality or
-//! distinctness from target count.
+//! Root-index equality says nothing about which target a goal belongs to. The
+//! canonical accumulation tree in `spec/06` §2.4 has no base leaf, so a value
+//! with one contribution has that contribution as its adjoint. For example,
+//! d/dx and d/dy of `mean(x + y)` are both `1/4`, and both are the one shared
+//! contribution node, so the two goals address the same root index. Other
+//! programs give two targets numerically equal adjoints at distinct roots.
+//! Consumers must key goals by target NAME and follow `grad_nodes_by_name`;
+//! they must not infer either equality or distinctness from target count.
 //!
 //! ## The no-in-tree-fit path (what this wave actually lands)
 //!

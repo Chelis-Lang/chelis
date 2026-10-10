@@ -205,7 +205,9 @@ fn ordered_cotangent_native_groups_check_actual_column_lengths() {
     );
     dag.add_root(root);
     let source = support::codegen(&dag, "runtime_iota").unwrap().c_source;
-    for (first_count, second_count) in [(3, 3), (0, 0), (3, 4)] {
+    // spec/06 §2.4: rows interleave, [a, a, -a, -a, 3, 3] pairs to
+    // (2a + -2a) + 6 = 6 with no base leaf; no row at all is exact +0.
+    for (first_count, second_count, expected) in [(3, 3, "6.0f"), (0, 0, "0.0f"), (3, 4, "0.0f")] {
         let body = format!(
             r#"
     float data[] = {{1.0e20f, -1.0e20f, 3.0f, 0.0f}};
@@ -215,7 +217,7 @@ fn ordered_cotangent_native_groups_check_actual_column_lengths() {
         chelis_tensor_entry_borrow(1, &second, CHELIS_DTYPE_F32, data, sizeof(data))
     }}, *outputs[1] = {{0}};
     runtime_iota(inputs, 2, outputs, 1);
-    return ((const float*)chelis_tensor_read_view(outputs[0]).data)[0] != 0.0f;
+    return ((const float*)chelis_tensor_read_view(outputs[0]).data)[0] != {expected};
 "#
         );
         let result = compile_and_run("ordered_groups", &source, &harness(&body));
