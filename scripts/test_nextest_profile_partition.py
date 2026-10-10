@@ -415,17 +415,29 @@ def _list_filterset(filterset: str) -> dict[str, tuple[str, bool]]:
     return out
 
 
-def _list_macos_census_selection(*, census_only: bool) -> set[str]:
-    """List the exact ci-full census or workspace selector on the Mac basis."""
-    from scripts.test_hosted_validation import MACOS_CENSUS_SELECTOR
+def _list_macos_selection(*, owner: str, shard: int | None = None) -> set[str]:
+    """List one exact ci-full macOS job selection."""
+    from scripts.test_hosted_validation import (
+        MACOS_CENSUS_SELECTOR,
+        MACOS_WIRE_CENSUS_SELECTOR,
+        MACOS_WORKSPACE_SELECTOR,
+    )
 
     command = ["cargo", "nextest", "list"]
-    if census_only:
+    if owner == "binding":
         command.extend(["-p", "chelis-python", "--test", "capacity_census_bindings"])
         selector = MACOS_CENSUS_SELECTOR
-    else:
+    elif owner == "wire":
+        command.extend(["-p", "chelis-compiler-api", "--test", "capacity_census_wire"])
+        selector = MACOS_WIRE_CENSUS_SELECTOR
+    elif owner == "workspace":
+        if shard not in (1, 2, 3):
+            raise ValueError(f"invalid macOS workspace shard: {shard}")
         command.append("--workspace")
-        selector = f"not ({MACOS_CENSUS_SELECTOR})"
+        command.extend(["--partition", f"hash:{shard}/3"])
+        selector = MACOS_WORKSPACE_SELECTOR
+    else:
+        raise ValueError(f"unknown macOS owner: {owner}")
     command.extend(["--profile", "ci-full", "--message-format", "json", "-E", selector])
     result = subprocess.run(
         command,
@@ -437,7 +449,7 @@ def _list_macos_census_selection(*, census_only: bool) -> set[str]:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"macOS census selection failed (exit {result.returncode}): "
+            f"macOS {owner} selection failed (exit {result.returncode}): "
             f"{result.stderr[-2000:]}"
         )
     document = json.loads(result.stdout)
@@ -609,28 +621,50 @@ class ProfilePartitionTests(unittest.TestCase):
             for owner in dtype_oracle_manifest.OWNERS
         }
 
-    def test_macos_census_is_selected_once_across_workspace_and_dedicated_job(self):
-        from scripts.test_hosted_validation import MACOS_CENSUS_SELECTOR
+    def test_macos_censuses_are_selected_once_across_workspace_and_dedicated_jobs(self):
+        from scripts.test_hosted_validation import (
+            MACOS_CENSUS_SELECTOR,
+            MACOS_WIRE_CENSUS_SELECTOR,
+        )
 
-        expected = (
+        binding = (
             "chelis-python::capacity_census_bindings::"
             "registered_pyfunctions_match_the_reviewed_rustdoc_signatures"
         )
-        self.assertIn(expected, self.full)
+        wire = (
+            "chelis-compiler-api::capacity_census_wire::"
+            "wire_schema_numeric_fields_match_the_reviewed_baseline"
+        )
+        self.assertIn(binding, self.full)
+        self.assertIn(wire, self.full)
         self.assertEqual(
             MACOS_CENSUS_SELECTOR,
             "binary_id(/^chelis-python::capacity_census_bindings$/) & "
             "test(/^registered_pyfunctions_match_the_reviewed_rustdoc_signatures$/)",
         )
-        census = _list_macos_census_selection(census_only=True)
-        workspace = _list_macos_census_selection(census_only=False)
-        self.assertEqual(census, {expected})
+        self.assertEqual(
+            MACOS_WIRE_CENSUS_SELECTOR,
+            "binary_id(/^chelis-compiler-api::capacity_census_wire$/) & "
+            "test(/^wire_schema_numeric_fields_match_the_reviewed_baseline$/)",
+        )
+        census = _list_macos_selection(owner="binding")
+        wire_census = _list_macos_selection(owner="wire")
+        workspace = [
+            _list_macos_selection(owner="workspace", shard=shard)
+            for shard in (1, 2, 3)
+        ]
+        self.assertEqual(census, {binding})
+        self.assertEqual(wire_census, {wire})
+        self.assertTrue(all(workspace))
         ordinary = {
             identity for identity, (status, ignored) in _list_profile("ci-full").items()
             if status == "matches" and not ignored
         }
-        self.assertEqual(workspace | census, ordinary)
-        self.assertFalse(workspace & census)
+        selections = [*workspace, census, wire_census]
+        self.assertEqual(set.union(*selections), ordinary)
+        for left in range(len(selections)):
+            for right in range(left + 1, len(selections)):
+                self.assertFalse(selections[left] & selections[right])
 
     def test_fast_selection_is_a_subset_of_unfiltered_nightly(self):
         from scripts import ci_test_targets, gate, ownership_ledger_tests

@@ -1932,6 +1932,7 @@ def _ci_job_block(job: str) -> str:
     if job in {
         "macos-workspace-shard",
         "macos-binding-census",
+        "macos-wire-census",
         "macos-smoke",
         "smt-build-darwin-arm64",
     }:
@@ -1963,10 +1964,10 @@ def _assert_executable_run_once(job_block: str, command: str) -> None:
         )
 
 
-def _assert_macos_aggregate_requires_census(aggregate_block: str) -> None:
+def _assert_macos_aggregate_requires_censuses(aggregate_block: str) -> None:
     needs = (
         "needs: [macos-workspace-shard, macos-binding-census, "
-        "macos-ownership-ledger]"
+        "macos-wire-census, macos-ownership-ledger]"
     )
     if needs not in aggregate_block:
         raise AssertionError("macOS aggregate omits a required producer")
@@ -1975,6 +1976,7 @@ def _assert_macos_aggregate_requires_census(aggregate_block: str) -> None:
         "python3 scripts/ci_require_success.py "
         "macos-workspace-shard=${{ needs.macos-workspace-shard.result }} "
         "macos-binding-census=${{ needs.macos-binding-census.result }} "
+        "macos-wire-census=${{ needs.macos-wire-census.result }} "
         "macos-ownership-ledger=${{ needs.macos-ownership-ledger.result }}",
     )
 
@@ -2658,27 +2660,44 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn("--require-disjoint", block)
         self.assertIn("uses: actions/upload-artifact@v7", block)
 
-    def test_macos_suite_is_two_disjoint_shards_behind_stable_aggregate(self):
+    def test_macos_suite_is_three_disjoint_shards_behind_stable_aggregate(self):
         shard_block = _ci_job_block("macos-workspace-shard")
         census_block = _ci_job_block("macos-binding-census")
+        wire_block = _ci_job_block("macos-wire-census")
         aggregate_block = _ci_job_block("macos-smoke")
-        _assert_hash_partition_contract(shard_block, expected_count=2)
+        _assert_hash_partition_contract(shard_block, expected_count=3)
         self.assertIn("cargo nextest run --workspace", shard_block)
-        self.assertIn("--partition hash:${{ matrix.shard }}/2", shard_block)
+        self.assertIn("--partition hash:${{ matrix.shard }}/3", shard_block)
         self.assertIn("if: matrix.shard == 2", shard_block)
         self.assertIn("name: macOS Binding Census", census_block)
+        self.assertIn("name: macOS Wire Census", wire_block)
         self.assertIn("name: macOS Smoke", aggregate_block)
-        _assert_macos_aggregate_requires_census(aggregate_block)
+        _assert_macos_aggregate_requires_censuses(aggregate_block)
 
-    def test_macos_aggregate_fails_if_census_is_dropped(self):
+    def test_macos_partition_rejects_missing_duplicate_or_wrong_denominator(self):
+        shard_block = _ci_job_block("macos-workspace-shard")
+        for old, new in (
+            ("shard: [1, 2, 3]", "shard: [1, 2]"),
+            ("shard: [1, 2, 3]", "shard: [1, 2, 2]"),
+            ("--partition hash:${{ matrix.shard }}/3", "--partition hash:${{ matrix.shard }}/2"),
+        ):
+            with self.subTest(new=new):
+                with self.assertRaises(AssertionError):
+                    _assert_hash_partition_contract(
+                        shard_block.replace(old, new), expected_count=3
+                    )
+
+    def test_macos_aggregate_fails_if_either_census_is_dropped(self):
         aggregate_block = _ci_job_block("macos-smoke")
         for missing in (
             "macos-binding-census, ",
             "macos-binding-census=${{ needs.macos-binding-census.result }} ",
+            "macos-wire-census, ",
+            "macos-wire-census=${{ needs.macos-wire-census.result }} ",
         ):
             with self.subTest(missing=missing):
                 with self.assertRaises(AssertionError):
-                    _assert_macos_aggregate_requires_census(
+                    _assert_macos_aggregate_requires_censuses(
                         aggregate_block.replace(missing, "")
                     )
 
