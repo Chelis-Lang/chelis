@@ -461,11 +461,19 @@ class CachePolicyTests(unittest.TestCase):
         self.rejects(workflows, "prefix-key must be")
 
     def test_self_hosted_capable_jobs_must_skip_the_cache(self) -> None:
-        for name, job_id in (("ci.yml", "lint-rust"), ("heavy-e2e.yml", "script-nightly"), ("conformance.yml", "conformance")):
+        for name, job_id in (("ci.yml", "lint-rust"), ("conformance.yml", "conformance")):
             with self.subTest(job=f"{name}::{job_id}"):
                 workflows = self.mutated()
                 self.job_cache(workflows, name, job_id).pop("if")
                 self.rejects(workflows, "can run self-hosted")
+
+    def test_hosted_nightly_cache_condition_is_optional_only_while_hosted(self) -> None:
+        workflows = self.mutated()
+        self.job_cache(workflows, "heavy-e2e.yml", "script-nightly").pop("if")
+        self.check_all(workflows)
+
+        workflows["heavy-e2e.yml"]["jobs"]["script-nightly"]["runs-on"] = "chelis-ci-warm-x64"
+        self.rejects(workflows, "can run self-hosted")
 
     def test_a_key_environment_difference_is_rejected(self) -> None:
         workflows = self.mutated()
