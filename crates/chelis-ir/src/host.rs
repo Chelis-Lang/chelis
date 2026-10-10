@@ -21434,6 +21434,73 @@ mod tests {
         })
     }
 
+    /// A native unwind runs each host scope's exit before the catch returns.
+    /// Invocation exit restores invocation state.
+    /// Mono-probe exit restores specialization state.
+    /// Preflight exit removes its frame.
+    #[test]
+    fn host_scopes_exit_on_a_native_unwind() {
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check("(lit {type: (t-prim {} i64)} 0)");
+            let mut native = chelis_types::NativeServices::new(None);
+            let mut session = HostLoweringSession::new(&checked);
+            let program = &mut session.cx(runtime, &mut native);
+            program.state.invocation.inlining.insert("outer".into());
+            program
+                .state
+                .invocation
+                .mono
+                .memo
+                .insert("outer-key".into(), "outer-symbol".into());
+
+            let caught: Result<(), _> = program.catch_lowering(|program| {
+                with_host_invocation::<LowerResult<()>>(program, |program| {
+                    assert!(program.state.invocation.inlining.is_empty());
+                    program.state.invocation.inlining.insert("inner".into());
+                    std::panic::panic_any("host invocation unwind")
+                })
+            });
+            assert_eq!(caught.unwrap_err().message, "host invocation unwind");
+            assert_eq!(program.state.invocation.inlining.len(), 1);
+            assert!(program.state.invocation.inlining.contains("outer"));
+
+            let caught: Result<(), _> = program.catch_lowering(|program| {
+                with_mono_probe::<LowerResult<()>>(program, |program| {
+                    program
+                        .state
+                        .invocation
+                        .mono
+                        .memo
+                        .insert("probe-key".into(), "probe-symbol".into());
+                    std::panic::panic_any("mono probe unwind")
+                })
+            });
+            assert_eq!(caught.unwrap_err().message, "mono probe unwind");
+            assert_eq!(program.state.invocation.mono.memo.len(), 1);
+            assert_eq!(
+                program
+                    .state
+                    .invocation
+                    .mono
+                    .memo
+                    .get("outer-key")
+                    .map(String::as_str),
+                Some("outer-symbol")
+            );
+
+            let expr = parse_one_expr("(lit {type: (t-prim {} i64)} 1)");
+            let frames = program.state.invocation.preflight.len();
+            let caught: Result<(), _> = program.catch_lowering(|program| {
+                with_preflight::<LowerResult<()>>(&expr, program, |program, _| {
+                    assert_eq!(program.state.invocation.preflight.len(), frames + 1);
+                    std::panic::panic_any("preflight unwind")
+                })
+            });
+            assert_eq!(caught.unwrap_err().message, "preflight unwind");
+            assert_eq!(program.state.invocation.preflight.len(), frames);
+        })
+    }
+
     /// A staged host region records its status inside its lowering catch,
     /// and the region's outcome is read from that status after the catch. A
     /// Random handler inside the region is a host control boundary: the

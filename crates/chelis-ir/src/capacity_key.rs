@@ -1067,4 +1067,35 @@ mod tests {
         let key = exact(literal(7));
         assert_eq!(key.literal_elements(), Some(&BigUint::from(7u8)));
     }
+
+    /// All native handles use one process-global sequence that starts at 1.
+    /// Each thread receives strictly increasing identities.
+    /// Two handles on one thread continue the same sequence.
+    /// No identity occurs twice across threads.
+    #[test]
+    fn fresh_id_draws_strictly_increasing_process_unique_identities() {
+        let draws = |count: usize| {
+            let mut supply = CapacityScopeSupply::native();
+            (0..count).map(|_| supply.fresh_id()).collect::<Vec<u64>>()
+        };
+        let threads: Vec<_> = (0..4)
+            .map(|_| std::thread::spawn(move || draws(256)))
+            .collect();
+        let mut first = CapacityScopeSupply::native();
+        let mut second = CapacityScopeSupply::native();
+        let (a, b, c) = (first.fresh_id(), second.fresh_id(), first.fresh_id());
+        assert!(1 <= a && a < b && b < c);
+        let mut all = draws(256);
+        assert!(all.windows(2).all(|pair| pair[0] < pair[1]));
+        for thread in threads {
+            let ids = thread.join().expect("drawing thread");
+            assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+            all.extend(ids);
+        }
+        all.extend([a, b, c]);
+        let total = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), total, "an identity was handed out twice");
+    }
 }

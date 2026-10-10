@@ -230,6 +230,25 @@ pub(crate) fn grow_stack_if_needed<S, R>(
 /// nor `Sync`, and checked programs and persisted lowering facts never
 /// contain it. It has no fields a caller can read: every access goes through
 /// a primitive, so the Lean model threads the flags as explicit state.
+///
+/// The handle cannot leave its thread:
+///
+/// ```compile_fail
+/// fn require_send<T: Send>() {}
+/// require_send::<chelis_ir::lowering_runtime::LoweringRuntime>();
+/// ```
+///
+/// ```compile_fail
+/// fn require_sync<T: Sync>() {}
+/// require_sync::<chelis_ir::lowering_runtime::LoweringRuntime>();
+/// ```
+///
+/// A `Send + Sync` handle satisfies the same bounds:
+///
+/// ```
+/// fn require_send_sync<T: Send + Sync>() {}
+/// require_send_sync::<chelis_ir::capacity_key::CapacityScopeSupply>();
+/// ```
 pub struct LoweringRuntime {
     thread_bound: PhantomData<*const ()>,
 }
@@ -684,6 +703,145 @@ mod tests {
         Event::Hook(message.to_owned())
     }
 
+    /// Return the panic payload label for the event recorder.
+    fn payload_label(payload: &(dyn std::any::Any + Send)) -> String {
+        if let Some(diagnostic) = payload.downcast_ref::<LowerDiagnostic>() {
+            diagnostic.message.clone()
+        } else if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_owned()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else if payload.is::<UnrepresentableDag>() {
+            "unrepresentable".to_owned()
+        } else {
+            "unknown".to_owned()
+        }
+    }
+
+    /// Run this module's test `name` in a child process with `env` set.
+    /// The child must print `done`.
+    fn run_child(name: &str, env: &str, done: &str) {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(env, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        let stderr = String::from_utf8_lossy(&child.stderr);
+        assert!(
+            child.status.success() && stdout.lines().any(|line| line == done),
+            "child {name} failed: {}\n{stdout}\n{stderr}",
+            child.status,
+        );
+    }
+
+    const HOOK_INSTALLATION_CHILD: &str = "CHELIS_LOWERING_RUNTIME_HOOK_INSTALLATION_CHILD";
+    const HOOK_INSTALLATION_DONE: &str = "hook installation observations passed";
+
+    /// Only a catch installs the Chelis hook.
+    /// Before the first catch, a fatal raise reaches the previous hook.
+    /// After the catch, the hook suppresses the same raise.
+    fn observe_hook_installation() {
+        let (events, observed) = mpsc::channel();
+        std::panic::set_hook(Box::new(move |info| {
+            events
+                .send(Event::Hook(payload_label(info.payload())))
+                .unwrap();
+        }));
+        with_native_lowering_runtime(|runtime| {
+            let before = LowerDiagnostic::new("before-first-catch", None, None);
+            assert_eq!(
+                runtime.raise_fatal_lowering_diagnostic(before.clone()),
+                LoweringFailure::Diagnostic(before.fatal())
+            );
+            assert_events(&observed, &[hook("before-first-catch")]);
+            let caught: Result<(), _> = runtime.catch_lowering(|runtime| {
+                Err(runtime.raise_lowering_diagnostic(LowerDiagnostic::new(
+                    "in-first-catch",
+                    None,
+                    None,
+                )))
+            });
+            assert_eq!(caught.unwrap_err().message, "in-first-catch");
+            let after = LowerDiagnostic::new("after-first-catch", None, None);
+            assert_eq!(
+                runtime.raise_lowering_diagnostic(after.clone()),
+                LoweringFailure::Diagnostic(after)
+            );
+            let fatal = LowerDiagnostic::new("fatal-after-first-catch", None, None);
+            assert_eq!(
+                runtime.raise_fatal_lowering_diagnostic(fatal.clone()),
+                LoweringFailure::Diagnostic(fatal.fatal())
+            );
+            assert_events(&observed, &[hook("after-first-catch")]);
+        });
+    }
+
+    #[test]
+    fn fatal_raise_before_first_catch_is_visible() {
+        if std::env::var_os(HOOK_INSTALLATION_CHILD).is_some() {
+            observe_hook_installation();
+            println!("{HOOK_INSTALLATION_DONE}");
+            return;
+        }
+        // A child process isolates the process-global hook installation.
+        run_child(
+            "lowering_runtime::tests::fatal_raise_before_first_catch_is_visible",
+            HOOK_INSTALLATION_CHILD,
+            HOOK_INSTALLATION_DONE,
+        );
+    }
+
+    const EXIT_PANIC_CHILD: &str = "CHELIS_LOWERING_RUNTIME_EXIT_PANIC_CHILD";
+    const EXIT_PANIC_DONE: &str = "exit panic observations passed";
+
+    /// `scoped` catches a body unwind and calls exit before it resumes.
+    /// An exit panic starts an ordinary unwind with the exit payload.
+    /// The hook observes each payload once, then the body payload drops.
+    /// The catch returns the exit diagnostic without a process abort.
+    fn observe_exit_panic_during_unwind() {
+        install_chelis_panic_hook();
+        let chelis = std::panic::take_hook();
+        let (events, observed) = mpsc::channel();
+        let hook_events = events.clone();
+        std::panic::set_hook(Box::new(move |info| {
+            hook_events
+                .send(Event::Hook(payload_label(info.payload())))
+                .unwrap();
+            chelis(info);
+        }));
+        with_native_lowering_runtime(|runtime| {
+            let result: Result<(), _> = runtime.catch_lowering(|_| {
+                scoped::<(), (), LowerResult<()>>(
+                    &mut (),
+                    |_| (),
+                    |_, ()| panic_any("exit"),
+                    |_| panic_any(RecordDrop("body-payload", events.clone())),
+                )
+            });
+            assert_eq!(result.unwrap_err().message, "exit");
+            assert_events(
+                &observed,
+                &[hook("unknown"), hook("exit"), Event::Drop("body-payload")],
+            );
+        });
+    }
+
+    #[test]
+    fn exit_panic_during_unwind_unwinds_with_the_exit_payload() {
+        if std::env::var_os(EXIT_PANIC_CHILD).is_some() {
+            observe_exit_panic_during_unwind();
+            println!("{EXIT_PANIC_DONE}");
+            return;
+        }
+        // A child process isolates the replacement process hook.
+        run_child(
+            "lowering_runtime::tests::exit_panic_during_unwind_unwinds_with_the_exit_payload",
+            EXIT_PANIC_CHILD,
+            EXIT_PANIC_DONE,
+        );
+    }
+
     fn observe_native_runtime() {
         let (events, observed) = mpsc::channel();
         let hook_events = events.clone();
@@ -873,5 +1031,24 @@ mod tests {
             "native runtime probe failed: {}\n{stdout}\n{stderr}",
             child.status,
         );
+    }
+
+    /// Both real `stacker::maybe_grow` branches apply the closure to state.
+    /// `usize::MAX` forces a fresh segment, and zero keeps the current stack.
+    #[test]
+    fn grow_stack_if_needed_applies_the_closure_on_both_branches() {
+        const SEGMENT: usize = 128 * 1024;
+        for (red_zone, grows) in [(usize::MAX, true), (0, false)] {
+            let mut state = vec![1u32];
+            let push = |state: &mut Vec<u32>| {
+                state.push(2);
+                let remaining = stacker::remaining_stack().expect("remaining stack is reported");
+                (state.len(), remaining)
+            };
+            let (length, remaining) = grow_stack_if_needed(&mut state, red_zone, SEGMENT, push);
+            assert_eq!(length, 2);
+            assert_eq!(state, [1, 2]);
+            assert_eq!(remaining <= SEGMENT, grows, "red zone {red_zone}");
+        }
     }
 }

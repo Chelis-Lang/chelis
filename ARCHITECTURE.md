@@ -458,6 +458,19 @@ These segments cover nested handles, scope cleanup, thread isolation, and three 
 The replay fixture uses a token-region drift guard before compilation.
 It does not establish a general relation for arbitrary native unwinds or aborts.
 
+The round-38 entry smoke in `.work/diag/resume38-main/o5-entry-adapter` runs one binary from production Rust 1.98.0 in a fresh process.
+It calls the public catch adapter `try_lower_program_to_library` twice on the rejected `floor` gradient fixture.
+Before the first entry call, speculation-flag probes before and after the fixture check reach the previous hook.
+After the first entry call, the Chelis panic hook suppresses the same kind of probe.
+During the second call, a raw recorder in front of that hook receives one payload equal to the returned fatal diagnostic.
+A final panic outside every flag scope reaches the previous hook, so both suppression flags are clear.
+
+The core source digest was the same before and after the run.
+This smoke covers one catch adapter and one fatal rejection only.
+No Lean check compares its output with the hand-model relations.
+It is not a wrapper relation, a final production theorem, or hook-installation (O5) coverage for every entry.
+Whole-entry noninterference (O16), caller correspondence (O17), and whole-core revalidation (O18) remain open.
+
 The proof package selects `scope=fragment` or `scope=whole-core`.
 It selects `chain=default` or `chain=lowering-trace` separately.
 The fragment scope excludes whole-core checker modules and caller obligations.

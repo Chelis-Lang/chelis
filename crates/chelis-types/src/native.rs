@@ -12,10 +12,10 @@
 //!
 //! The primitives are the trusted boundary of the functional model. Each is
 //! documented with the Lean model it is intended to have. Their signatures
-//! mention only `NativeServices` itself, the separately modeled
-//! [`CancelToken`] (shell-only constructor argument), std types, and
-//! closures, and `NativeServices` has no trait impls, so the Lean model can be
-//! written before any crate is extracted.
+//! mention only `NativeServices` itself, the shell-state [`CancelToken`]
+//! (shell-only constructor argument), std types, and closures.
+//! The `cancel` oracle abstracts this shared flag, not a separate value model.
+//! `NativeServices` has no trait impls, so its Lean model needs no extracted crate.
 
 use std::time::Instant;
 
@@ -275,5 +275,40 @@ mod tests {
             depth_at_check_entry(&mut reused),
             depth_at_check_entry(&mut NativeServices::new(None))
         );
+    }
+
+    /// Profile marks index this service's clocks.
+    /// A phase for an unissued mark has no effect.
+    /// Profiling changes no cancellation, depth, or stack observation.
+    #[test]
+    fn enabled_profiling_issues_consecutive_marks_and_changes_nothing_else() {
+        let token = CancelToken::new();
+        let mut profiled = NativeServices::new(Some(token.clone())).with_profiling(true);
+        let mut plain = NativeServices::new(Some(token.clone()));
+        let observe = |native: &mut NativeServices| {
+            (
+                native.cancellation_observed(),
+                native.depth,
+                native.stack_exhausted(),
+            )
+        };
+        assert_eq!(profiled.profile_start(), 0);
+        profiled.enter_frame();
+        plain.enter_frame();
+        assert_eq!(profiled.profile_start(), 1);
+        profiled.profile_phase(0, "check", "phase");
+        profiled.profile_phase(7, "check", "unissued mark");
+        assert_eq!(profiled.profile_marks.as_ref().map(Vec::len), Some(2));
+        assert_eq!(observe(&mut profiled), observe(&mut plain));
+        token.cancel();
+        assert_eq!(observe(&mut profiled), observe(&mut plain));
+        // Disabled profiling issues mark 0 and keeps no clock.
+        assert_eq!(plain.profile_start(), 0);
+        assert!(plain.profile_marks.is_none());
+        let mut disabled = NativeServices::new(None)
+            .with_profiling(true)
+            .with_profiling(false);
+        assert_eq!(disabled.profile_start(), 0);
+        assert!(disabled.profile_marks.is_none());
     }
 }

@@ -481,10 +481,44 @@ The catch laws transfer true installation evidence across thread identifiers.
 These laws do not turn a false CN installation lower bound into proof of native hook absence.
 Exact native suppression still needs process installation evidence or a justified true lower bound.
 
+`.work/diag/resume38-main/o5-entry-adapter` records one fresh-process smoke of the public catch adapter `try_lower_program_to_library`.
+Production Rust 1.98.0 (`88d9e12ae`) built the smoke program, and the run used the rejected `floor` gradient fixture of `lowering_trace`.
+The program first sets a recorder, which is the only panic hook before the first catch.
+The Chelis panic hook later keeps that recorder as its previous hook.
+The core source digest `02bcf3c6053241b58fb5144e7302220dae2a46b5604280c46a43e7b935ad2f80` was the same before and after the run.
+
+The three suppression probes panic inside `with_suppress_unrepresentable_panic`.
+The first probe runs before the fixture check, and the causal control runs after the check and before the first entry call.
+Both probes reach the previous hook, so the checker does not install the Chelis hook.
+The first entry call returns the fatal `floor` diagnostic and adds no visible panic.
+After that call, the Chelis hook suppresses a third probe of the same form.
+Thus the first entry call installs the hook.
+
+A raw recorder then wraps the installed hook.
+The second entry call returns a diagnostic equal to the first.
+The recorder receives exactly one payload, and that payload equals the returned diagnostic.
+A final panic outside every flag scope reaches the previous hook through the Chelis hook.
+Thus both suppression flags are clear after the entry calls.
+The previous hook records exactly `probe-before`, `probe-after-check`, and `flags-clear`, in that order.
+
+This evidence covers one catch adapter and one fatal rejection.
+It does not cover the other catch adapters, the resume adapters, the panic adapter, nonfatal speculative raises, or other threads.
+Other public entries still need process installation evidence or a justified true lower bound.
+No Lean check compares this output with the hand-model relations.
+The smoke is not a final production theorem or all-entry O5 coverage.
+O16 whole-entry noninterference, O17, and O18 remain open.
+
 O9 has conditional preflight balance laws for the entry stack, nested scopes, and body results.
 `.work/diag/resume38-main/native44-o5-o9/smoke.log` exercises success, diagnostic, and native-unwind values through the independent scope interface.
 The laws need explicit entry and body stack-preservation hypotheses.
 They do not prove whole-core preflight balance for production bodies.
+
+`verification/native_shell.json` lists 61 native-shell entries.
+Seven of them cover `chelis_types::cancel::CancelToken` and its items: one shell state, two shell helpers, and four shell entries.
+The current plans `.work/diag/resume38-main/plan-default.json` and `.work/diag/resume38-main/plan-trace.json` record inventory SHA-256 `9f9a9e10b9949b464bebe1b78ce727c9a2ddb162cb7768e451c0c21805a804d6` and core source digest `02bcf3c6053241b58fb5144e7302220dae2a46b5604280c46a43e7b935ad2f80`.
+`.work/diag/resume38-main/final-static-boundary-01.log` runs `accept.py --static` with both plans and records `STATIC CHECKS PASSED` and `EXIT 0`.
+Thus each plan has exactly these 61 entries, and no core item depends on a CancelToken entry.
+Correspondence between the extracted cancellation pollers and the `cancel` oracle remains open.
 
 Acceptance selects layout scope and feature chain separately.
 The fragment audit cannot satisfy whole-core acceptance.
