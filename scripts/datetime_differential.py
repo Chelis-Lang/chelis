@@ -19,12 +19,11 @@ Three kinds of observation are generated:
   stack.
 - A value is one binding whose printed value the reference predicts, used
   where a grid does not fit (strings, floats compared bit for bit, columns).
-- A failure is a program whose single binding must fail. Both lanes must exit
-  nonzero with the same §5 message, `<function>: <kind>: <detail>`, whose
-  function and kind equal the reference's and whose detail is nonempty. This
-  also shows that no primitive numeric trap escapes (§5): a trap would carry a
-  primitive's message instead. Repeated paths are sampled; every grid point is
-  still observed through the `try_` forms.
+- A failure is a program whose single binding must fail. Library failures
+  carry the reference's same §5 message, `<function>: <kind>: <detail>`, on
+  both lanes. Tensor arguments with conflicting named extents instead fail
+  at their §4.7 entry guard, before the library body runs. Repeated paths are
+  sampled; every grid point is still observed through the `try_` forms.
 
 Every printed line must belong to a binding of the program: a stray line, such
 as a library constant printed by one lane, is a disagreement.
@@ -526,12 +525,13 @@ class Value:
 
 @dataclass(frozen=True)
 class Failure:
-    """A program whose binding must fail with `<function>: <kind>: <detail>`."""
+    """A program whose binding must fail in the library or at an extent guard."""
 
     name: str
     expr: str
     function: str
     kind: str
+    extent: tuple[str, int, str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -611,6 +611,9 @@ class Corpus:
 
     def fails(self, label: str, expr: str, error: DatetimeError) -> None:
         self.failures.append(Failure(f"f{len(self.failures):04d}_{label}", expr, error.function, error.kind))
+
+    def extent_fails(self, label: str, expr: str, extent: tuple[str, int, str, int]) -> None:
+        self.failures.append(Failure(f"f{len(self.failures):04d}_{label}", expr, "load", "domain", extent))
 
     def outcome(self, label: str, expr: str, compute) -> None:
         """Record a trapping call as a value or a failure, whichever the reference says."""
@@ -1487,20 +1490,27 @@ def column_rounding(corpus: Corpus, inputs: dict[str, list]) -> None:
 
 
 def column_lengths(corpus: Corpus) -> None:
-    """Columns whose lengths only the running program knows: the call rejects the pair."""
+    """A shared named tensor extent is checked on entry before the library body."""
     two, three = "dates_from_epoch_days(span(2i64))", "dates_from_epoch_days(span(3i64))"
     stamps_two, stamps_three = "instants_from_unix(span(2i64), span(2i64))", "instants_from_unix(span(3i64), span(3i64))"
     cases = (
-        ("dates_add_days", f"to_list(dates_epoch_days(dates_add_days({two}, span(3i64))))"),
-        ("dates_add_months", f"to_list(dates_epoch_days(dates_add_months({three}, span(2i64), ClampToMonthEnd)))"),
-        ("dates_days_until", f"to_list(dates_days_until({two}, {three}))"),
-        ("dates_lte", f"to_list(dates_lte({three}, {two}))"),
-        ("instants_add_duration", f"instants_row(instants_add_duration({stamps_two}, durations(span(3i64), span(3i64))))"),
-        ("instants_until", f"durations_row(instants_until({stamps_three}, {stamps_two}))"),
-        ("instants_gt", f"to_list(instants_gt({stamps_two}, {stamps_three}))"),
+        ("dates_add_days", f"to_list(dates_epoch_days(dates_add_days({two}, span(3i64))))",
+         ("ds.epoch_days", 2, "days", 3)),
+        ("dates_add_months", f"to_list(dates_epoch_days(dates_add_months({three}, span(2i64), ClampToMonthEnd)))",
+         ("ds.epoch_days", 3, "months", 2)),
+        ("dates_days_until", f"to_list(dates_days_until({two}, {three}))",
+         ("a.epoch_days", 2, "b.epoch_days", 3)),
+        ("dates_lte", f"to_list(dates_lte({three}, {two}))",
+         ("a.epoch_days", 3, "b.epoch_days", 2)),
+        ("instants_add_duration", f"instants_row(instants_add_duration({stamps_two}, durations(span(3i64), span(3i64))))",
+         ("is.unix_seconds", 2, "ds.seconds", 3)),
+        ("instants_until", f"durations_row(instants_until({stamps_three}, {stamps_two}))",
+         ("a.unix_seconds", 3, "b.unix_seconds", 2)),
+        ("instants_gt", f"to_list(instants_gt({stamps_two}, {stamps_three}))",
+         ("a.unix_seconds", 2, "b.unix_seconds", 3)),
     )
-    for function, expr in cases:
-        corpus.fails(f"named_col_lengths_{function}", expr, ref.domain(function, "arguments have different lengths"))
+    for function, expr, extent in cases:
+        corpus.extent_fails(f"named_col_lengths_{function}", expr, extent)
 
 
 def column_corpus(corpus: Corpus) -> None:
@@ -1515,7 +1525,10 @@ def column_corpus(corpus: Corpus) -> None:
     column_rounding(columns, inputs)
     column_lengths(columns)
     corpus.columns += [Value("c" + value.name, value.expr, value.expected, value.float_bits) for value in columns.values]
-    corpus.failures += [Failure("c" + failure.name, failure.expr, failure.function, failure.kind) for failure in columns.failures]
+    corpus.failures += [
+        Failure("c" + failure.name, failure.expr, failure.function, failure.kind, failure.extent)
+        for failure in columns.failures
+    ]
 
 
 def build_ci_corpus() -> Corpus:
@@ -1728,6 +1741,18 @@ def failure_message(result: LaneResult) -> str | None:
     return None
 
 
+def extent_guard_message(result: LaneResult) -> tuple[str, int, str, int] | None:
+    """Read the two source extents; eval alone prefixes the context with `error:`."""
+    for line in result.stderr.splitlines():
+        match = re.fullmatch(
+            r"(?:error: )?extent `n`: (.+?) axis 0 = (-?\d+), (.+?) axis 0 = (-?\d+)",
+            line.strip(),
+        )
+        if match:
+            return match.group(1), int(match.group(2)), match.group(3), int(match.group(4))
+    return None
+
+
 @dataclass
 class Report:
     checked: int = 0
@@ -1738,6 +1763,23 @@ class Report:
 def check_program(program: Program, results: list[LaneResult], report: Report) -> None:
     if program.failure is not None:
         failure = program.failure
+        if failure.extent is not None:
+            for result in results:
+                expected_stage = "eval" if result.lane == "eval" else "run"
+                context = extent_guard_message(result)
+                trap = "numeric trap: domain in load at i64"
+                if (result.status == 0 or result.stage != expected_stage
+                        or context != failure.extent
+                        or trap not in result.stderr.splitlines()):
+                    report.problems.append(
+                        f"{failure.name} [{result.lane}/{result.stage}]: expected entry extent guard "
+                        f"{failure.extent!r} and `{trap}` at {expected_stage} with nonzero status; "
+                        f"got status {result.status}; stdout {result.stdout.strip()[:300]!r}; "
+                        f"stderr {result.stderr.strip()[:300]!r}\n"
+                        f"    expression: {failure.expr}"
+                    )
+            report.failures_checked += 1
+            return
         messages = {}
         for result in results:
             message = failure_message(result)

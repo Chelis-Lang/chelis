@@ -20,6 +20,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import datetime_lanes as lanes  # noqa: E402
+import datetime_differential as differential  # noqa: E402
 
 # `chelis --version` prints a version; `eval` prints a binding; `build --emit-c`
 # writes the C sources and the staged archive. FAIL_EVAL fails the eval and
@@ -163,6 +164,61 @@ class LaneTests(unittest.TestCase):
         self.runner.toolchain = None
         with self.assertRaisesRegex(ValueError, "needs a toolchain"):
             self.runner.lane("case_1", "module Demo.Main\n", "c")
+
+
+class ExtentGuardOracleTests(unittest.TestCase):
+    def failure(self) -> differential.Failure:
+        return differential.Failure(
+            "named_col_lengths_dates_add_days", "dates_add_days(...)",
+            "load", "domain", extent=("ds.epoch_days", 2, "days", 3),
+        )
+
+    def check(self, eval_stderr: str, c_stderr: str, *, c_stage: str = "run") -> list[str]:
+        program = differential.Program("extent_guard", "module Demo.Main\n", failure=self.failure())
+        results = [
+            lanes.LaneResult("eval", 1, "", eval_stderr, "eval"),
+            lanes.LaneResult("c", 1, "", c_stderr, c_stage),
+        ]
+        report = differential.Report()
+        differential.check_program(program, results, report)
+        return report.problems
+
+    def test_named_tensor_extent_guard_passes_on_both_lanes(self) -> None:
+        context = "extent `n`: ds.epoch_days axis 0 = 2, days axis 0 = 3"
+        trap = "numeric trap: domain in load at i64"
+        self.assertEqual(self.check(f"error: {context}\n{trap}\n", f"{context}\n{trap}\n"), [])
+
+    def test_named_tensor_extent_guard_rejects_wrong_or_missing_evidence(self) -> None:
+        context = "extent `n`: ds.epoch_days axis 0 = 2, days axis 0 = 3"
+        trap = "numeric trap: domain in load at i64"
+        bad_results = (
+            (f"error: {context}\n{trap}\n", "dates_add_days: domain: arguments have different lengths\n", "library fallback"),
+            (f"error: {context}\n{trap}\n", f"extent `n`: ds.epoch_days axis 0 = 2, days axis 0 = 4\n{trap}\n", "wrong extent"),
+            (f"error: {context}\n{trap}\n", f"{context}\n", "missing trap"),
+        )
+        for eval_stderr, c_stderr, label in bad_results:
+            with self.subTest(label):
+                self.assertTrue(self.check(eval_stderr, c_stderr))
+        self.assertTrue(self.check(
+            f"error: {context}\n{trap}\n", f"{context}\n{trap}\n", c_stage="build",
+        ))
+
+    def test_column_length_cases_use_extent_guards_and_library_failures_stay_distinct(self) -> None:
+        corpus = differential.Corpus()
+        differential.column_corpus(corpus)
+        length_failures = [failure for failure in corpus.failures if "named_col_lengths_" in failure.name]
+        self.assertEqual(len(length_failures), 7)
+        self.assertTrue(all(failure.extent is not None for failure in length_failures))
+
+        library = differential.Failure("scalar_domain", "date(...)", "date", "domain")
+        program = differential.Program("scalar_domain", "module Demo.Main\n", failure=library)
+        report = differential.Report()
+        differential.check_program(
+            program,
+            [lanes.LaneResult("eval", 1, "", "error: date: domain: invalid day\n", "eval")],
+            report,
+        )
+        self.assertEqual(report.problems, [])
 
 
 if __name__ == "__main__":
