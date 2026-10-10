@@ -562,6 +562,31 @@ fn replace_function_body_linearity_body_is_linearity_error() {
 }
 
 #[test]
+fn authoring_tools_accept_copy_repaired_tensor_reuse() {
+    let replaced = call_replace(json!({
+        "module": replace_fixtures::TENSOR_DEEP,
+        "function_name": "passthrough",
+        "new_body": replace_fixtures::TENSOR_COPY_REPAIRED_BODY,
+    }));
+    assert_eq!(replaced["result"]["isError"], false);
+    let replaced = &replaced["result"]["structuredContent"];
+    assert_eq!(
+        replaced["ok"], true,
+        "copy-repaired replacement: {replaced}"
+    );
+    assert!(replaced["result"]["module_deep"].as_str().is_some());
+
+    let added = call_add(json!({
+        "module": replace_fixtures::TENSOR_DEEP,
+        "new_decls": replace_fixtures::ADD_TENSOR_COPY_REPAIRED,
+    }));
+    assert_eq!(added["result"]["isError"], false);
+    let added = &added["result"]["structuredContent"];
+    assert_eq!(added["ok"], true, "copy-repaired addition: {added}");
+    assert!(added["result"]["module_deep"].as_str().is_some());
+}
+
+#[test]
 fn initialize_and_tool_discovery_work() {
     let init = handle_message(&json!({
         "jsonrpc":"2.0",
