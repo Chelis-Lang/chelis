@@ -471,6 +471,23 @@ No Lean check compares its output with the hand-model relations.
 It is not a wrapper relation, a final production theorem, or hook-installation (O5) coverage for every entry.
 Whole-entry noninterference (O16), caller correspondence (O17), and whole-core revalidation (O18) remain open.
 
+The later scenario runs in `.work/diag/resume38-main/native-scenarios-1791653446` extend this protocol.
+Each scenario runs in one fresh process of a production Rust 1.98.0 binary.
+W1 to W4 cover the evaluation-library catch, the panic adapter, one resume boundary, and nonfatal and unrepresentable raises.
+W6 checks four renderer cases and keeps the overflow case as a domain limit.
+W7 compares profiled and unprofiled processes, and their result and diagnostic digests are equal.
+
+For all 32 inventory rows, process evidence or an observed installed-state prerequisite now exists.
+Direct public calls cover most rows, and row 14 keeps the archived smoke.
+Rows 22, 24, and 25 are nested catches, and their attribution follows public calls.
+Row 23 is `pub(crate)`, so a crate-local test in a temporary copy of `chelis-ir` calls it.
+The exact marker check uses the same copy, and the copy keeps every production body unchanged.
+README lists the evidence class of each row and the retained receipt.
+
+These runs cover the exercised inputs only, and some rows raised nothing.
+They are not wrapper relations or final production theorems.
+O5 to O18, O16c, caller propositions, and whole-core acceptance remain open.
+
 The proof package selects `scope=fragment` or `scope=whole-core`.
 It selects `chain=default` or `chain=lowering-trace` separately.
 The fragment scope excludes whole-core checker modules and caller obligations.

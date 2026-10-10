@@ -503,10 +503,67 @@ The previous hook records exactly `probe-before`, `probe-after-check`, and `flag
 
 This evidence covers one catch adapter and one fatal rejection.
 It does not cover the other catch adapters, the resume adapters, the panic adapter, nonfatal speculative raises, or other threads.
-Other public entries still need process installation evidence or a justified true lower bound.
+The later scenario runs below give process evidence for the other public entries.
 No Lean check compares this output with the hand-model relations.
 The smoke is not a final production theorem or all-entry O5 coverage.
 O16 whole-entry noninterference, O17, and O18 remain open.
+
+`.work/diag/resume38-main/native-scenarios-1791653446` records the later native scenario runs.
+Production Rust 1.98.0 built each scenario program, and each scenario ran in one fresh process.
+Each build and run used the disk guard, `heavy`, `timeout -k 10`, and `nice -n 5`.
+`report.json`, `runs/`, `commands.log`, `identity.txt`, and `outputs-manifest.tsv` keep the receipt, the logs, and their identities.
+The core source digest `02bcf3c6053241b58fb5144e7302220dae2a46b5604280c46a43e7b935ad2f80` was the same before and after each phase.
+No ROOT source, fixture, proof, acceptance, pin, or Cargo file changed.
+
+W1 repeats the archived protocol on the catch adapter `try_lower_program_to_evaluation_library`, and all 15 checks pass.
+W2 calls the panic adapter `lower_program_with_context` with the `lib_const` library and the complete `floor` gradient fixture.
+Its String panic equals the Display text of the diagnostic from `try_lower_program_with_context`.
+The inner raise stays quiet, and only the String panic reaches the previous hook.
+W3 calls the resume entry `evaluation_profile` on the raw-parameter fixture of `raw_parameter_forms_with_extra_children_fail_loudly`.
+Each call has one hook event at the raise and none at the resume, and the unwound payload equals the raised diagnostic.
+
+W4 calls `try_lower_subexpr_program` on the string-literal fixture of `lower_lit_rejects_a_string_literal_with_a_cited_diagnostic`.
+In normal mode, the returned nonfatal diagnostic equals the one raw payload in every field.
+With the speculation flag set, the call returns the production conversion of the unrepresentable marker.
+The marker type `UnrepresentableDag` is `pub(crate)`, so the exact marker test needs crate-local code.
+For that test, `marker/` holds a temporary copy of `crates/chelis-ir` with every production body unchanged.
+The copy adds only a task-owned `Cargo.toml` and one temporary `#[cfg(test)]` module with two declaration lines.
+
+`marker/run.stdout` shows that the raw payload is the exact marker and that the entry returns the production conversion.
+After each run, the cleanup removed the module and its two lines, and the copy `lib.rs` again equals the ROOT file.
+This copy is not an acceptance model or a final production proof.
+
+W6 compares the native `LowerDiagnostic` Display with the four frozen cases of the source-equation smoke.
+The no-span, zero-span, byte-span, and span-id cases are byte-equal.
+The overflow case stays outside `DisplayArithmeticDomain`.
+In this debug build, the native call panics with `attempt to add with overflow`, and Lean gives `integerOverflow`.
+This is a domain limit, not an equality case.
+
+W7 runs one sequence of public checker and lowering entries in four processes.
+Two processes enable checker profiling and `CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1`, and two processes do not.
+All result and diagnostic digests of the twelve steps are equal in the four processes.
+Profile lines appear only in the profiled processes, from five pinned sites, and `report_internal` gave no output.
+`compare.txt` records the comparison.
+It does not discharge O16b, O16c, or whole-entry noninterference.
+
+For all 32 inventory rows, process evidence or an observed installed-state prerequisite now exists.
+Most rows use direct calls of their public entries in a fresh process.
+Rows 16 and 17 use their public `lowering_trace` wrappers, and row 14 keeps the archived `o5-entry-adapter` run.
+Rows 13, 19, 20, and 28 start after a prerequisite catch, and the runs observe that the hook is installed.
+Row 22 is a nested catch of rows 21 and 32, and row 24 is a nested catch of `try_lower_subexpr_program`.
+Row 25 is a nested catch of rows 11 and 12, and each attribution follows the source path of the public call.
+
+Row 23 is `pub(crate)`, so a crate-local test in the temporary copy calls it directly with the string-literal fixture.
+Its first call installs the hook before the raise, and its marker and payload checks match W4.
+`marker/row23-run.stdout` and `marker/row23-report.json` record that run.
+Rows 9, 10, 12, 13, 20, 26 to 29, and 32 raised nothing in their runs.
+For those rows, the logs show installation behavior, not suppression of a raise.
+
+These runs cover the exercised inputs only, in debug builds with the lowering-trace feature.
+They do not cover other threads.
+No Lean check compares their output with the hand-model relations.
+They are not wrapper relations or final production theorems.
+O5 to O18, O16c, the caller propositions, and whole-core acceptance remain open.
 
 O9 has conditional preflight balance laws for the entry stack, nested scopes, and body results.
 `.work/diag/resume38-main/native44-o5-o9/smoke.log` exercises success, diagnostic, and native-unwind values through the independent scope interface.
