@@ -5,8 +5,6 @@ from pathlib import Path
 import unittest
 from unittest import mock
 
-import yaml
-
 from scripts import gate
 from scripts import ownership_ledger_tests as ledger_targets
 
@@ -42,6 +40,12 @@ MACOS_WIRE_CENSUS_COMMAND = (
     "cargo nextest run -p chelis-compiler-api --test capacity_census_wire "
     f"--profile ci-full --no-tests=fail -E '{MACOS_WIRE_CENSUS_SELECTOR}'"
 )
+
+
+def load_workflow(path):
+    import yaml
+
+    return yaml.safe_load(path.read_text())
 
 
 def ledger_run(command):
@@ -202,8 +206,8 @@ def assert_hosted_coverage(test, workflow, nightly):
 
 class HostedCoverageTests(unittest.TestCase):
     def setUp(self):
-        self.workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
-        self.nightly = yaml.safe_load((ROOT / ".github/workflows/macos-nightly.yml").read_text())
+        self.workflow = load_workflow(ROOT / ".github/workflows/ci.yml")
+        self.nightly = load_workflow(ROOT / ".github/workflows/macos-nightly.yml")
 
     def test_current_workflow_preserves_hosted_coverage(self):
         assert_hosted_coverage(self, self.workflow, self.nightly)
@@ -263,7 +267,7 @@ class HostedCoverageTests(unittest.TestCase):
                     assert_hosted_coverage(self, self.workflow, nightly)
 
     def test_darwin_asset_producer_requires_nightly_or_manual_event(self):
-        workflow = yaml.safe_load((ROOT / ".github/workflows/build-cvc5.yml").read_text())
+        workflow = load_workflow(ROOT / ".github/workflows/build-cvc5.yml")
         self.assertEqual(workflow[True]["schedule"], [{"cron": "17 1 * * *"}])
         self.assertEqual(
             workflow["jobs"]["build-darwin-arm64"]["if"],
@@ -272,7 +276,7 @@ class HostedCoverageTests(unittest.TestCase):
 
     def test_ordinary_workflows_cannot_allocate_macos_runners(self):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
-            workflow = yaml.safe_load(path.read_text())
+            workflow = load_workflow(path)
             events = workflow.get(True, {})
             if not {"push", "pull_request", "pull_request_target"}.intersection(events):
                 continue
