@@ -23,6 +23,9 @@ const PRELUDE: &str = "module Demo.Main\n\
 type Lin[i] =\n  | Lin { w: tensor[i, f32] }\n\
 def square_sum(t: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(t, t), 0i32))\n\
 def apply_loss(f: (tensor[2, f32]) -> f32, p: tensor[2, f32]) -> f32 = f(p)\n\
+def apply_s(f: (f32) -> f32, x: f32) -> f32 = f(x)\n\
+def cube_sum(t: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(mul(t, t), t), 0i32))\n\
+def apply_ab(f: (tensor[2, f32]) -> f32, a: tensor[2, f32], b: tensor[3, f32]) -> f32 = add(f(a), tensor_to_scalar(sum(mul(b, b), 0i32)))\n\
 def lin_loss(p: Lin[2], x: tensor[2, f32]) -> f32 = match p with {\n  | Lin { w } => tensor_to_scalar(sum(mul(w, x), 0i32))\n}\n\
 def through[M](loss: M -> tensor[2, f32] -> f32, p: M, x: tensor[2, f32]) -> f32 = loss(p, x)\n";
 
@@ -63,6 +66,50 @@ const POSITIVE: &[Case] = &[
         name: "vmap_closing_over_the_function",
         body: "v = vmap(fn (x: tensor[2, f32]) -> apply_loss(square_sum, x))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n",
         eval: "v = tensor(shape=[2], data=[5.0, 25.0])\n",
+    },
+    // A closure argument capturing a value that is not top-level: a
+    // parameter of the enclosing def. d/dx (x * x * c) = 2xc = 20 at c = 5,
+    // x = 2; the outer gradients are d/dx 2xc = 2c = 10 and d/dc 2xc = 2x = 4.
+    Case {
+        name: "closure_capturing_a_parameter",
+        body: "def d_apply(c: f32, x: f32) -> f32 = grad(apply_s, wrt=x)(fn (y: f32) -> mul(mul(y, y), c), x)\nv = d_apply(5.0f32, 2.0f32)\ndx = grad(d_apply, wrt=x)(5.0f32, 2.0f32)\ndc = grad(d_apply, wrt=c)(5.0f32, 2.0f32)\n",
+        eval: "v = 20.0\ndx = 10.0\ndc = 4.0\n",
+    },
+    // The tensor form: d/dp sum(p * p * w) = 2pw = [6, 20] at w = [3, 5],
+    // p = [1, 2]; through a further grad, d/dw sum(2pw) = 2p = [2, 4].
+    Case {
+        name: "closure_capturing_a_tensor_parameter",
+        body: "def outer(w: tensor[2, f32], p: tensor[2, f32]) -> tensor[2, f32] = grad(apply_loss, wrt=p)(fn (t: tensor[2, f32]) -> tensor_to_scalar(sum(mul(mul(t, t), w), 0i32)), p)\ndef total(w: tensor[2, f32], p: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(outer(w, p), 0i32))\ng = outer(to_tensor([3.0f32, 5.0f32]), to_tensor([1.0f32, 2.0f32]))\ngw = grad(total, wrt=w)(to_tensor([3.0f32, 5.0f32]), to_tensor([1.0f32, 2.0f32]))\n",
+        eval: "g = tensor(shape=[2], data=[6.0, 20.0])\ngw = tensor(shape=[2], data=[2.0, 4.0])\n",
+    },
+    // The closure captures the very parameter that is the `wrt` target; the
+    // capture is a constant of the call, so d/dp sum(p * p_captured) is the
+    // captured value, [1, 2].
+    Case {
+        name: "closure_capturing_the_wrt_parameter",
+        body: "def self_cap(p: tensor[2, f32]) -> tensor[2, f32] = grad(apply_loss, wrt=p)(fn (t: tensor[2, f32]) -> tensor_to_scalar(sum(mul(t, p), 0i32)), p)\ng = self_cap(to_tensor([1.0f32, 2.0f32]))\n",
+        eval: "g = tensor(shape=[2], data=[1.0, 2.0])\n",
+    },
+    // A function-first `grad` inside a def body, for each `wrt` form, and a
+    // multi-name `wrt` written after the function: d/da sum(a^3) = 3a^2 =
+    // [3, 12] and d/db sum(b^2) = 2b = [6, 10, 14].
+    Case {
+        name: "function_first_grad_inside_a_def",
+        body: "def inside_b(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[3, f32] = grad(apply_ab, wrt=b)(cube_sum, a, b)\ndef inside_a(a: tensor[2, f32], b: tensor[3, f32]) -> tensor[2, f32] = grad(apply_ab, wrt=a)(cube_sum, a, b)\ndef inside_d(a: tensor[2, f32], b: tensor[3, f32]) -> (tensor[2, f32], tensor[3, f32]) = grad(apply_ab)(cube_sum, a, b)\ngb = inside_b(to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 5.0f32, 7.0f32]))\nga = inside_a(to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 5.0f32, 7.0f32]))\ngd = inside_d(to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 5.0f32, 7.0f32]))\n",
+        eval: "gb = tensor(shape=[3], data=[6.0, 10.0, 14.0])\nga = tensor(shape=[2], data=[3.0, 12.0])\ngd.0 = tensor(shape=[2], data=[3.0, 12.0])\ngd.1 = tensor(shape=[3], data=[6.0, 10.0, 14.0])\n",
+    },
+    Case {
+        name: "multi_name_wrt_after_the_function",
+        body: "gab = grad(apply_ab, wrt=(a, b))(cube_sum, to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 5.0f32, 7.0f32]))\ngba = grad(apply_ab, wrt=(b, a))(cube_sum, to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 5.0f32, 7.0f32]))\n",
+        eval: "gab.0 = tensor(shape=[2], data=[3.0, 12.0])\ngab.1 = tensor(shape=[3], data=[6.0, 10.0, 14.0])\ngba.0 = tensor(shape=[3], data=[6.0, 10.0, 14.0])\ngba.1 = tensor(shape=[2], data=[3.0, 12.0])\n",
+    },
+    // A type-generic formal instantiated at a tensor and at an f64 scalar:
+    // d/dp sum(p^2) * sum(x) = 2p * 7 = [14, 28, 42], and d/dp p^2 x = 2px =
+    // 30 at p = 3, x = 5.
+    Case {
+        name: "generic_formal_at_a_tensor_and_a_scalar",
+        body: "def through_t[M](loss: M -> tensor[2, f32] -> f32, p: M, x: tensor[2, f32]) -> f32 = loss(p, x)\ndef through_s[M](loss: M -> f32 -> f32, p: M, x: f32) -> f32 = loss(p, x)\ndef tloss(p: tensor[3, f32], x: tensor[2, f32]) -> f32 = mul(tensor_to_scalar(sum(mul(p, p), 0i32)), tensor_to_scalar(sum(x, 0i32)))\ndef dloss(p: f64, x: f32) -> f32 = mul(cast(mul(p, p), f32), x)\ndef step(q: tensor[3, f32], x: tensor[2, f32]) -> tensor[3, f32] = grad(through_t, wrt=p)(tloss, q, x)\ngq = grad(through_t, wrt=p)(tloss, to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([3.0f32, 4.0f32]))\ngs = step(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([3.0f32, 4.0f32]))\ngd = grad(through_s, wrt=p)(dloss, 3.0f64, 5.0f32)\n",
+        eval: "gq = tensor(shape=[3], data=[14.0, 28.0, 42.0])\ngs = tensor(shape=[3], data=[14.0, 28.0, 42.0])\ngd = 30.0\n",
     },
     // The issue's generic form: a type-generic def over a data-value target.
     Case {

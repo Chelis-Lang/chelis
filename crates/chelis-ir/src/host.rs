@@ -12182,14 +12182,10 @@ fn try_lower_general_list_grad_app(
     })))
 }
 
-/// Read the `wrt` meta off a `grad` list and resolve it to a list of
-/// parameter names. `None` is returned when `wrt` references something that
-/// is not a parameter name (e.g. a tuple element / field access), which is
-/// the container-AD case the spec rejects. Absent `wrt` defaults to all
-/// parameters.
-/// The argument whose type a one-target `grad` application's gradient has:
-/// the parameter its `wrt` names, or, without `wrt`, the first argument that
-/// is not a function. A function-valued argument is a constant of the
+/// The argument whose type a `grad` application's helper result takes: the
+/// first target the application differentiates that is not a function. The
+/// targets are the parameters its `wrt` names, in written order, or, without
+/// `wrt`, every argument. A function-valued argument is a constant of the
 /// differentiated call (spec/06 sections 2.1 and 2.2), never its target.
 fn grad_target_argument<'a>(
     grad_list: &Node,
@@ -12197,17 +12193,10 @@ fn grad_target_argument<'a>(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> Option<&'a Expr> {
+    let not_a_function =
+        |arg: &&Expr| !matches!(expr_host_type(arg, program, scope), HostTypeTerm::Fn(..));
     let Some(targets) = grad_list.meta().wrt() else {
-        return args
-            .iter()
-            .find(|arg| !matches!(expr_host_type(arg, program, scope), HostTypeTerm::Fn(..)));
-    };
-    let names = targets
-        .variables()
-        .map(|var| var.name().value().clone())
-        .collect::<Vec<_>>();
-    let [name] = names.as_slice() else {
-        return args.first();
+        return args.iter().find(not_a_function);
     };
     let defs = cached_program_defs(program);
     let fn_name = grad_list
@@ -12220,12 +12209,23 @@ fn grad_target_argument<'a>(
         return args.first();
     };
     let params = fn_kids.first().and_then(as_node)?.children_slice();
-    let position = params
-        .iter()
-        .position(|param| param_name(param).as_ref() == Some(name))?;
-    args.get(position)
+    targets
+        .variables()
+        .filter_map(|var| {
+            let name = var.name().value();
+            params
+                .iter()
+                .position(|param| param_name(param).as_ref() == Some(name))
+        })
+        .filter_map(|position| args.get(position))
+        .find(not_a_function)
 }
 
+/// Read the `wrt` meta off a `grad` list and resolve it to a list of
+/// parameter names. `None` is returned when `wrt` references something that
+/// is not a parameter name (e.g. a tuple element / field access), which is
+/// the container-AD case the spec rejects. Absent `wrt` defaults to all
+/// parameters.
 fn grad_wrt_param_names(grad_list: &Node, param_names: &[String]) -> Option<Vec<String>> {
     let Some(targets) = grad_list.meta().wrt() else {
         return Some(param_names.to_vec());

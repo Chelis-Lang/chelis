@@ -7359,6 +7359,18 @@ enum HostConstant {
     String(String),
 }
 
+/// Whether a formal's declared type is a bare type variable, through a
+/// borrow: `M` or `&M`, not a tensor whose slots hold variables.
+fn is_bare_type_variable(mut expr: &Expr) -> bool {
+    loop {
+        match stamped_parts(expr) {
+            Some((DeepTag::TVar, _, _)) => return true,
+            Some((DeepTag::TRef, _, [inner])) => expr = inner,
+            _ => return false,
+        }
+    }
+}
+
 /// One argument of a `grad` application: the callable a function-valued
 /// argument resolves to, or any other argument's lowered value.
 enum GradActual {
@@ -9023,15 +9035,22 @@ impl<'program> LowerCtx<'program> {
     }
 
     /// Seed a transform sub-context with `function`'s declaring scope, minus
-    /// the names its parameters shadow (chelis#2588). The sub-context has its
-    /// own graph, so every captured value enters it as a fresh `Load`; the
-    /// returned map sends each such `Load` back to the parent node it stands
-    /// for when the transformed graph is spliced in.
+    /// the names its parameters shadow (chelis#2588), and with
+    /// `argument_callables`, the callables the caller passes for
+    /// function-valued parameters. The sub-context has its own graph, so
+    /// every captured value enters it as a fresh `Load`; the returned map
+    /// sends each such `Load` back to the parent node it stands for when the
+    /// transformed graph is spliced in. This is the one place a caller-scope
+    /// callable enters a sub-context, and every one is rebased here through
+    /// the same [`ScopeRebase`] as the declaring scope, because a function
+    /// literal's captured scope reads the caller's graph, whose node ids mean
+    /// nothing in the sub-context.
     fn seed_subctx_with_declaring_scope(
         &self,
         subctx: &mut LowerCtx,
         function: &ResolvedFunction,
         shadowed: &[String],
+        argument_callables: &[(String, CallableExpr)],
     ) -> UnordMap<String, NodeId> {
         subctx.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
         subctx.activation_record = self.activation_record;
@@ -9072,6 +9091,10 @@ impl<'program> LowerCtx<'program> {
             .filter(|(name, _)| !shadowed.contains(name))
         {
             subctx.local_callables.insert(name, callable);
+        }
+        for (name, callable) in argument_callables {
+            let callable = self.rebase_callable(subctx, callable, &mut rebase);
+            subctx.local_callables.insert(name.clone(), callable);
         }
         // Section 12 (#2413): every top-level value declaration stays visible
         // to the body, bound to the Load that stands for its value. A
@@ -12992,8 +13015,24 @@ impl<'program> LowerCtx<'program> {
         // `if` arm passes its activation in through a Load the splice
         // resolves; a position every execution enters needs none.
         let caller_draw_activation = self.draw_activation();
-        let captured_bindings =
-            self.seed_subctx_with_declaring_scope(&mut subctx, fn_expr, &param_names);
+        // A function-valued argument enters the sub-context only through the
+        // seeding, which rebases its captured scope.
+        let argument_callables = param_names
+            .iter()
+            .zip(&plans)
+            .filter_map(|(name, plan)| match plan {
+                GradArgPlan::Callable(callable) => Some((name.clone(), callable.clone())),
+                GradArgPlan::HostConstant(_)
+                | GradArgPlan::Tensor(_)
+                | GradArgPlan::Structured { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let captured_bindings = self.seed_subctx_with_declaring_scope(
+            &mut subctx,
+            fn_expr,
+            &param_names,
+            &argument_callables,
+        );
         // Generated structured-leaf Loads share one name-keyed splice map
         // with ordinary parameters and captured values. Keep a fresh-name
         // set over that complete namespace: deriving a load name from an
@@ -13056,7 +13095,8 @@ impl<'program> LowerCtx<'program> {
                     }
                     subctx.bindings.insert(name.clone(), value.clone());
                 }
-                Some(GradArgPlan::Callable(callable)) => {
+                // Installed, rebased, by the seeding above.
+                Some(GradArgPlan::Callable(_)) => {
                     if wrt_indices.is_some_and(|indices| indices.contains(&index)) {
                         raise_lowering_error(
                             "a function is not a differentiable target (spec/06 section 2.7)",
@@ -13064,9 +13104,6 @@ impl<'program> LowerCtx<'program> {
                             self.current_span_id.clone(),
                         );
                     }
-                    subctx
-                        .local_callables
-                        .insert(name.clone(), callable.clone());
                 }
                 Some(GradArgPlan::Structured {
                     template,
@@ -13126,6 +13163,18 @@ impl<'program> LowerCtx<'program> {
                     );
                 }
                 Some(GradArgPlan::Tensor(actual)) => {
+                    // A formal whose declared type is a bare type parameter
+                    // (`p: M`) is instantiated by this call's actual; its
+                    // annotation carries no shape or precision of its own.
+                    let param_ty = if grad_param_type_exprs
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .is_some_and(is_bare_type_variable)
+                    {
+                        node_type(self, *actual)
+                    } else {
+                        param_ty
+                    };
                     // [05-OP-35] List selection counts are discrete scalar
                     // parameters, but the staged List spine still needs their
                     // exact call-site value while the grad body is lowered.
@@ -14654,7 +14703,7 @@ impl<'program> LowerCtx<'program> {
         // A symbolic batch lift can then read a formal's axis as its explicit
         // runtime extent witness.
         let captured_bindings =
-            self.seed_subctx_with_declaring_scope(&mut subctx, fn_expr, &param_names);
+            self.seed_subctx_with_declaring_scope(&mut subctx, fn_expr, &param_names, &[]);
         // The vmapped body is spliced back at this position, so it runs under
         // the position's activation: a call in a runtime `if` arm reads the
         // arm's activation through a captured Load the splice resolves, which
@@ -14999,7 +15048,7 @@ impl<'program> LowerCtx<'program> {
         // As in ordinary vmap, mapped formal Loads precede invariant capture
         // Loads so a symbolic capture lift can name a real batch witness.
         let captured_bindings =
-            self.seed_subctx_with_declaring_scope(&mut subctx, fn_expr, &param_names);
+            self.seed_subctx_with_declaring_scope(&mut subctx, fn_expr, &param_names, &[]);
         // As for `vmap` and `grad`, the differentiated, vmapped body is
         // spliced back at this position and runs under its activation.
         let caller_activation_arg = Self::pass_call_site_activation(
