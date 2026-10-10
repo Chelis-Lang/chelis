@@ -181,80 +181,68 @@ impl fmt::Display for LowerDiagnostic {
 impl std::error::Error for LowerDiagnostic {}
 
 /// Outcome of matching one `match` arm pattern against a statically-known
-/// constructor value during static arm selection (chelis#520 D1).
+/// value during static arm selection.
 enum StaticPatternMatch {
     /// The pattern matches; apply these bindings and take the arm.
     Match(Vec<(String, LoweredValue)>),
-    /// The pattern provably does not match this constructor; try the next arm.
+    /// The pattern provably does not match this value; try the next arm.
     NoMatch,
-    /// The pattern is outside the supported static slice; the whole match
-    /// must be rejected (taking a later arm could be unsound).
-    Unsupported(String),
+    /// The pattern reads a value known only at run time: a literal or
+    /// constructor test of a run-time leaf, which leaves the taken arm
+    /// unknown at compile time, or destructuring of a run-time tuple, which
+    /// this lowering cannot project. Carries the refusal's subject.
+    RuntimeTest(String),
+    /// A positional pattern against a record value whose declared field order
+    /// this lowering cannot establish ([04-PAT-3]).
+    UnknownFieldOrder(String),
+    /// A pattern form checked Deep does not produce at this value: a
+    /// malformed node, an arity or field the checker rejects, or a pattern
+    /// kind the value's type does not admit.
+    Malformed(String),
 }
 
-/// Match a Deep pattern against a static ADT value `(ctor, layout,
-/// fields)`. The supported slice is deliberately conservative: constructor
-/// name selection with `pat-var`/`pat-wild` sub-patterns (positional or
-/// record form), whole-value `pat-var`/`pat-wild`/`pat-as`. Anything else
-/// is `Unsupported`, which the caller turns into a loud rejection; a
-/// pattern this function cannot decide must never fall through to a later
-/// arm.
-fn match_static_pattern(
-    pattern: &Expr,
-    host: Option<&HostAggregateType>,
-    ctor: &str,
-    layout: &AdtLayout,
-    fields: &[LoweredValue],
-) -> StaticPatternMatch {
+/// Match a Deep pattern against a statically-known value, recursing through
+/// constructor, record, tuple, and as-patterns at every depth
+/// (spec/06-transformations.md §2.10.1: nested destructuring is ordinary
+/// destructuring of the matched value). Constructor tags are compile-time
+/// facts of `LoweredValue::Adt`, so a nested constructor test is decided
+/// here; only a test that reads a run-time value is not. Anything this
+/// function cannot decide is an outcome the caller rejects loudly; a
+/// pattern it cannot decide never falls through to a later arm.
+fn match_static_pattern(pattern: &Expr, value: &LoweredValue) -> StaticPatternMatch {
     let (pat_tag, pat_kids) = match pattern.carrier() {
         ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
         ExprCarrier::StructuralList(_) => {
-            return StaticPatternMatch::Unsupported("a structural-list pattern".to_string());
+            return StaticPatternMatch::Malformed("a structural-list pattern".to_string());
         }
         ExprCarrier::UndecodableHead(head, _, _) => {
-            return StaticPatternMatch::Unsupported(format!("an undecodable `{head}` pattern"));
+            return StaticPatternMatch::Malformed(format!("an undecodable `{head}` pattern"));
         }
         ExprCarrier::Atom(_) => {
-            return StaticPatternMatch::Unsupported("an atomic pattern".to_string());
+            return StaticPatternMatch::Malformed("an atomic pattern".to_string());
         }
         ExprCarrier::MetadataMap(_) => {
-            return StaticPatternMatch::Unsupported("a metadata-map pattern".to_string());
+            return StaticPatternMatch::Malformed("a metadata-map pattern".to_string());
         }
         ExprCarrier::MetadataExpression(_) => {
-            return StaticPatternMatch::Unsupported("a metadata-expression pattern".to_string());
+            return StaticPatternMatch::Malformed("a metadata-expression pattern".to_string());
         }
     };
     match pat_tag {
         DeepTag::PatWild => StaticPatternMatch::Match(Vec::new()),
         DeepTag::PatVar => match pat_kids.first().and_then(symbol_name) {
-            Some(name) => StaticPatternMatch::Match(vec![(
-                name.to_string(),
-                LoweredValue::Adt {
-                    host: host.cloned(),
-                    ctor: ctor.to_string(),
-                    layout: layout.clone(),
-                    fields: fields.to_vec(),
-                },
-            )]),
-            None => StaticPatternMatch::Unsupported("a nameless `pat-var`".to_string()),
+            Some(name) => StaticPatternMatch::Match(vec![(name.to_string(), value.clone())]),
+            None => StaticPatternMatch::Malformed("a nameless `pat-var`".to_string()),
         },
         DeepTag::PatAs => {
             let (Some(name), Some(inner)) =
                 (pat_kids.first().and_then(symbol_name), pat_kids.get(1))
             else {
-                return StaticPatternMatch::Unsupported("a malformed `pat-as`".to_string());
+                return StaticPatternMatch::Malformed("a malformed `pat-as`".to_string());
             };
-            match match_static_pattern(inner, host, ctor, layout, fields) {
+            match match_static_pattern(inner, value) {
                 StaticPatternMatch::Match(mut binds) => {
-                    binds.push((
-                        name.to_string(),
-                        LoweredValue::Adt {
-                            host: host.cloned(),
-                            ctor: ctor.to_string(),
-                            layout: layout.clone(),
-                            fields: fields.to_vec(),
-                        },
-                    ));
+                    binds.push((name.to_string(), value.clone()));
                     StaticPatternMatch::Match(binds)
                 }
                 other => other,
@@ -262,14 +250,18 @@ fn match_static_pattern(
         }
         DeepTag::PatCtor => {
             let Some(pat_ctor) = pat_kids.first().and_then(symbol_name) else {
-                return StaticPatternMatch::Unsupported("a nameless `pat-ctor`".to_string());
+                return StaticPatternMatch::Malformed("a nameless `pat-ctor`".to_string());
+            };
+            let (ctor, layout, fields) = match static_adt_parts(value, pat_ctor) {
+                Ok(parts) => parts,
+                Err(outcome) => return outcome,
             };
             if pat_ctor != ctor {
                 return StaticPatternMatch::NoMatch;
             }
             let sub_pats = &pat_kids[1..];
             if sub_pats.len() != fields.len() {
-                return StaticPatternMatch::Unsupported(format!(
+                return StaticPatternMatch::Malformed(format!(
                     "a `pat-ctor` with {} sub-patterns against a `{ctor}` value with {} \
                      fields",
                     sub_pats.len(),
@@ -280,39 +272,35 @@ fn match_static_pattern(
             // field. Slots stored in a record literal's written order cannot
             // answer that, so reject rather than bind the wrong field.
             if !layout.is_declared_order() {
-                return StaticPatternMatch::Unsupported(format!(
+                return StaticPatternMatch::UnknownFieldOrder(format!(
                     "a positional `pat-ctor` against a `{ctor}` record value whose \
                      declared field order is unknown to this lowering"
                 ));
             }
-            let mut binds = Vec::new();
-            for (sub_pat, field) in sub_pats.iter().zip(fields.iter()) {
-                match bind_leaf_pattern(sub_pat, field) {
-                    Ok(Some(bind)) => binds.push(bind),
-                    Ok(None) => {}
-                    Err(reason) => return StaticPatternMatch::Unsupported(reason),
-                }
-            }
-            StaticPatternMatch::Match(binds)
+            match_static_conjunction(sub_pats.iter().zip(fields.iter()))
         }
         DeepTag::PatRecord => {
             let Some(pat_ctor) = pat_kids.first().and_then(symbol_name) else {
-                return StaticPatternMatch::Unsupported("a nameless `pat-record`".to_string());
+                return StaticPatternMatch::Malformed("a nameless `pat-record`".to_string());
+            };
+            let (ctor, layout, fields) = match static_adt_parts(value, pat_ctor) {
+                Ok(parts) => parts,
+                Err(outcome) => return outcome,
             };
             if pat_ctor != ctor {
                 return StaticPatternMatch::NoMatch;
             }
             let Some(field_names) = layout.field_names() else {
-                return StaticPatternMatch::Unsupported(format!(
+                return StaticPatternMatch::UnknownFieldOrder(format!(
                     "a `pat-record` against a positionally-constructed `{ctor}` value"
                 ));
             };
-            let mut binds = Vec::new();
+            let mut pairs = Vec::with_capacity(pat_kids.len() - 1);
             for kv in &pat_kids[1..] {
                 let kv_kids = match kv.carrier() {
                     ExprCarrier::DecodedNode(DeepTag::Kv, _, children) => children,
                     ExprCarrier::DecodedNode(_, _, _) => {
-                        return StaticPatternMatch::Unsupported(
+                        return StaticPatternMatch::Malformed(
                             "a non-`kv` `pat-record` field entry".to_string(),
                         );
                     }
@@ -321,7 +309,7 @@ fn match_static_pattern(
                     | ExprCarrier::Atom(_)
                     | ExprCarrier::MetadataMap(_)
                     | ExprCarrier::MetadataExpression(_) => {
-                        return StaticPatternMatch::Unsupported(
+                        return StaticPatternMatch::Malformed(
                             "an unreadable `pat-record` field entry".to_string(),
                         );
                     }
@@ -329,67 +317,121 @@ fn match_static_pattern(
                 let (Some(field), Some(sub_pat)) =
                     (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
                 else {
-                    return StaticPatternMatch::Unsupported(
+                    return StaticPatternMatch::Malformed(
                         "a malformed `pat-record` field entry".to_string(),
                     );
                 };
-                let Some(value) = field_names
+                let Some(field_value) = field_names
                     .iter()
                     .position(|name| name == field)
                     .and_then(|index| fields.get(index))
                 else {
-                    return StaticPatternMatch::Unsupported(format!(
+                    return StaticPatternMatch::Malformed(format!(
                         "a `pat-record` field `{field}` absent from the constructed \
                          `{ctor}` value"
                     ));
                 };
-                match bind_leaf_pattern(sub_pat, value) {
-                    Ok(Some(bind)) => binds.push(bind),
-                    Ok(None) => {}
-                    Err(reason) => return StaticPatternMatch::Unsupported(reason),
+                pairs.push((sub_pat, field_value));
+            }
+            match_static_conjunction(pairs)
+        }
+        DeepTag::PatTuple => match value {
+            LoweredValue::Tuple(items) if items.len() == pat_kids.len() => {
+                match_static_conjunction(pat_kids.iter().zip(items.iter()))
+            }
+            LoweredValue::Tuple(items) => StaticPatternMatch::Malformed(format!(
+                "a `pat-tuple` with {} sub-patterns against a {}-tuple",
+                pat_kids.len(),
+                items.len()
+            )),
+            LoweredValue::Node(_) | LoweredValue::Host { .. } => StaticPatternMatch::RuntimeTest(
+                "`match` destructuring of a tuple held only as a run-time value".to_string(),
+            ),
+            _ => StaticPatternMatch::Malformed(
+                "a `pat-tuple` against a value that is not a tuple".to_string(),
+            ),
+        },
+        // [04-PAT-1] admits a literal only against a primitive. A string
+        // held as exact host data is compared here; a numeric leaf is a
+        // run-time value, so testing it selects the arm at run time.
+        DeepTag::PatLit => match (value, pat_kids.first().map(Expr::carrier)) {
+            (
+                LoweredValue::HostConstant(HostConstant::String(held)),
+                Some(ExprCarrier::Atom(Atom::Str(literal))),
+            ) => {
+                if held == literal {
+                    StaticPatternMatch::Match(Vec::new())
+                } else {
+                    StaticPatternMatch::NoMatch
                 }
             }
-            StaticPatternMatch::Match(binds)
-        }
-        // `pat-lit` against a constructor value cannot match, but a match
-        // mixing literal and constructor patterns is outside the checked
-        // slice; reject rather than guess.
-        other => StaticPatternMatch::Unsupported(format!("`{}` patterns", other.as_str())),
+            (LoweredValue::Node(_) | LoweredValue::Host { .. }, _) => {
+                StaticPatternMatch::RuntimeTest(
+                    "`match` arm selection by a literal pattern tested against a run-time value"
+                        .to_string(),
+                )
+            }
+            _ => StaticPatternMatch::Malformed(
+                "a `pat-lit` whose literal the matched value's type does not admit".to_string(),
+            ),
+        },
+        other => StaticPatternMatch::Malformed(format!("a `{}` pattern", other.as_str())),
     }
 }
 
-/// A leaf sub-pattern inside a constructor pattern: `pat-var` binds the
-/// field value, `pat-wild` discards it. Nested destructuring is outside
-/// the static slice.
-fn bind_leaf_pattern(
-    pattern: &Expr,
-    value: &LoweredValue,
-) -> Result<Option<(String, LoweredValue)>, String> {
-    let (pat_tag, pat_kids) = match pattern.carrier() {
-        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
-        ExprCarrier::StructuralList(_) => {
-            return Err("a structural-list sub-pattern".to_string());
+/// The constructor, layout, and fields of a statically-known ADT value that
+/// a constructor or record pattern naming `pat_ctor` tests, or the outcome
+/// when the value is not one: a run-time carrier needs a run-time test, and
+/// any other value is a pattern the checker does not admit there.
+fn static_adt_parts<'v>(
+    value: &'v LoweredValue,
+    pat_ctor: &str,
+) -> Result<(&'v str, &'v AdtLayout, &'v [LoweredValue]), StaticPatternMatch> {
+    match value {
+        LoweredValue::Adt {
+            ctor,
+            layout,
+            fields,
+            ..
+        } => Ok((ctor, layout, fields)),
+        LoweredValue::Node(_) | LoweredValue::Host { .. } => {
+            Err(StaticPatternMatch::RuntimeTest(format!(
+                "`match` arm selection by a `{pat_ctor}` constructor pattern tested \
+                 against a value whose constructor is known only at run time"
+            )))
         }
-        ExprCarrier::UndecodableHead(head, _, _) => {
-            return Err(format!("an undecodable `{head}` sub-pattern"));
+        _ => Err(StaticPatternMatch::Malformed(format!(
+            "a `{pat_ctor}` constructor pattern against a value that is not an ADT"
+        ))),
+    }
+}
+
+/// Match each sub-pattern against its part of the value; the pattern
+/// matches when every part does. A part that provably fails decides the
+/// conjunction whatever a run-time test of another part would say, so
+/// `NoMatch` outranks `RuntimeTest`; a malformed or order-unknown part
+/// outranks both, because it means this lowering cannot read the pattern.
+fn match_static_conjunction<'a>(
+    parts: impl IntoIterator<Item = (&'a Expr, &'a LoweredValue)>,
+) -> StaticPatternMatch {
+    let mut binds = Vec::new();
+    let mut no_match = false;
+    let mut runtime_test = None;
+    for (sub_pat, part) in parts {
+        match match_static_pattern(sub_pat, part) {
+            StaticPatternMatch::Match(part_binds) => binds.extend(part_binds),
+            StaticPatternMatch::NoMatch => no_match = true,
+            StaticPatternMatch::RuntimeTest(reason) => {
+                runtime_test.get_or_insert(reason);
+            }
+            outcome @ (StaticPatternMatch::UnknownFieldOrder(_)
+            | StaticPatternMatch::Malformed(_)) => return outcome,
         }
-        ExprCarrier::Atom(_) => return Err("an atomic sub-pattern".to_string()),
-        ExprCarrier::MetadataMap(_) => return Err("a metadata-map sub-pattern".to_string()),
-        ExprCarrier::MetadataExpression(_) => {
-            return Err("a metadata-expression sub-pattern".to_string());
-        }
-    };
-    match pat_tag {
-        DeepTag::PatWild => Ok(None),
-        DeepTag::PatVar => match pat_kids.first().and_then(symbol_name) {
-            Some(name) => Ok(Some((name.to_string(), value.clone()))),
-            None => Err("a nameless `pat-var` sub-pattern".to_string()),
-        },
-        other => Err(format!(
-            "nested `{}` sub-patterns (only `pat-var`/`pat-wild` field bindings \
-             are in the static slice)",
-            other.as_str()
-        )),
+    }
+    match (no_match, runtime_test) {
+        (true, _) => StaticPatternMatch::NoMatch,
+        (false, Some(reason)) => StaticPatternMatch::RuntimeTest(reason),
+        (false, None) => StaticPatternMatch::Match(binds),
     }
 }
 
@@ -23413,36 +23455,34 @@ impl<'program> LowerCtx<'program> {
 
     /// `(match {} scrutinee (arm {} pattern guard body) ...)`.
     ///
-    /// chelis#520 D1 slice: when the scrutinee lowers to a statically-known
+    /// Static arm selection: when the scrutinee lowers to a statically-known
     /// constructor value (`LoweredValue::Adt`), the taken arm is resolved at
     /// lowering time and only that arm's body is lowered. This is the exact
-    /// gradient semantics for AD (spec/design/differentiable_language.md
-    /// Phase 1: "the pattern match itself is non-differentiable; gradient
-    /// flow goes through the matched values"): the constructor tag is
-    /// discrete, so perturbing tensor inputs can never change the taken arm.
+    /// gradient semantics for AD (spec/06-transformations.md §2.10.1: the
+    /// executed arm is differentiated and pattern tests are discrete): every
+    /// constructor tag at every pattern depth is a compile-time fact, so
+    /// perturbing tensor inputs can never change the taken arm.
     ///
     /// A runtime scrutinee (anything that lowers to a tensor node), an arm
-    /// guard on the selected pattern, and pattern forms outside the static
-    /// slice all stay rejected, loudly, naming the construct.
+    /// guard on the selected pattern, and a pattern whose test reads a
+    /// run-time value all need run-time arm selection and stay rejected,
+    /// loudly, naming the construct and its owning issue.
     fn lower_match(&mut self, kids: &[Expr], span: Span) -> LoweredValue {
         if kids.len() < 2 {
             return self.lower_unrepresentable("match", kids, (Some(span), None));
         }
         let scrutinee = self.lower_expr(&kids[0]);
-        let LoweredValue::Adt {
-            host,
-            ctor,
-            layout,
-            fields,
-        } = scrutinee
-        else {
+        let LoweredValue::Adt { ctor, .. } = &scrutinee else {
             self.retain_host_match_control(span);
-            self.reject_static_adt(
+            self.reject_static_match(
                 span,
-                "`match` on a runtime scrutinee is not supported by IR evaluation yet; \
-                 only a match whose scrutinee is a compile-time-known constructor value \
-                 is resolved by static arm selection (chelis#520 D1)"
-                    .to_string(),
+                "`match` on a runtime scrutinee".to_string(),
+                chelis_types::unimplemented_rejection!(
+                    618,
+                    "`match` on a runtime scrutinee is not supported by IR lowering: \
+                     only a match whose scrutinee is a compile-time-known constructor \
+                     value is resolved by static arm selection"
+                ),
             );
         };
         for (selected_index, arm) in kids[1..].iter().enumerate() {
@@ -23454,26 +23494,53 @@ impl<'program> LowerCtx<'program> {
             else {
                 continue;
             };
-            match match_static_pattern(pattern, host.as_ref(), &ctor, &layout, &fields) {
+            match match_static_pattern(pattern, &scrutinee) {
                 StaticPatternMatch::NoMatch => continue,
-                StaticPatternMatch::Unsupported(reason) => {
+                StaticPatternMatch::RuntimeTest(reason) => {
+                    self.retain_host_match_control(span);
+                    self.reject_static_match(
+                        span,
+                        reason,
+                        chelis_types::unimplemented_rejection!(
+                            618,
+                            "static arm selection lowers a `match` only when its patterns \
+                             read compile-time-known structure; selecting an arm by, or \
+                             destructuring, a run-time value is not implemented"
+                        ),
+                    );
+                }
+                StaticPatternMatch::UnknownFieldOrder(reason) => {
+                    self.reject_static_match(
+                        span,
+                        reason,
+                        chelis_types::deliberate_rejection!(
+                            "[04-PAT-3]",
+                            "a lane that cannot establish a scrutinee's declared field \
+                             order rejects the pattern rather than match by another order"
+                        ),
+                    );
+                }
+                StaticPatternMatch::Malformed(reason) => {
                     self.reject_static_adt(
                         span,
                         format!(
-                            "`match` static arm selection does not support {reason} \
-                             (chelis#520 D1)"
+                            "`match` static arm selection met {reason}, which the checker \
+                             rejects before lowering"
                         ),
                     );
                 }
                 StaticPatternMatch::Match(binds) => {
                     if !guard_is_absent(guard) {
                         self.retain_host_match_control(span);
-                        self.reject_static_adt(
+                        self.reject_static_match(
                             span,
-                            "`match` arm guards are not supported by static arm \
-                             selection: a guard needs runtime evaluation, so the taken \
-                             arm is not compile-time-known (chelis#520 D1)"
-                                .to_string(),
+                            "a `match` arm guard".to_string(),
+                            chelis_types::unimplemented_rejection!(
+                                618,
+                                "`match` arm guards are not supported by static arm \
+                                 selection: a guard needs runtime evaluation, so the taken \
+                                 arm is not compile-time-known"
+                            ),
                         );
                     }
                     let saved = self.bindings.clone();
@@ -23504,8 +23571,7 @@ impl<'program> LowerCtx<'program> {
             span,
             format!(
                 "`match` static arm selection found no arm matching constructor \
-                 `{ctor}`; a checked match is exhaustive, so this indicates a pattern \
-                 form outside the supported static slice (chelis#520 D1)"
+                 `{ctor}`, but the checker proves a match exhaustive before lowering"
             ),
         )
     }
@@ -23553,6 +23619,33 @@ impl<'program> LowerCtx<'program> {
     /// falling back to interpretation).
     fn reject_static_adt(&self, span: Span, message: String) -> ! {
         self.reject_lowering_at((Some(span), None), message)
+    }
+
+    /// The typed refusal of a `match` whose taken arm static arm selection
+    /// cannot decide, carrying `authority` ([05-UNS-5]) on the raise ladder
+    /// of [`Self::reject_lowering_at`]: fatal inside an AD transform body,
+    /// recoverable elsewhere.
+    fn reject_static_match(
+        &self,
+        span: Span,
+        what: String,
+        authority: chelis_types::unsupported::RejectionAuthority,
+    ) -> ! {
+        if unrepresentable_panic_suppressed() {
+            std::panic::panic_any(UnrepresentableDag);
+        }
+        let unsupported = Unsupported::new(
+            UnsupportedKind::Construct(what),
+            "the static arm selection of a `match` in IR lowering",
+            Stage::Lowering,
+            authority,
+        );
+        let diagnostic = LowerDiagnostic::from_unsupported(unsupported, Some(span), None);
+        raise_lowering_diagnostic(if self.allow_host_list_ad_rewrites {
+            diagnostic.fatal()
+        } else {
+            diagnostic
+        })
     }
 
     /// The same suppression-aware raise ladder for callers that carry a
@@ -25078,7 +25171,10 @@ mod tests {
         let successor = Expr::node(DeepTag::PatWild, Metadata::default(), Vec::new(), span);
 
         assert!(
-            matches!(bind_leaf_pattern(&successor, &value), Ok(None)),
+            matches!(
+                match_static_pattern(&successor, &value),
+                StaticPatternMatch::Match(binds) if binds.is_empty()
+            ),
             "a decoded wildcard pattern binds nothing"
         );
     }
@@ -25094,15 +25190,118 @@ mod tests {
             children: Vec::new(),
             span,
         }));
-        let reason = |pattern: &Expr| match bind_leaf_pattern(pattern, &value) {
-            Err(reason) => reason,
-            Ok(_) => panic!("non-node carrier unexpectedly matched"),
+        let reason = |pattern: &Expr| match match_static_pattern(pattern, &value) {
+            StaticPatternMatch::Malformed(reason) => reason,
+            _ => panic!("non-node carrier unexpectedly decided"),
         };
-        assert_eq!(reason(&structural), "a structural-list sub-pattern");
+        assert_eq!(reason(&structural), "a structural-list pattern");
         assert_eq!(
             reason(&undecodable),
-            "an undecodable `future-pattern` sub-pattern"
+            "an undecodable `future-pattern` pattern"
         );
+    }
+
+    /// `Model { layer: Scale { k: <node 0> }, n: <node 1> }`, in declared order.
+    fn static_model_value() -> LoweredValue {
+        let declared = |names: &[&str]| {
+            AdtLayout::Declared(names.iter().map(|name| name.to_string()).collect())
+        };
+        LoweredValue::Adt {
+            host: None,
+            ctor: "Model".to_string(),
+            layout: declared(&["layer", "n"]),
+            fields: vec![
+                LoweredValue::Adt {
+                    host: None,
+                    ctor: "Scale".to_string(),
+                    layout: declared(&["k"]),
+                    fields: vec![LoweredValue::Node(NodeId(0))],
+                },
+                LoweredValue::Node(NodeId(1)),
+            ],
+        }
+    }
+
+    fn static_match_of(pattern: &str, value: &LoweredValue) -> StaticPatternMatch {
+        let exprs = chelis_deep::parser::parse_str(pattern).expect("pattern parses");
+        match_static_pattern(&exprs[0], value)
+    }
+
+    /// chelis#3463: static arm selection decides a constructor test at every
+    /// pattern depth, binds nested binders to the field they matched, and
+    /// lets a provably failed constructor decide an arm whose sibling test
+    /// would read a run-time value ([04-PAT-2]: the arm cannot match).
+    #[test]
+    fn static_pattern_decides_nested_constructors_at_every_depth() {
+        let value = static_model_value();
+        let failed_beside_literal = "(pat-record {} Model \
+             (kv {} layer (pat-record {} Dense (kv {} w (pat-var {} w)))) \
+             (kv {} n (pat-lit {} 0)))";
+        assert!(matches!(
+            static_match_of(failed_beside_literal, &value),
+            StaticPatternMatch::NoMatch
+        ));
+        let taken_beside_literal = "(pat-record {} Model \
+             (kv {} layer (pat-record {} Scale (kv {} k (pat-var {} k)))) \
+             (kv {} n (pat-lit {} 0)))";
+        assert!(matches!(
+            static_match_of(taken_beside_literal, &value),
+            StaticPatternMatch::RuntimeTest(reason) if reason.contains("literal")
+        ));
+        let taken = "(pat-record {} Model \
+             (kv {} layer (pat-as {} s (pat-record {} Scale (kv {} k (pat-var {} k))))) \
+             (kv {} n (pat-wild {})))";
+        let StaticPatternMatch::Match(binds) = static_match_of(taken, &value) else {
+            panic!("the executed nested constructor must match");
+        };
+        let names = binds
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["k", "s"]);
+        assert!(matches!(binds[0].1, LoweredValue::Node(NodeId(0))));
+        assert!(matches!(&binds[1].1, LoweredValue::Adt { ctor, .. } if ctor == "Scale"));
+    }
+
+    /// Negative parity for the conjunction: a constructor pattern against a
+    /// run-time carrier is a run-time test, and a part this lowering cannot
+    /// read outranks a provably failed sibling rather than skipping the arm.
+    #[test]
+    fn static_pattern_rejects_what_it_cannot_decide() {
+        let value = static_model_value();
+        let ctor_against_node = "(pat-record {} Model \
+             (kv {} layer (pat-wild {})) \
+             (kv {} n (pat-ctor {} Some (pat-wild {}))))";
+        assert!(matches!(
+            static_match_of(ctor_against_node, &value),
+            StaticPatternMatch::RuntimeTest(_)
+        ));
+        let malformed_beside_failed = "(pat-record {} Model \
+             (kv {} layer (pat-record {} Dense (kv {} w (pat-var {} w)))) \
+             (kv {} absent (pat-wild {})))";
+        assert!(matches!(
+            static_match_of(malformed_beside_failed, &value),
+            StaticPatternMatch::Malformed(reason) if reason.contains("absent")
+        ));
+    }
+
+    /// A string held as exact host data answers a string literal pattern at
+    /// lowering time; a numeric leaf does not.
+    #[test]
+    fn static_pattern_compares_a_held_string_literal() {
+        let held = LoweredValue::HostConstant(HostConstant::String("a".to_string()));
+        assert!(matches!(
+            static_match_of("(pat-lit {} \"a\")", &held),
+            StaticPatternMatch::Match(binds) if binds.is_empty()
+        ));
+        assert!(matches!(
+            static_match_of("(pat-lit {} \"b\")", &held),
+            StaticPatternMatch::NoMatch
+        ));
+        assert!(matches!(
+            static_match_of("(pat-lit {} 0)", &LoweredValue::Node(NodeId(0))),
+            StaticPatternMatch::RuntimeTest(_)
+        ));
     }
 
     #[test]

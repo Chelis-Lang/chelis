@@ -773,7 +773,7 @@ impl<'a> EvalContext<'a> {
                     "host runtime: `grad(...)` produced {} gradient roots for a \
                      structure expecting {expected}; refusing to pack a misaligned \
                      gradient (internal invariant: the IR lowering should have \
-                     zero-filled every adjoint-free slot) (chelis#520 D2)",
+                     zero-filled every adjoint-free slot)",
                     flat.len()
                 ));
             }
