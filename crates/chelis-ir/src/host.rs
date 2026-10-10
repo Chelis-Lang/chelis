@@ -13231,6 +13231,14 @@ fn lower_program_host_app(
             }
             grad_target_argument(callee, &kids[1..], program, scope)
                 .and_then(|target| expr_tensor_type(target, program, scope))
+                .or_else(|| {
+                    // A selected tuple target has no single tensor type, but
+                    // another tensor actual can still anchor its helper. The
+                    // gradient's component types come from the lowered DAG.
+                    kids[1..]
+                        .iter()
+                        .find_map(|arg| expr_tensor_type(arg, program, scope))
+                })
         });
     let (helper_expr, helper_scope, helper_bindings) = hoist_host_lane_tensor_bindings(
         app_expr,
