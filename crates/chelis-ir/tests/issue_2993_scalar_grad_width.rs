@@ -223,7 +223,7 @@ fn host_collection_transform_body_keeps_its_rejection() {
         panic!("{src}: expected the unresolved-transform marker, got {value:?}");
     };
     assert!(
-        matches!(callee, chelis_ir::host::HostCallee::Unresolved(marker)
+        matches!(callee.view(), chelis_ir::host::HostCalleeView::Unresolved(marker)
             if chelis_ir::host::is_host_unresolved_marker(marker)),
         "{src}: {callee:?}"
     );

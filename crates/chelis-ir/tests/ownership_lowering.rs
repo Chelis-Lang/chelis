@@ -990,7 +990,8 @@ fn malformed_real_host_programs_fail_at_typed_boundaries() {
     let front = front("def id(p: i64) -> i64 = p\nout = id(1i64)\n");
     let mut wrong_arity = front.host.clone();
     wrong_arity.globals[0].value = HostExpr::new(HostExprKind::Call {
-        callee: chelis_ir::host::HostCallee::Function("id".to_string()),
+        // A global's call of a def has the shape of a root driver's.
+        callee: chelis_ir::host::HostCallee::root_driver("id".to_string()),
         args: Vec::new(),
         arg_tys: Vec::new(),
         ty: ConcreteHostType::Int64,

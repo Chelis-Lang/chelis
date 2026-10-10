@@ -17,7 +17,7 @@ use crate::dag::{DimInfo, TensorType};
 use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
     ConcreteHostFunction, ConcreteHostMatchArm, ConcreteHostProgram, HostBinding, HostCallee,
-    HostDisplayRoot, HostExpr, HostExprKind, HostFunctionOrigin, HostTensorHelper,
+    HostCalleeView, HostDisplayRoot, HostExpr, HostExprKind, HostFunctionOrigin, HostTensorHelper,
 };
 use crate::host_type_state::ConcreteHostType;
 
@@ -1166,7 +1166,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 ty,
             } => {
                 let function = &callee.name().to_owned();
-                let native_specs = if let HostCallee::NativeProvider(provider) = callee
+                let native_specs = if let HostCalleeView::NativeProvider(provider) = callee.view()
                     && let Some((linked_name, symbol)) = &self.ctx.native_provider
                     && provider == symbol
                 {
@@ -1193,14 +1193,14 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 };
                 // Host lowering resolved the callee; only a function or a
                 // native provider has declared argument modes.
-                let direct_specs = match callee {
-                    HostCallee::Function(name) => self
+                let direct_specs = match callee.view() {
+                    HostCalleeView::Function(name) => self
                         .ctx
                         .signatures
                         .get(name)
                         .map(|signature| signature.params.clone()),
-                    HostCallee::NativeProvider(_) => native_specs.clone(),
-                    HostCallee::Local(_) | HostCallee::Unresolved(_) => None,
+                    HostCalleeView::NativeProvider(_) => native_specs.clone(),
+                    HostCalleeView::Local(_) | HostCalleeView::Unresolved(_) => None,
                 };
                 let values = if let Some(specs) = direct_specs {
                     if args.len() != specs.len() {
@@ -1714,7 +1714,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         // Host lowering resolved the callee. A local callee is the binding in
         // scope and a function callee is the program's function; neither
         // spelling is looked up in the other's namespace.
-        let (label, kind, specs) = match callee {
+        let (label, kind, specs) = match callee.view() {
             // These two unspellable placeholders are typed negative evidence
             // for the target capability boundary. Ownership still has to
             // account for their exact argument/result payload so the
@@ -1722,7 +1722,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             // ordinary unknown callee into an admissible call. The C ABI
             // projection rejects the retained marker before a raw call can be
             // emitted.
-            HostCallee::Unresolved(_) => {
+            HostCalleeView::Unresolved(_) => {
                 let mut args = Vec::with_capacity(values.len());
                 for value in values {
                     args.push(self.borrow(value)?);
@@ -1734,7 +1734,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     args,
                 );
             }
-            HostCallee::Local(_) => match self.lookup(function) {
+            HostCalleeView::Local(_) => match self.lookup(function) {
                 Some(Place::Callback(owner)) => {
                     let params = match &self.info(owner)?.ty {
                         ConcreteHostType::Function(params, _) => params.clone(),
@@ -1781,7 +1781,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     });
                 }
             },
-            HostCallee::NativeProvider(_) => (
+            HostCalleeView::NativeProvider(_) => (
                 format!("native_provider:{function}"),
                 ApplyKind::NativeProviderCall,
                 native_specs.ok_or_else(|| {
@@ -1790,7 +1790,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     ))
                 })?,
             ),
-            HostCallee::Function(_) => match self.ctx.signatures.get(function) {
+            HostCalleeView::Function(_) => match self.ctx.signatures.get(function) {
                 Some(signature) => {
                     let callee =
                         self.ctx
@@ -2882,7 +2882,7 @@ pub(super) fn materialize_manifest_roots(
             display_roots: vec![display_root(root)],
             ty: ty.clone(),
             value: HostExpr::new(HostExprKind::Call {
-                callee: HostCallee::Function(function_name),
+                callee: HostCallee::root_driver(function_name),
                 args: Vec::new(),
                 arg_tys: Vec::new(),
                 ty,
@@ -2991,11 +2991,9 @@ fn lower_roots(
                 let selected = binding.name == root.def_name
                     || matches!(
                         &binding.value.kind,
-                        ConcreteHostExprKind::Call {
-                            callee: HostCallee::Function(function),
-                            args,
-                            ..
-                        } if function == &root.def_name && args.is_empty()
+                        ConcreteHostExprKind::Call { callee, args, .. }
+                            if callee.view() == HostCalleeView::Function(&root.def_name)
+                                && args.is_empty()
                     );
                 root.lane == Lane::Host && selected && display_root(root) == *display
             });

@@ -1,6 +1,6 @@
 use chelis_ir::host::{
-    HostBlasMatmulSummary, HostCallee, HostFunctionSpecialization, HostSparseOpSummary,
-    HostTensorHelper, HostTensorSpecialization,
+    HostBlasMatmulSummary, HostCallee, HostCalleeView, HostFunctionSpecialization,
+    HostSparseOpSummary, HostTensorHelper, HostTensorSpecialization,
 };
 mod entry;
 mod entry_walk;
@@ -4184,11 +4184,9 @@ fn emit_main(
                 let selected = binding.name == root.def_name
                     || matches!(
                         &binding.value.kind,
-                        HostExprKind::Call {
-                            callee: HostCallee::Function(function),
-                            args,
-                            ..
-                        } if function == &root.def_name && args.is_empty()
+                        HostExprKind::Call { callee, args, .. }
+                            if callee.view() == HostCalleeView::Function(&root.def_name)
+                                && args.is_empty()
                     );
                 root.lane == Lane::Host
                     && selected
@@ -4341,8 +4339,8 @@ fn collect_called_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
                 walk(value, out)
             }
             HostExprKind::Call { callee, args, .. } => {
-                if let HostCallee::Function(function) = callee {
-                    out.insert(function.clone());
+                if let HostCalleeView::Function(function) = callee.view() {
+                    out.insert(function.to_string());
                 }
                 for arg in args {
                     walk(arg, out);
@@ -4444,8 +4442,8 @@ fn collect_called_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     fn walk_callback(callback: &HostCallback, out: &mut UnordSet<String>) {
         match &callback.kind {
             HostCallbackKind::Named { callee, .. } => {
-                if let HostCallee::Function(function) = callee {
-                    out.insert(function.clone());
+                if let HostCalleeView::Function(function) = callee.view() {
+                    out.insert(function.to_string());
                 }
             }
             HostCallbackKind::Inline { body, .. } => walk(body, out),
@@ -6248,8 +6246,8 @@ impl<'a> HostEmitter<'a> {
         callee: &HostCallee,
         kind: VerifiedApplyKind,
     ) -> Result<VerifiedCallee, Unsupported> {
-        match (kind, callee) {
-            (VerifiedApplyKind::DirectCall { .. }, HostCallee::Function(function)) => self
+        match (kind, callee.view()) {
+            (VerifiedApplyKind::DirectCall { .. }, HostCalleeView::Function(function)) => self
                 .emitted_names
                 .get(function)
                 .cloned()
@@ -6262,9 +6260,9 @@ impl<'a> HostEmitter<'a> {
                 }),
             (
                 VerifiedApplyKind::KeyBuiltinCall(_) | VerifiedApplyKind::IndirectCall,
-                HostCallee::Local(binding),
+                HostCalleeView::Local(binding),
             ) => Ok(VerifiedCallee::Value(self.local_c_name(binding))),
-            (VerifiedApplyKind::NativeProviderCall, HostCallee::NativeProvider(symbol)) => {
+            (VerifiedApplyKind::NativeProviderCall, HostCalleeView::NativeProvider(symbol)) => {
                 Ok(VerifiedCallee::Value(c_ident(symbol).into_owned()))
             }
             (kind, callee) => Err(invalid_abi_shape(
@@ -10906,8 +10904,8 @@ impl<'a> HostEmitter<'a> {
         let function = callee.name();
         let (_, call_kind) = verified_call_authority(site)?;
         // A def's selected summary replaces only a direct call of that def.
-        if let (VerifiedApplyKind::DirectCall { .. }, HostCallee::Function(function)) =
-            (call_kind, callee)
+        if let (VerifiedApplyKind::DirectCall { .. }, HostCalleeView::Function(function)) =
+            (call_kind, callee.view())
             && let Some(spec) = self.function_specializations.get(function).cloned()
         {
             match spec {

@@ -1104,16 +1104,17 @@ fn project_host_program_to_entry(
 ) -> Option<chelis_ir::host::ConcreteHostProgram> {
     use chelis_ir::host::{
         ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind, HostCallee,
+        HostCalleeView,
     };
 
     /// A call reaches the function it resolved to; a call through a lexical
     /// binding reaches no function by its spelling.
     fn collect_callee(callee: &HostCallee, out: &mut UnordSet<String>) {
-        match callee {
-            HostCallee::Function(name) | HostCallee::NativeProvider(name) => {
-                out.insert(name.clone());
+        match callee.view() {
+            HostCalleeView::Function(name) | HostCalleeView::NativeProvider(name) => {
+                out.insert(name.to_string());
             }
-            HostCallee::Local(_) | HostCallee::Unresolved(_) => {}
+            HostCalleeView::Local(_) | HostCalleeView::Unresolved(_) => {}
         }
     }
 

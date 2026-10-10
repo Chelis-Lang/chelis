@@ -185,14 +185,38 @@ fn nominal_function_field_rejects_at_abi_projection_before_boxing() {
     );
 }
 
+#[test]
+fn call_projection_admits_only_a_declared_function_identity() {
+    use chelis_ir::host::{HostBinding, HostCallee, HostExpr, HostExprKind};
+
+    let call = |name: &str| HostBinding {
+        name: "probe".into(),
+        display_name: None,
+        display_roots: Vec::new(),
+        ty: ConcreteHostType::Scalar(Prim::Int32),
+        value: HostExpr::new(HostExprKind::Call {
+            callee: HostCallee::root_driver(name.into()),
+            args: Vec::new(),
+            arg_tys: Vec::new(),
+            ty: ConcreteHostType::Scalar(Prim::Int32),
+        }),
+    };
+    let allowed =
+        crate::host_abi::AllowedCallees::functions(["known".to_string()].into_iter().collect());
+    let error = crate::host_abi::project_binding(call("missing"), &allowed)
+        .expect_err("an undeclared call identity must not project");
+    assert!(error.to_string().contains("function value `missing`"));
+    crate::host_abi::project_binding(call("known"), &allowed)
+        .expect("a declared call identity must still project");
+}
+
 /// chelis#841 review, finding 5: the marker guards in `project_expr` are
 /// defense in depth with no CLI-reachable trigger; lock them directly so
 /// a marker can never emit as a C symbol.
 #[test]
 fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
     use chelis_ir::host::{
-        ConcreteHostProgram, HOST_UNRESOLVED_CALLABLE_MARKER, HOST_UNRESOLVED_TRANSFORM_MARKER,
-        HostBinding, HostExpr, HostExprKind,
+        ConcreteHostProgram, HOST_UNRESOLVED_TRANSFORM_MARKER, HostBinding, HostExpr, HostExprKind,
     };
 
     let program_with = |kind: chelis_ir::host::HostExprKind<ConcreteHostType>| {
@@ -208,7 +232,7 @@ fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
     };
 
     let call_marker = program_with(HostExprKind::Call {
-        callee: chelis_ir::host::HostCallee::Unresolved(HOST_UNRESOLVED_CALLABLE_MARKER.into()),
+        callee: chelis_ir::host::HostCallee::unresolved_callable(),
         args: Vec::new(),
         arg_tys: Vec::new(),
         ty: ConcreteHostType::Scalar(Prim::Int32),

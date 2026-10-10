@@ -501,20 +501,20 @@ pub(super) fn resolve_callable_aliases(
     expr: &mut super::HostExpr,
     scope: &CallableAliasScope,
 ) -> Result<(), String> {
-    use super::{HostCallback, HostCallbackKind, HostCallee, HostExprKind};
+    use super::{HostCallback, HostCallbackKind, HostCallee, HostCalleeView, HostExprKind};
     fn local_alias<'s>(scope: &'s CallableAliasScope, callee: &HostCallee) -> Option<&'s String> {
-        match callee {
-            HostCallee::Local(name) => scope.aliases.get(name),
-            HostCallee::Function(_) | HostCallee::NativeProvider(_) | HostCallee::Unresolved(_) => {
-                None
-            }
+        match callee.view() {
+            HostCalleeView::Local(name) => scope.aliases.get(name),
+            HostCalleeView::Function(_)
+            | HostCalleeView::NativeProvider(_)
+            | HostCalleeView::Unresolved(_) => None,
         }
     }
     fn callback(callback: &mut HostCallback, scope: &CallableAliasScope) -> Result<(), String> {
         match &mut callback.kind {
             HostCallbackKind::Named { callee, .. } => {
                 if let Some(resolved) = local_alias(scope, callee) {
-                    *callee = HostCallee::Function(resolved.clone());
+                    *callee = HostCallee::staged_alias_target(resolved.clone());
                 }
                 Ok(())
             }
@@ -541,7 +541,7 @@ pub(super) fn resolve_callable_aliases(
         }
         HostExprKind::Call { callee, args, .. } => {
             if let Some(resolved) = local_alias(scope, callee) {
-                *callee = HostCallee::Function(resolved.clone());
+                *callee = HostCallee::staged_alias_target(resolved.clone());
             }
             for arg in args {
                 resolve_callable_aliases(arg, scope)?;
@@ -1279,7 +1279,7 @@ mod tests {
         let shadowed = CallableAliasScope::new(aliases.clone(), ["halve".to_string()]);
 
         let mut call = HostExpr::new(HostExprKind::Call {
-            callee: HostCallee::Local("g".into()),
+            callee: HostCallee::test_local("g"),
             args: vec![HostExpr::new(HostExprKind::Var("halve".into(), int()))],
             arg_tys: vec![int()],
             ty: int(),
@@ -1288,7 +1288,7 @@ mod tests {
         let HostExprKind::Call { callee, args, .. } = &call.kind else {
             unreachable!("resolution keeps the node kind");
         };
-        assert_eq!(*callee, HostCallee::Function("halve".into()));
+        assert_eq!(*callee, HostCallee::test_function("halve"));
         assert!(
             matches!(&args[0].kind, HostExprKind::Var(name, _) if name == "halve"),
             "the argument still reads the local binding"
