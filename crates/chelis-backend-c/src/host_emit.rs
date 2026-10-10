@@ -4318,7 +4318,7 @@ int main(int argc, char **argv) {
                 String::from_utf8_lossy(&output.stderr)
                     .lines()
                     .next()
-                    .unwrap_or_default()
+                    .expect("probe traps with a diagnostic")
                     .to_string()
             };
             let without_skip = first("copy");

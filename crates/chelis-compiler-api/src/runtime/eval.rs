@@ -6552,8 +6552,7 @@ mod nested_claim_walk_stack_tests {
             "type Chain[t] =\n  | End { v: t }\n  | Link { v: t, next: Chain[t] }\nout = 1i64\n";
         let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
         let deep = chelis_surf::desugar::desugar_program(&decls).expect("desugar");
-        let checked = chelis_types::check_ir_program(&deep)
-            .unwrap_or_else(|result| panic!("check failed: {:?}", result.errors));
+        let checked = chelis_types::check_ir_program(&deep).expect("check linked nominal source");
         let claimed = chelis_deep::parser::parse_str(
             "(t-adt {} Chain (t-tensor {} (d-lit {} 3) (t-prim {} f32)))",
         )
