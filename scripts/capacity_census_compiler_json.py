@@ -280,7 +280,10 @@ class VerifiedCompilerJsonBindings:
     def validate(self):
         from capacity_census_compiler_json_construction import construction_sources
         from capacity_census_compiler_json_controls import mir_control_sources
-        from capacity_census_wire_calls import _current_driver_receipt
+        from capacity_census_wire_calls import (
+            _current_driver_receipt,
+            validate_sealed_compiler_json_artifacts,
+        )
 
         _require(source_identity(self.root) == self.source_sha256, "stale compiler JSON source")
         self.wire.validate()
@@ -302,9 +305,7 @@ class VerifiedCompilerJsonBindings:
                         for name, source, error in mir_control_sources(self.root)]
         _require([(row["name"], row["source_sha256"], row["expected_error"]) for row in self.mir_controls] == expected_mir,
                  "compiled conversion controls changed or missing")
-        for entry in self.compiler_evidence["provenance"] + self.compiler_evidence["fixture_externs"]:
-            _require(hashlib.sha256(Path(entry["artifact"]).read_bytes()).hexdigest() == entry["sha256"],
-                     "changed defining conversion codec artifact")
+        validate_sealed_compiler_json_artifacts(self.compiler_evidence)
         processes = (*self.processes, self.compiler_evidence["process"],
                      *(row["process"] for row in self.construction), *(row["process"] for row in self.mir_controls))
         for process in processes:

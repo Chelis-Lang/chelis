@@ -5,6 +5,7 @@ dependencies. The runner must supply --extern artifacts; no project Cargo runs
 are hidden in this suite. Each accepted discovery still owes a codec owner.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -43,6 +44,70 @@ class BindingInvocationTargetControls(unittest.TestCase):
         ) as build:
             self.assertEqual(build_binding_driver(ROOT, target), expected)
         build.assert_called_once_with(ROOT, expected)
+
+    def test_compiler_json_artifacts_keep_their_compiled_bytes_after_a_later_build(self):
+        from capacity_census_wire_calls import (
+            seal_compiler_json_artifacts,
+            validate_sealed_compiler_json_artifacts,
+        )
+
+        (ROOT / "target").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="binding-seal-", dir=ROOT / "target") as scratch:
+            target = Path(scratch)
+            deps = target / "binding-invocations/cargo/debug/deps"
+            deps.mkdir(parents=True)
+            compiler_api = deps / "libchelis_compiler_api-current.rlib"
+            compiler_api.write_bytes(b"compiled compiler JSON dependency")
+            digest = hashlib.sha256(compiler_api.read_bytes()).hexdigest()
+            collected = {
+                "target_directory": str(target / "binding-invocations/cargo"),
+                "provenance": [{"artifact": str(compiler_api), "sha256": digest}],
+                "fixture_externs": [{"name": "chelis_compiler_api", "artifact": str(compiler_api), "sha256": digest}],
+            }
+
+            seal_compiler_json_artifacts(target, collected)
+            sealed = Path(collected["fixture_externs"][0]["sealed_artifact"])
+            self.assertEqual(collected["provenance"][0]["sealed_artifact"], str(sealed))
+            self.assertNotEqual(sealed, compiler_api)
+            self.assertEqual(sealed.read_bytes(), compiler_api.read_bytes())
+            validate_sealed_compiler_json_artifacts(collected)
+
+            compiler_api.write_bytes(b"later native bindings dependency")
+            validate_sealed_compiler_json_artifacts(collected)
+            self.assertEqual(sealed.read_bytes(), b"compiled compiler JSON dependency")
+
+    def test_compiler_json_artifact_seal_rejects_missing_or_changed_evidence(self):
+        from capacity_census_wire_calls import (
+            seal_compiler_json_artifacts,
+            validate_sealed_compiler_json_artifacts,
+        )
+
+        (ROOT / "target").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="binding-seal-", dir=ROOT / "target") as scratch:
+            target = Path(scratch)
+            deps = target / "binding-invocations/cargo/debug/deps"
+            deps.mkdir(parents=True)
+            artifact = deps / "libchelis_compiler_api-current.rlib"
+            artifact.write_bytes(b"compiled dependency")
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            collected = {
+                "target_directory": str(target / "binding-invocations/cargo"),
+                "provenance": [],
+                "fixture_externs": [{"name": "chelis_compiler_api", "artifact": str(artifact), "sha256": digest}],
+            }
+
+            collected["fixture_externs"][0]["sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "changed compiled compiler JSON artifact"):
+                seal_compiler_json_artifacts(target, collected)
+            collected["fixture_externs"][0]["sha256"] = digest
+            seal_compiler_json_artifacts(target, collected)
+            sealed = Path(collected["fixture_externs"][0]["sealed_artifact"])
+            sealed.write_bytes(b"tampered retained dependency")
+            with self.assertRaisesRegex(ValueError, "changed defining conversion codec artifact"):
+                validate_sealed_compiler_json_artifacts(collected)
+            del collected["fixture_externs"][0]["sealed_artifact"]
+            with self.assertRaisesRegex(ValueError, "missing sealed conversion codec artifact"):
+                validate_sealed_compiler_json_artifacts(collected)
 
 
 class DriverBuildControls(unittest.TestCase):
