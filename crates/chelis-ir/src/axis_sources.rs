@@ -120,15 +120,22 @@ fn is_anonymous(name: &str) -> bool {
     name.is_empty() || name == "*"
 }
 
+/// The prefix of the identity one call activation gives a checker dimension
+/// variable of its callee that no actual binds:
+/// `_act_dim_<activation>_<variable>`.
+pub const ACTIVATION_DIM_PREFIX: &str = "_act_dim_";
+
 /// Whether a dimension name was minted by the compiler rather than written in
 /// a signature.
 ///
-/// Three minting vocabularies exist and all three name a FRESH extent that no
-/// signature declares: the lowerer's `_rt_<operation>_dim_<node>_<axis>` for
-/// an extent an operation computes, the C emitter's and DAG's
-/// `_anon_dim_<node>_<axis>` for an axis with no name at all, and the
-/// checker's `d<N>` for an unresolved dimension variable. An anonymous
-/// spelling is included, since it is the same fact with no spelling.
+/// It recognizes these minting vocabularies, each of which names a FRESH
+/// extent that no signature declares: the lowerer's
+/// `_rt_<operation>_dim_<node>_<axis>` for an extent an operation computes,
+/// the C emitter's and DAG's `_anon_dim_<node>_<axis>` for an axis with no
+/// name at all, the lowerer's [`ACTIVATION_DIM_PREFIX`] identity for one
+/// activation's unbound checker variable, and the checker's `d<N>` for an
+/// unresolved dimension variable. An anonymous spelling is included, since it
+/// is the same fact with no spelling.
 ///
 /// The distinction this draws is ownership, not cosmetics. A user-spelled
 /// name on an axis is a claim some signature makes about it, with its own
@@ -144,6 +151,7 @@ pub fn is_synthesized_dim_name(name: &str) -> bool {
     is_anonymous(name)
         || name.starts_with("_rt_")
         || name.starts_with("_anon_dim_")
+        || name.starts_with(ACTIVATION_DIM_PREFIX)
         || name
             .strip_prefix('d')
             .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))

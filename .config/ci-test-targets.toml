@@ -1729,6 +1729,16 @@ cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "linspace per-element exact-rational oracle at a count above 2048, whose chelis eval of every element takes minutes per case under a debug chelis; the 257, 258 and 300 cases of every dtype run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_2992_linspace"
 tracking_issue = "chelis#3209"
 
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_3415_3462_generic_helper_dims_under_grad"
+name = "generic_helper_at_two_sizes_differentiates_on_c"
+workflow = "heavy-e2e.yml"
+job = "module-oracles"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "C lane of the two-size conv gradient, which emits about 2.5 MB of C and builds in tens of seconds; its evaluator twin and the bare-table gather C row run per pull request; run it on demand with cargo nextest run -p chelis-cli --test issue_3415_3462_generic_helper_dims_under_grad"
+tracking_issue = "chelis#3415"
+
 # Cargo metadata classifies paths under workspace package roots directly.
 # Shared roots remain fail-closed unless this file records a current,
 # evidence-backed disposition. Directory prefixes end in `/`; other rules are

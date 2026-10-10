@@ -576,15 +576,61 @@ fn a_result_only_binder_is_absorbed_to_the_extent_it_met() {
     }
 }
 
+/// Run `source` on both lanes: eval, then a native C build and its
+/// executable. Each output is returned whole, success or not.
+fn eval_and_c(source: &str, stem: &str) -> [(&'static str, std::process::Output); 2] {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{stem}.ch"));
+    fs::write(&path, source).expect("fixture");
+    let evaluated = eval_file(&path);
+    let out = dir.path().join("out");
+    let build = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", "--allow-style-violations", path.to_str().unwrap()])
+        .args(["--target", "c", "--output", out.to_str().unwrap()])
+        .output()
+        .expect("build");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = StdCommand::new(out.join(stem)).output().expect("run");
+    [("eval", evaluated), ("C", run)]
+}
+
+/// Both lanes refuse `source` with the section 4.7 guard `needle`, and
+/// neither prints a value for `main`.
+fn assert_claim_traps_on_both_lanes(source: &str, stem: &str, needle: &str) {
+    for (lane, output) in eval_and_c(source, stem) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{lane} must trap: {stderr}");
+        assert!(
+            stderr.contains(needle) && stderr.contains("numeric trap: domain in add"),
+            "{lane}: {stderr}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("main = "),
+            "{lane}: no value may be printed"
+        );
+    }
+}
+
 /// Negative parity for the row above: absorbing a result-only binder must not
-/// make every symbolic-dimension program runnable. Here `seq` IS bound by a
-/// parameter, so it stays a named dimension, the root has no value for it, and
-/// eval refuses with the same diagnostic as on the base sha.
+/// turn a parameter-bound name into a runtime extent. Here `seq` IS bound by
+/// `outer`'s parameter, so it stays a named dimension: the signature stays
+/// `() -> tensor[seq, f32]`, and `outer`'s declared result claims `s`'s
+/// extent, 3, which `g`'s shrink does not produce. Both lanes refuse with the
+/// `spec/04-type-system.md` section 4.7 guard for that claim.
 ///
-/// Disposition lock on both readings, measured on `0820ee28e` and here: the
-/// signature stays `() -> tensor[seq, f32]` and eval exits non-zero with
-/// `missing symbolic dimension binding \`seq\``. This row is eval-side only
-/// because the program never executes on either lane.
+/// Disposition lock on the signature, measured on `0820ee28e` and here.
+/// Regression test for the refusal: on `114a818a3` the C lane already
+/// executed the program and trapped this claim, while eval refused before
+/// executing with `missing symbolic dimension binding \`seq\``. Since
+/// chelis#3462 instantiates each activation's dimension variables, eval
+/// executes too, and the lanes agree (section 4.7: every mode observes the
+/// same values). The name is kept from the earlier reading.
 #[test]
 fn a_parameter_bound_binder_still_has_no_value_at_a_root() {
     let source = format!(
@@ -605,16 +651,60 @@ fn a_parameter_bound_binder_still_has_no_value_at_a_root() {
     let report = check(&source, &path);
     assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
 
-    let evaluated = eval_file(&path);
-    assert!(
-        !evaluated.status.success(),
-        "a parameter-bound binder has no value here: {}",
-        String::from_utf8_lossy(&evaluated.stdout)
+    assert_claim_traps_on_both_lanes(
+        &source,
+        "parameter_bound_binder_root",
+        "extent `seq`: claimed = 3, add axis 0 = 2",
     );
-    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
-    assert!(
-        stderr.contains("missing symbolic dimension binding `seq`"),
-        "the unchanged diagnostic: {stderr}"
+}
+
+/// Positive twin of the row above: the same program with a shrink that keeps
+/// the whole extent meets `outer`'s claim, so `seq` stays named and the root
+/// evaluates to `add(y, y)` of the actual on both lanes. On `114a818a3` the C
+/// lane printed this value and eval refused it with `missing symbolic
+/// dimension binding \`seq\``.
+#[test]
+fn a_parameter_bound_binder_that_keeps_its_extent_evaluates() {
+    let source = "def g0[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[0i64, shape(x, 0i32)]])\n\
+         def h[k](y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+         def apply1[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def outer(s: tensor[seq, f32]) -> tensor[seq, f32] = apply1(h, g0(s))\n\
+         def main() = outer(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+    let published = signatures(source);
+    assert_eq!(
+        published.get("main").map(String::as_str),
+        Some("() -> tensor[seq, f32]"),
+        "{published:?}"
+    );
+    for (lane, output) in eval_and_c(source, "parameter_bound_binder_kept") {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{lane}: {stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("main = tensor(shape=[3], data=[2.0, 4.0, 6.0])"),
+            "{lane}: {stdout}"
+        );
+    }
+}
+
+/// The claim is `outer`'s own: with an unrelated signature spelling `seq` and
+/// `outer` spelling `width`, both lanes report the violated claim as `width`.
+#[test]
+fn a_parameter_bound_claim_is_reported_under_its_own_signatures_spelling() {
+    let source = format!(
+        "{POLY_HELPERS}\
+         def apply1[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def unrelated(z: tensor[seq, f32]) -> tensor[seq, f32] = h(z)\n\
+         def outer(s: tensor[width, f32]) -> tensor[width, f32] = apply1(h, g(s))\n\
+         def main() = outer(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+    );
+    assert_claim_traps_on_both_lanes(
+        &source,
+        "unrelated_signature_seq",
+        "extent `width`: claimed = 3, add axis 0 = 2",
     );
 }
 
