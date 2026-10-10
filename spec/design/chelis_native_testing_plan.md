@@ -610,6 +610,12 @@ $ chelis test tests/ --timeout 5
 ```
 
 A test that exceeds the budget fails with a timeout message and the run exits `1`.
+The runner requests cancellation at the per-test deadline and waits up to five
+seconds for the evaluator to stop. It starts the next test in the same worker
+process only after the timed-out evaluator has stopped. If a blocking operation
+does not stop within that grace period, the remaining selected tests in that
+worker process receive failed, unrun rows, and the worker process exits. The
+whole-suite deadline still bounds the public command, including this cleanup.
 
 `--suite-timeout <seconds>` independently caps the complete public command,
 including Reef/context preparation, batch or file-worker execution, output

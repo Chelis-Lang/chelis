@@ -84,6 +84,11 @@ chelis test tests/ --timeout 10 --suite-timeout 120
 A whole-suite timeout exits `1` and marks the run incomplete. Completed test results remain
 available, but they do not mean the suite finished.
 
+When a test reaches its own limit, the runner cancels it before starting the next test in
+that worker. If a blocking operation keeps it running, later tests assigned to that worker
+are reported as failed and unrun. The runner exits that worker after a bounded wait. The
+whole-suite limit includes this wait.
+
 On a completed run, `--json` writes newline-delimited JSON test records and a summary. If an
 ordinary run selects no tests, JSON output contains one `errors` record with
 `empty_test_selection` and no passing summary. A timed-out JSON run marks the suite as timed
