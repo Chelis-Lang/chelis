@@ -187,10 +187,10 @@ fn composed_abs_matches_the_primitive_with_nonunit_cotangents() {
                     let wrapper = value(format!("wrapper_{i}_{j} = "));
                     let core = value(format!("core_{i}_{j} = "));
                     if i == 0 && (2..=4).contains(&j) {
-                        // The composed wrapper has another cotangent edge at
-                        // these inputs; the primitive has a singleton. The
-                        // base-free §2.4 trees preserve distinct zero signs.
-                        assert_eq!(wrapper, "0.0", "{dtype}: {output}");
+                        // Control reads do not queue data cotangents. Both
+                        // paths retain the negative zero from their sole
+                        // contribution in the base-free §2.4 tree.
+                        assert_eq!(wrapper, "-0.0", "{dtype}: {output}");
                         assert_eq!(core, "-0.0", "{dtype}: {output}");
                     } else {
                         assert_eq!(wrapper, core, "{dtype} coefficient {i} input {j}: {output}");
