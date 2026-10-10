@@ -7022,6 +7022,10 @@ fn lower_staged_host_plan(
                         captures.iter().find(|capture| capture.binding == reference)
                     {
                         callable_sources.get(&capture.value).cloned()
+                    } else if host_lexically_binds(&scope, reference) {
+                        // A lexical binding, such as a function-typed
+                        // parameter, shadows every def of its spelling.
+                        None
                     } else {
                         program
                             .def_named(reference)
