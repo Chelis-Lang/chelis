@@ -1368,9 +1368,10 @@ oracle's declared roots, `INVENTORY_ROOTS`. The freeze digest binds each root
 together with the concrete directories it matches, so the universe's
 definition is reviewed while its membership is derived: a new file is scanned
 the moment it exists, and a seam in it fails as an unclassified hit, exactly
-as a new seam in an existing file does. A frozen root directory that is
-missing fails even while its glob still matches other directories, and a
-directory that joins a root, like any change to a root, moves the freeze.
+as a new seam in an existing file does. A frozen root directory that holds
+no visible file fails even while its glob still matches other directories,
+and a directory that joins a root, like any change to a root, moves the
+freeze.
 
 A file that a path-keyed registration of the oracle names stays in the
 universe unless the baseline records it as retired: the file of any
@@ -1390,18 +1391,26 @@ other file there. A mutation targets a file that must exist, except a
 declared new-file witness, whose file must not; a missing target fails
 instead of being planted afresh.
 
-A file is visible when it is on disk and not git-ignored; git never ignores a
-tracked file. The scan reads every visible file under a root, and a root
-directory counts while it holds a visible file. An untracked crate with
-sources is therefore a new root directory at once, a frozen directory whose
-files remain on disk stays present even when untracked, and a leftover empty
-or git-ignored directory is neither a new nor a departed root directory.
+One visibility rule decides both the scanned files and the root directories.
+A file is visible when it is on disk, or is a link to a file on disk, and is
+not git-ignored; git never ignores a tracked file. The oracle reads it from a
+single NUL-delimited `git ls-files` of tracked and unignored untracked files,
+so a name's spelling never changes the answer. The scan reads every visible
+file under a root, and a root directory counts while it holds a visible
+file. The oracle reads the disk rather than only the git index because cargo
+compiles what is on disk: an untracked file is in the universe, a tracked
+file deleted from disk is not, and a git-ignored file is not. Consequently:
 
-The oracle reads the filesystem rather than the git index because cargo
-compiles what is on disk, so an untracked file is in the universe and a
-git-ignored file is not. A symbolically linked file under a root is scanned at
-the link's path; a symbolic link to a directory is not traversed, so a file
-reached only through one is outside the universe.
+- an untracked crate with sources is a new root directory at once;
+- a frozen directory whose files remain on disk stays present even when
+  untracked;
+- a frozen directory left empty, or holding only ignored files, departs;
+- a directory that is not frozen and holds no visible file is not a new
+  root directory;
+- a symbolically linked file under a root is scanned at the link's path;
+- a symbolic link to a directory, a nested git repository and a submodule
+  are each one entry that is never descended into, at any depth, so no file
+  inside one is visible and none is a root directory.
 
 Stating the claim over a *language* instead would not be dischargeable: a
 reviewer can always name one more construct. Stated over a file set it is
@@ -1762,9 +1771,9 @@ from the roots. A hand-kept list required to equal the roots would carry no
 information the roots do not, and would fail every change that adds, renames,
 or deletes a file under a root. The frozen `source_inventory.roots` holds each
 root pattern with the concrete directories it matches, so the digest binds the
-universe's definition while its membership is derived. A missing frozen
-directory fails as a departed root, and a file a path-keyed registration
-names (a foundation identity, an owner-module final form, or an
+universe's definition while its membership is derived. A frozen directory
+that holds no visible file fails as a departed root, and a file a path-keyed
+registration names (a foundation identity, an owner-module final form, or an
 existing-file mutation target) that leaves the universe fails until
 regeneration names it for retirement; the baseline's `retired_files` records
 each named departure outside the digest, as active debt is. Each frozen
@@ -1776,14 +1785,10 @@ failure naming the new file's owner, `raw-element-pointer` at
 at `runtime_representation_phase0_subdirectory`, which proves the derived
 universe scanned the file, and its implementation digest covers its
 documentation. Every other witness requires its target to exist rather than
-planting into a fresh file. The Phase 1 Python floor pins the derived
-universe, a new seam-free file, a seam in a new file, a symlinked file, a
-symlinked directory, a git-ignored file, an untracked or ignored directory, a
-departed root, a crate leaving a glob root, a changed root, a debt-bearing
-file, a final-form file, a retired-identity file and a mutation target
-leaving the roots, a recorded departure, and retirement of a file still
-present, in place of four identities that pinned a hand-kept list and its
-documented count. No
+planting into a fresh file. The Phase 1 Python floor replaces four
+identities that pinned a hand-kept list and its documented count with every
+identity of `SourceUniverseTests`, which a Phase 1 test checks against the
+floor. No
 foundation row, active-debt row, classifier, final form, or mutation
 semantics change, and no numbered representation semantics move. The
 amendment moves `FREEZE_SHA256` and the Phase 1 `MANIFEST_SHA256`; accepting it

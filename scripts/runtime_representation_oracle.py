@@ -51,12 +51,13 @@ import argparse
 import hashlib
 import inspect
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory.json"
@@ -574,11 +575,21 @@ SOURCE_REJECTED_FAILURE = FailureExpectation(
 )
 DEPARTED_ROOT_FAILURE = FailureExpectation(
     "inventory.departed_root",
-    "an inventory root names no existing directory",
+    "an inventory root directory holds no visible file",
 )
 DEPARTED_FILE_FAILURE = FailureExpectation(
     "inventory.departed_file",
     "a file the frozen baseline references is outside the inventory universe",
+)
+# The sanctioned next action each departure message names.
+ROOT_CHANGE_ACTION = (
+    "if the change is intended, set source_inventory.roots in the baseline to "
+    "root_directories(), regenerate with --phase 0 --regenerate, and move "
+    "FREEZE_SHA256 with a B1 amendment"
+)
+DEPARTED_FILE_ACTION = (
+    "if the file was deleted, regenerate with --retire-departed-file PATH; "
+    "a file moved outside the roots is never retired"
 )
 
 
@@ -616,37 +627,51 @@ def _probe(
     )
 
 
-def _inventory_candidates(root: Path) -> tuple[str, ...]:
-    """Every file on disk under an inventory root, minus ignored ones.
+def _visible_files(root: Path, pathspecs: Sequence[str]) -> list[str]:
+    """Every visible file matching the glob pathspecs.
 
-    This reads the filesystem rather than the git index on purpose: cargo
-    compiles what is on disk, so an unstaged new file in a crate's `src/` is
-    production source and can carry a seam. Enumerating the index instead would
-    let a file be invisible to the inventory right up until someone staged it.
+    A file is visible when it is on disk and not git-ignored. One
+    NUL-delimited `git ls-files` lists tracked files, which git never
+    ignores, and the untracked files no ignore rule matches, with no quoting
+    whatever `core.quotePath` says; a listed path counts only while it is a
+    file on disk, or a link to one. git lists a link to a directory, a nested
+    repository and a submodule as one entry and never descends into it, so a
+    file inside any of them is not visible, at any depth.
     """
 
-    found = {
-        path.relative_to(root).as_posix()
-        for pattern in INVENTORY_ROOTS
-        for path in root.glob(pattern)
-        if path.is_file()
-    }
-    if not found:
-        return ()
     completed = subprocess.run(
-        ("git", "check-ignore", "--stdin"),
+        (
+            "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+            "--", *(f":(glob){pathspec}" for pathspec in pathspecs),
+        ),
         cwd=root,
-        input="\n".join(sorted(found)),
         check=False,
         capture_output=True,
-        text=True,
     )
-    # Exit 0 means some paths matched, 1 means none did; anything else is a
-    # real failure rather than an empty ignore set.
-    if completed.returncode not in (0, 1):
-        raise OracleFailure("could not resolve ignored inventory candidates")
-    ignored = {line for line in completed.stdout.split("\n") if line}
-    return tuple(sorted(found - ignored))
+    if completed.returncode != 0:
+        raise OracleFailure(
+            "could not list the visible inventory files: "
+            + completed.stderr.decode(errors="replace").strip()
+        )
+    return sorted(
+        {
+            path
+            for raw in completed.stdout.split(b"\0")
+            if raw and (root / (path := os.fsdecode(raw))).is_file()
+        }
+    )
+
+
+def _inventory_candidates(root: Path) -> tuple[str, ...]:
+    """Every visible file under an inventory root.
+
+    This reads the filesystem rather than only the git index on purpose:
+    cargo compiles what is on disk, so an unstaged new file in a crate's
+    `src/` is production source and can carry a seam, and a tracked file
+    deleted from disk is not.
+    """
+
+    return tuple(_visible_files(root, INVENTORY_ROOTS))
 
 
 def _root_directory(pattern: str) -> str:
@@ -658,65 +683,38 @@ def _root_directory(pattern: str) -> str:
     return "/".join(parts)
 
 
-def _visible_directories(root: Path, directories: Sequence[str]) -> set[str]:
-    """Every directory that holds a visible file under `directories`.
-
-    A file is visible when it is on disk and not git-ignored, the rule the
-    scan applies to files: git never ignores a tracked file, and lists an
-    untracked one unless an ignore rule matches it.
-    """
-
-    if not directories:
-        return set()
-    completed = subprocess.run(
-        (
-            "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
-            "--", *sorted(set(directories)),
-        ),
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise OracleFailure("could not list the visible inventory directories")
-    return {
-        parent.as_posix()
-        for path in completed.stdout.split("\0")
-        if path and (root / path).exists()
-        for parent in Path(path).parents
-        if parent != Path(".")
-    }
-
-
 def root_directories(root: Path) -> list[dict[str, object]]:
     """Each root with the directories its directory part matches.
 
     The baseline freezes this expansion, so a crate that leaves a glob such
     as `crates/chelis-backend-*` fails even while other crates still match.
-    A directory counts while it holds a visible file, the rule the scan
-    applies to files: an untracked crate with sources is a new directory at
-    once, and a leftover empty or git-ignored directory is not one.
+    A directory counts while it holds a visible file, by the one rule the
+    scan applies to files: an untracked crate with sources is a new directory
+    at once, while a directory left empty, a git-ignored one, a nested
+    repository and a link to a directory are not root directories.
     """
 
-    candidates = {
-        pattern: sorted(
-            path.relative_to(root).as_posix()
-            for path in root.glob(_root_directory(pattern))
-            if path.is_dir()
+    parts = {pattern: _root_directory(pattern) for pattern in INVENTORY_ROOTS}
+    files = _visible_files(root, sorted({f"{part}/**" for part in parts.values()}))
+    rows = []
+    for pattern, part in parts.items():
+        depth = len(part.split("/"))
+        rows.append(
+            {
+                "pattern": pattern,
+                "directories": sorted(
+                    {
+                        prefix
+                        for path in files
+                        if PurePosixPath(
+                            prefix := "/".join(path.split("/")[:depth])
+                        ).match(part)
+                        and len(path.split("/")) > depth
+                    }
+                ),
+            }
         )
-        for pattern in INVENTORY_ROOTS
-    }
-    visible = _visible_directories(
-        root, [path for paths in candidates.values() for path in paths]
-    )
-    return [
-        {
-            "pattern": pattern,
-            "directories": [path for path in paths if path in visible],
-        }
-        for pattern, paths in candidates.items()
-    ]
+    return rows
 
 
 def inventory_sources(root: Path) -> tuple[str, ...]:
@@ -729,13 +727,13 @@ def inventory_sources(root: Path) -> tuple[str, ...]:
     """
 
     departed = [
-        pattern
-        for pattern in INVENTORY_ROOTS
-        if not any(path.is_dir() for path in root.glob(_root_directory(pattern)))
+        row["pattern"] for row in root_directories(root) if not row["directories"]
     ]
     if departed:
         raise OracleFailure(
-            f"{DEPARTED_ROOT_FAILURE.reason_prefix}: " + ", ".join(departed),
+            f"{DEPARTED_ROOT_FAILURE.reason_prefix}: "
+            + ", ".join(departed)
+            + f"; {ROOT_CHANGE_ACTION}",
             code=DEPARTED_ROOT_FAILURE.code,
         )
     return _inventory_candidates(root)
@@ -990,13 +988,17 @@ def _validate_frozen_root_directories(
         added |= current[row["pattern"]] - frozen
     if departed:
         raise OracleFailure(
-            f"{DEPARTED_ROOT_FAILURE.reason_prefix}: " + ", ".join(sorted(departed)),
+            f"{DEPARTED_ROOT_FAILURE.reason_prefix}: "
+            + ", ".join(sorted(departed))
+            + f"; {ROOT_CHANGE_ACTION}",
             code=DEPARTED_ROOT_FAILURE.code,
         )
     if added:
         raise OracleFailure(
             "inventory root directories do not match the frozen source universe; "
-            "a new directory under a root is a freeze move: " + ", ".join(sorted(added))
+            "a new directory under a root is a freeze move: "
+            + ", ".join(sorted(added))
+            + f"; {ROOT_CHANGE_ACTION}"
         )
 
 
@@ -1068,7 +1070,9 @@ def _validate_referenced_files(
     unretired = sorted(departed - set(retiring))
     if unretired:
         raise OracleFailure(
-            f"{DEPARTED_FILE_FAILURE.reason_prefix}: " + ", ".join(unretired),
+            f"{DEPARTED_FILE_FAILURE.reason_prefix}: "
+            + ", ".join(unretired)
+            + f"; {DEPARTED_FILE_ACTION}",
             code=DEPARTED_FILE_FAILURE.code,
         )
     return sorted(((recorded | set(retiring)) & referenced) - universe)

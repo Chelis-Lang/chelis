@@ -1920,9 +1920,9 @@ fn demetavariable(stream: proc_macro2::TokenStream) -> proc_macro2::TokenStream 
 pub fn scan_rust_source(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError> {
     let Some(class) = SourceClass::for_path(path) else {
         return Err(ScanError::new(format!(
-            "`{path}` is not a registered runtime-representation inventory source: no \
-             source class covers it, and a root added to INVENTORY_ROOTS in \
-             scripts/runtime_representation_oracle.py needs one"
+            "`{path}` is outside every runtime-representation source class; a root \
+             added to INVENTORY_ROOTS in scripts/runtime_representation_oracle.py \
+             needs a source class here too"
         )));
     };
     let production = production_rust_source(source)?;

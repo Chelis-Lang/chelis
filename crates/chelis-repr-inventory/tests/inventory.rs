@@ -38,12 +38,8 @@ fn kinds(path: &str, source: &str) -> Vec<String> {
 #[test]
 fn an_unregistered_source_path_fails_rather_than_scanning_empty() {
     let error = scan_rust_source("crates/chelis-brand-new/src/lib.rs", "pub fn f() {}")
-        .expect_err("an unregistered inventory source must fail closed");
-    assert!(
-        error.message.contains("not a registered"),
-        "{}",
-        error.message
-    );
+        .expect_err("a path outside every source class must fail closed");
+    assert!(error.message.contains("outside every"), "{}", error.message);
     assert!(
         error.message.contains("INVENTORY_ROOTS"),
         "the failure must name the exact sanctioned action: {}",
@@ -1641,7 +1637,7 @@ fn an_unreadable_macro_body_hiding_a_seam_fails_closed() {
 fn an_offset_of_the_data_field_is_a_seam() {
     // `offset_of!(T, data)` names the field by path rather than by access.
     // A destructuring pattern (`let T { data, .. } = t;`) is deliberately not
-    // a seam: the registered sources destructure `RiscOp::ConstTensor { data }`,
+    // a seam: the inventory sources destructure `RiscOp::ConstTensor { data }`,
     // an IR literal payload that no representation phase touches, and a rule
     // on the field name alone cannot tell that from a descriptor.
     let rows = identities(
