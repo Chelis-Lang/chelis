@@ -28,6 +28,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -853,6 +854,53 @@ def invocation_target_for_scope(target: Path, scope: str | None) -> Path:
     )
 
 
+def seal_compiler_json_artifacts(target: Path, collected: dict) -> None:
+    """Retain the exact selected Cargo bytes across a later binding build."""
+
+    cargo_target = invocation_target_for_scope(target, "compiler-json")
+    if Path(collected["target_directory"]) != cargo_target:
+        raise ValueError("wrong compiler JSON Cargo target")
+    dependencies = cargo_target / "debug/deps"
+    sealed_directory = cargo_target.parent / "compiler-json-artifacts"
+    sealed_directory.mkdir(parents=True, exist_ok=True)
+    sealed = {}
+    for entry in collected["provenance"] + collected["fixture_externs"]:
+        source = Path(entry["artifact"])
+        if source.parent != dependencies or not source.is_file() or source.is_symlink():
+            raise ValueError("missing owned compiler JSON artifact")
+        if _sha256(source) != entry["sha256"]:
+            raise ValueError("changed compiled compiler JSON artifact")
+        if source not in sealed:
+            destination = sealed_directory / source.name
+            if destination.is_symlink():
+                raise ValueError("symlinked sealed compiler JSON artifact")
+            destination.unlink(missing_ok=True)
+            shutil.copy2(source, destination)
+            if _sha256(destination) != entry["sha256"]:
+                raise ValueError("changed compiled compiler JSON artifact")
+            sealed[source] = destination
+        entry["sealed_artifact"] = str(sealed[source])
+
+
+def validate_sealed_compiler_json_artifacts(collected: dict) -> None:
+    """The original Cargo paths may change; the selected copies may not."""
+
+    cargo_target = Path(collected["target_directory"])
+    sealed_directory = cargo_target.parent / "compiler-json-artifacts"
+    for entry in collected["provenance"] + collected["fixture_externs"]:
+        original = Path(entry["artifact"])
+        sealed = entry.get("sealed_artifact")
+        if (
+            not isinstance(sealed, str)
+            or Path(sealed) != sealed_directory / original.name
+            or not Path(sealed).is_file()
+            or Path(sealed).is_symlink()
+        ):
+            raise ValueError("missing sealed conversion codec artifact")
+        if _sha256(Path(sealed)) != entry["sha256"]:
+            raise ValueError("changed defining conversion codec artifact")
+
+
 def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), scope=None) -> dict:
     """Requires the project build slot. Fresh output forces the target callback.
 
@@ -1030,6 +1078,7 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
                     }
                 )
             collected["fixture_externs"] = externs
+            seal_compiler_json_artifacts(target, collected)
             collected["process"] = json.loads((invocation_target.parent / "compiler-json-cargo.json").read_text())
         elif scope == "native-bindings":
             collected["collector_inputs"] = native_collector_inputs
