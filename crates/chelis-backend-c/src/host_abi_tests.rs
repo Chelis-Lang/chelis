@@ -185,14 +185,38 @@ fn nominal_function_field_rejects_at_abi_projection_before_boxing() {
     );
 }
 
+#[test]
+fn call_projection_admits_only_a_declared_function_identity() {
+    use chelis_ir::host::{HostBinding, HostCallee, HostExpr, HostExprKind};
+
+    let call = |name: &str| HostBinding {
+        name: "probe".into(),
+        display_name: None,
+        display_roots: Vec::new(),
+        ty: ConcreteHostType::Scalar(Prim::Int32),
+        value: HostExpr::new(HostExprKind::Call {
+            callee: HostCallee::root_driver(name.into()),
+            args: Vec::new(),
+            arg_tys: Vec::new(),
+            ty: ConcreteHostType::Scalar(Prim::Int32),
+        }),
+    };
+    let allowed =
+        crate::host_abi::AllowedCallees::functions(["known".to_string()].into_iter().collect());
+    let error = crate::host_abi::project_binding(call("missing"), &allowed)
+        .expect_err("an undeclared call identity must not project");
+    assert!(error.to_string().contains("function value `missing`"));
+    crate::host_abi::project_binding(call("known"), &allowed)
+        .expect("a declared call identity must still project");
+}
+
 /// chelis#841 review, finding 5: the marker guards in `project_expr` are
 /// defense in depth with no CLI-reachable trigger; lock them directly so
 /// a marker can never emit as a C symbol.
 #[test]
 fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
     use chelis_ir::host::{
-        ConcreteHostProgram, HOST_UNRESOLVED_CALLABLE_MARKER, HOST_UNRESOLVED_TRANSFORM_MARKER,
-        HostBinding, HostExpr, HostExprKind,
+        ConcreteHostProgram, HOST_UNRESOLVED_TRANSFORM_MARKER, HostBinding, HostExpr, HostExprKind,
     };
 
     let program_with = |kind: chelis_ir::host::HostExprKind<ConcreteHostType>| {
@@ -208,14 +232,14 @@ fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
     };
 
     let call_marker = program_with(HostExprKind::Call {
-        function: HOST_UNRESOLVED_CALLABLE_MARKER.into(),
+        callee: chelis_ir::host::HostCallee::unresolved_callable(),
         args: Vec::new(),
         arg_tys: Vec::new(),
         ty: ConcreteHostType::Scalar(Prim::Int32),
     });
     let err = crate::host_abi::project_binding(
         call_marker.globals.into_iter().next().unwrap(),
-        &chelis_unord::UnordSet::new(),
+        &crate::host_abi::AllowedCallees::default(),
     )
     .expect_err("a callable marker in Call position must never project");
     let rendered = err.to_string();
@@ -229,7 +253,7 @@ fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
     });
     let err = crate::host_abi::project_binding(
         builtin_marker.globals.into_iter().next().unwrap(),
-        &chelis_unord::UnordSet::new(),
+        &crate::host_abi::AllowedCallees::default(),
     )
     .expect_err("a transform marker in Builtin position must never project");
     let rendered = err.to_string();
@@ -927,4 +951,175 @@ def entry(s: i64, b: bool, w: bool) -> tensor[2, i64] = pick(s, b, w)\n";
 #[test]
 fn issue_2477_nested_arm_release_lands_on_the_block_that_jumps_to_the_join() {
     let _ = verified_host_from_source(NESTED_ARM_RELEASE);
+}
+
+/// The body of `name`'s private definition in emitted C, from a program
+/// whose top-level `out = name()` keeps it on the host lane.
+fn emitted_owned_body(source: &str, name: &str) -> String {
+    let verified = verified_host_from_source(source);
+    let emitted = crate::codegen_host_program(&verified, name)
+        .unwrap_or_else(|error| panic!("emit `{name}`: {error}"))
+        .c_source;
+    emitted_function_body(
+        &emitted,
+        &format!("{}__chelis_owned_body", authored_function_symbol(name)),
+    )
+    .to_string()
+}
+
+/// Whether `body` calls the C identifier `name` itself, not merely an
+/// identifier that ends with it.
+fn calls_c_identifier(body: &str, name: &str) -> bool {
+    body.match_indices(&format!("{name}(")).any(|(start, _)| {
+        !body[..start].ends_with(|byte: char| byte.is_ascii_alphanumeric() || byte == '_')
+    })
+}
+
+/// chelis#3440: a flattened let spine declares each binding under a
+/// generated C alias, so a call through a typed key-builtin alias must name
+/// that alias. The source spelling is undeclared in C, and gcc 13 accepts
+/// the implicit declaration with only a warning.
+#[test]
+fn typed_key_alias_chain_calls_the_declared_let_alias() {
+    let body = emitted_owned_body(
+        "def chain() -> key = {\n  \
+           first: i64 -> key = key_from_seed\n  \
+           second: i64 -> key = first\n  \
+           second(-1i64)\n\
+         }\n\
+         out = chain()\n",
+        "chain",
+    );
+    assert!(
+        body.contains(" (*__let_binding_1)(")
+            && body.contains("__result = __let_binding_1(__call_arg0_2);"),
+        "the call must go through the second binding's declared alias:\n{body}"
+    );
+    for alias in ["first", "second"] {
+        assert!(
+            !calls_c_identifier(&body, alias),
+            "`{alias}` is not a C function:\n{body}"
+        );
+    }
+}
+
+/// chelis#3440: a named loop callback is a call through the same lexical
+/// binding, so map and fold name the declared alias too.
+#[test]
+fn named_loop_callbacks_call_the_declared_let_alias() {
+    let mapped = emitted_owned_body(
+        "def mapped() -> List[key] = {\n  \
+           seed: i64 -> key = key_from_seed\n  \
+           map(seed, [1i64, -1i64])\n\
+         }\n\
+         out = mapped()\n",
+        "mapped",
+    );
+    assert!(
+        mapped.contains("__map_result_9 = __let_binding_0(__map_item_10);"),
+        "map must call the declared alias:\n{mapped}"
+    );
+    assert!(!calls_c_identifier(&mapped, "seed"), "{mapped}");
+    let folded = emitted_owned_body(
+        "def folded() -> key = {\n  \
+           mix: key -> i64 -> key = fold_in\n  \
+           fold(mix, key_from_seed(7i64), [1i64, 2i64])\n\
+         }\n\
+         out = folded()\n",
+        "folded",
+    );
+    assert!(
+        folded.contains("__result = __let_binding_0(__fold_acc_8, __fold_item_10);"),
+        "fold must call the declared alias:\n{folded}"
+    );
+    assert!(!calls_c_identifier(&folded, "mix"), "{folded}");
+}
+
+/// A lexical key alias shadows a def of the same spelling. Ownership lowering
+/// resolves the call to the alias, so the emitted C must call the alias and
+/// never the def's private body, in a direct call and in a loop callback.
+#[test]
+fn key_alias_shadowing_a_def_calls_the_alias() {
+    let call = emitted_owned_body(
+        "def mix(k: key, n: i64) -> key = k\n\
+         def shadow_call() -> key = {\n  \
+           mix: key -> i64 -> key = fold_in\n  \
+           mix(key_from_seed(7i64), -1i64)\n\
+         }\n\
+         out = shadow_call()\n",
+        "shadow_call",
+    );
+    assert!(
+        call.contains("__result = __let_binding_0(__call_arg0_1, __call_arg1_3);"),
+        "the call must go through the alias:\n{call}"
+    );
+    let def = format!("{}__chelis_owned_body", authored_function_symbol("mix"));
+    assert!(!calls_c_identifier(&call, &def), "{call}");
+    let mapped = emitted_owned_body(
+        "def seed(x: i64) -> key = key_from_seed(0i64)\n\
+         def shadow_map() -> List[key] = {\n  \
+           seed: i64 -> key = key_from_seed\n  \
+           map(seed, [1i64, -1i64])\n\
+         }\n\
+         out = shadow_map()\n",
+        "shadow_map",
+    );
+    assert!(
+        mapped.contains("__map_result_9 = __let_binding_0(__map_item_10);"),
+        "map must call the alias:\n{mapped}"
+    );
+    let def = format!("{}__chelis_owned_body", authored_function_symbol("seed"));
+    assert!(!calls_c_identifier(&mapped, &def), "{mapped}");
+}
+
+/// Negative control: with no lexical binding of the spelling, the same
+/// direct call and loop callback still name the def's private body and pass
+/// it the invocation context.
+#[test]
+fn unshadowed_def_callees_call_the_private_body() {
+    let def = format!("{}__chelis_owned_body", authored_function_symbol("seed"));
+    let direct = emitted_owned_body(
+        "def seed(x: i64) -> key = key_from_seed(x)\n\
+         def direct() -> key = seed(5i64)\n\
+         out = direct()\n",
+        "direct",
+    );
+    assert!(
+        direct.contains(&format!(
+            "__result = {def}(__call_arg0_0, __chelis_origin_arena, NULL, __chelis_result_claims, &__chelis_result_origin___result);"
+        )),
+        "{direct}"
+    );
+    let mapped = emitted_owned_body(
+        "def seed(x: i64) -> key = key_from_seed(x)\n\
+         def mapped() -> List[key] = map(seed, [1i64, -1i64])\n\
+         out = mapped()\n",
+        "mapped",
+    );
+    assert!(
+        mapped.contains(&format!(
+            "__map_result_8 = {def}(__map_item_9, __chelis_origin_arena, NULL, NULL, &__chelis_result_origin___map_result_8);"
+        )),
+        "{mapped}"
+    );
+}
+
+/// A def's function-typed parameter shadows a def of the same spelling, so
+/// the exported higher-order body calls its callback parameter, whatever
+/// any one caller passes.
+#[test]
+fn callback_parameter_shadowing_a_def_is_the_exported_callee() {
+    let body = emitted_owned_body(
+        "def inc(x: i64) -> i64 = x + 1i64\n\
+         def twice(x: i64) -> i64 = x * 2i64\n\
+         def apply_all(inc: i64 -> i64, xs: List[i64]) -> List[i64] = map(inc, xs)\n\
+         out = apply_all(twice, [1i64, 2i64])\n",
+        "apply_all",
+    );
+    assert!(
+        body.contains("__map_result_3 = inc(__map_item_4);"),
+        "the callback must be the parameter:\n{body}"
+    );
+    let def = format!("{}__chelis_owned_body", authored_function_symbol("inc"));
+    assert!(!calls_c_identifier(&body, &def), "{body}");
 }

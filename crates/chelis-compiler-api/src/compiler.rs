@@ -1103,8 +1103,20 @@ fn project_host_program_to_entry(
     entry: &str,
 ) -> Option<chelis_ir::host::ConcreteHostProgram> {
     use chelis_ir::host::{
-        ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind,
+        ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind, HostCallee,
+        HostCalleeView,
     };
+
+    /// A call reaches the function it resolved to; a call through a lexical
+    /// binding reaches no function by its spelling.
+    fn collect_callee(callee: &HostCallee, out: &mut UnordSet<String>) {
+        match callee.view() {
+            HostCalleeView::Function(name) | HostCalleeView::NativeProvider(name) => {
+                out.insert(name.to_string());
+            }
+            HostCalleeView::Local(_) | HostCalleeView::Unresolved(_) => {}
+        }
+    }
 
     fn collect_callback(
         callback: &ConcreteHostCallback,
@@ -1112,11 +1124,7 @@ fn project_host_program_to_entry(
         out: &mut UnordSet<String>,
     ) {
         match &callback.kind {
-            HostCallbackKind::Named { function, .. } => {
-                if !bound.contains(function) {
-                    out.insert(function.clone());
-                }
-            }
+            HostCallbackKind::Named { callee, .. } => collect_callee(callee, out),
             HostCallbackKind::Inline { params, body } => {
                 let mut scoped = bound.clone();
                 scoped.extend(params.iter().map(|param| param.name.clone()));
@@ -1127,10 +1135,8 @@ fn project_host_program_to_entry(
 
     fn collect_expr(expr: &ConcreteHostExpr, bound: &UnordSet<String>, out: &mut UnordSet<String>) {
         match &expr.kind {
-            ConcreteHostExprKind::Call { function, args, .. } => {
-                if !bound.contains(function) {
-                    out.insert(function.clone());
-                }
+            ConcreteHostExprKind::Call { callee, args, .. } => {
+                collect_callee(callee, out);
                 for arg in args {
                     collect_expr(arg, bound, out);
                 }

@@ -1,5 +1,8 @@
+mod callee;
 mod signature_entry;
 pub mod staged;
+use callee::HostAppCallee;
+pub use callee::{HostCallee, HostCalleeView};
 pub use signature_entry::{EntryContract, EntryPattern, SignatureEntryPlan};
 
 use chelis_deep::cons_spine::ConsSpine;
@@ -387,6 +390,13 @@ fn bind_top_level_callable(
 ) {
     scope.insert(name.to_string(), ty);
     scope.insert(callable_origin_key(name), HostTypeTerm::Unit);
+}
+
+/// Whether `name` is lexically bound in `scope`, rather than recorded there
+/// as a visible top-level callable. A lexical binding shadows every
+/// definition of its spelling.
+fn host_lexically_binds(scope: &UnordMap<String, HostTypeTerm>, name: &str) -> bool {
+    scope.contains_key(name) && !scope.contains_key(&callable_origin_key(name))
 }
 
 /// Give each free top-level value read the identity of its declaration
@@ -1912,7 +1922,7 @@ pub struct HostAdtField<T = HostTypeTerm> {
 #[derive(Debug, Clone)]
 pub enum HostCallbackKind<T = HostTypeTerm> {
     Named {
-        function: String,
+        callee: HostCallee,
         params: Vec<HostParam<T>>,
     },
     Inline {
@@ -2106,7 +2116,7 @@ pub enum HostExprKind<T = HostTypeTerm> {
     Tuple(Vec<HostExpr<T>>, T),
     Var(String, T),
     Call {
-        function: String,
+        callee: HostCallee,
         args: Vec<HostExpr<T>>,
         arg_tys: Vec<T>,
         ty: T,
@@ -2414,8 +2424,8 @@ fn resolve_host_callback(
     callback: HostCallback,
 ) -> Result<ConcreteHostCallback, crate::HostTypeResolutionError> {
     let kind = match callback.kind {
-        HostCallbackKind::Named { function, params } => ConcreteHostCallbackKind::Named {
-            function,
+        HostCallbackKind::Named { callee, params } => ConcreteHostCallbackKind::Named {
+            callee,
             params: params
                 .into_iter()
                 .map(resolve_host_param)
@@ -2499,12 +2509,12 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
         ),
         HostExprKind::Var(name, ty) => ConcreteHostExprKind::Var(name, ty.into_concrete()?),
         HostExprKind::Call {
-            function,
+            callee,
             args,
             arg_tys,
             ty,
         } => ConcreteHostExprKind::Call {
-            function,
+            callee,
             args: args
                 .into_iter()
                 .map(resolve_host_expr)
@@ -3040,13 +3050,13 @@ fn host_expr_stays_on_tensor_path(
         ConcreteHostExprKind::Var(_, ConcreteHostType::Tensor(_)) => true,
         ConcreteHostExprKind::TensorCall { .. } => true,
         ConcreteHostExprKind::Call {
-            function,
+            callee,
             args,
             arg_tys,
             ty,
         } => {
             matches!(ty, ConcreteHostType::Tensor(_))
-                && tensor_only_functions.contains(function)
+                && matches!(callee.view(), HostCalleeView::Function(name) if tensor_only_functions.contains(name))
                 && arg_tys
                     .iter()
                     .all(|ty| matches!(ty, ConcreteHostType::Tensor(_)))
@@ -3798,11 +3808,9 @@ pub fn host_program_unresolved_call_sites<T>(program: &HostProgram<T>) -> Vec<St
     // Markers appear as a `Builtin` when nothing about the callee
     // resolved, and as a `Call` function when the callee's TYPE resolved
     // but the callee itself did not.
-    host_program_call_name_sites(
-        program,
-        &is_host_unresolved_marker,
-        &is_host_unresolved_marker,
-    )
+    host_program_call_name_sites(program, &is_host_unresolved_marker, &|callee| {
+        matches!(callee.view(), HostCalleeView::Unresolved(_))
+    })
 }
 
 /// Scan a host program for defs whose bodies carry the transform marker:
@@ -3815,14 +3823,14 @@ pub fn host_program_unresolved_transform_sites<T>(program: &HostProgram<T>) -> V
     host_program_call_name_sites(
         program,
         &|name| name == HOST_UNRESOLVED_TRANSFORM_MARKER,
-        &|function| function == HOST_UNRESOLVED_TRANSFORM_MARKER,
+        &|callee| matches!(callee.view(), HostCalleeView::Unresolved(name) if name == HOST_UNRESOLVED_TRANSFORM_MARKER),
     )
 }
 
 fn host_program_call_name_sites<T>(
     program: &HostProgram<T>,
     builtin_matches: &dyn Fn(&str) -> bool,
-    function_matches: &dyn Fn(&str) -> bool,
+    function_matches: &dyn Fn(&HostCallee) -> bool,
 ) -> Vec<String> {
     let mut out = Vec::new();
     for function in &program.functions {
@@ -4200,28 +4208,31 @@ fn derive_host_function_specialization(
                 }
             }
         }
-        HostExprKind::Call {
-            function: callee,
-            args,
-            ..
-        } => match summaries.get(callee)? {
-            HostFunctionSpecialization::BlasMatmul(summary) => {
-                remap_blas_summary_to_params(summary, args, &function.params)
-                    .map(HostFunctionSpecialization::BlasMatmul)
+        // Only a call of a function inherits its summary; a call through a
+        // parameter of the same spelling never does.
+        HostExprKind::Call { callee, args, .. } => {
+            let HostCalleeView::Function(callee) = callee.view() else {
+                return None;
+            };
+            match summaries.get(callee)? {
+                HostFunctionSpecialization::BlasMatmul(summary) => {
+                    remap_blas_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::BlasMatmul)
+                }
+                HostFunctionSpecialization::SparseGather(summary) => {
+                    remap_sparse_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::SparseGather)
+                }
+                HostFunctionSpecialization::SparseScatterAdd(summary) => {
+                    remap_sparse_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::SparseScatterAdd)
+                }
+                HostFunctionSpecialization::SparseScatterReplace(summary) => {
+                    remap_sparse_summary_to_params(summary, args, &function.params)
+                        .map(HostFunctionSpecialization::SparseScatterReplace)
+                }
             }
-            HostFunctionSpecialization::SparseGather(summary) => {
-                remap_sparse_summary_to_params(summary, args, &function.params)
-                    .map(HostFunctionSpecialization::SparseGather)
-            }
-            HostFunctionSpecialization::SparseScatterAdd(summary) => {
-                remap_sparse_summary_to_params(summary, args, &function.params)
-                    .map(HostFunctionSpecialization::SparseScatterAdd)
-            }
-            HostFunctionSpecialization::SparseScatterReplace(summary) => {
-                remap_sparse_summary_to_params(summary, args, &function.params)
-                    .map(HostFunctionSpecialization::SparseScatterReplace)
-            }
-        },
+        }
         _ => None,
     }
 }
@@ -4327,7 +4338,7 @@ fn host_type_is_unresolved(ty: &HostTypeTerm) -> bool {
 fn host_body_has_call_matching<T>(
     expr: &HostExpr<T>,
     builtin_matches: &dyn Fn(&str) -> bool,
-    function_matches: &dyn Fn(&str) -> bool,
+    function_matches: &dyn Fn(&HostCallee) -> bool,
 ) -> bool {
     let recurse =
         |e: &HostExpr<T>| host_body_has_call_matching(e, builtin_matches, function_matches);
@@ -4338,8 +4349,8 @@ fn host_body_has_call_matching<T>(
         HostExprKind::Builtin { name, args, .. } => {
             builtin_matches(name) || args.iter().any(recurse)
         }
-        HostExprKind::Call { function, args, .. } => {
-            function_matches(function) || args.iter().any(recurse)
+        HostExprKind::Call { callee, args, .. } => {
+            function_matches(callee) || args.iter().any(recurse)
         }
         HostExprKind::Let { bindings, body, .. }
         | HostExprKind::RetainedInvocation { bindings, body, .. } => {
@@ -5908,8 +5919,15 @@ fn host_def_signature(
             if param_tys.is_empty() && ret_ty.is_unresolved() {
                 return None;
             }
+            // The synthesized parameters must not capture a name the bound
+            // expression reads, such as a def named `arg0`.
+            let mut read = UnordSet::new();
+            collect_deep_var_names(body, &mut read);
             for (index, param_ty) in param_tys.iter().enumerate() {
-                let pname = format!("arg{index}");
+                let mut pname = format!("arg{index}");
+                while read.contains(&pname) {
+                    pname.push('_');
+                }
                 bind_host_local(&mut scope, pname.clone(), param_ty.clone());
                 params.push(HostParam {
                     name: pname,
@@ -6931,6 +6949,10 @@ fn lower_staged_host_plan(
                         captures.iter().find(|capture| capture.binding == reference)
                     {
                         callable_sources.get(&capture.value).cloned()
+                    } else if host_lexically_binds(&scope, reference) {
+                        // A lexical binding, such as a function-typed
+                        // parameter, shadows every def of its spelling.
+                        None
                     } else {
                         program
                             .def_named(reference)
@@ -6998,7 +7020,14 @@ fn lower_staged_host_plan(
                     helpers,
                     Some(&ty),
                 )?;
-                staged::resolve_callable_aliases(&mut body, &callable_aliases);
+                staged::resolve_callable_aliases(
+                    &mut body,
+                    &staged::CallableAliasScope::new(
+                        callable_aliases,
+                        captured_bindings.iter().map(|binding| binding.name.clone()),
+                    ),
+                )
+                .map_err(|detail| host_expr_lowering_error(expression, detail))?;
                 let value = HostExpr::new(HostExprKind::Let {
                     bindings: captured_bindings,
                     body: Box::new(body),
@@ -8493,7 +8522,7 @@ fn lower_host_expr_kind(
                     } else {
                         bindings.push(host_binding);
                     }
-                    scoped.insert(name.to_string(), bind_ty);
+                    bind_host_local(&mut scoped, name.to_string(), bind_ty);
                 }
             }
             let mut body = lower_host_expr(body_expr, program, &scoped, tensor_helpers)?;
@@ -8874,12 +8903,15 @@ fn refine_host_function_signatures(functions: &mut [HostFunction]) -> bool {
             }
 
             let HostExprKind::Call {
-                function: callee,
+                callee,
                 args,
                 arg_tys,
                 ty,
             } = &mut function.body.kind
             else {
+                continue;
+            };
+            let HostCalleeView::Function(callee) = callee.view() else {
                 continue;
             };
             let Some((callee_params, callee_ret)) = signatures.get(callee) else {
@@ -9131,10 +9163,15 @@ fn merge_named_callback_signature(
     callback: &HostCallback,
     out: &mut UnordMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) {
-    let HostCallbackKind::Named { function, params } = &callback.kind else {
+    // These signatures refine the host functions a callback names, so a
+    // callback through a lexical binding contributes nothing.
+    let HostCallbackKind::Named { callee, params } = &callback.kind else {
         return;
     };
-    let entry = out.entry(function.clone()).or_insert_with(|| {
+    let HostCalleeView::Function(function) = callee.view() else {
+        return;
+    };
+    let entry = out.entry(function.to_string()).or_insert_with(|| {
         (
             std::iter::repeat_with(fresh_host_inference)
                 .take(params.len())
@@ -9184,13 +9221,15 @@ fn infer_callable_param_types_in_expr(
             infer_callable_param_types_in_expr(value, unknown, out);
         }
         HostExprKind::Call {
-            function,
+            callee,
             args,
             arg_tys,
             ..
         } => {
-            if unknown.contains(function) {
-                out.entry(function.clone()).or_insert_with(|| {
+            if let HostCalleeView::Local(function) = callee.view()
+                && unknown.contains(function)
+            {
+                out.entry(function.to_string()).or_insert_with(|| {
                     HostTypeTerm::Fn(arg_tys.clone(), Box::new(HostTypeTerm::Tuple(Vec::new())))
                 });
             }
@@ -9342,7 +9381,7 @@ fn refine_host_expr_types(
             }
         }
         HostExprKind::Call {
-            function,
+            callee,
             args,
             arg_tys,
             ty,
@@ -9350,12 +9389,14 @@ fn refine_host_expr_types(
             for arg in args.iter_mut() {
                 changed |= refine_host_expr_types(arg, scope, signatures);
             }
-            let inferred_sig = scope.get(function).and_then(|ty| match ty {
-                HostTypeTerm::Fn(params, ret) => Some((params.clone(), (**ret).clone())),
-                _ => None,
-            });
-            let declared_sig = signatures.get(function).cloned();
-            let sig = inferred_sig.or(declared_sig);
+            let sig = match callee.view() {
+                HostCalleeView::Local(name) => scope.get(name).and_then(|ty| match ty {
+                    HostTypeTerm::Fn(params, ret) => Some((params.clone(), (**ret).clone())),
+                    _ => None,
+                }),
+                HostCalleeView::Function(name) => signatures.get(name).cloned(),
+                HostCalleeView::NativeProvider(_) | HostCalleeView::Unresolved(_) => None,
+            };
             if let Some((params, ret)) = sig {
                 for (index, arg_ty) in arg_tys.iter_mut().enumerate() {
                     if let Some(inferred) = params.get(index)
@@ -10501,9 +10542,11 @@ fn fence_pattern_bound_callees(expr: &mut HostExpr, binders: &UnordSet<String>) 
         | HostExprKind::String(_)
         | HostExprKind::Var(_, _)
         | HostExprKind::Unit => {}
-        HostExprKind::Call { function, args, .. } => {
-            if binders.contains(function.as_str()) {
-                *function = HOST_UNRESOLVED_CALLABLE_MARKER.to_string();
+        HostExprKind::Call { callee, args, .. } => {
+            if let HostCalleeView::Local(name) = callee.view()
+                && binders.contains(name)
+            {
+                *callee = HostCallee::unresolved_callable();
             }
             for arg in args {
                 fence_pattern_bound_callees(arg, binders);
@@ -10609,8 +10652,8 @@ fn fence_pattern_bound_callees(expr: &mut HostExpr, binders: &UnordSet<String>) 
 
 fn fence_pattern_bound_callback(callback: &mut HostCallback, binders: &UnordSet<String>) {
     match &mut callback.kind {
-        HostCallbackKind::Named { function, params } => {
-            if !binders.contains(function.as_str()) {
+        HostCallbackKind::Named { callee, params } => {
+            if !matches!(callee.view(), HostCalleeView::Local(name) if binders.contains(name)) {
                 return;
             }
             let args = params
@@ -10621,7 +10664,7 @@ fn fence_pattern_bound_callback(callback: &mut HostCallback, binders: &UnordSet<
             callback.kind = HostCallbackKind::Inline {
                 params: std::mem::take(params),
                 body: Box::new(HostExpr::new(HostExprKind::Call {
-                    function: HOST_UNRESOLVED_CALLABLE_MARKER.to_string(),
+                    callee: HostCallee::unresolved_callable(),
                     args,
                     arg_tys,
                     ty: callback.ret_ty.clone(),
@@ -12315,6 +12358,103 @@ fn lower_app_host_expr(
             }
         })
         .to_string();
+    match callee::resolve(name, scope) {
+        HostAppCallee::Lexical(callee) => lower_lexical_host_call(
+            app_expr,
+            list,
+            callee,
+            program,
+            scope,
+            tensor_helpers,
+            expected_ty,
+        ),
+        HostAppCallee::Program(callee) => lower_program_host_app(
+            app_expr,
+            list,
+            callee,
+            program,
+            scope,
+            tensor_helpers,
+            expected_ty,
+        ),
+    }
+}
+
+/// A call through a lexical binding: the operation or function value the
+/// binding holds, never a definition or builtin of the same spelling.
+fn lower_lexical_host_call(
+    app_expr: &Expr,
+    list: &Node,
+    lexical: callee::LexicalCallee<'_>,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+    expected_ty: Option<&HostTypeTerm>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let (name, binding) = (lexical.name(), lexical.binding());
+    let kids = list.children_slice();
+    let checked_ty = expr_host_type(app_expr, program, scope);
+    let explicit_ty = expected_ty
+        .filter(|_| checked_ty.is_unresolved())
+        .cloned()
+        .unwrap_or(checked_ty);
+    let args = kids[1..]
+        .iter()
+        .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let HostTypeTerm::KeyBuiltinCallable(op) = binding {
+        // This identity came from the resolved value's producer, including
+        // aliases and tuple projections. The application metadata selects
+        // its concrete result; the alias's spelling selects nothing.
+        let ty = if explicit_ty.is_unresolved() {
+            infer_builtin_host_type(op.symbol(), &args).ok_or_else(|| {
+                host_expr_lowering_error(app_expr, "checked key call has no concrete result type")
+            })?
+        } else {
+            explicit_ty
+        };
+        return Ok(HostExpr::new(HostExprKind::Builtin {
+            name: op.symbol().to_string(),
+            args,
+            ty,
+        }));
+    }
+    let (param_tys, ret_ty) = host_fn_signature(binding)
+        .or_else(|| kids.first().and_then(expr_fn_type))
+        .ok_or_else(|| {
+            host_expr_lowering_error(
+                app_expr,
+                format!("lexical callee `{name}` has no function type"),
+            )
+        })?;
+    // Unknown or unresolved application metadata takes the binding's
+    // result type, as an ordinary call takes its signature's.
+    let ty = if host_type_is_unresolved(&explicit_ty) {
+        ret_ty
+    } else {
+        explicit_ty
+    };
+    Ok(HostExpr::new(HostExprKind::Call {
+        callee: lexical.callee(),
+        args,
+        arg_tys: param_tys,
+        ty,
+    }))
+}
+
+/// An application whose callee no lexical binding shadows: a definition, a
+/// builtin, a constructor, or a top-level callable a global initializer sees.
+fn lower_program_host_app(
+    app_expr: &Expr,
+    list: &Node,
+    program_callee: callee::ProgramCallee,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+    expected_ty: Option<&HostTypeTerm>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let kids = list.children_slice();
+    let name = program_callee.name().to_string();
     let fn_sig = scope
         .get(&name)
         .and_then(host_fn_signature)
@@ -12344,27 +12484,6 @@ fn lower_app_host_expr(
         .filter(|_| checked_ty.is_unresolved())
         .cloned()
         .unwrap_or(checked_ty);
-    if let Some(HostTypeTerm::KeyBuiltinCallable(op)) = scope.get(&name) {
-        // This identity came from the resolved value's producer, including
-        // aliases and tuple projections. The application metadata selects
-        // its concrete result; the alias's spelling selects nothing.
-        let args = kids[1..]
-            .iter()
-            .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
-            .collect::<Result<Vec<_>, _>>()?;
-        let ty = if explicit_ty.is_unresolved() {
-            infer_builtin_host_type(op.symbol(), &args).ok_or_else(|| {
-                host_expr_lowering_error(app_expr, "checked key call has no concrete result type")
-            })?
-        } else {
-            explicit_ty
-        };
-        return Ok(HostExpr::new(HostExprKind::Builtin {
-            name: op.symbol().to_string(),
-            args,
-            ty,
-        }));
-    }
     // Std.Io.Json owns canonical object observation. Keep generic
     // `dict_entries` insertion-ordered and lower only this exact private
     // package identity to the generated-C-local sorter. The name is exact so
@@ -12421,7 +12540,7 @@ fn lower_app_host_expr(
                 host_expr_lowering_error(app_expr, "native provider has no checked signature")
             })?;
         return Ok(HostExpr::new(HostExprKind::Call {
-            function: symbol,
+            callee: program_callee.native_provider(symbol),
             args,
             arg_tys,
             ty: if explicit_ty.is_unresolved() {
@@ -13077,7 +13196,7 @@ fn lower_app_host_expr(
     {
         return lower_recursive_generic_call(
             app_expr,
-            &name,
+            &program_callee,
             &kids[1..],
             &explicit_ty,
             &inferred_ret_ty,
@@ -13138,7 +13257,7 @@ fn lower_app_host_expr(
         // doesn't share the outer pass's tvar bindings.
         let prefer_inferred = host_type_is_unresolved(&explicit_ty);
         return Ok(HostExpr::new(HostExprKind::Call {
-            function: name,
+            callee: program_callee.callee(),
             args,
             arg_tys: fn_sig
                 .as_ref()
@@ -14668,7 +14787,12 @@ fn inline_top_level_host_call(
         .and_then(as_node)
         .filter(|callee| callee.tag() == DeepTag::Var)
         .and_then(|callee| callee.children_slice().first().and_then(symbol_name))?;
-    if is_inlining(callee_name) || inlining_would_capture(program, callee_name, scope, expr) {
+    // A lexical binding shadows every def of its spelling, so a call
+    // through one never inlines a def.
+    if host_lexically_binds(scope, callee_name)
+        || is_inlining(callee_name)
+        || inlining_would_capture(program, callee_name, scope, expr)
+    {
         return None;
     }
     let defs = cached_program_defs(program);
@@ -14705,7 +14829,7 @@ fn inline_top_level_host_call(
 #[allow(clippy::too_many_arguments)]
 fn lower_recursive_generic_call(
     app_expr: &Expr,
-    name: &str,
+    program_callee: &callee::ProgramCallee,
     args: &[Expr],
     explicit_ty: &HostTypeTerm,
     inferred_ret_ty: &HostTypeTerm,
@@ -14713,6 +14837,7 @@ fn lower_recursive_generic_call(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let name = program_callee.name();
     // Resolve the callee to its defining declaration first: the interned
     // identity is the definition's own name, never the call site's spelling,
     // so a qualified and a short reference to one def intern one
@@ -14890,7 +15015,7 @@ fn lower_recursive_generic_call(
             })
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(HostExpr::new(HostExprKind::Call {
-            function: symbol,
+            callee: program_callee.monomorphized(symbol),
             args: lowered_args,
             arg_tys: param_tys,
             ty: ret_ty,
@@ -16962,13 +17087,13 @@ fn checked_tensor_scan_callback(
     let HostCallback { kind, ret_ty } = callback;
     let (params, body) = match kind {
         HostCallbackKind::Inline { params, body } => (params, *body),
-        HostCallbackKind::Named { function, params } => {
+        HostCallbackKind::Named { callee, params } => {
             let args = params
                 .iter()
                 .map(|param| HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone())))
                 .collect();
             let body = HostExpr::new(HostExprKind::Call {
-                function,
+                callee,
                 args,
                 arg_tys: params.iter().map(|param| param.ty.clone()).collect(),
                 ty: ret_ty.clone(),
@@ -17147,6 +17272,20 @@ fn lower_host_callback(
             let Some(name) = list.children_slice().first().and_then(symbol_name) else {
                 return Ok(None);
             };
+            // A lexical binding shadows every definition of its spelling, so
+            // its own function type is the only signature this callback may
+            // take. A binding without one (an unannotated key-builtin alias)
+            // is not a lowerable callback.
+            let program_callee = match callee::resolve_value(name.to_string(), scope) {
+                HostAppCallee::Lexical(lexical) => {
+                    return Ok(
+                        host_fn_signature(lexical.binding()).map(|(param_tys, ret_ty)| {
+                            named_host_callback(lexical.callee(), param_tys, ret_ty)
+                        }),
+                    );
+                }
+                HostAppCallee::Program(program_callee) => program_callee,
+            };
             let Some((param_tys, ret_ty)) = scope
                 .get(name)
                 .and_then(host_fn_signature)
@@ -17160,23 +17299,44 @@ fn lower_host_callback(
             else {
                 return Ok(None);
             };
-            let params = param_tys
-                .into_iter()
-                .enumerate()
-                .map(|(index, ty)| HostParam {
-                    name: format!("arg{index}"),
-                    ty,
-                })
-                .collect();
-            Ok(Some(HostCallback {
-                kind: HostCallbackKind::Named {
-                    function: name.to_string(),
-                    params,
-                },
+            Ok(Some(named_host_callback(
+                program_callee.callee(),
+                param_tys,
                 ret_ty,
-            }))
+            )))
         }
         _ => Ok(None),
+    }
+}
+
+/// Positional callback parameters `arg0`, `arg1`, ... of the given types.
+/// None takes the callee's spelling, so the callee stays free in any body
+/// built over these parameters.
+fn positional_host_params(param_tys: Vec<HostTypeTerm>, callee: &HostCallee) -> Vec<HostParam> {
+    param_tys
+        .into_iter()
+        .enumerate()
+        .map(|(index, ty)| {
+            let mut name = format!("arg{index}");
+            while name == callee.name() {
+                name.push('_');
+            }
+            HostParam { name, ty }
+        })
+        .collect()
+}
+
+fn named_host_callback(
+    callee: HostCallee,
+    param_tys: Vec<HostTypeTerm>,
+    ret_ty: HostTypeTerm,
+) -> HostCallback {
+    HostCallback {
+        kind: HostCallbackKind::Named {
+            params: positional_host_params(param_tys, &callee),
+            callee,
+        },
+        ret_ty,
     }
 }
 
@@ -20273,7 +20433,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
         }
         HostExprKind::Var(name, _) => HostExprKind::Var(name, ty),
         HostExprKind::Call {
-            function,
+            callee,
             args,
             arg_tys,
             ..
@@ -20290,7 +20450,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                 })
                 .collect();
             HostExprKind::Call {
-                function,
+                callee,
                 args,
                 arg_tys,
                 ty,
@@ -26848,7 +27008,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             display_roots: Vec::new(),
             ty: HostTypeTerm::Unit,
             value: HostExpr::new(HostExprKind::Call {
-                function: HOST_UNRESOLVED_CALLABLE_MARKER.into(),
+                callee: HostCallee::unresolved_callable(),
                 args: Vec::new(),
                 arg_tys: Vec::new(),
                 ty: HostTypeTerm::Unit,
@@ -27129,13 +27289,13 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         // specialization it lives in.
         let body = format!("{:?}", specialization.body);
         assert!(
-            body.contains(&format!("function: \"{}\"", specialization.name)),
+            body.contains(&format!("callee: Function(\"{}\")", specialization.name)),
             "the recursive edge must call the owning specialized symbol \
              `{}`, got body:\n{body}",
             specialization.name
         );
         assert!(
-            !body.contains("function: \"all_eq_len\""),
+            !body.contains("callee: Function(\"all_eq_len\")"),
             "no edge may still call the elided generic symbol `all_eq_len`, \
              got body:\n{body}"
         );
@@ -27608,7 +27768,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             (
                 "call argument without a parameter type",
                 HostExpr::new(HostExprKind::Call {
-                    function: "f".into(),
+                    callee: HostCallee::test_function("f"),
                     args: vec![sibling_typed_option_list()],
                     arg_tys: Vec::new(),
                     ty: HostTypeTerm::Int64,
@@ -27717,7 +27877,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     fn operation_name(expr: &HostExpr) -> &str {
         match &expr.kind {
             HostExprKind::Builtin { name, .. } => name,
-            HostExprKind::Call { function, .. } => function,
+            HostExprKind::Call { callee, .. } => callee.name(),
             other => panic!("expected an operation, got {other:?}"),
         }
     }
@@ -27785,18 +27945,20 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     #[test]
     fn pattern_bound_callee_fence_is_lexical_and_rewrites_named_callbacks() {
         let int = || HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
-        let call = |function: &str| {
+        let call_to = |callee: HostCallee| {
             HostExpr::new(HostExprKind::Call {
-                function: function.into(),
+                callee,
                 args: vec![HostExpr::new(HostExprKind::Int(1))],
                 arg_tys: vec![int()],
                 ty: int(),
             })
         };
+        let call = |name: &str| call_to(HostCallee::test_local(name));
         let callee = |expr: &HostExpr| match &expr.kind {
-            HostExprKind::Call { function, .. } => function.clone(),
+            HostExprKind::Call { callee, .. } => callee.clone(),
             other => panic!("expected a call, got {other:?}"),
         };
+        let marker = HostCallee::unresolved_callable;
         let binders = UnordSet::from(["h".to_string()]);
 
         // `let g = h(1) in let h = .. in h(1)` beside a call to an unrelated
@@ -27825,15 +27987,25 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let HostExprKind::Let { bindings, body, .. } = &shadowed.kind else {
             unreachable!("the fence keeps the node kind");
         };
-        assert_eq!(callee(&bindings[0].value), HOST_UNRESOLVED_CALLABLE_MARKER);
-        assert_eq!(callee(&bindings[1].value), "f");
-        assert_eq!(callee(body), "h", "the inner `h` is not the pattern binder");
+        assert_eq!(callee(&bindings[0].value), marker());
+        assert_eq!(callee(&bindings[1].value), HostCallee::test_local("f"));
+        assert_eq!(
+            callee(body),
+            HostCallee::test_local("h"),
+            "the inner `h` is not the pattern binder"
+        );
+
+        // A call of the program function `h` is not a call through the
+        // pattern binder that shares its spelling.
+        let mut function_call = call_to(HostCallee::test_function("h"));
+        fence_pattern_bound_callees(&mut function_call, &binders);
+        assert_eq!(callee(&function_call), HostCallee::test_function("h"));
 
         let named = |function: &str| {
             HostExpr::new(HostExprKind::Map {
                 callback: HostCallback {
                     kind: HostCallbackKind::Named {
-                        function: function.into(),
+                        callee: HostCallee::test_local(function),
                         params: vec![HostParam {
                             name: "x".into(),
                             ty: int(),
@@ -27855,10 +28027,10 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         };
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].name, "x");
-        let HostExprKind::Call { function, args, .. } = &body.kind else {
+        let HostExprKind::Call { callee, args, .. } = &body.kind else {
             panic!("the inline body must apply the marker");
         };
-        assert_eq!(function, HOST_UNRESOLVED_CALLABLE_MARKER);
+        assert_eq!(*callee, marker());
         assert!(
             matches!(&args[..], [HostExpr { kind: HostExprKind::Var(name, _), .. }] if name == "x")
         );
@@ -27870,7 +28042,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         };
         assert!(matches!(
             &callback.kind,
-            HostCallbackKind::Named { function, .. } if function == "f"
+            HostCallbackKind::Named { callee, .. } if callee.view() == HostCalleeView::Local("f")
         ));
     }
 }

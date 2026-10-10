@@ -16,9 +16,9 @@
 use chelis_ir::ConcreteHostType;
 use chelis_ir::host::{
     ConcreteHostBinding, ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr,
-    ConcreteHostExprKind, ConcreteHostParam, HostBinding, HostCallback, HostCallbackKind, HostExpr,
-    HostExprKind, HostFunction, HostMatchArm, HostParam, HostPatternBinding, HostProgram,
-    HostTensorHelper,
+    ConcreteHostExprKind, ConcreteHostParam, HostBinding, HostCallback, HostCallbackKind,
+    HostCallee, HostCalleeView, HostExpr, HostExprKind, HostFunction, HostMatchArm, HostParam,
+    HostPatternBinding, HostProgram, HostTensorHelper,
 };
 use chelis_ir::host_type_state::KeyBuiltinCallable;
 use chelis_ir::ownership::{
@@ -305,14 +305,71 @@ impl HostAbiType {
     }
 }
 
+/// The callees a projected expression may call or name as a function
+/// value: the program's functions, and the callable local bindings in scope.
+#[derive(Clone, Default)]
+pub(crate) struct AllowedCallees {
+    functions: UnordSet<String>,
+    locals: UnordSet<String>,
+}
+
+impl AllowedCallees {
+    pub(crate) fn functions(functions: UnordSet<String>) -> Self {
+        Self {
+            functions,
+            locals: UnordSet::new(),
+        }
+    }
+
+    /// Whether a call or named callback of this resolved callee is admitted.
+    fn admits(&self, callee: &HostCallee) -> bool {
+        match callee.view() {
+            HostCalleeView::Function(name) => self.functions.contains(name),
+            HostCalleeView::Local(name) => self.locals.contains(name),
+            HostCalleeView::NativeProvider(_) => true,
+            HostCalleeView::Unresolved(_) => false,
+        }
+    }
+
+    /// Whether a function value of this name is admitted. Only a lexical
+    /// callable is a C value: a def has no C function-value ABI, and a
+    /// reference to one would otherwise be emitted by its source spelling.
+    fn admits_value(&self, name: &str) -> bool {
+        self.locals.contains(name)
+    }
+
+    /// Whether a function-typed binding holds a callable this projection
+    /// admits: a closed key operation, or an admitted lexical callable.
+    fn admits_binding(&self, binding: &ConcreteHostBinding) -> bool {
+        let value = match &binding.value.kind {
+            ConcreteHostExprKind::FormalIngress { value, .. } => &value.kind,
+            value => value,
+        };
+        matches!(binding.ty, ConcreteHostType::Function(_, _))
+            && match value {
+                ConcreteHostExprKind::Builtin { name, args, .. } => {
+                    args.is_empty()
+                        && matches!(
+                            name.as_str(),
+                            "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+                        )
+                }
+                ConcreteHostExprKind::Var(name, _) => self.admits_value(name),
+                _ => false,
+            }
+    }
+}
+
 pub(crate) fn project_program(
     emission: VerifiedHostEmission<'_>,
 ) -> Result<ProjectedHostProgram<'_>, Unsupported> {
     let adt_layouts = emission.adt_layouts();
-    let declared_callbacks = (0..emission.function_count())
-        .filter_map(|index| emission.function(index))
-        .map(|function| function.name().to_string())
-        .collect::<UnordSet<_>>();
+    let declared_callbacks = AllowedCallees::functions(
+        (0..emission.function_count())
+            .filter_map(|index| emission.function(index))
+            .map(|function| function.name().to_string())
+            .collect(),
+    );
     let program = HostAbiProgram {
         globals: emission
             .globals()
@@ -472,7 +529,7 @@ fn helper_metadata(helper: VerifiedHostTensorHelperView<'_>) -> HostTensorHelper
 
 pub(crate) fn project_binding(
     binding: ConcreteHostBinding,
-    allowed_callbacks: &UnordSet<String>,
+    allowed_callbacks: &AllowedCallees,
 ) -> Result<HostAbiBinding, Unsupported> {
     Ok(HostAbiBinding {
         name: binding.name,
@@ -489,7 +546,7 @@ pub(crate) fn project_binding(
 
 fn project_function(
     function: VerifiedHostFunctionView<'_>,
-    declared_callbacks: &UnordSet<String>,
+    declared_callbacks: &AllowedCallees,
     adt_layouts: &[chelis_ir::host::HostAdtLayout<ConcreteHostType>],
 ) -> Result<HostAbiFunction, Unsupported> {
     // Authored functions are externally declared even if unused by the
@@ -517,7 +574,7 @@ fn project_function(
     let mut allowed_callbacks = declared_callbacks.clone();
     for param in function.params() {
         if matches!(param.ty, ConcreteHostType::Function(_, _)) {
-            allowed_callbacks.insert(param.name.clone());
+            allowed_callbacks.locals.insert(param.name.clone());
         }
     }
     Ok(HostAbiFunction {
@@ -623,14 +680,14 @@ fn project_function_param(param: ConcreteHostParam) -> Result<HostAbiParam, Unsu
 
 fn project_callback(
     callback: ConcreteHostCallback,
-    allowed_callbacks: &UnordSet<String>,
+    allowed_callbacks: &AllowedCallees,
 ) -> Result<HostAbiCallback, Unsupported> {
     let kind = match callback.kind {
-        ConcreteHostCallbackKind::Named { function, params } => HostAbiCallbackKind::Named {
-            function: if allowed_callbacks.contains(&function) {
-                function
+        ConcreteHostCallbackKind::Named { callee, params } => HostAbiCallbackKind::Named {
+            callee: if allowed_callbacks.admits(&callee) {
+                callee
             } else {
-                return Err(unsupported_function_symbol(&function));
+                return Err(unsupported_function_symbol(callee.name()));
             },
             params: params
                 .into_iter()
@@ -653,7 +710,7 @@ fn project_callback(
 
 fn project_let_spine(
     expr: ConcreteHostExpr,
-    allowed_callbacks: &UnordSet<String>,
+    allowed_callbacks: &AllowedCallees,
 ) -> Result<HostAbiExpr, Unsupported> {
     let mut current = expr;
     let mut source_frames = Vec::new();
@@ -680,21 +737,10 @@ fn project_let_spine(
     for (bindings, ty, span_id, merged_spans) in source_frames {
         let mut projected = Vec::with_capacity(bindings.len());
         for binding in bindings {
-            let admitted = matches!(binding.ty, ConcreteHostType::Function(_, _))
-                && match &binding.value.kind {
-                    ConcreteHostExprKind::Builtin { name, args, .. } => {
-                        args.is_empty()
-                            && matches!(
-                                name.as_str(),
-                                "key_from_seed" | "split_key" | "split_keys" | "fold_in"
-                            )
-                    }
-                    ConcreteHostExprKind::Var(name, _) => visible.contains(name),
-                    _ => false,
-                };
+            let admitted = visible.admits_binding(&binding);
             let projected_binding = project_binding(binding, &visible)?;
             if admitted {
-                visible.insert(projected_binding.name.clone());
+                visible.locals.insert(projected_binding.name.clone());
             }
             projected.push(projected_binding);
         }
@@ -722,7 +768,7 @@ fn project_let_spine(
 
 fn project_expr(
     expr: ConcreteHostExpr,
-    allowed_callbacks: &UnordSet<String>,
+    allowed_callbacks: &AllowedCallees,
 ) -> Result<HostAbiExpr, Unsupported> {
     if matches!(&expr.kind, ConcreteHostExprKind::Let { .. }) {
         return project_let_spine(expr, allowed_callbacks);
@@ -764,21 +810,27 @@ fn project_expr(
         ),
         ConcreteHostExprKind::Var(name, ty) => HostAbiExprKind::Var(
             name.clone(),
-            if matches!(ty, ConcreteHostType::Function(_, _)) && allowed_callbacks.contains(&name) {
+            if matches!(ty, ConcreteHostType::Function(_, _))
+                && allowed_callbacks.admits_value(&name)
+            {
                 HostAbiType::try_callback_signature(&ty)?
             } else {
                 HostAbiType::try_from_concrete(&ty)?
             },
         ),
         ConcreteHostExprKind::Call {
-            function,
+            callee,
             args,
             arg_tys,
             ty,
         } => {
-            if chelis_ir::host::is_host_unresolved_marker(&function) {
-                return Err(unsupported_callable_use(&function));
+            if let HostCalleeView::Unresolved(marker) = callee.view() {
+                return Err(unsupported_callable_use(marker));
             }
+            if !allowed_callbacks.admits(&callee) {
+                return Err(unsupported_function_symbol(callee.name()));
+            }
+            let function = callee.name();
             if args.len() != arg_tys.len() {
                 return Err(invalid_callback_shape(format!(
                     "call `{function}` has {} arguments but {} checked argument types",
@@ -806,7 +858,7 @@ fn project_expr(
                 .into_iter()
                 .unzip();
             HostAbiExprKind::Call {
-                function,
+                callee,
                 args,
                 arg_tys,
                 ty: HostAbiType::try_from_concrete(&ty)?,
@@ -948,12 +1000,21 @@ fn project_expr(
         },
         ConcreteHostExprKind::Let { .. } => unreachable!("let projection handled iteratively"),
         ConcreteHostExprKind::RetainedInvocation { bindings, body, ty } => {
+            // A retained formal that holds an admitted callable is a lexical
+            // callable within the invocation's body.
+            let mut visible = allowed_callbacks.clone();
+            let mut projected = Vec::with_capacity(bindings.len());
+            for binding in bindings {
+                let admitted = visible.admits_binding(&binding);
+                let projected_binding = project_binding(binding, &visible)?;
+                if admitted {
+                    visible.locals.insert(projected_binding.name.clone());
+                }
+                projected.push(projected_binding);
+            }
             HostAbiExprKind::RetainedInvocation {
-                bindings: bindings
-                    .into_iter()
-                    .map(|binding| project_binding(binding, allowed_callbacks))
-                    .collect::<Result<Vec<_>, _>>()?,
-                body: Box::new(project_expr(*body, allowed_callbacks)?),
+                bindings: projected,
+                body: Box::new(project_expr(*body, &visible)?),
                 ty: HostAbiType::try_from_concrete(&ty)?,
             }
         }
@@ -1019,7 +1080,7 @@ fn project_expr(
 fn project_callback_argument(
     expr: ConcreteHostExpr,
     expected: &ConcreteHostType,
-    allowed_callbacks: &UnordSet<String>,
+    allowed_callbacks: &AllowedCallees,
 ) -> Result<HostAbiExpr, Unsupported> {
     let ConcreteHostExprKind::Var(name, actual) = expr.kind else {
         return Err(unsupported_function_value(
@@ -1043,7 +1104,7 @@ fn project_callback_argument(
             "callback `{name}` has type {actual:?}, expected {expected:?}"
         )));
     }
-    if !allowed_callbacks.contains(&name) {
+    if !allowed_callbacks.admits_value(&name) {
         return Err(unsupported_function_symbol(&name));
     }
     Ok(HostAbiExpr {

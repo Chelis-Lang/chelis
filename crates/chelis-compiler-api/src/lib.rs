@@ -25,6 +25,8 @@ pub use transcript_capture::{
 };
 
 #[cfg(test)]
+mod callee_agreement;
+#[cfg(test)]
 mod fp_env_arch;
 #[cfg(test)]
 mod source_arch;
