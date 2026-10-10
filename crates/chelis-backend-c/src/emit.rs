@@ -221,6 +221,15 @@ fn finalize_elem(
     }
 }
 
+/// How a sum tree stores a lone leaf that no addition touched.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CarriedLeaf {
+    /// [04-NUM-2]: a reduction's one-leaf result finalizes like a sum.
+    Finalized,
+    /// spec/06 §2.4: a single cotangent contribution is the adjoint itself.
+    Unchanged,
+}
+
 struct MatmulEmitSpec {
     a: NodeId,
     b: NodeId,
@@ -5547,7 +5556,7 @@ impl CEmitter {
         let id = node.id.0;
         let et = Self::elem_type(&node.output_type);
         self.emit_slot_wrapper(id, &node.output_type);
-        self.line(&format!("int64_t t{id}_contributions = 1;"));
+        self.line(&format!("int64_t t{id}_contributions = 0;"));
         let mut offset = 0;
         for &width in groups {
             let first = node.inputs[offset].0;
@@ -5562,11 +5571,7 @@ impl CEmitter {
             &format!("t{id}_contributions"),
             node.output_type.precision,
         );
-        self.line(&format!(
-            "__sum_level_{id}[0] = {};",
-            Self::scalar_zero_literal(node.output_type.precision)
-        ));
-        self.line(&format!("int64_t t{id}_leaf = 1;"));
+        self.line(&format!("int64_t t{id}_leaf = 0;"));
         offset = 0;
         for &width in groups {
             let first = node.inputs[offset].0;
@@ -5587,7 +5592,7 @@ impl CEmitter {
         self.line("{");
         self.indent += 1;
         self.line("const int64_t outer = 0;");
-        self.emit_sum_fold(id, node.output_type.precision);
+        self.emit_sum_fold_with(id, node.output_type.precision, CarriedLeaf::Unchanged);
         self.indent -= 1;
         self.line("}");
     }
@@ -6927,6 +6932,13 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// accumulator width, and carry odd leaves without adding an identity.
     /// Fused and materialized Sum use this same emitted tree.
     fn emit_sum_fold(&mut self, id: usize, precision: Prim) {
+        self.emit_sum_fold_with(id, precision, CarriedLeaf::Finalized);
+    }
+
+    fn emit_sum_fold_with(&mut self, id: usize, precision: Prim, carried: CarriedLeaf) {
+        if carried == CarriedLeaf::Unchanged {
+            self.line(&format!("const int t{id}_carried = __sum_n_{id} == 1;"));
+        }
         let et = Self::elem_type(&TensorType {
             dims: vec![],
             precision,
@@ -6980,6 +6992,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     precision,
                 },
             )
+        };
+        let total = match carried {
+            CarriedLeaf::Finalized => total,
+            CarriedLeaf::Unchanged => format!("t{id}_carried ? __sum_level_{id}[0] : {total}"),
         };
         self.line(&format!("(({et}*)t{id}_data)[outer] = {total};"));
         self.line(&format!("chelis_tensor_end_write(__sum_guard_{id});"));

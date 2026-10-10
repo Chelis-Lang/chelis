@@ -40,7 +40,7 @@ The recursive definition is shape-preserving. It never drops a tuple field,
 list element, or ADT field merely because its cotangent is unit, and it never
 uses a backend carrier limitation to reject a language-defined cotangent.
 
-A disconnected differentiable scalar or tensor receives exact zeros with its
+A disconnected differentiable scalar or tensor receives exact positive zeros with its
 actual argument's dtype and ordered shape, including empty axes and rank zero. See
 [`grad_disconnected.ch`](../examples/grad_disconnected.ch).
 
@@ -118,8 +118,10 @@ from an arbitrary topological-sort tie.
 **Step 1 -- Initialize adjoints.**
 
 Create one cotangent accumulator for every forward value. Its type is §2.1's
-recursive `dT`, not necessarily one RISC tensor node. Initialize it with the
-shape-preserving zero cotangent for the executed primal value:
+recursive `dT`, not necessarily one RISC tensor node. A value that receives no
+contribution keeps the shape-preserving zero cotangent for the executed primal
+value. That zero is the adjoint only when nothing is queued; it is never a
+summand of §2.4's tree:
 
 ```
 for each value v_i in G:
@@ -179,15 +181,19 @@ lexicographically by canonical forward node ordinal, then by input-slot index.
 Repeated use by one consumer therefore remains distinct and is ordered by the
 slot in that consumer's exact input list. This consumer-edge order is
 independent of the work-list or topological-sort tie order used to construct
-the backward graph. At every float scalar or tensor leaf, combine their contributions with the
-canonical adjacent-pair balanced addition tree at that leaf's declared dtype,
-beginning with an exact positive-zero base leaf. Tuple, List, and ADT
-cotangents combine corresponding fields/elements recursively; List lengths and
-the executed ADT constructor must match the primal, and `unit` fields remain
-`unit`.
+the backward graph. At every float scalar or tensor leaf with m >= 1
+contributions, the adjoint is [05-OP-30]'s canonical adjacent-pair balanced
+tree over exactly those contributions in this order, each addition finalized at
+the leaf's declared dtype. No base value enters the tree: a single contribution
+is the adjoint unchanged, with no addition, so its sign of zero and its stored
+bits are kept. With no contribution the adjoint is exact positive zero at the
+primal's dtype and shape. Tuple, List, and ADT cotangents combine corresponding
+fields/elements recursively; List lengths and the executed ADT constructor must
+match the primal, and `unit` fields remain `unit`.
 
 ```
-adjoint[x] = balanced_add(+0, contribution(edge_1), ..., contribution(edge_m))
+adjoint[x] = balanced_add(contribution(edge_1), ..., contribution(edge_m))
+balanced_add() = +0
 ```
 
 This implements the multivariate chain rule: if `L = L(y_1(x), y_2(x), ..., y_m(x))`, then `dL/dx = sum_i (dL/dy_i * dy_i/dx)`.
@@ -936,9 +942,8 @@ function build_adjoint(G, wrt):
 
     -- Step 4: Backward traversal
     for each node n in reverse_topo:
-        upstream = balanced_sum(
-            exact_zero(cotangent_type(type_of(n))),
-            values_sorted_by_key(contributions[n]))
+        -- The empty tree is exact +0; one value is returned unchanged.
+        upstream = balanced_sum(values_sorted_by_key(contributions[n]))
 
         let rule = adjoint_rule(op_of(n))
         let input_contributions = rule(inputs_of(n), upstream)

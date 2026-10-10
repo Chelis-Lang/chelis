@@ -12218,6 +12218,7 @@ fn try_lower_general_list_grad_app(
         return Ok(None);
     };
     let has_explicit_wrt = callee.meta().wrt().is_some();
+    let declared_param_types = lookup_declared_fn_type(program, fn_name).map(|(params, _)| params);
 
     let mut rewritten_children = kids.to_vec();
     let mut parameter_plans = UnordMap::new();
@@ -12228,10 +12229,23 @@ fn try_lower_general_list_grad_app(
         };
         // A formal of a type-generic target is instantiated by this call's
         // actual, as the differentiated body is.
-        let Some(param_ty) = param_host_type(param).or_else(|| {
-            let actual_ty = expr_host_type(actual, program, scope);
-            (!actual_ty.is_unresolved()).then_some(actual_ty)
-        }) else {
+        let Some(param_ty) = param_host_type(param)
+            .or_else(|| {
+                let actual_ty = expr_host_type(actual, program, scope);
+                (!actual_ty.is_unresolved()).then_some(actual_ty)
+            })
+            .or_else(|| {
+                // A recursive tuple actual can have an unresolved host
+                // inference slot even when the target's checked parameter
+                // has a complete tuple type. Use that checked signature for
+                // the cotangent reconstruction plan.
+                declared_param_types
+                    .as_ref()
+                    .and_then(|params| params.get(param_index))
+                    .filter(|ty| !ty.is_unresolved())
+                    .cloned()
+            })
+        else {
             return Ok(None);
         };
         let mut rewritten_actual = actual.clone();
@@ -18112,7 +18126,11 @@ fn remap_tensor_helper_dim_symbols_raising(
     }
 
     let mut expected_output = expected_output.clone();
-    if let Some(mut returned) = dag.roots().first().copied() {
+    // A single expected output can bind only a single root. Gradient helpers
+    // may pack cotangents in an order different from their parameter order;
+    // binding their first root globally can rewrite an unrelated runtime axis.
+    if let [root] = dag.roots() {
+        let mut returned = *root;
         loop {
             let node = dag.get(returned).expect("helper root belongs to DAG");
             for dependency in &node.shape_deps {
@@ -18146,6 +18164,13 @@ fn remap_tensor_helper_dim_symbols_raising(
         }
     }
     let expected_output = &expected_output;
+    // A multi-root helper has no single expected result to bind globally.
+    // Check the original checker symbols before the positional substitution
+    // below can replace a shared symbol with one activation's extent and hide
+    // a conflicting extent from another activation.
+    if dag.roots().len() > 1 {
+        let _ = actualize_tensor_helper_types(dag, scope);
+    }
     let formal_inputs = tensor_helper_inputs(dag);
     let mut actual_inputs = formal_inputs
         .iter()
@@ -18158,7 +18183,9 @@ fn remap_tensor_helper_dim_symbols_raising(
         .iter()
         .map(|input| input.ty.clone())
         .collect::<Vec<_>>();
-    if let Some(root) = dag.roots().first().and_then(|id| dag.get(*id)) {
+    if let [root] = dag.roots()
+        && let Some(root) = dag.get(*root)
+    {
         formal_params.push(root.output_type.clone());
         let actual_output = if tensor_type_has_synthetic_dims(expected_output) {
             match root.op {
@@ -18200,9 +18227,9 @@ fn remap_tensor_helper_dim_symbols_raising(
     // symbol painted anywhere else has no declaring Load or op and resolves
     // to no extent origin at emission; those axes stay anon and size
     // themselves per node.
-    if let (Some(root_id), Some(actual_output)) =
-        (dag.roots().first().copied(), actual_inputs.last())
-        && let Some(root) = remapped.get(root_id)
+    if let [root_id] = dag.roots()
+        && let Some(actual_output) = actual_inputs.last()
+        && let Some(root) = remapped.get(*root_id)
         && root.output_type.dims.len() == actual_output.dims.len()
     {
         let is_anon = |dim: &crate::dag::DimInfo| matches!(dim, crate::dag::DimInfo::Named(name, None) if name.is_empty() || name == "*");
@@ -18223,7 +18250,7 @@ fn remap_tensor_helper_dim_symbols_raising(
         if changed {
             let op = root.op.clone();
             let inputs = root.inputs.clone();
-            remapped.replace_node(root_id, op, inputs, output);
+            remapped.replace_node(*root_id, op, inputs, output);
         }
     }
     actualize_tensor_helper_types(&remapped, scope)
@@ -27288,6 +27315,21 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         for root in actualized.roots() {
             assert_eq!(
                 actualized.get(*root).expect("root").output_type.dims,
+                vec![DimInfo::Lit(3)]
+            );
+        }
+        let remapped = remap_tensor_helper_dim_symbols(
+            &dag,
+            &agreeing,
+            &TensorType {
+                dims: vec![shared],
+                precision: Prim::Int64,
+            },
+        )
+        .expect("matching extents remain valid through the helper route");
+        for root in remapped.roots() {
+            assert_eq!(
+                remapped.get(*root).expect("root").output_type.dims,
                 vec![DimInfo::Lit(3)]
             );
         }

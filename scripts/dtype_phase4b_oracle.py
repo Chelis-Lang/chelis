@@ -1902,9 +1902,12 @@ def validate_normative_contract(
                 "fusion finalization boundary",
             ),
             (
-                "upstream = balanced_sum(\n"
-                "            exact_zero(cotangent_type(type_of(n))),",
-                "formal balanced cotangent accumulation",
+                "upstream = balanced_sum(values_sorted_by_key(contributions[n]))",
+                "base-free formal balanced cotangent accumulation",
+            ),
+            (
+                "-- The empty tree is exact +0; one value is returned unchanged.",
+                "formal empty and singleton accumulation",
             ),
             (
                 "canonical forward node ordinal, then by input-slot index",

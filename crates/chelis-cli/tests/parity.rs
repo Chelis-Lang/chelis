@@ -449,9 +449,10 @@ fn parity_grad_fused_zero() {
 fn parity_grad_runtime_basis() {
     let path = examples_root().join("grad_runtime_basis.ch");
     drive_parity(&path, true);
+    // The base-free adjacent-pair sum combines 1e20 and -1e20 before 3.0.
     assert_eq!(
         run_eval(&path),
-        b"out = tensor(shape=[3], data=[0.0, 3.0, 0.0])\ncapture = tensor(shape=[1], data=[0.0])\n"
+        b"out = tensor(shape=[3], data=[0.0, 3.0, 0.0])\ncapture = tensor(shape=[1], data=[3.0])\n"
     );
 }
 

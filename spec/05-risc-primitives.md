@@ -2753,14 +2753,20 @@ exact ADT identity by [05-OP-34].
 > follows the exact language-and-C selection contract above.
 >
 > `cumsum` admits signed-integer and float tensors and returns
-> `sum_result(p, default(p))` at the input shape. In increasing axis order an
-> exact-zero accumulator adds each input at §5.7.1's default sum-accumulator
-> dtype. Every prefix is finalized to the result dtype for output without
+> `sum_result(p, default(p))` at the input shape. In increasing axis order
+> the first input, converted exactly to §5.7.1's default sum-accumulator dtype,
+> is the first prefix, and each later input is added to the previous prefix at
+> that dtype. No base value enters the scan: the first prefix keeps the first
+> input's stored value, a `-0` included, and finalizes a NaN as a one-leaf
+> `sum` does. Every prefix is finalized to the result dtype for output without
 > narrowing the continuing accumulator. Integer overflow is checked at each
 > addition. A zero-length axis returns an empty tensor. The float adjoint is
-> the inclusive decreasing-axis scan at the same accumulator dtype, emitting
-> each suffix at the operand dtype. Integers are forward-only and bool is a
-> type error.
+> the inclusive decreasing-axis scan of the cotangent at the same accumulator
+> dtype under the same rule: the last cotangent is the last suffix, no base
+> value enters, and each suffix is emitted at the operand dtype. (Not fully
+> implemented for a `-0` suffix on an axis of two or more elements; see
+> [chelis#3414](https://github.com/Chelis-Lang/chelis/issues/3414).)
+> Integers are forward-only and bool is a type error.
 >
 > `sort` admits signed-integer and float tensors and returns `(values,
 > indices)`, with values at the input shape/dtype and exact i64 indices at

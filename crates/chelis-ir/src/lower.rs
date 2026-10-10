@@ -13367,6 +13367,49 @@ impl<'program> LowerCtx<'program> {
                     body.span_id().map(ToOwned::to_owned),
                 )
             });
+        // Inlining a gradient can turn a caller's runtime extent claim into
+        // a literal contradiction. Check the newly spliced witnesses in DAG
+        // order, before the cotangent is published: a singleton adjoint no
+        // longer creates an Add that would incidentally expose this proof.
+        for source in specialized_grad_dag.nodes() {
+            let Some(node) = remap.get(&source.id).and_then(|id| self.dag.get(*id)) else {
+                continue;
+            };
+            let RiscOp::ExtentWitness {
+                parameter,
+                axis: RtAxis::Lit(observed_axis),
+                requirements,
+                ..
+            } = &node.op
+            else {
+                continue;
+            };
+            let Some(axis) = usize::try_from(*observed_axis).ok() else {
+                continue;
+            };
+            let Some(&input) = node.inputs.first() else {
+                continue;
+            };
+            let Some(actual) = self.graph_fixed_axis_extent(input, axis) else {
+                continue;
+            };
+            for requirement in requirements {
+                if let Some(required) = requirement.as_i64_exact()
+                    && usize::try_from(required).ok() != Some(actual)
+                {
+                    raise_lowering_diagnostic(
+                        LowerDiagnostic::dimension_mismatch(
+                            format!(
+                                "extent witness `{parameter}` axis {axis}: expected {required}, \
+                                 got {actual} (extents fixed by literals after inlining)"
+                            ),
+                            node.span_id.clone(),
+                        )
+                        .fatal(),
+                    );
+                }
+            }
+        }
         #[cfg(feature = "lowering-trace")]
         let after_splice = subctx.trace.as_ref().map(|_| self.dag.clone());
         let mut control_roots = grad_result.dag.roots().iter().copied();

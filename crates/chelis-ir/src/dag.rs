@@ -852,8 +852,9 @@ pub enum RiscOp {
     ListMapCapture {
         first: bool,
     },
-    /// spec/06 §2.4's positive-zero-prefixed, own-dtype adjacent-pair tree.
-    /// Each group consumes this many consecutive inputs. Rank-one inputs in
+    /// spec/06 §2.4's own-dtype adjacent-pair tree over exactly the queued
+    /// contributions: one contribution is the adjoint unchanged, and none is
+    /// exact positive zero. Each group consumes this many consecutive inputs. Rank-one inputs in
     /// one group are interleaved row first, then input order; a scalar group
     /// has exactly one input. Groups follow canonical forward order.
     OrderedAdjointSum {

@@ -1476,24 +1476,22 @@ fn fill_like(dag: &mut Dag, owner: Owner, source: NodeId, value: f64) -> NodeId 
 }
 
 /// Combine one forward value's incoming cotangent contributions in the exact
-/// spec/06 §2.4 order: an exact positive-zero base leaf followed by increasing
-/// forward consumer ordinal and input slot, reduced by adjacent pairs while an
-/// odd tail is carried unchanged. The caller supplies contributions in that
-/// sorted order.
+/// spec/06 §2.4 order: increasing forward consumer ordinal and input slot,
+/// reduced by adjacent pairs while an odd tail is carried unchanged. No base
+/// value enters the tree, so a single contribution is the adjoint itself and
+/// keeps its sign of zero. The caller supplies at least one contribution, in
+/// that sorted order.
 fn balanced_adjoint_sum(
     dag: &mut Dag,
     forward_node: &DagNode,
     contributions: Vec<NodeId>,
 ) -> NodeId {
-    debug_assert!(!contributions.is_empty());
+    assert!(
+        !contributions.is_empty(),
+        "an adjoint with no contribution is the exact positive zero, not an empty tree"
+    );
     let ty = forward_node.output_type.clone();
-    let before_zero = dag.len();
-    let zero = zero_like(dag, forward_node.owner, forward_node.id);
-    stamp_grad_marker(dag, before_zero, forward_node);
-
-    let mut level = Vec::with_capacity(contributions.len() + 1);
-    level.push(zero);
-    level.extend(contributions);
+    let mut level = contributions;
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
@@ -4725,8 +4723,9 @@ mod tests {
     #[test]
     fn grad_accumulation_uses_forward_consumer_order_and_a_balanced_tree() {
         // The four uses of x have forward consumer order c1, c2, c3, c4.
-        // With the required positive-zero base leaf, adjacent-pair balancing
-        // computes ((+0 + c1) + (c2 + c3)) + c4 = 1 at f32. The historical
+        // With no base leaf, adjacent-pair balancing computes
+        // (c1 + c2) + (c3 + c4) = 0 + 2 = 2 at f32. A positive-zero base leaf
+        // would compute ((+0 + c1) + (c2 + c3)) + c4 = 1, and the historical
         // reverse-consumer left fold computes (((c4 + c3) + c2) + c1) = 0.
         let mut dag = Dag::new();
         let owner = Owner::from(dag.declare("test"));
@@ -4757,11 +4756,11 @@ mod tests {
         let grad_result = grad_dag(&dag, output, &[x]).expect("gradient");
         let values = eval_scalar(&grad_result.dag, &UnordMap::from([("x".to_string(), 0.0)]));
 
-        assert_eq!(values[&grad_result.grad_nodes[&x]], 1.0);
+        assert_eq!(values[&grad_result.grad_nodes[&x]], 2.0);
     }
 
     #[test]
-    fn balanced_adjoint_zero_tracks_runtime_wildcard_shape() {
+    fn balanced_adjoint_sum_tracks_runtime_wildcard_shape() {
         use crate::eval::{TensorValue, eval_tensor};
 
         let concrete_ty = TensorType {

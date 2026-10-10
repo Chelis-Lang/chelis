@@ -184,11 +184,17 @@ fn composed_abs_matches_the_primitive_with_nonunit_cotangents() {
                             .find_map(|line| line.strip_prefix(&prefix))
                             .unwrap()
                     };
-                    assert_eq!(
-                        value(format!("wrapper_{i}_{j} = ")),
-                        value(format!("core_{i}_{j} = ")),
-                        "{dtype} coefficient {i} input {j}: {output}"
-                    );
+                    let wrapper = value(format!("wrapper_{i}_{j} = "));
+                    let core = value(format!("core_{i}_{j} = "));
+                    if i == 0 && (2..=4).contains(&j) {
+                        // Control reads do not queue data cotangents. Both
+                        // paths retain the negative zero from their sole
+                        // contribution in the base-free §2.4 tree.
+                        assert_eq!(wrapper, "-0.0", "{dtype}: {output}");
+                        assert_eq!(core, "-0.0", "{dtype}: {output}");
+                    } else {
+                        assert_eq!(wrapper, core, "{dtype} coefficient {i} input {j}: {output}");
+                    }
                 }
             }
         };

@@ -3048,9 +3048,11 @@ fn within_family(
     }
 }
 
-/// [05-OP-33] `cumsum` over explicitly ordered lanes. In lane order an
-/// exact-zero accumulator at §5.7.1's default sum-accumulator dtype adds each
-/// input, and each prefix is stored at `sum_result(p, default(p))`. Every
+/// [05-OP-33] `cumsum` over explicitly ordered lanes. In lane order the first
+/// input, converted to §5.7.1's default sum-accumulator dtype and finalized
+/// like a one-leaf sum, is the first prefix; each later input is added to the
+/// previous prefix at that dtype. No base value enters, so a `-0` first input
+/// stays `-0`. Each prefix is stored at `sum_result(p, default(p))`. Every
 /// input index belongs to exactly one lane; callers own the axis planning.
 pub fn cumsum_tensor_lanes(
     input: &TensorStorage,
@@ -3082,11 +3084,15 @@ pub fn cumsum_tensor_lanes(
     };
     let mut values = vec![within_family(OP, zero, result)?; input.len()];
     for lane in lanes {
-        let mut running = zero;
+        let mut running = None;
         for &index in lane {
             let leaf = within_family(OP, input.scalar_at(index), accumulator)?;
-            running = width_add(OP, running, leaf)?;
-            values[index] = within_family(OP, running, result)?;
+            let prefix = match running {
+                None => canonical_nan_scalar(leaf),
+                Some(previous) => width_add(OP, previous, leaf)?,
+            };
+            running = Some(prefix);
+            values[index] = within_family(OP, prefix, result)?;
         }
     }
     Ok(tensor_from_scalars(result, &values))

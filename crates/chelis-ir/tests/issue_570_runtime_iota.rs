@@ -301,14 +301,16 @@ fn ordered_cotangent_tree_rounds_at_each_active_float_width() {
     ] {
         let dag = ordered_sum_program(precision, vec![1], &[1]);
         assert!(chelis_ir::verify::verify(&dag).is_empty());
-        for data in [vec![large, -large, small], vec![]] {
+        // spec/06 §2.4 has no base leaf: (large + -large) + small = small,
+        // and no contribution is exact +0.
+        for (data, expected) in [(vec![large, -large, small], small), (vec![], 0.0)] {
             let values = eval_tensor_roots_with_strict(&dag, dag.roots(), |_| {
                 Some(TensorValue::from_vec(vec![data.len()], data.clone()))
             })
             .unwrap();
             assert_eq!(
                 values[&dag.roots()[0]].first_f64_lossy_or_zero().to_bits(),
-                0.0f64.to_bits(),
+                f64::to_bits(expected),
                 "{precision:?}"
             );
         }
@@ -317,7 +319,9 @@ fn ordered_cotangent_tree_rounds_at_each_active_float_width() {
 
 #[test]
 fn ordered_cotangent_groups_preserve_rows_and_separate_invocations() {
-    for (groups, expected) in [(vec![2], 0.0), (vec![1, 1], 3.0)] {
+    // Rows interleave within a group: [a, a, b, b, 3, 3] sums to 6, while two
+    // invocations give [a, b, 3, a, b, 3], which pairs to ((a + b) + (3 + a)) + (b + 3) = 0.
+    for (groups, expected) in [(vec![2], 6.0), (vec![1, 1], 0.0)] {
         let dag = ordered_sum_program(Prim::F32, groups, &[1, 1]);
         let values = eval_tensor_roots_with_strict(&dag, dag.roots(), |_| {
             Some(TensorValue::from_vec(vec![3], vec![1.0e20, -1.0e20, 3.0]))

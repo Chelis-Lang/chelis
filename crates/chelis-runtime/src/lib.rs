@@ -6693,15 +6693,22 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
         let output = Output::data_ptr_unchecked(out);
         for outer_idx in 0..outer {
             for inner_idx in 0..inner {
-                let mut running: Accumulator = Accumulator::default();
+                // [05-OP-33]: the first input is the first prefix, finalized
+                // like a one-leaf sum; no base value is added to it, so a
+                // `-0` stays `-0`.
+                let mut running: Option<Accumulator> = None;
                 for axis_idx in 0..axis_size {
                     let linear = metadata_or_fail(
                         axis.linear_index(outer_idx, axis_idx, inner_idx),
                         "chelis_tensor_cumsum",
                     );
-                    running =
-                        running.runtime_add((*input.add(linear)).into_accumulator(), "cumsum");
-                    *output.add(linear) = Output::from_accumulator(running);
+                    let leaf: Accumulator = (*input.add(linear)).into_accumulator();
+                    let prefix = match running {
+                        None => leaf.runtime_finalize(),
+                        Some(previous) => previous.runtime_add(leaf, "cumsum"),
+                    };
+                    running = Some(prefix);
+                    *output.add(linear) = Output::from_accumulator(prefix);
                 }
             }
         }
