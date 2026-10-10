@@ -1,1 +1,0 @@
-Rejection-registry generation writes from the production module graph without compiling the full workspace. Pull-request CI retains the independent compiler source-closure check. See [#3303](https://github.com/Chelis-Lang/chelis/issues/3303).
