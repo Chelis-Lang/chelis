@@ -1749,55 +1749,74 @@ def test_two() -> unit = test_assert(true, "would have passed two")
 // === Phase 3t.5 extras: richer failure-mode coverage ===
 
 #[test]
-fn chelis_test_infinite_recursion_times_out_and_suite_continues() {
-    // 3t.5 coverage: an infinite loop in one test should surface as a FAIL
-    // carrying the timeout message, not hang the suite. A sibling passing
-    // test must still run and pass so the runner is proven to proceed past
-    // the timed-out worker. The timeout is the `--timeout` override so we do
-    // not have to wait the default 30s.
-    let (_dir, pkg) = make_reef_package("phase3t-smoke-timeout");
+fn chelis_test_blocking_timeout_marks_unrun_and_suite_continues() {
+    let (dir, pkg) = make_reef_package("phase3t-smoke-timeout");
+    let late_marker = dir.path().join("late.txt");
+    let unrun_marker = dir.path().join("unrun.txt");
+    let late_literal =
+        serde_json::to_string(&late_marker.to_string_lossy()).expect("late marker literal");
+    let unrun_literal =
+        serde_json::to_string(&unrun_marker.to_string_lossy()).expect("unrun marker literal");
     write_file(
-        &pkg.join("tests/loopy.ch"),
-        r#"module Smoke.Tests.Loopy
-
--- A fold over a multi-million-element range is a stack-safe way to trip
--- the per-test timeout without blowing the worker stack (native
--- recursion with no base case overflows the 32 MB test-worker stack
--- before the timeout deadline fires). 10_000_000 iterations consistently
--- exceeds the --timeout 2 budget used below.
-def test_infinite() -> unit = test_assert(eq(fold(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), range(cast(0, i64), cast(10000000, i64))), cast(0, i64)), "never")
-
-def test_quick() -> unit = test_assert(true, "quick")
+        &pkg.join("tests/blocked.ch"),
+        &r#"module Smoke.Tests.Blocked
+def test_blocked() -> unit ! { Test, IO } = {
+  _ = process_run("sleep", ["8"])
+  write_file(@@LATE@@, "late")
+}
+def test_unrun() -> unit ! { Test, IO } = write_file(@@UNRUN@@, "ran")
+"#
+        .replace("@@LATE@@", &late_literal)
+        .replace("@@UNRUN@@", &unrun_literal),
+    );
+    write_file(
+        &pkg.join("tests/separate.ch"),
+        r#"module Smoke.Tests.Separate
+def test_separate() -> unit = test_assert(true, "separate file runs")
 "#,
     );
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
-        .args(["test", "--timeout", "2", "tests/"])
+        .args([
+            "test",
+            "--timeout",
+            "2",
+            "--jobs",
+            "1",
+            "--batch-mode",
+            "file",
+            "tests/",
+        ])
         .output()
         .expect("run");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // The looping test must appear as FAIL with a timeout-flavored message.
     assert!(
-        stdout.contains("test_infinite"),
-        "test_infinite missing from:\n{stdout}"
+        stdout.lines().any(|line| {
+            line.contains("test_blocked") && line.contains("FAIL (timeout after 2s)")
+        }),
+        "test_blocked timeout missing from:\n{stdout}"
     );
     assert!(
-        stdout.contains("timeout"),
-        "timeout message missing from:\n{stdout}"
+        stdout.lines().any(|line| {
+            line.contains("test_unrun")
+                && line.contains("FAIL (unrun after timed-out test did not stop)")
+        }),
+        "test_unrun failure missing from:\n{stdout}"
     );
-    // The sibling test must have PASSed — the runner must not bail after one
-    // timed-out test.
     assert!(
-        stdout.contains("test_quick"),
-        "test_quick missing from:\n{stdout}"
+        stdout
+            .lines()
+            .any(|line| line.contains("test_separate") && line.contains("PASS")),
+        "separate file must pass after the stopped worker:\n{stdout}"
     );
-    let pass_count = stdout.matches("PASS").count();
     assert!(
-        pass_count >= 1,
-        "expected at least one PASS (test_quick); got {pass_count} in:\n{stdout}"
+        stdout.contains("1 passed, 2 failed"),
+        "expected one pass and two failures:\n{stdout}"
     );
+    assert!(!late_marker.exists(), "timed-out row wrote a late marker");
+    assert!(!unrun_marker.exists(), "unrun row executed");
     assert_eq!(output.status.code(), Some(1));
 }
 
