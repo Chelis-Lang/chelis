@@ -2131,6 +2131,7 @@
     "scripts.test_runtime_representation_oracle.SourceUniverseTests.test_retiring_a_file_still_in_the_universe_fails",
     "scripts.test_runtime_representation_oracle.SourceUniverseTests.test_the_universe_holds_the_phase2_owned_sources",
     "scripts.test_runtime_representation_oracle.SourceUniverseTests.test_the_universe_is_every_file_under_the_frozen_roots",
+    "scripts.test_runtime_representation_oracle.SourceUniverseTests.test_visible_names_are_scanned_whatever_their_spelling",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_added_test_binary_is_hashed_and_checked_after_execution",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_duplicate_json_fields_are_not_a_valid_selection",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_execution_receipt_names_and_reports_an_added_test",

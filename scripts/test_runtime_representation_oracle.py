@@ -324,6 +324,32 @@ class SourceUniverseTests(unittest.TestCase):
         )
         self.assertEqual(directories, baseline["source_inventory"]["roots"])
 
+    def test_visible_names_are_scanned_whatever_their_spelling(self) -> None:
+        local = REPO_ROOT / "crates/chelis-ir/src/runtime_representation_visible_names"
+        self.assertFalse(local.exists())
+        names = ("\u00e9.rs", 'q"t.rs', "tab\tname.rs", "back\\slash.rs", "new\nline.rs")
+        expected = {
+            f"crates/chelis-ir/src/runtime_representation_visible_names/{name}"
+            for name in names
+        }
+        try:
+            local.mkdir()
+            for name in names:
+                (local / name).write_text("pub fn visible() {}\n", encoding="utf-8")
+            oracle._invalidate_inventory_cache()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "core.quotePath",
+                    "GIT_CONFIG_VALUE_0": "true",
+                },
+            ):
+                self.assertLessEqual(expected, set(oracle.inventory_sources(REPO_ROOT)))
+        finally:
+            shutil.rmtree(local, ignore_errors=True)
+            oracle._invalidate_inventory_cache()
+
     def test_regeneration_prunes_unreferenced_retired_files(self) -> None:
         stale = "crates/chelis-ir/src/runtime_representation_unreferenced_probe.rs"
         baseline = oracle.load_baseline()
