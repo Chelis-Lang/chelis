@@ -1929,7 +1929,12 @@ def _ci_job_block(job: str) -> str:
         return _workflow_job_block(PR_CONTRACT_ACK_YML, job)
     if job in {"package-expansion-shard", "package-expansion-summary"}:
         return _workflow_job_block(PR_PACKAGE_EXPANSION_YML, job)
-    if job in {"macos-workspace-shard", "macos-smoke", "smt-build-darwin-arm64"}:
+    if job in {
+        "macos-workspace-shard",
+        "macos-binding-census",
+        "macos-smoke",
+        "smt-build-darwin-arm64",
+    }:
         return _workflow_job_block(CI_YML.with_name("macos-nightly.yml"), job)
     if job in {'backend-sanitizers-full', 'dtype-phase3-oracle', 'compiled-value-ownership-phase0-oracle', 'faithful-observation-phase2-oracle', 'generalize-sweep-oracle-shard', 'full-workspace', 'runtime-representation-phase0-oracle', 'integration-support', 'generalize-sweep-oracle', 'module-oracles'}:
         return _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), job)
@@ -1956,6 +1961,22 @@ def _assert_executable_run_once(job_block: str, command: str) -> None:
         raise AssertionError(
             f"expected exactly one executable `run: {command}`, found {count}"
         )
+
+
+def _assert_macos_aggregate_requires_census(aggregate_block: str) -> None:
+    needs = (
+        "needs: [macos-workspace-shard, macos-binding-census, "
+        "macos-ownership-ledger]"
+    )
+    if needs not in aggregate_block:
+        raise AssertionError("macOS aggregate omits a required producer")
+    _assert_executable_run_once(
+        aggregate_block,
+        "python3 scripts/ci_require_success.py "
+        "macos-workspace-shard=${{ needs.macos-workspace-shard.result }} "
+        "macos-binding-census=${{ needs.macos-binding-census.result }} "
+        "macos-ownership-ledger=${{ needs.macos-ownership-ledger.result }}",
+    )
 
 
 def _ci_step_block(job_block: str, step_name: str) -> str:
@@ -2639,16 +2660,27 @@ class CiParityTests(unittest.TestCase):
 
     def test_macos_suite_is_two_disjoint_shards_behind_stable_aggregate(self):
         shard_block = _ci_job_block("macos-workspace-shard")
+        census_block = _ci_job_block("macos-binding-census")
         aggregate_block = _ci_job_block("macos-smoke")
         _assert_hash_partition_contract(shard_block, expected_count=2)
         self.assertIn("cargo nextest run --workspace", shard_block)
         self.assertIn("--partition hash:${{ matrix.shard }}/2", shard_block)
         self.assertIn("if: matrix.shard == 2", shard_block)
+        self.assertIn("name: macOS Binding Census", census_block)
         self.assertIn("name: macOS Smoke", aggregate_block)
-        self.assertIn(
-            "needs: [macos-workspace-shard, macos-ownership-ledger]", aggregate_block
-        )
-        self.assertIn("scripts/ci_require_success.py", aggregate_block)
+        _assert_macos_aggregate_requires_census(aggregate_block)
+
+    def test_macos_aggregate_fails_if_census_is_dropped(self):
+        aggregate_block = _ci_job_block("macos-smoke")
+        for missing in (
+            "macos-binding-census, ",
+            "macos-binding-census=${{ needs.macos-binding-census.result }} ",
+        ):
+            with self.subTest(missing=missing):
+                with self.assertRaises(AssertionError):
+                    _assert_macos_aggregate_requires_census(
+                        aggregate_block.replace(missing, "")
+                    )
 
     def test_topology_docs_name_current_shard_owners(self):
         doc = (REPO_ROOT / "docs/ci_validation.md").read_text()

@@ -415,6 +415,40 @@ def _list_filterset(filterset: str) -> dict[str, tuple[str, bool]]:
     return out
 
 
+def _list_macos_census_selection(*, census_only: bool) -> set[str]:
+    """List the exact ci-full census or workspace selector on the Mac basis."""
+    from scripts.test_hosted_validation import MACOS_CENSUS_SELECTOR
+
+    command = ["cargo", "nextest", "list"]
+    if census_only:
+        command.extend(["-p", "chelis-python", "--test", "capacity_census_bindings"])
+        selector = MACOS_CENSUS_SELECTOR
+    else:
+        command.append("--workspace")
+        selector = f"not ({MACOS_CENSUS_SELECTOR})"
+    command.extend(["--profile", "ci-full", "--message-format", "json", "-E", selector])
+    result = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        env=_cargo_environment(),
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"macOS census selection failed (exit {result.returncode}): "
+            f"{result.stderr[-2000:]}"
+        )
+    document = json.loads(result.stdout)
+    return {
+        f"{binary}::{name}"
+        for binary, suite in document["rust-suites"].items()
+        for name, info in suite["testcases"].items()
+        if info["filter-match"]["status"] == "matches" and not info["ignored"]
+    }
+
+
 def _module_oracle_test_names() -> set[str]:
     """The canonical names of the tests the `module-oracles` job owns."""
     config = ci_change_owned.read_config(REPO_ROOT / ".config/ci-test-targets.toml")
@@ -574,6 +608,29 @@ class ProfilePartitionTests(unittest.TestCase):
             )
             for owner in dtype_oracle_manifest.OWNERS
         }
+
+    def test_macos_census_is_selected_once_across_workspace_and_dedicated_job(self):
+        from scripts.test_hosted_validation import MACOS_CENSUS_SELECTOR
+
+        expected = (
+            "chelis-python::capacity_census_bindings::"
+            "registered_pyfunctions_match_the_reviewed_rustdoc_signatures"
+        )
+        self.assertIn(expected, self.full)
+        self.assertEqual(
+            MACOS_CENSUS_SELECTOR,
+            "binary_id(/^chelis-python::capacity_census_bindings$/) & "
+            "test(/^registered_pyfunctions_match_the_reviewed_rustdoc_signatures$/)",
+        )
+        census = _list_macos_census_selection(census_only=True)
+        workspace = _list_macos_census_selection(census_only=False)
+        self.assertEqual(census, {expected})
+        ordinary = {
+            identity for identity, (status, ignored) in _list_profile("ci-full").items()
+            if status == "matches" and not ignored
+        }
+        self.assertEqual(workspace | census, ordinary)
+        self.assertFalse(workspace & census)
 
     def test_fast_selection_is_a_subset_of_unfiltered_nightly(self):
         from scripts import ci_test_targets, gate, ownership_ledger_tests
