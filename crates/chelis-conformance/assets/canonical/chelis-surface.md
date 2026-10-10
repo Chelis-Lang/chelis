@@ -168,7 +168,7 @@ see §6 for dtype and dynamic-extent restrictions.
 | `permute` | `(&tensor[..,p], axes: i32...) -> tensor[..,p]` | `permute(g, inverse_axes)` |
 | `expand` | `(&tensor[D,p], axis: i32, size: i64) -> tensor[D',p]` | `insert(sum(g, axis), axis, 1i64)` |
 | `insert` | `(&tensor[D,p], axis: i32, size: i64) -> tensor[D_plus,p]` | `sum(g, axis)` |
-| `pad` | `(&tensor[D,p], padding, fill) -> tensor[D',p]` | `shrink(g, inverse_padding)` |
+| `pad` | `(&tensor[D,p], padding, fill: p) -> tensor[D',p]` | `shrink(g, inverse_padding)`; `fill`, literal or runtime, receives `g` summed with every moved-`x` cell masked to +0 ([05-OP-49]) |
 | `shrink` | `(&tensor[D,p], bounds) -> tensor[D',p]` | `pad(g, inverse_bounds)` |
 | `stride` | `(&tensor[D,p], strides) -> tensor[D',p]` | [05-MOV-1]'s zero-filled inverse sampling map at the original shape |
 

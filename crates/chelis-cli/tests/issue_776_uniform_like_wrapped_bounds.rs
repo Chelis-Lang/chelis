@@ -296,42 +296,22 @@ fn pad_cast_wrapped_fill_emits_declared_bits_not_silent_zero() {
 }
 
 #[test]
-fn pad_runtime_fill_build_fails_loudly() {
-    // A runtime pad fill is not statically foldable: the build must fail loudly
-    // naming pad + chelis#776, never silently bake a 0.0f fill.
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("pad_rt.ch");
-    let out_dir = dir.path().join("pad_rt-out");
-    write_file(
-        &path,
-        "def f(x: tensor[4, f32], r: f32) -> tensor[6, f32] = pad(&x, [[1i64, 1i64]], r)\n\
-         out = f(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]), cast(9.0, f32))\n",
-    );
-    let out = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            "--emit-c",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .output()
-        .expect("chelis build should run");
-    assert!(
-        !out.status.success(),
-        "build must fail loudly on a runtime pad fill, not silently compile"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("pad")
-            && stderr.contains("statically-resolvable")
-            && stderr.contains("chelis#776"),
-        "build diagnostic must name pad, the static requirement, and chelis#776:\n{stderr}"
-    );
+fn pad_runtime_fill_places_its_runtime_value_in_both_lanes() {
+    // chelis#3389: a runtime pad fill is an ordinary [05-OP-49] value operand.
+    // The build that once refused it (chelis#776's loud refusal) now compiles,
+    // and both lanes place the runtime 9.0 in the padded cells: never a baked
+    // 0.0f default, and never a statically substituted value.
+    let src = "def f(x: tensor[4, f32], r: f32) -> tensor[6, f32] = pad(&x, [[1i64, 1i64]], r)\n\
+               sampled = f(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]), cast(9.0, f32))\n";
+    let expected = [9.0, 1.0, 2.0, 3.0, 4.0, 9.0];
+    let eval = eval_sampled(src);
+    assert_eq!(eval, expected, "eval places the runtime fill");
+    if !gcc_available() {
+        eprintln!("skipping the C lane: no host C compiler");
+        return;
+    }
+    let c = c_sampled(src, "pad_rt");
+    assert_f32_bit_parity(&eval, &c, "runtime pad fill");
 }
 
 // -- chelis#731 obligation: the checker sees a keyed draw's bounds -----------

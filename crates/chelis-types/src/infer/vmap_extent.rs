@@ -297,8 +297,10 @@ fn movement_operation(name: &str) -> Option<&str> {
 fn movement_bound_dependencies(operation: &str, args: &[ParamDeps]) -> ParamDeps {
     let selected: Box<dyn Iterator<Item = &ParamDeps> + '_> = match operation {
         "expand" | "insert" => Box::new(args.get(2).into_iter()),
-        "reshape" => Box::new(args.get(1).into_iter()),
-        "shrink" | "pad" | "stride" => Box::new(args.iter().skip(1)),
+        // `pad`'s third argument is its fill, a value operand ([05-OP-49]),
+        // not an extent: a batched fill pads each row with its own value.
+        "reshape" | "pad" => Box::new(args.get(1).into_iter()),
+        "shrink" | "stride" => Box::new(args.iter().skip(1)),
         _ => Box::new(std::iter::empty()),
     };
     selected.flatten().copied().collect()

@@ -1377,46 +1377,25 @@ fn zero_like(dag: &mut Dag, owner: Owner, source: NodeId) -> NodeId {
 
 /// Construct a uniform `value` with the dtype and physical axes of `source`,
 /// a node already in `dag`. Every synthesized backward constant at positive
-/// rank goes through here. Anonymous dimensions are claims, not an allocation
-/// or equality witness, so a ranked `Const` that merely copies `source`'s
-/// type has no extent source for them (the chelis#1482 refusal, reached from
-/// grad in chelis#3381). Instead a rank-0 constant is widened one axis at a
-/// time, each `Expand` reading its extent directly from `source`.
+/// rank goes through here: a rank-0 constant widened by
+/// [`Dag::broadcast_like`] (chelis#1482, reached from grad in chelis#3381).
 fn fill_like(dag: &mut Dag, owner: Owner, source: NodeId, value: f64) -> NodeId {
-    let ty = dag
+    let precision = dag
         .get(source)
         .expect("fill_like source is a node of the backward DAG")
         .output_type
-        .clone();
-    let mut filled = dag.add_node(
+        .precision;
+    let scalar = dag.add_node(
         owner,
-        RiscOp::synth_const(ty.precision, value),
+        RiscOp::synth_const(precision, value),
         vec![],
         TensorType {
             dims: vec![],
-            precision: ty.precision,
+            precision,
         },
         None,
     );
-    for axis in 0..ty.dims.len() {
-        filled = dag.add_node(
-            owner,
-            RiscOp::Expand {
-                axis,
-                size: RtDim::InputAxis {
-                    tensor: 1,
-                    axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits i32")),
-                },
-            },
-            vec![filled, source],
-            TensorType {
-                dims: ty.dims[..=axis].to_vec(),
-                precision: ty.precision,
-            },
-            None,
-        );
-    }
-    filled
+    dag.broadcast_like(owner, scalar, source, None)
 }
 
 /// Combine one forward value's incoming cotangent contributions in the exact
