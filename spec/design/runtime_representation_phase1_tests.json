@@ -363,6 +363,25 @@
       ]
     },
     {
+      "name": "nested C claim pattern table, projection, join and value-walk execution",
+      "args": [
+        "-p",
+        "chelis-cli",
+        "--test",
+        "issue_3347_nested_claim_patterns",
+        "-E",
+        "(test(=c_nongeneric_box_result_traps_at_insert) | test(=c_recursive_pair_traps_at_the_right_leaf) | test(=c_tuple_option_and_record_results_trap_at_their_producer) | test(=c_mutual_recursion_names_the_innermost_claim) | test(=c_self_recursion_checks_its_own_witness) | test(=agreeing_claim_walks_run_when_the_host_is_cxx)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
+      ],
+      "required": [
+        "chelis-cli::issue_3347_nested_claim_patterns::agreeing_claim_walks_run_when_the_host_is_cxx",
+        "chelis-cli::issue_3347_nested_claim_patterns::c_mutual_recursion_names_the_innermost_claim",
+        "chelis-cli::issue_3347_nested_claim_patterns::c_nongeneric_box_result_traps_at_insert",
+        "chelis-cli::issue_3347_nested_claim_patterns::c_recursive_pair_traps_at_the_right_leaf",
+        "chelis-cli::issue_3347_nested_claim_patterns::c_self_recursion_checks_its_own_witness",
+        "chelis-cli::issue_3347_nested_claim_patterns::c_tuple_option_and_record_results_trap_at_their_producer"
+      ]
+    },
+    {
       "name": "named List entry metadata and result witness execution",
       "args": [
         "-p",
