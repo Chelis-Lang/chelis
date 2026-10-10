@@ -724,10 +724,16 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/06-transformations.md"
         mutations = (
             (
+                "upstream = balanced_sum(values_sorted_by_key(contributions[n]))",
                 "upstream = balanced_sum(\n"
-                "            exact_zero(cotangent_type(type_of(n))),",
-                "upstream = left_fold_add(contributions[n])",
-                "formal balanced cotangent accumulation",
+                "            exact_zero(cotangent_type(type_of(n))),\n"
+                "            values_sorted_by_key(contributions[n]))",
+                "base-free formal balanced cotangent accumulation",
+            ),
+            (
+                "-- The empty tree is exact +0; one value is returned unchanged.",
+                "-- The empty tree is exact +0; one value adds that zero.",
+                "formal empty and singleton accumulation",
             ),
             (
                 "return pack_wrt_gradients(grads)",
