@@ -1141,6 +1141,14 @@ impl<'a> VerifiedHostFunctionView<'a> {
         &self.function().helper_result_claim_axes
     }
 
+    pub fn result_claim(self) -> Option<&'a std::sync::Arc<crate::claim_pattern::ClaimPattern>> {
+        self.function().result_claim.as_ref()
+    }
+
+    pub fn entry_claims(self) -> &'a [Option<std::sync::Arc<crate::claim_pattern::ClaimPattern>>] {
+        &self.function().entry_claims
+    }
+
     pub fn entry_contract(
         self,
     ) -> &'a crate::host::EntryContract<crate::host_type_state::ConcreteHostType> {

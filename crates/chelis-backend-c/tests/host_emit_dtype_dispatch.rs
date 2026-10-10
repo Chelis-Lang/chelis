@@ -51,6 +51,8 @@ fn make_binary_program(op_name: &str, prim: Prim) -> HostProgram {
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
+            entry_claims: Vec::new(),
             entry_contract: Default::default(),
             name: "the_fn".to_string(),
             params: vec![
@@ -90,6 +92,8 @@ fn make_unary_program(op_name: &str, prim: Prim) -> HostProgram {
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
+            entry_claims: Vec::new(),
             entry_contract: Default::default(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
@@ -126,6 +130,8 @@ fn make_tensor_to_scalar_program(prim: Prim, scalar_ty: HostType) -> HostProgram
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
+            entry_claims: Vec::new(),
             entry_contract: Default::default(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
@@ -162,6 +168,8 @@ fn make_scalar_to_tensor_program() -> HostProgram {
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
+            entry_claims: Vec::new(),
             entry_contract: Default::default(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
@@ -262,6 +270,8 @@ fn make_checked_tensor_cast_program(source: Prim, target: Prim) -> HostProgram {
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
+            entry_claims: Vec::new(),
             entry_contract: Default::default(),
             name: "the_fn".to_string(),
             params: vec![HostParam {

@@ -1287,7 +1287,9 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 }
                 for entry in lists {
                     let actual = expr_type(&entry.value);
-                    if !matches!(actual, ConcreteHostType::List(_)) {
+                    // A nested-claim formal is walked along its pattern
+                    // (runtime_extents.md C6.5); any other entry is a List.
+                    if entry.claim.is_none() && !matches!(actual, ConcreteHostType::List(_)) {
                         return Err(OwnershipError::CallArgumentType {
                             unit: self.unit_name.clone(),
                             callee: "signature entry".into(),

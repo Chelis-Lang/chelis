@@ -46,6 +46,17 @@ fn entry_tensor_dims(ty: &HostTypeTerm) -> Vec<&DimInfo> {
     }
 }
 
+impl<T> EntryPattern<T> {
+    /// Whether the formal holds a tensor this pattern observes.
+    pub fn has_tensor(&self) -> bool {
+        match self {
+            Self::Tensor(_) => true,
+            Self::List(inner) => inner.has_tensor(),
+            Self::Other => false,
+        }
+    }
+}
+
 impl EntryPattern<HostTypeTerm> {
     /// An entry check is needed for a declared literal or named tensor axis.
     pub fn has_extent_claim(&self) -> bool {

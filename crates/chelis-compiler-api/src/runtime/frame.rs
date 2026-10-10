@@ -51,9 +51,15 @@ impl ResultProducer {
     }
 
     pub(crate) fn child(&self, index: usize) -> Option<Self> {
+        self.child_ref(index).cloned()
+    }
+
+    /// [`Self::child`], borrowed: a walk that only reads a child's
+    /// provenance copies no subtree.
+    pub(crate) fn child_ref(&self, index: usize) -> Option<&Self> {
         match self {
-            Self::Aggregate(children) => children.get(index).cloned().flatten(),
-            Self::Uniform(_) | Self::Interface => Some(self.clone()),
+            Self::Aggregate(children) => children.get(index).and_then(Option::as_ref),
+            Self::Uniform(_) | Self::Interface => Some(self),
             Self::Tensor(_) => None,
         }
     }

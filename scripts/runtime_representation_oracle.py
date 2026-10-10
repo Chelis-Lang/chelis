@@ -342,6 +342,21 @@ RESULT_CLAIM_METADATA_FINAL_FORMS = (
         "load-store-template",
         "append_host_result_interface_origin_support",
     ),
+    # chelis#3347 (runtime_extents.md C6.5): a nested claim's pattern tables
+    # are `int64_t` axis positions, binder slots, node indices and constructor
+    # offsets, and its projection and value walks index those tables and read
+    # tensor shape metadata through the runtime accessors. No form reads or
+    # writes tensor element storage or carries a number across an interface.
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "backend-element-spelling",
+        "claim_pattern_table_lines",
+    ),
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "append_nested_claim_support",
+    ),
 )
 # chelis#2627: these generated-C forms carry only private entry metadata.
 # The count indexes a bounded result-axis array; the List loops fetch typed
@@ -2554,6 +2569,19 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "test(c_nested_list_pattern_retains_selected_tail_producer) | "
                 "test(c_option_projection_distinguishes_local_and_formal_origins) | "
                 "test(c_aggregate_origin_arena_is_fresh_for_repeated_public_calls)",
+            ),
+        ),
+        OracleLeg(
+            "nested C claim pattern table, projection, join and value-walk execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-cli",
+                "--test", "issue_3347_nested_claim_patterns", "-E",
+                "test(=c_nongeneric_box_result_traps_at_insert) | "
+                "test(=c_recursive_pair_traps_at_the_right_leaf) | "
+                "test(=c_tuple_option_and_record_results_trap_at_their_producer) | "
+                "test(=c_mutual_recursion_names_the_innermost_claim) | "
+                "test(=c_self_recursion_checks_its_own_witness) | "
+                "test(=agreeing_claim_walks_run_when_the_host_is_cxx)",
             ),
         ),
         OracleLeg(

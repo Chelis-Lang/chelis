@@ -337,12 +337,126 @@ use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap};
 use chelis_unord::{UnordMap, UnordSet};
 
+thread_local! {
+    /// Whether the program being emitted carries any nested claim pattern
+    /// (runtime_extents.md C6.5). Without one no claim frame can name a
+    /// pattern node, so construction projects nothing and no aggregate is
+    /// walked.
+    static NESTED_CLAIMS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn nested_claims_emitted() -> bool {
+    NESTED_CLAIMS.with(std::cell::Cell::get)
+}
+
+/// Restores the enclosing program's flag when one emission ends.
+struct NestedClaimsGuard(bool);
+
+impl NestedClaimsGuard {
+    fn set(value: bool) -> Self {
+        Self(NESTED_CLAIMS.with(|flag| flag.replace(value)))
+    }
+}
+
+impl Drop for NestedClaimsGuard {
+    fn drop(&mut self) {
+        NESTED_CLAIMS.with(|flag| flag.set(self.0));
+    }
+}
+
+fn program_has_nested_claims(program: &HostProgram) -> bool {
+    fn uses(node: &HostExpr) -> bool {
+        let any = |items: &[HostExpr]| items.iter().any(uses);
+        match &node.kind {
+            HostExprKind::ResultClaimScope { plan, body, .. } => {
+                plan.nested().is_some() || uses(body)
+            }
+            HostExprKind::SignatureEntry { args, lists, .. } => {
+                any(args)
+                    || lists
+                        .iter()
+                        .any(|entry| entry.claim.is_some() || uses(&entry.value))
+            }
+            HostExprKind::FormalIngress { value, .. } | HostExprKind::ExtentSites { value, .. } => {
+                uses(value)
+            }
+            HostExprKind::Call { args, .. }
+            | HostExprKind::Builtin { args, .. }
+            | HostExprKind::TensorCall { args, .. }
+            | HostExprKind::List(args, _)
+            | HostExprKind::Tuple(args, _)
+            | HostExprKind::AdtConstruct { fields: args, .. } => any(args),
+            HostExprKind::AdtFieldAccess { base, .. } => uses(base),
+            HostExprKind::If {
+                cond,
+                then_expr,
+                else_expr,
+                ..
+            } => uses(cond) || uses(then_expr) || uses(else_expr),
+            HostExprKind::MatchOption {
+                scrutinee,
+                some_expr,
+                none_expr,
+                ..
+            } => uses(scrutinee) || uses(some_expr) || uses(none_expr),
+            HostExprKind::MatchAdt {
+                scrutinee,
+                arms,
+                default_expr,
+                ..
+            } => {
+                uses(scrutinee)
+                    || arms.iter().any(|arm| uses(&arm.expr))
+                    || default_expr.as_deref().is_some_and(uses)
+            }
+            HostExprKind::Let { bindings, body, .. }
+            | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+                bindings.iter().any(|binding| uses(&binding.value)) || uses(body)
+            }
+            HostExprKind::Map { callback, list, .. }
+            | HostExprKind::Filter { callback, list, .. }
+            | HostExprKind::Partition { callback, list, .. }
+            | HostExprKind::FlatMap { callback, list, .. } => callback_expr(callback) || uses(list),
+            HostExprKind::Fold {
+                callback,
+                init,
+                list,
+                ..
+            }
+            | HostExprKind::Scan {
+                callback,
+                init,
+                list,
+                ..
+            } => callback_expr(callback) || uses(init) || uses(list),
+            HostExprKind::Int(_)
+            | HostExprKind::Float(_)
+            | HostExprKind::Bool(_)
+            | HostExprKind::String(_)
+            | HostExprKind::Unit
+            | HostExprKind::Var(_, _) => false,
+        }
+    }
+    fn callback_expr(callback: &HostCallback) -> bool {
+        match &callback.kind {
+            HostCallbackKind::Named { .. } => false,
+            HostCallbackKind::Inline { body, .. } => uses(body),
+        }
+    }
+    program.functions.iter().any(|function| {
+        function.result_claim.is_some()
+            || function.entry_claims.iter().any(Option::is_some)
+            || uses(&function.body)
+    }) || program.globals.iter().any(|binding| uses(&binding.value))
+}
+
 pub(crate) fn emit_host_abi_program(
     projected: &ProjectedHostProgram<'_>,
     program_name: &str,
     external_helpers: &UnordSet<String>,
 ) -> Result<String, Unsupported> {
     let program = projected.program();
+    let _nested_claims = NestedClaimsGuard::set(program_has_nested_claims(program));
     let _site_identity_count = projected.sites().len();
     // Emit helpers and functions into a body buffer first so we can detect which
     // runtime headers they transitively require (`chelis_blas.h` when a helper
@@ -666,6 +780,9 @@ pub(crate) fn emit_host_abi_program(
         append_host_stack_budget_support(&mut result_claim_support);
     }
     append_host_result_claim_checks(&mut result_claim_support);
+    if nested_claims_emitted() {
+        append_nested_claim_support(&mut result_claim_support);
+    }
     result_claim_support.push(String::new());
     result_claim_support.extend(body);
     body = result_claim_support;
@@ -2452,9 +2569,9 @@ fn append_private_host_context_args(args: &mut Vec<String>, entry_receipt: &str)
 
 fn append_invocation_origin_context(out: &mut Vec<String>, guarded: bool) {
     let fields = if guarded {
-        "NULL, NULL, 0, 0, 0"
+        "NULL, NULL, NULL, 0, 0, 0"
     } else {
-        "NULL, NULL"
+        "NULL, NULL, NULL"
     };
     out.push(format!(
         "    __chelis_host_result_origin_arena __chelis_origin_arena_storage = {{ {fields} }};"
@@ -2777,6 +2894,314 @@ impl HostResultClaim {
     }
 }
 
+/// Static C tables for a claim pattern (runtime_extents.md C6.5), the node
+/// array named `name`. Binder slots follow [`ClaimPattern::binders`].
+pub(super) fn claim_pattern_table_lines(
+    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    name: &str,
+    indent: &str,
+) -> Vec<String> {
+    use chelis_ir::claim_pattern::{ClaimAxisPosition, ClaimDim, ClaimNode};
+    let binders = pattern.binders();
+    let child = |node: Option<chelis_ir::claim_pattern::ClaimNodeId>| {
+        node.map_or("-1".to_string(), |node| node.index().to_string())
+    };
+    let mut lines = Vec::new();
+    let mut table = |kind: &str, index: usize, values: Vec<String>, ty: &str| {
+        let array = format!("{name}_{kind}{index}");
+        // A tensor's axis rows are triples.
+        let rows = if kind == "axes" { "[3]" } else { "" };
+        lines.push(format!(
+            "{indent}static const {ty} {array}[]{rows} = {{ {} }};",
+            values.join(", ")
+        ));
+        array
+    };
+    let mut rows = Vec::new();
+    for (index, node) in pattern.nodes().iter().enumerate() {
+        let null = || "NULL".to_string();
+        // kind, rank, count, axes, names, offsets, children, labels
+        let row: (u8, i64, usize, String, String, String, String, String) = match node {
+            ClaimNode::Tensor(tensor) => {
+                let entries = tensor
+                    .axes
+                    .iter()
+                    .map(|axis| {
+                        let position = match axis.position {
+                            ClaimAxisPosition::Front(axis) => axis as i64,
+                            ClaimAxisPosition::Back(axis) => -(axis as i64) - 1,
+                        };
+                        let (slot, literal) = match &axis.claim {
+                            ClaimDim::Literal(value) => (-1, *value),
+                            ClaimDim::Binder(binder) => (
+                                binders
+                                    .iter()
+                                    .position(|seen| seen == binder)
+                                    .expect("pattern binders are complete")
+                                    as i64,
+                                0,
+                            ),
+                        };
+                        format!("{{ {position}, {slot}, {literal} }}")
+                    })
+                    .collect::<Vec<_>>();
+                let axes = table("axes", index, entries, "int64_t");
+                // The C table spells a rank spread's open rank as -1.
+                let rank = match tensor.rank {
+                    Some(rank) => rank as i64,
+                    None => -1,
+                };
+                (
+                    0,
+                    rank,
+                    tensor.axes.len(),
+                    axes,
+                    null(),
+                    null(),
+                    null(),
+                    null(),
+                )
+            }
+            ClaimNode::Tuple(items) => {
+                let children = table(
+                    "children",
+                    index,
+                    items.iter().map(|item| child(*item)).collect(),
+                    "int64_t",
+                );
+                let labels = table(
+                    "labels",
+                    index,
+                    (0..items.len())
+                        .map(|component| c_string_literal(&format!(".{component}")))
+                        .collect(),
+                    "char *const",
+                );
+                (1, -1, items.len(), null(), null(), null(), children, labels)
+            }
+            ClaimNode::List(item) => {
+                let children = table("children", index, vec![item.index().to_string()], "int64_t");
+                (2, -1, 1, null(), null(), null(), children, null())
+            }
+            ClaimNode::Option(item) => {
+                let children = table("children", index, vec![item.index().to_string()], "int64_t");
+                let labels = table(
+                    "labels",
+                    index,
+                    vec![c_string_literal(".Some.value")],
+                    "char *const",
+                );
+                (3, -1, 1, null(), null(), null(), children, labels)
+            }
+            ClaimNode::Nominal { constructors, .. } => {
+                let several = constructors.len() > 1;
+                let mut offsets = vec!["0".to_string()];
+                let mut slots = Vec::new();
+                let mut slot_labels = Vec::new();
+                for constructor in constructors {
+                    offsets.push((slots.len() + constructor.fields.len()).to_string());
+                    for (position, field) in constructor.fields.iter().enumerate() {
+                        slots.push(child(field.node));
+                        let segment = field.name.clone().unwrap_or_else(|| position.to_string());
+                        slot_labels.push(c_string_literal(&if several {
+                            format!(".{}.{segment}", constructor.stored_name)
+                        } else {
+                            format!(".{segment}")
+                        }));
+                    }
+                }
+                let names = table(
+                    "names",
+                    index,
+                    constructors
+                        .iter()
+                        .map(|constructor| c_string_literal(&constructor.stored_name))
+                        .collect(),
+                    "char *const",
+                );
+                let offsets = table("offsets", index, offsets, "int64_t");
+                let children = table("children", index, slots, "int64_t");
+                let labels = table("labels", index, slot_labels, "char *const");
+                (
+                    4,
+                    -1,
+                    constructors.len(),
+                    null(),
+                    names,
+                    offsets,
+                    children,
+                    labels,
+                )
+            }
+        };
+        let (kind, rank, count, axes, names, offsets, children, labels) = row;
+        rows.push(format!(
+            "{{ {kind}, {rank}, {count}, {axes}, {names}, {offsets}, {children}, {labels} }}"
+        ));
+    }
+    lines.push(format!(
+        "{indent}static const __chelis_claim_node {name}[] = {{ {} }};",
+        rows.join(", ")
+    ));
+    lines
+}
+
+/// The C initializer of one binder slot: the witnessing tensor axis read
+/// now, a List witness state, or an unwitnessed slot that claims nothing.
+fn named_list_binder_slot(state: usize) -> String {
+    let source = format!("__chelis_entry_named_states[{state}]");
+    format!(
+        "{{ 0, {source}.seen ? {source}.value : 0, {source}.seen ? {source}.claim : NULL, {source}.seen ? {source}.path : NULL, {source}.axis }}"
+    )
+}
+
+fn direct_binder_slot(claim: &str, source: &str, prepared: &str, axis: usize) -> String {
+    format!(
+        "{{ 0, chelis_tensor_shape({}, {axis}), {}, {}, {axis} }}",
+        c_ident(prepared),
+        c_string_literal(claim),
+        c_string_literal(source),
+    )
+}
+
+const UNWITNESSED_BINDER_SLOT: &str = "{ 0, 0, NULL, NULL, 0 }";
+
+/// The frame of a nested result claim (runtime_extents.md C6.5): its static
+/// tables, its binder slots and the frame itself, linked to `parent`.
+fn nested_claim_frame_lines(
+    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    binders: Vec<String>,
+    frame: &str,
+    parent: &str,
+    indent: &str,
+    outer_claims_first: bool,
+) -> Vec<String> {
+    let nodes = format!("{frame}_nodes");
+    let mut lines = claim_pattern_table_lines(pattern, &nodes, indent);
+    let binder_count = binders.len();
+    let binder_table = if binders.is_empty() {
+        "NULL".to_string()
+    } else {
+        let name = format!("{frame}_binders");
+        lines.push(format!(
+            "{indent}const __chelis_host_result_axis {name}[] = {{ {} }};",
+            binders.join(", ")
+        ));
+        name
+    };
+    let root = pattern
+        .root()
+        .expect("a nested result claim owes an obligation")
+        .index();
+    lines.push(format!(
+        "{indent}const __chelis_host_result_claim {frame}_declared = {{ {parent}, -1, 0, NULL, {}, {nodes}, {root}, {binder_table}, {} }};",
+        i32::from(outer_claims_first),
+        binder_count
+    ));
+    lines.push(format!(
+        "{indent}const __chelis_host_result_claim *{frame}_joined = __chelis_join_host_result_claim(__chelis_origin_arena, &{frame}_declared);"
+    ));
+    lines
+}
+
+/// A declaration's nested result frame. Each binder reads the first tensor
+/// parameter axis that declares it, as the tensor result frame does.
+fn nested_result_frame_lines(
+    function: &HostFunction,
+    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    frame: &str,
+    parent: &str,
+    indent: &str,
+) -> Vec<String> {
+    let named_lists = function.entry_contract.named_list_binders().to_vec();
+    let binders = pattern
+        .binders()
+        .iter()
+        .map(|binder| {
+            if let Some(state) = named_lists.iter().position(|name| name == binder) {
+                return named_list_binder_slot(state);
+            }
+            // The authored entry contract names the binders; a specialized
+            // function's ABI parameter types may have lost them.
+            let authored = function
+                .entry_contract
+                .formals()
+                .iter()
+                .zip(&function.params)
+                .map(|(formal, param)| match formal.pattern() {
+                    chelis_ir::host::EntryPattern::Tensor(ty) => (param, ty),
+                    _ => (param, &param.ty),
+                });
+            let declared = function.params.iter().map(|param| (param, &param.ty));
+            let witnesses: Vec<(&HostParam, &HostAbiType)> =
+                if function.entry_contract.formals().len() == function.params.len() {
+                    authored.collect()
+                } else {
+                    declared.collect()
+                };
+            witnesses
+                .into_iter()
+                .find_map(|(param, ty)| {
+                    let HostAbiType::Tensor(param_ty) = ty else {
+                        return None;
+                    };
+                    param_ty
+                        .dims
+                        .iter()
+                        .position(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder))
+                        .map(|axis| {
+                            direct_binder_slot(
+                                &chelis_ir::lower::extent_binder_label(binder),
+                                &param.name,
+                                &param.name,
+                                axis,
+                            )
+                        })
+                })
+                .unwrap_or_else(|| UNWITNESSED_BINDER_SLOT.to_string())
+        })
+        .collect();
+    nested_claim_frame_lines(pattern, binders, frame, parent, indent, false)
+}
+
+/// An inlined declaration's nested result frame, from its retained plan.
+fn nested_plan_frame_lines(
+    plan: &chelis_ir::host::NestedResultClaimPlan,
+    frame: &str,
+    parent: &str,
+    indent: &str,
+    outer_claims_first: bool,
+) -> Vec<String> {
+    use chelis_ir::host::NestedBinderWitness;
+    let binders = plan
+        .binders()
+        .iter()
+        .map(|witness| match witness {
+            Some(NestedBinderWitness::Extent {
+                claim,
+                source,
+                axis,
+                extent,
+            }) => format!(
+                "{{ 0, {}, {}, {}, {axis} }}",
+                c_ident(extent),
+                c_string_literal(claim),
+                c_string_literal(source),
+            ),
+            Some(NestedBinderWitness::ListState(state)) => named_list_binder_slot(*state),
+            None => UNWITNESSED_BINDER_SLOT.to_string(),
+        })
+        .collect();
+    nested_claim_frame_lines(
+        plan.pattern(),
+        binders,
+        frame,
+        parent,
+        indent,
+        outer_claims_first,
+    )
+}
+
 /// A C string literal spelling `text`. Binder labels and parameter names are
 /// identifiers, but the escape keeps any byte a literal cannot hold verbatim.
 fn c_string_literal(text: &str) -> String {
@@ -2829,13 +3254,43 @@ typedef struct __chelis_host_result_axis {
     int64_t source_axis;
 } __chelis_host_result_axis;
 
+/* One node of a claim pattern (runtime_extents.md C6.5): the obligations of
+   a claimed type on the tensors it nests. `kind` is 0 for a tensor, 1 for a
+   tuple, 2 for a List, 3 for an Option and 4 for a nominal value. A tensor's
+   `axes` rows are { axis (from the end when negative), binder slot or -1,
+   literal }. A nominal's constructor c owns child slots offsets[c] up to
+   offsets[c + 1]. A child of -1 owes nothing; `labels` names each child
+   slot's path segment. */
+typedef struct __chelis_claim_node {
+    int64_t kind;
+    int64_t rank;
+    int64_t count;
+    const int64_t (*axes)[3];
+    const char *const *names;
+    const int64_t *offsets;
+    const int64_t *children;
+    const char *const *labels;
+} __chelis_claim_node;
+
+/* A frame with `nodes` claims the pattern node `node` of the value it is
+   checked against; its binder slots read `binders`. A frame without them
+   claims a tensor value's `axes` directly. */
 typedef struct __chelis_host_result_claim {
     const struct __chelis_host_result_claim *next;
     int64_t rank;
     int64_t count;
     const __chelis_host_result_axis *axes;
     int outer_claims_first;
+    const __chelis_claim_node *nodes;
+    int64_t node;
+    const __chelis_host_result_axis *binders;
+    int64_t binder_count;
 } __chelis_host_result_claim;
+
+/* One allocation of projected frames; the frames follow the header. */
+typedef struct __chelis_host_result_claim_block {
+    struct __chelis_host_result_claim_block *next;
+} __chelis_host_result_claim_block;
 
 typedef struct __chelis_host_result_origin {
     struct __chelis_host_result_origin *allocation_next;
@@ -2853,6 +3308,7 @@ typedef struct __chelis_host_result_origin {
 typedef struct __chelis_host_result_origin_arena {
     __chelis_host_result_origin *head;
     __chelis_host_result_origin *leaf_head;
+    __chelis_host_result_claim_block *claim_head;
 #ifdef __CHELIS_HOST_STACK_GUARD
     uintptr_t stack_low;
     uintptr_t stack_high;
@@ -2878,6 +3334,13 @@ static void __chelis_host_result_origin_arena_destroy(__chelis_host_result_origi
     }
     arena->head = NULL;
     arena->leaf_head = NULL;
+    __chelis_host_result_claim_block *block = arena->claim_head;
+    while (block != NULL) {
+        __chelis_host_result_claim_block *next = block->next;
+        free(block);
+        block = next;
+    }
+    arena->claim_head = NULL;
 }
 
 static __chelis_host_result_origin *__chelis_host_result_origin_alloc(__chelis_host_result_origin_arena *arena, int64_t child_count) {
@@ -3093,6 +3556,345 @@ static void __chelis_host_recursive_call_guard(__chelis_host_result_origin_arena
 "#.to_string());
 }
 
+/// The projection and boundary walk of nested claim frames
+/// (runtime_extents.md C6.5), emitted only for a program that has one.
+fn append_nested_claim_support(out: &mut Vec<String>) {
+    out.push(
+        r#"
+/* A borrowed view of a heap value for a claim walk. Every byte of the value
+   is zeroed before its tag and handle are set: the runtime rejects a payload
+   whose unused bytes are not zero, and neither C nor C++ initialization of
+   one union member zeroes the rest. The walk never releases this view. */
+static chelis_value __chelis_claim_borrowed_value(chelis_value_tag tag, const void *handle) {
+    chelis_value value;
+    memset(&value, 0, sizeof value);
+    value.tag = tag;
+    value.payload.handle = (void *)handle;
+    return value;
+}
+
+/* The pattern node a component of a value owes: `kind` as in a claim node,
+   `ctor` the constructor tag of a nominal value, `field` its slot. */
+static int64_t __chelis_claim_child(const __chelis_claim_node *nodes, int64_t index, int64_t kind, const char *ctor, int64_t field) {
+    const __chelis_claim_node *node = &nodes[index];
+    if (node->kind != kind) return -1;
+    if (kind == 1) return field >= 0 && field < node->count ? node->children[field] : -1;
+    if (kind == 2 || kind == 3) return node->children[0];
+    for (int64_t c = 0; c < node->count; ++c) {
+        if (strcmp(node->names[c], ctor) != 0) continue;
+        int64_t slot = node->offsets[c] + field;
+        return field >= 0 && slot < node->offsets[c + 1] ? node->children[slot] : -1;
+    }
+    return -1;
+}
+
+/* Two pattern frames that state the same obligation: the same pattern table
+   and node, ordering and binder witnesses. */
+static int __chelis_claim_frames_equal(const __chelis_host_result_claim *a, const __chelis_host_result_claim *b) {
+    if (a->nodes != b->nodes || a->node != b->node || a->outer_claims_first != b->outer_claims_first || a->binder_count != b->binder_count) return 0;
+    if (a->binders == b->binders) return 1;
+    if (a->binders == NULL || b->binders == NULL) return 0;
+    for (int64_t i = 0; i < a->binder_count; ++i) {
+        const __chelis_host_result_axis *x = &a->binders[i];
+        const __chelis_host_result_axis *y = &b->binders[i];
+        if (x->required != y->required || x->source_axis != y->source_axis || (x->claim == NULL) != (y->claim == NULL) || (x->source == NULL) != (y->source == NULL)) return 0;
+        if (x->claim != NULL && strcmp(x->claim, y->claim) != 0) return 0;
+        if (x->source != NULL && strcmp(x->source, y->source) != 0) return 0;
+    }
+    return 1;
+}
+
+static int __chelis_claim_chain_holds(const __chelis_host_result_claim *chain, const __chelis_host_result_claim *frame) {
+    for (; chain != NULL; chain = chain->next) {
+        if (chain->nodes != NULL && __chelis_claim_frames_equal(chain, frame)) return 1;
+    }
+    return 0;
+}
+
+/* A declared pattern frame joins the chain it extends. A chain checks its
+   frames in order and the first failing frame names the trap, so a later
+   frame equal to an earlier one can never be the one that names it. When the
+   chain already holds the declared obligation, the later copy is dropped and
+   the declared frame keeps its place at the head: a recursive activation,
+   self or mutual, holds each distinct claim once and its traps name the same
+   claim they name without the duplicate. Only the frames ahead of the
+   duplicate are copied. A chain holding an outer-first frame keeps its order
+   rule untouched. */
+static const __chelis_host_result_claim *__chelis_join_host_result_claim(__chelis_host_result_origin_arena *arena, const __chelis_host_result_claim *frame) {
+    const __chelis_host_result_claim *chain = frame->next;
+    if (frame->outer_claims_first) return frame;
+    if (chain != NULL && chain->nodes != NULL && __chelis_claim_frames_equal(chain, frame)) return chain;
+    int64_t before = 0;
+    const __chelis_host_result_claim *duplicate = NULL;
+    for (const __chelis_host_result_claim *at = chain; at != NULL; at = at->next) {
+        if (at->outer_claims_first) return frame;
+        if (at->nodes != NULL && __chelis_claim_frames_equal(at, frame)) {
+            duplicate = at;
+            break;
+        }
+        before += 1;
+    }
+    if (duplicate == NULL) return frame;
+    if (arena == NULL || (uint64_t)before >= (SIZE_MAX - sizeof(__chelis_host_result_claim_block)) / sizeof(__chelis_host_result_claim)) {
+        fprintf(stderr, "host runtime: invalid result claim join\n");
+        abort();
+    }
+    __chelis_host_result_claim_block *block = (__chelis_host_result_claim_block *)malloc(sizeof(__chelis_host_result_claim_block) + (size_t)(before + 1) * sizeof(__chelis_host_result_claim));
+    if (block == NULL) {
+        fprintf(stderr, "host runtime: result claim join allocation failed\n");
+        abort();
+    }
+    block->next = arena->claim_head;
+    arena->claim_head = block;
+    __chelis_host_result_claim *frames = (__chelis_host_result_claim *)(block + 1);
+    frames[0] = *frame;
+    const __chelis_host_result_claim *at = chain;
+    for (int64_t index = 1; index <= before; ++index, at = at->next) {
+        frames[index] = *at;
+        frames[index - 1].next = &frames[index];
+    }
+    frames[before].next = duplicate->next;
+    return &frames[0];
+}
+
+/* The claims a component of a value under construction owes: every pattern
+   frame projected to that component, in order, each distinct obligation
+   once. A tensor frame says nothing about a component. A chain that projects
+   onto itself, as in a recursive construction, is returned unchanged, so a
+   linear recursion holds one copy of each distinct claim. */
+static const __chelis_host_result_claim *__chelis_project_host_result_claims(__chelis_host_result_origin_arena *arena, const __chelis_host_result_claim *claims, int64_t kind, const char *ctor, int64_t field) {
+    int64_t count = 0;
+    int unchanged = 1;
+    for (const __chelis_host_result_claim *frame = claims; frame != NULL; frame = frame->next) {
+        int64_t child = frame->nodes != NULL ? __chelis_claim_child(frame->nodes, frame->node, kind, ctor, field) : -1;
+        if (child >= 0) count += 1;
+        if (child != frame->node) unchanged = 0;
+    }
+    if (count == 0) return NULL;
+    if (unchanged) return claims;
+    if (arena == NULL || (uint64_t)count > (SIZE_MAX - sizeof(__chelis_host_result_claim_block)) / sizeof(__chelis_host_result_claim)) {
+        fprintf(stderr, "host runtime: invalid result claim projection\n");
+        abort();
+    }
+    __chelis_host_result_claim_block *block = (__chelis_host_result_claim_block *)malloc(sizeof(__chelis_host_result_claim_block) + (size_t)count * sizeof(__chelis_host_result_claim));
+    if (block == NULL) {
+        fprintf(stderr, "host runtime: result claim projection allocation failed\n");
+        abort();
+    }
+    block->next = arena->claim_head;
+    arena->claim_head = block;
+    __chelis_host_result_claim *frames = (__chelis_host_result_claim *)(block + 1);
+    int64_t at = 0;
+    for (const __chelis_host_result_claim *frame = claims; frame != NULL; frame = frame->next) {
+        if (frame->nodes == NULL) continue;
+        int64_t child = __chelis_claim_child(frame->nodes, frame->node, kind, ctor, field);
+        if (child < 0) continue;
+        frames[at] = *frame;
+        frames[at].node = child;
+        frames[at].next = NULL;
+        int duplicate = 0;
+        for (int64_t seen = 0; seen < at; ++seen) {
+            if (__chelis_claim_frames_equal(&frames[seen], &frames[at])) duplicate = 1;
+        }
+        if (duplicate) continue;
+        if (at > 0) frames[at - 1].next = &frames[at];
+        at += 1;
+    }
+    return &frames[0];
+}
+
+static const __chelis_host_result_origin *__chelis_claim_origin_child(const __chelis_host_result_origin *origin, int64_t index) {
+    if (origin == NULL || origin->uniform) return origin;
+    if (origin->child_count < 0 || index >= origin->child_count || origin->child_view == NULL) return NULL;
+    return origin->child_view[index];
+}
+
+/* A cursor over the components of a value that a claim walk visits, in
+   declared order: a tuple's components by position, every List element, a
+   present `Option` payload, and the fields of the constructor a nominal value
+   carries. A value whose kind its pattern node does not name has none. */
+typedef struct __chelis_claim_components {
+    const void *container;
+    int64_t next;
+    int64_t end;
+    int64_t base;
+} __chelis_claim_components;
+
+static __chelis_claim_components __chelis_claim_components_of(const __chelis_claim_node *pattern, chelis_value value) {
+    __chelis_claim_components at;
+    memset(&at, 0, sizeof at);
+    if (pattern->kind == 1 && value.tag == CHELIS_VALUE_TUPLE) {
+        const chelis_tuple *tuple = chelis_tuple_borrow_value(value);
+        int64_t length = chelis_tuple_len(tuple);
+        at.container = tuple;
+        at.end = pattern->count < length ? pattern->count : length;
+    } else if (pattern->kind == 2 && value.tag == CHELIS_VALUE_LIST) {
+        const chelis_list *list = chelis_list_borrow_value(value);
+        at.container = list;
+        at.end = chelis_list_len(list);
+    } else if (pattern->kind == 3 && value.tag == CHELIS_VALUE_OPTION) {
+        const chelis_option *option = chelis_option_borrow_value(value);
+        at.container = option;
+        at.end = chelis_option_is_some(option) ? 1 : 0;
+    } else if (pattern->kind == 4 && value.tag == CHELIS_VALUE_ADT) {
+        const chelis_adt *adt = chelis_adt_borrow_value(value);
+        chelis_string tag = chelis_adt_get_tag(adt);
+        at.container = adt;
+        for (int64_t c = 0; c < pattern->count; ++c) {
+            chelis_string name = chelis_string_from_cstr(pattern->names[c]);
+            bool carried = chelis_string_eq(tag, name);
+            chelis_string_release(name);
+            if (!carried) continue;
+            at.base = pattern->offsets[c];
+            at.next = pattern->offsets[c];
+            at.end = pattern->offsets[c + 1];
+            break;
+        }
+        chelis_string_release(tag);
+    }
+    return at;
+}
+
+/* Fetch the next component `at` owes a claim on: its pattern node, the
+   component itself (the caller releases it), and its slot in the value and
+   in the pattern node. Returns 0 when none is left. */
+static int __chelis_claim_components_next(const __chelis_claim_node *pattern, __chelis_claim_components *at, int64_t *child, chelis_value *item, int64_t *component, int64_t *slot) {
+    while (at->next < at->end) {
+        int64_t index = at->next++;
+        if (pattern->kind == 1) {
+            if (pattern->children[index] < 0) continue;
+            *item = chelis_tuple_get((const chelis_tuple *)at->container, index);
+            *child = pattern->children[index];
+            *component = index;
+            *slot = index;
+        } else if (pattern->kind == 2) {
+            *item = chelis_list_index((const chelis_list *)at->container, index);
+            *child = pattern->children[0];
+            *component = index;
+            *slot = 0;
+        } else if (pattern->kind == 3) {
+            *item = chelis_option_unwrap((const chelis_option *)at->container);
+            *child = pattern->children[0];
+            *component = 0;
+            *slot = 0;
+        } else {
+            const chelis_adt *adt = (const chelis_adt *)at->container;
+            int64_t field = index - at->base;
+            if (pattern->children[index] < 0 || field >= chelis_adt_field_count(adt)) continue;
+            *item = chelis_adt_get_field(adt, field);
+            *child = pattern->children[index];
+            *component = field;
+            *slot = index;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* Check a tensor at a pattern frame's tensor node `node` against the
+   producer its provenance records. */
+static void __chelis_check_claim_tensor_value(const __chelis_host_result_claim *frame, int64_t node, chelis_value value, const __chelis_host_result_origin *origin) {
+    const __chelis_claim_node *pattern = &frame->nodes[node];
+    if (pattern->kind != 0 || value.tag != CHELIS_VALUE_TENSOR) return;
+    const chelis_tensor *tensor = chelis_tensor_borrow_value(value);
+    __chelis_host_result_claim single = *frame;
+    single.next = NULL;
+    single.node = node;
+    single.outer_claims_first = 0;
+    if (origin == NULL || origin->child_count != -1 || origin->op == NULL || origin->trap == NULL) {
+        if (!__chelis_claim_pattern_tensor(&single, chelis_tensor_rank(tensor))) return;
+        for (int64_t i = 0; i < pattern->count; ++i) {
+            __chelis_host_result_axis claim;
+            if (__chelis_claim_pattern_axis(&single, chelis_tensor_rank(tensor), i, &claim) && chelis_tensor_shape(tensor, claim.axis) != claim.required) {
+                fprintf(stderr, "host runtime: pending result claim reached a tensor without producer provenance\n");
+                abort();
+            }
+        }
+        return;
+    }
+    __chelis_check_host_result_claims(&single, tensor, origin->op, origin->trap);
+}
+
+/* One value a value walk has entered and not finished: borrowed at the
+   root, owned below it, with its provenance and the components it still
+   owes. */
+typedef struct __chelis_claim_value_step {
+    struct __chelis_claim_value_step *below;
+    int64_t node;
+    chelis_value value;
+    int owned;
+    const __chelis_host_result_origin *origin;
+    __chelis_claim_components components;
+} __chelis_claim_value_step;
+
+static __chelis_claim_value_step *__chelis_claim_value_enter(__chelis_claim_value_step *below, const __chelis_host_result_claim *frame, int64_t node, chelis_value value, int owned, const __chelis_host_result_origin *origin) {
+    __chelis_check_claim_tensor_value(frame, node, value, origin);
+    __chelis_claim_value_step *step = (__chelis_claim_value_step *)malloc(sizeof *step);
+    if (step == NULL) {
+        fprintf(stderr, "host runtime: claim walk allocation failed\n");
+        abort();
+    }
+    memset(step, 0, sizeof *step);
+    step->below = below;
+    step->node = node;
+    step->value = value;
+    step->owned = owned;
+    step->origin = origin;
+    step->components = __chelis_claim_components_of(&frame->nodes[node], value);
+    return step;
+}
+
+/* Check one pattern frame at node `node` against `value`, already produced:
+   walk the value and its producer provenance together. Only the constructor
+   a value carries is walked, and every tensor is checked against the
+   producer its provenance records. Components are visited depth first in
+   declared order, each held until its own components are done, from a heap
+   stack: a deep value costs heap, never native stack. */
+static void __chelis_check_claim_frame_value(const __chelis_host_result_claim *frame, int64_t node, chelis_value value, const __chelis_host_result_origin *origin) {
+    __chelis_claim_value_step *top = __chelis_claim_value_enter(NULL, frame, node, value, 0, origin);
+    while (top != NULL) {
+        int64_t child, component, slot;
+        chelis_value item;
+        if (__chelis_claim_components_next(&frame->nodes[top->node], &top->components, &child, &item, &component, &slot)) {
+            top = __chelis_claim_value_enter(top, frame, child, item, 1, __chelis_claim_origin_child(top->origin, component));
+            continue;
+        }
+        __chelis_claim_value_step *done = top;
+        top = done->below;
+        if (done->owned) chelis_value_release(done->value);
+        free(done);
+    }
+}
+
+/* Check every pattern frame of `claims` against an already produced value,
+   in the order every claim chain is checked: immediate frames in link order,
+   then outer-first frames in reverse link order. */
+static void __chelis_check_host_result_value_claims(const __chelis_host_result_claim *claims, chelis_value value, const __chelis_host_result_origin *origin) {
+    if (claims == NULL) return;
+    const __chelis_host_result_claim *first_deferred = NULL;
+    const __chelis_host_result_claim **deferred = NULL;
+    size_t length = 0, capacity = 0;
+    for (const __chelis_host_result_claim *claim = claims; claim != NULL; claim = claim->next) {
+        if (claim->outer_claims_first) {
+            __chelis_defer_host_result_claim(&first_deferred, &deferred, &length, &capacity, claim);
+        } else if (claim->nodes != NULL) {
+            __chelis_check_claim_frame_value(claim, claim->node, value, origin);
+        }
+    }
+    while (length != 0) {
+        const __chelis_host_result_claim *claim = deferred[--length];
+        if (claim->nodes != NULL) __chelis_check_claim_frame_value(claim, claim->node, value, origin);
+    }
+    if (first_deferred != NULL && first_deferred->nodes != NULL) {
+        __chelis_check_claim_frame_value(first_deferred, first_deferred->node, value, origin);
+    }
+    if (deferred != NULL) free(deferred);
+}
+"#
+        .to_string(),
+    );
+}
+
 fn append_host_result_claim_checks(out: &mut Vec<String>) {
     out.push(r#"
 static void __chelis_host_result_claim_trap(const __chelis_host_result_axis *claim, const char *op, int64_t observed_axis, int64_t observed, const char *trap) {
@@ -3102,6 +3904,34 @@ static void __chelis_host_result_claim_trap(const __chelis_host_result_axis *cla
         fprintf(stderr, "extent `%s`: %s axis %lld = %lld, %s axis %lld = %lld\n", claim->claim, claim->source, (long long)claim->source_axis, (long long)claim->required, op, (long long)observed_axis, (long long)observed);
     }
     chelis_numeric_trap(trap);
+}
+
+/* Resolve claimed axis `i` of a pattern frame at a tensor node, for a value
+   of rank `rank`. Returns 0 when that axis owes nothing at this rank. */
+static int __chelis_claim_pattern_axis(const __chelis_host_result_claim *claims, int64_t rank, int64_t i, __chelis_host_result_axis *out) {
+    const __chelis_claim_node *node = &claims->nodes[claims->node];
+    int64_t axis = node->axes[i][0] < 0 ? rank + node->axes[i][0] : node->axes[i][0];
+    if (axis < 0 || axis >= rank) return 0;
+    int64_t slot = node->axes[i][1];
+    if (slot < 0) {
+        out->axis = axis;
+        out->required = node->axes[i][2];
+        out->claim = NULL;
+        out->source = NULL;
+        out->source_axis = 0;
+    } else {
+        if (claims->binders == NULL || claims->binders[slot].source == NULL) return 0;
+        *out = claims->binders[slot];
+        out->axis = axis;
+    }
+    return 1;
+}
+
+/* Whether a pattern frame claims a tensor of rank `rank` here. */
+static int __chelis_claim_pattern_tensor(const __chelis_host_result_claim *claims, int64_t rank) {
+    if (claims->nodes == NULL) return 0;
+    const __chelis_claim_node *node = &claims->nodes[claims->node];
+    return node->kind == 0 && (node->rank < 0 || node->rank == rank);
 }
 
 /* Immediate claims fail in link order; deferred claims fail in reverse link order.
@@ -3128,12 +3958,27 @@ static void __chelis_defer_host_result_claim(const __chelis_host_result_claim **
     (*deferred)[(*length)++] = claim;
 }
 
+/* One frame's checks: a pattern frame at a tensor node claims the axes its
+   node names; a tensor frame claims its own axes. */
 static void __chelis_check_host_result_extent_claim_one(const __chelis_host_result_claim *claim, int64_t rank, const int64_t (*observations)[3], int64_t count, const char *op, const char *trap) {
-    if (rank == claim->rank) for (int64_t i = 0; i < claim->count; ++i) {
-        for (int64_t j = 0; j < count; ++j) {
-            if (claim->axes[i].axis != observations[j][0]) continue;
-            if (claim->axes[i].required != observations[j][2]) {
-                __chelis_host_result_claim_trap(&claim->axes[i], op, observations[j][1], observations[j][2], trap);
+    if (__chelis_claim_pattern_tensor(claim, rank)) {
+        for (int64_t i = 0; i < claim->nodes[claim->node].count; ++i) {
+            __chelis_host_result_axis owed;
+            if (!__chelis_claim_pattern_axis(claim, rank, i, &owed)) continue;
+            for (int64_t j = 0; j < count; ++j) {
+                if (owed.axis != observations[j][0]) continue;
+                if (owed.required != observations[j][2]) {
+                    __chelis_host_result_claim_trap(&owed, op, observations[j][1], observations[j][2], trap);
+                }
+            }
+        }
+    } else if (claim->nodes == NULL && rank == claim->rank) {
+        for (int64_t i = 0; i < claim->count; ++i) {
+            for (int64_t j = 0; j < count; ++j) {
+                if (claim->axes[i].axis != observations[j][0]) continue;
+                if (claim->axes[i].required != observations[j][2]) {
+                    __chelis_host_result_claim_trap(&claim->axes[i], op, observations[j][1], observations[j][2], trap);
+                }
             }
         }
     }
@@ -3161,11 +4006,22 @@ static void __chelis_check_host_result_extent_claims(const __chelis_host_result_
 }
 
 static void __chelis_check_host_result_claim_one(const __chelis_host_result_claim *claim, const chelis_tensor *value, const char *op, const char *trap) {
-    if (chelis_tensor_rank(value) == claim->rank) for (int64_t i = 0; i < claim->count; ++i) {
-        int64_t axis = claim->axes[i].axis;
-        int64_t observed = chelis_tensor_shape(value, axis);
-        if (observed != claim->axes[i].required) {
-            __chelis_host_result_claim_trap(&claim->axes[i], op, axis, observed, trap);
+    if (__chelis_claim_pattern_tensor(claim, chelis_tensor_rank(value))) {
+        for (int64_t i = 0; i < claim->nodes[claim->node].count; ++i) {
+            __chelis_host_result_axis owed;
+            if (!__chelis_claim_pattern_axis(claim, chelis_tensor_rank(value), i, &owed)) continue;
+            int64_t observed = chelis_tensor_shape(value, owed.axis);
+            if (observed != owed.required) {
+                __chelis_host_result_claim_trap(&owed, op, owed.axis, observed, trap);
+            }
+        }
+    } else if (claim->nodes == NULL && chelis_tensor_rank(value) == claim->rank) {
+        for (int64_t i = 0; i < claim->count; ++i) {
+            int64_t axis = claim->axes[i].axis;
+            int64_t observed = chelis_tensor_shape(value, axis);
+            if (observed != claim->axes[i].required) {
+                __chelis_host_result_claim_trap(&claim->axes[i], op, axis, observed, trap);
+            }
         }
     }
 }
@@ -3190,6 +4046,7 @@ static void __chelis_check_host_result_claims(const __chelis_host_result_claim *
     }
     if (deferred != NULL) free(deferred);
 }
+
 "#.to_string());
 }
 
@@ -3215,12 +4072,27 @@ mod claim_stack_tests {
         int64_t source_axis;
     } __chelis_host_result_axis;
 
+    typedef struct __chelis_claim_node {
+        int64_t kind;
+        int64_t rank;
+        int64_t count;
+        const int64_t (*axes)[3];
+        const char *const *names;
+        const int64_t *offsets;
+        const int64_t *children;
+        const char *const *labels;
+    } __chelis_claim_node;
+
     typedef struct __chelis_host_result_claim {
         const struct __chelis_host_result_claim *next;
         int64_t rank;
         int64_t count;
         const __chelis_host_result_axis *axes;
         int outer_claims_first;
+        const __chelis_claim_node *nodes;
+        int64_t node;
+        const __chelis_host_result_axis *binders;
+        int64_t binder_count;
     } __chelis_host_result_claim;
 
     typedef struct chelis_tensor { volatile int64_t rank, extent; } chelis_tensor;
@@ -3333,6 +4205,132 @@ mod claim_stack_tests {
     }
 }
 
+#[cfg(test)]
+mod claim_frame_order_tests {
+    // Two nested claim frames that share one pattern table and differ only in
+    // `outer_claims_first` state one obligation at two check positions: the
+    // immediate copy is checked in link order, the outer-first copy after
+    // every immediate frame. Neither the join nor a projection may treat one
+    // as a duplicate of the other. A third claim, checked between them,
+    // fails with a different message, so a skip that moved the obligation to
+    // the outer-first position would let the third claim name the trap.
+    //
+    // No Chelis program builds this pair: each claim site emits its own
+    // static pattern table and has one ordering flag, so two frames share a
+    // table only when one site produced both, with one flag. The probe
+    // builds the frames directly and defends the invariant the merge rule
+    // relies on, should tables ever be shared across sites.
+
+    use super::{
+        append_host_result_claim_checks, append_host_result_claim_support,
+        append_nested_claim_support,
+    };
+    use std::fs;
+    use std::process::Command;
+
+    const MAIN: &str = r#"
+int main(int argc, char **argv) {
+    if (argc != 3) return 97;
+    int projected = argv[1][0] == 'p';
+    int shared = argv[2][0] == 's';
+    /* A tuple of one tensor; T claims its component at extent 3, U at 4. */
+    static const int64_t t_axes[][3] = { { 0, -1, 3 } };
+    static const int64_t u_axes[][3] = { { 0, -1, 4 } };
+    static const int64_t children[] = { 1 };
+    static const char *const labels[] = { ".0" };
+    static const __chelis_claim_node t_nodes[] = {
+        { 1, -1, 1, NULL, NULL, NULL, children, labels },
+        { 0, 1, 1, t_axes, NULL, NULL, NULL, NULL },
+    };
+    /* T's content in a table of its own: the same obligation, never equal. */
+    static const __chelis_claim_node t_copy[] = {
+        { 1, -1, 1, NULL, NULL, NULL, children, labels },
+        { 0, 1, 1, t_axes, NULL, NULL, NULL, NULL },
+    };
+    static const __chelis_claim_node u_nodes[] = {
+        { 1, -1, 1, NULL, NULL, NULL, children, labels },
+        { 0, 1, 1, u_axes, NULL, NULL, NULL, NULL },
+    };
+    /* Join: the declared copy joins a chain that holds the outer-first copy.
+       Projection: the outer-first copy heads the chain the declared copy
+       extends, so a merge keeping the first copy would keep the late one. */
+    const __chelis_claim_node *table = shared ? t_nodes : t_copy;
+    __chelis_host_result_claim third = { NULL, -1, 0, NULL, 0, u_nodes, 0, NULL, 0 };
+    __chelis_host_result_claim outer = { &third, -1, 0, NULL, 1, t_nodes, 0, NULL, 0 };
+    __chelis_host_result_claim declared = { &outer, -1, 0, NULL, 0, table, 0, NULL, 0 };
+    __chelis_host_result_origin_arena arena;
+    memset(&arena, 0, sizeof arena);
+    const __chelis_host_result_claim *chain = NULL;
+    if (projected) {
+        declared.next = &third;
+        outer.next = &declared;
+        chain = __chelis_project_host_result_claims(&arena, &outer, 1, NULL, 0);
+    } else {
+        third.node = outer.node = declared.node = 1;
+        chain = __chelis_join_host_result_claim(&arena, &declared);
+    }
+    int64_t shape[1] = { 5 };
+    chelis_tensor *value = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    __chelis_check_host_result_claims(chain, value, "probe", "numeric trap: domain in probe at i64");
+    return 96;
+}
+"#;
+
+    #[test]
+    fn frames_differing_only_in_order_are_never_merged() {
+        let mut source = String::from(
+            "#include \"chelis_runtime.h\"\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n",
+        );
+        let mut helpers = Vec::new();
+        append_host_result_claim_support(&mut helpers);
+        append_host_result_claim_checks(&mut helpers);
+        append_nested_claim_support(&mut helpers);
+        source.push_str(&helpers.join("\n"));
+        source.push_str(MAIN);
+        let dir = tempfile::tempdir().expect("probe directory");
+        let staged = chelis_runtime_bundle::stage(dir.path()).expect("stage the carried runtime");
+        fs::write(dir.path().join("order.c"), &source).expect("write the probe");
+        let toolchain = crate::toolchain::test_toolchain(Default::default());
+        let binary = dir.path().join("order");
+        let compiled = Command::new(&toolchain.compiler)
+            .args(&toolchain.compile_flags)
+            .arg("-I")
+            .arg(dir.path())
+            .arg(dir.path().join("order.c"))
+            .arg(&staged.archive)
+            .args(&toolchain.link_flags)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("compile the probe");
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        for site in ["join", "projection"] {
+            let first = |table: &str| {
+                let output = Command::new(&binary)
+                    .args([site, table])
+                    .output()
+                    .expect("run the probe");
+                assert!(!output.status.success(), "{site} {table}: {output:?}");
+                String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .next()
+                    .expect("probe traps with a diagnostic")
+                    .to_string()
+            };
+            let without_skip = first("copy");
+            assert_eq!(
+                without_skip, "extent `3`: claimed = 3, probe axis 0 = 5",
+                "{site}: the immediate claim precedes the third claim"
+            );
+            assert_eq!(first("shared"), without_skip, "{site}");
+        }
+    }
+}
+
 /// A signature entry's checks, in signature order: every observation's null,
 /// dtype and rank checks, then the ordered extent comparisons.
 ///
@@ -3395,6 +4393,22 @@ fn validate_retained_entry_contract(
     }
     let mut projected_binders = Vec::new();
     for entry in lists {
+        if entry.claim.is_some() {
+            // A nested claim's formal carries no tensor of its own pattern.
+            if contract
+                .formals()
+                .get(entry.position)
+                .is_none_or(|formal| formal.name() != entry.name || formal.pattern().has_tensor())
+                || represented[entry.position]
+            {
+                return Err(invalid_abi_shape(
+                    "retained entry changed a nested-claim formal".into(),
+                    "signature entry",
+                ));
+            }
+            represented[entry.position] = true;
+            continue;
+        }
         let Some(formal) = contract.formals().get(entry.position) else {
             return Err(invalid_abi_shape(
                 "retained entry has an invalid List position".into(),
@@ -3634,18 +4648,27 @@ fn signature_entry_lines(
 fn entry_receipt_groups(program: &HostProgram) -> UnordMap<String, usize> {
     let mut groups = UnordMap::new();
     for (index, function) in program.functions.iter().enumerate() {
-        let representative = program.functions[..index]
-            .iter()
-            .position(|prior| {
-                prior.entry_contract == function.entry_contract
-                    && prior.params.len() == function.params.len()
-                    && prior
-                        .params
-                        .iter()
-                        .zip(&function.params)
-                        .all(|(left, right)| left.name == right.name && left.ty == right.ty)
-            })
-            .unwrap_or(index);
+        let representative =
+            program.functions[..index]
+                .iter()
+                .position(|prior| {
+                    prior.entry_contract == function.entry_contract
+                        && prior.entry_claims.len() == function.entry_claims.len()
+                        && prior.entry_claims.iter().zip(&function.entry_claims).all(
+                            |(left, right)| match (left, right) {
+                                (None, None) => true,
+                                (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+                                _ => false,
+                            },
+                        )
+                        && prior.params.len() == function.params.len()
+                        && prior
+                            .params
+                            .iter()
+                            .zip(&function.params)
+                            .all(|(left, right)| left.name == right.name && left.ty == right.ty)
+                })
+                .unwrap_or(index);
         groups.insert(function.name.clone(), representative);
     }
     groups
@@ -3885,8 +4908,18 @@ fn emit_function(
         )
     })?;
     let indent = emitter.indent.clone();
-    let (mut claim_lines, claims_parent) =
+    let (mut claim_lines, mut claims_parent) =
         first_site_frames.declare(&indent, "__chelis_caller_result_claims");
+    if let Some(pattern) = &function.result_claim {
+        claim_lines.extend(nested_result_frame_lines(
+            function,
+            pattern,
+            "__chelis_declared_nested_result",
+            &claims_parent,
+            &indent,
+        ));
+        claims_parent = "__chelis_declared_nested_result_joined".to_string();
+    }
     match HostResultClaim::of(function) {
         Some(claim) => claim_lines.extend(claim.frame_lines(
             &indent,
@@ -6400,16 +7433,29 @@ impl<'a> HostEmitter<'a> {
                 let axes = self.next_temp("result_claim_axes");
                 let frame = self.next_temp("result_claim_frame");
                 let parent = result_claims.as_deref().unwrap_or("NULL");
-                self.lines
-                    .extend(HostResultClaim::from_plan(plan).frame_lines(
-                        &self.indent,
-                        &axes,
+                match plan.nested() {
+                    Some(nested) => self.lines.extend(nested_plan_frame_lines(
+                        nested,
                         &frame,
                         parent,
-                        None,
+                        &self.indent,
                         plan.outer_claims_first(),
-                    ));
-                let previous_claims = self.result_claims.replace(format!("&{frame}"));
+                    )),
+                    None => self
+                        .lines
+                        .extend(HostResultClaim::from_plan(plan).frame_lines(
+                            &self.indent,
+                            &axes,
+                            &frame,
+                            parent,
+                            None,
+                            plan.outer_claims_first(),
+                        )),
+                }
+                let previous_claims = self.result_claims.replace(match plan.nested() {
+                    Some(_) => format!("{frame}_joined"),
+                    None => format!("&{frame}"),
+                });
                 self.claim_on_spine = true;
                 self.assign_expr(target, body, ty)?;
                 self.result_claims = previous_claims;
@@ -6469,11 +7515,11 @@ impl<'a> HostEmitter<'a> {
             )),
             HostExprKind::List(items, expr_ty) => {
                 require_same_abi_type(ty, expr_ty, "list expression")?;
-                self.assign_list_literal(target, items, ty)?;
+                self.assign_list_literal(target, items, ty, result_claims.as_deref())?;
             }
             HostExprKind::Tuple(items, expr_ty) => {
                 require_same_abi_type(ty, expr_ty, "tuple expression")?;
-                self.assign_tuple_literal(target, items, ty)?;
+                self.assign_tuple_literal(target, items, ty, result_claims.as_deref())?;
             }
             HostExprKind::Var(name, var_ty) => {
                 if name == "Nil" {
@@ -6544,7 +7590,8 @@ impl<'a> HostEmitter<'a> {
                 } else if !matches!(name.as_str(), "tuple-get" | "index") {
                     self.stamp_result_origin(target, ty, name);
                 }
-                if name != "pad_sequences_to" {
+                // `Some` projected its claims into the payload's producer.
+                if !matches!(name.as_str(), "pad_sequences_to" | "Some") {
                     self.emit_result_claim_guard(target, ty, result_claims.as_deref());
                 }
             }
@@ -6554,7 +7601,7 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "ADT construction")?;
-                self.assign_adt_construct(target, ctor, fields, ty)?;
+                self.assign_adt_construct(target, ctor, fields, ty, result_claims.as_deref())?;
             }
             HostExprKind::AdtFieldAccess {
                 base,
@@ -6821,7 +7868,7 @@ impl<'a> HostEmitter<'a> {
                     site,
                     body_block,
                 )?;
-                self.stamp_combinator_result_origin(target, ty, "map");
+                self.finish_combinator(target, ty, "map", result_claims.as_deref());
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
@@ -6838,7 +7885,7 @@ impl<'a> HostEmitter<'a> {
                     site,
                     body_block,
                 )?;
-                self.stamp_combinator_result_origin(target, ty, "filter");
+                self.finish_combinator(target, ty, "filter", result_claims.as_deref());
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
@@ -6866,8 +7913,7 @@ impl<'a> HostEmitter<'a> {
                 // whichever iteration or seed supplied it, so it stamps and
                 // guards that value exactly as a builtin producer does. A
                 // tensor nested in an aggregate result is its too.
-                self.stamp_combinator_result_origin(target, ty, "fold");
-                self.emit_result_claim_guard(target, ty, result_claims.as_deref());
+                self.finish_combinator(target, ty, "fold", result_claims.as_deref());
                 self.emit_expression_site_excluding_blocks(
                     site,
                     target,
@@ -6895,7 +7941,7 @@ impl<'a> HostEmitter<'a> {
                     preheader_block,
                     body_block,
                 )?;
-                self.stamp_combinator_result_origin(target, ty, "scan");
+                self.finish_combinator(target, ty, "scan", result_claims.as_deref());
                 self.emit_expression_site_excluding_blocks(
                     site,
                     target,
@@ -6916,7 +7962,7 @@ impl<'a> HostEmitter<'a> {
                     site,
                     body_block,
                 )?;
-                self.stamp_combinator_result_origin(target, ty, "partition");
+                self.finish_combinator(target, ty, "partition", result_claims.as_deref());
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
@@ -6933,7 +7979,7 @@ impl<'a> HostEmitter<'a> {
                     site,
                     body_block,
                 )?;
-                self.stamp_combinator_result_origin(target, ty, "flat_map");
+                self.finish_combinator(target, ty, "flat_map", result_claims.as_deref());
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
@@ -6986,13 +8032,21 @@ impl<'a> HostEmitter<'a> {
                     )?);
                 } else {
                     let count = contract.formals().len();
+                    let mut named_list_binders = contract.named_list_binders().to_vec();
+                    for pattern in lists.iter().filter_map(|entry| entry.claim.as_ref()) {
+                        for binder in pattern.binders() {
+                            if !named_list_binders.contains(&binder) {
+                                named_list_binders.push(binder);
+                            }
+                        }
+                    }
                     let mut work = entry_walk::FunctionEntryWork {
                         args: actuals.clone(),
                         owners: positions.clone(),
                         params: (0..count)
                             .map(|_| entry_walk::ParamEntryWork::default())
                             .collect(),
-                        named_list_binders: contract.named_list_binders().to_vec(),
+                        named_list_binders,
                         release: Vec::new(),
                     };
                     if positions.len() != args.len() {
@@ -7009,6 +8063,23 @@ impl<'a> HostEmitter<'a> {
                     for entry in lists {
                         let temp = self.next_temp("entry_list");
                         self.emit_expr_to_var(&entry.value, &temp, &host_type(&entry.value))?;
+                        if let Some(pattern) = &entry.claim {
+                            let step = entry_walk::nested_entry_step(
+                                pattern,
+                                &HostParam {
+                                    name: entry.name.clone(),
+                                    ty: host_type(&entry.value),
+                                },
+                                &temp,
+                                entry.position,
+                                &work.named_list_binders,
+                            )?;
+                            work.params[entry.position].extents.push(step.clone());
+                            work.params[entry.position]
+                                .ordered_extents
+                                .push(entry_walk::ExtentStep::Walk(step));
+                            continue;
+                        }
                         work.params[entry.position].metadata.extend(
                             entry_walk::retained_list_pass(
                                 &entry.ty,
@@ -7050,6 +8121,16 @@ impl<'a> HostEmitter<'a> {
             }
         }
         self.emit_expression_site(site, target)
+    }
+
+    /// A list combinator's result on the result spine: the combinator is the
+    /// producer of every tensor the result holds (spec/04 section 4.7), so it
+    /// stamps that provenance and checks the spine's claims against it,
+    /// nested ones included (runtime_extents.md C6.5). Every combinator arm
+    /// ends here.
+    fn finish_combinator(&mut self, target: &str, ty: &HostType, op: &str, claims: Option<&str>) {
+        self.stamp_combinator_result_origin(target, ty, op);
+        self.emit_result_claim_guard(target, ty, claims);
     }
 
     /// spec/04 section 4.7: a list combinator produces every tensor it
@@ -7271,7 +8352,52 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{indent}}}"));
     }
 
+    /// Emit `field` as one component of a value under construction on the
+    /// result spine: its claims are the spine's pattern frames projected to
+    /// that component (runtime_extents.md C6.5), so the component's own
+    /// producer checks them before any later component runs.
+    fn emit_claimed_component(
+        &mut self,
+        field: &HostExpr,
+        target: &str,
+        ty: &HostType,
+        claims: Option<&str>,
+        step: (u8, Option<&str>, usize),
+    ) -> Result<(), Unsupported> {
+        let Some(claims) =
+            claims.filter(|_| nested_claims_emitted() && host_type_may_carry_result_origin(ty))
+        else {
+            return self.emit_expr_to_var(field, target, ty);
+        };
+        let (kind, ctor, index) = step;
+        let projected = self.next_temp("component_claims");
+        let ctor = ctor.map_or("NULL".to_string(), c_string_literal);
+        self.lines.push(format!(
+            "{}const __chelis_host_result_claim *{projected} = __chelis_project_host_result_claims(__chelis_origin_arena, {claims}, {kind}, {ctor}, {index});",
+            self.indent
+        ));
+        let previous = self.result_claims.replace(projected);
+        self.claim_on_spine = true;
+        let emitted = self.emit_expr_to_var(field, target, ty);
+        self.claim_on_spine = false;
+        self.result_claims = previous;
+        emitted
+    }
+
     fn emit_result_claim_guard(&mut self, target: &str, ty: &HostType, claims: Option<&str>) {
+        if let Some(claims) = claims
+            && let Some(tag) = borrowed_claim_value_tag(ty)
+            && nested_claims_emitted()
+        {
+            // A value this activation already produced, or one that entered
+            // it: walk it along every pattern frame (runtime_extents.md C6.5).
+            let origin = result_origin_name(target);
+            self.lines.push(format!(
+                "{}if ({claims} != NULL) __chelis_check_host_result_value_claims({claims}, __chelis_claim_borrowed_value({tag}, {target}), {origin});",
+                self.indent
+            ));
+            return;
+        }
         if let Some(claims) = claims
             && matches!(ty, HostType::Tensor(_))
         {
@@ -7390,7 +8516,11 @@ impl<'a> HostEmitter<'a> {
             // available; otherwise the already-resolved expression type is
             // authoritative.  There is no catch-all ABI default.
             let arg_ty = expected_builtin_arg_ty(name, ty, index).unwrap_or(inferred_ty);
-            self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
+            if name == "Some" {
+                self.emit_claimed_component(arg, &arg_name, &arg_ty, result_claims, (3, None, 0))?;
+            } else {
+                self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
+            }
             arg_vars.push((arg_name, arg_ty));
         }
 
@@ -11103,6 +12233,7 @@ impl<'a> HostEmitter<'a> {
         ctor: &str,
         fields: &[HostExpr],
         ty: &HostType,
+        claims: Option<&str>,
     ) -> Result<(), Unsupported> {
         // A nullary variant (e.g. `Nothing`, `True`) has no payload fields.
         // ISO C forbids a zero-length array (`chelis_value adt_fields[0];`),
@@ -11119,10 +12250,17 @@ impl<'a> HostEmitter<'a> {
                 values_name,
                 fields.len()
             ));
+            let stored = stored_constructor_name(ty, ctor);
             for (index, field) in fields.iter().enumerate() {
                 let field_var = self.next_temp(&format!("adt_field{index}"));
                 let field_ty = host_type(field);
-                self.emit_expr_to_var(field, &field_var, &field_ty)?;
+                self.emit_claimed_component(
+                    field,
+                    &field_var,
+                    &field_ty,
+                    claims,
+                    (4, Some(&stored), index),
+                )?;
                 self.lines.push(format!(
                     "{}{}[{index}] = {};",
                     self.indent,
@@ -11345,6 +12483,7 @@ impl<'a> HostEmitter<'a> {
         target: &str,
         items: &[HostExpr],
         ty: &HostType,
+        claims: Option<&str>,
     ) -> Result<(), Unsupported> {
         let HostType::List(item_ty) = ty else {
             return Err(invalid_abi_shape(
@@ -11369,7 +12508,7 @@ impl<'a> HostEmitter<'a> {
             let item_var = self.next_temp(&format!("list_item{index}"));
             let actual_ty = host_type(item);
             require_list_element_abi_type(item_ty, &actual_ty)?;
-            self.emit_expr_to_var(item, &item_var, &actual_ty)?;
+            self.emit_claimed_component(item, &item_var, &actual_ty, claims, (2, None, index))?;
             self.lines.push(format!(
                 "{}{}[{index}] = {};",
                 self.indent,
@@ -11399,6 +12538,7 @@ impl<'a> HostEmitter<'a> {
         target: &str,
         items: &[HostExpr],
         ty: &HostType,
+        claims: Option<&str>,
     ) -> Result<(), Unsupported> {
         let HostType::Tuple(item_tys) = ty else {
             return Err(invalid_abi_shape(
@@ -11434,7 +12574,7 @@ impl<'a> HostEmitter<'a> {
             for (index, item) in items.iter().enumerate() {
                 let item_var = self.next_temp(&format!("tuple_item{index}"));
                 let item_ty = &item_tys[index];
-                self.emit_expr_to_var(item, &item_var, item_ty)?;
+                self.emit_claimed_component(item, &item_var, item_ty, claims, (1, None, index))?;
                 self.lines.push(format!(
                     "{}{}[{index}] = {};",
                     self.indent,
@@ -13136,6 +14276,21 @@ fn host_type(expr: &HostExpr) -> HostType {
         | HostExprKind::FormalIngress { ty, .. }
         | HostExprKind::ExtentSites { ty, .. } => ty.clone(),
         HostExprKind::Unit | HostExprKind::SignatureEntry { .. } => HostType::Unit,
+    }
+}
+
+/// The value tag of an aggregate that may hold a claimed tensor, for a
+/// borrowed boundary walk of its pattern claims.
+pub(super) fn borrowed_claim_value_tag(ty: &HostType) -> Option<&'static str> {
+    if !host_type_may_carry_result_origin(ty) {
+        return None;
+    }
+    match ty {
+        HostType::Tuple(_) => Some("CHELIS_VALUE_TUPLE"),
+        HostType::List(_) => Some("CHELIS_VALUE_LIST"),
+        HostType::Option(_) => Some("CHELIS_VALUE_OPTION"),
+        HostType::Adt(_, _) => Some("CHELIS_VALUE_ADT"),
+        _ => None,
     }
 }
 

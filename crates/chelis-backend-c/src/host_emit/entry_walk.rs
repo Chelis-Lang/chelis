@@ -145,7 +145,13 @@ pub(super) struct FunctionEntryWork {
 impl FunctionEntryWork {
     /// Whether any parameter's value is walked.
     pub fn walks(&self) -> bool {
-        self.params.iter().any(|param| !param.metadata.is_empty())
+        self.params.iter().any(|param| {
+            !param.metadata.is_empty()
+                || param
+                    .ordered_extents
+                    .iter()
+                    .any(|step| matches!(step, ExtentStep::Walk(_)))
+        })
     }
 }
 
@@ -543,7 +549,18 @@ impl<'a> EntryWalkers<'a> {
     /// The entry work of one function's body and of its exported entry.
     pub fn entry_work(&mut self, function: &HostFunction) -> Result<EntryWork, Unsupported> {
         validate_entry_contract(function)?;
-        let named_list_binders = function.entry_contract.named_list_binders().to_vec();
+        let mut named_list_binders = function.entry_contract.named_list_binders().to_vec();
+        // A binder a formal nests below a tuple or nominal type may first be
+        // witnessed there, so it shares the List witness state: every
+        // observation in signature order defines it or is compared with it
+        // (runtime_extents.md C6.5). Appending keeps every List state index.
+        for pattern in function.entry_claims.iter().flatten() {
+            for binder in pattern.binders() {
+                if !named_list_binders.contains(&binder) {
+                    named_list_binders.push(binder);
+                }
+            }
+        }
         let claimed_lists = function
             .entry_contract
             .formals()
@@ -553,7 +570,8 @@ impl<'a> EntryWalkers<'a> {
                     && entry_pattern_has_extent_claim(formal.pattern())
             })
             .collect::<Vec<_>>();
-        let extent_at_body = claimed_lists.iter().any(|claimed| *claimed);
+        let extent_at_body = claimed_lists.iter().any(|claimed| *claimed)
+            || function.entry_claims.iter().any(Option::is_some);
         // The exported entry checks every aggregate in signature order.
         // Internal calls retain the established List-only admission boundary.
         let exported = if has_exported_entry(function) {
@@ -639,6 +657,19 @@ impl<'a> EntryWalkers<'a> {
                 &mut serial,
                 &mut work,
             )?;
+            if let Some(pattern) = function.entry_claims.get(index).and_then(Option::as_ref) {
+                let step = nested_entry_step(
+                    pattern,
+                    param,
+                    &c_ident(&param.name),
+                    index,
+                    &work.named_list_binders,
+                )?;
+                work.params[index].extents.push(step.clone());
+                work.params[index]
+                    .ordered_extents
+                    .push(ExtentStep::Walk(step));
+            }
         }
         Ok(work)
     }
@@ -764,35 +795,159 @@ static inline void __chelis_entry_named_observe(__chelis_entry_named_state *stat
         out.push(
             r#"
 
-/* `used` counts the whole path's length, including what did not fit. */
-static inline void __chelis_entry_path_append(const __chelis_entry_path *path, char *buffer, size_t size, size_t *used) {
-    if (path->parent != NULL) __chelis_entry_path_append(path->parent, buffer, size, used);
-    size_t room = *used < size ? size - *used : 0;
-    char *at = room > 0 ? buffer + *used : NULL;
-    int written = path->segment != NULL
-        ? snprintf(at, room, "%s", path->segment)
-        : snprintf(at, room, "[%lld]", (long long)path->index);
-    if (written > 0) *used += (size_t)written;
+/* The text of one path segment: its label, or its index rendered into
+   `scratch`. */
+static inline const char *__chelis_entry_path_segment(const __chelis_entry_path *path, char *scratch, size_t size, size_t *length) {
+    if (path->segment != NULL) {
+        *length = strlen(path->segment);
+        return path->segment;
+    }
+    int written = snprintf(scratch, size, "[%lld]", (long long)path->index);
+    *length = written > 0 ? (size_t)written : 0;
+    return scratch;
 }
 
-/* Renders only on a failing check, into storage the trap that follows ends. */
+/* Renders into storage the caller's next use of it ends. A path is linked
+   from its last segment, so one pass measures the whole text and a second
+   copies each segment to its offset from the end; neither recurses, however
+   deep the path. */
 static inline const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
     static const char marker[] = "...(truncated)";
     static char buffer[512];
+    char scratch[32];
     size_t used = 0;
-    buffer[0] = '\0';
-    __chelis_entry_path_append(path, buffer, sizeof buffer, &used);
+    for (const __chelis_entry_path *at = path; at != NULL; at = at->parent) {
+        size_t length;
+        (void)__chelis_entry_path_segment(at, scratch, sizeof scratch, &length);
+        used += length;
+    }
+    size_t end = used;
+    for (const __chelis_entry_path *at = path; at != NULL; at = at->parent) {
+        size_t length;
+        const char *text = __chelis_entry_path_segment(at, scratch, sizeof scratch, &length);
+        size_t start = end - length;
+        if (start < sizeof buffer - 1) {
+            size_t stop = end < sizeof buffer - 1 ? end : sizeof buffer - 1;
+            memcpy(buffer + start, text, stop - start);
+        }
+        end = start;
+    }
+    buffer[used < sizeof buffer - 1 ? used : sizeof buffer - 1] = '\0';
     if (used >= sizeof buffer) {
         /* A path that did not fit ends in the marker, placed at a UTF-8 lead byte. */
-        size_t end = sizeof buffer - sizeof marker;
-        while (end > 0 && (buffer[end] & 0xC0) == 0x80) --end;
-        memcpy(buffer + end, marker, sizeof marker);
+        size_t cut = sizeof buffer - sizeof marker;
+        while (cut > 0 && (buffer[cut] & 0xC0) == 0x80) --cut;
+        memcpy(buffer + cut, marker, sizeof marker);
     }
     return buffer;
 }
 "#
             .to_string(),
         );
+        if nested_claims_emitted() {
+            out.push(
+            r#"
+/* As `__chelis_entry_named_observe`, for an observation a nested claim walk
+   reaches by `path`: the path is rendered only when a witness keeps it or a
+   comparison fails, so a deep value's agreeing observations render nothing. */
+static void __chelis_entry_named_observe_at(__chelis_entry_named_state *states, size_t count, const char *key, const __chelis_entry_path *path, int axis, int64_t value) {
+    if (states == NULL) return;
+    for (size_t i = 0; i < count; ++i) {
+        __chelis_entry_named_state *state = &states[i];
+        if (strcmp(state->key, key) != 0) continue;
+        if (!state->seen || state->value != value) {
+            __chelis_entry_named_observe(state, 1, key, __chelis_entry_path_text(path), axis, value);
+        }
+        return;
+    }
+}
+
+/* Check a tensor at a formal's nested tensor node: a literal axis as a
+   literal entry extent, a binder axis through the invocation's witness
+   states. */
+static void __chelis_entry_claim_tensor(const __chelis_claim_node *pattern, chelis_value value, const __chelis_entry_path *path, const char *const *keys, __chelis_entry_named_state *states, size_t count) {
+    if (pattern->kind != 0 || value.tag != CHELIS_VALUE_TENSOR) return;
+    const chelis_tensor *tensor = chelis_tensor_borrow_value(value);
+    int64_t rank = chelis_tensor_rank(tensor);
+    if (pattern->rank >= 0 && pattern->rank != rank) return;
+    for (int64_t i = 0; i < pattern->count; ++i) {
+        int64_t axis = pattern->axes[i][0] < 0 ? rank + pattern->axes[i][0] : pattern->axes[i][0];
+        if (axis < 0 || axis >= rank) continue;
+        int64_t observed = chelis_tensor_shape(tensor, axis);
+        if (pattern->axes[i][1] >= 0) {
+            __chelis_entry_named_observe_at(states, count, keys[pattern->axes[i][1]], path, (int)axis, observed);
+        } else if (observed != pattern->axes[i][2]) {
+            fprintf(stderr, "input `%s` axis %lld expected %lld, got %lld\n", __chelis_entry_path_text(path), (long long)axis, (long long)pattern->axes[i][2], (long long)observed);
+            chelis_numeric_trap("numeric trap: domain in load at i64");
+        }
+    }
+}
+
+/* One value an entry walk has entered and not finished: borrowed at the
+   root, owned below it, with the path that reaches it and the components it
+   still owes. Below the root, `path` is `here`, linked to the path of the
+   value below, which outlives it. */
+typedef struct __chelis_entry_claim_step {
+    struct __chelis_entry_claim_step *below;
+    int64_t node;
+    chelis_value value;
+    int owned;
+    const __chelis_entry_path *path;
+    __chelis_entry_path here;
+    __chelis_claim_components components;
+} __chelis_entry_claim_step;
+
+static __chelis_entry_claim_step *__chelis_entry_claim_enter(__chelis_entry_claim_step *below, const __chelis_host_result_claim *frame, int64_t node, chelis_value value, int owned, const __chelis_entry_path *root, const char *segment, int64_t index, const char *const *keys, __chelis_entry_named_state *states, size_t count) {
+    __chelis_entry_claim_step *step = (__chelis_entry_claim_step *)malloc(sizeof *step);
+    if (step == NULL) {
+        fprintf(stderr, "host runtime: claim walk allocation failed\n");
+        abort();
+    }
+    memset(step, 0, sizeof *step);
+    step->below = below;
+    step->node = node;
+    step->value = value;
+    step->owned = owned;
+    if (below == NULL) {
+        step->path = root;
+    } else {
+        step->here.parent = below->path;
+        step->here.segment = segment;
+        step->here.index = index;
+        step->path = &step->here;
+    }
+    __chelis_entry_claim_tensor(&frame->nodes[node], value, step->path, keys, states, count);
+    step->components = __chelis_claim_components_of(&frame->nodes[node], value);
+    return step;
+}
+
+/* Check the claims a formal nests below a tuple or nominal type against the
+   value it carries (runtime_extents.md C6.5), in signature position then
+   depth-first declared order. Only the constructor a value carries is
+   walked. Components are visited in that order, each held until its own
+   components are done, from a heap stack: a deep value costs heap, never
+   native stack. */
+static void __chelis_entry_claim_walk(const __chelis_host_result_claim *frame, int64_t node, chelis_value value, const __chelis_entry_path *path, const char *const *keys, __chelis_entry_named_state *states, size_t count) {
+    __chelis_entry_claim_step *top = __chelis_entry_claim_enter(NULL, frame, node, value, 0, path, NULL, 0, keys, states, count);
+    while (top != NULL) {
+        const __chelis_claim_node *pattern = &frame->nodes[top->node];
+        int64_t child, component, slot;
+        chelis_value item;
+        if (__chelis_claim_components_next(pattern, &top->components, &child, &item, &component, &slot)) {
+            const char *segment = pattern->kind == 2 ? NULL : pattern->labels[slot];
+            top = __chelis_entry_claim_enter(top, frame, child, item, 1, path, segment, pattern->kind == 2 ? component : 0, keys, states, count);
+            continue;
+        }
+        __chelis_entry_claim_step *done = top;
+        top = done->below;
+        if (done->owned) chelis_value_release(done->value);
+        free(done);
+    }
+}
+"#
+            .to_string(),
+        );
+        }
         if self.types.is_empty() {
             return;
         }
@@ -977,6 +1132,63 @@ static inline const char *__chelis_entry_path_text(const __chelis_entry_path *pa
         }
         out.push(String::new());
     }
+}
+
+/// The entry check of the claims a formal nests below a tuple or nominal
+/// type (runtime_extents.md C6.5): one walk of the carried value along its
+/// claim pattern, in the formal's signature position.
+pub(super) fn nested_entry_step(
+    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    param: &HostParam,
+    value: &str,
+    index: usize,
+    named_binders: &[String],
+) -> Result<String, Unsupported> {
+    let tag = borrowed_claim_value_tag(&param.ty).ok_or_else(|| {
+        invalid_abi_shape(
+            format!("claimed formal `{}` carries no walkable value", param.name),
+            "signature entry",
+        )
+    })?;
+    let root = pattern
+        .root()
+        .expect("an entry claim owes an obligation")
+        .index();
+    let nodes = format!("__chelis_entry_claim_{index}_nodes");
+    let mut lines = claim_pattern_table_lines(pattern, &nodes, "");
+    let keys = format!("__chelis_entry_claim_{index}_keys");
+    let binders = pattern.binders();
+    lines.push(if binders.is_empty() {
+        format!("static const char *const *const {keys} = NULL;")
+    } else {
+        format!(
+            "static const char *const {keys}[] = {{ {} }};",
+            binders
+                .iter()
+                .map(|binder| c_string_literal(binder))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    lines.push(format!(
+        "const __chelis_host_result_claim __chelis_entry_claim_{index} = {{ NULL, -1, 0, NULL, 0, {nodes}, {root}, NULL }};"
+    ));
+    lines.push(format!(
+        "const __chelis_entry_path __chelis_entry_claim_path_{index} = {{ NULL, {}, 0 }};",
+        c_utf8_byte_literal(&param.name)
+    ));
+    let (states, count) = if named_binders.is_empty() {
+        ("NULL".to_string(), 0)
+    } else {
+        (
+            "__chelis_entry_named_states".to_string(),
+            named_binders.len(),
+        )
+    };
+    lines.push(format!(
+        "__chelis_entry_claim_walk(&__chelis_entry_claim_{index}, {root}, __chelis_claim_borrowed_value({tag}, {value}), &__chelis_entry_claim_path_{index}, {keys}, {states}, {count});"
+    ));
+    Ok(format!("{{ {} }}", lines.join(" ")))
 }
 
 /// How a check names the tensor it reads: a format fragment and the
@@ -1183,6 +1395,8 @@ mod entry_contract_tests {
             .unwrap();
         HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
+            entry_claims: Vec::new(),
             name: "f".into(),
             entry_contract,
             params: [

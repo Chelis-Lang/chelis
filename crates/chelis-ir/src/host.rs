@@ -1278,6 +1278,14 @@ pub struct HostFunction<T = HostTypeTerm> {
     /// Exact authored literal axes whose obligations lowering installed in
     /// this body's tensor helpers. Empty means the host owns those claims.
     pub helper_result_claim_axes: Vec<crate::dag::RtAxis>,
+    /// The authored result's claims on tensors it nests in an aggregate or
+    /// nominal value (runtime_extents.md C6.5), derived before body
+    /// refinement. `None` owes nothing beyond a top-level tensor claim.
+    pub result_claim: Option<std::sync::Arc<crate::claim_pattern::ClaimPattern>>,
+    /// Per formal in signature order, the authored claims on tensors the
+    /// formal nests in a tuple or nominal value (runtime_extents.md C6.5).
+    /// Empty when no formal owes one.
+    pub entry_claims: Vec<Option<std::sync::Arc<crate::claim_pattern::ClaimPattern>>>,
     pub name: String,
     /// Authored parameter order and recursive List admission, retained
     /// before body refinement and projected unchanged across host lanes.
@@ -1310,6 +1318,10 @@ pub struct HostListEntry<T = HostTypeTerm> {
     pub name: String,
     pub ty: T,
     pub value: HostExpr<T>,
+    /// The claim pattern of a formal that nests its tensors below a nominal
+    /// type (runtime_extents.md C6.5). Such an entry is walked along the
+    /// pattern rather than as a claimed List.
+    pub claim: Option<Arc<crate::claim_pattern::ClaimPattern>>,
 }
 
 pub type ConcreteHostProgram = HostProgram<ConcreteHostType>;
@@ -1986,6 +1998,51 @@ pub struct HostResultClaimPlan {
     result: TensorType,
     axes: Vec<(usize, HostResultRequirementPlan)>,
     outer_claims_first: bool,
+    /// A claim on tensors the authored result nests below its top level
+    /// (runtime_extents.md C6.5). `result` and `axes` are then empty.
+    nested: Option<NestedResultClaimPlan>,
+}
+
+/// An inlined declaration's nested result claim and, per binder slot of its
+/// pattern, the invocation witness that supplies the binder.
+#[derive(Debug, Clone)]
+pub struct NestedResultClaimPlan {
+    pattern: Arc<crate::claim_pattern::ClaimPattern>,
+    binders: Vec<Option<NestedBinderWitness>>,
+}
+
+/// The witness of one binder slot of an inlined nested result claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NestedBinderWitness {
+    /// A direct tensor formal's axis, read into the invocation local
+    /// `extent` right after entry, before the formal can be released.
+    Extent {
+        claim: String,
+        source: String,
+        axis: usize,
+        extent: String,
+    },
+    /// The first List element witness of the entry contract's state.
+    ListState(usize),
+}
+
+impl PartialEq for NestedResultClaimPlan {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.pattern, &other.pattern) && self.binders == other.binders
+    }
+}
+
+impl Eq for NestedResultClaimPlan {}
+
+impl NestedResultClaimPlan {
+    pub fn pattern(&self) -> &crate::claim_pattern::ClaimPattern {
+        &self.pattern
+    }
+
+    /// Aligned with [`crate::claim_pattern::ClaimPattern::binders`].
+    pub fn binders(&self) -> &[Option<NestedBinderWitness>] {
+        &self.binders
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2015,6 +2072,10 @@ impl HostResultClaimPlan {
 
     pub fn axes(&self) -> &[(usize, HostResultRequirementPlan)] {
         &self.axes
+    }
+
+    pub fn nested(&self) -> Option<&NestedResultClaimPlan> {
+        self.nested.as_ref()
     }
 }
 
@@ -2393,6 +2454,8 @@ fn resolve_host_function(
 ) -> Result<ConcreteHostFunction, crate::HostTypeResolutionError> {
     Ok(ConcreteHostFunction {
         helper_result_claim_axes: function.helper_result_claim_axes,
+        result_claim: function.result_claim,
+        entry_claims: function.entry_claims,
         name: function.name,
         entry_contract: function
             .entry_contract
@@ -2469,6 +2532,7 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
                         name: entry.name,
                         ty: entry.ty.into_concrete()?,
                         value: resolve_host_expr(entry.value)?,
+                        claim: entry.claim,
                     })
                 })
                 .collect::<Result<Vec<_>, crate::HostTypeResolutionError>>()?,
@@ -4430,6 +4494,85 @@ struct HostDefSignature {
     scope: UnordMap<String, HostTypeTerm>,
     ret_ty: HostTypeTerm,
     body_expr: Expr,
+    /// The authored result's claims on tensors nested below its top level,
+    /// or the typed refusal its derivation raised (runtime_extents.md C6.5).
+    result_claim: Result<Option<Arc<crate::claim_pattern::ClaimPattern>>, String>,
+    /// Per formal, the nested claim of its authored type (see
+    /// `HostFunction::entry_claims`), or the refusal its derivation raised.
+    entry_claims: Result<Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>, String>,
+    /// Per formal, the authored parameter types of a function-typed formal
+    /// whose parameters nest claims, which every call through it owes.
+    callable_claims: Result<Vec<Option<Vec<Expr>>>, String>,
+}
+
+/// The nested claim pattern of an authored claim-source type, or `None` when
+/// it owes nothing a top-level tensor carrier does not already hold.
+pub fn nested_claim_pattern(
+    program: &HostLoweringSession<'_>,
+    authored: &Expr,
+) -> Result<Option<Arc<crate::claim_pattern::ClaimPattern>>, String> {
+    // The derivation expands aliases itself: reifying an aliased type
+    // through the host type erases its nominal dimension arguments.
+    let pattern = crate::claim_pattern::ClaimPattern::derive(authored, program.adt_registry())
+        .map_err(|error| error.to_string())?;
+    Ok(pattern.nested_root().is_some().then(|| Arc::new(pattern)))
+}
+
+/// The nested claim of each formal, from its authored type, aligned with
+/// `params`, or no claims when no formal nests one (runtime_extents.md C6.5).
+/// A tensor or List-of-tensor formal keeps its established entry pattern;
+/// the nested pattern owns every other carrier, a tuple of tensors included,
+/// which no signature entry observes. Named declarations and inline lambdas
+/// share this derivation.
+fn formal_nested_claims<'a>(
+    program: &HostLoweringSession<'_>,
+    authored: impl Iterator<Item = Option<&'a Expr>>,
+    params: &[HostParam],
+) -> Result<Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>, String> {
+    let claims = authored
+        .zip(params)
+        .map(|(formal, param)| {
+            let Some(formal) = formal else {
+                return Ok(None);
+            };
+            if EntryContract::from_params(std::slice::from_ref(param)).formals()[0]
+                .pattern()
+                .has_tensor()
+            {
+                return Ok(None);
+            }
+            nested_claim_pattern(program, formal)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(
+        if claims.iter().any(Option::is_some) && claims.len() == params.len() {
+            claims
+        } else {
+            Vec::new()
+        },
+    )
+}
+
+/// The authored parameter types of a function-typed formal when any of them
+/// nests a claim: a call through the formal checks them on its arguments, as
+/// a lambda formal's declared type is checked (runtime_extents.md C6.5).
+fn callable_formal_claims(
+    program: &HostLoweringSession<'_>,
+    formal: &Expr,
+) -> Result<Option<Vec<Expr>>, String> {
+    let Some((params, _)) = parse_fn_type_expr_parts(formal) else {
+        return Ok(None);
+    };
+    let host_params = params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| HostParam {
+            name: format!("arg{index}"),
+            ty: decode_expanded_host_type_expr(program, ty).unwrap_or_else(fresh_host_inference),
+        })
+        .collect::<Vec<_>>();
+    let claims = formal_nested_claims(program, params.iter().map(Some), &host_params)?;
+    Ok((!claims.is_empty()).then_some(params))
 }
 
 /// A tensor-only helper drops List parameters that the body does not read.
@@ -5955,12 +6098,36 @@ fn host_def_signature(
     // unresolved-callable marker builtin
     // (`HOST_UNRESOLVED_CALLABLE_MARKER`), which ABI projection rejects
     // pre-emission.
+    // Only an authored signature claims; a checked type the body inferred
+    // states no obligation (runtime_extents.md C6.5).
+    let authored_parts = lookup_authored_defsig_type_expr(program, name)
+        .as_ref()
+        .and_then(parse_fn_type_expr_parts);
+    let result_claim = authored_parts
+        .as_ref()
+        .map_or(Ok(None), |(_, ret)| nested_claim_pattern(program, ret));
+    let entry_claims = authored_parts
+        .as_ref()
+        .map_or(Ok(Vec::new()), |(formals, _)| {
+            formal_nested_claims(program, formals.iter().map(Some), &params)
+        });
+    let callable_claims = authored_parts
+        .as_ref()
+        .map_or(Ok(Vec::new()), |(formals, _)| {
+            formals
+                .iter()
+                .map(|formal| callable_formal_claims(program, formal))
+                .collect()
+        });
     Some(HostDefSignature {
         name: name.to_string(),
         params,
         scope,
         ret_ty,
         body_expr: inline_local_callable_lets(&body_expr),
+        result_claim,
+        entry_claims,
+        callable_claims,
     })
 }
 
@@ -6028,8 +6195,37 @@ fn lower_host_function(
     host_body.append_merged_span(signature.body_expr.span_id());
     host_body.append_merged_span(body.span_id());
     let HostDefSignature {
-        mut params, ret_ty, ..
+        mut params,
+        ret_ty,
+        result_claim,
+        entry_claims,
+        ..
     } = signature;
+    // A compiled function's own entry walk already observes a tensor at a
+    // fixed tuple position of its ABI type; only a retained invocation,
+    // whose signature entry observes no tuple, walks such a pattern.
+    let entry_claims = entry_claims
+        .map_err(|error| claim_pattern_refusal(body, format!("`{name}` formal: {error}")))?
+        .into_iter()
+        .map(|claim| {
+            claim.filter(|pattern| {
+                !pattern.nodes().iter().all(|node| {
+                    matches!(
+                        node,
+                        crate::claim_pattern::ClaimNode::Tuple(_)
+                            | crate::claim_pattern::ClaimNode::Tensor(_)
+                    )
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let entry_claims = if entry_claims.iter().any(Option::is_some) {
+        entry_claims
+    } else {
+        Vec::new()
+    };
+    let result_claim = result_claim
+        .map_err(|error| claim_pattern_refusal(body, format!("`{name}` result: {error}")))?;
     let entry_contract = EntryContract::from_params(&params);
     refine_function_params_from_body(&mut params, &host_body);
     let ret_ty = if ret_ty.is_unresolved() {
@@ -6042,6 +6238,8 @@ fn lower_host_function(
     Ok(Some(LoweredHostFunction {
         function: HostFunction {
             helper_result_claim_axes,
+            result_claim,
+            entry_claims,
             name: name.to_string(),
             entry_contract,
             params,
@@ -6431,6 +6629,9 @@ fn lower_host_body_with_record_locals(
         scope: scope.clone(),
         ret_ty: signature.ret_ty.clone(),
         body_expr: rewritten.clone(),
+        result_claim: signature.result_claim.clone(),
+        entry_claims: signature.entry_claims.clone(),
+        callable_claims: signature.callable_claims.clone(),
     };
     let body = match lower_def_body_kernel(program, &rewritten_signature, tensor_helpers)? {
         Some(kernel_call) => kernel_call,
@@ -8072,6 +8273,51 @@ fn sequential_host_let_chain<'expr>(
     })
 }
 
+/// An explicit local ascription whose type nests tensors below a tuple or
+/// nominal type keeps its claim on the initializer's producers
+/// (runtime_extents.md C6.5), after the enclosing claims. A binder axis of
+/// such an ascription has no invocation witness in this scope and claims
+/// nothing; its literal axes are the obligation.
+fn retain_local_nested_ascription(
+    value: HostExpr,
+    initializer: &Expr,
+    program: &HostLoweringSession<'_>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let Some((_, metadata, _)) = stamped_parts(initializer) else {
+        return Ok(value);
+    };
+    if !metadata.surf_binding_type().is_some_and(|origin| {
+        *origin.value() == chelis_deep::annotations::BindingTypeOrigin::Explicit
+    }) {
+        return Ok(value);
+    }
+    let Some(authored) = metadata.ty().map(|ty| ty.expression().clone()) else {
+        return Ok(value);
+    };
+    let Some(pattern) = nested_claim_pattern(program, &authored)
+        .map_err(|error| claim_pattern_refusal(initializer, error))?
+    else {
+        return Ok(value);
+    };
+    let ty = host_expr_type(&value);
+    Ok(HostExpr::new(HostExprKind::ResultClaimScope {
+        plan: HostResultClaimPlan {
+            result: TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            },
+            axes: Vec::new(),
+            outer_claims_first: true,
+            nested: Some(NestedResultClaimPlan {
+                binders: vec![None; pattern.binders().len()],
+                pattern,
+            }),
+        },
+        body: Box::new(value),
+        ty,
+    }))
+}
+
 fn lower_checked_local_ascription_region(
     name: &str,
     initializer: &Expr,
@@ -8131,6 +8377,18 @@ fn lower_checked_local_ascription_region(
         sites,
         ty,
     }))
+}
+
+/// A claim source whose claim pattern cannot be derived, such as one that
+/// passes through non-regular recursion (runtime_extents.md C6.5), is
+/// refused before execution; it is never checked partially.
+fn claim_pattern_refusal(expr: &Expr, detail: impl Into<String>) -> crate::lower::LowerDiagnostic {
+    crate::lower::LowerDiagnostic::new(
+        format!("extent claim refused: {}", detail.into()),
+        Some(expr.span()),
+        expr.span_id().map(str::to_string),
+    )
+    .fatal()
 }
 
 fn host_expr_lowering_error(
@@ -8506,7 +8764,8 @@ fn lower_host_expr_kind(
                             tensor_helpers,
                         )?
                     } else {
-                        lower_host_expr(initializer, program, &scoped, tensor_helpers)?
+                        let value = lower_host_expr(initializer, program, &scoped, tensor_helpers)?;
+                        retain_local_nested_ascription(value, initializer, program)?
                     };
                     // The original `(bind {span: a} ...)` node wraps this
                     // value even when a cross-let local-ascription region
@@ -13386,17 +13645,6 @@ fn retain_actualized_result_claim_with_order(
     result: Option<&TensorType>,
     outer_claims_first: bool,
 ) -> HostExpr {
-    fn pattern_has_binder(pattern: &EntryPattern<HostTypeTerm>, binder: &str) -> bool {
-        match pattern {
-            EntryPattern::Tensor(HostTypeTerm::Tensor(tensor)) => tensor
-                .dims
-                .iter()
-                .any(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder)),
-            EntryPattern::List(inner) => pattern_has_binder(inner, binder),
-            _ => false,
-        }
-    }
-
     let Some(result) = result else {
         return body;
     };
@@ -13435,56 +13683,8 @@ fn retain_actualized_result_claim_with_order(
                 if binder == "*" {
                     continue;
                 }
-                let claim = crate::lower::extent_binder_label(binder);
-                let first_direct = observations
-                    .iter()
-                    .zip(positions)
-                    .filter_map(|(observation, position)| {
-                        let formal = contract.formals().get(*position)?;
-                        let EntryPattern::Tensor(HostTypeTerm::Tensor(tensor)) = formal.pattern()
-                        else {
-                            return None;
-                        };
-                        let source_axis = tensor.dims.iter().position(
-                            |dim| matches!(dim, DimInfo::Named(name, _) if name == binder),
-                        )?;
-                        let HostExprKind::Var(prepared, _) = &observation.kind else {
-                            return None;
-                        };
-                        Some((
-                            *position,
-                            HostResultRequirementPlan::NamedDirect {
-                                claim: claim.clone(),
-                                source: formal.name().to_owned(),
-                                prepared: prepared.clone(),
-                                axis: source_axis,
-                            },
-                        ))
-                    })
-                    .min_by_key(|(position, _)| *position);
-                let first_list =
-                    contract
-                        .formals()
-                        .iter()
-                        .enumerate()
-                        .find_map(|(position, formal)| {
-                            (matches!(formal.pattern(), EntryPattern::List(_))
-                                && pattern_has_binder(formal.pattern(), binder))
-                            .then_some(position)
-                        });
-                let requirement = if first_list.is_some_and(|list| {
-                    first_direct
-                        .as_ref()
-                        .is_none_or(|(direct, _)| list < *direct)
-                }) {
-                    contract
-                        .named_list_binders()
-                        .iter()
-                        .position(|name| name == binder)
-                        .map(|state| HostResultRequirementPlan::NamedList { state })
-                } else {
-                    first_direct.map(|(_, requirement)| requirement)
-                };
+                let requirement =
+                    signature_binder_requirement(contract, observations, positions, binder);
                 if let Some(requirement) = requirement {
                     axes.push((axis, requirement));
                 }
@@ -13502,6 +13702,7 @@ fn retain_actualized_result_claim_with_order(
             result: result.clone(),
             axes,
             outer_claims_first,
+            nested: None,
         };
         // Actual preparation and signature entry are outside the result
         // obligation. Only the callee body is on its result spine.
@@ -13532,6 +13733,7 @@ fn retain_actualized_result_claim_with_order(
         result: result.clone(),
         axes: literal_axes,
         outer_claims_first,
+        nested: None,
     };
     let ty = host_expr_type(&body);
     HostExpr::new(HostExprKind::ResultClaimScope {
@@ -13539,6 +13741,255 @@ fn retain_actualized_result_claim_with_order(
         body: Box::new(body),
         ty,
     })
+}
+
+/// The invocation witness of result binder `binder`: the first formal
+/// observation in signature order, a direct tensor axis or a List element
+/// state, as the retained entry plan orders them.
+fn signature_binder_requirement(
+    contract: &EntryContract<HostTypeTerm>,
+    observations: &[HostExpr],
+    positions: &[usize],
+    binder: &str,
+) -> Option<HostResultRequirementPlan> {
+    fn pattern_has_binder(pattern: &EntryPattern<HostTypeTerm>, binder: &str) -> bool {
+        match pattern {
+            EntryPattern::Tensor(HostTypeTerm::Tensor(tensor)) => tensor
+                .dims
+                .iter()
+                .any(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder)),
+            EntryPattern::List(inner) => pattern_has_binder(inner, binder),
+            _ => false,
+        }
+    }
+    let claim = crate::lower::extent_binder_label(binder);
+    let first_direct = observations
+        .iter()
+        .zip(positions)
+        .filter_map(|(observation, position)| {
+            let formal = contract.formals().get(*position)?;
+            let EntryPattern::Tensor(HostTypeTerm::Tensor(tensor)) = formal.pattern() else {
+                return None;
+            };
+            let source_axis = tensor
+                .dims
+                .iter()
+                .position(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder))?;
+            let HostExprKind::Var(prepared, _) = &observation.kind else {
+                return None;
+            };
+            Some((
+                *position,
+                HostResultRequirementPlan::NamedDirect {
+                    claim: claim.clone(),
+                    source: formal.name().to_owned(),
+                    prepared: prepared.clone(),
+                    axis: source_axis,
+                },
+            ))
+        })
+        .min_by_key(|(position, _)| *position);
+    let first_list = contract
+        .formals()
+        .iter()
+        .enumerate()
+        .find_map(|(position, formal)| {
+            (matches!(formal.pattern(), EntryPattern::List(_))
+                && pattern_has_binder(formal.pattern(), binder))
+            .then_some(position)
+        });
+    if first_list.is_some_and(|list| {
+        first_direct
+            .as_ref()
+            .is_none_or(|(direct, _)| list < *direct)
+    }) {
+        contract
+            .named_list_binders()
+            .iter()
+            .position(|name| name == binder)
+            .map(|state| HostResultRequirementPlan::NamedList { state })
+    } else {
+        first_direct.map(|(_, requirement)| requirement)
+    }
+}
+
+/// Keep an inlined declaration's nested result claim (runtime_extents.md
+/// C6.5) around its substituted body, after actual preparation and entry,
+/// exactly where a tensor result claim is kept.
+fn retain_nested_result_claim(
+    body: HostExpr,
+    pattern: Option<&Arc<crate::claim_pattern::ClaimPattern>>,
+    authored: &[HostParam],
+    origin: &Expr,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let Some(pattern) = pattern else {
+        return Ok(body);
+    };
+    let scope = |inner: HostExpr, binders: Vec<Option<NestedBinderWitness>>| {
+        let ty = host_expr_type(&inner);
+        HostExpr::new(HostExprKind::ResultClaimScope {
+            plan: HostResultClaimPlan {
+                result: TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Bool,
+                },
+                axes: Vec::new(),
+                outer_claims_first: false,
+                nested: Some(NestedResultClaimPlan {
+                    pattern: pattern.clone(),
+                    binders,
+                }),
+            },
+            body: Box::new(inner),
+            ty,
+        })
+    };
+    let HostExpr {
+        kind,
+        span_id,
+        merged_spans,
+    } = body;
+    if let HostExprKind::RetainedInvocation {
+        mut bindings,
+        body,
+        ty,
+    } = kind
+    {
+        let entry = bindings.iter().find_map(|binding| {
+            let HostExprKind::SignatureEntry {
+                contract,
+                args,
+                positions,
+                ..
+            } = &binding.value.kind
+            else {
+                return None;
+            };
+            Some((contract.clone(), args.clone(), positions.clone()))
+        });
+        // The authored signature names each binder's witness; the entry
+        // contract of a specialized invocation is built from actualized
+        // types that may have lost the name. A witness observed directly is
+        // the first authored tensor formal declaring the binder, read through
+        // that formal's prepared observation; any other witness keeps the
+        // contract's rule (a List element state).
+        let requirements = pattern
+            .binders()
+            .iter()
+            .map(|binder| {
+                let (contract, args, positions) = entry.as_ref()?;
+                let direct = authored.iter().enumerate().find_map(|(position, param)| {
+                    let HostTypeTerm::Tensor(tensor) = &param.ty else {
+                        return None;
+                    };
+                    let axis = tensor
+                        .dims
+                        .iter()
+                        .position(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder))?;
+                    Some((position, param, axis))
+                });
+                let list_first = contract.formals().iter().position(|formal| {
+                    matches!(formal.pattern(), EntryPattern::List(_))
+                        && contract
+                            .named_list_binders()
+                            .iter()
+                            .any(|name| name == binder)
+                });
+                match direct {
+                    Some((position, param, axis))
+                        if list_first.is_none_or(|list| position < list) =>
+                    {
+                        let observation = positions.iter().position(|at| *at == position)?;
+                        let HostExprKind::Var(prepared, _) = &args[observation].kind else {
+                            return None;
+                        };
+                        Some(HostResultRequirementPlan::NamedDirect {
+                            claim: crate::lower::extent_binder_label(binder),
+                            source: param.name.clone(),
+                            prepared: prepared.clone(),
+                            axis,
+                        })
+                    }
+                    _ => signature_binder_requirement(contract, args, positions, binder),
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut binders = Vec::with_capacity(requirements.len());
+        for requirement in requirements {
+            binders.push(match requirement {
+                Some(HostResultRequirementPlan::NamedDirect {
+                    claim,
+                    source,
+                    prepared,
+                    axis,
+                }) => {
+                    // Read the witness right after entry: the formal may be
+                    // released before the body's producer runs.
+                    let prepared_ty = bindings
+                        .iter()
+                        .find(|binding| binding.name == prepared)
+                        .map(|binding| binding.ty.clone())
+                        .ok_or_else(|| {
+                            claim_pattern_refusal(
+                                origin,
+                                format!("retained witness `{prepared}` has no prepared binding"),
+                            )
+                        })?;
+                    let mut serial = 0usize;
+                    let extent = loop {
+                        let candidate = format!("__chelis_nested_claim_extent_{serial}");
+                        if !bindings.iter().any(|binding| binding.name == candidate) {
+                            break candidate;
+                        }
+                        serial += 1;
+                    };
+                    bindings.push(HostBinding {
+                        name: extent.clone(),
+                        display_name: None,
+                        display_roots: Vec::new(),
+                        ty: HostTypeTerm::Int64,
+                        value: HostExpr::new(HostExprKind::Builtin {
+                            name: "shape".to_string(),
+                            args: vec![
+                                HostExpr::new(HostExprKind::Var(prepared, prepared_ty)),
+                                HostExpr::new(HostExprKind::Int(axis as i64)),
+                            ],
+                            ty: HostTypeTerm::Int64,
+                        }),
+                    });
+                    Some(NestedBinderWitness::Extent {
+                        claim,
+                        source,
+                        axis,
+                        extent,
+                    })
+                }
+                Some(HostResultRequirementPlan::NamedList { state }) => {
+                    Some(NestedBinderWitness::ListState(state))
+                }
+                Some(HostResultRequirementPlan::Literal(_)) | None => None,
+            });
+        }
+        let scoped = scope(*body, binders);
+        return Ok(HostExpr {
+            kind: HostExprKind::RetainedInvocation {
+                bindings,
+                body: Box::new(scoped),
+                ty,
+            },
+            span_id,
+            merged_spans,
+        });
+    }
+    let binders = vec![None; pattern.binders().len()];
+    Ok(scope(
+        HostExpr {
+            kind,
+            span_id,
+            merged_spans,
+        },
+        binders,
+    ))
 }
 
 /// The authored literal axes in a result signature are obligations on the
@@ -14147,6 +14598,11 @@ struct RetainedHostInvocation<'a> {
     entry: SignatureEntryPlan,
     callable_entries: Vec<bool>,
     name: Option<&'a str>,
+    /// Per formal, the nested claim of its authored type (C6.5).
+    entry_claims: Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>,
+    /// Per formal, the authored parameter types of a function-typed formal
+    /// whose parameters nest claims (C6.5).
+    callable_claims: Vec<Option<Vec<Expr>>>,
 }
 
 impl<'a> RetainedHostInvocation<'a> {
@@ -14208,6 +14664,8 @@ impl<'a> RetainedHostInvocation<'a> {
             entry,
             callable_entries,
             name: None,
+            entry_claims: Vec::new(),
+            callable_claims: Vec::new(),
         }
     }
 }
@@ -14391,6 +14849,7 @@ fn host_type_syntax(ty: &HostTypeTerm, span: chelis_deep::Span) -> Option<Expr> 
 fn retain_callable_entry_contract(
     actual: &Expr,
     formal: &HostTypeTerm,
+    authored: Option<&[Expr]>,
     formal_index: usize,
     reserved: &mut UnordSet<String>,
     span: chelis_deep::Span,
@@ -14417,8 +14876,14 @@ fn retain_callable_entry_contract(
     let declarations = param_names
         .iter()
         .zip(param_tys)
-        .map(|(name, ty)| {
-            let type_syntax = host_type_syntax(ty, span);
+        .enumerate()
+        .map(|(index, (name, ty))| {
+            // The authored parameter type keeps a nominal type's dimension
+            // arguments, which the adapter's entry then claims.
+            let type_syntax = authored
+                .and_then(|authored| authored.get(index))
+                .cloned()
+                .or_else(|| host_type_syntax(ty, span));
             Expr::BareList(
                 vec![
                     Expr::Atom(Atom::Name(name.clone()), span),
@@ -14521,9 +14986,20 @@ fn lower_inline_host_invocation(
     }
     let signature =
         expr_fn_type(callee).map(|signature| expand_host_fn_type_aliases(program, signature));
+    let mut invocation = RetainedHostInvocation::new(&params, body);
+    // A lambda formal's declared type claims its nested tensors on every
+    // invocation, as a named formal's does (runtime_extents.md C6.5).
+    let declared = declarations
+        .children_slice()
+        .iter()
+        .map(param_declared_type_expr)
+        .collect::<Vec<_>>();
+    invocation.entry_claims =
+        formal_nested_claims(program, declared.iter().map(Option::as_ref), &params)
+            .map_err(|error| claim_pattern_refusal(expr, format!("lambda formal: {error}")))?;
     lower_retained_host_invocation(
         expr,
-        RetainedHostInvocation::new(&params, body),
+        invocation,
         expected,
         program,
         scope,
@@ -14620,6 +15096,21 @@ fn lower_named_retained_host_invocation(
         checked_binder_body.as_ref().unwrap_or(&signature.body_expr),
     );
     invocation.name = Some(name);
+    invocation.entry_claims = signature
+        .entry_claims
+        .clone()
+        .map_err(|error| claim_pattern_refusal(expr, format!("`{name}` formal: {error}")))?;
+    invocation.callable_claims = signature
+        .callable_claims
+        .clone()
+        .map_err(|error| claim_pattern_refusal(expr, format!("`{name}` formal: {error}")))?;
+    for (entry, claims) in invocation
+        .callable_entries
+        .iter_mut()
+        .zip(&invocation.callable_claims)
+    {
+        *entry |= claims.is_some();
+    }
     let actualized_expected = result_claim
         .as_ref()
         .map(result_claim_body_type)
@@ -14640,7 +15131,16 @@ fn lower_named_retained_host_invocation(
             tensor_specialization: actualize_polymorphic_contract.then_some(tensor_specialization),
         },
     )
-    .map(|body| Some((body, result_claim)))
+    .and_then(|body| {
+        let nested = signature
+            .result_claim
+            .clone()
+            .map_err(|error| claim_pattern_refusal(expr, format!("`{name}` result: {error}")))?;
+        Ok(Some((
+            retain_nested_result_claim(body, nested.as_ref(), &signature.params, expr)?,
+            result_claim,
+        )))
+    })
 }
 
 /// Evaluate payload actuals once in caller order, then execute the complete
@@ -14698,9 +15198,20 @@ fn lower_retained_host_invocation(
         .enumerate()
     {
         if *callable_entry {
+            let authored = invocation
+                .callable_claims
+                .get(index)
+                .and_then(Option::as_deref);
             substitutions.insert(
                 formal.name.clone(),
-                retain_callable_entry_contract(arg, &formal.ty, index, &mut reserved, *span),
+                retain_callable_entry_contract(
+                    arg,
+                    &formal.ty,
+                    authored,
+                    index,
+                    &mut reserved,
+                    *span,
+                ),
             );
             continue;
         }
@@ -14790,6 +15301,15 @@ fn lower_retained_host_invocation(
                 name: formal.name.clone(),
                 ty: formal.ty.clone(),
                 value: HostExpr::new(HostExprKind::Var(formal_local.clone(), ty.clone())),
+                claim: None,
+            });
+        } else if let Some(Some(claim)) = invocation.entry_claims.get(index) {
+            list_observations.push(HostListEntry {
+                position: index,
+                name: formal.name.clone(),
+                ty: formal.ty.clone(),
+                value: HostExpr::new(HostExprKind::Var(formal_local.clone(), ty.clone())),
+                claim: Some(claim.clone()),
             });
         }
         substitutions.insert(
@@ -15488,6 +16008,14 @@ fn ensure_mono_specialization(
     solve_host_type_vars(&authored.ret_ty, ret_ty, &mut authored_substitution);
     let authored_result_ty =
         substitute_host_type_term(authored.ret_ty.clone(), &authored_substitution);
+    let result_claim = authored
+        .result_claim
+        .clone()
+        .map_err(|error| claim_pattern_refusal(app_expr, format!("`{name}` result: {error}")))?;
+    let entry_claims = authored
+        .entry_claims
+        .clone()
+        .map_err(|error| claim_pattern_refusal(app_expr, format!("`{name}` formal: {error}")))?;
     let entry_params = authored
         .params
         .into_iter()
@@ -15514,6 +16042,8 @@ fn ensure_mono_specialization(
         entry_contract,
         ret_ty,
         authored_result_ty,
+        result_claim,
+        entry_claims,
         body_expr: &body_expr,
         fn_expr: body,
         program,
@@ -15535,6 +16065,8 @@ struct MonoSpecializedFunctionInput<'a> {
     entry_contract: EntryContract<HostTypeTerm>,
     ret_ty: &'a HostTypeTerm,
     authored_result_ty: HostTypeTerm,
+    result_claim: Option<Arc<crate::claim_pattern::ClaimPattern>>,
+    entry_claims: Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>,
     body_expr: &'a Expr,
     fn_expr: &'a Expr,
     program: &'a HostLoweringSession<'a>,
@@ -15552,6 +16084,8 @@ fn lower_mono_specialized_function(
         entry_contract,
         ret_ty,
         authored_result_ty,
+        result_claim,
+        entry_claims,
         body_expr,
         fn_expr,
         program,
@@ -15602,6 +16136,8 @@ fn lower_mono_specialized_function(
     Ok(LoweredHostFunction {
         function: HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim,
+            entry_claims,
             name: symbol.to_string(),
             entry_contract,
             params,
@@ -17292,8 +17828,32 @@ fn lower_host_callback(
                 })
                 .collect::<Vec<_>>();
             let contract = EntryContract::from_params(&declared_params);
+            // A formal whose declared type nests its tensors below a nominal
+            // type claims them on every invocation, as a named formal's
+            // does (runtime_extents.md C6.5).
+            let authored = params_list
+                .children_slice()
+                .iter()
+                .map(param_declared_type_expr)
+                .collect::<Vec<_>>();
+            let nested = formal_nested_claims(
+                program,
+                authored.iter().map(Option::as_ref),
+                &declared_params,
+            )
+            .map_err(|error| claim_pattern_refusal(expr, format!("lambda formal: {error}")))?;
             for (position, (declared, param)) in declared_params.iter().zip(&params).enumerate() {
                 let value = HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone()));
+                if let Some(Some(claim)) = nested.get(position) {
+                    lists.push(HostListEntry {
+                        position,
+                        name: param.name.clone(),
+                        ty: declared.ty.clone(),
+                        value,
+                        claim: Some(claim.clone()),
+                    });
+                    continue;
+                }
                 match contract.formals()[position].pattern() {
                     EntryPattern::Tensor(HostTypeTerm::Tensor(ty)) => {
                         inputs.push(HostTensorInput {
@@ -17309,6 +17869,7 @@ fn lower_host_callback(
                             name: param.name.clone(),
                             ty: declared.ty.clone(),
                             value,
+                            claim: None,
                         })
                     }
                     _ => {}
@@ -23753,6 +24314,8 @@ def bad[b](box: Box[b]) -> bool =
             functions: vec![LoweredHostFunction {
                 function: HostFunction {
                     helper_result_claim_axes: Vec::new(),
+                    result_claim: None,
+                    entry_claims: Vec::new(),
                     name: "seeded__mono_0123456789abcdef".to_string(),
                     entry_contract: EntryContract::default(),
                     params: Vec::new(),
@@ -23974,6 +24537,8 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
         };
         HostFunction {
             helper_result_claim_axes: Vec::new(),
+            result_claim: None,
+            entry_claims: Vec::new(),
             name: name.to_string(),
             entry_contract: EntryContract::default(),
             params: vec![HostParam {
@@ -28108,6 +28673,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                     vec![HostListEntry {
                         position: 0,
                         name: "xs".into(),
+                        claim: None,
                         ty: list_ty.clone(),
                         value: HostExpr::new(HostExprKind::List(
                             vec![HostExpr::new(HostExprKind::Var(
@@ -28594,6 +29160,7 @@ mod record_hoist_binder_vocabulary_tests {
                     name: "list".into(),
                     ty: list_term.clone(),
                     value: HostExpr::new(HostExprKind::Var("prepared_list".into(), list_term)),
+                    claim: None,
                 }],
             });
             let result_ty = HostTypeTerm::Tensor(tensor.clone());

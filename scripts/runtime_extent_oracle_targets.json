@@ -1454,6 +1454,109 @@
         "runtime_iota_native_inactive_arm_does_not_read_overflowing_endpoints",
         "runtime_iota_native_overflow_precedes_allocation"
       ]
+    },
+    {
+      "phase": "b",
+      "id": "cli_nested_claim_patterns",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_3347_nested_claim_patterns.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "agreeing_claim_walks_run_when_the_host_is_cxx",
+        "c_absent_variant_owes_nothing",
+        "c_alias_type_argument_claims_like_its_expansion",
+        "c_aliased_nominal_claims_like_its_expansion",
+        "c_box_formal_traps_at_entry",
+        "c_callable_formal_claims_its_nested_parameter",
+        "c_deep_entry_walk_reaches_the_last_link",
+        "c_deep_result_walk_reaches_the_last_link",
+        "c_effects_surround_the_nested_producer_guard",
+        "c_generic_callee_inherits_box_result_claim",
+        "c_lambda_callbacks_claim_their_nested_formals",
+        "c_lambda_chain_accumulator_checks_every_link",
+        "c_lambda_formal_claims_its_nested_tensor",
+        "c_lambda_nested_binder_guards_a_later_formal",
+        "c_lambda_outer_binder_disposition_lock",
+        "c_lambda_tuple_formals_claim_their_positions",
+        "c_list_combinator_results_trap_at_the_combinator",
+        "c_local_box_ascription_traps_at_its_initializer",
+        "c_mutual_recursion_names_the_innermost_claim",
+        "c_named_box_result_names_its_witness",
+        "c_nested_binder_witness_guards_a_later_formal",
+        "c_nongeneric_box_result_traps_at_insert",
+        "c_recursive_claimed_builder_memory_stays_linear",
+        "c_recursive_pair_traps_at_the_right_leaf",
+        "c_self_recursion_checks_its_own_witness",
+        "c_tuple_option_and_record_results_trap_at_their_producer",
+        "c_unclaimed_generic_call_checks_nothing",
+        "container_recursive_alias_closes_at_the_alias",
+        "eval_absent_variant_owes_nothing",
+        "eval_alias_type_argument_claims_like_its_expansion",
+        "eval_aliased_nominal_claims_like_its_expansion",
+        "eval_box_formal_traps_at_entry",
+        "eval_callable_formal_claims_its_nested_parameter",
+        "eval_deep_entry_walk_reaches_the_last_link",
+        "eval_deep_result_walk_reaches_the_last_link",
+        "eval_effects_surround_the_nested_producer_guard",
+        "eval_generic_callee_inherits_box_result_claim",
+        "eval_lambda_callbacks_claim_their_nested_formals",
+        "eval_lambda_chain_accumulator_checks_every_link",
+        "eval_lambda_formal_claims_its_nested_tensor",
+        "eval_lambda_nested_binder_guards_a_later_formal",
+        "eval_lambda_outer_binder_disposition_lock",
+        "eval_lambda_tuple_formals_claim_their_positions",
+        "eval_list_combinator_results_trap_at_the_combinator",
+        "eval_local_box_ascription_traps_at_its_initializer",
+        "eval_mutual_recursion_names_the_innermost_claim",
+        "eval_named_box_result_names_its_witness",
+        "eval_nested_binder_witness_guards_a_later_formal",
+        "eval_nongeneric_box_result_traps_at_insert",
+        "eval_recursive_claimed_builder_memory_stays_linear",
+        "eval_recursive_pair_traps_at_the_right_leaf",
+        "eval_self_recursion_checks_its_own_witness",
+        "eval_tuple_option_and_record_results_trap_at_their_producer",
+        "eval_unclaimed_generic_call_checks_nothing",
+        "literal_visible_generic_call_never_succeeds",
+        "mutual_recursive_claimed_builder_memory_stays_linear",
+        "non_closing_alias_recursion_terminates_on_both_lanes",
+        "non_regular_recursion_claim_is_refused_on_both_lanes",
+        "static_literal_field_is_a_checker_rejection_on_both_lanes",
+        "tensor_free_recursive_alias_owes_no_claim"
+      ],
+      "note": "#3347/#2644 (runtime_extents.md C6.5): claims on tensors nested in tuple, Option, record and nominal values, including nominal dimension arguments, on Eval and compiled C with file-supplied extents: producer-owned result and local-ascription guards through construction and generic calls, recursive patterns, named witnesses, entry walks with nested binder witnesses, absent variants, effect order, unclaimed calls, the static checker verdict and the non-regular refusal."
+    },
+    {
+      "phase": "b",
+      "id": "eval_nested_claim_walks",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/runtime/eval.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "runtime::eval::nested_claim_order_tests::projection_keeps_the_earlier_copy_of_an_obligation",
+        "runtime::eval::nested_claim_walk_stack_tests::entry_claim_walk_reaches_the_last_link_of_a_deep_chain",
+        "runtime::eval::nested_claim_walk_stack_tests::result_claim_walk_reaches_the_last_link_of_a_deep_chain"
+      ],
+      "note": "#3347/#3460 (runtime_extents.md C6.5): Eval walks a 100,000-link claimed chain to its last link on a 256 KiB thread, which the CLI rows cannot show because evaluation runs on a grown stack segment, and projecting claims keeps the earlier copy of a repeated obligation, so the first failing claim is the one the unmerged list names."
+    },
+    {
+      "phase": "b",
+      "id": "c_nested_claim_frame_order",
+      "package": "chelis-backend-c",
+      "kind": "lib",
+      "file": "crates/chelis-backend-c/src/host_emit.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "host_emit::claim_frame_order_tests::frames_differing_only_in_order_are_never_merged"
+      ],
+      "note": "#3347 (runtime_extents.md C6.5, chelis#3447 ordering): two generated C pattern frames sharing one table and differing only in outer_claims_first are never merged by the join or a projection, so a third, differently failing claim never names the trap the order without the skip names."
     }
   ]
 }

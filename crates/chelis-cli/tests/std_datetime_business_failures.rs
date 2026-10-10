@@ -5,7 +5,7 @@
 //! horizon, and a query whose answer those days do not determine fails
 //! `domain`. Each suite runs as one `chelis test` invocation over a generated
 //! fixture whose every test calls one failing (or extreme) expression; the
-//! runner reports each call's failure message on its FAIL line. Opaque
+//! runner reports each call's failure message in its FAIL verdict. Opaque
 //! construction and field access outside the module are checked through
 //! `chelis check`, against the plain `Weekmask` record that any module may
 //! build.
@@ -235,20 +235,19 @@ fn exact_failures() -> Vec<(&'static str, &'static str, String)> {
         (
             "column_count_lengths_differ_empty",
             "dates_business_day_count(cal(), days_from(20458i64, 0i64), days_from(20458i64, 1i64))",
-            "dates_business_day_count: domain: arguments have 0 and 1 elements".into(),
+            "extent `n`: begins.epoch_days axis 0 = 0, ends.epoch_days axis 0 = 1\nnumeric trap: domain in load at i64".into(),
         ),
-        // A column argument whose length differs from another argument's
-        // fails before any element is read, rather than pairing the shorter
-        // prefix.
+        // Nested nominal formals reject a mismatched column length at entry,
+        // before any element is read or a shorter prefix can be paired.
         (
             "column_offset_lengths_differ",
             "dates_business_day_offset(cal(), days_from(20458i64, 2i64), run_of(1i64, 3i64), RejectNonBusinessStart)",
-            "dates_business_day_offset: domain: arguments have 2 and 3 elements".into(),
+            "extent `n`: ds.epoch_days axis 0 = 2, offsets axis 0 = 3\nnumeric trap: domain in load at i64".into(),
         ),
         (
             "column_count_lengths_differ",
             "dates_business_day_count(cal(), days_from(20458i64, 2i64), days_from(20460i64, 3i64))",
-            "dates_business_day_count: domain: arguments have 2 and 3 elements".into(),
+            "extent `n`: begins.epoch_days axis 0 = 2, ends.epoch_days axis 0 = 3\nnumeric trap: domain in load at i64".into(),
         ),
     ]
 }
@@ -303,7 +302,17 @@ fn run_expression_suite(
         .concat(),
     );
     let mut outcomes = BTreeMap::new();
+    let mut pending: Option<(String, String)> = None;
     for line in rendered.lines() {
+        if let Some((_, message)) = pending.as_mut() {
+            message.push('\n');
+            message.push_str(line.trim());
+            if message.ends_with(')') {
+                let (name, message) = pending.take().expect("pending failure");
+                outcomes.insert(name, Some(message[..message.len() - 1].to_string()));
+            }
+            continue;
+        }
         let Some(rest) = line.trim_start().strip_prefix("test_") else {
             continue;
         };
@@ -313,13 +322,15 @@ fn run_expression_suite(
         let verdict = verdict.trim_start_matches(['.', ' ']);
         if verdict == "PASS" {
             outcomes.insert(name.to_string(), None);
-        } else if let Some(message) = verdict
-            .strip_prefix("FAIL (")
-            .and_then(|tail| tail.strip_suffix(')'))
-        {
-            outcomes.insert(name.to_string(), Some(message.to_string()));
+        } else if let Some(message) = verdict.strip_prefix("FAIL (") {
+            if let Some(message) = message.strip_suffix(')') {
+                outcomes.insert(name.to_string(), Some(message.to_string()));
+            } else {
+                pending = Some((name.to_string(), message.to_string()));
+            }
         }
     }
+    assert!(pending.is_none(), "unterminated test verdict:\n{rendered}");
     assert_eq!(
         outcomes.len(),
         expressions.len(),

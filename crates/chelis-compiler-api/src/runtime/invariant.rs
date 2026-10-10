@@ -851,6 +851,7 @@ fn revalidate_adt_value_inner(
         session: None,
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
+        claim_patterns: Default::default(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),

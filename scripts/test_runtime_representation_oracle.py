@@ -1719,15 +1719,28 @@ class ManifestTests(unittest.TestCase):
                 "load-store-template",
                 "append_host_result_interface_origin_support",
             ),
+            (
+                "crates/chelis-backend-c/src/host_emit.rs",
+                "backend-element-spelling",
+                "claim_pattern_table_lines",
+            ),
+            (
+                "crates/chelis-backend-c/src/host_emit.rs",
+                "load-store-template",
+                "append_nested_claim_support",
+            ),
         )
         self.assertEqual(oracle.RESULT_CLAIM_METADATA_FINAL_FORMS, expected)
         forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
         for path, kind, owner in expected:
             self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
             self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
-            self.assertFalse(
-                oracle.owner_module_final_form("backend-element-spelling", path, owner)
+            other_kind = (
+                "load-store-template"
+                if kind == "backend-element-spelling"
+                else "backend-element-spelling"
             )
+            self.assertFalse(oracle.owner_module_final_form(other_kind, path, owner))
             self.assertFalse(
                 oracle.owner_module_final_form(
                     kind, path.replace("host_emit.rs", "emit.rs"), owner
@@ -1745,6 +1758,24 @@ class ManifestTests(unittest.TestCase):
             and "c_aggregate_origin_arena_is_fresh_for_repeated_public_calls" in command
             for command in commands
         ))
+        nested_controls = (
+            "c_nongeneric_box_result_traps_at_insert",
+            "c_recursive_pair_traps_at_the_right_leaf",
+            "c_tuple_option_and_record_results_trap_at_their_producer",
+            "c_mutual_recursion_names_the_innermost_claim",
+            "c_self_recursion_checks_its_own_witness",
+            "agreeing_claim_walks_run_when_the_host_is_cxx",
+        )
+        self.assertTrue(any(
+            "--test issue_3347_nested_claim_patterns" in command
+            and all(f"test(={name})" in command for name in nested_controls)
+            for command in commands
+        ))
+        receipts = (
+            oracle.REPO_ROOT / "crates/chelis-cli/tests/issue_3347_nested_claim_patterns.rs"
+        ).read_text(encoding="utf-8")
+        for name in nested_controls:
+            self.assertIn(f"#[test]\nfn {name}()", receipts)
 
     def test_named_list_entry_metadata_owners_require_exact_execution_controls(self) -> None:
         expected = (
