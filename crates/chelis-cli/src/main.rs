@@ -2489,18 +2489,29 @@ fn emit_failed_eval_transcript(transcript: &[String], json: bool) -> io::Result<
 }
 
 fn cmd_cost(file: &Path, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let summary = copy_cost_for_file(file)?;
+    let report = copy_cost_for_file(file)?;
     if json {
-        println!("{}", copy_cost_json(file, &summary));
+        println!("{}", copy_cost_json(file, &report));
     } else {
-        print!("{}", copy_cost_human(file, &summary));
+        print!("{}", copy_cost_human(file, &report));
     }
     Ok(())
 }
 
-fn copy_cost_for_file(
-    file: &Path,
-) -> Result<chelis_ir::analysis::CopyCostSummary, Box<dyn std::error::Error>> {
+/// What `chelis cost` reports: the copy cost of the lowered program, and
+/// every copy the linearity checker inserted to repair consuming fan-out in
+/// the entry program's declarations (spec/04 section 8.3).
+///
+/// The two answer different questions. A repair is a copy the language
+/// semantics place at a source consume; a lowered program whose earlier use
+/// never consumes its input pays nothing for it, so `copy_count` can be
+/// smaller than the number of repairs.
+struct CopyCostReport {
+    summary: chelis_ir::analysis::CopyCostSummary,
+    repairs: Vec<chelis_types::CopyRepair>,
+}
+
+fn copy_cost_for_file(file: &Path) -> Result<CopyCostReport, Box<dyn std::error::Error>> {
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext == "dp" {
         let source = fs::read_to_string(file)?;
@@ -2509,7 +2520,10 @@ fn copy_cost_for_file(
             .map_err(|err| format!("Deep parse error: {err}"))?;
         let checked =
             checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
-        return copy_cost_for_checked(&checked, &deep_exprs, &deep_exprs);
+        return Ok(CopyCostReport {
+            summary: copy_cost_for_checked(&checked, &deep_exprs, &deep_exprs)?,
+            repairs: entry_copy_repairs(&checked, &deep_exprs)?,
+        });
     }
 
     let prepared = chelis_reef::prepare_program_for_file(file, &EMBEDDED_RUNTIME)
@@ -2540,7 +2554,65 @@ fn copy_cost_for_file(
     let _linked_guard = linked_program.then(chelis_types::install_linked_program_guard);
     let checked = checked_program_with_effects(&check_deep_exprs)
         .map_err(|e| format!("Check errors: {e}"))?;
-    copy_cost_for_checked(&checked, &check_deep_exprs, &entry_deep_exprs)
+    let entry_exprs = if linked_program {
+        &entry_deep_exprs
+    } else {
+        &check_deep_exprs
+    };
+    Ok(CopyCostReport {
+        summary: copy_cost_for_checked(&checked, &check_deep_exprs, &entry_deep_exprs)?,
+        repairs: entry_copy_repairs(&checked, entry_exprs)?,
+    })
+}
+
+/// The copy repairs in the declarations `entry_exprs` names. A linked
+/// program also holds its dependencies' declarations, whose repairs are not
+/// the entry author's to act on and whose span offsets index other files.
+fn entry_copy_repairs(
+    checked: &chelis_types::CheckedProgram,
+    entry_exprs: &[DeepExpr],
+) -> Result<Vec<chelis_types::CopyRepair>, Box<dyn std::error::Error>> {
+    let mut entry_names = BTreeSet::new();
+    collect_declaration_names(entry_exprs, &mut entry_names);
+    let repairs = chelis_types::copy_repairs(checked, Some(&entry_names)).map_err(|errors| {
+        format!(
+            "Check errors: {}",
+            errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    Ok(repairs
+        .into_iter()
+        .filter(|repair| {
+            repair
+                .declaration
+                .as_ref()
+                .is_some_and(|name| entry_names.contains(name))
+        })
+        .map(|repair| chelis_types::CopyRepair {
+            declaration: repair.declaration.as_deref().map(display_root_name),
+            ..repair
+        })
+        .collect())
+}
+
+/// Every top-level declaration name in `exprs`, through module wrappers.
+fn collect_declaration_names(exprs: &[DeepExpr], names: &mut BTreeSet<String>) {
+    for expr in exprs {
+        match expr.carrier() {
+            DeepExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
+                collect_declaration_names(children.get(1..).unwrap_or(&[]), names);
+            }
+            _ => {
+                if let Some(name) = deep_top_level_expr_name(expr) {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
 }
 
 fn copy_cost_for_checked(
@@ -2633,10 +2705,8 @@ fn summarize_copy_cost_functions(
     }
 }
 
-fn copy_cost_json(
-    file: &Path,
-    summary: &chelis_ir::analysis::CopyCostSummary,
-) -> serde_json::Value {
+fn copy_cost_json(file: &Path, report: &CopyCostReport) -> serde_json::Value {
+    let summary = &report.summary;
     let functions = summary
         .functions
         .iter()
@@ -2666,10 +2736,15 @@ fn copy_cost_json(
     if let Some(bytes) = summary.total_bytes_copied {
         object.insert("total_bytes_copied".to_string(), serde_json::json!(bytes));
     }
+    object.insert(
+        "copy_repairs".to_string(),
+        serde_json::to_value(&report.repairs).expect("copy repairs serialize"),
+    );
     serde_json::Value::Object(object)
 }
 
-fn copy_cost_human(file: &Path, summary: &chelis_ir::analysis::CopyCostSummary) -> String {
+fn copy_cost_human(file: &Path, report: &CopyCostReport) -> String {
+    let summary = &report.summary;
     let mut out = format!("file: {}\n", file.display());
     for function in &summary.functions {
         out.push_str(&format!(
@@ -2690,7 +2765,33 @@ fn copy_cost_human(file: &Path, summary: &chelis_ir::analysis::CopyCostSummary) 
         out.push_str(&format!(", total_bytes_copied={formula}"));
     }
     out.push('\n');
+    for repair in &report.repairs {
+        let forced_by = repair
+            .forced_by
+            .iter()
+            .map(|later| format!("{} at {}", copy_repair_use_label(later.kind), later.at))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "copy_repair {}: `{}` copied at {} ({}), for {}\n",
+            repair.declaration.as_deref().unwrap_or("<top level>"),
+            repair.binding,
+            repair.copy_at,
+            repair.consumed_by,
+            forced_by
+        ));
+    }
     out
+}
+
+fn copy_repair_use_label(kind: chelis_types::CopyRepairUseKind) -> &'static str {
+    match kind {
+        chelis_types::CopyRepairUseKind::Consume => "consume",
+        chelis_types::CopyRepairUseKind::Borrow => "borrow",
+        chelis_types::CopyRepairUseKind::Capture => "capture",
+        chelis_types::CopyRepairUseKind::Drop => "drop",
+        chelis_types::CopyRepairUseKind::Root => "root",
+    }
 }
 
 /// Exit code returned by `cmd_check` (and the `main` dispatch) when

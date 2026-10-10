@@ -5,8 +5,13 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_types::CopyRepairUseKind;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
+use copy_repair::assert_copy_repaired;
+
+#[path = "support/copy_repair.rs"]
+mod copy_repair;
 
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
     let decls = parse_str(source).expect("surf parse should succeed");
@@ -18,8 +23,11 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
 /// `realize(y)` consumes the value shared by `y` and `w`, so
 /// `add(w, z)` reports `UseAfterConsume` on `w`.
 #[test]
-fn aliased_consume_bypass_errors_after_fix() {
-    let errors = linearity_errors(
+fn aliased_consume_lands_on_the_source() {
+    // The consume through alias `y` lands on `w`, so the later borrow of `w`
+    // is fan-out repaired at that consume (spec/04 section 8.3), which the
+    // repair names by the alias it spells.
+    assert_copy_repaired(
         r#"
 def f(w: tensor[4, f32]) -> tensor[4, f32] =
   {
@@ -28,12 +36,9 @@ def f(w: tensor[4, f32]) -> tensor[4, f32] =
     add(w, z)
   }
 "#,
-    );
-    assert!(
-        errors.iter().any(|e| {
-            matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `w`")
-        }),
-        "expected UseAfterConsume on `w` consumed via aliased binding `y`; got {errors:?}"
+        "y",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }
 

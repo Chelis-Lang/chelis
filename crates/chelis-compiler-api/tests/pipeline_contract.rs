@@ -292,9 +292,9 @@ fn effect_rejection_uses_the_narrow_semantic_error() {
 #[test]
 fn linearity_rejection_uses_the_narrow_semantic_error() {
     let source =
-        "def broken(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = realize(x)\n  add(x, y)\n}\n";
+        "def broken(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = drop(x)\n  realize(x)\n}\n";
     let rejection = complete_checks(accepted_analysis(source), SemanticContext::Isolated)
-        .expect_err("a consumed tensor cannot be used again");
+        .expect_err("a dropped tensor cannot be used again");
     assert!(matches!(rejection, SemanticRejection::Linearity { .. }));
 
     let full_rejection = run_source(request(source, PipelineGoal::FullCheck))

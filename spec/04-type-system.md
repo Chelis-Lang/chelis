@@ -3315,7 +3315,16 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   consuming call argument, `realize`, and the value a destructuring `let`
   destructures are ordinary consumes. Ordinary consuming fan-out (a later use after
   an earlier ordinary consume) is handled by inserted copies; a use after any other
-  consume is rejected. Diagnostics remain for
+  consume is rejected. The later use may be of any kind: a borrow (an argument in a
+  `&T` position, an auto-borrowed operand of a read-only primitive, or an argument of
+  a `grad(f)(..)` or `vmap(f)(..)` call) is a later use exactly as a consume is, and so
+  is a closure capture, borrowing or consuming, which [04-LIN-2] places at the closure's
+  creation; the earlier ordinary consume receives the copy. A consuming capture is not
+  itself ordinary, so a use after it is rejected. A top-level function declaration's free
+  reference is not a later use, because a declaration has no place in initializer order;
+  the declaration rule above governs it. Every copy this rule inserts SHALL be reported by
+  `chelis cost`, as a function of the program text, naming the consume that receives it
+  and each later use that forced it. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases for which a unique terminal path cannot be proven.
 - **Destructured components are excepted from copy insertion.** A binding introduced by

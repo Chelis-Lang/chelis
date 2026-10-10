@@ -719,7 +719,7 @@ fn cache_reconstruction_rejects_a_program_only_literal_edit_after_checksum_recom
 /// `w`, so renaming that use of `w` to `x` is a use after consume.
 const LINEARITY_EDIT_SOURCE: &str = "module Dep.Ops\nexport (settle)\n\n\
     def settle(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = {\n  \
-    y = realize(x)\n  mul(w, y)\n}\n";
+    y = drop(x)\n  realize(w)\n}\n";
 
 /// chelis#2558 review: a typecheck cache payload that carries no lowering
 /// has nothing to compare its checked program against, so an edit confined to
@@ -728,8 +728,9 @@ const LINEARITY_EDIT_SOURCE: &str = "module Dep.Ops\nexport (settle)\n\n\
 /// rerunning them: the dependency typecheck cache (`LibraryContext`), whose
 /// wire never carries a lowering, and a `StdLibContext` whose optional
 /// lowering is absent. In each, one use of `w` in `settle` is renamed to `x`,
-/// which `realize` has already consumed, and the resealed entry must be
-/// rejected as a linearity violation rather than bound.
+/// which `drop` has already ended (no inserted copy repairs a use after a
+/// `drop`), and the resealed entry must be rejected as a linearity violation
+/// rather than bound.
 #[test]
 fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violation() {
     let directory = tempfile::tempdir().unwrap();
@@ -876,7 +877,7 @@ fn assert_linearity_edit_is_rejected<T: cache_envelope::CachePayload>(
         };
         assert!(
             matches!(error, cache_envelope::CacheError::Decode(ref message)
-                if message.contains("was already consumed by realize")),
+                if message.contains("was already consumed by call to `drop`")),
             "{label}: the rejection must be the linearity checker's: {error}"
         );
     }

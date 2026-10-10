@@ -71,18 +71,18 @@ const ADD_EFFECTING: &str = r#"(defsig {}
 "#;
 
 const ADD_LINEARITY_VIOLATION: &str = r#"(defsig {}
-  alias_twice
+  use_after_drop
   (t-fn {eff: (effects {})}
     (t-tensor {} (d-lit {} 4) (t-prim {} f32))
     (t-tensor {} (d-lit {} 4) (t-prim {} f32))))
 (def {}
-  alias_twice
+  use_after_drop
   (fn {}
     (params {}
       (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
     (let {}
-      (bind {} y (realize {} (var {} x)))
-      (app {} (var {} add) (var {} x) (var {} y)))))
+      (bind {} y (app {} (var {} drop) (var {} x)))
+      (realize {} (var {} x)))))
 "#;
 
 const ADD_ILL_TYPED: &str = r#"(defsig {}

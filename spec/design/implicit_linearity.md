@@ -34,7 +34,7 @@ existing runtime or typed elementwise comparison arms.
 
 The regression oracle is `cargo test -p chelis-cli --test
 issue_1248_read_only_families`: family and operator reuse succeeds, reuse after
-`realize` fails, and host-produced tensor comparisons execute with eval/C parity
+`realize` is copy-repaired fan-out, reuse after `drop` fails, and host-produced tensor comparisons execute with eval/C parity
 while incompatible shape or dtype inputs fail checking.
 
 ## Drop Insertion
@@ -74,13 +74,19 @@ component out of the parent: an ordinary consume of that component is fan-out th
 same way, while a `drop` of it ends the component, so the parent is unusable as a
 whole afterwards and only the disjoint components remain usable.
 
-Borrows do not count as fan-out. Multiple `&T` uses share the same source. A value
-passed once to a consuming function after any number of borrows is not fan-out and does
-not receive a copy.
+Borrows before a consume do not count as fan-out. Multiple `&T` uses share the same
+source, and a value passed once to a consuming function after any number of borrows is
+not fan-out and does not receive a copy. A borrow after an earlier ordinary consume is
+fan-out like a later consume (spec/04 section 8.3): an `&T` argument, an auto-borrowed
+primitive operand, a borrowing closure capture, and a `grad(f)(..)` or `vmap(f)(..)`
+argument each give the earlier consume a copy. The checker's `read_or_error` accepts
+such a read on the same terms as `consume_var_expr` accepts a consume after an
+ordinary consume, so the two cannot disagree about which earlier consumes are
+repairable.
 
 Explicit source `copy()` lowers to the same `RiscOp::Copy` used for inserted copies.
-Cost and fitness signals intentionally do not distinguish explicit and inserted
-copies.
+`copy_count` and the fitness report do not distinguish explicit and inserted copies;
+`copy_repairs` lists only inserted ones.
 
 ## Destructured Components
 
@@ -136,12 +142,11 @@ Two things follow, and they are easy to conflate:
   asking the region-relative question loses the carrier inside every branch, which lets a
   branch consume fail to survive the join — the opposite of the rule above.
 - The join carries a branch's consume out onto a binding whose outer record is an
-  **alias**, and it does so only for a **component carrier**. An alias record is
-  bookkeeping, never a destruction, so for a carrier the branch's real consume must
-  replace it. An ordinary `let y = x` records the same shape for an unrelated reason,
-  and promoting it there would make a later *borrow* of `y` fail after one branch
-  consumed `x`. Ordinary aliases keep their existing behavior; the promotion is
-  carrier-only.
+  **alias**. An alias record is bookkeeping, never a destruction, so the branch's real
+  consume replaces it, for a component carrier and an ordinary `let y = x` alike. A
+  later borrow after an ordinary branch consume is copy-repaired fan-out (spec/04
+  section 8.3), so the promotion rejects only what a match scrutinee, a consuming
+  capture or a `drop` in the branch must reject after the join.
 
 ### Aliases
 
@@ -275,6 +280,62 @@ and inserted copies are counted once.
 For tensors with symbolic dimensions, `bytes_copied` is omitted for that function and
 from `total_bytes_copied`; the human output prints the symbolic byte formula when
 available.
+
+The report also carries `copy_repairs`, always present and possibly empty: one entry per
+copy that consuming fan-out (spec/04 section 8.3) inserts in the entry program's
+declarations. Root observation takes part in that copy insertion ([04-LIN-6]), so the
+copies it forces are listed too.
+
+```json
+"copy_repairs": [
+  {
+    "declaration": "consume_then_borrow",
+    "binding": "x",
+    "copy_at": "surf:197..204",
+    "consumed_by": "call to `eats`",
+    "forced_by": [{ "at": "surf:219..220", "kind": "borrow" }]
+  }
+]
+```
+
+`copy_at` is the span identity of the earlier ordinary consume that receives the copy,
+the same identity a linearity diagnostic prints, or of the root binding whose
+observation receives it. `binding` is the name the source spells, or the projection path
+(`p.w`) when the consume is of a component a projection moves out ([04-LIN-11]).
+`forced_by` lists every later use that needs the value after that consume, in source
+order, each with its span identity and its `kind`: `consume`, `borrow`, `capture`,
+`drop` or `root`. A use the desugarer synthesized, such as the component reads of a
+destructuring `let`, has no source location and is not listed; the source use it
+belongs to is.
+
+Copy sites are kept per leaf of the binding's value. A tuple projection or field access
+moves its component out ([04-LIN-11]), so `p.w` and `p.0` are consumes of that
+component. The report splits each binding into leaves from its type: every path to a
+component that is not a tuple or a single-variant record. Each leaf remembers the latest
+ordinary consume that took it, and a use forces a copy at the latest consume of every
+leaf under its path; a consume then becomes the latest of every leaf under its own path.
+So `p.w` and `p.b` never copy for each other, a use of `p` whole needs every leaf, and
+after `eatp(p)` both a later `p.w` and a later `p.b` force the copy at `eatp(p)`, while
+a later use of `p` whole forces only the projections that took its leaves since. A
+projection the type does not resolve, such as a component of a field whose type is a
+type parameter, splits a leaf of its own. A chain of whole consumes reports one entry
+per earlier consume. This bookkeeping is the report's own; it reads the checker's walk
+but changes no verdict. Across a branch join the latest ordinary consume of every path
+receives a copy when a use follows the join ([04-LIN-5]), so each branch's consume is
+listed; the join unions the latest consumes per leaf. Root observations happen in
+manifest order after every initializer: a root whose value an initializer consumed
+copies at that consume, and of two roots denoting one value the earlier observation
+copies. Entries are ordered by declaration name and then by source position; the report
+comes from the same walk `chelis check` runs, so it is a function of the program text.
+The human output prints one `copy_repair` line per entry.
+
+`copy_repairs` and `copy_count` answer different questions. A repair is a copy the
+language semantics place at a source consume. `copy_count` counts the `RiscOp::Copy`
+nodes of the lowered tensor DAG, where a call that never consumes its input in the
+lowered program pays nothing for the repair, so the two counts can differ. The copies
+[04-LIN-7] requires before an externally supplied entry argument crosses an internal
+owned-parameter edge are not listed yet: reporting them needs the artifact's entry set,
+which the linearity walk does not carry.
 
 ## Migration And Linting
 

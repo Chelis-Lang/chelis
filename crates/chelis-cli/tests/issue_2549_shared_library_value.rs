@@ -9,7 +9,7 @@
 //! "already consumed by closure capture". A declaration may be called after
 //! every initializer of the linked program, so the negative controls keep a
 //! declaration that reads a value some initializer consumes rejected, in the
-//! library or in a later-sorted module, as well as a consume-then-reuse inside
+//! library or in a later-sorted module, as well as a drop-then-reuse inside
 //! one declaration body.
 
 mod common;
@@ -180,19 +180,37 @@ fn two_test_files_reading_the_shared_library_value_pass() {
 }
 
 #[test]
-fn consume_then_reuse_inside_one_importing_declaration_is_still_rejected() {
+fn consume_then_reuse_inside_one_importing_declaration_is_copy_repaired() {
+    // Inside one declaration body the free reference is an ordinary binding,
+    // so a borrow after its `realize` is consuming fan-out that an inserted
+    // copy repairs (spec/04 section 8.3).
+    let a = importer("A");
+    let reuse = "module App.Reuse\nimport Drawlib.Draw (sampled)\n\
+               def main() -> tensor[2, f32] = {\n  y = realize(sampled)\n  add(sampled, y)\n}\n";
+    let (dir, root) = shared_value_package(&[("src/a.ch", &a), ("src/reuse.ch", reuse)]);
+    let cache = dir.path().join("cache");
+    let (ok, stdout, stderr) = chelis(&root, &cache, &["eval", "--file", "src/reuse.ch"]);
+    assert!(
+        ok,
+        "the repaired reuse in App.Reuse must evaluate; stderr: {stderr}"
+    );
+    assert_eq!(stdout, "main = tensor(shape=[2], data=[2.0, 2.0])\n");
+}
+
+#[test]
+fn drop_then_reuse_inside_one_importing_declaration_is_rejected() {
     let a = importer("A");
     let bad = "module App.Bad\nimport Drawlib.Draw (sampled)\n\
-               def main() -> tensor[2, f32] = {\n  y = realize(sampled)\n  add(sampled, y)\n}\n";
+               def main() -> tensor[2, f32] = {\n  y = drop(sampled)\n  realize(sampled)\n}\n";
     let (dir, root) = shared_value_package(&[("src/a.ch", &a), ("src/bad.ch", bad)]);
     let cache = dir.path().join("cache");
     let (ok, _stdout, stderr) = chelis(&root, &cache, &["eval", "--file", "src/a.ch"]);
-    assert!(!ok, "a consume-then-reuse in App.Bad must fail the package");
+    assert!(!ok, "a drop-then-reuse in App.Bad must fail the package");
     assert!(
         stderr.contains("sampled`")
-            && stderr.contains("already consumed by realize")
+            && stderr.contains("already consumed by call to `drop`")
             && !stderr.contains(CONSUMED_BY_CAPTURE),
-        "the only rejection must be the realize consume of `sampled`; stderr: {stderr}"
+        "the only rejection must be the drop of `sampled`; stderr: {stderr}"
     );
 }
 

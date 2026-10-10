@@ -535,17 +535,35 @@ out = run(true)
     );
 }
 
-/// chelis#1200 review finding 2, the negative half: the branch join's
-/// `Aliasing` -> `Structural` upgrade must NOT reach ordinary aliases.
-///
-/// `y = x` records the same `Aliasing` shape a component carrier does, for
-/// an unrelated reason. Upgrading it made a later BORROW of `y` reject
-/// after one branch consumed `x`. Released 0.18.4 accepts this program, so
-/// rejecting it would be exactly the ecosystem-breaking tightening
-/// chelis#1200 exists to undo.
+/// chelis#1200 review finding 2: an ordinary alias survives a branch's
+/// ordinary consume of its source. The join promotes the branch consume onto
+/// the alias's record, and a later borrow of `y` after it is consuming fan-out
+/// that an inserted copy repairs (spec/04 section 8.3), so both lanes accept
+/// and agree.
 #[test]
 fn ordinary_alias_survives_a_branch_consume_of_its_source_in_both_lanes() {
     assert_lane_parity(
+        r#"
+def run(c: bool) -> tensor[2, f32] = {
+  x = to_tensor([1.0f32, 2.0f32])
+  t = to_tensor([3.0f32, 4.0f32])
+  y = x
+  r: tensor[2, f32] = if c then realize(x) else t
+  add(r, add(y, y))
+}
+out = run(false)
+"#,
+        "issue1200_ordinary_alias_branch_join",
+        &[5.0, 8.0],
+    );
+}
+
+/// A consuming capture of the source in a branch leaves nothing a copy could
+/// repair, so a use of an ordinary alias after the join is rejected, as it is
+/// on the straight-line path (spec/04 section 8.3).
+#[test]
+fn ordinary_alias_after_a_branch_consuming_capture_of_its_source_fails_the_cli() {
+    assert_rejects_naming(
         r#"
 def run(c: bool) -> tensor[2, f32] = {
   x = to_tensor([1.0f32, 2.0f32])
@@ -559,8 +577,8 @@ def run(c: bool) -> tensor[2, f32] = {
 }
 out = run(false)
 "#,
-        "issue1200_ordinary_alias_branch_join",
-        &[5.0, 8.0],
+        "issue1200_ordinary_alias_branch_capture",
+        "variable `y`",
     );
 }
 

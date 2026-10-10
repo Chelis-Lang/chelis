@@ -161,19 +161,21 @@ fn pipeline_artifact_semantic_reports_stay_exact() {
         ),
         (
             "linearity",
-            "def broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x)\n add(x, y) }\n",
+            // A use after `drop`: no inserted copy repairs it (spec/04
+            // section 8.3, [04-LIN-11]), unlike a use after `realize`.
+            "def broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = drop(x)\n realize(x) }\n",
             serde_json::json!({
                 "score": 0.8,
                 "components": { "parse": 1, "structure": 1, "names": 1, "types": 1 },
-                "typed_nodes": 7,
+                "typed_nodes": 6,
                 "untyped_nodes": 0,
-                "total_nodes": 7,
+                "total_nodes": 6,
                 "unresolved_names": [],
                 "errors": [{
                     "kind": "UseAfterConsume",
-                    "message": "variable `x` was already consumed by realize at surf:56..66; later use at surf:72..73 is invalid",
-                    "span": { "offset": 72, "span": "point" },
-                    "span_id": "surf:72..73",
+                    "message": "variable `x` was already consumed by call to `drop` at surf:56..63; later use at surf:73..74 is invalid",
+                    "span": { "offset": 73, "span": "point" },
+                    "span_id": "surf:73..74",
                     "severity": 0.9,
                     // chelis#886 [04-FIT-15]: the field set no longer varies
                     // by producing stage. The embedding API always carried
@@ -181,7 +183,7 @@ fn pipeline_artifact_semantic_reports_stay_exact() {
                     // divergence, so this fixture gains the hint it was
                     // always entitled to.
                     "suggestions": [
-                        "Insert `copy(x)` before the first consuming use if you need to reuse it"
+                        "Move the later use before the `drop`, or bind `copy(x)` before it"
                     ],
                 }],
             }),

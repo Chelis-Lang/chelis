@@ -19,8 +19,13 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_types::CopyRepairUseKind;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
+use copy_repair::assert_copy_repaired;
+
+#[path = "support/copy_repair.rs"]
+mod copy_repair;
 
 /// Run the linearity check on a Surf source. Returns the errors so
 /// fixtures that assert a violation can match on
@@ -33,27 +38,22 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
 }
 
 #[test]
-fn bare_top_level_realize_then_borrow_errors_today() {
-    let errors = linearity_errors(
+fn bare_top_level_realize_then_borrow_is_copy_repaired() {
+    assert_copy_repaired(
         r#"
 x = to_tensor([1.0, 2.0, 3.0], f32)
 y = realize(x)
 b = add(x, y)
 "#,
-    );
-    assert!(
-        errors.iter().any(|e| {
-            matches!(e.kind, CheckErrorKind::UseAfterConsume)
-                && e.message.contains("variable `x`")
-                && e.message.contains("realize")
-        }),
-        "bare top-level realize-then-borrow must still error (this is the control); got {errors:?}"
+        "x",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }
 
 #[test]
-fn bare_top_level_consuming_call_then_borrow_errors_today() {
-    let errors = linearity_errors(
+fn bare_top_level_consuming_call_then_borrow_is_copy_repaired() {
+    assert_copy_repaired(
         r#"
 def consume_it(t: tensor[3, f32]) -> tensor[3, f32] = realize(t)
 
@@ -61,20 +61,15 @@ x = to_tensor([1.0, 2.0, 3.0], f32)
 y = consume_it(x)
 b = mul(x, y)
 "#,
-    );
-    assert!(
-        errors.iter().any(|e| {
-            matches!(e.kind, CheckErrorKind::UseAfterConsume)
-                && e.message.contains("variable `x`")
-                && e.message.contains("consume_it")
-        }),
-        "bare top-level consuming-call-then-borrow must still error (control); got {errors:?}"
+        "x",
+        "consume_it",
+        CopyRepairUseKind::Borrow,
     );
 }
 
 #[test]
-fn bare_top_level_multi_realize_then_borrow_errors_today() {
-    let errors = linearity_errors(
+fn bare_top_level_multi_realize_then_borrow_is_copy_repaired() {
+    assert_copy_repaired(
         r#"
 x = to_tensor([1.0, 2.0, 3.0], f32)
 y = realize(x)
@@ -82,24 +77,16 @@ b = realize(x)
 c = realize(x)
 d = add(x, y)
 "#,
-    );
-    assert!(
-        errors.iter().any(|e| {
-            matches!(e.kind, CheckErrorKind::UseAfterConsume)
-                && e.message.contains("variable `x`")
-                && e.message.contains("realize")
-        }),
-        "bare top-level multi-realize-then-borrow must still error (control); got {errors:?}"
+        "x",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }
 
 #[test]
-fn module_wrapped_realize_then_borrow_errors() {
-    // The same statements as `bare_top_level_realize_then_borrow_errors_today`,
-    // but wrapped in `module Test`. After Linearity-F3 PR 2 the
-    // module-recursive walk must surface the violation as a hard error
-    // — the warning-mode plumbing from PR 1 is gone.
-    let errors = linearity_errors(
+fn module_wrapped_realize_then_borrow_is_copy_repaired() {
+    // The module-recursive walk tracks the consume as the bare walk does.
+    assert_copy_repaired(
         r#"
 module Test
 
@@ -107,23 +94,15 @@ x = to_tensor([1.0, 2.0, 3.0], f32)
 y = realize(x)
 b = add(x, y)
 "#,
-    );
-    assert!(
-        errors.iter().any(|e| {
-            matches!(e.kind, CheckErrorKind::UseAfterConsume)
-                && e.message.contains("variable `x`")
-                && e.message.contains("realize")
-        }),
-        "expected a UseAfterConsume error for `x` consumed by `realize`; got {errors:?}"
+        "x",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }
 
 #[test]
-fn module_wrapped_consuming_call_then_borrow_errors() {
-    // Mirrors `bare_top_level_consuming_call_then_borrow_errors_today`
-    // but inside a module. The consume site is the call to
-    // `consume_it`, so the error message must call that out.
-    let errors = linearity_errors(
+fn module_wrapped_consuming_call_then_borrow_is_copy_repaired() {
+    assert_copy_repaired(
         r#"
 module Test
 
@@ -133,24 +112,15 @@ x = to_tensor([1.0, 2.0, 3.0], f32)
 y = consume_it(x)
 b = mul(x, y)
 "#,
-    );
-    assert!(
-        errors.iter().any(|e| {
-            matches!(e.kind, CheckErrorKind::UseAfterConsume)
-                && e.message.contains("variable `x`")
-                && e.message.contains("consume_it")
-        }),
-        "expected a UseAfterConsume error for `x` consumed by `consume_it`; got {errors:?}"
+        "x",
+        "consume_it",
+        CopyRepairUseKind::Borrow,
     );
 }
 
 #[test]
-fn module_wrapped_multi_realize_then_borrow_errors() {
-    // PR #60 (V2-F4) tightened the binding-aliasing path for bare
-    // top-level statements (`y = x` chains). After Linearity-F3 PR 2
-    // the same chain wrapped in `module Test` must surface the use-
-    // after-consume as a hard error, not a warning.
-    let errors = linearity_errors(
+fn module_wrapped_multi_realize_then_borrow_is_copy_repaired() {
+    assert_copy_repaired(
         r#"
 module Test
 
@@ -160,13 +130,50 @@ b = realize(x)
 c = realize(x)
 d = add(x, y)
 "#,
+        "x",
+        "realize",
+        CopyRepairUseKind::Borrow,
+    );
+}
+
+/// A use after a `drop` is not fan-out (spec/04 section 8.3, [04-LIN-11]), so
+/// it is the violation that must surface as an error, bare or module-wrapped.
+#[test]
+fn bare_top_level_drop_then_borrow_errors() {
+    let errors = linearity_errors(
+        r#"
+x = to_tensor([1.0, 2.0, 3.0], f32)
+y = drop(x)
+b = add(x, x)
+"#,
     );
     assert!(
         errors.iter().any(|e| {
             matches!(e.kind, CheckErrorKind::UseAfterConsume)
                 && e.message.contains("variable `x`")
-                && e.message.contains("realize")
+                && e.message.contains("drop")
         }),
-        "expected a UseAfterConsume error for `x` consumed by `realize`; got {errors:?}"
+        "expected a UseAfterConsume error for `x` after `drop`; got {errors:?}"
+    );
+}
+
+#[test]
+fn module_wrapped_drop_then_borrow_errors() {
+    let errors = linearity_errors(
+        r#"
+module Test
+
+x = to_tensor([1.0, 2.0, 3.0], f32)
+y = drop(x)
+b = add(x, x)
+"#,
+    );
+    assert!(
+        errors.iter().any(|e| {
+            matches!(e.kind, CheckErrorKind::UseAfterConsume)
+                && e.message.contains("variable `x`")
+                && e.message.contains("drop")
+        }),
+        "expected a UseAfterConsume error for `x` after `drop`; got {errors:?}"
     );
 }

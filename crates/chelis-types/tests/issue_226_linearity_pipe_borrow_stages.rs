@@ -25,8 +25,12 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::errors::CheckErrorKind;
+use chelis_types::CopyRepairUseKind;
 use chelis_types::{check_linearity, check_typed_program};
+use copy_repair::assert_copy_repaired;
+
+#[path = "support/copy_repair.rs"]
+mod copy_repair;
 
 fn check_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let decls = parse_str(source).expect("surf parse should succeed");
@@ -96,40 +100,24 @@ def f(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
 
 #[test]
 fn pipe_into_realize_still_consumes() {
-    // Negative parity: `realize` IS a structural consume (returns an
-    // owned tensor that destroys the input view).  After the fix the
-    // peering must not over-permit; `x |> realize` followed by a later
-    // read of `x` must still trip `UseAfterConsume`.
-    let errors = check_surf(
+    // `x |> realize` consumes `x`: the later borrow is fan-out repaired at the
+    // pipe stage (spec/04 section 8.3), which a borrowing stage would not record.
+    assert_copy_repaired(
         r#"
 def bad(x: tensor[4, f32]) -> tensor[4, f32] = {
   y = x |> realize
   add(x, y)
 }
 "#,
-    )
-    .expect_err(
-        "issue #226 fix must preserve consume detection: pipe into `realize` \
-         is still a structural consume of the piped variable",
-    );
-    assert!(
-        errors.iter().any(
-            |error| matches!(error.kind, CheckErrorKind::UseAfterConsume)
-                && error.message.contains("variable `x`")
-        ),
-        "expected UseAfterConsume on `x`, got: {errors:?}"
+        "x",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }
 
 #[test]
 fn pipe_into_user_consuming_function_still_consumes() {
-    // A user-defined function whose first parameter is owned-linear
-    // (`tensor[4, f32]`, not `&tensor[...]`) consumes its argument by
-    // signature. The pipe must propagate that — `x |> grab` consumes
-    // `x`, and a later `add(x, y)` must trip `UseAfterConsume`.
-    // (Fixture renamed from `take` for chelis#353: `take` is a builtin
-    // name and bare shadowing defs are now rejected at declaration time.)
-    let errors = check_surf(
+    assert_copy_repaired(
         r#"
 def grab(t: tensor[4, f32]) -> tensor[4, f32] = t
 def bad(x: tensor[4, f32]) -> tensor[4, f32] = {
@@ -137,28 +125,17 @@ def bad(x: tensor[4, f32]) -> tensor[4, f32] = {
   add(x, y)
 }
 "#,
-    )
-    .expect_err(
-        "issue #226 fix must preserve consume detection: pipe into a user fn \
-         whose first param is owned-linear still consumes the piped variable",
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::UseAfterConsume)),
-        "expected UseAfterConsume diagnostic, got: {errors:?}"
+        "x",
+        "grab",
+        CopyRepairUseKind::Borrow,
     );
 }
 
 #[test]
 fn pipe_into_user_consuming_function_with_explicit_args_still_consumes() {
-    // Same as above but the pipe stage carries explicit args, so the
-    // desugarer emits a synthesized lambda. `x |> consume_two(k)`
-    // expands to `(fn (params __chelis_pipe) (app consume_two
-    // __chelis_pipe k))`. The peering must look up `consume_two`'s
-    // signature, NOT the synthesized lambda's, and still mark `x` as
-    // consumed.
-    let errors = check_surf(
+    // The peering looks up `consume_two`'s signature, not the synthesized
+    // lambda's, so the copy sits at the call to `consume_two`.
+    assert_copy_repaired(
         r#"
 def consume_two(t: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = t
 def bad(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
@@ -166,15 +143,8 @@ def bad(x: tensor[4, f32], k: tensor[4, f32]) -> tensor[4, f32] = {
   add(x, y)
 }
 "#,
-    )
-    .expect_err(
-        "issue #226 fix must preserve consume detection inside synthesized \
-         pipe-stage lambdas wrapping a user fn that consumes its first arg",
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::UseAfterConsume)),
-        "expected UseAfterConsume diagnostic, got: {errors:?}"
+        "x",
+        "consume_two",
+        CopyRepairUseKind::Borrow,
     );
 }

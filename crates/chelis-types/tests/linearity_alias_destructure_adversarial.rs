@@ -3,8 +3,13 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_types::CopyRepairUseKind;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
+use copy_repair::assert_copy_repaired;
+
+#[path = "support/copy_repair.rs"]
+mod copy_repair;
 
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
     let decls = parse_str(source).expect("surf parse should succeed");
@@ -31,7 +36,11 @@ fn assert_linearity_clean(source: &str) {
 /// `resolve_alias_chain` must follow every link to the source.
 #[test]
 fn alias_chain_three_levels_propagates_consume() {
-    let errors = linearity_errors(
+    // The consume through three alias links lands on `x`, so the later borrow
+    // of `x` is fan-out repaired at that consume (spec/04 section 8.3). Had it
+    // not landed, `x` would be live and nothing would be copied. The repair
+    // names the alias the consume spells.
+    assert_copy_repaired(
         r#"
 def f(x: tensor[4, f32]) -> tensor[4, f32] =
   {
@@ -41,19 +50,16 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
     add(x, r)
   }
 "#,
-    );
-    assert!(
-        errors.iter().any(|e| {
-            matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `x`")
-        }),
-        "expected UseAfterConsume on `x` after consume traverses three alias links; got {errors:?}"
+        "z",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }
 
 /// Four-level alias chain. Stress the chain walk one step further.
 #[test]
 fn alias_chain_four_levels_propagates_consume() {
-    let errors = linearity_errors(
+    assert_copy_repaired(
         r#"
 def f(x: tensor[4, f32]) -> tensor[4, f32] =
   {
@@ -65,12 +71,9 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
     add(x, r)
   }
 "#,
-    );
-    assert!(
-        errors.iter().any(|e| {
-            matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `x`")
-        }),
-        "expected UseAfterConsume on `x` after consume traverses four alias links; got {errors:?}"
+        "d",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }
 
@@ -106,7 +109,7 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
 /// map. This fixture confirms the contract.
 #[test]
 fn alias_then_pipe_stage_consume_propagates() {
-    let errors = linearity_errors(
+    assert_copy_repaired(
         r#"
 def f(x: tensor[4, f32]) -> tensor[4, f32] =
   {
@@ -115,12 +118,9 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
     add(x, r)
   }
 "#,
-    );
-    assert!(
-        errors.iter().any(|e| {
-            matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `x`")
-        }),
-        "expected UseAfterConsume on `x` consumed via pipe-stage on alias `y`; got {errors:?}"
+        "y",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }
 
@@ -128,7 +128,7 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
 /// shape as pipe but the alias is consumed as an app-arg.
 #[test]
 fn alias_then_app_arg_consume_propagates() {
-    let errors = linearity_errors(
+    assert_copy_repaired(
         r#"
 def f(x: tensor[4, f32]) -> tensor[4, f32] =
   {
@@ -137,12 +137,9 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
     add(x, r)
   }
 "#,
-    );
-    assert!(
-        errors.iter().any(|e| {
-            matches!(e.kind, CheckErrorKind::UseAfterConsume) && e.message.contains("variable `x`")
-        }),
-        "expected UseAfterConsume on `x` consumed via app-arg on alias `y`; got {errors:?}"
+        "y",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }
 

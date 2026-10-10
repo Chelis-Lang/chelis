@@ -418,7 +418,7 @@ mod tests {
                 "effects",
             ),
             (
-                "module M\ndef broken(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = realize(x)\n  add(x, y)\n}\n",
+                "module M\ndef broken(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = drop(x)\n  realize(x)\n}\n",
                 "linearity",
             ),
         ];

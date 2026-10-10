@@ -22,11 +22,16 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_types::CopyRepairUseKind;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{
     build_type_env_from_library, check_ir_program, check_ir_with_context, check_linearity,
     check_linearity_with_context, check_typed_program,
 };
+use copy_repair::assert_copy_repaired;
+
+#[path = "support/copy_repair.rs"]
+mod copy_repair;
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
@@ -158,19 +163,20 @@ def main_b() -> tensor[2, f32] = sampled
 }
 
 #[test]
-fn consume_then_borrow_inside_one_declaration_is_still_rejected() {
-    assert_use_after_consume(
-        linearity(
-            r#"
+fn consume_then_borrow_inside_one_declaration_is_copy_repaired() {
+    // Inside one declaration body the capture is an ordinary binding, so a
+    // borrow after its consume is fan-out (spec/04 section 8.3).
+    assert_copy_repaired(
+        r#"
 sampled = to_tensor([1.0f32, 1.0f32])
 def first() -> tensor[2, f32] = {
   y = realize(sampled)
   add(sampled, y)
 }
 "#,
-        ),
-        &["variable `sampled`", "realize"],
-        "a consume then borrow inside one declaration body",
+        "sampled",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }
 

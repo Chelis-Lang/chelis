@@ -169,9 +169,11 @@ fn rejected_packages_keep_type_effect_and_linearity_boundaries() {
         &BuildOptions { auto_fetch: false },
         &chelis_std_bundle::EMBEDDED_RUNTIME,
     )
-    .expect_err("using both consumed tensors must reject");
+    .expect_err("using both dropped tensors must reject");
     assert_eq!(
-        linearity.matches("already consumed by realize").count(),
+        linearity
+            .matches("already consumed by call to `drop`")
+            .count(),
         2,
         "both consumed values must be reported: {linearity}"
     );

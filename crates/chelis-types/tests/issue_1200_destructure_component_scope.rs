@@ -43,8 +43,13 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_types::CopyRepairUseKind;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{check_linearity, check_typed_program};
+use copy_repair::assert_copy_repaired;
+
+#[path = "support/copy_repair.rs"]
+mod copy_repair;
 
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
     let decls = parse_str(source).expect("surf parse should succeed");
@@ -613,19 +618,16 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] = {
     );
 }
 
-/// chelis#1211 item 2, the later-consume half: an ordinary alias stays
-/// consumable after a branch closure consumes its source. The join's
-/// Aliasing-to-Structural promotion is carrier-only, so the parent's
-/// `Consumed(Aliasing)` record on `x` survives the join and the
-/// after-join `realize(y)` forwards onto it as ordinary implicit-Copy
-/// fan-out. The later-borrow half (`add(y, y)` after a branch consume)
-/// is pinned end-to-end by the chelis-cli lane-parity cell
-/// `ordinary_alias_survives_a_branch_consume_of_its_source_in_both_lanes`.
-/// The verdict is recorded in `spec/design/implicit_linearity.md` §"New
-/// declaration regions" and rides [04-LIN-2]'s identity ruling.
+/// chelis#1211 item 2, revised: a consuming capture of the source inside a
+/// branch survives the join onto the source's alias record, so a later consume
+/// of an ordinary alias is a use after a consuming capture and is rejected,
+/// exactly as on the straight-line path (spec/04 section 8.3). An ordinary
+/// branch consume instead leaves a later use copy-repaired; the chelis-cli
+/// lane-parity cell `ordinary_alias_survives_a_branch_consume_of_its_source_in_both_lanes`
+/// pins that half end to end.
 #[test]
-fn ordinary_alias_still_consumable_after_a_branch_closure_consumes_its_source() {
-    assert_linearity_clean(
+fn ordinary_alias_is_not_consumable_after_a_branch_closure_consumes_its_source() {
+    let errors = linearity_errors(
         r#"
 def f(c: bool, x: tensor[4, f32], t: tensor[4, f32]) -> tensor[4, f32] = {
   y: tensor[4, f32] = x
@@ -636,6 +638,14 @@ def f(c: bool, x: tensor[4, f32], t: tensor[4, f32]) -> tensor[4, f32] = {
   add(r, realize(y))
 }
 "#,
+    );
+    assert!(
+        errors.iter().any(|e| {
+            matches!(e.kind, CheckErrorKind::UseAfterConsume)
+                && e.message.contains("variable `y`")
+                && e.message.contains("closure capture")
+        }),
+        "a use of the alias after a branch's consuming capture must error; got {errors:?}"
     );
 }
 
@@ -819,7 +829,10 @@ def f(s: tensor[4, f32]) -> tensor[4, f32] = {
 /// disappear. Both spellings must now report it.
 #[test]
 fn authored_destructure_temp_name_does_not_hide_an_outer_double_consume() {
-    let errors = linearity_errors(
+    // The authored `__chelis_tmp0` must not misroute `realize(y)`: the consume
+    // stays on `y`'s binding, so the later borrows of `y` are fan-out repaired at
+    // it (spec/04 section 8.3). A misrouted consume records no repair.
+    assert_copy_repaired(
         r#"
 def two(t: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = (t, t)
 def f(x: tensor[4, f32], w: tensor[4, f32]) -> tensor[4, f32] = {
@@ -832,10 +845,8 @@ def f(x: tensor[4, f32], w: tensor[4, f32]) -> tensor[4, f32] = {
   add(r, add(y, y))
 }
 "#,
-    );
-    assert!(
-        errors.iter().any(|error| error.message.contains("`y`")),
-        "the authored/synthesized collision must not hide `y`'s \
-         use-after-consume; got {errors:?}"
+        "y",
+        "realize",
+        CopyRepairUseKind::Borrow,
     );
 }

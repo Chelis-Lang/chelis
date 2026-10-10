@@ -10,12 +10,13 @@ use chelis_deep::ast::{Atom, Expr};
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
+use crate::adt::AdtRegistry;
 use crate::builtins::{BUILTIN_NAMES, BuiltinSiblingCaseId, COMPARISON_OPS, builtin_decl};
 use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
 use crate::key_admission::{KeyAdmission, KeyRefusal, TagKeys, builtin_key_operand, tag_keys};
-use crate::types::Type;
+use crate::types::{NominalParamKind, Type, TypeVar};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearityInfo {
@@ -99,7 +100,221 @@ struct ConsumeSite {
     /// `UseAfterConsume` rather than consuming fan-out repaired by copy
     /// insertion ([04-LIN-11]; chelis#3177).
     terminal: bool,
+    /// Where the consume is written; `None` for a consume with no source
+    /// node of its own, such as a root observation.
+    at: Option<SiteLocation>,
 }
+
+/// An ordinary consume that receives an inserted copy when a later use of an
+/// overlapping path follows it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CopySite {
+    at: SiteLocation,
+    /// The binding or projection the copy duplicates, as the source spells
+    /// it: `x`, or `p.w` for a component a projection moves out
+    /// ([04-LIN-11]).
+    binding: String,
+    consumed_by: String,
+}
+
+/// One leaf of a binding's value, for the copy report ([04-LIN-11]): the
+/// component `path` names, less the deeper components `split` off it, and the
+/// latest ordinary consumes that took it, one per path into this point, as
+/// indices into the checker's [`Checker::copy_sites`].
+#[derive(Debug, Clone)]
+struct CopyLeaf {
+    path: Vec<ProjectionStep>,
+    split: Vec<Vec<ProjectionStep>>,
+    latest: Rc<LatestSet>,
+}
+
+/// A set of copy-site indices that a join builds without copying: the join
+/// of two sets is a node over both, and only a use flattens it. Unions are
+/// hash-consed ([`LatestUnions`]), so leaves that join the same two sets share
+/// one node, and a use after many sequential joins visits each node once.
+#[derive(Debug)]
+enum LatestSet {
+    Empty,
+    One(usize),
+    Union(Rc<LatestSet>, Rc<LatestSet>),
+}
+
+/// The union nodes built so far, keyed by their operands' addresses. Each
+/// entry holds its operands, so an address is never freed and reused while
+/// it is a key.
+type LatestUnions = BTreeMap<(usize, usize), (Rc<LatestSet>, Rc<LatestSet>, Rc<LatestSet>)>;
+
+impl LatestSet {
+    fn union(unions: &mut LatestUnions, lhs: &Rc<Self>, rhs: &Rc<Self>) -> Rc<Self> {
+        if Rc::ptr_eq(lhs, rhs) || matches!(**rhs, LatestSet::Empty) {
+            return lhs.clone();
+        }
+        if matches!(**lhs, LatestSet::Empty) {
+            return rhs.clone();
+        }
+        let key = (Rc::as_ptr(lhs) as usize, Rc::as_ptr(rhs) as usize);
+        unions
+            .entry(key)
+            .or_insert_with(|| {
+                (
+                    lhs.clone(),
+                    rhs.clone(),
+                    Rc::new(LatestSet::Union(lhs.clone(), rhs.clone())),
+                )
+            })
+            .2
+            .clone()
+    }
+
+    /// Add every index in `set` to `out`, visiting each shared node once.
+    fn collect(set: &Rc<Self>, visited: &mut BTreeSet<usize>, out: &mut BTreeSet<usize>) {
+        let mut stack = vec![set.clone()];
+        while let Some(node) = stack.pop() {
+            if !visited.insert(Rc::as_ptr(&node) as usize) {
+                continue;
+            }
+            match &*node {
+                LatestSet::Empty => {}
+                LatestSet::One(site) => {
+                    out.insert(*site);
+                }
+                LatestSet::Union(lhs, rhs) => {
+                    stack.push(lhs.clone());
+                    stack.push(rhs.clone());
+                }
+            }
+        }
+    }
+}
+
+/// A type whose components the copy report is deriving: the binding's own
+/// Deep type, or a checker type inside a record definition together with the
+/// arguments its type parameters stand for.
+#[derive(Clone)]
+enum ShapeArg<'a> {
+    Deep(&'a Expr),
+    Checked(Type, Vec<(TypeVar, ShapeArg<'a>)>),
+}
+
+/// What a use leaves in its owner's copy leaves ([`BindingRecord::copy_leaves`]).
+enum Takes {
+    /// A borrow or a capture that borrows: the frontier is unchanged.
+    Nothing,
+    /// An ordinary consume: it replaces every overlapping site and is the
+    /// site a still later overlapping use copies at.
+    Copyable {
+        at: SiteLocation,
+        consumed_by: String,
+    },
+    /// A consume no copy follows (a `drop`, a match scrutinee, a consuming
+    /// capture): it removes every overlapping site.
+    Original,
+}
+
+/// The projection chain the walk is inside: its source spelling, its path,
+/// and its location, `None` for a chain the desugarer synthesized.
+#[derive(Debug, Clone)]
+struct ProjectionUse {
+    label: String,
+    path: Vec<ProjectionStep>,
+    at: Option<SiteLocation>,
+}
+
+impl ConsumeSite {
+    /// How strongly a joined state must keep this consume, so a join's
+    /// verdict does not depend on branch order: a `drop` ends the owner, any
+    /// other non-ordinary consume rejects every later use, an ordinary one
+    /// is repaired by copies, and an aliasing bind destroys nothing.
+    fn join_rank(&self) -> u8 {
+        if self.terminal {
+            3
+        } else if matches!(self.kind, ConsumeKind::Aliasing) {
+            0
+        } else if self.is_ordinary() {
+            1
+        } else {
+            2
+        }
+    }
+
+    /// spec/04 section 8.3: an *ordinary consume* is every consuming use
+    /// except a `drop`, a match scrutinee, a consuming closure capture, and a
+    /// consume of a key-carrying value or of a destructured component. A
+    /// later use of either kind, consume or borrow, after an ordinary consume
+    /// is consuming fan-out that an inserted copy repairs; after any other
+    /// consume it is rejected. The key-carrying and component exceptions are
+    /// properties of the binding, which the callers check.
+    fn is_ordinary(&self) -> bool {
+        matches!(self.kind, ConsumeKind::Structural)
+            && !self.terminal
+            && !self.description.contains("closure capture")
+            && !self.description.contains("match scrutinee")
+    }
+}
+
+/// A source location as the checker reports it: the node's span identity
+/// when it carries one, with its start offset for ordering.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct SiteLocation {
+    /// The top-level declaration whose body holds the site. A consume site
+    /// is stamped with it when the consume is recorded, so a copy repair
+    /// names the declaration that holds the copy even when the later use
+    /// sits in another one, as a later top-level initializer does.
+    declaration: Option<String>,
+    offset: usize,
+    id: String,
+}
+
+/// One compiler-inserted copy that repairs consuming fan-out (spec/04
+/// section 8.3): the ordinary consume at `copy_at` receives a copy so that
+/// the binding stays usable for each later use in `forced_by`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyRepair {
+    /// The top-level declaration whose body holds the copy, or `None` for
+    /// a bare top-level expression.
+    pub declaration: Option<String>,
+    /// What the copy duplicates, as the source spells it at `copy_at`: a
+    /// binding, or a projection path such as `p.w` ([04-LIN-11]).
+    pub binding: String,
+    /// The earlier ordinary consume that receives the copy, or the root
+    /// binding whose observation does ([04-LIN-6]).
+    pub copy_at: String,
+    /// What that consume is, for example ``call to `eats` ``.
+    pub consumed_by: String,
+    /// Every later use that needs the binding after `copy_at`, in source
+    /// order.
+    pub forced_by: Vec<CopyRepairUse>,
+}
+
+/// A later use that forces a copy repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyRepairUse {
+    pub at: String,
+    pub kind: CopyRepairUseKind,
+}
+
+/// How a later use reads the binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyRepairUseKind {
+    /// A consuming use: an owned argument, `realize`, a binding.
+    Consume,
+    /// A borrow: an `&T` argument, an auto-borrowed operand, or an
+    /// argument of a `grad(f)(..)` or `vmap(f)(..)` call.
+    Borrow,
+    /// A closure capture, consuming or borrowing.
+    Capture,
+    /// An explicit `drop`, which takes the original owner.
+    Drop,
+    /// The observation of a top-level root ([04-LIN-6]).
+    Root,
+}
+
+/// Copy repairs keyed by their copy site, so a site the checker walks more
+/// than once is reported once, and the report is ordered by declaration and
+/// then by source position rather than by walk order.
+type CopyRepairs =
+    BTreeMap<SiteLocation, (String, String, BTreeSet<(SiteLocation, CopyRepairUseKind)>)>;
 
 /// What a single binding generation was introduced by.  One record per
 /// `LinearScope::declare`, keyed by the generation's `BindingId`.
@@ -204,6 +419,13 @@ struct BindingRecord {
     /// a projection overlapping a dropped component, is `UseAfterConsume`;
     /// a projection disjoint from every dropped component stays usable.
     dropped_components: Vec<(Vec<ProjectionStep>, String)>,
+    /// Report-only, for `copy_repairs`; no verdict reads it. The binding's
+    /// value split into leaves, each with the latest ordinary consumes that
+    /// took it ([04-LIN-11]). Built from the binding's type at its first
+    /// reported use; a use of a component the type did not resolve splits
+    /// a leaf of its own. Branch joins union the latest consumes per leaf
+    /// ([04-LIN-5]).
+    copy_leaves: Option<Vec<CopyLeaf>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -252,6 +474,7 @@ impl LinearScope {
                 moved_key_components: BTreeSet::new(),
                 closure_borrows: Vec::new(),
                 dropped_components: Vec::new(),
+                copy_leaves: None,
             },
         );
         self.visible.entry(name).or_default().push(id);
@@ -421,6 +644,44 @@ impl LinearScope {
         }
     }
 
+    /// Every generation on `id`'s alias chain, from `id` itself to the owner
+    /// it resolves to, with the same cycle guard as [`Self::resolve_alias_chain`].
+    fn alias_chain(&self, id: BindingId) -> Vec<BindingId> {
+        let mut chain = vec![id];
+        let mut visited: UnordSet<BindingId> = UnordSet::new();
+        visited.insert(id);
+        let mut current = id;
+        while let Some(source) = self.record(current).and_then(|record| record.origin.alias) {
+            if !visited.insert(source) {
+                break;
+            }
+            chain.push(source);
+            current = source;
+        }
+        chain
+    }
+
+    /// The consume, on any generation of `use_id`'s alias chain, after which
+    /// no use is valid: a `drop` ([04-LIN-11]), or a match scrutinee or a
+    /// consuming closure capture (spec/04 section 8.3). A consuming capture
+    /// is recorded on the binding it names ([04-LIN-2]), not forwarded to the
+    /// owner, so a use through that alias must find it there. Every use path
+    /// asks this one question.
+    fn blocking_consume(&self, use_id: BindingId) -> Option<ConsumeSite> {
+        self.alias_chain(use_id)
+            .into_iter()
+            .find_map(|id| match self.state(id) {
+                Some(BindingState::Consumed(site))
+                    if site.terminal
+                        || (matches!(site.kind, ConsumeKind::Structural)
+                            && !site.is_ordinary()) =>
+                {
+                    Some(site.clone())
+                }
+                _ => None,
+            })
+    }
+
     /// Walk the alias chain from the generation `id` to the underlying
     /// non-alias source generation.  Returns `None` if `id` carries no
     /// alias link; returns `Some(source)` if it aliases `source`
@@ -501,11 +762,329 @@ struct Checker {
     /// is inside that chain. Its root variable's read or consume there is a
     /// use of the projected component, not of the owner whole.
     projection_root: Option<BindingId>,
+    /// The top-level declaration whose body the walk is in, for
+    /// [`CopyRepair::declaration`].
+    current_def: Option<String>,
+    /// The record definitions the copy report splits values by.
+    adt_registry: AdtRegistry,
+    /// Every copy site the report has created, in walk order; a leaf's
+    /// `latest` holds indices into it so a join copies integers, not sites.
+    copy_sites: Vec<CopySite>,
+    latest_unions: LatestUnions,
+    /// Whether the walk keeps the copy report's bookkeeping. Only
+    /// [`copy_repairs`] reads it, so [`check_linearity`] skips it: no verdict
+    /// may pay for report-only work.
+    report: bool,
+    /// Set while the walk checks a match scrutinee written as a projection:
+    /// the scrutinee consumes the component and never receives a copy
+    /// (spec/04 section 8.3).
+    scrutinee_projection: bool,
+    /// The top-level value bindings that are roots of the program under
+    /// check, for the [04-LIN-6] copies; `None` makes every one a root.
+    roots: Option<BTreeSet<String>>,
+    /// While the walk is inside a projection chain, the chain as the source
+    /// spells it (`p.w`) and its location: a consume of the chain's root is
+    /// a consume of that component ([04-LIN-11]).
+    projection_use: Option<ProjectionUse>,
+    /// Every consuming fan-out the walk accepted on the strength of an
+    /// inserted copy.
+    repairs: CopyRepairs,
+    /// Set while the walk enters a function declaration's own `fn`, whose
+    /// captures are the declaration's free references to top-level values.
+    /// spec/04 section 8.3 rejects such a reference to a value an initializer
+    /// consumes, whatever the textual order, so no copy repairs it.
+    declaration_free_reads: bool,
 }
 
 impl Checker {
     fn push_diagnostic(&mut self, error: CheckError) {
         self.errors.push(error);
+    }
+
+    /// Record that `site` receives an inserted copy because of a later use
+    /// at `later`. A use the desugarer synthesized has no location; it is
+    /// not listed, and a copy only it forces is not either.
+    fn record_copy_repair(
+        &mut self,
+        site: usize,
+        later: Option<SiteLocation>,
+        kind: CopyRepairUseKind,
+    ) {
+        let Some(later) = later else {
+            return;
+        };
+        let site = &self.copy_sites[site];
+        self.repairs
+            .entry(site.at.clone())
+            .or_insert_with(|| {
+                (
+                    site.binding.clone(),
+                    site.consumed_by.clone(),
+                    BTreeSet::new(),
+                )
+            })
+            .2
+            .insert((later, kind));
+    }
+
+    /// Report a use of `owner`, spelled `name` at `expr`, through the
+    /// projection chain the walk is in, or of the binding whole outside one.
+    /// Every frontier site whose path overlaps the use's receives a copy, and
+    /// `takes` updates the frontier. Only the report reads this.
+    fn report_use(
+        &mut self,
+        scope: &mut LinearScope,
+        owner: BindingId,
+        name: &str,
+        expr: &Expr,
+        kind: CopyRepairUseKind,
+        takes: Takes,
+    ) {
+        if !self.report {
+            return;
+        }
+        let (label, path, later) = match &self.projection_use {
+            Some(projection) => (
+                projection.label.clone(),
+                projection.path.clone(),
+                projection.at.clone(),
+            ),
+            None => (name.to_string(), Vec::new(), source_location(expr)),
+        };
+        let Some(record) = scope.record(owner) else {
+            return;
+        };
+        let initial = record
+            .copy_leaves
+            .is_none()
+            .then(|| self.initial_copy_leaves(record.ty.as_ref()));
+        let Some(record) = scope.record_mut(owner) else {
+            return;
+        };
+        let leaves = record
+            .copy_leaves
+            .get_or_insert_with(|| initial.unwrap_or_default());
+        split_copy_leaf(leaves, &path);
+        let consumes = !matches!(takes, Takes::Nothing);
+        let copy = match takes {
+            Takes::Copyable { at, consumed_by } => {
+                self.copy_sites.push(CopySite {
+                    at: SiteLocation {
+                        declaration: self.current_def.clone(),
+                        ..at
+                    },
+                    binding: label,
+                    consumed_by,
+                });
+                Some(self.copy_sites.len() - 1)
+            }
+            Takes::Nothing | Takes::Original => None,
+        };
+        let mut forced: BTreeSet<usize> = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let taken = match (copy, consumes) {
+            (Some(copy), _) => Some(Rc::new(LatestSet::One(copy))),
+            (None, true) => Some(Rc::new(LatestSet::Empty)),
+            (None, false) => None,
+        };
+        for leaf in leaves
+            .iter_mut()
+            .filter(|leaf| leaf.path.starts_with(&path))
+        {
+            LatestSet::collect(&leaf.latest, &mut visited, &mut forced);
+            if let Some(taken) = &taken {
+                leaf.latest = taken.clone();
+            }
+        }
+        for site in forced {
+            self.record_copy_repair(site, later.clone(), kind);
+        }
+    }
+
+    /// The leaves of a value of type `ty` for the copy report: every path to
+    /// a component that is not a tuple or a single-variant record, or the
+    /// value itself when it has no such structure.
+    fn initial_copy_leaves(&self, ty: Option<&Expr>) -> Vec<CopyLeaf> {
+        let mut paths = Vec::new();
+        match ty {
+            Some(ty) => self.collect_leaf_paths(
+                &ShapeArg::Deep(ty),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut paths,
+            ),
+            None => paths.push(Vec::new()),
+        }
+        paths
+            .into_iter()
+            .map(|path| CopyLeaf {
+                path,
+                split: Vec::new(),
+                latest: Rc::new(LatestSet::Empty),
+            })
+            .collect()
+    }
+
+    fn collect_leaf_paths(
+        &self,
+        ty: &ShapeArg<'_>,
+        prefix: &mut Vec<ProjectionStep>,
+        visiting: &mut Vec<String>,
+        out: &mut Vec<Vec<ProjectionStep>>,
+    ) {
+        let components = self.shape_components(ty, visiting);
+        match components {
+            Some((name, components)) if out.len() < 256 => {
+                if let Some(name) = &name {
+                    visiting.push(name.clone());
+                }
+                for (step, component) in components {
+                    prefix.push(step);
+                    self.collect_leaf_paths(&component, prefix, visiting, out);
+                    prefix.pop();
+                }
+                if name.is_some() {
+                    visiting.pop();
+                }
+            }
+            _ => out.push(prefix.clone()),
+        }
+    }
+
+    /// The immediate components of a tuple or single-variant record type,
+    /// with the record's name for the recursion guard; `None` for any other
+    /// type, and for a record already being expanded.
+    #[allow(clippy::type_complexity)]
+    fn shape_components<'a>(
+        &self,
+        ty: &ShapeArg<'a>,
+        visiting: &[String],
+    ) -> Option<(Option<String>, Vec<(ProjectionStep, ShapeArg<'a>)>)> {
+        match ty {
+            ShapeArg::Deep(expr) => match expr.carrier() {
+                ExprCarrier::MetadataExpression(meta) => {
+                    self.shape_components(&ShapeArg::Deep(&meta.expr), visiting)
+                }
+                ExprCarrier::DecodedNode(DeepTag::TRef, _, children) => {
+                    self.shape_components(&ShapeArg::Deep(children.first()?), visiting)
+                }
+                ExprCarrier::DecodedNode(DeepTag::TTuple, _, children) => Some((
+                    None,
+                    children
+                        .iter()
+                        .enumerate()
+                        .map(|(index, child)| (ProjectionStep::Index(index), ShapeArg::Deep(child)))
+                        .collect(),
+                )),
+                ExprCarrier::DecodedNode(DeepTag::TAdt, _, children) => {
+                    let name = children.first().and_then(symbol_name)?;
+                    let args = children.iter().skip(1).map(ShapeArg::Deep).collect();
+                    self.record_components(name, args, visiting)
+                }
+                ExprCarrier::DecodedNode(_, _, _)
+                | ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_) => None,
+            },
+            ShapeArg::Checked(ty, substitution) => match ty {
+                Type::Ref(inner) => self.shape_components(
+                    &ShapeArg::Checked((**inner).clone(), substitution.clone()),
+                    visiting,
+                ),
+                Type::Tuple(items) => Some((
+                    None,
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            (
+                                ProjectionStep::Index(index),
+                                ShapeArg::Checked(item.clone(), substitution.clone()),
+                            )
+                        })
+                        .collect(),
+                )),
+                Type::Adt(name, args) => {
+                    let args = args
+                        .iter()
+                        .map(|arg| ShapeArg::Checked(arg.clone(), substitution.clone()))
+                        .collect();
+                    self.record_components(name, args, visiting)
+                }
+                Type::KindedAdt(name, args) => {
+                    let args = args
+                        .iter()
+                        .map(|arg| match arg.as_type() {
+                            Some(arg) => ShapeArg::Checked(arg.clone(), substitution.clone()),
+                            None => ShapeArg::Checked(Type::Unit, Vec::new()),
+                        })
+                        .collect();
+                    self.record_components(name, args, visiting)
+                }
+                Type::Var(var) => {
+                    let (_, arg) = substitution.iter().find(|(bound, _)| bound == var)?;
+                    self.shape_components(&arg.clone(), visiting)
+                }
+                _ => None,
+            },
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn record_components<'a>(
+        &self,
+        name: &str,
+        args: Vec<ShapeArg<'a>>,
+        visiting: &[String],
+    ) -> Option<(Option<String>, Vec<(ProjectionStep, ShapeArg<'a>)>)> {
+        if visiting.iter().any(|seen| seen == name) {
+            return None;
+        }
+        let definition = self.adt_registry.lookup(name)?;
+        let [variant] = definition.variants.as_slice() else {
+            return None;
+        };
+        // The type-kinded arguments, in order, stand for `param_vars`.
+        let type_args = definition
+            .param_kinds
+            .iter()
+            .zip(args)
+            .filter(|(kind, _)| matches!(kind, NominalParamKind::Type))
+            .map(|(_, arg)| arg);
+        let substitution: Vec<(TypeVar, ShapeArg<'a>)> = definition
+            .param_vars
+            .iter()
+            .copied()
+            .zip(type_args)
+            .collect();
+        let components = variant
+            .fields
+            .iter()
+            .map(|(field, ty)| {
+                Some((
+                    ProjectionStep::Field(field.clone()?),
+                    ShapeArg::Checked(ty.clone(), substitution.clone()),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some((Some(name.to_string()), components))
+    }
+
+    fn into_copy_repairs(self) -> Vec<CopyRepair> {
+        self.repairs
+            .into_iter()
+            .map(|(copy_at, (binding, consumed_by, uses))| CopyRepair {
+                declaration: copy_at.declaration,
+                binding,
+                copy_at: copy_at.id,
+                consumed_by,
+                forced_by: uses
+                    .into_iter()
+                    .map(|(at, kind)| CopyRepairUse { at: at.id, kind })
+                    .collect(),
+            })
+            .collect()
     }
 }
 
@@ -545,6 +1124,39 @@ fn pre_declare_one(expr: &Expr, type_env: &BTreeMap<String, Expr>, scope: &mut L
 }
 
 pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<CheckError>> {
+    let checker = walk_linearity(program, None, false);
+    if checker.errors.is_empty() {
+        Ok(program.clone().with_linearity(checker.info))
+    } else {
+        Err(checker.errors)
+    }
+}
+
+/// The compiler-inserted copies that repair consuming fan-out in `program`
+/// (spec/04 section 8.3), including the fan-out of root observation
+/// ([04-LIN-6]), ordered by declaration and then by copy site. `roots` names
+/// the top-level value bindings that are the program's roots; `None` makes
+/// every top-level value binding one ([05-OBS-7]).
+///
+/// This runs the same walk as [`check_linearity`], so it reports exactly the
+/// fan-out that check accepts, and it fails with the same diagnostics.
+pub fn copy_repairs(
+    program: &CheckedProgram,
+    roots: Option<&BTreeSet<String>>,
+) -> Result<Vec<CopyRepair>, Vec<CheckError>> {
+    let checker = walk_linearity(program, roots.cloned(), true);
+    if checker.errors.is_empty() {
+        Ok(checker.into_copy_repairs())
+    } else {
+        Err(checker.errors)
+    }
+}
+
+fn walk_linearity(
+    program: &CheckedProgram,
+    roots: Option<BTreeSet<String>>,
+    report: bool,
+) -> Checker {
     let tensor_carrying_adts = compute_tensor_carrying_adts(program.annotated_exprs());
     let key_carrying_adts = compute_key_carrying_adts(program.annotated_exprs());
     let mut checker = Checker {
@@ -556,6 +1168,16 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         signature_inference: program.signature_inference().clone(),
         type_headers: program.type_headers().clone(),
         projection_root: None,
+        current_def: None,
+        adt_registry: program.adt_registry().clone(),
+        report,
+        scrutinee_projection: false,
+        copy_sites: Vec::new(),
+        latest_unions: LatestUnions::new(),
+        roots,
+        projection_use: None,
+        repairs: CopyRepairs::new(),
+        declaration_free_reads: false,
     };
     let mut scope = LinearScope::default();
 
@@ -567,12 +1189,7 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
     // program. Abandoning the walk proves nothing about the tail, so this is a
     // hard failure rather than a partial `Ok` (covered-or-rejected).
     checker.check_program_items(program.annotated_exprs(), &mut scope);
-
-    if checker.errors.is_empty() {
-        Ok(program.clone().with_linearity(checker.info))
-    } else {
-        Err(checker.errors)
-    }
+    checker
 }
 
 /// Phase E: check linearity of `new_program` against an outer-scope
@@ -685,6 +1302,16 @@ pub fn check_linearity_with_context(
         signature_inference: merged_signature_inference,
         type_headers: merged_type_headers,
         projection_root: None,
+        current_def: None,
+        adt_registry: new_program.adt_registry().clone(),
+        report: false,
+        scrutinee_projection: false,
+        copy_sites: Vec::new(),
+        latest_unions: LatestUnions::new(),
+        roots: None,
+        projection_use: None,
+        repairs: CopyRepairs::new(),
+        declaration_free_reads: false,
     };
 
     let mut scope = LinearScope::default();
@@ -754,6 +1381,89 @@ impl Checker {
         for expr in exprs {
             self.observe_top_level_key_roots(expr, scope);
         }
+        let mut observed = BTreeMap::new();
+        for expr in exprs {
+            self.report_root_observation_copies(expr, scope, &mut observed);
+        }
+    }
+
+    /// [04-LIN-6]: each root observation is, in manifest order, a terminal
+    /// consuming use that takes part in the same copy insertion as authored
+    /// fan-out. A root whose owner an initializer consumed ordinarily, or an
+    /// earlier root already observed, forces a copy there; the final
+    /// observation takes the original. This records those copies and leaves
+    /// the ownership state, and so every verdict, unchanged. `observed` maps
+    /// each owner to the root observation that last took it.
+    fn report_root_observation_copies(
+        &mut self,
+        expr: &Expr,
+        scope: &LinearScope,
+        observed: &mut BTreeMap<BindingId, BTreeSet<usize>>,
+    ) {
+        if !self.report {
+            return;
+        }
+        let children = match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
+                for child in children.iter().skip(1) {
+                    self.report_root_observation_copies(child, scope, observed);
+                }
+                return;
+            }
+            ExprCarrier::DecodedNode(DeepTag::Def, _, children) => children,
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => return,
+        };
+        let Some(name) = children.first().and_then(symbol_name) else {
+            return;
+        };
+        if function_declaration_body(children).is_some()
+            || self
+                .roots
+                .as_ref()
+                .is_some_and(|roots| !roots.contains(name))
+        {
+            return;
+        }
+        let Some(id) = scope.top_id(name) else {
+            return;
+        };
+        let Some(ty) = scope.record(id).and_then(|record| record.ty.as_ref()) else {
+            return;
+        };
+        if !type_expr_is_owned_linear(ty, &self.tensor_carrying_adts) || self.type_holds_key(ty) {
+            return;
+        }
+        let owner = scope.resolve_alias_chain(id).unwrap_or(id);
+        let frontier = observed.get(&owner).cloned().unwrap_or_else(|| {
+            let mut frontier = BTreeSet::new();
+            let mut visited = BTreeSet::new();
+            for leaf in scope
+                .record(owner)
+                .and_then(|record| record.copy_leaves.as_deref())
+                .unwrap_or_default()
+            {
+                LatestSet::collect(&leaf.latest, &mut visited, &mut frontier);
+            }
+            frontier
+        });
+        let at = SiteLocation {
+            declaration: Some(name.to_string()),
+            ..site_location(expr)
+        };
+        for site in frontier {
+            self.record_copy_repair(site, Some(at.clone()), CopyRepairUseKind::Root);
+        }
+        self.copy_sites.push(CopySite {
+            at,
+            binding: name.to_string(),
+            consumed_by: format!("the root observation of `{name}`"),
+        });
+        observed.insert(owner, BTreeSet::from([self.copy_sites.len() - 1]));
     }
 
     /// [04-LIN-6] and [04-LIN-9]: every top-level value binding is a root
@@ -823,6 +1533,7 @@ impl Checker {
                 description: format!("the root observation of `{name}`"),
                 kind: ConsumeKind::Structural,
                 terminal: false,
+                at: None,
             },
         );
     }
@@ -844,7 +1555,11 @@ impl Checker {
             ExprCarrier::DecodedNode(DeepTag::Def, _, children) => {
                 if let Some(body) = function_declaration_body(children) {
                     let mut declaration_scope = scope.clone();
+                    self.current_def = children.first().and_then(symbol_name).map(str::to_string);
+                    self.declaration_free_reads = true;
                     self.check_expr(body, &mut declaration_scope);
+                    self.declaration_free_reads = false;
+                    self.current_def = None;
                 }
             }
             ExprCarrier::DecodedNode(_, _, _)
@@ -876,57 +1591,9 @@ impl Checker {
                     (children.first().and_then(symbol_name), children.get(1))
                     && !(is_var_expr(body) && var_name(body) == Some(name))
                 {
-                    if matches!(get_tag_expr(body), Some(DeepTag::Borrow)) {
-                        self.invalid_borrow(body, "borrow cannot be returned from a function");
-                        return;
-                    }
-                    // chelis#2549: a function declaration's body is checked by
-                    // `check_function_declarations` once every initializer
-                    // has been walked, never at the def's text position.
-                    if function_declaration_body(children).is_some() {
-                        return;
-                    }
-                    // A top-level `def name = x` shares the same lowered
-                    // node as `x`. Classify its var body as an aliasing
-                    // binding, as `check_let` does, so a later borrow of
-                    // `x` remains valid.
-                    if is_var_expr(body) && self.expr_holds_key(body, scope) {
-                        // [04-LIN-9]: `def a = b` of a key holder moves the
-                        // key into `a`; it is not an aliasing share.
-                        self.consume_var_expr(
-                            body,
-                            scope,
-                            ConsumeSite {
-                                description: format!("binding `{name}` {}", diag_site(body)),
-                                kind: ConsumeKind::Structural,
-                                terminal: false,
-                            },
-                        );
-                    } else if is_var_expr(body) && self.expr_is_owned_linear(body, scope) {
-                        // Resolve both generations by name here: top-level
-                        // defs are pre-declared exactly once each, so the
-                        // stacks are static during this walk and the lookup
-                        // is the record-time resolution chelis#1209 wants.
-                        // A `def a = (var b)` alias can point at a def
-                        // declared *later* in program order; that is fine —
-                        // the id is already minted by pre-declaration.
-                        let alias_link = var_name(body)
-                            .and_then(|source| Some((scope.top_id(name)?, scope.top_id(source)?)));
-                        self.consume_var_expr(
-                            body,
-                            scope,
-                            ConsumeSite {
-                                description: format!("binding `{name}` {}", diag_site(body)),
-                                kind: ConsumeKind::Aliasing,
-                                terminal: false,
-                            },
-                        );
-                        if let Some((alias_id, source_id)) = alias_link {
-                            scope.record_alias(alias_id, source_id);
-                        }
-                    } else {
-                        self.check_expr(body, scope);
-                    }
+                    self.current_def = Some(name.to_string());
+                    self.check_top_level_def(name, body, children, scope);
+                    self.current_def = None;
                 }
             }
             ExprCarrier::DecodedNode(tag, _, _) if is_runtime_expression_tag(tag) => {
@@ -938,6 +1605,68 @@ impl Checker {
             | ExprCarrier::Atom(_)
             | ExprCarrier::MetadataMap(_)
             | ExprCarrier::MetadataExpression(_) => self.check_expr(expr, scope),
+        }
+    }
+
+    fn check_top_level_def(
+        &mut self,
+        name: &str,
+        body: &Expr,
+        children: &[Expr],
+        scope: &mut LinearScope,
+    ) {
+        if matches!(get_tag_expr(body), Some(DeepTag::Borrow)) {
+            self.invalid_borrow(body, "borrow cannot be returned from a function");
+            return;
+        }
+        // chelis#2549: a function declaration's body is checked by
+        // `check_function_declarations` once every initializer
+        // has been walked, never at the def's text position.
+        if function_declaration_body(children).is_some() {
+            return;
+        }
+        // A top-level `def name = x` shares the same lowered
+        // node as `x`. Classify its var body as an aliasing
+        // binding, as `check_let` does, so a later borrow of
+        // `x` remains valid.
+        if is_var_expr(body) && self.expr_holds_key(body, scope) {
+            // [04-LIN-9]: `def a = b` of a key holder moves the
+            // key into `a`; it is not an aliasing share.
+            self.consume_var_expr(
+                body,
+                scope,
+                ConsumeSite {
+                    description: format!("binding `{name}` {}", diag_site(body)),
+                    kind: ConsumeKind::Structural,
+                    terminal: false,
+                    at: Some(site_location(body)),
+                },
+            );
+        } else if is_var_expr(body) && self.expr_is_owned_linear(body, scope) {
+            // Resolve both generations by name here: top-level
+            // defs are pre-declared exactly once each, so the
+            // stacks are static during this walk and the lookup
+            // is the record-time resolution chelis#1209 wants.
+            // A `def a = (var b)` alias can point at a def
+            // declared *later* in program order; that is fine —
+            // the id is already minted by pre-declaration.
+            let alias_link = var_name(body)
+                .and_then(|source| Some((scope.top_id(name)?, scope.top_id(source)?)));
+            self.consume_var_expr(
+                body,
+                scope,
+                ConsumeSite {
+                    description: format!("binding `{name}` {}", diag_site(body)),
+                    kind: ConsumeKind::Aliasing,
+                    terminal: false,
+                    at: Some(site_location(body)),
+                },
+            );
+            if let Some((alias_id, source_id)) = alias_link {
+                scope.record_alias(alias_id, source_id);
+            }
+        } else {
+            self.check_expr(body, scope);
         }
     }
 
@@ -991,6 +1720,15 @@ impl Checker {
                 let entered_projection = matches!(tag, DeepTag::TupleGet | DeepTag::Access)
                     && self.projection_root.is_none()
                     && self.check_projection_use(expr, scope);
+                if entered_projection {
+                    self.projection_use = projection_chain(expr).and_then(|(_, path)| {
+                        Some(ProjectionUse {
+                            label: projection_label(expr)?,
+                            path,
+                            at: source_location(expr),
+                        })
+                    });
+                }
                 match tag {
                     DeepTag::Var => self.consume_var_expr(expr, scope, generic_site(expr)),
                     DeepTag::Copy => self.check_copy(children, scope),
@@ -1019,6 +1757,7 @@ impl Checker {
                 }
                 if entered_projection {
                     self.projection_root = None;
+                    self.projection_use = None;
                 }
             }
             ExprCarrier::StructuralList(elements) => {
@@ -1195,8 +1934,22 @@ impl Checker {
         if let Some(target) = children.first() {
             if is_var_expr(target) && self.expr_holds_key(target, scope) {
                 self.project_key_holder(target, children.get(1), scope);
-            } else if is_var_expr(target) && self.expr_is_owned_linear(target, scope) {
-                self.read_var_expr(target, scope);
+            } else if let Some(name) = var_name(target)
+                && self.expr_is_owned_linear(target, scope)
+            {
+                self.read_or_error(name, target, scope, true);
+                scope.borrow(name, borrow_site(target));
+                // [04-LIN-11]: a tuple projection the source wrote moves its
+                // component out, so the report takes it as an ordinary consume
+                // of that component; the verdict keeps treating it as a read.
+                let takes = match self.projection_use.as_ref().and_then(|p| p.at.clone()) {
+                    Some(at) => Takes::Copyable {
+                        at,
+                        consumed_by: "projection".to_string(),
+                    },
+                    None => Takes::Nothing,
+                };
+                self.report_read(name, target, scope, CopyRepairUseKind::Consume, takes);
             } else {
                 self.check_expr(target, scope);
             }
@@ -1399,6 +2152,7 @@ impl Checker {
                             description: format!("binding `{name}` {}", diag_site(value)),
                             kind: ConsumeKind::Structural,
                             terminal: false,
+                            at: Some(site_location(value)),
                         },
                     );
                 } else if is_var_expr(value) && self.expr_is_owned_linear(value, scope) {
@@ -1420,6 +2174,7 @@ impl Checker {
                             description: format!("binding `{name}` {}", diag_site(value)),
                             kind: ConsumeKind::Aliasing,
                             terminal: false,
+                            at: Some(site_location(value)),
                         },
                     );
                 } else if matches!(get_tag_expr(value), Some(DeepTag::Borrow)) {
@@ -1454,6 +2209,8 @@ impl Checker {
             return;
         }
 
+        let declaration = std::mem::take(&mut self.declaration_free_reads);
+        let repairable = !declaration;
         let params = param_names(&children[0]);
         let captured = free_vars(&children[1], &params);
         let mut inner_scope = outer_scope.clone();
@@ -1539,7 +2296,16 @@ impl Checker {
                 true
             });
             if body_consumes {
-                self.read_or_error(name.as_str(), expr, outer_scope);
+                self.read_or_error(name.as_str(), expr, outer_scope, repairable);
+                if repairable {
+                    self.report_read(
+                        name.as_str(),
+                        expr,
+                        outer_scope,
+                        CopyRepairUseKind::Capture,
+                        Takes::Original,
+                    );
+                }
                 // chelis#1200: forward the capture consume to a
                 // destructured component's carrier.
                 //
@@ -1582,6 +2348,7 @@ impl Checker {
                             description: format!("closure capture {}", diag_site(expr)),
                             kind: ConsumeKind::Structural,
                             terminal: false,
+                            at: Some(site_location(expr)),
                         },
                     );
                 }
@@ -1594,8 +2361,17 @@ impl Checker {
                 // the body's borrow-reads inside the closure resolve
                 // against the captured borrow rather than re-entering
                 // the outer binding state.
-                self.read_or_error(name.as_str(), expr, outer_scope);
+                self.read_or_error(name.as_str(), expr, outer_scope, repairable);
                 outer_scope.borrow(name.as_str(), borrow_site(expr));
+                if repairable {
+                    self.report_read(
+                        name.as_str(),
+                        expr,
+                        outer_scope,
+                        CopyRepairUseKind::Capture,
+                        Takes::Nothing,
+                    );
+                }
                 if let Some(use_id) = outer_scope.top_id(&name) {
                     let owner = outer_scope.resolve_alias_chain(use_id).unwrap_or(use_id);
                     if let Some(record) = outer_scope.record_mut(owner) {
@@ -1678,10 +2454,13 @@ impl Checker {
                     description: format!("match scrutinee {}", diag_site(&children[0])),
                     kind: ConsumeKind::Structural,
                     terminal: false,
+                    at: Some(site_location(&children[0])),
                 },
             );
         } else {
+            self.scrutinee_projection = projection_chain(&children[0]).is_some();
             self.check_expr(&children[0], scope);
+            self.scrutinee_projection = false;
         }
 
         let visible_ids = scope.all_visible_ids();
@@ -1769,6 +2548,7 @@ impl Checker {
             ),
             kind: ConsumeKind::Structural,
             terminal: false,
+            at: site.at.clone(),
         };
         for id in visible_ids {
             let Some(record) = arm_scope.record(*id) else {
@@ -1810,6 +2590,7 @@ impl Checker {
                         ),
                         kind: ConsumeKind::Structural,
                         terminal: false,
+                        at: None,
                     },
                 ));
             }
@@ -1958,29 +2739,40 @@ impl Checker {
             // over an `Aliasing` record from another branch: an alias bind
             // does not destroy anything, and letting it win would report the
             // wrong site. A terminal consume ends the owner on its path, so
-            // it outranks an ordinary one (chelis#3177).
-            let consumed_site = branches
+            // it outranks every other (chelis#3177), and a non-ordinary
+            // consume, after which every use is rejected, outranks an ordinary
+            // one, which copies repair (spec/04 section 8.3). Ranking rather
+            // than taking the first branch keeps the verdict independent of
+            // branch order.
+            let branch_sites = branches
                 .iter()
-                .find_map(|branch| match branch.state(*id) {
-                    Some(BindingState::Consumed(site)) if site.terminal => Some(site.clone()),
+                .filter_map(|branch| match branch.state(*id) {
+                    Some(BindingState::Consumed(site)) => Some(site),
                     _ => None,
                 })
-                .or_else(|| {
-                    branches.iter().find_map(|branch| match branch.state(*id) {
-                        Some(BindingState::Consumed(site))
-                            if matches!(site.kind, ConsumeKind::Structural) =>
-                        {
-                            Some(site.clone())
-                        }
-                        _ => None,
-                    })
-                })
-                .or_else(|| {
-                    branches.iter().find_map(|branch| match branch.state(*id) {
-                        Some(BindingState::Consumed(site)) => Some(site.clone()),
-                        _ => None,
-                    })
-                });
+                .collect::<Vec<_>>();
+            let consumed_site = branch_sites
+                .iter()
+                .map(|site| site.join_rank())
+                .max()
+                .and_then(|rank| branch_sites.iter().find(|site| site.join_rank() == rank))
+                .map(|site| (*site).clone());
+            // [04-LIN-5]: a later use copies at the latest ordinary consume of
+            // every path, so each leaf joins every branch's latest consumes.
+            let branch_leaves = branches
+                .iter()
+                .filter_map(|branch| branch.record(*id)?.copy_leaves.as_ref())
+                .collect::<Vec<_>>();
+            if self.report
+                && let Some(first) = branch_leaves.first()
+                && let Some(record) = scope.record_mut(*id)
+            {
+                record.copy_leaves = Some(join_copy_leaves(
+                    &mut self.latest_unions,
+                    first,
+                    &branch_leaves,
+                ));
+            }
             let Some(site) = consumed_site else {
                 continue;
             };
@@ -1998,38 +2790,36 @@ impl Checker {
             // `Structural` consume from a branch legitimately replaces it,
             // exactly as `consume_var_expr`'s Aliasing-then-Structural arm does
             // on the straight-line path.
-            // The rule (chelis#1200 review finding 2):
+            // The rule:
             //
             //   Live                      -> a branch consume always wins.
-            //   Consumed(Aliasing), and
-            //     the name is a component
-            //     carrier                 -> a branch Structural consume wins.
-            //   Consumed(Aliasing), and
-            //     the name is an ordinary
-            //     binding                 -> unchanged.
+            //   Consumed(Aliasing)        -> a branch Structural consume wins.
+            //   Consumed(Structural)      -> a branch consume that ranks at
+            //                                least as high wins.
             //   Consumed, not by a `drop`,
             //     and a branch dropped
             //     the owner               -> the `drop` wins, as in
             //                                `consume_var_expr` (chelis#3177).
             //
-            // The carve-out is deliberately narrow. The justification above
-            // is entirely about carriers: a component's `Aliasing` record is
-            // bookkeeping for `p = (var __chelis_tmpN)`, never a destruction,
-            // so a branch's real consume must replace it. An ordinary `y = x`
-            // alias records the same `Aliasing` shape for a completely
-            // different reason, and upgrading it there rejects
-            // `y = x; if c then { f = fn () -> realize(x) f() } else t;
-            // add(y, y)` — which released 0.18.4 accepts. Tightening ordinary
-            // aliases is exactly the class of ecosystem-breaking change
-            // chelis#1200 exists to undo, so the upgrade asks for component
-            // identity (permanent) rather than the region-relative F2 mark.
+            // An ordinary `y = x` alias records the same `Aliasing` shape as a
+            // component carrier, and its branch consumes win too. chelis#1200
+            // kept them from winning because a later borrow after an ordinary
+            // consume used to be rejected; spec/04 section 8.3 now repairs
+            // that borrow with a copy, so an ordinary branch consume rejects
+            // nothing, and a scrutinee or consuming capture in a branch must
+            // reject a later use after the join exactly as it does on the
+            // straight-line path.
             let replaces_outer = match scope.state(*id) {
                 Some(BindingState::Live { .. }) => true,
                 Some(BindingState::Consumed(outer)) => {
                     (site.terminal && !outer.terminal)
+                        // A structural outer consume is replaced by the
+                        // joined one when that ranks at least as high: a
+                        // branch's later consume is the latest on its path.
+                        || (matches!(outer.kind, ConsumeKind::Structural)
+                            && site.join_rank() >= outer.join_rank())
                         || (matches!(outer.kind, ConsumeKind::Aliasing)
-                            && matches!(site.kind, ConsumeKind::Structural)
-                            && scope.is_component_id(*id))
+                            && matches!(site.kind, ConsumeKind::Structural))
                 }
                 None => false,
             };
@@ -2200,39 +2990,40 @@ impl Checker {
             self.consume_key_holder(expr, name, target, scope, site);
             return;
         }
-        // A `drop` ends the owner, so every later use is refused, whatever
-        // this use's own kind (chelis#3177). The owner is checked through the
-        // alias chain as well as on the use's own binding: after `y = x;
-        // c = drop(x)`, binding `z = y` is an `Aliasing` consume whose target
-        // is `y`'s live record, but it names the dropped owner.
+        // A `drop`, a match scrutinee or a consuming capture leaves nothing a
+        // copy could repair, so every later use is refused, whatever this
+        // use's own kind (chelis#3177, spec/04 section 8.3). It is looked for
+        // on every binding of the alias chain: after `y = x; c = drop(x)`,
+        // binding `z = y` is an `Aliasing` consume whose target is `y`'s live
+        // record, but it names the dropped owner; and a consuming capture of
+        // `y` is recorded on `y` itself.
         let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
-        let ended_at = [use_id, owner]
-            .into_iter()
-            .find_map(|id| match scope.state(id) {
-                Some(BindingState::Consumed(consumed_at)) if consumed_at.terminal => {
-                    Some(consumed_at.description.clone())
-                }
-                _ => None,
-            });
-        if let Some(description) = ended_at {
+        if let Some(blocking) = scope.blocking_consume(use_id) {
             // chelis#1200: report the name the user wrote, not
             // `target`. `target` is the alias chain's terminal, which
             // for a destructured component is the desugarer's
             // `__chelis_tmpN` — a name that appears nowhere in the
             // user's source and that they cannot act on.
-            self.push_diagnostic(located_error(expr, CheckError::new(
-                CheckErrorKind::UseAfterConsume,
-                with_macro_provenance(
-                    expr,
-                    format!(
-                        "variable `{name}` was already consumed by {description}; later use {} is invalid",
-                        diag_site(expr)
+            let suggestion = if blocking.terminal {
+                format!("Move the later use before the `drop`, or bind `copy({name})` before it")
+            } else {
+                "Structural ownership consumes cannot be auto-copied; move the later use before the consume or copy before the structural consume".to_string()
+            };
+            self.push_diagnostic(located_error(
+                expr,
+                CheckError::new(
+                    CheckErrorKind::UseAfterConsume,
+                    with_macro_provenance(
+                        expr,
+                        format!(
+                            "variable `{name}` was already consumed by {}; later use {} is invalid",
+                            blocking.description,
+                            diag_site(expr)
+                        ),
                     ),
+                    vec![suggestion],
                 ),
-                vec![format!(
-                    "Move the later use before the `drop`, or bind `copy({name})` before it"
-                )],
-            )));
+            ));
             return;
         }
         // A `drop` cannot end an owner that a closure still borrows: the
@@ -2258,6 +3049,46 @@ impl Checker {
                 )],
             ));
             return;
+        }
+        if matches!(site.kind, ConsumeKind::Structural) {
+            let takes = match (&site.at, &self.projection_use) {
+                (_, Some(_)) if self.scrutinee_projection => Takes::Original,
+                (_, Some(projection)) if site.is_ordinary() => match &projection.at {
+                    Some(at) => Takes::Copyable {
+                        at: at.clone(),
+                        consumed_by: "projection".to_string(),
+                    },
+                    None => Takes::Original,
+                },
+                (Some(at), None) if site.is_ordinary() => Takes::Copyable {
+                    at: at.clone(),
+                    consumed_by: site
+                        .description
+                        .strip_suffix(&format!(" at {}", at.id))
+                        .unwrap_or(&site.description)
+                        .to_string(),
+                },
+                _ => Takes::Original,
+            };
+            let kind = if site.terminal {
+                CopyRepairUseKind::Drop
+            } else {
+                CopyRepairUseKind::Consume
+            };
+            self.report_use(scope, target, name, expr, kind, takes);
+        } else {
+            // An aliasing bind shares the value: the new name and the old both
+            // still need it, so it forces the copies a later use would and
+            // takes nothing. A destructuring `let` binds its value this way.
+            let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
+            self.report_use(
+                scope,
+                owner,
+                name,
+                expr,
+                CopyRepairUseKind::Consume,
+                Takes::Nothing,
+            );
         }
         match scope.state(target) {
             Some(BindingState::Live { .. }) => scope.consume_id(target, site),
@@ -2348,11 +3179,19 @@ impl Checker {
             // insertion gives the earlier use the copy, so a use after
             // `a = eat(x); c = drop(x)` is refused.
             Some(BindingState::Consumed(_)) if site.terminal => scope.consume_id(target, site),
-            Some(BindingState::Consumed(_)) => {
-                // The implicit-linearity pass will insert a Copy for
-                // consuming fan-out.  Borrow-after-consume remains an
-                // error through `read_or_error`.
+            // Consuming fan-out: the implicit-linearity pass inserts a Copy at
+            // the earlier consume (spec/04 section 8.3), and this consume
+            // becomes the binding's state. A later ordinary consume is then the
+            // site a still later use copies at; a later match scrutinee makes
+            // every still later use a use-after-consume.
+            Some(BindingState::Consumed(earlier)) if earlier.is_ordinary() => {
+                if matches!(site.kind, ConsumeKind::Structural) {
+                    scope.consume_id(target, site);
+                }
             }
+            // An aliasing record after an aliasing bind shares the value;
+            // nothing is copied.
+            Some(BindingState::Consumed(_)) => {}
             None => {}
         }
     }
@@ -2364,11 +3203,38 @@ impl Checker {
         if !self.expr_is_owned_linear(expr, scope) {
             return;
         }
-        self.read_or_error(name, expr, scope);
+        self.read_or_error(name, expr, scope, true);
         scope.borrow(name, borrow_site(expr));
+        self.report_read(name, expr, scope, CopyRepairUseKind::Borrow, Takes::Nothing);
     }
 
-    fn read_or_error(&mut self, name: &str, expr: &Expr, scope: &LinearScope) {
+    /// [`Self::report_use`] for a use of `name` that the walk read rather
+    /// than consumed, against the owner its alias chain resolves to.
+    fn report_read(
+        &mut self,
+        name: &str,
+        expr: &Expr,
+        scope: &mut LinearScope,
+        kind: CopyRepairUseKind,
+        takes: Takes,
+    ) {
+        if self.expr_holds_key(expr, scope) {
+            return;
+        }
+        let Some(use_id) = scope.top_id(name) else {
+            return;
+        };
+        let owner = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
+        self.report_use(scope, owner, name, expr, kind, takes);
+    }
+
+    /// Check a use of `name` that leaves its owner live, a read or a closure
+    /// capture, against the owner's consumed state. After an ordinary consume
+    /// the use is consuming fan-out, repaired by a copy inserted at that
+    /// consume exactly as a later consume is (spec/04 section 8.3); after any
+    /// other consume it is a use-after-consume. `repairable` is `false` for a
+    /// use no copy repairs, a function declaration's free reference.
+    fn read_or_error(&mut self, name: &str, expr: &Expr, scope: &LinearScope, repairable: bool) {
         // A structural consume of an alias is recorded on its source
         // generation. Check that generation so reads through either
         // name observe the same consumed state.
@@ -2379,7 +3245,15 @@ impl Checker {
             return;
         };
         let resolved = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
-        let Some(BindingState::Consumed(site)) = scope.state(resolved) else {
+        let blocking = scope.blocking_consume(use_id);
+        let state = match &blocking {
+            Some(site) => Some(site),
+            None => match scope.state(resolved) {
+                Some(BindingState::Consumed(site)) => Some(site),
+                _ => None,
+            },
+        };
+        let Some(site) = state else {
             return;
         };
         // Binding an alias shares the value and permits later borrows.
@@ -2401,6 +3275,9 @@ impl Checker {
                     diag_site(expr)
                 ),
             );
+            return;
+        }
+        if repairable && site.is_ordinary() && !scope.is_destructured_id(resolved) {
             return;
         }
         let message = with_macro_provenance(
@@ -3719,9 +4596,33 @@ fn located_error(expr: &Expr, mut error: CheckError) -> CheckError {
 }
 
 fn diag_site(expr: &Expr) -> String {
+    format!("at {}", site_location(expr).id)
+}
+
+/// [`site_location`] for a node the source wrote, or `None` for one the
+/// desugarer synthesized, which carries neither a span identity nor an
+/// extent.
+fn source_location(expr: &Expr) -> Option<SiteLocation> {
+    (span_metadata_id(expr).is_some() || expr.span().len > 0).then(|| site_location(expr))
+}
+
+/// The location [`diag_site`] prints, with the start offset that orders it.
+fn site_location(expr: &Expr) -> SiteLocation {
     match span_metadata_id(expr) {
-        Some(id) => format!("at {id}"),
-        None => format!("at offset {}", expr.span().offset),
+        Some(id) => SiteLocation {
+            declaration: None,
+            offset: id
+                .strip_prefix("surf:")
+                .and_then(|id| id.split_once(".."))
+                .and_then(|(start, _)| start.parse().ok())
+                .unwrap_or(expr.span().offset),
+            id: id.to_string(),
+        },
+        None => SiteLocation {
+            declaration: None,
+            offset: expr.span().offset,
+            id: format!("offset {}", expr.span().offset),
+        },
     }
 }
 
@@ -4076,7 +4977,7 @@ fn type_expr_holds_key(expr: &Expr, key_carrying_adts: &UnordSet<String>) -> boo
 }
 
 /// [04-LIN-11]: one step of a projection chain, `.i` or `.f`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ProjectionStep {
     Index(usize),
     Field(String),
@@ -4103,6 +5004,99 @@ fn projection_chain(expr: &Expr) -> Option<(&Expr, Vec<ProjectionStep>)> {
     let (root, mut path) = projection_chain(target)?;
     path.push(step);
     Some((root, path))
+}
+
+/// Give `path` a leaf of its own when it lies strictly inside a leaf, as a
+/// component the binding's type did not resolve does. The new leaf inherits
+/// the latest consumes of the leaf it is split from.
+fn split_copy_leaf(leaves: &mut Vec<CopyLeaf>, path: &[ProjectionStep]) {
+    while let Some(index) = leaves.iter().position(|leaf| {
+        path.len() > leaf.path.len()
+            && path.starts_with(&leaf.path)
+            && !leaf.split.iter().any(|split| path.starts_with(split))
+    }) {
+        let parent = &mut leaves[index];
+        let split = parent
+            .split
+            .iter()
+            .filter(|split| split.starts_with(path))
+            .cloned()
+            .collect();
+        let latest = parent.latest.clone();
+        parent.split.push(path.to_vec());
+        leaves.push(CopyLeaf {
+            path: path.to_vec(),
+            split,
+            latest,
+        });
+    }
+}
+
+/// The union, per leaf, of every branch's latest consumes. Branches split
+/// leaves independently, so each is first refined to every leaf any branch
+/// has; a leaf of the refinement lies inside exactly one leaf of each branch.
+fn join_copy_leaves(
+    unions: &mut LatestUnions,
+    first: &[CopyLeaf],
+    branches: &[&Vec<CopyLeaf>],
+) -> Vec<CopyLeaf> {
+    let mut joined = first
+        .iter()
+        .map(|leaf| CopyLeaf {
+            latest: Rc::new(LatestSet::Empty),
+            ..leaf.clone()
+        })
+        .collect::<Vec<_>>();
+    let mut present = joined
+        .iter()
+        .map(|leaf| leaf.path.clone())
+        .collect::<BTreeSet<_>>();
+    for branch in branches {
+        for leaf in branch.iter() {
+            if present.insert(leaf.path.clone()) {
+                split_copy_leaf(&mut joined, &leaf.path);
+            }
+        }
+    }
+    let by_path = branches
+        .iter()
+        .map(|branch| {
+            branch
+                .iter()
+                .map(|leaf| (leaf.path.as_slice(), leaf))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .collect::<Vec<_>>();
+    for target in &mut joined {
+        for (branch, by_path) in branches.iter().zip(&by_path) {
+            let source = by_path.get(target.path.as_slice()).copied().or_else(|| {
+                branch.iter().find(|leaf| {
+                    target.path.starts_with(&leaf.path)
+                        && !leaf
+                            .split
+                            .iter()
+                            .any(|split| target.path.starts_with(split))
+                })
+            });
+            if let Some(source) = source {
+                target.latest = LatestSet::union(unions, &target.latest, &source.latest);
+            }
+        }
+    }
+    joined
+}
+
+/// A projection chain as the source spells it, `p.w` or `t.0.1`.
+fn projection_label(expr: &Expr) -> Option<String> {
+    let (root, path) = projection_chain(expr)?;
+    let mut label = var_name(root)?.to_string();
+    for step in path {
+        match step {
+            ProjectionStep::Index(index) => label.push_str(&format!(".{index}")),
+            ProjectionStep::Field(field) => label.push_str(&format!(".{field}")),
+        }
+    }
+    Some(label)
 }
 
 /// Two projection paths overlap when one is a prefix of the other: the empty
@@ -4348,6 +5342,7 @@ fn app_site(expr: &Expr, children: &[Expr], builtin_callee: Option<&str>) -> Con
         description: format!("{name} {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
         terminal: builtin_callee == Some("drop"),
+        at: Some(site_location(expr)),
     }
 }
 
@@ -4356,6 +5351,7 @@ fn generic_site(expr: &Expr) -> ConsumeSite {
         description: format!("use {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
         terminal: false,
+        at: Some(site_location(expr)),
     }
 }
 
@@ -4364,6 +5360,7 @@ fn realize_site(expr: &Expr) -> ConsumeSite {
         description: format!("realize {}", diag_site(expr)),
         kind: ConsumeKind::Structural,
         terminal: false,
+        at: Some(site_location(expr)),
     }
 }
 
@@ -4582,7 +5579,18 @@ mod tests {
 
     #[test]
     fn effect_handler_payload_retains_nested_ownership_traversal() {
-        let use_x = || node("realize", vec![], vec![node("var", vec![], vec![sym("x")])]);
+        // A `drop` ends `x`, so any later use is rejected whatever the fan-out
+        // rule (spec/04 section 8.3); the oracle needs only that the walk sees it.
+        let use_x = || {
+            node(
+                "app",
+                vec![],
+                vec![
+                    node("var", vec![], vec![sym("drop")]),
+                    node("var", vec![], vec![sym("x")]),
+                ],
+            )
+        };
         let handler = Expr::BareList(vec![use_x()], span());
         let program = CheckedProgram::unchecked_for_linearity_diagnostic_test(
             vec![
@@ -4715,7 +5723,16 @@ mod tests {
             head: "future-block".into(),
             meta: Metadata::default(),
             children: vec![
-                node("realize", vec![], vec![node("var", vec![], vec![sym("x")])]),
+                // A `drop`, so the later reads are rejected whatever the
+                // fan-out rule (spec/04 section 8.3).
+                node(
+                    "app",
+                    vec![],
+                    vec![
+                        node("var", vec![], vec![sym("drop")]),
+                        node("var", vec![], vec![sym("x")]),
+                    ],
+                ),
                 node(
                     "app",
                     vec![],
@@ -4840,7 +5857,18 @@ mod tests {
 
     #[test]
     fn redteam_malformed_match_arm_cannot_hide_nested_consume() {
-        let realize_x = || node("realize", vec![], vec![node("var", vec![], vec![sym("x")])]);
+        // A `drop` ends `x`, so any later use is rejected whatever the fan-out
+        // rule (spec/04 section 8.3); the oracle needs only that the walk sees it.
+        let realize_x = || {
+            node(
+                "app",
+                vec![],
+                vec![
+                    node("var", vec![], vec![sym("drop")]),
+                    node("var", vec![], vec![sym("x")]),
+                ],
+            )
+        };
         let malformed_arms = [
             node("params", vec![], vec![realize_x()]),
             node(
@@ -4878,7 +5906,7 @@ mod tests {
             );
             assert_eq!(
                 free_runtime_variables(&malformed_match),
-                vec!["x".to_string()],
+                vec!["drop".to_string(), "x".to_string()],
                 "a malformed arm must not hide a closure capture"
             );
             let body = node(

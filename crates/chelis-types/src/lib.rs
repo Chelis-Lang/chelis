@@ -102,8 +102,9 @@ pub use infer::{
     set_grow_segment_bytes_for_test,
 };
 pub use linearity::{
-    LinearityInfo, check_linearity, check_linearity_with_context,
-    param_names as lexical_param_names, pattern_names as lexical_pattern_names,
+    CopyRepair, CopyRepairUse, CopyRepairUseKind, LinearityInfo, check_linearity,
+    check_linearity_with_context, copy_repairs, param_names as lexical_param_names,
+    pattern_names as lexical_pattern_names,
 };
 pub use observation::{ElementRef, format_element, format_key, format_key_bits};
 pub use opacity::{

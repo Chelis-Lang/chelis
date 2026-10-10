@@ -19,11 +19,11 @@ use tempfile::{TempDir, tempdir};
 const VALID_OPS: &str = "module Mylib.Ops\nexport (settle)\n\
      def settle(x: tensor[2, f32]) -> tensor[2, f32] = realize(x)\n";
 
-/// `settle` consumes `x` with `realize` and then reads it again.
+/// `settle` drops `x` and then reads it again, which no inserted copy repairs.
 const INVALID_OPS: &str = "module Mylib.Ops\nexport (settle)\n\
-     def settle(x: tensor[2, f32]) -> tensor[2, f32] = {\n  y = realize(x)\n  add(x, y)\n}\n";
+     def settle(x: tensor[2, f32]) -> tensor[2, f32] = {\n  y = drop(x)\n  realize(x)\n}\n";
 
-const VIOLATION: &str = "already consumed by realize";
+const VIOLATION: &str = "already consumed by call to `drop`";
 
 const VALID_KEY_OPS: &str = "module Mylib.Ops\nexport (settle)\n\
      def settle(x: tensor[2, f32]) -> tensor[2, f32] = {\n  k = key_from_seed(7i64)\n  (a, b) = split_key(k)\n  _ = fold_in(a, 1i64)\n  _ = fold_in(b, 2i64)\n  realize(x)\n}\n";

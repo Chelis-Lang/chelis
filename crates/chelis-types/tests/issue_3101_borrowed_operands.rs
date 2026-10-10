@@ -9,7 +9,12 @@
 use chelis_deep::Expr;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
+use chelis_types::CopyRepairUseKind;
 use chelis_types::{check_ir_program, check_linearity, check_typed_program};
+use copy_repair::copy_repairs_of;
+
+#[path = "support/copy_repair.rs"]
+mod copy_repair;
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
@@ -238,17 +243,25 @@ fn an_owned_read_only_operand_auto_borrows() {
 
 /// The negative twin: a position that takes its operand by value (here a
 /// tuple element of the result) still consumes it after the read-only call,
-/// so a later borrow is refused.
+/// so the later borrows are fan-out repaired at that element (spec/04
+/// section 8.3) rather than at the read-only call.
 #[test]
 fn a_consuming_operation_still_consumes_beside_a_read_only_one() {
     for (call, dtype) in READ_ONLY_OPS {
         let body = format!(
             "def f(x: tensor[3, {dtype}]) -> (tensor[3, {dtype}], tensor[3, {dtype}]) = {{\n  a = {call}\n  (x, add(&x, &x))\n}}\n"
         );
-        let errors = linearity_errors_of(&body);
+        let repairs = copy_repairs_of(&body);
         assert!(
-            errors.iter().any(|m| m.contains("already consumed")),
-            "returning x after `{call}` must consume it: {errors:?}"
+            repairs.len() == 1
+                && repairs[0].binding == "x"
+                && repairs[0].consumed_by == "use"
+                && repairs[0].forced_by.len() == 2
+                && repairs[0]
+                    .forced_by
+                    .iter()
+                    .all(|later| later.kind == CopyRepairUseKind::Borrow),
+            "returning x after `{call}` must consume it at the tuple element: {repairs:#?}"
         );
     }
 }

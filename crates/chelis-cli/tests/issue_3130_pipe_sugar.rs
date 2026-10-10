@@ -226,7 +226,7 @@ fn authored_stage_errors_retain_original_source_locations() {
         ),
         (
             "ownership",
-            "def f(x: tensor[2, f32]) -> tensor[2, f32] = x |> realize |> add(x)\n",
+            "def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = {\n  u = drop(x)\n  y |> add(x)\n}\n",
             "UseAfterConsume",
             "x)\n",
         ),

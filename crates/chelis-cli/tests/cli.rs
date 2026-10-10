@@ -6199,7 +6199,7 @@ fn check_reports_linearity_errors() {
     let path = dir.path().join("linearity.ch");
     write_file(
         &path,
-        "def bad(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y: tensor[4, f32] = realize(x)\n  add(x, y)\n}\n",
+        "def bad(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = drop(x)\n  realize(x)\n}\n",
     );
 
     let json = run_json_check(&path);
@@ -6208,7 +6208,7 @@ fn check_reports_linearity_errors() {
         error["kind"].as_str() == Some("UseAfterConsume")
             && error["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("realize"))
+                .is_some_and(|message| message.contains("call to `drop`"))
     }));
     assert!(json["score"].as_f64().unwrap() < 1.0);
 }
@@ -6292,8 +6292,8 @@ fn check_reports_macro_provenance_for_linearity_errors() {
     write_file(
         &path,
         r#"
-macro dup_relu(x) = add(realize(x), x)
-def bad(x: tensor[4, f32]) -> tensor[4, f32] = dup_relu(x)
+macro dropped_then_read(x) = (drop(x), realize(x))
+def bad(x: tensor[4, f32]) -> (unit, tensor[4, f32]) = dropped_then_read(x)
 "#,
     );
 
@@ -6303,7 +6303,7 @@ def bad(x: tensor[4, f32]) -> tensor[4, f32] = dup_relu(x)
         error["kind"].as_str() == Some("UseAfterConsume")
             && error["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("in expansion of (dup_relu"))
+                .is_some_and(|message| message.contains("in expansion of (dropped_then_read"))
     }));
 }
 
