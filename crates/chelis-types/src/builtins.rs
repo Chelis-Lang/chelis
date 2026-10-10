@@ -1919,12 +1919,14 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     // [05-OP-80]: the dtype argument states the result dtype, so the
     // result type is decided by the dedicated route, not by a scheme.
+    // The mapped reads do not preserve a tensor operand's shape, so §4.2
+    // classifies all three as untracked in a rank-polymorphic body.
     BuiltinDecl {
         name: "mmap_tensor",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, MmapTensor),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1934,7 +1936,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1944,7 +1946,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
         realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::Untracked,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -4170,6 +4172,13 @@ mod tests {
             }
         }
         assert_eq!(shape_class("not_a_builtin"), None);
+    }
+
+    #[test]
+    fn mapped_ingress_is_untracked_inside_a_rank_polymorphic_body() {
+        for name in ["mmap_tensor", "mmap_text", "mmap_sha256"] {
+            assert_eq!(shape_class(name), Some(ShapeClass::Untracked), "{name}");
+        }
     }
 
     /// An axis argument addresses an axis, so a builtin that takes one is
