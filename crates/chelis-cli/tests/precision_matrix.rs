@@ -995,40 +995,18 @@ fn int64_binding_fanout_keeps_both_reads_exact_and_equal() {
 // future change does not quietly make them another silent f64 path.
 // ===========================================================================
 
-/// `copy(x)` on an i64 scalar must reject at check time rather than taking a
-/// lossy scalar-to-f64 runtime path.
+/// `copy(x)` of an i64 scalar is the same i64 (spec/04 section 8.2: `copy`
+/// is generic). 2^53 + 1 has no f64 image, so an exact result on both lanes
+/// shows the copy takes no lossy scalar-to-f64 path.
 #[test]
-fn copy_of_int64_scalar_is_rejected_loudly() {
-    let source = "module M.Main\nx = cast(9007199254740993, i64)\ny = copy(x)\nout = print(y)\n";
-    let err =
-        eval_program_first_line(source).expect_err("copy of an i64 scalar should be rejected");
-    assert!(
-        err.contains("TypeMismatch") && err.contains("copy"),
-        "{err}"
-    );
-
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("p.ch");
-    write_file(&path, source);
-    let output = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["check", path.to_str().unwrap()])
-        .output()
-        .expect("check scalar-copy rejection");
-    assert_eq!(output.status.code(), Some(2));
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("check JSON");
-    assert!(
-        report["errors"]
-            .as_array()
-            .is_some_and(|errors| errors.iter().any(|error| {
-                error["kind"] == "TypeMismatch"
-                    && error["expected"] == "tensor"
-                    && error["got"] == "i64"
-                    && error["span"]["offset"] == source.find("copy(").unwrap()
-            })),
-        "copy must retain its directional operand and authored call: {report}"
-    );
+fn copy_of_int64_scalar_is_exact() {
+    let expr = "copy(cast(9007199254740993, i64))";
+    let eval_got = eval_lane_str(expr).expect("eval lane copies an i64 scalar");
+    assert_eq!(eval_got, "9007199254740993", "eval lane");
+    if c_toolchain_available() {
+        let c_got = c_lane_str(expr, "i64", "copy_i64").expect("C lane copies an i64 scalar");
+        assert_eq!(c_got, "9007199254740993", "C lane");
+    }
 }
 
 /// `&x` on an i64 scalar is rejected at check time:
