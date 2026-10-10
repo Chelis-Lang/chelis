@@ -150,7 +150,12 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32])
     assert_eq!(trace.lowering.gradients.len(), 1);
     let gradient = &trace.lowering.gradients[0];
     assert_eq!(gradient.wrt.len(), 2);
-    assert_eq!(gradient.gradients.len(), 1, "raw AD keeps y missing");
+    assert_eq!(
+        gradient.gradients.len(),
+        2,
+        "raw AD records disconnected +0"
+    );
+    assert!(gradient.gradients.contains_key(&gradient.wrt[1]));
     let application = gradient.application.as_ref().expect("packed application");
     let Value::Tuple(results) = &application.result else {
         panic!("two ordered cotangents stay a tuple");
@@ -159,7 +164,9 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32])
     let Value::Node(disconnected) = results[1] else {
         panic!("disconnected tensor cotangent is a shaped zero");
     };
-    assert!(application.after_splice.get(disconnected).is_none());
+    let raw_disconnected = gradient.gradients[&gradient.wrt[1]];
+    assert_eq!(application.remap[&raw_disconnected], disconnected);
+    assert!(application.after_splice.get(disconnected).is_some());
     assert_eq!(
         application
             .after_packing
