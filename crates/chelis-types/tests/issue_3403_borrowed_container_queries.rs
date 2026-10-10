@@ -395,3 +395,34 @@ fn len_of_a_borrowed_tensor_is_not_a_container_query() {
         "index of a &tensor parameter",
     );
 }
+
+#[test]
+fn a_borrowed_error_operand_reports_its_root_cause_once() {
+    // An operand whose type is already an error. Through the transported
+    // contract the restored `Type::Var(_)` arm keeps main's exact list:
+    // the root cause, then the contract's own refusal of the error operand.
+    // The direct arm decides the borrowed error on its referent and stops
+    // there, so it reports the root cause once; main added two cascades
+    // ("len expects List or Dict input, got &<error>" and a signature
+    // mismatch).
+    for (source, expected) in [
+        (
+            "def probe() -> i64 = len(&nope)\n",
+            vec!["unbound variable: nope"],
+        ),
+        (
+            "def probe() -> i64 = {\n  f = len\n  f(&nope)\n}\n",
+            vec![
+                "unbound variable: nope",
+                "len expects List or Dict input, got &<error>",
+            ],
+        ),
+    ] {
+        let errors = check_errors(source);
+        let messages = errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(messages, expected, "{source}");
+    }
+}
