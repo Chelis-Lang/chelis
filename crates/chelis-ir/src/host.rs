@@ -17589,6 +17589,13 @@ fn remap_tensor_helper_dim_symbols_raising(
         }
     }
     let expected_output = &expected_output;
+    // A multi-root helper has no single expected result to bind globally.
+    // Check the original checker symbols before the positional substitution
+    // below can replace a shared symbol with one activation's extent and hide
+    // a conflicting extent from another activation.
+    if dag.roots().len() > 1 {
+        let _ = actualize_tensor_helper_types(dag, scope);
+    }
     let formal_inputs = tensor_helper_inputs(dag);
     let mut actual_inputs = formal_inputs
         .iter()
@@ -26729,6 +26736,21 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         for root in actualized.roots() {
             assert_eq!(
                 actualized.get(*root).expect("root").output_type.dims,
+                vec![DimInfo::Lit(3)]
+            );
+        }
+        let remapped = remap_tensor_helper_dim_symbols(
+            &dag,
+            &agreeing,
+            &TensorType {
+                dims: vec![shared],
+                precision: Prim::Int64,
+            },
+        )
+        .expect("matching extents remain valid through the helper route");
+        for root in remapped.roots() {
+            assert_eq!(
+                remapped.get(*root).expect("root").output_type.dims,
                 vec![DimInfo::Lit(3)]
             );
         }
