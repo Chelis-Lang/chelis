@@ -215,7 +215,7 @@ fn eval_gradient(source: &str, stem: &str) -> Vec<f64> {
 /// is itself an oracle: an unsubstituted `dN` (in an output type OR an
 /// op-internal field like `Expand::size`) emits an undeclared C
 /// identifier and the native compiler rejects it.
-fn build_and_run_gradient(source: &str, stem: &str) -> Vec<f64> {
+fn build_and_execute_gradient(source: &str, stem: &str) -> std::process::Output {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{stem}.ch"));
     let out_dir = dir.path().join(format!("{stem}-out"));
@@ -244,9 +244,13 @@ fn build_and_run_gradient(source: &str, stem: &str) -> Vec<f64> {
          would be an undeclared identifier): {status}",
     );
 
-    let run_output = StdCommand::new(out_dir.join(stem))
+    StdCommand::new(out_dir.join(stem))
         .output()
-        .expect("compiled binary should run");
+        .expect("compiled binary should run")
+}
+
+fn build_and_run_gradient(source: &str, stem: &str) -> Vec<f64> {
+    let run_output = build_and_execute_gradient(source, stem);
     assert!(
         run_output.status.success(),
         "{stem}: compiled gradient binary failed: {}\nstderr: {}",
@@ -290,6 +294,53 @@ fn issue_345_row_c_quantifier_form_grad_is_step() {
 #[test]
 fn issue_345_row_d_shim_over_sig_verb_grad_is_step() {
     assert_row(&row_d_shim_form(), "issue345_row_d", &RELU_GRAD);
+}
+
+/// The separately signed wrapper remains observable during differentiation.
+/// A runtime shrink makes its output narrower than the shim's named result;
+/// the forward claim must trap before any backward tensor is published.
+#[test]
+fn issue_345_row_d_wrong_forward_claim_traps_on_eval_and_c() {
+    let source = row_d_shim_form().replacen(
+        "= relu_sig(x)",
+        "= relu_sig(shrink(x, [[0i64, floor_div(shape(x, 0i32), 2i64)]]))",
+        1,
+    );
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("issue345_row_d_false.ch");
+    write_file(&path, &source);
+    let check = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("run chelis check");
+    let json: Value = serde_json::from_slice(&check.stdout).expect("check JSON");
+    assert_eq!(json["errors"], serde_json::json!([]), "{json}");
+
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("run chelis eval");
+    let compiled = build_and_execute_gradient(&source, "issue345_row_d_false_c");
+    for (lane, output) in [("eval", eval), ("c", compiled)] {
+        assert!(
+            !output.status.success(),
+            "{lane}: a refuted forward claim must prevent gradient output: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("extent `n`: claimed = 2, relu axis 0 = 1"),
+            "{lane}: the declared forward claim must retain its witness: {stderr}"
+        );
+        assert!(
+            stderr.contains("numeric trap: domain in relu at i64"),
+            "{lane}: the forward producer owns the trap: {stderr}"
+        );
+    }
 }
 
 #[test]
