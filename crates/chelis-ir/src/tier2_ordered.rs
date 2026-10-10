@@ -138,7 +138,9 @@ impl Builder<'_> {
         self.node(RiscOp::Shrink { bounds }, vec![x], &out, precision)
     }
 
-    fn pad_axis(
+    /// Pad `axis` with `-0`, the IEEE additive identity: adding the padded
+    /// cells to anything leaves its stored bits unchanged, `-0` included.
+    fn identity_pad_axis(
         &mut self,
         x: NodeId,
         dims: &[usize],
@@ -158,12 +160,9 @@ impl Builder<'_> {
             .collect();
         let mut out = dims.to_vec();
         out[axis] += before + after;
-        self.node(
-            RiscOp::zero_pad(precision, padding),
-            vec![x],
-            &out,
-            precision,
-        )
+        let fill = chelis_types::scalar_from_f64("pad", precision, -0.0)
+            .expect("negative zero finalizes at every float dtype");
+        self.node(RiscOp::Pad { padding, fill }, vec![x], &out, precision)
     }
 }
 
@@ -271,18 +270,23 @@ pub fn lower_trace(
     Ok(b.cast(sum, &out_dims, accumulator, result))
 }
 
-/// [05-OP-33] float `cumsum(x, axis)`: in increasing axis order an exact-zero
-/// accumulator adds each input at the accumulator dtype, and every prefix is
-/// finalized to the result dtype. The graph is that sequential chain over
-/// unit slabs of the axis, `r_0 = 0 + x_0` and `r_k = r_(k-1) + x_k`.
+/// [05-OP-33] float `cumsum(x, axis)`: in increasing axis order the first
+/// input is the first prefix and each later input is added to the previous
+/// prefix at the accumulator dtype; every prefix is finalized to the result
+/// dtype. The graph is that sequential chain over unit slabs of the axis,
+/// `r_0 = -0 + x_0` and `r_k = r_(k-1) + x_k`. Adding `-0`, the IEEE
+/// additive identity, keeps every stored bit of `x_0`, a `-0` included, and
+/// finalizes a NaN as a one-leaf sum does.
 ///
 /// Slabs are cut and the prefixes rejoined by balanced halving, so the
 /// adjoint's work is `O(numel * log n)` rather than one zero-padded
-/// contribution per slab. Rejoining adds disjoint zero-padded halves; a
-/// prefix is never `-0` (it starts from `+0`), so each join is exact. The
-/// reverse derivative of the chain is the inclusive decreasing-axis scan of
-/// the cotangent at the same accumulator dtype, finalized at the operand
-/// dtype by the leading cast's adjoint.
+/// contribution per slab. Rejoining adds disjoint halves padded with `-0`,
+/// so each join keeps every prefix exactly. The reverse derivative of the
+/// chain is the inclusive decreasing-axis scan of the cotangent at the same
+/// accumulator dtype, finalized at the operand dtype by the leading cast's
+/// adjoint, except for the sign of a zero suffix: when the axis has two or
+/// more elements, each slab's cotangent returns to `x` through a shrink
+/// adjoint's `+0` fill, so a `-0` suffix accumulates to `+0` (chelis#3414).
 pub fn lower_cumsum(
     owner: Owner,
     dag: &mut Dag,
@@ -319,7 +323,7 @@ pub fn lower_cumsum(
     let mut slabs = Vec::with_capacity(n);
     split_slabs(&mut b, wide, &dims, axis, accumulator, &mut slabs);
     let mut running = b.node(
-        RiscOp::synth_const(accumulator, 0.0),
+        RiscOp::synth_const(accumulator, -0.0),
         vec![],
         &slab_dims,
         accumulator,
@@ -378,8 +382,8 @@ fn join_slabs(
     left_dims[axis] = mid;
     let mut right_dims = slab_dims.to_vec();
     right_dims[axis] = slabs.len() - mid;
-    let left = b.pad_axis(left, &left_dims, axis, 0, slabs.len() - mid, precision);
-    let right = b.pad_axis(right, &right_dims, axis, mid, 0, precision);
+    let left = b.identity_pad_axis(left, &left_dims, axis, 0, slabs.len() - mid, precision);
+    let right = b.identity_pad_axis(right, &right_dims, axis, mid, 0, precision);
     let mut dims = slab_dims.to_vec();
     dims[axis] = slabs.len();
     b.node(RiscOp::Add, vec![left, right], &dims, precision)

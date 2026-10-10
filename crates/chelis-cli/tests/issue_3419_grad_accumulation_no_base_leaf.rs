@@ -191,3 +191,48 @@ fn gradient_accumulation_has_no_base_leaf_on_every_lane_and_float_width() {
         }
     }
 }
+
+fn cumsum_program(dtype: &str) -> String {
+    let d = dtype;
+    format!(
+        r#"
+def scan_weights(x: tensor[3, {d}], w: tensor[3, {d}]) -> tensor[{d}] = sum(mul(cumsum(x, 0i32), w), 0i32)
+def scan_weights_one(x: tensor[1, {d}], w: tensor[1, {d}]) -> tensor[{d}] = sum(mul(cumsum(x, 0i32), w), 0i32)
+host_lone = cumsum(to_tensor([-0.0{d}]), 0i32)
+host_pair = cumsum(to_tensor([-0.0{d}, -0.0{d}, 1.0{d}]), 0i32)
+host_sum = sum(to_tensor([-0.0{d}]), 0i32)
+host_mixed = cumsum(to_tensor([-0.0{d}, 0.0{d}, -0.0{d}]), 0i32)
+host_positive = cumsum(to_tensor([0.0{d}, -0.0{d}]), 0i32)
+chain_pair = grad(scan_weights, wrt=w)(to_tensor([-0.0{d}, -0.0{d}, 1.0{d}]), to_tensor([1.0{d}, 1.0{d}, 1.0{d}]))
+chain_lone = grad(scan_weights_one, wrt=w)(to_tensor([-0.0{d}]), to_tensor([1.0{d}]))
+chain_mixed = grad(scan_weights, wrt=w)(to_tensor([-0.0{d}, 0.0{d}, -0.0{d}]), to_tensor([1.0{d}, 1.0{d}, 1.0{d}]))
+"#
+    )
+}
+
+#[test]
+fn cumsum_has_no_base_leaf_on_the_host_kernels_and_the_grad_chain() {
+    for dtype in DTYPES {
+        let source = cumsum_program(dtype);
+        for (lane, stdout) in both_lanes(&source, &format!("cumsum_no_base_leaf_{dtype}")) {
+            let check = |name: &str, expected: &[&str], why: &str| {
+                assert_eq!(
+                    printed_elements(&stdout, name),
+                    expected,
+                    "{dtype} {lane} `{name}`: {why}\n{stdout}"
+                );
+            };
+            check("host_lone", &["-0.0"], "the first prefix is the first input");
+            check("host_sum", &["-0.0"], "cumsum's first prefix agrees with a one-leaf sum");
+            check("host_pair", &["-0.0", "-0.0", "1.0"], "(-0) + (-0) is -0");
+            // Under grad the prefixes come from the Tier 1 chain; the gradient
+            // with respect to unit weights is those prefixes bit for bit.
+            check("chain_lone", &["-0.0"], "the chain's first prefix is the first input");
+            check("chain_pair", &["-0.0", "-0.0", "1.0"], "the chain's joins keep a -0 prefix");
+            // Negative parity: once a +0 is added the prefix is +0.
+            check("host_mixed", &["-0.0", "0.0", "0.0"], "(-0) + (+0) is +0");
+            check("host_positive", &["0.0", "0.0"], "(+0) + (-0) is +0");
+            check("chain_mixed", &["-0.0", "0.0", "0.0"], "the chain adds (-0) + (+0) to +0");
+        }
+    }
+}

@@ -8,3 +8,6 @@ differently from before, so the last bits of such a gradient can change. A
 parameter that receives no contribution still gets an exact `+0` gradient. The
 evaluator and the C lane agree. See
 [#3419](https://github.com/Chelis-Lang/chelis/issues/3419).
+
+`cumsum` keeps a `-0` first element: `cumsum([-0.0, -0.0])` is now
+`[-0.0, -0.0]`, where it was `[0.0, 0.0]`, and agrees with `sum([-0.0])`.
