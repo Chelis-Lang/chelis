@@ -712,26 +712,37 @@ class HostedNightlyRoutingTests(unittest.TestCase):
         self.nightly = yaml.safe_load((ROOT / ".github/workflows/heavy-e2e.yml").read_text())
 
     def assert_hosted_parallel_routing(self, nightly):
+        self.assertEqual(
+            nightly.get("concurrency"),
+            {
+                "group": "linux-extended-${{ github.ref }}",
+                "cancel-in-progress": False,
+            },
+        )
         for name, job in nightly["jobs"].items():
             self.assertEqual(job["runs-on"], "ubuntu-latest", name)
             self.assertNotIn("concurrency", job, name)
             if "timeout-minutes" in job:
                 self.assertLessEqual(job["timeout-minutes"], 360, name)
 
-    def test_every_job_is_hosted_and_has_no_shared_job_lane(self):
+    def test_every_job_is_hosted_and_runs_share_only_a_per_ref_workflow_lane(self):
         self.assert_hosted_parallel_routing(self.nightly)
 
-    def test_warm_route_or_job_serialization_is_rejected(self):
-        for mutation in ("warm", "serial"):
+    def test_warm_route_or_wrong_concurrency_is_rejected(self):
+        for mutation in ("warm", "serial", "no-workflow-group", "constant-workflow-group"):
             nightly = copy.deepcopy(self.nightly)
             job = nightly["jobs"]["dtype-phase3-oracle"]
             if mutation == "warm":
                 job["runs-on"] = WARM_LABEL
-            else:
+            elif mutation == "serial":
                 job["concurrency"] = {
                     "group": "linux-extended-warm-x64",
                     "queue": "max",
                 }
+            elif mutation == "no-workflow-group":
+                del nightly["concurrency"]
+            else:
+                nightly["concurrency"]["group"] = "linux-extended-main"
             with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
                 self.assert_hosted_parallel_routing(nightly)
 
