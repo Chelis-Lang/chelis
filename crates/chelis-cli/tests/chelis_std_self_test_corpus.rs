@@ -71,7 +71,9 @@ fn chelis_std_self_test_corpus_passes_under_chelis_test() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&pkg)
-        .args(["test", "tests/"])
+        // Wide JSON documents need about 15 seconds per assertion on an idle
+        // worker. Leave room for contention in this manual corpus gate.
+        .args(["test", "--timeout", "60", "tests/"])
         .assert();
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone())

@@ -331,11 +331,14 @@ def test_try_parse_json_wide_invalid_containers_reject() -> unit ! { Test } = {
 def test_try_parse_json_many_small_objects() -> unit ! { Test } = {
   prefix = fold(fn (acc: string, i: i64) -> string_concat(acc, "{\"k\":0},"), "", range(0i64, 500i64))
   valid = string_concat("[", string_concat(prefix, "{\"last\":1}]"))
-  invalid = string_concat("[", string_concat(prefix, "{\"last\":1,}]"))
-  _ = match json_array(Some(parse_json(valid))) with {
+  match json_array(Some(parse_json(valid))) with {
     | Some(items) => assert_eq(len(items), 501i64, "many small objects keep every array element")
     | None => fail("many small objects did not parse")
   }
+}
+def test_try_parse_json_many_small_objects_malformed_final_rejects() -> unit ! { Test } = {
+  prefix = fold(fn (acc: string, i: i64) -> string_concat(acc, "{\"k\":0},"), "", range(0i64, 500i64))
+  invalid = string_concat("[", string_concat(prefix, "{\"last\":1,}]"))
   match try_parse_json(invalid) with {
     | Some(_) => fail("many small objects with a malformed final object must be rejected")
     | None => assert_true(true, "malformed final object rejected")

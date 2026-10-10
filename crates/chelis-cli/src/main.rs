@@ -143,6 +143,21 @@ struct Cli {
     command: Option<Command>,
 }
 
+#[cfg(test)]
+mod test_timeout_default_tests {
+    use super::{Cli, Command};
+    use clap::Parser;
+
+    #[test]
+    fn ordinary_test_invocations_keep_the_thirty_second_per_test_default() {
+        let cli = Cli::try_parse_from(["chelis", "test", "tests/"]).expect("parse test command");
+        let Some(Command::Test { timeout, .. }) = cli.command else {
+            panic!("expected test command");
+        };
+        assert_eq!(timeout, 30);
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Desugar Surf (.ch) to canonical Deep s-expressions
