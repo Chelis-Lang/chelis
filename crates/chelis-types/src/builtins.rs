@@ -156,6 +156,9 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "mmap_file",
     "mmap_read",
     "mmap_len",
+    "mmap_tensor",
+    "mmap_text",
+    "mmap_sha256",
     "process_run",
     "clock_wall_read",
     "clock_monotonic_read",
@@ -244,6 +247,9 @@ pub enum BuiltinSiblingCaseId {
     MmapFile,
     MmapRead,
     MmapLen,
+    MmapTensor,
+    MmapText,
+    MmapSha256,
     ProcessRun,
     ClockWallRead,
     ClockMonotonicRead,
@@ -368,6 +374,9 @@ pub(crate) const fn case_value_equality(case: BuiltinSiblingCaseId) -> ValueEqua
         | Case::MmapFile
         | Case::MmapRead
         | Case::MmapLen
+        | Case::MmapTensor
+        | Case::MmapText
+        | Case::MmapSha256
         | Case::ProcessRun
         | Case::ClockWallRead
         | Case::ClockMonotonicRead
@@ -632,6 +641,9 @@ pub const fn case_keys(case: BuiltinSiblingCaseId) -> CaseKeys {
         | Case::MmapFile
         | Case::MmapRead
         | Case::MmapLen
+        | Case::MmapTensor
+        | Case::MmapText
+        | Case::MmapSha256
         | Case::ProcessRun
         | Case::ClockWallRead
         | Case::ClockMonotonicRead
@@ -886,6 +898,7 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "to_list",
     "pad_sequences",
     "pad_sequences_to",
+    "mmap_tensor",
     "round_to",
     "parse_csv",
     "to_csv",
@@ -1897,6 +1910,38 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "mmap_len",
         capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, MmapLen),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Untracked,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // [05-OP-80]: the dtype argument states the result dtype, so the
+    // result type is decided by the dedicated route, not by a scheme.
+    // The mapped reads do not preserve a tensor operand's shape, so §4.2
+    // classifies all three as untracked in a rank-polymorphic body.
+    BuiltinDecl {
+        name: "mmap_tensor",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, MmapTensor),
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Untracked,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "mmap_text",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, MmapText),
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
+        },
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Untracked,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "mmap_sha256",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, MmapSha256),
         inference: InferenceDisposition::GenericAccepted {
             reason: "the scheme states the complete operand and result contract; the direct route only refines diagnostics",
         },
@@ -3866,6 +3911,24 @@ pub fn builtin_env() -> (Env, VarGen) {
             Box::new(Type::Prim(Prim::Int64)),
         )),
     );
+    // [05-OP-81]: mapped-range text and digests take the handle and exact
+    // `i64` offsets and lengths, as `mmap_read` does.
+    for name in ["mmap_text", "mmap_sha256"] {
+        env.bind(
+            name.to_string(),
+            Scheme::mono(Type::Fn(
+                vec![
+                    Type::Adt("MappedFile".to_string(), Vec::new()),
+                    Type::Prim(Prim::Int64),
+                    Type::Prim(Prim::Int64),
+                ],
+                Box::new(Type::Prim(Prim::String)),
+            )),
+        );
+    }
+    // [05-OP-80]: the dedicated route (`infer::app_mmap`) states the result
+    // from the dtype argument; this scheme only names the operands.
+    generic_triop("mmap_tensor", &mut env, &mut vg);
     generic_triop_second_third_borrow("einsum", &mut env, &mut vg);
     generic_triop_first_borrow("split", &mut env, &mut vg);
     generic_triop_first_two_borrow("gather", &mut env, &mut vg);
@@ -4109,6 +4172,13 @@ mod tests {
             }
         }
         assert_eq!(shape_class("not_a_builtin"), None);
+    }
+
+    #[test]
+    fn mapped_ingress_is_untracked_inside_a_rank_polymorphic_body() {
+        for name in ["mmap_tensor", "mmap_text", "mmap_sha256"] {
+            assert_eq!(shape_class(name), Some(ShapeClass::Untracked), "{name}");
+        }
     }
 
     /// An axis argument addresses an axis, so a builtin that takes one is

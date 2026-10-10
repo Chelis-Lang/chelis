@@ -39,7 +39,7 @@ Locked before any agent dispatches:
 
 **Decision 5: Decompose-then-recognize for high-level operators.** ONNX has operators like Attention, LayerNormalization, Softmax that are higher-level than Chelis's RISC primitives. The translation decomposes these to their RISC equivalents initially. Later refinements add recognizers in the IR specialization substrate so the decompositions collapse back to fused emissions when fusion infrastructure ships. The translation never produces RISC-level decompositions that the compiler can't recognize as the original high-level pattern.
 
-**Decision 6: Weight loading is part of the shell, not a separate concern.** Hydronnx reads ONNX tensor data, converts to Chelis tensor format, handles dtype mapping, and embeds the weights as constants in the loaded function. The user doesn't manage weight loading separately.
+**Decision 6: Weights are explicit runtime parameters, loaded through a typed, checksummed reader.** Hydronnx writes the ONNX initializers to a `.hnw` weight archive at their native dtypes and emits a `forward` function that takes every weight as a typed tensor parameter, so the checker and `chelis prove` reason about the function for all weights rather than for one set of values. The shell also emits a loader that opens the archive with `Std.Io.Tensors.open_hnw` and reads each weight with the reader for its declared dtype and shape (spec/05-risc-primitives.md [05-OP-82]); each read checks the stored dtype, shape, byte length, and SHA-256 before it reads an element, and `mmap_tensor` ([05-OP-80]) reinterprets the payload bits without conversion. The weights never become compile-time constants: an `extern const` would make the checker perform hidden IO and would put tens to hundreds of megabytes into generated C, and SMT gains nothing from millions of concrete values. The user still does not manage weight loading by hand, because the shell emits the loader.
 
 **Decision 7: The shell is named `Hydronnx` and lives in the canonical shell location.** Follows the existing shell naming convention (Coral, Nautilus, Octant). Module path is `Hydronnx` per the ecosystem nomenclature; crate, package, source files, and directory names use lowercase `hydronnx`.
 
@@ -53,7 +53,7 @@ Hydronnx has four components:
 
 **Operator translator.** Maps each ONNX operator to a Chelis expression. For operators with direct Chelis equivalents (MatMul, Add, Mul), the mapping is a single function call. For higher-level operators (Softmax, LayerNormalization, Attention), the mapping is a decomposition to RISC primitives that the compiler can later recognize.
 
-**Weight loader.** Reads ONNX tensor data, performs dtype conversion if needed, lays out tensors in Chelis's expected memory format, embeds weights as Chelis constants accessible from the loaded function's body.
+**Weight loader.** Reads ONNX tensor data, writes each initializer to the `.hnw` archive at its native dtype as a row-major little-endian payload with its SHA-256, and emits the Chelis loader that reads each weight through `Std.Io.Tensors` and passes it to `forward` as a parameter.
 
 **Function emitter.** Produces a Chelis function definition with the correct type signature (derived from ONNX input/output specs), body (derived from the translated operator graph), and metadata (model name, ONNX opset version, provenance information).
 
@@ -136,10 +136,10 @@ Single agent. Implements the weight conversion and the final Chelis function emi
 
 **Scope.**
 
-- Weight tensor conversion: read ONNX TensorProto data, validate against expected dtype and shape, convert to Chelis tensor format, embed as a Chelis constant accessible from the loaded function's body.
+- Weight archive: read ONNX TensorProto data, validate against expected dtype and shape, and write it to the `.hnw` archive; emit a loader whose every read declares the weight's dtype and shape, so a mismatched archive fails before inference runs.
 - Layout conversion: ONNX uses NCHW for image convolutions; Chelis may have layout conventions that differ. Hydronnx handles the conversion (or fails clearly if the conversion isn't supported).
-- Dtype conversion: weights stored as one dtype in ONNX may need conversion to a different dtype when loaded. f32 weights with f64 model body: cast at load time. Mismatched dtypes that can't be cleanly converted produce a clear error.
-- Function emission: given the translated graph and loaded weights, emit a Chelis function definition. Signature derived per Phase 0 rules; body is the translated operator sequence with weights as constants; metadata attached.
+- Dtype conversion: the archive stores each weight at its ONNX dtype, and a read never converts. When the model body needs another dtype (f32 weights in an f64 body), the emitted loader applies an explicit `cast` after the read. Mismatched dtypes that can't be cleanly converted produce a clear error.
+- Function emission: given the translated graph and loaded weights, emit a Chelis function definition. Signature derived per Phase 0 rules, with one tensor parameter per weight; body is the translated operator sequence; metadata attached.
 
 **The user-facing API.** Concretely:
 

@@ -264,6 +264,57 @@ pub(crate) fn to_tensor_call<'a>(
     }
 }
 
+/// The reserved call whose argument position holds a dtype (spec/02 §P9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DtypeCall {
+    /// The optional second argument of `to_tensor`.
+    ToTensor,
+    /// The fourth argument of `mmap_tensor`.
+    MmapTensor,
+}
+
+impl DtypeCall {
+    pub(crate) const fn callee(self) -> &'static str {
+        match self {
+            Self::ToTensor => "to_tensor",
+            Self::MmapTensor => "mmap_tensor",
+        }
+    }
+
+    pub(crate) const fn position(self) -> &'static str {
+        match self {
+            Self::ToTensor => "second",
+            Self::MmapTensor => "fourth",
+        }
+    }
+}
+
+/// A call of the reserved `mmap_tensor` ([05-OP-80]): its three value
+/// arguments and the dtype argument that states the result element dtype.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MmapTensorCall<'a> {
+    pub(crate) arguments: &'a [Expr],
+    pub(crate) dtype: &'a Expr,
+}
+
+/// `mmap_tensor(mapped, offset, count, p)`. Any other arity is an ordinary
+/// call that the checker rejects.
+pub(crate) fn mmap_tensor_call<'a>(
+    callee: &'a Expr,
+    arguments: &'a [Expr],
+) -> Option<MmapTensorCall<'a>> {
+    let Expr::Var(name, _) = callee else {
+        return None;
+    };
+    match arguments {
+        [_, _, _, dtype] if name == "mmap_tensor" => Some(MmapTensorCall {
+            arguments: &arguments[..3],
+            dtype,
+        }),
+        _ => None,
+    }
+}
+
 /// The dtype a dtype argument names. The position holds a dtype, never a
 /// value (`spec/02-surf-syntax.md` §P9), so only an identifier naming a
 /// primitive or a binder in scope states one.
@@ -308,11 +359,19 @@ pub(crate) enum Site<'a> {
 }
 
 /// Receives every numeric literal of a program with its site, and every
-/// `to_tensor` dtype argument.
+/// `to_tensor` or `mmap_tensor` dtype argument.
 pub(crate) trait SiteVisitor<'a> {
     fn literal(&mut self, literal: NumericLiteral<'a>, site: Site<'a>);
 
-    fn dtype_argument(&mut self, _dtype: &'a Expr, _stated: Option<StatedDtype<'a>>) {}
+    /// `call` names the dtype position: `DtypeCall::ToTensor` or
+    /// `DtypeCall::MmapTensor`.
+    fn dtype_argument(
+        &mut self,
+        _call: DtypeCall,
+        _dtype: &'a Expr,
+        _stated: Option<StatedDtype<'a>>,
+    ) {
+    }
 }
 
 /// Signatures and binders by declaration name, which decide declared types
@@ -544,6 +603,15 @@ impl<'a, V: SiteVisitor<'a>> Walker<'_, 'a, V> {
             Expr::Apply(callee, arguments, _) => {
                 if let Some(call) = to_tensor_call(callee, arguments) {
                     self.tensor_conversion(call, cast_target);
+                } else if let Some(call) = mmap_tensor_call(callee, arguments) {
+                    // The dtype argument states the result dtype only; it
+                    // contains no literal.
+                    for argument in call.arguments {
+                        self.expr(argument, None);
+                    }
+                    let stated = dtype_argument(call.dtype, &self.is_binder());
+                    self.visitor
+                        .dtype_argument(DtypeCall::MmapTensor, call.dtype, stated);
                 } else {
                     self.expr(callee, None);
                     for argument in arguments {
@@ -640,7 +708,8 @@ impl<'a, V: SiteVisitor<'a>> Walker<'_, 'a, V> {
         let site = match call.dtype {
             Some(dtype) => {
                 let stated = dtype_argument(dtype, &self.is_binder());
-                self.visitor.dtype_argument(dtype, stated);
+                self.visitor
+                    .dtype_argument(DtypeCall::ToTensor, dtype, stated);
                 Site::DtypeArgument(stated)
             }
             None => Site::MissingDtype {

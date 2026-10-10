@@ -2143,8 +2143,8 @@ class ContractValidationTests(unittest.TestCase):
             REPO_ROOT / "spec/registry/stdlib_numeric_manifest.md"
         ).read_text(encoding="utf-8")
         rows = re.findall(r"^\| `([^`]+)` \|", registry, re.MULTILINE)
-        self.assertEqual(len(rows), 283)
-        self.assertEqual(len(set(rows)), 283)
+        self.assertEqual(len(rows), 293)
+        self.assertEqual(len(set(rows)), 293)
         identities = set(rows)
         for identity in (
             "decimal::decimal_add",

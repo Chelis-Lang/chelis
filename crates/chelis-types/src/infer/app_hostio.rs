@@ -262,3 +262,136 @@ pub(super) fn check_csv_builtin_signature(
         other => unreachable!("check_csv_builtin_signature dispatched on `{other}`"),
     }
 }
+
+/// [05-OP-80]: `mmap_tensor(mapped, offset, count, T)` borrows a mapped file,
+/// takes an exact `i64` byte offset and element count, and returns a rank-one
+/// tensor of the dtype its type-node child `T` states (spec/03 §6.4). A
+/// literal count gives a literal extent; any other count a fresh extent.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn infer_mmap_tensor_app(
+    expr: &deep::Expr,
+    node: &DeepNode,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+) -> Type {
+    const FNAME: &str = "mmap_tensor";
+    let kids = node.children_slice();
+    let dtype_child = kids.last().filter(|child| {
+        matches!(
+            stamped_parts(child),
+            Some((DeepTag::TPrim | DeepTag::TVar, _, _))
+        )
+    });
+    let (Some(dtype_child), 5) = (dtype_child, kids.len()) else {
+        return report_at_check_site(
+            errors,
+            CheckError::with_types(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "mmap_tensor expects (mapped, offset, count, T) with a dtype `T` as its \
+                     fourth argument, got {} argument(s) ([05-OP-80])",
+                    kids.len().saturating_sub(1)
+                ),
+                "(mapped, offset, count, T)".to_string(),
+                format!("{} argument(s)", kids.len().saturating_sub(1)),
+                vec![],
+            ),
+            CheckSite::Expr(expr),
+        );
+    };
+    let callee_ty = super::app::infer_callee(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let arg_tys: Vec<Type> = kids[1..4]
+        .iter()
+        .map(|arg| infer_expr(arg, env, vg, subst, adt_reg, errors, product))
+        .collect();
+    if let Some(err) = propagate_if_error(arg_tys.iter()) {
+        return err;
+    }
+    let mapped = Type::Adt("MappedFile".to_string(), Vec::new());
+    let slots = [
+        (&mapped, "a MappedFile handle"),
+        (&Type::Prim(Prim::Int64), "an i64 byte offset"),
+        (&Type::Prim(Prim::Int64), "an i64 element count"),
+    ];
+    for (slot, (expected, description)) in arg_tys.iter().zip(slots) {
+        if let Some(rejected) =
+            unify_host_slot_eager(errors, node, FNAME, slot, expected, description, subst)
+        {
+            return rejected;
+        }
+    }
+    let dtype = {
+        let mut resolver = DeepTypeResolver::new(
+            TypeUseSite::Annotation,
+            annotation_binder_mode(env),
+            adt_reg.resolution_env(),
+            vg,
+            errors,
+        )
+        .with_diagnostic_owner(expr);
+        match resolver.resolve(dtype_child) {
+            Ok(dtype) => dtype.into_type(),
+            Err(witness) => return propagate(&witness),
+        }
+    };
+    // A `t-prim` child must name a data element dtype. A `t-var` child names
+    // a dtype binder whose declared bound admits only data element dtypes
+    // ([04-DTYPE-2]): every §5.9 family and explicit set does, and an
+    // unbounded binder does not, since it could stand for `string`.
+    let precision = match (&dtype, stamped_parts(dtype_child)) {
+        (Type::Prim(prim), _) if prim.is_numeric() || *prim == Prim::Bool => {
+            TensorPrec::Concrete(*prim)
+        }
+        (Type::Var(tv), Some((DeepTag::TVar, _, _)))
+            if matches!(
+                subst.tvar_restriction(*tv),
+                Some(
+                    TypeVarRestriction::ActiveFloat
+                        | TypeVarRestriction::ActiveInt
+                        | TypeVarRestriction::ActiveNumeric
+                        | TypeVarRestriction::ActiveSet(_)
+                )
+            ) =>
+        {
+            TensorPrec::Var(*tv)
+        }
+        _ => {
+            // A binder is named as written, not by its inference variable.
+            let written = match stamped_parts(dtype_child) {
+                Some((DeepTag::TVar, _, [name])) => symbol_name(name)
+                    .map(|name| format!("the unbounded binder `{name}`"))
+                    .unwrap_or_else(|| dtype.to_string()),
+                _ => dtype.to_string(),
+            };
+            return report_at_check_site(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!(
+                        "mmap_tensor's dtype argument must be an active data element dtype or \
+                         a dtype binder bounded by a dtype family or set, not {written} ([05-OP-80])"
+                    ),
+                    vec![],
+                ),
+                CheckSite::Expr(expr),
+            );
+        }
+    };
+    let extent = match extract_int_literal(&kids[3]) {
+        Some(count) if count >= 0 => Dim::Lit(count),
+        _ => Dim::Wildcard,
+    };
+    let result = Type::Tensor(vec![extent], precision);
+    let signature = Type::Fn(
+        vec![mapped, Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)],
+        Box::new(result.clone()),
+    );
+    if let Err(error) = unify(&callee_ty, &signature, subst) {
+        return report_at_check_site(errors, error.into(), CheckSite::Expr(expr));
+    }
+    result
+}

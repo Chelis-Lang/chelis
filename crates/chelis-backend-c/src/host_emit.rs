@@ -8572,6 +8572,36 @@ impl<'a> HostEmitter<'a> {
                 ));
                 return Ok(());
             }
+            "mmap_tensor" => {
+                // [05-OP-80]: the checked result dtype is the dtype argument
+                // the checker consumed. A non-tensor result is an IR/ABI
+                // disagreement, never an untyped fallback.
+                let HostType::Tensor(t) = ty else {
+                    return Err(invalid_abi_shape(
+                        format!("mmap_tensor result has non-tensor ABI type `{ty:?}`"),
+                        "mmap_tensor mapped ingress",
+                    ));
+                };
+                let dtype = t.precision.runtime_dtype().map_err(|error| {
+                    invalid_abi_shape(error.to_string(), "mmap_tensor mapped ingress")
+                })?;
+                self.lines.push(format!(
+                    "{}{target} = chelis_mmap_tensor({}, {}, {}, {});",
+                    self.indent,
+                    arg_vars[0].0,
+                    arg_vars[1].0,
+                    arg_vars[2].0,
+                    dtype.c_macro()
+                ));
+                return Ok(());
+            }
+            "mmap_text" | "mmap_sha256" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_{name}({}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                ));
+                return Ok(());
+            }
             _ => {}
         }
 

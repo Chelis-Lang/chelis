@@ -2971,10 +2971,13 @@ exact ADT identity by [05-OP-34].
 > access, owner flag, or free-style path; it has no accumulator and is outside
 > AD.
 >
-> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the eighteen
+> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the nineteen
 > exported stdlib ADT identities enumerated in the normative registry
 > `spec/registry/stdlib_adt_identities.md`, which this atom incorporates by
-> reference, and no structurally similar successor.
+> reference, together with the unexported `io/tensors::TensorEntry`, which
+> the registry also enumerates because the exported
+> `io/tensors::TensorArchive` holds it in a field, and no structurally
+> similar successor.
 >
 > Every field crosses at its declared dtype and stored bits, without
 > arithmetic, conversion, or float funnel. An ordinary public ADT constructor
@@ -3001,8 +3004,9 @@ exact ADT identity by [05-OP-34].
 > comparison and rendering. The opaque `datetime::*`,
 > `datetime/business::*`, `datetime/clock::*`, `datetime/columns::*`, and
 > `datetime/zone::*`
-> identities hold [05-OP-73]'s invariants, and the opaque `decimal::Decimal`
-> identity holds [05-OP-76]'s, by construction. There is no second prelude JSON
+> identities hold [05-OP-73]'s invariants, the opaque `decimal::Decimal`
+> identity holds [05-OP-76]'s, and the opaque `io/tensors::TensorArchive`
+> identity holds [05-OP-82]'s, by construction. There is no second prelude JSON
 > identity or constructor registry. Under spec/06 §2.1 and §2.10.1, an
 > ordinary constructor and the executed matching arm preserve the recursive
 > cotangent shape: differentiable float fields receive their corresponding
@@ -3013,7 +3017,7 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the two hundred eighty-three final exported stdlib numeric definitions enumerated in the
+> the two hundred ninety-three final exported stdlib numeric definitions enumerated in the
 > normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
 > atom incorporates by reference. A
 > signature and effect set are part of the identity. Only the exact registry
@@ -3032,7 +3036,8 @@ exact ADT identity by [05-OP-34].
 > unchanged. The `datetime::*`, `datetime/business::*`, `datetime/clock::*`,
 > `datetime/columns::*`, and `datetime/zone::*` identities follow [05-OP-73].
 > The `decimal::*`
-> identities follow [05-OP-76]. Index wrappers
+> identities follow [05-OP-76], and the `io/tensors::*` identities follow
+> [05-OP-82]. Index wrappers
 > follow [05-OP-32], sort wrappers follow [05-OP-33], and no tensor
 > constructor infers or casts an element dtype.
 > For a differentiable element type, `list_index(xs,i)` returns an input
@@ -4624,6 +4629,145 @@ path even though bare `round` under `grad` remains a structural
 >
 > Accumulator: None; all returned byte counts and offsets are exact checked
 > i64.
+
+#### Mapped tensor ingress
+
+> **[05-OP-80]** Signature: `mmap_tensor(mapped,offset,count,T)->tensor[n,T]`
+> borrows a `MappedFile`, takes an exact i64 byte `offset` and an exact i64
+> element `count`, and states the result element dtype `T` as its final
+> argument, written in the dtype position spec/02 §P9 names. It is pure: the
+> IO effect belongs to `mmap_file` ([05-OP-60]). The result is rank one and
+> its extent `n` is `count`: a literal `count` gives a literal extent and any
+> other expression a fresh runtime extent, as spec/04 §4.7.2 gives `insert`.
+> `mmap_tensor` is a reserved name (spec/04 §8.6).
+>
+> Domain: `T` is an active data element dtype (spec/04 §1.1) or a dtype
+> binder in scope whose bound admits only such dtypes ([04-DTYPE-2]). The
+> element width `w` is 1 for `i8` and `bool`, 2 for `f16`, `bf16` and `i16`,
+> 4 for `f32` and `i32`, and 8 for `f64` and `i64`. The payload is the
+> `count * w` bytes beginning at `offset`, read as a contiguous row-major
+> sequence: element `i` is the `w` bytes at `offset + i * w`, least
+> significant byte first. A float element is the IEEE 754 binary16,
+> binary32 or binary64 pattern, or the bfloat16 pattern, of its dtype; an
+> integer element is two's-complement; a `bool` element is the byte 0
+> (false) or 1 (true). The offset carries no alignment requirement.
+>
+> Result: Each element's stored bits equal its payload bits. The written
+> `T` is authoritative and the bytes are reinterpreted, never converted,
+> rounded, widened, or normalized. Every bit pattern of a float dtype is
+> admitted and preserved, including each NaN's payload and quiet or
+> signaling bit, signed zeros, subnormals, and infinities. The result is a
+> fresh tensor that owns its storage and does not alias the mapping. A
+> tensor of higher rank is a row-major `reshape` ([05-OP-49]) of this
+> result, and a declared result type on that `reshape` supplies the
+> spec/04 §4.7 runtime extent guard.
+>
+> Failure: A negative `offset` or `count`, or a payload that ends past
+> `mmap_len(mapped)`, traps `Domain`; a `count * w` or `offset + count * w`
+> outside i64 traps `Overflow`. These traps are [04-NUM-9] lines whose
+> `<op>` is `mmap_tensor` and whose `<prim>` is `i64`, and each lane
+> conveys, on context lines before the trap line, the offset, the count or
+> byte length, and the mapping length. A `bool` payload byte other than 0
+> or 1 traps `Domain` at `bool`, after a context line naming the element
+> index and the byte. Every check completes before allocation, and no
+> clamped, truncated, zero-filled, or converted result substitutes for a
+> failure. `key`, `string`, a non-dtype final argument, a missing final
+> argument, and non-i64 offsets or counts are type errors.
+>
+> Adjoint: Mapped tensor ingress has no differentiable operand and is
+> outside AD; its result enters differentiated code only as a value, and
+> no cotangent flows to the mapping.
+>
+> Accumulator: None; offsets, counts, and byte lengths are exact checked
+> i64.
+
+#### Mapped byte text and digests
+
+> **[05-OP-81]** Signature: `mmap_text(mapped,offset,length)->string` and
+> `mmap_sha256(mapped,offset,length)->string` borrow a `MappedFile` and
+> take an exact i64 byte `offset` and byte `length`. Both are pure: the IO
+> effect belongs to `mmap_file` ([05-OP-60]).
+>
+> Domain: The range is the `length` bytes beginning at `offset`, the range
+> `mmap_read` selects. An offset at the end of the mapping is valid only for
+> zero length.
+>
+> Result: `mmap_text` decodes the range as UTF-8 and returns its exact text,
+> with no byte-order-mark removal, newline translation, or Unicode
+> normalization. `mmap_sha256` returns the SHA-256 digest (FIPS 180-4) of the
+> range as 64 lowercase hexadecimal ASCII characters, two per digest byte in
+> digest order, high nibble first. An empty range gives the empty string and
+> the digest of the empty message respectively. The digest is text so that a
+> loader compares it with a recorded checksum by string equality; it is not a
+> numeric value.
+>
+> Failure: A negative `offset` or `length`, or a range that ends past
+> `mmap_len(mapped)`, traps `Domain`, and an `offset + length` outside i64
+> traps `Overflow`; each trap is an [04-NUM-9] line whose `<op>` is the
+> operation's name and whose `<prim>` is `i64`, after the same context lines
+> [05-OP-80] requires. A range that is not valid UTF-8 fails `mmap_text`
+> loudly with the message `mmap_text: invalid UTF-8 at byte <k>`, where
+> `<k>` is the decimal mapping offset of the first byte that does not begin
+> or continue a valid sequence. No replacement character, truncation, or
+> partial text substitutes for that failure.
+>
+> Adjoint: Text and digest reads are structurally non-differentiable.
+>
+> Accumulator: None; offsets and lengths are exact checked i64.
+
+#### Typed tensor archives
+
+> **[05-OP-82]** `tensor_archive(arguments...) -> result` governs exactly the
+> `io/tensors::*` identities: the opaque archive `TensorArchive`, its
+> entry record `TensorEntry`,
+> `open_hnw(path:string)->TensorArchive!{IO}`, and, for each active data
+> element dtype `T`, the reader
+> `read_T(archive:TensorArchive,name:string,dims:List[i64])->tensor[n,T]`
+> (`read_f64`, `read_f32`, `read_f16`, `read_bf16`, `read_i64`,
+> `read_i32`, `read_i16`, `read_i8`, `read_bool`). The readers are pure.
+>
+> Domain: `open_hnw` reads the hydronnx weight archive layout of format
+> major version 1: the eight magic bytes `HNXWGT`, 0, 1; a little-endian
+> u32 header length of at least 80 at byte 8 and a little-endian u32
+> manifest length at byte 12; the manifest's SHA-256 digest at bytes 16
+> through 47; the UTF-8 JSON manifest at the header length; and the
+> payload region at the first 64-byte boundary at or after the manifest's
+> end. The manifest's `format` object names `hydronnx-weights` with
+> `major` 1, and each element of its `tensors` array carries a string
+> `id`, a string `dtype` that spells a Chelis primitive, an integer
+> `shape` array, the `layout` `onnx-row-major`, the `encoding` `raw-le`,
+> an integer payload-relative `offset` and `byte_len`, and a lowercase
+> hexadecimal `sha256` of the tensor's payload bytes.
+>
+> Result: `open_hnw` maps the file once and returns an archive whose
+> entries are the manifest's tensors in manifest order, each with its
+> `offset` made absolute in the file. `read_T(archive,
+> name, dims)` selects the first entry whose `id` is `name` and returns
+> [05-OP-80]'s `mmap_tensor` of its payload at `T`, with `count` the
+> checked i64 product of `dims`: the stored elements in row-major order
+> as a rank-one tensor. A declared tensor type on a `reshape` of that
+> result by `dims` gives it the declared shape.
+>
+> Failure: Every check below completes before any element is read, and
+> each failure fails through [05-OP-60] with the message
+> `Std.Io.Tensors: <path>: <detail>`. `open_hnw` fails for a file shorter
+> than 80 bytes, other magic bytes, a major version other than 1, a header
+> length below 80, a manifest whose digest differs from the recorded one,
+> a missing or malformed manifest field, a negative extent, offset, or byte
+> length, another format name or major
+> version, and a layout or encoding other than the ones above. A reader
+> fails when no entry has the name, when the stored dtype is not `T`, when
+> the stored shape is not exactly `dims`, when the stored byte length is
+> not the product of `dims` times `T`'s width, and when the payload's
+> SHA-256 differs from the recorded digest. `open_hnw` does not digest the
+> whole payload region: every byte a program can read through an archive
+> is digested by the reader that returns it. Range, JSON, and UTF-8
+> failures are those of [05-OP-80], [05-OP-2], and [05-OP-81].
+>
+> Adjoint: Archive reads have no differentiable operand and are outside
+> AD.
+>
+> Accumulator: None; the product of `dims` is checked i64 arithmetic.
 
 #### Host clocks
 

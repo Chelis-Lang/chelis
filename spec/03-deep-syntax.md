@@ -1006,8 +1006,12 @@ other cast keeps its node with the operand as written.
 A `to_tensor` call with a dtype argument desugars to a three-child
 application, `(app {} (var {} to_tensor) xs' (t-prim {} p))` or
 `(app {} (var {} to_tensor) xs' (t-var {} p))`, and each literal element of a
-bracket-literal `xs` carries `p` in its `type` metadata. A type node is an
-expression-position child only there.
+bracket-literal `xs` carries `p` in its `type` metadata. An `mmap_tensor`
+call desugars to a five-child application,
+`(app {} (var {} mmap_tensor) m' o' n' (t-prim {} p))` or the same with
+`(t-var {} p)`, whose final child states the result dtype
+(`spec/05-risc-primitives.md` [05-OP-80]). A type node is an
+expression-position child only in these two applications.
 
 #### 6.4.1 Literal Suffixes
 

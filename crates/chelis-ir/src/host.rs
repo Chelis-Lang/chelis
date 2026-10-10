@@ -5387,6 +5387,9 @@ const HOST_ONLY_BUILTINS: &[&str] = &[
     "mmap_file",
     "mmap_read",
     "mmap_len",
+    "mmap_tensor",
+    "mmap_text",
+    "mmap_sha256",
     "process_run",
     "clock_wall_read",
     "clock_monotonic_read",
@@ -9792,6 +9795,7 @@ pub(crate) fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
                 | "split_keys"
                 | "fold_in"
                 | "to_tensor"
+                | "mmap_tensor"
                 | "scalar_to_tensor"
                 | "pad_sequences"
                 | "pad_sequences_to"
@@ -13615,6 +13619,29 @@ fn actualize_retained_host_contract(
             solve_host_type_vars(&checked_term, actual, &mut checked_substitution);
         }
     }
+    // A binder that only the result mentions (a dtype binder stated by a
+    // body's dtype argument, [05-OP-80]) is bound by the call's checked
+    // result type. Arguments bind first; the result only fills what they
+    // leave open, and only with a concrete dtype (`solve_result_dtype_vars`).
+    // Inside a generic caller the result still names the
+    // caller's own binders, so it is read through the active caller
+    // substitution first; that is what lets a binder solved at any call depth
+    // reach this one.
+    let call_result = apply_host_type_subst(call_result, &active_substitution);
+    let call_result = &call_result;
+    // The application's own checked type is the same evidence, spelled in the
+    // caller's namespace, and is read the same way. A generic caller's body
+    // spells its binders by their unique checked identities by the time it is
+    // lowered (`retained_body_with_checked_binders`), so this resolves through
+    // the caller's substitution alone.
+    let stamped_result = checked_type_expr(expr)
+        .and_then(|stamped| decode_expanded_host_type_expr(program, stamped))
+        .map(|stamped| apply_host_type_subst(&stamped, &active_substitution));
+    for result in std::iter::once(call_result).chain(stamped_result.as_ref()) {
+        if let Some(checked_term) = decode_expanded_host_type_expr(program, &checked_result) {
+            solve_result_dtype_vars(&checked_term, result, &mut checked_substitution);
+        }
+    }
     let mut body_substitution = active_substitution.clone();
     for (name, term) in checked_substitution.to_sorted() {
         // Active caller identities remain authoritative for substituted
@@ -13666,6 +13693,11 @@ fn actualize_retained_host_contract(
     for (authored, actual_term) in authored_formals.iter().zip(actual_types) {
         if let Some(authored_term) = decode_expanded_host_type_expr(program, authored) {
             solve_host_type_vars(&authored_term, actual_term, &mut authored_substitution);
+        }
+    }
+    if let Some(authored_term) = decode_expanded_host_type_expr(program, &authored_result) {
+        for result in std::iter::once(call_result).chain(stamped_result.as_ref()) {
+            solve_result_dtype_vars(&authored_term, result, &mut authored_substitution);
         }
     }
     let mut params = signature
@@ -14522,7 +14554,17 @@ fn lower_named_retained_host_invocation(
             tensor_specialization: crate::lower::TensorCallsiteSpecialization::default(),
         }
     };
-    let mut invocation = RetainedHostInvocation::new(&params, &signature.body_expr);
+    // A retained generic body is lowered in its own binder namespace: every
+    // authored binder it spells becomes the checker's unique identity for
+    // that binder before any caller syntax is substituted into it, so a name
+    // always resolves in the scope that wrote it.
+    let checked_binder_body = actualize_polymorphic_contract.then(|| {
+        retained_body_with_checked_binders(program, canonical, body, &signature.body_expr)
+    });
+    let mut invocation = RetainedHostInvocation::new(
+        &params,
+        checked_binder_body.as_ref().unwrap_or(&signature.body_expr),
+    );
     invocation.name = Some(name);
     let actualized_expected = result_claim
         .as_ref()
@@ -20277,6 +20319,104 @@ fn substitute_host_dimension_terms(
     }
 }
 
+/// `body` with each authored type binder of the definition `name` respelled
+/// as the checker's unique identity for it. The pairing comes from walking
+/// the authored and the checked function types in parallel; a body type that
+/// spells the authored name (an ascription keeps the written spelling) then
+/// reads the same identity the definition's checked signature does.
+fn retained_body_with_checked_binders(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+    definition: &Expr,
+    body: &Expr,
+) -> Expr {
+    let mut identities = UnordMap::new();
+    if let (Some(authored), Some(checked)) = (
+        lookup_declared_type_expr(program, name),
+        checked_function_type_expr(definition),
+    ) {
+        pair_authored_binder_identities(&authored, &checked, &mut identities);
+    }
+    if identities.is_empty() {
+        return body.clone();
+    }
+    respell_type_binders(body, &identities)
+}
+
+fn pair_authored_binder_identities(
+    authored: &Expr,
+    checked: &Expr,
+    out: &mut UnordMap<String, String>,
+) {
+    let (Some((authored_tag, _, authored_kids)), Some((checked_tag, _, checked_kids))) =
+        (stamped_parts(authored), stamped_parts(checked))
+    else {
+        return;
+    };
+    if authored_tag != checked_tag || authored_kids.len() != checked_kids.len() {
+        return;
+    }
+    if authored_tag == DeepTag::TVar {
+        if let (Some(from), Some(to)) = (
+            authored_kids.first().and_then(symbol_name),
+            checked_kids.first().and_then(symbol_name),
+        ) && from != "_"
+            && from != to
+        {
+            out.entry(from.to_string())
+                .or_insert_with(|| to.to_string());
+        }
+        return;
+    }
+    for (authored, checked) in authored_kids.iter().zip(checked_kids) {
+        pair_authored_binder_identities(authored, checked, out);
+    }
+}
+
+/// Respell every `t-var` named in `identities`, in children and in metadata
+/// types alike.
+fn respell_type_binders(expr: &Expr, identities: &UnordMap<String, String>) -> Expr {
+    match expr {
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            chelis_deep::ast::MetaExpr {
+                metadata: meta
+                    .metadata
+                    .map_expressions(&mut |value, _| respell_type_binders(value, identities))
+                    .expect("respelling preserves annotation roles"),
+                expr: Box::new(respell_type_binders(&meta.expr, identities)),
+            },
+            *span,
+        ),
+        Expr::Node(node, span) => {
+            if node.tag() == DeepTag::TVar
+                && let Some(to) = node
+                    .children_slice()
+                    .first()
+                    .and_then(symbol_name)
+                    .and_then(|from| identities.get(from))
+            {
+                return Expr::node(
+                    DeepTag::TVar,
+                    node.meta().clone(),
+                    vec![Expr::Atom(Atom::Name(to.clone()), *span)],
+                    *span,
+                );
+            }
+            let metadata = node
+                .meta()
+                .map_expressions(&mut |value, _| respell_type_binders(value, identities))
+                .expect("respelling preserves annotation roles");
+            let children = node
+                .children_slice()
+                .iter()
+                .map(|child| respell_type_binders(child, identities))
+                .collect();
+            Expr::node(node.tag(), metadata, children, *span)
+        }
+        other => other.clone(),
+    }
+}
+
 fn collect_host_type_variable_substitutions(
     pattern: &HostTypeTerm,
     applied: &HostTypeTerm,
@@ -21498,6 +21638,11 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         "mmap_file" => Some(HostTypeTerm::MappedFile),
         "mmap_read" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
         "mmap_len" => Some(HostTypeTerm::Int64),
+        // [05-OP-80]: the dtype argument is checked away before lowering, so
+        // the result type is the checker's stamped `tensor[n, T]`.
+        "mmap_tensor" => Some(fresh_host_inference()),
+        // [05-OP-81].
+        "mmap_text" | "mmap_sha256" => Some(HostTypeTerm::String),
         // spec/05 §2.6: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
         "process_run" => Some(HostTypeTerm::Tuple(vec![
             HostTypeTerm::Int64,
@@ -22668,6 +22813,60 @@ fn inline_call_type_subst(
     subst
 }
 
+/// Result evidence for a result-only dtype binder: bind a precision variable,
+/// or a type variable standing for a scalar dtype, to the concrete dtype the
+/// call's result type holds at the same position, and nothing else. A type
+/// variable that the result fills with anything but a concrete dtype (a
+/// dimension argument the host type erases to `unit`, an ADT, a container)
+/// stays unsolved, so a call no context fixes is still rejected as
+/// unresolved ([05-UNS-1], chelis#2599). Existing bindings win.
+fn solve_result_dtype_vars(
+    declared: &HostTypeTerm,
+    actual: &HostTypeTerm,
+    out: &mut UnordMap<String, HostTypeTerm>,
+) {
+    match (declared, actual) {
+        (
+            HostTypeTerm::TypeVariable(name)
+            | HostTypeTerm::Scalar(HostPrecisionTerm::Variable(name)),
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)),
+        ) => {
+            out.entry(name.clone())
+                .or_insert(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+                    *precision,
+                )));
+        }
+        (
+            HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                precision: HostPrecisionTerm::Variable(name),
+                ..
+            }),
+            HostTypeTerm::Tensor(TensorType { precision, .. })
+            | HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                precision: HostPrecisionTerm::Concrete(precision),
+                ..
+            }),
+        ) => {
+            out.entry(name.clone())
+                .or_insert(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+                    *precision,
+                )));
+        }
+        (HostTypeTerm::List(declared), HostTypeTerm::List(actual))
+        | (HostTypeTerm::Option(declared), HostTypeTerm::Option(actual)) => {
+            solve_result_dtype_vars(declared, actual, out);
+        }
+        (HostTypeTerm::Tuple(declared), HostTypeTerm::Tuple(actual))
+            if declared.len() == actual.len() =>
+        {
+            for (declared, actual) in declared.iter().zip(actual) {
+                solve_result_dtype_vars(declared, actual, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Structurally match a declared host type against a resolved one, binding
 /// each `TypeVariable` on the declared side (chelis#1201).
 ///
@@ -22733,6 +22932,30 @@ mod tests {
     use super::*;
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
+
+    #[test]
+    fn inferred_type_holes_are_not_authored_binders() {
+        let parse = |source: &str| {
+            chelis_deep::parser::parse_str(source)
+                .expect("Deep type parses")
+                .into_iter()
+                .next()
+                .expect("one type")
+        };
+        let authored = parse("(t-fn {} (t-var {} _) (t-var {} p))");
+        let checked = parse("(t-fn {} (t-var {} t7) (t-var {} t8))");
+        let mut identities = UnordMap::new();
+        pair_authored_binder_identities(&authored, &checked, &mut identities);
+        assert_eq!(identities.get("_"), None);
+        assert_eq!(identities.get("p").map(String::as_str), Some("t8"));
+
+        let body = parse("(t-fn {} (t-var {} _) (t-var {} p))");
+        let respelled = respell_type_binders(&body, &identities);
+        assert_eq!(
+            chelis_deep::printer::print_expr_flat(&respelled),
+            "(t-fn {} (t-var {} _) (t-var {} t8))"
+        );
+    }
 
     #[test]
     fn issue_1248_comparison_family_preserves_operand_surface() {

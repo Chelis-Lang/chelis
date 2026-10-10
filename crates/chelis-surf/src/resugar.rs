@@ -2845,14 +2845,19 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 return Ok(operator);
             }
             let function = resugar_expression_inner(&node.children[0])?;
-            // spec/03 §6.4: `to_tensor(xs, p)` carries its dtype argument as a
-            // type node, which prints in the dtype position (§P9).
-            let dtype_argument = (node.children.len() == 3
-                && variable_name(&node.children[0]) == Some("to_tensor"))
-            .then(|| cast_target_name(&node.children[2]))
-            .flatten();
+            // spec/03 §6.4: `to_tensor(xs, p)` and `mmap_tensor(m, o, n, p)`
+            // carry their dtype argument as a final type node, which prints in
+            // the dtype position (§P9).
+            let dtype_arity = match variable_name(&node.children[0]) {
+                Some("to_tensor") => Some(3),
+                Some("mmap_tensor") => Some(5),
+                _ => None,
+            };
+            let dtype_argument = (dtype_arity == Some(node.children.len()))
+                .then(|| node.children.last().and_then(cast_target_name))
+                .flatten();
             let value_arguments = if dtype_argument.is_some() {
-                &node.children[1..2]
+                &node.children[1..node.children.len() - 1]
             } else {
                 &node.children[1..]
             };

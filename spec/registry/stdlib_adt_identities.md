@@ -3,7 +3,9 @@
 This file is normative-tier content under the AGENTS.md Documentation
 Authority rules: it is incorporated by reference into
 `spec/05-risc-primitives.md` [05-OP-34] and is amended only as a
-numbered-spec change under the same review discipline. Rows are keyed by
+numbered-spec change under the same review discipline. Besides the exported
+identities it enumerates an unexported ADT that an exported one holds in a
+field, as [05-OP-34] states. Rows are keyed by
 identity; row order is not semantic and no ordinal is part of any identity.
 
 | identity | exact variants and fields |
@@ -26,3 +28,5 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | `datetime/zone::TimeZone` | `TimeZone { name: string, initial_offset: i64, transitions: List[(i64,i64)], footer: Option[(i64,Option[(i64,(i64,i64,i64,i64,i64),(i64,i64,i64,i64,i64))])] }` |
 | `datetime/zone::Zoned` | `Zoned { instant: Instant, zone: TimeZone }` |
 | `datetime/zone::ZonedText` | `ZonedText { written: DateTime, offset: Option[Offset], zone_name: string, critical: bool }` |
+| `io/tensors::TensorArchive` | `TensorArchive { path: string, mapped: MappedFile, entries: List[TensorEntry] }` |
+| `io/tensors::TensorEntry` | `TensorEntry { name: string, dtype: string, shape: List[i64], offset: i64, byte_len: i64, sha256: string }` |

@@ -4557,6 +4557,59 @@ where
     Ok(out)
 }
 
+/// [05-OP-80]: storage whose element bits are the bits of a contiguous
+/// little-endian payload, least significant byte first. Insertion is not a
+/// numeric op: every float bit pattern, NaN payloads and signaling bits
+/// included, is stored as it is, and nothing is rounded or converted.
+/// `prim` must be an active data element dtype, `bytes` a whole number of
+/// its elements, and a `bool` payload only the bytes 0 and 1; the caller
+/// checks the range and the `bool` bytes first, so a violation names the
+/// unmet precondition.
+pub fn tensor_from_le_payload(prim: Prim, bytes: &[u8]) -> Result<TensorStorage, String> {
+    fn chunks<const N: usize>(bytes: &[u8]) -> impl Iterator<Item = [u8; N]> + '_ {
+        bytes.as_chunks::<N>().0.iter().copied()
+    }
+    let width = match prim {
+        Prim::Int8 | Prim::Bool => 1,
+        Prim::Int16 | Prim::F16 | Prim::Bf16 => 2,
+        Prim::Int32 | Prim::F32 => 4,
+        Prim::Int64 | Prim::F64 => 8,
+        other => {
+            return Err(format!(
+                "mmap_tensor payload dtype {} is not an active data element dtype",
+                other.name()
+            ));
+        }
+    };
+    if !bytes.len().is_multiple_of(width) {
+        return Err(format!(
+            "mmap_tensor payload of {} bytes is not a whole number of {}-byte elements",
+            bytes.len(),
+            width
+        ));
+    }
+    let buf = match prim {
+        Prim::F64 => Buf::F64(chunks(bytes).map(f64::from_le_bytes).collect()),
+        Prim::F32 => Buf::F32(chunks(bytes).map(f32::from_le_bytes).collect()),
+        Prim::F16 => Buf::F16(chunks(bytes).map(half::f16::from_le_bytes).collect()),
+        Prim::Bf16 => Buf::Bf16(chunks(bytes).map(half::bf16::from_le_bytes).collect()),
+        Prim::Int64 => Buf::I64(chunks(bytes).map(i64::from_le_bytes).collect()),
+        Prim::Int32 => Buf::I32(chunks(bytes).map(i32::from_le_bytes).collect()),
+        Prim::Int16 => Buf::I16(chunks(bytes).map(i16::from_le_bytes).collect()),
+        Prim::Int8 => Buf::I8(chunks(bytes).map(i8::from_le_bytes).collect()),
+        Prim::Bool => {
+            if let Some(byte) = bytes.iter().find(|byte| **byte > 1) {
+                return Err(format!(
+                    "mmap_tensor bool payload byte {byte} is neither 0 nor 1"
+                ));
+            }
+            Buf::Bool(bytes.to_vec())
+        }
+        _ => unreachable!("the width match admits only data element dtypes"),
+    };
+    Ok(TensorStorage { buf })
+}
+
 /// Build sealed storage from ALREADY-finalized scalars, exactly.
 ///
 /// The transport companion of [`finalize_tensor`] for values that carry

@@ -8493,17 +8493,97 @@ pub unsafe extern "C" fn chelis_mmap_read(
         ownership_ledger::Kind::MappedFile,
         "chelis_mmap_read",
     );
-    if offset < 0 || len < 0 {
-        runtime_fail!("mmap_read requires non-negative offsets");
-    }
     let mapped = &*mapped;
-    let offset = offset as usize;
-    let len = len as usize;
-    if offset > mapped.mmap.len() {
-        runtime_fail!("mmap_read offset out of bounds");
+    let range = chelis_abi::mapped::mapped_range("mmap_read", offset, len, mapped.mmap.len())
+        .unwrap_or_else(|message| runtime_fail!("{message}"));
+    bytes_to_value_list(&mapped.mmap[range])
+}
+
+/// `mmap_tensor` in compiled host code ([05-OP-80]): a fresh rank-one
+/// tensor whose element bits are the little-endian payload's bits. The range
+/// and `bool` checks are the evaluator's, through `chelis_abi::mapped`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_mmap_tensor(
+    mapped: *const chelis_mapped_file,
+    offset: i64,
+    count: i64,
+    dtype: chelis_dtype,
+) -> *mut chelis_tensor {
+    require_live_kind(
+        mapped.cast(),
+        ownership_ledger::Kind::MappedFile,
+        "chelis_mmap_tensor",
+    );
+    let dtype = require_data_element_dtype(
+        require_runtime_dtype(dtype, "chelis_mmap_tensor dtype"),
+        "chelis_mmap_tensor dtype",
+    );
+    let mapped = &*mapped;
+    let range = chelis_abi::mapped::mapped_tensor_range(offset, count, dtype, mapped.mmap.len())
+        .unwrap_or_else(|message| runtime_fail!("{message}"));
+    let payload = &mapped.mmap[range];
+    if dtype == RuntimeDType::Bool {
+        chelis_abi::mapped::check_bool_payload(payload)
+            .unwrap_or_else(|message| runtime_fail!("{message}"));
     }
-    let end = offset.saturating_add(len).min(mapped.mmap.len());
-    bytes_to_value_list(&mapped.mmap[offset..end])
+    let out = chelis_alloc(1, &count, dtype.id() as chelis_dtype);
+    if payload.is_empty() {
+        return out;
+    }
+    // Each element's little-endian bytes become one scalar's bits, stored
+    // through the typed scalar write, so storage stays native-endian.
+    let element_bytes = payload.len() / count as usize;
+    for (index, element) in payload.chunks_exact(element_bytes).enumerate() {
+        let mut bits = [0u8; 8];
+        bits[..element.len()].copy_from_slice(element);
+        write_scalar_bits(
+            out,
+            index,
+            chelis_scalar_from_bits(dtype.id() as chelis_dtype, u64::from_le_bytes(bits)),
+        );
+    }
+    out
+}
+
+/// `mmap_text` in compiled host code ([05-OP-81]): the range's exact UTF-8
+/// text, decoded through the evaluator's definition.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_mmap_text(
+    mapped: *const chelis_mapped_file,
+    offset: i64,
+    len: i64,
+) -> chelis_string {
+    require_live_kind(
+        mapped.cast(),
+        ownership_ledger::Kind::MappedFile,
+        "chelis_mmap_text",
+    );
+    let mapped = &*mapped;
+    let range = chelis_abi::mapped::mapped_range("mmap_text", offset, len, mapped.mmap.len())
+        .unwrap_or_else(|message| runtime_fail!("{message}"));
+    let start = range.start;
+    let text = chelis_abi::mapped::mapped_text(start, &mapped.mmap[range])
+        .unwrap_or_else(|message| runtime_fail!("{message}"));
+    new_runtime_string(text)
+}
+
+/// `mmap_sha256` in compiled host code ([05-OP-81]): the range's SHA-256 as
+/// 64 lowercase hexadecimal characters, through the evaluator's definition.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_mmap_sha256(
+    mapped: *const chelis_mapped_file,
+    offset: i64,
+    len: i64,
+) -> chelis_string {
+    require_live_kind(
+        mapped.cast(),
+        ownership_ledger::Kind::MappedFile,
+        "chelis_mmap_sha256",
+    );
+    let mapped = &*mapped;
+    let range = chelis_abi::mapped::mapped_range("mmap_sha256", offset, len, mapped.mmap.len())
+        .unwrap_or_else(|message| runtime_fail!("{message}"));
+    new_runtime_string(chelis_abi::mapped::sha256_hex(&mapped.mmap[range]))
 }
 
 #[no_mangle]

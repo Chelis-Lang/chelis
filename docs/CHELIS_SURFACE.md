@@ -331,7 +331,9 @@ Eval handles the form. See [#2740](https://github.com/Chelis-Lang/chelis/issues/
 
 `read_file`, `write_file`, `read_lines`, `read_bytes`, `file_exists`, `list_dir`,
 `mmap_file`, `mmap_read`, `mmap_len`, `process_run`, `clock_wall_read`,
-`clock_monotonic_read`.
+`clock_monotonic_read`. The reads of an open mapping, `mmap_read`,
+`mmap_len`, `mmap_tensor`, `mmap_text`, and `mmap_sha256`, are pure: the
+`IO` effect belongs to `mmap_file`.
 
 | Name | Signature | Notes |
 |---|---|---|
@@ -339,6 +341,9 @@ Eval handles the form. See [#2740](https://github.com/Chelis-Lang/chelis/issues/
 | `process_run` | `(cmd: string, args: List[string]) -> (i64, string, string)` | argv, no shell. Eval and compiled C run it; a signal reports `-1`, and a capture that is not UTF-8 traps `IO`. |
 | `clock_wall_read` | `() -> (i64, i64)` | Host wall clock on the POSIX timescale as `(seconds, nanoseconds)` since 1970-01-01T00:00:00 UTC, from one reading; nanoseconds in `[0, 10^9)`. Eval and compiled C run it. [05-OP-75] |
 | `clock_monotonic_read` | `() -> (i64, i64)` | A clock that never runs backwards, as `(seconds, nanoseconds)` from an unspecified origin. Eval and compiled C run it. [05-OP-75] |
+| `mmap_tensor` | `(MappedFile, offset: i64, count: i64, T) -> tensor[n, T]` | `count` little-endian elements of the dtype `T`, written as the reserved fourth argument, starting at byte `offset`; bits are reinterpreted, never converted. A range past the mapping traps `Domain`, and a `bool` byte other than 0 or 1 traps `Domain` at `bool`. Eval and compiled C run it. [05-OP-80] |
+| `mmap_text` | `(MappedFile, offset: i64, length: i64) -> string` | The range's exact UTF-8 text; invalid UTF-8 fails. [05-OP-81] |
+| `mmap_sha256` | `(MappedFile, offset: i64, length: i64) -> string` | The range's SHA-256 as 64 lowercase hexadecimal characters. [05-OP-81] |
 
 String-valued path APIs cannot directly name non-UTF-8 files. `list_dir`
 preserves valid names exactly, without normalization; on conversion failure its
@@ -454,7 +459,8 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               to_float rank shape numel tensor_to_scalar scalar_to_tensor to_tensor
               to_list
               read_file write_file read_lines read_bytes file_exists list_dir
-              mmap_file mmap_read mmap_len process_run
+              mmap_file mmap_read mmap_len mmap_tensor mmap_text mmap_sha256
+              process_run
               clock_wall_read clock_monotonic_read
               round_to
               parse_csv to_csv csv_f64s csv_ints csv_strs csv_nrows csv_cols
@@ -653,7 +659,7 @@ before target selection.
 
 | Effect | Introduced by | Handled by |
 |---|---|---|
-| `IO` | file ops, `mmap_*`, `process_run`, `clock_*_read`, `print` | checked execution boundary / runtime |
+| `IO` | file ops, `mmap_file`, `process_run`, `clock_*_read`, `print` | checked execution boundary / runtime |
 | `Test` | `test_assert*` | test/root boundary |
 | `Accum` | internal gradient accumulation | compiler-internal |
 | `Resource(Device)` | `with device(...)` placement region | checked handler and selected target |
@@ -738,6 +744,7 @@ losses, optimizers, and training loops live in a shell, not in `chelis-std`
 | `Std.Io` | `read_text`, `write_text`, `read_trimmed_lines`, `read_head_bytes`, `exists`, `list`, `mmap_size`. |
 | `Std.Io.Csv` | `read_csv`, `try_read_csv`, `to_csv`, `try_to_csv`, `write_csv`, `try_write_csv`. These are source-defined functions, distinct from the eval-only CSV builtin family. The line-based reader and serializer do not accept CR/LF inside a cell. |
 | `Std.Io.Json` | `Json` with `JsonNull`, `JsonBool`, `JsonInt`, `JsonBigInt`, `JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; parsing, serialization, file I/O, accessors, and `try_*` forms. Integer tokens preserve the `JsonInt(i64)`/`JsonBigInt(string)` distinction instead of passing through `f64`; decimal/exponent tokens use `JsonFloat(f64, string)`, keeping the token text beside its correctly rounded `f64`. |
+| `Std.Io.Tensors` | `TensorArchive`, `open_hnw`, and `read_f64`, `read_f32`, `read_f16`, `read_bf16`, `read_i64`, `read_i32`, `read_i16`, `read_i8`, `read_bool`. Each reader takes the tensor's name and declared shape and fails unless the archive stores exactly that dtype and shape with an intact SHA-256; it returns the elements as a rank-one tensor to `reshape` under a declared type. [05-OP-82] |
 | `Std.Io.Parquet`, `Std.Io.Safetensors` | `read_parquet`/`write_parquet`; `save_tensors`/`load_tensors`. Check concrete dtype, shape, and target support for a selected call. |
 | `Std.Scalar`, `Std.Text`, `Std.Test` | Scalar `max`/`min`/`abs`; `join`; assertions, shape checks, and failure helpers. |
 | `Std.Datetime`, `Std.Datetime.Business`, `Std.Datetime.Clock`, `Std.Datetime.Columns`, `Std.Rounding`, `Std.Decimal`, `Std.Process`, `Std.Contracts` | Validated dates, times, instants, offsets, durations, periods, and date/instant columns; business-day calendars over a declared horizon; the host wall and monotonic clocks, which carry `IO`; elementwise column forms and a `Durations[n]` column; the shared rounding modes; exact 38-digit decimal arithmetic; `run`/`run_chelis`; named contract predicates. |
