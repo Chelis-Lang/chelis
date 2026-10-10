@@ -182,6 +182,20 @@ def _cargo_environment(
 
 
 class FilterTextTests(unittest.TestCase):
+    def test_macos_census_selector_import_needs_no_optional_python_packages(self):
+        result = subprocess.run(
+            [
+                sys.executable, "-S", "-c",
+                "from scripts.test_hosted_validation import MACOS_CENSUS_SELECTOR; "
+                "print(MACOS_CENSUS_SELECTOR)",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("capacity_census_bindings", result.stdout)
+
     """No-compile lock on the three filter blocks' text."""
 
     def test_module_oracle_exclusion_check_rejects_absent_or_selected_tests(self):
