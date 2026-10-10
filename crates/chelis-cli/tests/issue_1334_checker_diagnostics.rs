@@ -255,12 +255,15 @@ fn rejected_tensor_conversion_and_copy_calls_locate_the_genuine_operand() {
             "rank-0 tensor",
             "rank-1 tensor",
         ),
+        // `copy` is generic (spec/04 section 8.2); the copy it still refuses
+        // is an operand whose type is a declared parameter that never
+        // resolves.
         (
-            "out = copy([1.0f32])\n",
+            "def go[t](x: t) -> t = copy(x)\n",
             "TypeMismatch",
             "copy(",
-            "tensor",
-            "List f32",
+            "an operand of determined type",
+            "`t`",
         ),
         (
             "def bad(x: List[f32]) -> f64 = cast(x, f64)\n",
@@ -620,12 +623,15 @@ fn nested_tensor_parameter_error_identifies_the_component_and_declared_axis() {
 #[test]
 fn settled_deferred_copy_and_cast_rejections_keep_the_original_call_site() {
     for (source, kind, call, expected, got) in [
+        // The deferred `copy` operand is bound to a declared parameter that
+        // never resolves, the one operand `copy` refuses (spec/04 section
+        // 8.2); the rejection still lands on the original call.
         (
-            "def bad(x: List[f32]) -> List[f32] = { k = fn (v) -> copy(v)\n k(x) }\n",
+            "def bad[t](x: t) -> t = { k = fn (v) -> copy(v)\n k(x) }\n",
             "TypeMismatch",
             "copy(",
-            "tensor",
-            "List f32",
+            "an operand of determined type",
+            "`t`",
         ),
         (
             "def bad(x: List[f32]) -> f64 = { k = fn (v) -> cast(v, f64)\n k(x) }\n",

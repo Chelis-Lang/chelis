@@ -4,11 +4,23 @@
 use chelis_types::check_ir_program;
 use chelis_types::errors::CheckErrorKind;
 
+/// A `copy` whose operand's type is a declared type parameter that never
+/// resolves, which spec/04 section 8.2 refuses: `copy` is generic, so this is
+/// the bad copy every lane rejects. `copy_meta` is the copy node's metadata.
+fn unresolved_copy_source(copy_meta: &str) -> String {
+    format!(
+        "(defsig {{}} go (t) (t-fn {{}} (t-var {{}} t) (t-var {{}} t)))\n\
+         (def {{}} go (fn {{}} (params {{}} (x {{type: (t-var {{}} t)}})) \
+         (copy {copy_meta} (var {{}} x))))"
+    )
+}
+
 #[test]
 fn native_deep_bad_copy_points_to_the_actual_copy_node() {
-    let source = "(def {} x (copy {} (lit {type: (t-prim {} i32)} 1)))";
+    let source = unresolved_copy_source("{}");
+    let source = source.as_str();
     let exprs = chelis_deep::parser::parse_str(source).expect("valid Deep source");
-    let report = check_ir_program(&exprs).expect_err("copying a scalar must reject");
+    let report = check_ir_program(&exprs).expect_err("copying an unresolved operand must reject");
     let at = source.find("(copy").unwrap();
     let error = report
         .errors
@@ -26,15 +38,19 @@ fn native_deep_bad_copy_points_to_the_actual_copy_node() {
         error.span_id, None,
         "native Deep does not invent an external identity"
     );
-    assert_eq!(error.expected.as_deref(), Some("tensor"));
-    assert_eq!(error.got.as_deref(), Some("i32"));
+    assert_eq!(
+        error.expected.as_deref(),
+        Some("an operand of determined type")
+    );
+    assert_eq!(error.got.as_deref(), Some("`t`"));
 }
 
 #[test]
 fn external_deep_identity_is_preserved_not_derived_from_its_coordinate() {
-    let source = "(def {} x (copy {span: \"octant:line:7\"} (lit {type: (t-prim {} i32)} 1)))";
+    let source = unresolved_copy_source("{span: \"octant:line:7\"}");
+    let source = source.as_str();
     let exprs = chelis_deep::parser::parse_str(source).expect("valid Deep source");
-    let report = check_ir_program(&exprs).expect_err("copying a scalar must reject");
+    let report = check_ir_program(&exprs).expect_err("copying an unresolved operand must reject");
     let at = source.find("(copy").unwrap();
     let error = report
         .errors
@@ -138,13 +154,16 @@ fn native_deep_tensor_to_scalar_reports_its_measured_call_without_an_external_id
 
 #[test]
 fn opaque_numeric_range_id_does_not_override_measured_native_coordinate() {
-    let source = "(def {} x (copy {span: \"octant:line:42..69\"} (lit {type: (t-prim {} i32)} 1)))";
+    let source = unresolved_copy_source("{span: \"octant:line:42..69\"}");
+    let source = source.as_str();
     let exprs = chelis_deep::parser::parse_str(source).expect("valid Deep source");
-    let report = check_ir_program(&exprs).expect_err("scalar copy rejects");
+    let report = check_ir_program(&exprs).expect_err("unresolved copy rejects");
     let error = report
         .errors
         .iter()
-        .find(|error| error.message.contains("copy argument 1"))
+        .find(|error| {
+            error.message.contains("copy requires") && error.message.contains("argument 1")
+        })
         .unwrap_or_else(|| panic!("missing copy rejection: {:#?}", report.errors));
     assert_eq!(error.span_id.as_deref(), Some("octant:line:42..69"));
     assert_eq!(error.span_offset, Some(source.find("(copy").unwrap()));

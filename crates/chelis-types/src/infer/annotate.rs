@@ -343,6 +343,29 @@ pub(super) fn annotate_expr_with_scope(
         deep::Expr::Node(node, span) => {
             let tag = node.tag();
             let children = node.children_slice();
+            // spec/04 section 8.2: the copy of a function value is that value.
+            // A function is immutable, so sharing it is its copy, and no
+            // downstream callable resolver ever meets a `copy` around one.
+            if tag == DeepTag::Copy
+                && let [operand] = children
+                && let Some(Type::Fn(..)) = product.owner_type(expr, "copy node", errors)
+            {
+                return annotate_expr_with_scope(operand, product, annotation_context, errors);
+            }
+            // spec/04 section 8.2: `copy(&x)` copies the referent, the value
+            // `copy(x)` copies, so it is represented once as `copy(x)` and no
+            // downstream reader meets a borrow inside a copy.
+            let peeled_copy_operand;
+            let children = match children {
+                [operand] if tag == DeepTag::Copy => match stamped_parts(operand) {
+                    Some((DeepTag::Borrow, _, [referent])) => {
+                        peeled_copy_operand = [referent.clone()];
+                        &peeled_copy_operand[..]
+                    }
+                    _ => children,
+                },
+                _ => children,
+            };
             // spec/03 §6.4: `to_tensor`'s dtype child is checked during
             // inference ([05-OP-57]); every lane receives `to_tensor(xs)`.
             let children = if tag == DeepTag::App && is_to_tensor_with_dtype_child(children) {

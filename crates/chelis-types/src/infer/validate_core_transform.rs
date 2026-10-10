@@ -461,6 +461,17 @@ fn classify_core_transform_value(
     };
     match tag {
         DeepTag::Fn => CoreTransformValue::Ordinary,
+        // A copy has its operand's value, and so its provenance.
+        DeepTag::Copy => children
+            .first()
+            .map_or(CoreTransformValue::Ordinary, |operand| {
+                classify_core_transform_value(
+                    operand,
+                    top_level_functions,
+                    module_values,
+                    lexical_scope,
+                )
+            }),
         DeepTag::Var => {
             let Some(name) = children.first().and_then(symbol_name) else {
                 return CoreTransformValue::Ordinary;
@@ -576,6 +587,14 @@ fn classify_core_transform_value(
     }
 }
 
+/// `expr` without its enclosing `copy` forms.
+fn peel_copy(mut expr: &deep::Expr) -> &deep::Expr {
+    while let Some((DeepTag::Copy, _, [operand])) = stamped_parts(expr) {
+        expr = operand;
+    }
+    expr
+}
+
 fn validate_core_transform_target(
     tag: DeepTag,
     target: Option<&deep::Expr>,
@@ -584,6 +603,8 @@ fn validate_core_transform_target(
     lexical_scope: &CoreTransformScope,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    // A copied target is its operand (spec/04 section 8.2).
+    let target = target.map(peel_copy);
     let target_parts = target.and_then(stamped_parts);
     let name = target_parts.and_then(|(target_tag, _, children)| {
         (target_tag == DeepTag::Var)

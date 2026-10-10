@@ -651,7 +651,8 @@ impl DeferredOperandGate {
 
     pub(crate) fn expected_operand(&self) -> String {
         match self {
-            Self::Copy { .. } | Self::ShapeRoute { .. } => "tensor".to_string(),
+            Self::Copy { .. } => "an operand of determined type".to_string(),
+            Self::ShapeRoute { .. } => "tensor".to_string(),
             Self::Cast { .. } => "tensor or numeric/bool scalar".to_string(),
             Self::CastToBinder { .. } => "numeric or bool scalar".to_string(),
             Self::HostSlot { description, .. } => description.clone(),
@@ -694,15 +695,8 @@ impl DeferredOperandGate {
     fn discharge(self, resolved: &Type, subst: &mut Subst) {
         match self {
             Self::Copy { ref result, .. } => {
-                match crate::infer::expr::copy_result_from_source(resolved) {
-                    Some(settled) => {
-                        self.reconcile_result(result, settled, subst);
-                    }
-                    None => subst.record_operand_gate_failure(OperandGateFailure::Rejected {
-                        gate: self.clone(),
-                        resolved: resolved.clone(),
-                    }),
-                }
+                let settled = crate::infer::expr::copy_result_from_source(resolved);
+                self.reconcile_result(result, settled, subst);
             }
             Self::Cast {
                 target,
@@ -841,7 +835,14 @@ impl DeferredOperandGate {
     /// `a_never_resolved_declared_parameter_is_named_not_numbered`.
     pub(crate) fn message(&self, subject: &str) -> String {
         match self {
-            Self::Copy { .. } => format!("copy requires tensor input, got {subject}"),
+            // `copy` accepts every settled operand, so its one rejection is
+            // the operand that never settles: whether it is a borrow decides
+            // the result.
+            Self::Copy { .. } => format!(
+                "copy requires its operand's type to be determined at the call, because \
+                 whether it is a borrow decides the result (spec/04-type-system.md \
+                 section 8.2), got {subject}"
+            ),
             Self::Cast { .. } => format!("cast requires tensor or prim type, got {subject}"),
             Self::CastToBinder { .. } => format!(
                 "cast to a quantified scalar dtype requires a numeric or bool scalar, got {subject}"
@@ -890,7 +891,9 @@ impl DeferredOperandGate {
     /// The repair hint, where the eager path carried one.
     pub(crate) fn suggestions(&self) -> Vec<String> {
         match self {
-            Self::Copy { .. } => vec!["Wrap only tensor values in copy".to_string()],
+            Self::Copy { .. } => {
+                vec!["Declare the copied value's type, as `T` or as the borrow `&T`".to_string()]
+            }
             _ => Vec::new(),
         }
     }

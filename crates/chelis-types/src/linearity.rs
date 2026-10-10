@@ -2593,12 +2593,15 @@ impl Checker {
 
     /// [04-LIN-9]: a key holder has no read that leaves it live.
     fn reject_key_read(&mut self, expr: &Expr, how: &str) {
-        let name = var_name(expr).unwrap_or("<expression>");
+        let subject = var_name(expr).map_or_else(
+            || "a key-carrying value".to_string(),
+            |name| format!("key-carrying variable `{name}`"),
+        );
         self.key_reuse(
             expr,
             format!(
-                "key-carrying variable `{name}` cannot be {how} {}: a key is used at most once and \
-                 has no read that leaves it live ([04-LIN-9])",
+                "{subject} cannot be {how} {}: a key is used at most once and has no read that \
+                 leaves it live ([04-LIN-9])",
                 diag_site(expr)
             ),
         );

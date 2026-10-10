@@ -1045,12 +1045,12 @@ fn copy_accepts_tensor() {
     );
 }
 
+// chelis#2219: `copy` is generic (spec/04 section 8.2).
 #[test]
-fn copy_rejects_scalar() {
-    check_err(
+fn copy_accepts_scalar() {
+    check_ok(
         "(def {} x (lit {type: (t-prim {} i32)} 42))
          (def {} y (copy {} (var {} x)))",
-        CheckErrorKind::TypeMismatch,
     );
 }
 

@@ -67,51 +67,33 @@ fn infer_copy(
     let kids = node.children_slice();
     if let Some(inner) = kids.first() {
         let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
-        let resolved = subst.apply(&inner_ty);
-        match copy_result_from_source(&resolved) {
-            Some(settled) => settled,
-            None => match resolved {
-                // chelis#1489: the operand may simply not be
-                // resolved YET. Suspend the decision on it, and
-                // unification calls `copy_result_from_source`
-                // with the settled type at the instant that
-                // variable is bound. A variable that is never
-                // bound is still rejected by the per-def pass,
-                // so this defers the decision rather than
-                // dropping it.
-                //
-                // The result is a FRESH variable, not the
-                // operand's, and discharge unifies the shared
-                // decision's answer into it. Returning the
-                // operand's variable made a deferred `copy(&t)`
-                // type as `&t` where an eager one is `t` -- the
-                // inference-order sensitivity this issue exists to
-                // delete, reintroduced by its own fix.
-                Type::Var(tv) => {
-                    let result = vg.fresh_type();
-                    subst.record_deferred_tensor_operand(
-                        tv,
-                        DeferredOperandGate::Copy {
-                            result: Box::new(result.clone()),
-                            location: TypeDiagnosticLocation::from_expr(expr),
-                        },
-                    );
-                    result
-                }
-                _ => report(
-                    errors,
-                    at_check_site(
-                        expr,
-                        CheckError::with_types(
-                            CheckErrorKind::TypeMismatch,
-                            format!("copy argument 1: expected tensor, got {resolved}"),
-                            "tensor".to_string(),
-                            resolved.to_string(),
-                            vec!["Wrap only tensor values in copy".to_string()],
-                        ),
-                    ),
-                ),
-            },
+        match subst.apply(&inner_ty) {
+            // chelis#1489: the operand may simply not be resolved YET, and
+            // it may yet be bound to a borrow, which changes the result.
+            // Suspend the decision on it, and unification calls
+            // `copy_result_from_source` with the settled type at the instant
+            // that variable is bound. A variable that is never bound is still
+            // rejected by the per-def pass, so this defers the decision
+            // rather than dropping it.
+            //
+            // The result is a FRESH variable, not the operand's, and
+            // discharge unifies the shared decision's answer into it.
+            // Returning the operand's variable made a deferred `copy(&t)`
+            // type as `&t` where an eager one is `t` -- the inference-order
+            // sensitivity this issue exists to delete, reintroduced by its
+            // own fix.
+            Type::Var(tv) => {
+                let result = vg.fresh_type();
+                subst.record_deferred_tensor_operand(
+                    tv,
+                    DeferredOperandGate::Copy {
+                        result: Box::new(result.clone()),
+                        location: TypeDiagnosticLocation::from_expr(expr),
+                    },
+                );
+                result
+            }
+            settled => copy_result_from_source(&settled),
         }
     } else {
         malformed_form(node, "copy", "one wrapped expression", errors)
@@ -138,9 +120,12 @@ pub(crate) fn settled_borrow_type(resolved: Type) -> Option<Type> {
 /// The source-side decision `copy` makes, factored out so the eager arm and
 /// the suspended constraint's discharge run *the same code* (chelis#1489).
 ///
-/// Returns `None` when the operand is not something `copy` accepts, leaving
-/// the caller to report — the eager arm and discharge word that rejection
-/// differently, and only the decision is shared.
+/// spec/04 section 8.2: `copy(x)` accepts an owned `T` or a borrowed `&T`
+/// for every `T` and yields a fresh owned `T`, so every settled operand has
+/// a result and there is no rejection to share. [04-LIN-9]'s refusal of a
+/// key-carrying operand belongs to the linearity checker, which owns every
+/// use of a key. The callers decide only a settled operand: one that is still
+/// an inference variable may yet be bound to a borrow.
 ///
 /// This exists because the decision previously lived in three places: two
 /// identical eager arms and a re-derivation in the pass that decided the
@@ -148,14 +133,11 @@ pub(crate) fn settled_borrow_type(resolved: Type) -> Option<Type> {
 /// chelis#1489 has been some path disagreeing with another. A comment even
 /// claimed this function existed before it did, which is worse than the
 /// duplication: a reviewer reading it would stop looking.
-pub(crate) fn copy_result_from_source(resolved: &Type) -> Option<Type> {
-    match resolved {
-        Type::Tensor(_, _) | Type::Error(_) => Some(resolved.clone()),
+pub(crate) fn copy_result_from_source(settled: &Type) -> Type {
+    match settled {
         // `copy(&t)` yields `t`, not `&t`.
-        Type::Ref(inner) if matches!(inner.as_ref(), Type::Tensor(_, _)) => {
-            Some(inner.as_ref().clone())
-        }
-        _ => None,
+        Type::Ref(referent) => referent.as_ref().clone(),
+        owned => owned.clone(),
     }
 }
 

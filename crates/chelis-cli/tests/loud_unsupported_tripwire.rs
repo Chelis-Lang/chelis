@@ -724,7 +724,7 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        20,
+        18,
         "declared derived-Debug residue carriers: Err(format!) \
          diagnostics over Value/callable/handle shapes; the seven \
          chelis#890/#903 JSON/CSV builtin dispatch arms left with \
@@ -735,7 +735,9 @@ const BASELINE: &[Entry] = &[
          chelis#2413: the `with seed` handler and its seed diagnostic are \
          deleted. Two fewer since chelis#1297: the assert_eq_tensor shape \
          diagnostic moved to chelis-runtime's host_assert, which renders \
-         shapes without Debug",
+         shapes without Debug. Two fewer since chelis#2219: `copy` is \
+         generic, so both evaluator copy sites lost their non-tensor \
+         rejection",
     ),
     (
         Pat::RustDebugNumericFormat,
