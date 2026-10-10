@@ -60,9 +60,11 @@ Per repo policy this is Python, not a shell script.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 # Bounded attempts. Three is enough to ride out the observed failure mode
 # (a fetch refusal that clears within minutes) without spending a whole
@@ -106,6 +108,40 @@ TRANSIENT_SIGNATURES: tuple[str, ...] = (
     "early eof",
     "rpc failed",
 )
+
+# cvc5-1.3.1's FindGMP.cmake uses the GitHub blob endpoint for its GMP
+# archive. That endpoint returned HTTP 503 across three release platforms on
+# 2026-10-10, while GitHub's raw endpoint served the identical archive. The
+# upstream CMake URL_HASH continues to verify the bytes after this transport
+# substitution. Keep the source spelling and expected hash exact so an
+# upstream recipe change fails visibly rather than being patched by accident.
+GMP_BLOB_URL = "https://github.com/cvc5/cvc5-deps/blob/main/gmp-6.3.0.tar.bz2?raw=true"
+GMP_RAW_URL = "https://raw.githubusercontent.com/cvc5/cvc5-deps/main/gmp-6.3.0.tar.bz2"
+GMP_SHA256 = "ac28211a7cfb609bae2e2c8d6058d66c8fe96434f740cf6fe2e47b000d1c20cb"
+
+
+def rewrite_gmp_download_url(target_root: Path) -> list[Path]:
+    """Switch the exact cloned cvc5 GMP URL after a transient fetch failure.
+
+    The first shape is the native release target; the second covers Cargo's
+    explicit --target builds. The cvc5-sys build script leaves its clone in
+    this target after a failed fetch and reruns CMake on the next attempt.
+    """
+    changed: list[Path] = []
+    patterns = (
+        "release/build/cvc5-sys-*/out/cvc5/cmake/FindGMP.cmake",
+        "*/release/build/cvc5-sys-*/out/cvc5/cmake/FindGMP.cmake",
+    )
+    for pattern in patterns:
+        for path in target_root.glob(pattern):
+            source = path.read_text(encoding="utf-8")
+            if source.count(f"URL {GMP_BLOB_URL}") != 1:
+                continue
+            if f"URL_HASH SHA256={GMP_SHA256}" not in source:
+                continue
+            path.write_text(source.replace(GMP_BLOB_URL, GMP_RAW_URL), encoding="utf-8")
+            changed.append(path)
+    return changed
 
 
 def classify_line(line: str) -> bool:
@@ -162,6 +198,7 @@ def build(
     backoff_seconds: float = BACKOFF_SECONDS,
     sleep=time.sleep,
     runner=run_streaming,
+    target_root: Path | None = None,
 ) -> int:
     """Run `cmd`, retrying only when the failing attempt showed a transient
     fetch signature. Returns 0 on success, else the last attempt's code.
@@ -172,6 +209,9 @@ def build(
     if not cmd:
         print("ci_cvc5_build: no command given; nothing to do.", file=sys.stderr)
         return 2
+
+    if target_root is None:
+        target_root = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
 
     last_rc = 0
     for attempt in range(1, attempts + 1):
@@ -199,6 +239,13 @@ def build(
                 file=sys.stderr,
             )
             return rc
+        if attempt < attempts:
+            for path in rewrite_gmp_download_url(target_root):
+                print(
+                    f"ci_cvc5_build: switched GMP download to the SHA-256-verified "
+                    f"raw URL in {path}",
+                    flush=True,
+                )
         if attempt == attempts:
             print(
                 f"ci_cvc5_build: transient fetch failure persisted across "

@@ -13,6 +13,7 @@ positive case here therefore has a negative twin.
 from __future__ import annotations
 
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -154,6 +155,76 @@ class BuildRetryTest(unittest.TestCase):
     def test_empty_command_is_a_usage_error(self) -> None:
         rc = ci_cvc5_build.build([], runner=FakeRunner([]), sleep=lambda _s: None)
         self.assertEqual(rc, 2)
+
+
+class GmpDownloadFallbackTest(unittest.TestCase):
+    OLD_URL = "https://github.com/cvc5/cvc5-deps/blob/main/gmp-6.3.0.tar.bz2?raw=true"
+    RAW_URL = "https://raw.githubusercontent.com/cvc5/cvc5-deps/main/gmp-6.3.0.tar.bz2"
+    HASH = "ac28211a7cfb609bae2e2c8d6058d66c8fe96434f740cf6fe2e47b000d1c20cb"
+
+    def test_transient_retry_switches_only_the_gmp_transport_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = (
+                root / "x86_64-unknown-linux-gnu/release/build/cvc5-sys-abc/out/cvc5"
+                / "cmake/FindGMP.cmake"
+            )
+            source.parent.mkdir(parents=True)
+            original = f"URL {self.OLD_URL}\nURL_HASH SHA256={self.HASH}\n"
+            source.write_text(original, encoding="utf-8")
+            case = self
+
+            class CheckingRunner:
+                calls = 0
+
+                def __call__(self, _cmd):
+                    self.calls += 1
+                    if self.calls == 1:
+                        self.assert_source(original)
+                        return 101, True
+                    self.assert_source(original.replace(GmpDownloadFallbackTest.OLD_URL, GmpDownloadFallbackTest.RAW_URL))
+                    return 0, False
+
+                def assert_source(self, expected):
+                    case.assertEqual(source.read_text(encoding="utf-8"), expected)
+
+            runner = CheckingRunner()
+            rc = ci_cvc5_build.build(
+                ["cargo", "build"], runner=runner, sleep=lambda _s: None,
+                backoff_seconds=0, target_root=root,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(runner.calls, 2)
+            self.assertEqual(source.read_text(encoding="utf-8").count(self.RAW_URL), 1)
+            self.assertIn(f"URL_HASH SHA256={self.HASH}", source.read_text(encoding="utf-8"))
+
+    def test_real_failure_does_not_rewrite_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "release/build/cvc5-sys-abc/out/cvc5/cmake/FindGMP.cmake"
+            source.parent.mkdir(parents=True)
+            original = f"URL {self.OLD_URL}\nURL_HASH SHA256={self.HASH}\n"
+            source.write_text(original, encoding="utf-8")
+            rc = ci_cvc5_build.build(
+                ["cargo", "build"], runner=FakeRunner([(101, False)]),
+                sleep=lambda _s: None, target_root=root,
+            )
+            self.assertEqual(rc, 101)
+            self.assertEqual(source.read_text(encoding="utf-8"), original)
+
+    def test_unknown_url_or_missing_hash_is_not_rewritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "release/build/cvc5-sys-abc/out/cvc5/cmake/FindGMP.cmake"
+            source.parent.mkdir(parents=True)
+            for original in (
+                f"URL https://example.com/gmp.tar.bz2\nURL_HASH SHA256={self.HASH}\n",
+                f"URL {self.OLD_URL}\nURL_HASH SHA256=unknown\n",
+            ):
+                with self.subTest(original=original):
+                    source.write_text(original, encoding="utf-8")
+                    self.assertEqual(ci_cvc5_build.rewrite_gmp_download_url(root), [])
+                    self.assertEqual(source.read_text(encoding="utf-8"), original)
 
 
 class ArgParsingTest(unittest.TestCase):

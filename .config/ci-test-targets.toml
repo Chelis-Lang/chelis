@@ -3206,6 +3206,15 @@ reason = "script-unit checks the immutable Bullseye producer and release configu
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "scripts/ci_cvc5_build.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit exercises the cvc5 cold-build retry classifier and SHA-256-guarded GMP URL fallback"
+tracking_issue = "chelis#1004"
+
+[[path_rule]]
 prefix = "scripts/test_ci_cvc5_build.py"
 disposition = "owner"
 workflow = "ci.yml"
