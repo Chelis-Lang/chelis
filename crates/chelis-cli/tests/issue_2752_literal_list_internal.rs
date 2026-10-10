@@ -211,12 +211,23 @@ fn recursive_monomorphized_literal_list_checks_each_invocation() {
 }
 
 #[test]
-fn claimed_list_does_not_move_option_extents_into_internal_call() {
-    let source = "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
-                  def f[n](xs: List[tensor[n, f32]], o: Option[tensor[2, f32]]) -> i64 = len(xs)\n\
-                  out = f([to_tensor([1.0f32, 2.0f32]) |> hidden], to_tensor([3.0f32, 4.0f32, 5.0f32]) |> hidden |> Some)\n";
+fn claimed_list_keeps_the_independent_option_entry_claim() {
+    let prefix = "def hidden(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+                  def f[n](xs: List[tensor[n, f32]], o: Option[tensor[2, f32]]) -> i64 = len(xs)\n";
+    assert_both_trap(
+        &format!(
+            "{prefix}out = f([to_tensor([1.0f32, 2.0f32]) |> hidden], to_tensor([3.0f32, 4.0f32, 5.0f32]) |> hidden |> Some)\n"
+        ),
+        "extent `2`: claimed = 2, o.Some.value axis 0 = 3",
+        "input `o.Some.value` axis 0 expected 2, got 3",
+    );
     for native in [false, true] {
-        let (ok, output) = result_claims::run(source, native);
+        let (ok, output) = result_claims::run(
+            &format!(
+                "{prefix}out = f([to_tensor([1.0f32, 2.0f32]) |> hidden], to_tensor([3.0f32, 4.0f32]) |> hidden |> Some)\n"
+            ),
+            native,
+        );
         assert!(ok, "native={native}: {output}");
         assert!(output.contains("out = 1"), "native={native}: {output}");
     }

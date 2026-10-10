@@ -3,12 +3,12 @@
 //! A column callable fails exactly where its scalar twin fails at some
 //! element, with the twin's kind for the lowest such index and the twin's
 //! detail prefixed `element k: `, under the column callable's name.
-//! A column argument whose length differs from another argument's fails
-//! `domain` before any element is read, and no primitive numeric trap
-//! escapes a call made with extreme arguments. Each suite runs as one `chelis test`
+//! A nested nominal argument whose length differs from another argument's
+//! fails its entry extent claim before any element is read; extreme matched
+//! inputs still receive the column operation's own error. Each suite runs as one `chelis test`
 //! invocation over a generated fixture whose every test evaluates one
-//! expression; the runner reports each call's failure message on its FAIL
-//! line. Construction of the opaque `Durations` outside its module is checked
+//! expression; the runner reports each call's failure message in its FAIL
+//! verdict. Construction of the opaque `Durations` outside its module is checked
 //! through `chelis check`.
 
 #[path = "common/mod.rs"]
@@ -70,7 +70,7 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
     (
         "dates_add_days_lengths",
         "dates_add_days(days(2i64), zeros(3i64))",
-        "dates_add_days: domain: arguments have 2 and 3 elements",
+        "extent `n`: ds.epoch_days axis 0 = 2, days axis 0 = 3\nnumeric trap: domain in load at i64",
     ),
     (
         "dates_add_months_reject",
@@ -95,22 +95,22 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
     (
         "dates_add_months_lengths",
         "dates_add_months(days(1i64), zeros(2i64), ClampToMonthEnd)",
-        "dates_add_months: domain: arguments have 1 and 2 elements",
+        "extent `n`: ds.epoch_days axis 0 = 1, months axis 0 = 2\nnumeric trap: domain in load at i64",
     ),
     (
         "dates_days_until_lengths",
         "dates_days_until(days(2i64), days(3i64))",
-        "dates_days_until: domain: arguments have 2 and 3 elements",
+        "extent `n`: a.epoch_days axis 0 = 2, b.epoch_days axis 0 = 3\nnumeric trap: domain in load at i64",
     ),
     (
         "dates_lt_lengths",
         "dates_lt(days(2i64), days(1i64))",
-        "dates_lt: domain: arguments have 2 and 1 elements",
+        "extent `n`: a.epoch_days axis 0 = 2, b.epoch_days axis 0 = 1\nnumeric trap: domain in load at i64",
     ),
     (
         "dates_gte_lengths",
         "dates_gte(days(0i64), days(1i64))",
-        "dates_gte: domain: arguments have 0 and 1 elements",
+        "extent `n`: a.epoch_days axis 0 = 0, b.epoch_days axis 0 = 1\nnumeric trap: domain in load at i64",
     ),
     (
         "instants_from_unix_count_hours",
@@ -145,17 +145,17 @@ const EXACT_FAILURES: &[(&str, &str, &str)] = &[
     (
         "instants_add_duration_lengths",
         "instants_add_duration(stamps(1i64), durations(zeros(2i64), zeros(2i64)))",
-        "instants_add_duration: domain: arguments have 1 and 2 elements",
+        "extent `n`: is.unix_seconds axis 0 = 1, ds.seconds axis 0 = 2\nnumeric trap: domain in load at i64",
     ),
     (
         "instants_until_lengths",
         "instants_until(stamps(3i64), stamps(2i64))",
-        "instants_until: domain: arguments have 3 and 2 elements",
+        "extent `n`: a.unix_seconds axis 0 = 3, b.unix_seconds axis 0 = 2\nnumeric trap: domain in load at i64",
     ),
     (
         "instants_lt_lengths",
         "instants_lt(stamps(1i64), stamps(0i64))",
-        "instants_lt: domain: arguments have 1 and 0 elements",
+        "extent `n`: a.unix_seconds axis 0 = 1, b.unix_seconds axis 0 = 0\nnumeric trap: domain in load at i64",
     ),
     (
         "instants_round_to_increment_empty_column",
@@ -231,7 +231,17 @@ fn run_expression_suite(
         &["test", "--batch-mode", "file", path.to_str().unwrap()],
     );
     let mut outcomes = BTreeMap::new();
+    let mut pending: Option<(String, String)> = None;
     for line in rendered.lines() {
+        if let Some((_, message)) = pending.as_mut() {
+            message.push('\n');
+            message.push_str(line.trim());
+            if message.ends_with(')') {
+                let (name, message) = pending.take().expect("pending failure");
+                outcomes.insert(name, Some(message[..message.len() - 1].to_string()));
+            }
+            continue;
+        }
         let Some(rest) = line.trim_start().strip_prefix("test_") else {
             continue;
         };
@@ -241,13 +251,15 @@ fn run_expression_suite(
         let verdict = verdict.trim_start_matches(['.', ' ']);
         if verdict == "PASS" {
             outcomes.insert(name.to_string(), None);
-        } else if let Some(message) = verdict
-            .strip_prefix("FAIL (")
-            .and_then(|tail| tail.strip_suffix(')'))
-        {
-            outcomes.insert(name.to_string(), Some(message.to_string()));
+        } else if let Some(message) = verdict.strip_prefix("FAIL (") {
+            if let Some(message) = message.strip_suffix(')') {
+                outcomes.insert(name.to_string(), Some(message.to_string()));
+            } else {
+                pending = Some((name.to_string(), message.to_string()));
+            }
         }
     }
+    assert!(pending.is_none(), "unterminated test verdict:\n{rendered}");
     assert_eq!(
         outcomes.len(),
         expressions.len(),

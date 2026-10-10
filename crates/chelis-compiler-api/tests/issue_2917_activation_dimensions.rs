@@ -230,9 +230,8 @@ const NEGATIVE: &[(Case, &str)] = &[
     ),
 ];
 
-/// chelis#2906's twin: the two columns' shared binder has no entry
-/// observation (a record erases its dimension argument), so both lanes
-/// fail at the first elementwise operation over the two lengths.
+/// chelis#2906's twin: the two columns' shared binder is observed at the
+/// nested nominal formal entry, before the first elementwise operation.
 const COLUMN_LENGTHS_DIFFER: Case = Case {
     name: "chelis_2906_lengths_differ",
     definitions: &[FILLED, FIRST_FALSE, COLUMNS],
@@ -240,9 +239,9 @@ const COLUMN_LENGTHS_DIFFER: Case = Case {
 };
 
 /// spec/04-type-system.md section 4.7: the disagreeing columns are one
-/// `Domain` trap, rendered identically by both lanes.
-const COLUMN_LENGTHS_TRAP: &str = "operands disagree at axis 0: lhs [3] has 3, rhs [2] has 2\n\
-                                   numeric trap: domain in";
+/// entry `Domain` trap, rendered identically by both lanes.
+const COLUMN_LENGTHS_TRAP: &str = "extent `n`: a.days axis 0 = 2, b.days axis 0 = 3\n\
+                                   numeric trap: domain in load at i64";
 
 fn request(source: &str) -> EvalRequest {
     EvalRequest {
