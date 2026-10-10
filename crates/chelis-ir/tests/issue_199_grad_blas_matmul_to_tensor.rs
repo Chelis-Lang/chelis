@@ -244,10 +244,10 @@ fn issue_199_blas_matmul_grad_matches_finite_difference() {
 /// constant (no Loads on the gradient path) must still produce a clean
 /// result, not a panic or "non-differentiable" error. The adjoint of
 /// every const is the empty input-gradient list, so a `grad(c, wrt=x)`
-/// where `x` is unrelated should produce no grad_node entry for `x`,
-/// not crash.
+/// where `x` is unrelated receives no contribution, and its gradient is the
+/// exact positive zero of its own shape (spec/06 §7.5), not a crash.
 #[test]
-fn issue_199_grad_with_unrelated_wrt_returns_no_grad_entry() {
+fn issue_199_grad_with_unrelated_wrt_returns_a_positive_zero_entry() {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let scalar_ty = TensorType {
@@ -275,12 +275,20 @@ fn issue_199_grad_with_unrelated_wrt_returns_no_grad_entry() {
     );
     let result = grad_dag(&dag, c, &[unrelated]).expect(
         "grad of a pure constant w.r.t. an unrelated load should succeed; \
-         the unrelated load simply receives no adjoint entry",
+         the unrelated load receives no contribution",
     );
+    let gradient = result.grad_nodes[&unrelated];
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
+    inputs.insert(
+        "unrelated".into(),
+        TensorValue::from_vec(vec![2], vec![7.0, -7.0]),
+    );
+    let values = eval_tensor(&result.dag, &inputs).expect("eval gradient DAG");
+    let zeros = values[&gradient].to_f64_lossy_vec();
+    assert_eq!(zeros.len(), 2);
     assert!(
-        !result.grad_nodes.contains_key(&unrelated),
-        "an unrelated wrt must not appear in grad_nodes; got {:?}",
-        result.grad_nodes,
+        zeros.iter().all(|zero| zero.to_bits() == 0.0f64.to_bits()),
+        "an unrelated wrt's gradient must be exact +0; got {zeros:?}"
     );
 }
 

@@ -470,3 +470,66 @@ out = grad(loss, wrt=x)(to_tensor([1.0f32, 2.0f32, 3.0f32]))
         "tensor(shape=[3], data=[0.0, 0.0, 0.0])",
     );
 }
+
+/// spec/06 §7.5 dependence, slot by slot. A value-read bound carries its
+/// operand's dependence: a `floor` of a slice whose start comes from `x` is
+/// active and rejects as data, while the same slice from an undifferentiated
+/// `m` is a constant, `floor([2.5, 3.5, 4.5])` summed, 9.
+#[test]
+fn a_value_read_bound_carries_dependence() {
+    let active = r#"
+def loss(x: f32, v: tensor[4, f32]) -> f32 = mul(x, tensor_to_scalar(sum(floor(shrink(&v, [[cast_trunc(x, i64), 4i64]])), 0i32)))
+out = grad(loss, wrt=x)(1.5f32, to_tensor([1.5f32, 2.5f32, 3.5f32, 4.5f32]))
+"#;
+    assert_refused(
+        active,
+        "bound_active",
+        "grad: floor is non-differentiable (piecewise constant)",
+    );
+    let inactive = r#"
+def loss(x: f32, m: f32, v: tensor[4, f32]) -> f32 = mul(x, tensor_to_scalar(sum(floor(shrink(&v, [[cast_trunc(m, i64), 4i64]])), 0i32)))
+out = grad(loss, wrt=x)(1.5f32, 1.5f32, to_tensor([1.5f32, 2.5f32, 3.5f32, 4.5f32]))
+"#;
+    assert_out(inactive, "bound_inactive", "9.0");
+}
+
+/// spec/06 §7.5 dependence: a metadata read and a guard predicate carry no
+/// element-value dependence, so a conversion read through one is a constant
+/// with respect to `x`. Each row would reject if its slot carried dependence.
+#[test]
+fn metadata_reads_and_guard_predicates_carry_no_value_dependence() {
+    for (stem, source, expected) in [
+        (
+            "shape_read",
+            r#"
+def loss(x: tensor[3, f32]) -> f32 = mul(tensor_to_scalar(sum(x, 0i32)), floor(cast(shape(&x, 0i32), f32)))
+out = grad(loss, wrt=x)(to_tensor([1.5f32, 2.5f32, 3.5f32]))
+"#,
+            "tensor(shape=[3], data=[3.0, 3.0, 3.0])",
+        ),
+        (
+            "uniform_template",
+            r#"
+def loss(x: tensor[3, f32]) -> f32 = {
+  u = uniform_like(fold_in(key_from_seed(7i64), 1i64), x, 0.0f32, 4.0f32)
+  tensor_to_scalar(sum(mul(x, floor(u)), 0i32))
+}
+out = grad(loss, wrt=x)(to_tensor([1.5f32, 2.5f32, 3.5f32]))
+"#,
+            "tensor(shape=[3], data=[3.0, 3.0, 0.0])",
+        ),
+        (
+            "guard_predicate",
+            r#"
+def loss(x: f32, m: f32) -> f32 = {
+  g = if gt(x, 10.0f32) then fail("big") else m
+  mul(x, floor(g))
+}
+out = grad(loss, wrt=x)(2.5f32, 3.5f32)
+"#,
+            "3.0",
+        ),
+    ] {
+        assert_out(source, stem, expected);
+    }
+}

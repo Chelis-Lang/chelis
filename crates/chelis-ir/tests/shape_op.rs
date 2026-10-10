@@ -179,13 +179,14 @@ fn shape_node_is_ad_transparent_with_zero_adjoint() {
 
     let result = grad_dag_checked(&dag, loss, &[x])
         .expect("grad must accept a Shape node (trivial constant, not rejected)");
-    // spec/06 §7.5: `shape` reads a control slot, which receives no
-    // contribution, so `x` is a disconnected parameter: the transform builds
-    // no gradient node for it and the caller supplies its exact +0
-    // (`issue_3464_grad_control_slots::shape_read_gradient_is_positive_zero`
-    // checks that value on eval and C).
+    // The gradient DAG must contain the input's zero cotangent: a Const 0.0.
+    let has_zero_const = result
+        .dag
+        .nodes()
+        .iter()
+        .any(|n| matches!(&n.op, RiscOp::Const { value } if value.as_f64_lossy() == 0.0));
     assert!(
-        !result.grad_nodes.contains_key(&x),
-        "a shape read must not route a contribution to its input"
+        has_zero_const,
+        "Shape adjoint must route a zero cotangent to the input"
     );
 }

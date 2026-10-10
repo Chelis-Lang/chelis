@@ -1276,6 +1276,23 @@ fn grad_dag_result(
         }
     }
 
+    // spec/06 §7.5: a requested float parameter with no contribution, read
+    // only through control slots or not at all, has the exact positive zero
+    // gradient of its own shape and dtype. Building it here gives every
+    // consumer of `grad_nodes` (lowering, the compiler API, `tide`, `prove`)
+    // one entry per float `wrt` leaf. A discrete leaf, which only a direct IR
+    // caller can select, carries no cotangent and gets no entry.
+    for &id in wrt {
+        let Some(parameter) = forward.get(id) else {
+            continue;
+        };
+        if parameter.output_type.precision.is_float() && !adjoints.contains_key(&id) {
+            let before = dag.len();
+            let zero = fill_like(&mut dag, parameter.owner, id, 0.0);
+            stamp_grad_marker(&mut dag, before, parameter);
+            adjoints.insert(id, zero);
+        }
+    }
     let grad_nodes = wrt
         .iter()
         .filter_map(|&id| adjoints.get(&id).map(|&g| (id, g)))
@@ -5008,10 +5025,10 @@ mod tests {
     }
 
     /// A parameter read only through control slots receives no contribution
-    /// (spec/06 §7.5), so it is a disconnected parameter with no gradient
-    /// node; Surf lowering fills it with exact +0.
+    /// (spec/06 §7.5), so its gradient is the exact positive zero of a
+    /// parameter with none, built once for every consumer.
     #[test]
-    fn grad_predicate_only_parameter_has_no_contribution() {
+    fn grad_predicate_only_parameter_is_positive_zero() {
         let (mut dag, x, selected) = comparison_with_discrete_cast(None, false, false);
         let owner = dag.get(selected).unwrap().owner;
         // Read a second parameter only through a comparison and a `where`
@@ -5079,7 +5096,8 @@ mod tests {
                 &UnordMap::from([("x".to_string(), -2.0), ("y".to_string(), y0)]),
             );
             assert_eq!(values[&result.grad_nodes[&x]], sign * -4.0, "y = {y0}");
-            assert!(!result.grad_nodes.contains_key(&y), "y = {y0}");
+            let dy = values[&result.grad_nodes[&y]];
+            assert_eq!(dy.to_bits(), 0.0f64.to_bits(), "y = {y0}: {dy}");
         }
     }
 

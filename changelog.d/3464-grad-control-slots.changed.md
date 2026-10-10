@@ -30,3 +30,10 @@ reduction output, signed-integer arithmetic, truncated-quotient jump, logical
 operation, and replace-scatter) now say that the operation's result has a data
 path to the differentiated output and how to keep it off one, instead of
 recommending a `stop_gradient` that programs cannot yet call.
+
+Every requested `wrt` parameter now has a gradient entry. A parameter that
+receives no contribution, read only through control slots or not read at all,
+gets the exact positive zero of its own shape and dtype. Surf lowering already
+returned that value; the compiler API's `grad`, `tide`'s `/grad`, and
+`prove`'s gradient goals now return it too. Previously they omitted such a
+parameter, and a `prove` gradient goal on it failed as an unknown target.
