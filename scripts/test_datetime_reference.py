@@ -523,8 +523,16 @@ class FailureGrammar(unittest.TestCase):
         corpus = harness.build_ci_corpus()
         self.assertGreater(len(corpus.failures), 100)
         for failure_case in corpus.failures:
-            self.assertRegex(f"{failure_case.function}: {failure_case.kind}: x", MESSAGE)
-            self.assertIn(failure_case.function, harness.FUNCTIONS + harness.COLUMN_FUNCTIONS, failure_case)
+            if failure_case.extent is None:
+                self.assertRegex(f"{failure_case.function}: {failure_case.kind}: x", MESSAGE)
+                self.assertIn(failure_case.function, harness.FUNCTIONS + harness.COLUMN_FUNCTIONS, failure_case)
+            else:
+                self.assertEqual((failure_case.function, failure_case.kind), ("load", "domain"))
+                self.assertIn(
+                    failure_case.name.split("_named_col_lengths_", 1)[1],
+                    harness.COLUMN_FUNCTIONS,
+                    failure_case,
+                )
 
     def test_kinds_are_closed(self) -> None:
         with self.assertRaises(ValueError):
@@ -706,11 +714,21 @@ class HarnessLogic(unittest.TestCase):
         column_exprs = harness.prelude() + " ".join(v.expr for v in corpus.columns) + " ".join(f.expr for f in corpus.failures)
         missing = [function for function in harness.COLUMN_FUNCTIONS if not re.search(rf"\b{function}\(", column_exprs)]
         self.assertEqual(missing, [])
-        column_kinds = {(f.function, f.kind) for f in corpus.failures if f.name.startswith("cf")}
+        column_kinds = {
+            (f.function, f.kind)
+            for f in corpus.failures if f.name.startswith("cf") and f.extent is None
+        }
         for kind in (("dates_add_months", "domain"), ("dates_add_months", "overflow"), ("instants_to_unix_count", "domain"),
-                     ("instants_to_unix_count", "overflow"), ("instants_round_to", "domain"), ("instants_round_to", "overflow"),
-                     ("dates_days_until", "domain"), ("instants_until", "domain")):
+                     ("instants_to_unix_count", "overflow"), ("instants_round_to", "domain"), ("instants_round_to", "overflow")):
             self.assertIn(kind, column_kinds)
+        guarded_columns = {
+            f.name.split("_named_col_lengths_", 1)[1]
+            for f in corpus.failures if f.extent is not None
+        }
+        self.assertEqual(guarded_columns, {
+            "dates_add_days", "dates_add_months", "dates_days_until", "dates_lte",
+            "instants_add_duration", "instants_until", "instants_gt",
+        })
         kinds = {(f.function, f.kind) for f in corpus.failures}
         self.assertIn(("try_date_add_months", "overflow"), kinds)
         self.assertIn(("date_add_months", "domain"), kinds)
