@@ -157,6 +157,61 @@ fn ordered_adjoints_match_the_atoms_in_eval_and_c_at_every_float_width() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+/// Residual gap (chelis#3414): [05-OP-33]'s adjoint is the base-free reverse
+/// scan, so a `-0` last cotangent is a `-0` last suffix, as `e_gap`'s host
+/// scan shows. Under `grad` the Tier 1 chain cuts an axis of two or more
+/// elements into slabs whose cotangents return to `x` through a shrink
+/// adjoint's `+0` fill, so `a_gap`'s last suffix accumulates to `+0`. An axis
+/// of one element has no cut and already conforms (`cs3`). The gap must keep
+/// failing exactly as recorded, in eval and C at every float width, so the
+/// scan primitive that closes it also removes it here.
+const SIGNED_ZERO_SUFFIX_GAP: &str = r#"
+def gap(x: tensor[2, P], w: tensor[2, P]) -> tensor[P] = sum(mul(cumsum(x, 0i32), w), 0i32)
+w2 = to_tensor([1.0P, -0.0P])
+r2 = to_tensor([1i32, 0i32])
+a_gap = grad(gap, wrt=x)(to_tensor([1.0P, 2.0P]), w2)
+e_gap = gather(cumsum(gather(w2, r2, 0i32), 0i32), r2, 0i32)
+"#;
+
+/// The `data=[...]` text of a printed tensor root.
+fn root_data<'a>(stdout: &'a str, name: &str) -> &'a str {
+    let prefix = format!("{name} = ");
+    let value = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("no `{name}` root in:\n{stdout}"));
+    let start = value.find("data=[").expect("tensor data");
+    &value[start..]
+}
+
+#[test]
+fn recorded_signed_zero_suffix_gap_still_fails_exactly_as_recorded() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        let (_dir, reef, app) = common::make_app("issue-3414");
+        let program = format!(
+            "module Demo.Main\n{}",
+            SIGNED_ZERO_SUFFIX_GAP.replace('P', dtype)
+        );
+        common::write_file(&app.join("src/main.ch"), &program);
+        let output = eval_text(&reef, &app);
+        assert!(output.status.success(), "{dtype}: {output:?}");
+        let evaluated = String::from_utf8(output.stdout).unwrap();
+        let native = common::build_and_run_app(&reef, &app, "main");
+        for (lane, stdout) in [("eval", &evaluated), ("C", &native)] {
+            assert_eq!(
+                root_data(stdout, "e_gap"),
+                "data=[1.0, -0.0])",
+                "{dtype} {lane}: the base-free reverse scan keeps the -0 suffix"
+            );
+            assert_eq!(
+                root_data(stdout, "a_gap"),
+                "data=[1.0, 0.0])",
+                "{dtype} {lane}: the chain now keeps the -0 suffix; remove this gap (chelis#3414)"
+            );
+        }
+    }
+}
+
 fn scalar_root(stdout: &str, name: &str) -> f64 {
     let prefix = format!("{name} = ");
     stdout

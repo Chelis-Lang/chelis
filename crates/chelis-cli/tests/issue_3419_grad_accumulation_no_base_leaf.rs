@@ -164,30 +164,86 @@ fn gradient_accumulation_has_no_base_leaf_on_every_lane_and_float_width() {
                     "{dtype} {lane} `{name}`: {why}\n{stdout}"
                 );
             };
-            check("forward", &["-0.0", "2.0"], "the forward product keeps its -0");
-            check("single", &["-0.0", "1.0"], "one -0 contribution is the adjoint unchanged");
+            check(
+                "forward",
+                &["-0.0", "2.0"],
+                "the forward product keeps its -0",
+            );
+            check(
+                "single",
+                &["-0.0", "1.0"],
+                "one -0 contribution is the adjoint unchanged",
+            );
             check("twice", &["-0.0", "2.0"], "(-0) + (-0) is -0");
-            check("dead_relu", &["-0.0", "2.0"], "a dead unit's +0 times a negative input is -0");
+            check(
+                "dead_relu",
+                &["-0.0", "2.0"],
+                "a dead unit's +0 times a negative input is -0",
+            );
             for target in ["shared.0", "shared.1"] {
-                check(target, &["-0.0", "1.0"], "targets sharing one adjoint node each keep it");
+                check(
+                    target,
+                    &["-0.0", "1.0"],
+                    "targets sharing one adjoint node each keep it",
+                );
             }
-            check("padded", &["-0.0", "1.0"], "pad's adjoint shrinks the -0 interior cotangent");
-            check("shared.2", &["4.0", "6.0"], "the third root is its own adjoint");
-            check("four", &["2.0"], "(b + -b) + (1 + 1): no base leaf absorbs a one");
-            check("six", &["2.0"], "((b + 1) + (-b + 1)) + (1 + 1) at the leaf's dtype");
+            check(
+                "padded",
+                &["-0.0", "1.0"],
+                "pad's adjoint shrinks the -0 interior cotangent",
+            );
+            check(
+                "shared.2",
+                &["4.0", "6.0"],
+                "the third root is its own adjoint",
+            );
+            check(
+                "four",
+                &["2.0"],
+                "(b + -b) + (1 + 1): no base leaf absorbs a one",
+            );
+            check(
+                "six",
+                &["2.0"],
+                "((b + 1) + (-b + 1)) + (1 + 1) at the leaf's dtype",
+            );
             assert_eq!(
                 printed_elements(&stdout, "six"),
                 printed_elements(&stdout, "host_six"),
                 "{dtype} {lane}: the adjoint is the host tree over the same contributions"
             );
-            check("capture_one", &["-0.0"], "one List-capture row is the adjoint unchanged");
-            check("capture_two", &["-0.0"], "two -0 List-capture rows add to -0");
+            check(
+                "capture_one",
+                &["-0.0"],
+                "one List-capture row is the adjoint unchanged",
+            );
+            check(
+                "capture_two",
+                &["-0.0"],
+                "two -0 List-capture rows add to -0",
+            );
             // Negative parity: +0 wherever a +0 enters or nothing is queued.
             check("mixed", &["0.0", "2.0"], "(-0) + (+0) is +0");
-            check("unused", &["0.0", "0.0"], "an unused parameter receives exact +0");
-            check("compared", &["0.0", "0.0"], "a comparison contributes exact +0");
-            check("capture_mixed", &["0.0"], "(-0) + (+0) List-capture rows add to +0");
-            check("capture_empty", &["0.0"], "an empty List capture receives exact +0");
+            check(
+                "unused",
+                &["0.0", "0.0"],
+                "an unused parameter receives exact +0",
+            );
+            check(
+                "compared",
+                &["0.0", "0.0"],
+                "a comparison contributes exact +0",
+            );
+            check(
+                "capture_mixed",
+                &["0.0"],
+                "(-0) + (+0) List-capture rows add to +0",
+            );
+            check(
+                "capture_empty",
+                &["0.0"],
+                "an empty List capture receives exact +0",
+            );
         }
     }
 }
@@ -222,17 +278,37 @@ fn cumsum_has_no_base_leaf_on_the_host_kernels_and_the_grad_chain() {
                     "{dtype} {lane} `{name}`: {why}\n{stdout}"
                 );
             };
-            check("host_lone", &["-0.0"], "the first prefix is the first input");
-            check("host_sum", &["-0.0"], "cumsum's first prefix agrees with a one-leaf sum");
+            check(
+                "host_lone",
+                &["-0.0"],
+                "the first prefix is the first input",
+            );
+            check(
+                "host_sum",
+                &["-0.0"],
+                "cumsum's first prefix agrees with a one-leaf sum",
+            );
             check("host_pair", &["-0.0", "-0.0", "1.0"], "(-0) + (-0) is -0");
             // Under grad the prefixes come from the Tier 1 chain; the gradient
             // with respect to unit weights is those prefixes bit for bit.
-            check("chain_lone", &["-0.0"], "the chain's first prefix is the first input");
-            check("chain_pair", &["-0.0", "-0.0", "1.0"], "the chain's joins keep a -0 prefix");
+            check(
+                "chain_lone",
+                &["-0.0"],
+                "the chain's first prefix is the first input",
+            );
+            check(
+                "chain_pair",
+                &["-0.0", "-0.0", "1.0"],
+                "the chain's joins keep a -0 prefix",
+            );
             // Negative parity: once a +0 is added the prefix is +0.
             check("host_mixed", &["-0.0", "0.0", "0.0"], "(-0) + (+0) is +0");
             check("host_positive", &["0.0", "0.0"], "(+0) + (-0) is +0");
-            check("chain_mixed", &["-0.0", "0.0", "0.0"], "the chain adds (-0) + (+0) to +0");
+            check(
+                "chain_mixed",
+                &["-0.0", "0.0", "0.0"],
+                "the chain adds (-0) + (+0) to +0",
+            );
         }
     }
 }
