@@ -20200,7 +20200,8 @@ fn pair_authored_binder_identities(
         if let (Some(from), Some(to)) = (
             authored_kids.first().and_then(symbol_name),
             checked_kids.first().and_then(symbol_name),
-        ) && from != to
+        ) && from != "_"
+            && from != to
         {
             out.entry(from.to_string())
                 .or_insert_with(|| to.to_string());
@@ -22652,11 +22653,6 @@ fn inline_call_type_subst(
     subst
 }
 
-/// Structurally match a declared host type against a resolved one, binding
-/// each `TypeVariable` on the declared side (chelis#1201).
-///
-/// Only the shapes a generic signature can name are walked; anything else
-/// contributes no binding rather than guessing one.
 /// Result evidence for a result-only dtype binder: bind a precision variable,
 /// or a type variable standing for a scalar dtype, to the concrete dtype the
 /// call's result type holds at the same position, and nothing else. A type
@@ -22711,6 +22707,11 @@ fn solve_result_dtype_vars(
     }
 }
 
+/// Structurally match a declared host type against a resolved one, binding
+/// each `TypeVariable` on the declared side (chelis#1201).
+///
+/// Only the shapes a generic signature can name are walked; anything else
+/// contributes no binding rather than guessing one.
 fn solve_host_type_vars(
     declared: &HostTypeTerm,
     actual: &HostTypeTerm,
@@ -22771,6 +22772,30 @@ mod tests {
     use super::*;
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
+
+    #[test]
+    fn inferred_type_holes_are_not_authored_binders() {
+        let parse = |source: &str| {
+            chelis_deep::parser::parse_str(source)
+                .expect("Deep type parses")
+                .into_iter()
+                .next()
+                .expect("one type")
+        };
+        let authored = parse("(t-fn {} (t-var {} _) (t-var {} p))");
+        let checked = parse("(t-fn {} (t-var {} t7) (t-var {} t8))");
+        let mut identities = UnordMap::new();
+        pair_authored_binder_identities(&authored, &checked, &mut identities);
+        assert_eq!(identities.get("_"), None);
+        assert_eq!(identities.get("p").map(String::as_str), Some("t8"));
+
+        let body = parse("(t-fn {} (t-var {} _) (t-var {} p))");
+        let respelled = respell_type_binders(&body, &identities);
+        assert_eq!(
+            chelis_deep::printer::print_expr_flat(&respelled),
+            "(t-fn {} (t-var {} _) (t-var {} t8))"
+        );
+    }
 
     #[test]
     fn issue_1248_comparison_family_preserves_operand_surface() {
