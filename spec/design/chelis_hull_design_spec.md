@@ -1073,8 +1073,10 @@ lowering-trace --lib --test lowering_trace`. It must cover:
    inputs, the production splice map, and caller snapshots immediately before
    splicing, immediately after splicing, and after result packing/reuse hints.
    The returned value retains tuple/ADT structure, field order and names, including
-   empty discrete cotangent slots. Missing raw gradients remain missing in the AD
-   observation; their subsequent shaped zeros appear only in the packing snapshot.
+   empty discrete cotangent slots. A selected float input with no contribution
+   has its shape-preserving positive zero in the raw AD observation, and the
+   mapped zero is present immediately after splicing. Packing retains the
+   cotangent and any final reuse hints.
    Nested applications use their gradient context's parent as the caller context.
    This does not extend capture to host-classified structured/List applications;
    those still have `UnloweredDefinitions` boundaries. Structural value copying
@@ -1176,9 +1178,9 @@ The retained helper trace is owned and `Send + Sync`; the collector's local
 
 The focused IR oracle for this companion is `cargo nextest run -p chelis-ir
 --features lowering-trace --test helper_lowering_trace --test lowering_trace`.
-It compares traced/untraced helper graphs, raw versus shaped-zero gradients,
-tuple root order, actual fixed-control pre/post-AD execution and function
-projection. This IR evidence alone does not bind a trace to final emitted bytes;
+It compares traced/untraced helper graphs, raw shaped-zero gradients and their
+packed results, tuple root order, actual fixed-control pre/post-AD execution and
+function projection. This IR evidence alone does not bind a trace to final emitted bytes;
 the opt-in compilation API below supplies the final-success pairing.
 
 ### Opt-in observation of selected compiler emission

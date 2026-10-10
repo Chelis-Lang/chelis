@@ -79,7 +79,8 @@ pub struct Application {
     pub remap: BTreeMap<NodeId, NodeId>,
     pub before_splice: Dag,
     pub after_splice: Dag,
-    /// Includes shaped-zero materialization and final reuse hints.
+    /// Includes result packing and final reuse hints. A disconnected float
+    /// cotangent is already present in the raw AD and post-splice snapshots.
     pub after_packing: Dag,
     pub result: Value,
 }

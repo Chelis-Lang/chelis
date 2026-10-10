@@ -328,7 +328,7 @@ def second(x: tensor[3, f32]) -> tensor[3, f32] = grad(first)(x)
 
 #[cfg(feature = "lowering-trace")]
 #[test]
-fn shaped_zero_materialization_is_not_fabricated_in_the_raw_ad_result() {
+fn disconnected_shaped_zero_is_captured_in_the_raw_ad_result() {
     let source = r#"
 def constant(x: tensor[3, f32]) -> f32 = 1.0f32
 def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
@@ -336,15 +336,33 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
     let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
     let grad = &trace.gradients[0];
     assert_eq!(grad.wrt.len(), 1);
-    assert!(
-        grad.gradients.is_empty(),
-        "the AD pass itself does not materialize this zero"
+    assert_eq!(grad.gradients.len(), 1);
+    let raw_zero = grad.gradients[&grad.wrt[0]];
+    assert!(grad.backward.is_root(raw_zero));
+    assert_eq!(
+        grad.backward.get(raw_zero).unwrap().output_type.dims,
+        vec![chelis_ir::dag::DimInfo::Lit(3)]
+    );
+    let values = chelis_ir::eval::eval_tensor_roots_exact(&grad.backward, &[raw_zero], |name| {
+        (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![3], vec![1.0, -2.0, 3.0]))
+    })
+    .unwrap();
+    let zero_value = &values[&raw_zero];
+    assert_eq!(zero_value.shape, vec![3]);
+    assert_eq!(
+        zero_value
+            .to_f64_lossy_vec()
+            .iter()
+            .map(|value| (*value as f32).to_bits())
+            .collect::<Vec<_>>(),
+        vec![0; 3],
+        "the raw AD result is the exact positive zero of the argument shape"
     );
     assert!(!library.rootless_defs().contains("derivative"));
     let root = library.symbol_table()["derivative"];
     assert!(
         library.dag().is_root(root),
-        "source packing subsequently materializes it"
+        "source packing retains the AD cotangent as a result"
     );
     assert_eq!(
         library.dag().get(root).unwrap().output_type.dims,
@@ -355,9 +373,14 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
     let chelis_ir::lowering_trace::Value::Node(zero) = application.result else {
         panic!("single disconnected cotangent remains a tensor result");
     };
-    assert!(application.after_splice.get(zero).is_none());
+    assert_eq!(zero, application.remap[&raw_zero]);
+    assert!(application.before_splice.get(zero).is_none());
+    assert!(application.after_splice.get(zero).is_some());
     assert!(application.after_packing.get(zero).is_some());
-    assert!(application.after_packing.len() > application.after_splice.len());
+    assert_eq!(
+        application.after_packing.len(),
+        application.after_splice.len()
+    );
 }
 
 #[cfg(feature = "lowering-trace")]
