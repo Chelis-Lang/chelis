@@ -254,7 +254,7 @@ fn eval_stderr_expecting_failure(dir: &Path, source: &str, name: &str) -> String
     String::from_utf8(output.stderr).expect("utf-8 stderr")
 }
 
-fn build_compile_run(source: &str, name: &str) -> String {
+fn build_compile_execute(source: &str, name: &str) -> std::process::Output {
     let dir = tempdir().expect("tempdir");
     let src = dir.path().join(format!("{name}.ch"));
     let out_dir = dir.path().join(format!("{name}-out"));
@@ -305,7 +305,11 @@ fn build_compile_run(source: &str, name: &str) -> String {
         "link of chained-expand C must succeed: {link}"
     );
 
-    let run = StdCommand::new(&bin).output().expect("binary runs");
+    StdCommand::new(&bin).output().expect("binary runs")
+}
+
+fn build_compile_run(source: &str, name: &str) -> String {
+    let run = build_compile_execute(source, name);
     assert!(
         run.status.success(),
         "chained-expand binary must run: {}\nstderr: {}",
@@ -313,6 +317,43 @@ fn build_compile_run(source: &str, name: &str) -> String {
         String::from_utf8_lossy(&run.stderr)
     );
     String::from_utf8(run.stdout).expect("utf-8 stdout")
+}
+
+/// A claim on the first inserted axis remains distinct from the physical
+/// `shape(x, 2)` size source. The size expression computes h+1 while the
+/// declaration still claims h, so the first insert must trap before any
+/// later insert or helper activation executes.
+#[test]
+fn issue_579_chained_rank4_false_shape_equality_traps_on_eval_and_c() {
+    let source = chained_achw_source(&BIG_SHAPE, ExtentSpelling::Inline).replacen(
+        "shape(x, cast(2, i32))",
+        "add(shape(x, cast(2, i32)), 1i64)",
+        1,
+    );
+    assert_clean(
+        &check_json(&source),
+        "false chained insert claim checks clean",
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let eval = eval_stderr_expecting_failure(dir.path(), &source, "issue_579_false_h");
+    let compiled = build_compile_execute(&source, "issue_579_false_h_c");
+    assert!(
+        !compiled.status.success(),
+        "compiled C must reject the false insert claim: {}",
+        String::from_utf8_lossy(&compiled.stdout)
+    );
+    let c = String::from_utf8_lossy(&compiled.stderr);
+    for (lane, stderr) in [("eval", eval.as_str()), ("c", c.as_ref())] {
+        assert!(
+            stderr.contains("extent `h`: claimed = 4, insert axis 1 = 5"),
+            "{lane}: false equality must identify the declared and produced extents: {stderr}"
+        );
+        assert!(
+            stderr.contains("numeric trap: domain in insert at i64"),
+            "{lane}: the introducing insert owns the trap: {stderr}"
+        );
+    }
 }
 
 fn parse_printed_tensors(stdout: &str) -> Vec<(String, Vec<usize>, Vec<f64>)> {
