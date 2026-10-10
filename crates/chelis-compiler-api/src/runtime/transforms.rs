@@ -136,22 +136,54 @@ fn repack_scalar_gradient(value: RuntimeValue, prim: Prim) -> Result<RuntimeValu
     ))
 }
 
+fn stage_callable_argument<'v>(
+    kind: &TransformKind,
+    index: usize,
+    value: &'v RuntimeValue,
+    arg_exprs: &mut Vec<Expr>,
+    callable_arguments: &mut Vec<(usize, &'v RuntimeValue)>,
+    span: Span,
+) -> Result<bool, String> {
+    if !matches!(
+        value,
+        RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }
+    ) {
+        return Ok(false);
+    }
+    if matches!(kind, TransformKind::Vmap) {
+        return Err(format!(
+            "host runtime: `vmap(...)` argument {index} is a function value. \
+             spec/06-transformations.md section 3.6 broadcasts a non-tensor \
+             argument unbatched to every row, and this lane does not yet carry a \
+             function-valued `vmap` argument (chelis#3523); close over the function \
+             inside the mapped function instead, as in `vmap(fn (x) -> f(g, x))`."
+        ));
+    }
+    callable_arguments.push((arg_exprs.len(), value));
+    arg_exprs.push(make_unit_expr(span));
+    Ok(true)
+}
+
+struct StagedTransformActuals<'v> {
+    placeholder_names: Vec<String>,
+    placeholder_types: Vec<TensorType>,
+    placeholder_tensors: UnordMap<String, IrTensorValue>,
+    arg_exprs: Vec<Expr>,
+    arg_repacks: Vec<ArgRepack>,
+    callable_arguments: Vec<(usize, &'v RuntimeValue)>,
+}
+
 impl<'a> EvalContext<'a> {
-    /// Bucket 1 entry point: evaluate `(grad f)(args...)` /
-    /// `(vmap f)(args...)` in the host runtime. Synthesizes a Deep
-    /// `(app {} <transform-expr> (var __chelis_xform_arg_k))` form and
-    /// routes it through `chelis_ir::lower::lower_subexpr_program` +
-    /// `chelis_ir::eval::eval_tensor_*`. The IR pipeline already
-    /// implements grad and vmap (it's what the C backend uses); we just
-    /// reuse it instead of writing a parallel reverse-mode evaluator
-    /// inside the host-runtime tree.
-    pub(super) fn apply_transform(
-        &mut self,
-        kind: TransformKind,
-        transform_expr: &Expr,
-        captured_env: Frame,
-        args: Vec<RuntimeValue>,
-    ) -> Result<RuntimeValue, String> {
+    fn stage_transform_actuals<'v>(
+        &self,
+        kind: &TransformKind,
+        args: &'v [RuntimeValue],
+        fn_expr: Option<&Expr>,
+        grad_formals: Option<&Expr>,
+        vmap_formals: Option<(&Expr, Option<usize>)>,
+        grad_wrt: &Option<Vec<usize>>,
+    ) -> Result<StagedTransformActuals<'v>, String> {
+        let span = Span::new(0, 0);
         // Allocate placeholder names for the call's actual arguments. We
         // synthesize `(var {type: ...} __chelis_xform_arg_K)` inside the
         // app form and feed the corresponding tensor values via the
@@ -177,88 +209,6 @@ impl<'a> EvalContext<'a> {
         // Function-valued `grad` arguments, by position, staged as callables
         // once the frame's closure conversion exists below.
         let mut callable_arguments: Vec<(usize, &RuntimeValue)> = Vec::new();
-        // wrt indices for this grad call, if narrowed (`grad(f, wrt=i)`).
-        // `None` means differentiate every differentiable argument, exactly
-        // as the checker's `grad_result_type` and the IR lowering's
-        // `is_selected_wrt` do.
-        let grad_wrt = match kind {
-            TransformKind::Grad => grad_wrt_indices_from_transform(transform_expr)?,
-            TransformKind::Vmap => None,
-        };
-
-        // Read the exact admitted transform carrier so we can inspect the inner
-        // function's parameter type metadata. The transform_expr is the
-        // captured `(grad ... fn-expr ...)` or `(vmap ... fn-expr
-        // axis-lit)` form; the fn-expr is the first child.
-        let expected_tag = match kind {
-            TransformKind::Grad => DeepTag::Grad,
-            TransformKind::Vmap => DeepTag::Vmap,
-        };
-        let transform_children = match transform_expr.carrier() {
-            ExprCarrier::DecodedNode(tag, _, children) if tag == expected_tag => children,
-            ExprCarrier::DecodedNode(tag, _, _) => {
-                return Err(format!(
-                    "host runtime: expected `{}`, found `{}` transform",
-                    expected_tag.as_str(),
-                    tag.as_str()
-                ));
-            }
-            ExprCarrier::StructuralList(_)
-            | ExprCarrier::UndecodableHead(_, _, _)
-            | ExprCarrier::Atom(_)
-            | ExprCarrier::MetadataMap(_)
-            | ExprCarrier::MetadataExpression(_) => {
-                return Err(format!(
-                    "host runtime: `{}` transform is not a decoded runtime node",
-                    expected_tag.as_str()
-                ));
-            }
-        };
-        let fn_expr = transform_children.first();
-        // #1956, chelis#2588: for `grad` and `vmap` alike, only the
-        // already-resolved direct declaration owns free values here. The
-        // fresh lowerer has no local callable for this operand; its exact
-        // program_defs entry is the original Fn, and captured-closure
-        // injection below cannot replace that entry.
-        // A present snapshot binding, alias or inline Fn stays on the old
-        // lexical path. Do not use current caller bindings or the formals
-        // helper to infer identity, and do not rewrite the target.
-        let declaration_captures = fn_expr.and_then(var_name).is_some_and(|name| {
-            !captured_env.contains_key(name)
-                && self.program.defs().get(name).is_some_and(|body| {
-                    tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn)
-                })
-        });
-        let grad_formals = match kind {
-            TransformKind::Grad => {
-                resolve_transform_fn_for_formals(transform_expr, self.program.defs())
-                    .map(|(function, _)| function)
-            }
-            TransformKind::Vmap => None,
-        };
-
-        // chelis#351: in the vmap lane, marshalling the batched actuals
-        // with bare Lit dims loses the callee's declared dim names. The
-        // inlined body keeps its formal named dims (e.g. a Tier-3
-        // rank-poly named reduce's surviving `hidden`), and vmap's rank
-        // shift (batched actual = formal rank + 1) defeats the same-rank
-        // formal/actual remap at the transform boundary — so the name
-        // stays unbound and no input declares it, so the C lane has no
-        // extent source for it. Type the placeholder from
-        // the callee's declared formals instead (the chelis#338/#346
-        // pattern for plain def calls): the vmap axis stays `Lit`, the
-        // mapped axes carry the formal's names with runtime sizes, and
-        // the symbolic-dim machinery binds the body's names against the
-        // placeholder Load. Best-effort: any unresolved shape falls back
-        // to the Lit-dim marshalling below.
-        let vmap_formals = match kind {
-            TransformKind::Vmap => {
-                resolve_transform_fn_for_formals(transform_expr, self.program.defs())
-            }
-            TransformKind::Grad => None,
-        };
-
-        let span = Span::new(0, 0);
         for (index, value) in args.iter().enumerate() {
             // A handled grad must allocate Random ordinals along the branch
             // actually selected by a concrete discrete argument. Keeping a
@@ -341,21 +291,14 @@ impl<'a> EvalContext<'a> {
             // `unit`, so it owns no root; it is passed as the callable it is,
             // staged below by the same closure conversion as the frame's own
             // closures.
-            if matches!(
+            if stage_callable_argument(
+                kind,
+                index,
                 value,
-                RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }
-            ) {
-                if matches!(kind, TransformKind::Vmap) {
-                    return Err(format!(
-                        "host runtime: `vmap(...)` argument {index} is a function value. \
-                         spec/06-transformations.md section 3.6 broadcasts a non-tensor \
-                         argument unbatched to every row, and this lane does not yet carry a \
-                         function-valued `vmap` argument (chelis#3523); close over the function \
-                         inside the mapped function instead, as in `vmap(fn (x) -> f(g, x))`."
-                    ));
-                }
-                callable_arguments.push((arg_exprs.len(), value));
-                arg_exprs.push(make_unit_expr(span));
+                &mut arg_exprs,
+                &mut callable_arguments,
+                span,
+            )? {
                 continue;
             }
             let placeholder = format!("__chelis_xform_arg_{index}");
@@ -411,6 +354,129 @@ impl<'a> EvalContext<'a> {
             None => arg_repacks.into_iter().map(|(_, plan)| plan).collect(),
         };
 
+        Ok(StagedTransformActuals {
+            placeholder_names,
+            placeholder_types,
+            placeholder_tensors,
+            arg_exprs,
+            arg_repacks,
+            callable_arguments,
+        })
+    }
+
+    /// Bucket 1 entry point: evaluate `(grad f)(args...)` /
+    /// `(vmap f)(args...)` in the host runtime. Synthesizes a Deep
+    /// `(app {} <transform-expr> (var __chelis_xform_arg_k))` form and
+    /// routes it through `chelis_ir::lower::lower_subexpr_program` +
+    /// `chelis_ir::eval::eval_tensor_*`. The IR pipeline already
+    /// implements grad and vmap (it's what the C backend uses); we just
+    /// reuse it instead of writing a parallel reverse-mode evaluator
+    /// inside the host-runtime tree.
+    pub(super) fn apply_transform(
+        &mut self,
+        kind: TransformKind,
+        transform_expr: &Expr,
+        captured_env: Frame,
+        args: Vec<RuntimeValue>,
+    ) -> Result<RuntimeValue, String> {
+        // wrt indices for this grad call, if narrowed (`grad(f, wrt=i)`).
+        // `None` means differentiate every differentiable argument, exactly
+        // as the checker's `grad_result_type` and the IR lowering's
+        // `is_selected_wrt` do.
+        let grad_wrt = match kind {
+            TransformKind::Grad => grad_wrt_indices_from_transform(transform_expr)?,
+            TransformKind::Vmap => None,
+        };
+
+        // Read the exact admitted transform carrier so we can inspect the inner
+        // function's parameter type metadata. The transform_expr is the
+        // captured `(grad ... fn-expr ...)` or `(vmap ... fn-expr
+        // axis-lit)` form; the fn-expr is the first child.
+        let expected_tag = match kind {
+            TransformKind::Grad => DeepTag::Grad,
+            TransformKind::Vmap => DeepTag::Vmap,
+        };
+        let transform_children = match transform_expr.carrier() {
+            ExprCarrier::DecodedNode(tag, _, children) if tag == expected_tag => children,
+            ExprCarrier::DecodedNode(tag, _, _) => {
+                return Err(format!(
+                    "host runtime: expected `{}`, found `{}` transform",
+                    expected_tag.as_str(),
+                    tag.as_str()
+                ));
+            }
+            ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => {
+                return Err(format!(
+                    "host runtime: `{}` transform is not a decoded runtime node",
+                    expected_tag.as_str()
+                ));
+            }
+        };
+        let fn_expr = transform_children.first();
+        // #1956, chelis#2588: for `grad` and `vmap` alike, only the
+        // already-resolved direct declaration owns free values here. The
+        // fresh lowerer has no local callable for this operand; its exact
+        // program_defs entry is the original Fn, and captured-closure
+        // injection below cannot replace that entry.
+        // A present snapshot binding, alias or inline Fn stays on the old
+        // lexical path. Do not use current caller bindings or the formals
+        // helper to infer identity, and do not rewrite the target.
+        let declaration_captures = fn_expr.and_then(var_name).is_some_and(|name| {
+            !captured_env.contains_key(name)
+                && self.program.defs().get(name).is_some_and(|body| {
+                    tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn)
+                })
+        });
+        let grad_formals = match kind {
+            TransformKind::Grad => {
+                resolve_transform_fn_for_formals(transform_expr, self.program.defs())
+                    .map(|(function, _)| function)
+            }
+            TransformKind::Vmap => None,
+        };
+
+        // chelis#351: in the vmap lane, marshalling the batched actuals
+        // with bare Lit dims loses the callee's declared dim names. The
+        // inlined body keeps its formal named dims (e.g. a Tier-3
+        // rank-poly named reduce's surviving `hidden`), and vmap's rank
+        // shift (batched actual = formal rank + 1) defeats the same-rank
+        // formal/actual remap at the transform boundary — so the name
+        // stays unbound and no input declares it, so the C lane has no
+        // extent source for it. Type the placeholder from
+        // the callee's declared formals instead (the chelis#338/#346
+        // pattern for plain def calls): the vmap axis stays `Lit`, the
+        // mapped axes carry the formal's names with runtime sizes, and
+        // the symbolic-dim machinery binds the body's names against the
+        // placeholder Load. Best-effort: any unresolved shape falls back
+        // to the Lit-dim marshalling below.
+        let vmap_formals = match kind {
+            TransformKind::Vmap => {
+                resolve_transform_fn_for_formals(transform_expr, self.program.defs())
+            }
+            TransformKind::Grad => None,
+        };
+
+        let span = Span::new(0, 0);
+        let StagedTransformActuals {
+            mut placeholder_names,
+            mut placeholder_types,
+            mut placeholder_tensors,
+            mut arg_exprs,
+            arg_repacks,
+            callable_arguments,
+        } = self.stage_transform_actuals(
+            &kind,
+            &args,
+            fn_expr,
+            grad_formals,
+            vmap_formals,
+            &grad_wrt,
+        )?;
+
         // chelis#2619: the target reads the caller's frame lexically, and each
         // caller closure it reaches reads its own environment. Closure-convert
         // them: every such read is respelled to a fresh name bound around the
@@ -429,14 +495,7 @@ impl<'a> EvalContext<'a> {
             fresh: 0,
             span,
         };
-        for (position, value) in callable_arguments {
-            let Some(staged) = captures.stage(value)? else {
-                return Err(format!(
-                    "grad argument {position} is a function value that could not be staged"
-                ));
-            };
-            arg_exprs[position] = var_expr(&staged, span);
-        }
+        captures.stage_callable_arguments(callable_arguments, &mut arg_exprs)?;
 
         // Synthesize `(app {} <transform-expr> <arg-expr_0> ...)`. A transform
         // captured from a bind value carries that binding's origin, which the
@@ -1245,6 +1304,22 @@ struct FrameCaptures<'a> {
 }
 
 impl FrameCaptures<'_> {
+    fn stage_callable_arguments(
+        &mut self,
+        callable_arguments: Vec<(usize, &RuntimeValue)>,
+        arg_exprs: &mut [Expr],
+    ) -> Result<(), String> {
+        for (position, value) in callable_arguments {
+            let Some(staged) = self.stage(value)? else {
+                return Err(format!(
+                    "grad argument {position} is a function value that could not be staged"
+                ));
+            };
+            arg_exprs[position] = var_expr(&staged, self.span);
+        }
+        Ok(())
+    }
+
     fn fresh_name(&mut self) -> String {
         let name = format!("__chelis_xform_capture_{}", self.fresh);
         self.fresh += 1;
