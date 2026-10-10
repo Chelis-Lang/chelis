@@ -158,9 +158,13 @@ class BuildRetryTest(unittest.TestCase):
 
 
 class GmpDownloadFallbackTest(unittest.TestCase):
-    OLD_URL = "https://github.com/cvc5/cvc5-deps/blob/main/gmp-6.3.0.tar.bz2?raw=true"
-    RAW_URL = "https://raw.githubusercontent.com/cvc5/cvc5-deps/main/gmp-6.3.0.tar.bz2"
+    VERSION_LINE = '  set(GMP_VERSION "6.3.0")'
+    OLD_LINE = "    URL https://github.com/cvc5/cvc5-deps/blob/main/gmp-${GMP_VERSION}.tar.bz2?raw=true"
+    RAW_LINE = "    URL https://raw.githubusercontent.com/cvc5/cvc5-deps/main/gmp-6.3.0.tar.bz2"
     HASH = "ac28211a7cfb609bae2e2c8d6058d66c8fe96434f740cf6fe2e47b000d1c20cb"
+
+    def recipe(self, *, version: str = VERSION_LINE, url: str = OLD_LINE, hash_value: str = HASH) -> str:
+        return f"{version}\n{url}\n    URL_HASH SHA256={hash_value}\n"
 
     def test_transient_retry_switches_only_the_gmp_transport_url(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -170,7 +174,7 @@ class GmpDownloadFallbackTest(unittest.TestCase):
                 / "cmake/FindGMP.cmake"
             )
             source.parent.mkdir(parents=True)
-            original = f"URL {self.OLD_URL}\nURL_HASH SHA256={self.HASH}\n"
+            original = self.recipe()
             source.write_text(original, encoding="utf-8")
             case = self
 
@@ -182,7 +186,7 @@ class GmpDownloadFallbackTest(unittest.TestCase):
                     if self.calls == 1:
                         self.assert_source(original)
                         return 101, True
-                    self.assert_source(original.replace(GmpDownloadFallbackTest.OLD_URL, GmpDownloadFallbackTest.RAW_URL))
+                    self.assert_source(original.replace(GmpDownloadFallbackTest.OLD_LINE, GmpDownloadFallbackTest.RAW_LINE))
                     return 0, False
 
                 def assert_source(self, expected):
@@ -195,7 +199,7 @@ class GmpDownloadFallbackTest(unittest.TestCase):
             )
             self.assertEqual(rc, 0)
             self.assertEqual(runner.calls, 2)
-            self.assertEqual(source.read_text(encoding="utf-8").count(self.RAW_URL), 1)
+            self.assertEqual(source.read_text(encoding="utf-8").count(self.RAW_LINE), 1)
             self.assertIn(f"URL_HASH SHA256={self.HASH}", source.read_text(encoding="utf-8"))
 
     def test_real_failure_does_not_rewrite_source(self) -> None:
@@ -203,7 +207,7 @@ class GmpDownloadFallbackTest(unittest.TestCase):
             root = Path(temp)
             source = root / "release/build/cvc5-sys-abc/out/cvc5/cmake/FindGMP.cmake"
             source.parent.mkdir(parents=True)
-            original = f"URL {self.OLD_URL}\nURL_HASH SHA256={self.HASH}\n"
+            original = self.recipe()
             source.write_text(original, encoding="utf-8")
             rc = ci_cvc5_build.build(
                 ["cargo", "build"], runner=FakeRunner([(101, False)]),
@@ -218,8 +222,10 @@ class GmpDownloadFallbackTest(unittest.TestCase):
             source = root / "release/build/cvc5-sys-abc/out/cvc5/cmake/FindGMP.cmake"
             source.parent.mkdir(parents=True)
             for original in (
-                f"URL https://example.com/gmp.tar.bz2\nURL_HASH SHA256={self.HASH}\n",
-                f"URL {self.OLD_URL}\nURL_HASH SHA256=unknown\n",
+                self.recipe(url="    URL https://example.com/gmp.tar.bz2"),
+                self.recipe(version='  set(GMP_VERSION "6.4.0")'),
+                self.recipe(hash_value="unknown"),
+                self.recipe(hash_value="unknown") + f"# {self.HASH}\n",
             ):
                 with self.subTest(original=original):
                     source.write_text(original, encoding="utf-8")

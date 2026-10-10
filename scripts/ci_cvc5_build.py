@@ -115,9 +115,18 @@ TRANSIENT_SIGNATURES: tuple[str, ...] = (
 # upstream CMake URL_HASH continues to verify the bytes after this transport
 # substitution. Keep the source spelling and expected hash exact so an
 # upstream recipe change fails visibly rather than being patched by accident.
-GMP_BLOB_URL = "https://github.com/cvc5/cvc5-deps/blob/main/gmp-6.3.0.tar.bz2?raw=true"
-GMP_RAW_URL = "https://raw.githubusercontent.com/cvc5/cvc5-deps/main/gmp-6.3.0.tar.bz2"
-GMP_SHA256 = "ac28211a7cfb609bae2e2c8d6058d66c8fe96434f740cf6fe2e47b000d1c20cb"
+GMP_VERSION_LINE = '  set(GMP_VERSION "6.3.0")'
+GMP_BLOB_LINE = (
+    "    URL https://github.com/cvc5/cvc5-deps/blob/main/"
+    "gmp-${GMP_VERSION}.tar.bz2?raw=true"
+)
+GMP_RAW_LINE = (
+    "    URL https://raw.githubusercontent.com/cvc5/cvc5-deps/main/"
+    "gmp-6.3.0.tar.bz2"
+)
+GMP_HASH_LINE = (
+    "    URL_HASH SHA256=ac28211a7cfb609bae2e2c8d6058d66c8fe96434f740cf6fe2e47b000d1c20cb"
+)
 
 
 def rewrite_gmp_download_url(target_root: Path) -> list[Path]:
@@ -135,11 +144,12 @@ def rewrite_gmp_download_url(target_root: Path) -> list[Path]:
     for pattern in patterns:
         for path in target_root.glob(pattern):
             source = path.read_text(encoding="utf-8")
-            if source.count(f"URL {GMP_BLOB_URL}") != 1:
+            if source.splitlines().count(GMP_VERSION_LINE) != 1:
                 continue
-            if f"URL_HASH SHA256={GMP_SHA256}" not in source:
+            recipe = f"{GMP_BLOB_LINE}\n{GMP_HASH_LINE}"
+            if source.count(recipe) != 1:
                 continue
-            path.write_text(source.replace(GMP_BLOB_URL, GMP_RAW_URL), encoding="utf-8")
+            path.write_text(source.replace(recipe, f"{GMP_RAW_LINE}\n{GMP_HASH_LINE}", 1), encoding="utf-8")
             changed.append(path)
     return changed
 
