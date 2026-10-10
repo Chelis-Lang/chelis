@@ -72,12 +72,31 @@ fn chelis_std_self_test_corpus_passes_under_chelis_test() {
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&pkg)
         .args(["test", "tests/"])
-        .assert()
-        .success()
-        .code(0);
+        .assert();
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone())
         .expect("utf-8 stdout from chelis test");
+    let failed_rows = stdout
+        .lines()
+        .filter(|line| line.contains(" FAIL"))
+        .collect::<Vec<_>>();
+    let output_tail = stdout
+        .lines()
+        .rev()
+        .take(10)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        assert.get_output().status.success(),
+        "chelis-std self-test corpus exited with {}.\nFailing test rows:\n{}\nOutput tail:\n{}\nstderr:\n{}",
+        assert.get_output().status,
+        failed_rows.join("\n"),
+        output_tail,
+        String::from_utf8_lossy(&assert.get_output().stderr)
+    );
 
     // Locate the canonical summary line `N passed, M failed` emitted by
     // `chelis test`. Source: `crates/chelis-cli/src/main.rs` writes
