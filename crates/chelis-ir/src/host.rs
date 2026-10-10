@@ -17551,7 +17551,11 @@ fn remap_tensor_helper_dim_symbols_raising(
     }
 
     let mut expected_output = expected_output.clone();
-    if let Some(mut returned) = dag.roots().first().copied() {
+    // A single expected output can bind only a single root. Gradient helpers
+    // may pack cotangents in an order different from their parameter order;
+    // binding their first root globally can rewrite an unrelated runtime axis.
+    if let [root] = dag.roots() {
+        let mut returned = *root;
         loop {
             let node = dag.get(returned).expect("helper root belongs to DAG");
             for dependency in &node.shape_deps {
@@ -17597,7 +17601,9 @@ fn remap_tensor_helper_dim_symbols_raising(
         .iter()
         .map(|input| input.ty.clone())
         .collect::<Vec<_>>();
-    if let Some(root) = dag.roots().first().and_then(|id| dag.get(*id)) {
+    if let [root] = dag.roots()
+        && let Some(root) = dag.get(*root)
+    {
         formal_params.push(root.output_type.clone());
         let actual_output = if tensor_type_has_synthetic_dims(expected_output) {
             match root.op {
@@ -17639,9 +17645,9 @@ fn remap_tensor_helper_dim_symbols_raising(
     // symbol painted anywhere else has no declaring Load or op and resolves
     // to no extent origin at emission; those axes stay anon and size
     // themselves per node.
-    if let (Some(root_id), Some(actual_output)) =
-        (dag.roots().first().copied(), actual_inputs.last())
-        && let Some(root) = remapped.get(root_id)
+    if let [root_id] = dag.roots()
+        && let Some(actual_output) = actual_inputs.last()
+        && let Some(root) = remapped.get(*root_id)
         && root.output_type.dims.len() == actual_output.dims.len()
     {
         let is_anon = |dim: &crate::dag::DimInfo| matches!(dim, crate::dag::DimInfo::Named(name, None) if name.is_empty() || name == "*");
@@ -17662,7 +17668,7 @@ fn remap_tensor_helper_dim_symbols_raising(
         if changed {
             let op = root.op.clone();
             let inputs = root.inputs.clone();
-            remapped.replace_node(root_id, op, inputs, output);
+            remapped.replace_node(*root_id, op, inputs, output);
         }
     }
     actualize_tensor_helper_types(&remapped, scope)
