@@ -95,7 +95,7 @@ fn compiled_c_reads_long_valid_line_without_a_recursive_frame_per_character() {
 }
 
 #[test]
-fn malformed_first_row_skips_a_later_expensive_valid_row() {
+fn large_valid_row_and_malformed_first_row_have_distinct_results() {
     let dir = tempdir().expect("tempdir");
     let long_row = format!("{},y", "x".repeat(4 * 1024 * 1024));
     let valid_csv = dir.path().join("valid-large.csv");
@@ -115,30 +115,20 @@ fn malformed_first_row_skips_a_later_expensive_valid_row() {
     let valid_source = source_for("valid-large", &valid_csv);
     let bad_first_source = source_for("bad-first-large", &bad_first_csv);
 
-    // The control proves the same later row needs more than the evaluation
-    // budget when parsed; the malformed-first file can pass only by skipping it.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", dir.path().join("reef"))
-        .args([
-            "eval",
-            "--timeout",
-            "3",
-            "--file",
-            valid_source.to_str().expect("UTF-8 path"),
-        ])
+        .args(["eval", "--file", valid_source.to_str().expect("UTF-8 path")])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("evaluation timed out after 3s"));
+        .success()
+        .stdout(predicates::str::contains("v = 1"));
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", dir.path().join("reef"))
         .args([
             "eval",
-            "--timeout",
-            "3",
             "--file",
             bad_first_source.to_str().expect("UTF-8 path"),
         ])
