@@ -194,11 +194,31 @@ def test_empty_header_round_trips() -> unit ! { Test, IO } = {
   check_field(back, cast(0, i64), "", "x", "value keyed by the empty header reads back")
 }
 def test_to_csv_handles_multi_kilobyte_fields() -> unit ! { Test } = {
-  tail = fold(fn (acc: string, i: i64) -> string_concat(acc, "ab"), "", range(cast(0, i64), cast(2048, i64)))
+  tail = kib4_line()
   field = string_concat("a\"b,", tail)
   rows = [dict_of([("k", field), ("v", "plain")])]
   expected = string_concat("k,v\n\"a\"\"b,", string_concat(tail, "\",plain\n"))
   assert_eq(to_csv(rows), expected, "4 KiB quoted field renders byte-exactly")
+}
+def kib32_line() -> string = {
+  s4 = kib4_line()
+  s8 = string_concat(s4, s4)
+  s16 = string_concat(s8, s8)
+  string_concat(s16, s16)
+}
+def test_to_csv_handles_long_quoted_field() -> unit ! { Test } = {
+  tail = kib32_line()
+  rows = [dict_of([("k", string_concat(tail, "\""))])]
+  expected = string_concat("k\n\"", string_concat(tail, "\"\"\"\n"))
+  assert_eq(to_csv(rows), expected, "32 KiB field with final quote renders byte-exactly")
+}
+def test_try_to_csv_rejects_long_newline_field() -> unit ! { Test } = {
+  field = string_concat(kib32_line(), "\n")
+  rows = [dict_of([("k", field)])]
+  match try_to_csv(rows) with {
+    | Some(_) => fail("long field with LF must not serialize")
+    | None => assert_true(true, "long field with LF is rejected")
+  }
 }
 def test_try_write_csv_mismatched_rows_returns_none() -> unit ! { Test, IO } = {
   rows = [dict_of([("a", "1")]), dict_of([("b", "2")])]
