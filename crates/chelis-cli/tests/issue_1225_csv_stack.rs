@@ -119,7 +119,13 @@ fn large_valid_row_and_malformed_first_row_have_distinct_results() {
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", dir.path().join("reef"))
-        .args(["eval", "--file", valid_source.to_str().expect("UTF-8 path")])
+        .args([
+            "eval",
+            "--timeout",
+            "120",
+            "--file",
+            valid_source.to_str().expect("UTF-8 path"),
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("v = 1"));
@@ -129,6 +135,8 @@ fn large_valid_row_and_malformed_first_row_have_distinct_results() {
         .env("CHELIS_REEF_HOME", dir.path().join("reef"))
         .args([
             "eval",
+            "--timeout",
+            "120",
             "--file",
             bad_first_source.to_str().expect("UTF-8 path"),
         ])

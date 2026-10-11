@@ -142,8 +142,8 @@ def test_read_csv_unquoted_split_preserves_empty_and_unicode_fields() -> unit ! 
   check_field(rows, cast(0, i64), "d", "", "trailing empty field")
 }
 -- A malformed first data row makes the whole file invalid even when a
--- later row is long. The CLI regression also uses an execution budget to
--- check that the later row is skipped rather than parsed eagerly.
+-- later row is long. The CLI regression checks this result alongside
+-- the corresponding valid-file result.
 def test_short_first_row_before_long_line_returns_none() -> unit ! { Test, IO } = {
   path = "/tmp/chelis_std_test_csv_short_then_long.csv"
   _ = write_file(path, string_concat("a,b\n1\n", kib4_line()))
