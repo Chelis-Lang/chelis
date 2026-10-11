@@ -663,10 +663,10 @@ v4 = print(ok_quote)
 
 /// A malformed first data row followed by a large later line returns None.
 /// The 4 MiB line exercises the compiled package path. The CLI regression
-/// separately checks skipped work with a controlled evaluation budget.
+/// checks the valid and malformed file results with the same later row.
 #[test]
 #[ignore = "manual gate: standard IO package acceptance suite exceeds the default inner-loop budget"]
-fn reef_std_csv_compiled_lane_short_circuits_before_long_line() {
+fn reef_std_csv_compiled_lane_rejects_short_row_before_long_line() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
     let std_pkg = dir.path().join("chelis-std");
