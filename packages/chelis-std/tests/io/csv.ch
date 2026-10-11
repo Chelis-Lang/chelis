@@ -101,6 +101,46 @@ def kib4_line() -> string = {
   s2048 = string_concat(s1024, s1024)
   string_concat(s2048, s2048)
 }
+def kib16_line() -> string = {
+  s4 = kib4_line()
+  s8 = string_concat(s4, s4)
+  string_concat(s8, s8)
+}
+def repeat_128(text: string) -> string = {
+  s2 = string_concat(text, text)
+  s4 = string_concat(s2, s2)
+  s8 = string_concat(s4, s4)
+  s16 = string_concat(s8, s8)
+  s32 = string_concat(s16, s16)
+  s64 = string_concat(s32, s32)
+  string_concat(s64, s64)
+}
+def test_read_csv_preserves_long_unquoted_field() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_long_unquoted.csv"
+  field = kib16_line()
+  _ = write_file(path, string_concat("k\n", field))
+  rows = read_csv(path)
+  check_field(rows, cast(0, i64), "k", field, "16 KiB unquoted field survives parsing")
+}
+def test_try_read_csv_rejects_long_unquoted_ragged_row() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_long_ragged.csv"
+  _ = write_file(path, string_concat("a,b\n", kib16_line()))
+  match try_read_csv(path) with {
+    | Some(_) => fail("long unquoted row missing a column must be rejected")
+    | None => assert_true(true, "long unquoted row missing a column is rejected")
+  }
+}
+def test_read_csv_unquoted_split_preserves_empty_and_unicode_fields() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_unquoted_boundary.csv"
+  left = repeat_128("x")
+  right = repeat_128("é")
+  _ = write_file(path, string_concat("a,b,c,d\n", string_concat(",", string_concat(left, string_concat(",", string_concat(right, ","))))))
+  rows = read_csv(path)
+  _ = check_field(rows, cast(0, i64), "a", "", "leading empty field")
+  _ = check_field(rows, cast(0, i64), "b", left, "field ending at a recursive split")
+  _ = check_field(rows, cast(0, i64), "c", right, "unicode scalar field before trailing delimiter")
+  check_field(rows, cast(0, i64), "d", "", "trailing empty field")
+}
 -- A malformed first data row makes the whole file invalid even when a
 -- later row is long. The CLI regression also uses an execution budget to
 -- check that the later row is skipped rather than parsed eagerly.
