@@ -54,7 +54,13 @@ def render_line(fields: List[string]) -> string = {
   if eq(string_len(line), cast(0, i64)) then "\"\"" else line
 }
 def render_field(text: string) -> string = if or(string_contains(text, ","), string_contains(text, "\"")) then string_concat("\"", string_concat(double_quotes(text), "\"")) else text
-def double_quotes(text: string) -> string = if not(string_contains(text, "\"")) then text else fold(fn (acc: string, idx: i64) -> string_concat(acc, if eq(string_slice(text, idx, cast(1, i64)), "\"") then "\"\"" else string_slice(text, idx, cast(1, i64))), "", range(cast(0, i64), string_len(text)))
+def double_quotes(text: string) -> string =
+  if not(string_contains(text, "\"")) then text else if lte(string_len(text), cast(64, i64)) then fold(fn (acc: string, idx: i64) -> string_concat(acc, if eq(string_slice(text, idx, cast(1, i64)), "\"") then "\"\"" else string_slice(text, idx, cast(1, i64))), "", range(cast(0, i64), string_len(text))) else {
+    middle = floor_div(string_len(text), cast(2, i64))
+    left = string_slice(text, cast(0, i64), middle)
+    right = string_slice(text, middle, sub(string_len(text), middle))
+    string_concat(double_quotes(left), double_quotes(right))
+  }
 def first_invalid_row(rows: List[Dict[string, string]]) -> i64 =
   if eq(len(rows), cast(0, i64)) then cast(-1, i64) else {
     headers = dict_keys(index(rows, cast(0, i64)))
