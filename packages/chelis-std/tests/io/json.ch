@@ -290,15 +290,71 @@ def test_try_load_json_missing_path_returns_none() -> unit ! { Test, IO } =
     | Some(_) => fail("try_load_json on a missing path must be None, got Some")
     | None => assert_true(true, "missing path -> None (not a crash)")
   }
+def json_kib16() -> string = {
+  s1 = "x"
+  s2 = string_concat(s1, s1)
+  s4 = string_concat(s2, s2)
+  s8 = string_concat(s4, s4)
+  s16 = string_concat(s8, s8)
+  s32 = string_concat(s16, s16)
+  s64 = string_concat(s32, s32)
+  s128 = string_concat(s64, s64)
+  s256 = string_concat(s128, s128)
+  s512 = string_concat(s256, s256)
+  s1024 = string_concat(s512, s512)
+  s2048 = string_concat(s1024, s1024)
+  s4096 = string_concat(s2048, s2048)
+  s8192 = string_concat(s4096, s4096)
+  string_concat(s8192, s8192)
+}
+def json_repeat_128(text: string) -> string = {
+  s2 = string_concat(text, text)
+  s4 = string_concat(s2, s2)
+  s8 = string_concat(s4, s4)
+  s16 = string_concat(s8, s8)
+  s32 = string_concat(s16, s16)
+  s64 = string_concat(s32, s32)
+  string_concat(s64, s64)
+}
+def json_repeat_2048(text: string) -> string = {
+  s128 = json_repeat_128(text)
+  s256 = string_concat(s128, s128)
+  s512 = string_concat(s256, s256)
+  s1024 = string_concat(s512, s512)
+  string_concat(s1024, s1024)
+}
+def test_parse_json_preserves_long_string() -> unit ! { Test } = {
+  field = json_kib16()
+  assert_eq(parse_json(string_concat("\"", string_concat(field, "\""))), JsonString(field), "16 KiB JSON string parses byte-exactly")
+}
+def test_to_json_escapes_long_string() -> unit ! { Test } = {
+  field = json_kib16()
+  assert_eq(to_json(JsonString(string_concat(field, "\u{8}"))), string_concat("\"", string_concat(field, "\\b\"")), "16 KiB JSON string escapes trailing control")
+}
+def test_parse_json_long_string_handles_surrogate_pair_across_split() -> unit ! { Test } = {
+  left = json_repeat_128("é")
+  right = json_repeat_128("β")
+  raw = string_concat("\"", string_concat(left, string_concat("\\ud83d\\ude00", string_concat(right, "\""))))
+  assert_eq(parse_json(raw), JsonString(string_concat(left, string_concat("😀", right))), "JSON surrogate pair crossing a split decodes to one scalar")
+}
+def test_try_parse_json_rejects_long_string_with_raw_control() -> unit ! { Test } = {
+  field = json_kib16()
+  match try_parse_json(string_concat("\"", string_concat(field, "\u{8}\""))) with {
+    | Some(_) => fail("long JSON string with raw control must be rejected")
+    | None => assert_true(true, "long JSON string with raw control is rejected")
+  }
+}
 def test_to_json_long_string_renders_escaped() -> unit ! { Test } = {
-  tail = fold(fn (acc: string, i: i64) -> string_concat(acc, "ab"), "", range(cast(0, i64), cast(2048, i64)))
+  tail = json_repeat_2048("ab")
   big = string_concat("a\"b\\c", tail)
   expected = string_concat("\"a\\\"b\\\\c", string_concat(tail, "\""))
+  _ = assert_eq(string_len(tail), 4096i64, "doubled builder keeps the 4 KiB tail")
   _ = assert_eq(to_json(JsonString(big)), expected, "4 KiB string with escapes renders byte-exactly")
   assert_eq(parse_json(expected), JsonString(big), "4 KiB string parses back without input-size recursion")
 }
 def test_try_parse_json_long_invalid_string_rejects() -> unit ! { Test } = {
-  prefix = fold(fn (acc: string, i: i64) -> string_concat(acc, "a"), "", range(0i64, 2048i64))
+  prefix = json_repeat_2048("a")
+  _ = assert_eq(string_len(prefix), 2048i64, "doubled builder keeps the 2 KiB prefix")
   match try_parse_json(string_concat("\"", string_concat(prefix, "\\q\""))) with {
     | Some(_) => fail("a long string with an invalid escape must be rejected")
     | None => assert_true(true, "long invalid string rejected")

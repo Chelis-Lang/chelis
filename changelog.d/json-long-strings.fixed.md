@@ -1,0 +1,1 @@
+`Std.Io.Json` parses and renders long strings without per-character copies of the full text, including Unicode escapes and control characters. See [#1784](https://github.com/Chelis-Lang/chelis/issues/1784).
