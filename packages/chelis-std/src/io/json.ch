@@ -155,7 +155,14 @@ def try_write_json(path: string, value: Json) -> Option[unit] ! { IO } =
     | None => None
   }
 def quote_string(text: string) -> string = string_concat("\"", string_concat(escape_text(text), "\""))
-def escape_text(text: string) -> string = fold(fn (acc: string, idx: i64) -> string_concat(acc, escape_char(char_at(text, idx))), "", range(cast(0, i64), string_len(text)))
+def has_json_control(text: string) -> bool = fold(fn (found: bool, code: i64) -> if found then true else string_contains(text, char_from_code(code)), false, range(0i64, 32i64))
+def needs_json_string_scan(text: string) -> bool = if string_contains(text, "\"") then true else if string_contains(text, "\\") then true else has_json_control(text)
+def escape_text_small(text: string) -> string = fold(fn (acc: string, idx: i64) -> string_concat(acc, escape_char(char_at(text, idx))), "", range(0i64, string_len(text)))
+def escape_text(text: string) -> string =
+  if not(needs_json_string_scan(text)) then text else if lte(string_len(text), 64i64) then escape_text_small(text) else {
+    middle = floor_div(string_len(text), 2i64)
+    string_concat(escape_text(string_slice(text, 0i64, middle)), escape_text(string_slice(text, middle, sub(string_len(text), middle))))
+  }
 def escape_char(ch: string) -> string =
   if eq(ch, "\"") then "\\\"" else if eq(ch, "\\") then "\\\\" else if eq(ch, "\u{8}") then "\\b" else if eq(ch, "\u{c}") then "\\f" else if eq(ch, "\n") then "\\n" else if eq(ch, "\r") then "\\r" else if eq(ch, "\t") then "\\t" else {
     code = char_code(ch)
@@ -295,34 +302,37 @@ def array_scan_step(text: string, acc: Option[(i64, List[Json], bool)], position
   }
     | None => None
   }
-def parse_string(text: string, idx: i64) -> Option[(string, i64)] = if gte(idx, string_len(text)) then None else if neq(char_at(text, idx), "\"") then None else parse_string_chars(text, add(idx, cast(1, i64)), "")
-def parse_string_chars(text: string, idx: i64, acc: string) -> Option[(string, i64)] =
-  if gte(idx, string_len(text)) then None else if eq(char_at(text, idx), "\"") then Some((acc, add(idx, 1i64))) else if and(lt(add(idx, 1i64), string_len(text)), and(neq(char_at(text, idx), "\\"), and(gte(char_code(char_at(text, idx)), 32i64), eq(char_at(text, add(idx, 1i64)), "\"")))) then Some((string_concat(acc, char_at(text, idx)), add(idx, 2i64))) else {
-    limit = if lt(add(idx, 32i64), string_len(text)) then add(idx, 32i64) else string_len(text)
-    first = fold(fn (step: Option[(string, i64, bool)], position: i64) -> string_scan_step(text, step, position), Some((acc, idx, false)), range(idx, limit))
-    state = match first with {
-      | Some((found, cursor, true)) => Some((found, cursor, true))
-      | Some((found, cursor, false)) => scan_string_suffix(text, Some((found, cursor, false)), limit, string_len(text))
-      | None => None
+def parse_string(text: string, idx: i64) -> Option[(string, i64)] = if gte(idx, string_len(text)) then None else if neq(char_at(text, idx), "\"") then None else parse_string_chars(text, add(idx, 1i64))
+def parse_string_chars(text: string, idx: i64) -> Option[(string, i64)] =
+  if gte(idx, string_len(text)) then None else match scan_string_chunk(text, string_slice(text, idx, sub(string_len(text), idx)), idx, idx) with {
+    | Some((found, cursor, true)) => Some((found, cursor))
+    | _ => None
+  }
+-- The cursor remains in the original text so an escape may cross a split.
+-- Each leaf reads only its bounded chunk; parent nodes join decoded pieces.
+def scan_string_chunk(text: string, chunk: string, start: i64, cursor: i64) -> Option[(string, i64, bool)] = {
+  end = add(start, string_len(chunk))
+  if gte(cursor, end) then Some(("", cursor, false)) else {
+    remaining = if eq(cursor, start) then chunk else string_slice(chunk, sub(cursor, start), sub(end, cursor))
+    size = string_len(remaining)
+    if not(needs_json_string_scan(remaining)) then Some((remaining, end, false)) else if lte(size, 32i64) then fold(fn (step: Option[(string, i64, bool)], position: i64) -> string_scan_step(text, remaining, cursor, step, position), Some(("", cursor, false)), range(cursor, end)) else {
+      middle = floor_div(size, 2i64)
+      left = scan_string_chunk(text, string_slice(remaining, 0i64, middle), cursor, cursor)
+      match left with {
+        | None => None
+        | Some((found, next, true)) => Some((found, next, true))
+        | Some((found, next, false)) => match scan_string_chunk(text, string_slice(remaining, middle, sub(size, middle)), add(cursor, middle), next) with {
+        | Some((tail, after, done)) => Some((string_concat(found, tail), after, done))
+        | None => None
+      }
+      }
     }
-    match state with {
-      | Some((found, cursor, true)) => Some((found, cursor))
-      | _ => None
-    }
   }
-def scan_string_suffix(text: string, state: Option[(string, i64, bool)], start: i64, end: i64) -> Option[(string, i64, bool)] =
-  match state with {
-    | None => None
-    | Some((found, cursor, done)) => if or(done, gte(cursor, end)) then Some((found, cursor, done)) else if lte(sub(end, start), 32i64) then fold(fn (step: Option[(string, i64, bool)], position: i64) -> string_scan_step(text, step, position), Some((found, cursor, done)), range(if gt(cursor, start) then cursor else start, end)) else {
-    middle = add(start, floor_div(sub(end, start), 2i64))
-    left = scan_string_suffix(text, state, start, middle)
-    scan_string_suffix(text, left, middle, end)
-  }
-  }
-def string_scan_step(text: string, step: Option[(string, i64, bool)], position: i64) -> Option[(string, i64, bool)] =
+}
+def string_scan_step(text: string, chunk: string, start: i64, step: Option[(string, i64, bool)], position: i64) -> Option[(string, i64, bool)] =
   match step with {
     | Some((found, cursor, done)) => if or(done, lt(position, cursor)) then Some((found, cursor, done)) else {
-    ch = char_at(text, cursor)
+    ch = char_at(chunk, sub(cursor, start))
     if eq(ch, "\"") then Some((found, add(cursor, 1i64), true)) else if eq(ch, "\\") then {
       esc_idx = add(cursor, 1i64)
       if gte(esc_idx, string_len(text)) then None else match decode_escape(text, esc_idx) with {
