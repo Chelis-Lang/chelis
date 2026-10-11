@@ -111,17 +111,34 @@ def fields_of(line: string) -> List[string] =
     | Some(fields) => fields
     | None => []
   }
--- The fold carries the scanner state rather than one native call per character.
--- A doubled quote consumes its second byte on the next index without changing
--- the quoted field. All other quote and delimiter cases match the line grammar.
-def parse_line(line: string) -> Option[List[string]] = {
-  size = string_len(line)
-  state = fold(fn (acc: (bool, bool, string, List[string]), idx: i64) -> if acc.0 then (false, acc.1, acc.2, acc.3) else {
+-- Quote-free segments without a comma are complete fields. Split other
+-- segments in halves so only bounded leaves scan one scalar at a time.
+def split_unquoted_small(line: string) -> List[string] = {
+  state = fold(fn (acc: (string, List[string]), idx: i64) -> {
     ch = string_slice(line, idx, cast(1, i64))
-    if eq(ch, "\"") then if acc.1 then {
-      next = add(idx, cast(1, i64))
-      if lt(next, size) then if eq(string_slice(line, next, cast(1, i64)), "\"") then (true, true, string_concat(acc.2, "\""), acc.3) else (false, false, acc.2, acc.3) else (false, false, acc.2, acc.3)
-    } else (false, true, acc.2, acc.3) else if and(eq(ch, ","), not(acc.1)) then (false, false, "", append(acc.3, acc.2)) else (false, acc.1, string_concat(acc.2, ch), acc.3)
-  }, (false, false, "", []), range(cast(0, i64), size))
-  if state.1 then None else Some(append(state.3, state.2))
+    if eq(ch, ",") then ("", append(acc.1, acc.0)) else (string_concat(acc.0, ch), acc.1)
+  }, ("", []), range(cast(0, i64), string_len(line)))
+  append(state.1, state.0)
 }
+def split_unquoted(line: string) -> List[string] =
+  if not(string_contains(line, ",")) then [line] else if lte(string_len(line), cast(64, i64)) then split_unquoted_small(line) else {
+    middle = floor_div(string_len(line), cast(2, i64))
+    left = split_unquoted(string_slice(line, cast(0, i64), middle))
+    right = split_unquoted(string_slice(line, middle, sub(string_len(line), middle)))
+    joined = string_concat(index(left, sub(len(left), cast(1, i64))), index(right, cast(0, i64)))
+    concat(append(take(left, sub(len(left), cast(1, i64))), joined), skip(right, cast(1, i64)))
+  }
+-- Quoted lines carry scanner state across delimiter and escape characters.
+-- A doubled quote consumes its second scalar on the next index.
+def parse_line(line: string) -> Option[List[string]] =
+  if not(string_contains(line, "\"")) then Some(split_unquoted(line)) else {
+    size = string_len(line)
+    state = fold(fn (acc: (bool, bool, string, List[string]), idx: i64) -> if acc.0 then (false, acc.1, acc.2, acc.3) else {
+      ch = string_slice(line, idx, cast(1, i64))
+      if eq(ch, "\"") then if acc.1 then {
+        next = add(idx, cast(1, i64))
+        if lt(next, size) then if eq(string_slice(line, next, cast(1, i64)), "\"") then (true, true, string_concat(acc.2, "\""), acc.3) else (false, false, acc.2, acc.3) else (false, false, acc.2, acc.3)
+      } else (false, true, acc.2, acc.3) else if and(eq(ch, ","), not(acc.1)) then (false, false, "", append(acc.3, acc.2)) else (false, acc.1, string_concat(acc.2, ch), acc.3)
+    }, (false, false, "", []), range(cast(0, i64), size))
+    if state.1 then None else Some(append(state.3, state.2))
+  }
