@@ -167,6 +167,32 @@ def test_quoted_field_with_escaped_quote() -> unit ! { Test, IO } = {
   _ = assert_eq(len(rows), cast(1, i64), "escaped-quote CSV -> 1 row")
   check_field(rows, cast(0, i64), "k", "he said \"hi\"", "doubled \"\" decodes to literal \"")
 }
+def test_read_csv_preserves_long_quoted_field() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_long_quoted.csv"
+  field = kib16_line()
+  _ = write_file(path, string_concat("a,b\n\"", string_concat(field, "\",z")))
+  rows = read_csv(path)
+  _ = check_field(rows, cast(0, i64), "a", field, "16 KiB quoted field survives parsing")
+  check_field(rows, cast(0, i64), "b", "z", "field following long quoted field")
+}
+def test_read_csv_quoted_split_preserves_escapes_unicode_and_empty_fields() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_quoted_boundary.csv"
+  left = repeat_128("é")
+  right = repeat_128("β")
+  _ = write_file(path, string_concat("a,b,c\n,", string_concat("\"", string_concat(left, string_concat("\"\"", string_concat(right, "\","))))))
+  rows = read_csv(path)
+  _ = check_field(rows, cast(0, i64), "a", "", "leading empty field")
+  _ = check_field(rows, cast(0, i64), "b", string_concat(left, string_concat("\"", right)), "escaped quote at recursive split")
+  check_field(rows, cast(0, i64), "c", "", "trailing empty field")
+}
+def test_try_read_csv_rejects_long_unterminated_quote() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_long_unterm.csv"
+  _ = write_file(path, string_concat("k\n\"", kib16_line()))
+  match try_read_csv(path) with {
+    | Some(_) => fail("long unterminated quoted row must be rejected")
+    | None => assert_true(true, "long unterminated quoted row is rejected")
+  }
+}
 def test_try_read_csv_missing_path_returns_none() -> unit ! { Test, IO } =
   match try_read_csv("/tmp/chelis_std_test_csv_definitely_missing_x9q7p2.csv") with {
     | Some(_) => fail("try_read_csv on missing path must be None, got Some")
