@@ -14260,6 +14260,7 @@ fn concrete_precision_evidence(
 struct ActualizedRetainedHostContract {
     params: Vec<HostParam>,
     result_claim: Option<TensorType>,
+    body_expected: Option<HostTypeTerm>,
     body_substitution: UnordMap<String, HostTypeTerm>,
     body_dimensions: UnordMap<String, DimInfo>,
     tensor_specialization: crate::lower::TensorCallsiteSpecialization,
@@ -14269,6 +14270,29 @@ struct ActualizedRetainedHostContract {
 struct RetainedHostPreparation {
     actuals: Option<Vec<Option<HostExpr>>>,
     tensor_specialization: Option<crate::lower::TensorCallsiteSpecialization>,
+}
+
+/// Recover a tensor actual's caller-scoped axes from its checked stamp.
+/// Host operations around a generic result may still carry the callee's
+/// authored axis spelling. Rank and precision must agree with the prepared
+/// value before the checked identity can replace that lowering metadata.
+fn checked_tensor_actual_type(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    prepared: &HostTypeTerm,
+) -> Option<HostTypeTerm> {
+    let HostTypeTerm::Tensor(prepared) = prepared else {
+        return None;
+    };
+    let checked = checked_type_expr(expr)
+        .and_then(|ty| decode_expanded_host_type_expr(program, ty))
+        .map(|ty| apply_host_type_subst(&ty, &active_type_subst()))
+        .map(|ty| substitute_host_dimension_terms(ty, &active_dim_subst()))?;
+    let HostTypeTerm::Tensor(checked) = checked else {
+        return None;
+    };
+    (prepared.precision == checked.precision && prepared.dims.len() == checked.dims.len())
+        .then_some(HostTypeTerm::Tensor(checked))
 }
 
 /// Actualize the tensor-bearing parts of one authored host invocation.
@@ -14367,10 +14391,15 @@ fn actualize_retained_host_contract(
     let body_dimensions = checked_type
         .as_ref()
         .map(|checked_type| {
+            // The call's checked result is in the caller's binder namespace.
+            // The authored result names the callee's binders and cannot be
+            // used as evidence for the checker's result binder: doing so
+            // maps two nested invocations to one printable name (`o`).
+            let result_evidence = stamped_result.as_ref().unwrap_or(call_result);
             let evidence = checked_formals
                 .iter()
                 .zip(actual_types)
-                .chain(std::iter::once((&checked_result, call_result)))
+                .chain(std::iter::once((&checked_result, result_evidence)))
                 .collect::<Vec<_>>();
             let mut dimensions = activation_dimensions(program, checked_type, &evidence);
             // A record's dimension arguments survive only in the checked
@@ -14532,9 +14561,36 @@ fn actualize_retained_host_contract(
         }
         _ => None,
     };
+    // The authored result is a claim, not the inferred shape of this call's
+    // body. In particular, its `o` binder may denote different widths in two
+    // nested invocations. Keep the checker's call-site axis identities for
+    // the body while erasing only independent literal result claims, which
+    // are checked at the producer rather than assumed during lowering.
+    let body_expected = result.as_ref().map(|claim| {
+        let checked = stamped_result.as_ref().and_then(|term| match term {
+            HostTypeTerm::Tensor(tensor) if tensor.dims.len() == claim.dims.len() => Some(tensor),
+            _ => None,
+        });
+        HostTypeTerm::Tensor(match checked {
+            Some(checked) => TensorType {
+                dims: checked
+                    .dims
+                    .iter()
+                    .zip(&claim.dims)
+                    .map(|(axis, claim)| match claim {
+                        DimInfo::Lit(_) => DimInfo::Named("*".to_string(), None),
+                        _ => axis.clone(),
+                    })
+                    .collect(),
+                precision: checked.precision,
+            },
+            None => result_claim_body_type(claim),
+        })
+    });
     Ok(ActualizedRetainedHostContract {
         params,
         result_claim: result,
+        body_expected,
         body_substitution,
         body_dimensions,
         tensor_specialization,
@@ -15255,6 +15311,7 @@ fn lower_named_retained_host_invocation(
     let ActualizedRetainedHostContract {
         params,
         result_claim,
+        body_expected,
         body_substitution,
         body_dimensions,
         tensor_specialization,
@@ -15266,12 +15323,13 @@ fn lower_named_retained_host_invocation(
             .iter()
             .zip(app_args)
             .map(|(prepared, actual)| {
-                prepared.as_ref().map(host_expr_type).unwrap_or_else(|| {
+                let prepared_ty = prepared.as_ref().map(host_expr_type).unwrap_or_else(|| {
                     // Callable values are not executable payloads. Their
                     // checked type is the only representation evidence needed
                     // to instantiate a nested precision variable.
                     expr_host_type(actual, program, scope)
-                })
+                });
+                checked_tensor_actual_type(actual, program, &prepared_ty).unwrap_or(prepared_ty)
             })
             .collect::<Vec<_>>();
         actualize_retained_host_contract(
@@ -15286,6 +15344,7 @@ fn lower_named_retained_host_invocation(
         ActualizedRetainedHostContract {
             params: signature.params.clone(),
             result_claim: None,
+            body_expected: None,
             body_substitution: active_type_subst(),
             body_dimensions: active_dim_subst(),
             tensor_specialization: crate::lower::TensorCallsiteSpecialization::default(),
@@ -15318,10 +15377,6 @@ fn lower_named_retained_host_invocation(
     {
         *entry |= claims.is_some();
     }
-    let actualized_expected = result_claim
-        .as_ref()
-        .map(result_claim_body_type)
-        .map(HostTypeTerm::Tensor);
     let _body_substitution =
         actualize_polymorphic_contract.then(|| ActiveTypeSubstGuard::push(body_substitution));
     let _body_dimensions =
@@ -15329,7 +15384,7 @@ fn lower_named_retained_host_invocation(
     lower_retained_host_invocation(
         expr,
         invocation,
-        Some(actualized_expected.as_ref().unwrap_or(expected)),
+        Some(body_expected.as_ref().unwrap_or(expected)),
         program,
         scope,
         tensor_helpers,
@@ -15455,12 +15510,15 @@ fn lower_retained_host_invocation(
         // monomorphized generic whose dimension no argument fixes keeps its
         // hole, and the typed [05-UNS-1] rejection still fires.
         let own_ty = host_expr_type(&value);
-        let (ty, value) = if own_ty.is_unresolved() && !formal.ty.is_unresolved() {
-            let fixed = formal.ty.clone();
-            (fixed.clone(), force_host_expr_type(value, fixed))
-        } else {
-            (own_ty, value)
-        };
+        let (ty, value) =
+            if let Some(checked_ty) = checked_tensor_actual_type(arg, program, &own_ty) {
+                (checked_ty.clone(), force_host_expr_type(value, checked_ty))
+            } else if own_ty.is_unresolved() && !formal.ty.is_unresolved() {
+                let fixed = formal.ty.clone();
+                (fixed.clone(), force_host_expr_type(value, fixed))
+            } else {
+                (own_ty, value)
+            };
         let mut serial = index;
         let actual_local = loop {
             let candidate = format!("__chelis_entry_actual_{serial}");
@@ -21154,7 +21212,7 @@ fn substitute_host_dimension_terms(
     }
 }
 
-/// `body` with each authored type binder of the definition `name` respelled
+/// `body` with each authored type and dimension binder of `name` respelled
 /// as the checker's unique identity for it. The pairing comes from walking
 /// the authored and the checked function types in parallel; a body type that
 /// spells the authored name (an ascription keeps the written spelling) then
@@ -21165,23 +21223,30 @@ fn retained_body_with_checked_binders(
     definition: &Expr,
     body: &Expr,
 ) -> Expr {
-    let mut identities = UnordMap::new();
+    let mut type_identities = UnordMap::new();
+    let mut dimension_identities = UnordMap::new();
     if let (Some(authored), Some(checked)) = (
         lookup_declared_type_expr(program, name),
         checked_function_type_expr(definition),
     ) {
-        pair_authored_binder_identities(&authored, &checked, &mut identities);
+        pair_authored_binder_identities(
+            &authored,
+            &checked,
+            &mut type_identities,
+            &mut dimension_identities,
+        );
     }
-    if identities.is_empty() {
+    if type_identities.is_empty() && dimension_identities.is_empty() {
         return body.clone();
     }
-    respell_type_binders(body, &identities)
+    respell_type_binders(body, &type_identities, &dimension_identities)
 }
 
 fn pair_authored_binder_identities(
     authored: &Expr,
     checked: &Expr,
-    out: &mut UnordMap<String, String>,
+    type_out: &mut UnordMap<String, String>,
+    dimension_out: &mut UnordMap<String, String>,
 ) {
     let (Some((authored_tag, _, authored_kids)), Some((checked_tag, _, checked_kids))) =
         (stamped_parts(authored), stamped_parts(checked))
@@ -21191,47 +21256,65 @@ fn pair_authored_binder_identities(
     if authored_tag != checked_tag || authored_kids.len() != checked_kids.len() {
         return;
     }
-    if authored_tag == DeepTag::TVar {
+    if matches!(authored_tag, DeepTag::TVar | DeepTag::DVar) {
         if let (Some(from), Some(to)) = (
             authored_kids.first().and_then(symbol_name),
             checked_kids.first().and_then(symbol_name),
         ) && from != "_"
             && from != to
         {
+            let out = if authored_tag == DeepTag::TVar {
+                &mut *type_out
+            } else {
+                &mut *dimension_out
+            };
             out.entry(from.to_string())
                 .or_insert_with(|| to.to_string());
         }
         return;
     }
     for (authored, checked) in authored_kids.iter().zip(checked_kids) {
-        pair_authored_binder_identities(authored, checked, out);
+        pair_authored_binder_identities(authored, checked, type_out, dimension_out);
     }
 }
 
-/// Respell every `t-var` named in `identities`, in children and in metadata
-/// types alike.
-fn respell_type_binders(expr: &Expr, identities: &UnordMap<String, String>) -> Expr {
+/// Respell each authored binder, in children and metadata types alike.
+fn respell_type_binders(
+    expr: &Expr,
+    type_identities: &UnordMap<String, String>,
+    dimension_identities: &UnordMap<String, String>,
+) -> Expr {
     match expr {
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             chelis_deep::ast::MetaExpr {
                 metadata: meta
                     .metadata
-                    .map_expressions(&mut |value, _| respell_type_binders(value, identities))
+                    .map_expressions(&mut |value, _| {
+                        respell_type_binders(value, type_identities, dimension_identities)
+                    })
                     .expect("respelling preserves annotation roles"),
-                expr: Box::new(respell_type_binders(&meta.expr, identities)),
+                expr: Box::new(respell_type_binders(
+                    &meta.expr,
+                    type_identities,
+                    dimension_identities,
+                )),
             },
             *span,
         ),
         Expr::Node(node, span) => {
-            if node.tag() == DeepTag::TVar
-                && let Some(to) = node
-                    .children_slice()
+            let identities = match node.tag() {
+                DeepTag::TVar => Some(type_identities),
+                DeepTag::DVar => Some(dimension_identities),
+                _ => None,
+            };
+            if let Some(to) = identities.and_then(|identities| {
+                node.children_slice()
                     .first()
                     .and_then(symbol_name)
                     .and_then(|from| identities.get(from))
-            {
+            }) {
                 return Expr::node(
-                    DeepTag::TVar,
+                    node.tag(),
                     node.meta().clone(),
                     vec![Expr::Atom(Atom::Name(to.clone()), *span)],
                     *span,
@@ -21239,12 +21322,14 @@ fn respell_type_binders(expr: &Expr, identities: &UnordMap<String, String>) -> E
             }
             let metadata = node
                 .meta()
-                .map_expressions(&mut |value, _| respell_type_binders(value, identities))
+                .map_expressions(&mut |value, _| {
+                    respell_type_binders(value, type_identities, dimension_identities)
+                })
                 .expect("respelling preserves annotation roles");
             let children = node
                 .children_slice()
                 .iter()
-                .map(|child| respell_type_binders(child, identities))
+                .map(|child| respell_type_binders(child, type_identities, dimension_identities))
                 .collect();
             Expr::node(node.tag(), metadata, children, *span)
         }
@@ -23780,15 +23865,39 @@ mod tests {
         let authored = parse("(t-fn {} (t-var {} _) (t-var {} p))");
         let checked = parse("(t-fn {} (t-var {} t7) (t-var {} t8))");
         let mut identities = UnordMap::new();
-        pair_authored_binder_identities(&authored, &checked, &mut identities);
+        pair_authored_binder_identities(&authored, &checked, &mut identities, &mut UnordMap::new());
         assert_eq!(identities.get("_"), None);
         assert_eq!(identities.get("p").map(String::as_str), Some("t8"));
 
         let body = parse("(t-fn {} (t-var {} _) (t-var {} p))");
-        let respelled = respell_type_binders(&body, &identities);
+        let respelled = respell_type_binders(&body, &identities, &UnordMap::new());
         assert_eq!(
             chelis_deep::printer::print_expr_flat(&respelled),
             "(t-fn {} (t-var {} _) (t-var {} t8))"
+        );
+    }
+
+    #[test]
+    fn retained_body_respells_dimension_binders_in_callback_annotations() {
+        let parse = |source: &str| {
+            chelis_deep::parser::parse_str(source)
+                .expect("Deep type parses")
+                .into_iter()
+                .next()
+                .expect("one type")
+        };
+        let authored =
+            parse("(t-fn {} (t-tensor {} (d-var {} c) (d-var {} f)) (t-tensor {} (d-var {} c)))");
+        let checked = parse(
+            "(t-fn {} (t-tensor {} (d-var {} d1) (d-var {} d2)) (t-tensor {} (d-var {} d1)))",
+        );
+        let body = parse("(t-tensor {} (d-var {} c) (d-var {} f))");
+        let mut identities = UnordMap::new();
+        pair_authored_binder_identities(&authored, &checked, &mut UnordMap::new(), &mut identities);
+        let respelled = respell_type_binders(&body, &UnordMap::new(), &identities);
+        assert_eq!(
+            chelis_deep::printer::print_expr_flat(&respelled),
+            "(t-tensor {} (d-var {} d1) (d-var {} d2))"
         );
     }
 
