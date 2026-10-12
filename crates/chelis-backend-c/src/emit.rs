@@ -710,11 +710,7 @@ impl CEmitter {
             ));
         }
         for position in 1..backward_len {
-            if position != wanted {
-                self.line(&format!(
-                    "chelis_tensor_release(t{id}_rec_backward_outputs[{position}]);"
-                ));
-            } else if capture_target {
+            if position != wanted || capture_target {
                 self.line(&format!(
                     "chelis_tensor_release(t{id}_rec_backward_outputs[{position}]);"
                 ));
