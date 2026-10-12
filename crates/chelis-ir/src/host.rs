@@ -13553,16 +13553,17 @@ fn lower_program_host_app(
     }
     // [04-TOT-2]: a checked tensor builtin runs in the tensor execution lane.
     // When an operand holds work that lane cannot represent, such as a
-    // `to_tensor` of a run-time List beneath a `cast`, the helper over the
-    // whole application fails. Each operand that does work is then evaluated
-    // on the host, once and in source order, and the builtin runs as a helper
-    // over those values, so its kernel is the one every dtype has
-    // (chelis#2734). An operation the C host lane's own elementwise loop
-    // covers stays on that loop, which needs no rebuilt application.
+    // helper call beneath `sum` or a List `index` used as an `insert` size,
+    // the helper over the whole application fails. Evaluate each working
+    // operand on the host, once and in source order, then retry the checked
+    // builtin over those typed values. The retry is accepted only when its
+    // tensor DAG actually lowers. Elementwise operations already covered by
+    // the C host loop keep that route (chelis#2734).
     if let Some(tensor_ty) = helper_tensor_ty
         && callee_is_builtin
-        && elementwise_function_of_operands(&name)
-        && host_elementwise_loop_admits(&name, tensor_ty.precision) != Some(true)
+        && (matches!(name.as_str(), "sum" | "insert")
+            || (elementwise_function_of_operands(&name)
+                && host_elementwise_loop_admits(&name, tensor_ty.precision) != Some(true)))
         && !should_keep_tensor_expr_in_host_lane(app_expr)
     {
         let (operation, operation_scope, mut bindings) = hoist_host_lane_tensor_bindings(
@@ -13573,13 +13574,25 @@ fn lower_program_host_app(
             tensor_helpers,
             HoistedOperands::EveryWorkingOperand,
         )?;
-        if let Some(tensor_call) = try_lower_tensor_helper_call(
-            operation.as_ref(),
-            program,
-            operation_scope.as_ref(),
-            tensor_helpers,
-            tensor_ty,
-        ) {
+        // A call through a lexical callable is only admissible when the
+        // enclosing host function has a callback place for it. This retry
+        // cannot establish that fact: a local alias such as `f = helper`
+        // would otherwise pass its tensor DAG and fail later in ownership
+        // lowering as an unknown callee. Leave that application at its
+        // existing host admission boundary.
+        if (!matches!(name.as_str(), "sum" | "insert")
+            || !helper_bindings
+                .iter()
+                .chain(&bindings)
+                .any(|binding| host_expr_contains_local_call(&binding.value)))
+            && let Some(tensor_call) = try_lower_tensor_helper_call(
+                operation.as_ref(),
+                program,
+                operation_scope.as_ref(),
+                tensor_helpers,
+                tensor_ty,
+            )
+        {
             let mut all_bindings = helper_bindings;
             all_bindings.append(&mut bindings);
             if all_bindings.is_empty() {
@@ -13810,6 +13823,89 @@ fn lower_program_host_app(
         args
     };
     Ok(HostExpr::new(HostExprKind::Builtin { name, args, ty }))
+}
+
+fn host_expr_contains_local_call<T>(expr: &HostExpr<T>) -> bool {
+    let contains = |child: &HostExpr<T>| host_expr_contains_local_call(child);
+    match &expr.kind {
+        HostExprKind::Call { callee, args, .. } => {
+            matches!(callee.view(), HostCalleeView::Local(_)) || args.iter().any(contains)
+        }
+        HostExprKind::ResultClaimScope { body, .. } => contains(body),
+        HostExprKind::FormalIngress { value, .. }
+        | HostExprKind::ExtentSites { value, .. }
+        | HostExprKind::AdtFieldAccess { base: value, .. } => contains(value),
+        HostExprKind::Int(_)
+        | HostExprKind::Float(_)
+        | HostExprKind::Bool(_)
+        | HostExprKind::String(_)
+        | HostExprKind::Unit
+        | HostExprKind::Var(_, _) => false,
+        HostExprKind::List(items, _)
+        | HostExprKind::Tuple(items, _)
+        | HostExprKind::Builtin { args: items, .. }
+        | HostExprKind::TensorCall { args: items, .. }
+        | HostExprKind::AdtConstruct { fields: items, .. } => items.iter().any(contains),
+        HostExprKind::SignatureEntry { args, lists, .. } => args
+            .iter()
+            .chain(lists.iter().map(|entry| &entry.value))
+            .any(contains),
+        HostExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => [cond.as_ref(), then_expr, else_expr]
+            .into_iter()
+            .any(contains),
+        HostExprKind::MatchOption {
+            scrutinee,
+            some_expr,
+            none_expr,
+            ..
+        } => [scrutinee.as_ref(), some_expr, none_expr]
+            .into_iter()
+            .any(contains),
+        HostExprKind::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => {
+            contains(scrutinee)
+                || arms.iter().any(|arm| contains(&arm.expr))
+                || default_expr.as_deref().is_some_and(contains)
+        }
+        HostExprKind::Let { bindings, body, .. }
+        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+            bindings.iter().any(|binding| contains(&binding.value)) || contains(body)
+        }
+        HostExprKind::Map { callback, list, .. }
+        | HostExprKind::Filter { callback, list, .. }
+        | HostExprKind::Partition { callback, list, .. }
+        | HostExprKind::FlatMap { callback, list, .. } => {
+            contains(list) || host_callback_contains_local_call(callback)
+        }
+        HostExprKind::Fold {
+            callback,
+            init,
+            list,
+            ..
+        }
+        | HostExprKind::Scan {
+            callback,
+            init,
+            list,
+            ..
+        } => contains(init) || contains(list) || host_callback_contains_local_call(callback),
+    }
+}
+
+fn host_callback_contains_local_call<T>(callback: &HostCallback<T>) -> bool {
+    match &callback.kind {
+        HostCallbackKind::Named { .. } => false,
+        HostCallbackKind::Inline { body, .. } => host_expr_contains_local_call(body),
+    }
 }
 
 /// [05-OP-36]: `eq`, `neq`, and `test_assert_eq` compare two leading
@@ -17595,13 +17691,31 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     // This also preserves effects in the other operand when only one has
     // a host-only descendant. Other builtins may carry static axis/list
     // arguments, so this two-tensor boundary is specific to matmul.
-    let hoist_matmul_operands = kids.len() == 3 && direct_var_name(&kids[0]) == Some("matmul");
-    let host_operand = |arg: &Expr| {
-        should_keep_tensor_expr_in_host_lane(arg)
-            || operand_reads_host_record(arg, program, scope)
-            || (hoisted == HoistedOperands::EveryWorkingOperand && operand_does_work(arg))
+    let callee = direct_var_name(&kids[0]);
+    let hoist_matmul_operands = kids.len() == 3 && callee == Some("matmul");
+    // The checker fixes a reduction or insertion axis before this rewrite.
+    // A cast-wrapped integer literal is still a static axis: replacing it
+    // with a host binding turns it into a name and loses that decision in
+    // the tensor DAG. Its constant evaluation has no observable work, so it
+    // can stay at its original argument position while later operands move.
+    let static_axis = |index: usize, arg: &Expr| {
+        ((callee == Some("sum") && index >= 2) || (callee == Some("insert") && index == 2))
+            && crate::lower::extract_int_axis(arg).is_some()
     };
-    if !hoist_matmul_operands && !kids.iter().skip(1).any(host_operand) {
+    let does_work = |index: usize, arg: &Expr| !static_axis(index, arg) && operand_does_work(arg);
+    let host_operand = |index: usize, arg: &Expr| {
+        !static_axis(index, arg)
+            && (should_keep_tensor_expr_in_host_lane(arg)
+                || operand_reads_host_record(arg, program, scope)
+                || (hoisted == HoistedOperands::EveryWorkingOperand && does_work(index, arg)))
+    };
+    if !hoist_matmul_operands
+        && !kids
+            .iter()
+            .enumerate()
+            .skip(1)
+            .any(|(index, arg)| host_operand(index, arg))
+    {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
 
@@ -17614,7 +17728,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
         .iter()
         .enumerate()
         .skip(1)
-        .filter(|(_, arg)| hoist_matmul_operands || host_operand(arg))
+        .filter(|(index, arg)| hoist_matmul_operands || host_operand(*index, arg))
         .map(|(index, _)| index)
         .next_back();
 
@@ -17624,8 +17738,8 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
 
     for (index, arg) in kids.iter().enumerate().skip(1) {
         let precedes_a_hoisted_operand =
-            last_hoisted.is_some_and(|last| index < last) && operand_does_work(arg);
-        if hoist_matmul_operands || host_operand(arg) || precedes_a_hoisted_operand {
+            last_hoisted.is_some_and(|last| index < last) && does_work(index, arg);
+        if hoist_matmul_operands || host_operand(index, arg) || precedes_a_hoisted_operand {
             let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
             let preferred_ty = fn_sig
                 .and_then(|(param_tys, _)| param_tys.get(index - 1))
