@@ -98,6 +98,8 @@ Each row names its governing atom.
 | `Numeric:DropoutReplay:TableA` | [05-OP-37] |
 | `Numeric:ExtremaAdjoint:TableA` | [05-OP-40] |
 | `Numeric:ReduceWindowGrad:TableA` | [05-OP-39] |
+| `Numeric:RuntimeRecurrence:TableA` | [05-OP-55] |
+| `Numeric:RuntimeRecurrenceAdjoint:TableA` | [05-OP-55] |
 | `Numeric:ReluAdjoint:TableA` | [05-OP-43] |
 | `Numeric:UniformBoundAdjoint:TableA` | [05-OP-8] |
 | `Numeric:abs:TableA` | [05-OP-46] |

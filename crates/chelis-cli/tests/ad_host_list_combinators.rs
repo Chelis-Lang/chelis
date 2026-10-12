@@ -730,34 +730,9 @@ v = vmap(k)(to_tensor([1i64, 2i64]))
     );
     assert!(
         stderr.contains("could not lower `vmap(...)`")
-            && stderr.contains(&format!("unsupported: `fold` {UNSTAGED_LIST_REJECTION}")),
+            && stderr.contains("runtime range inside vmap requires a shared cardinality representation"),
         "the rejection must not claim a differentiated body under plain vmap:\n{stderr}"
     );
-}
-
-#[test]
-fn eval_grad_through_fold_and_scan_over_range_is_the_unstaged_list_rejection() {
-    // A `range` source is not staged as known items, even with literal bounds;
-    // its recurrence needs the runtime trip count chelis#3366 tracks.
-    for (name, body) in [
-        (
-            "fold",
-            "fold(fn (acc: f32, i: i64) -> acc * x, 1.0f32, range(0i64, 3i64))",
-        ),
-        (
-            "scan",
-            "index(scan(fn (acc: f32, i: i64) -> acc * x, 1.0f32, range(0i64, 3i64)), 2i64)",
-        ),
-    ] {
-        let stderr = eval_failure(
-            &format!("def loss(x: f32) -> f32 = {body}\ng = grad(loss)(2.0f32)\n"),
-            &format!("ad_{name}_range"),
-        );
-        assert!(
-            stderr.contains(&format!("unsupported: `{name}` {UNSTAGED_LIST_REJECTION}")),
-            "`{name}` over a range must be the named rejection:\n{stderr}"
-        );
-    }
 }
 
 // chelis#3366: [05-OP-55] reverses exactly the runtime recurrence. The bound
@@ -967,4 +942,51 @@ empty = step(Model { blocks: [] })
         String::from_utf8(compiled.stdout).expect("C stdout utf-8"),
         evaluated
     );
+}
+
+#[test]
+fn c_grad_runtime_adt_fold_with_two_axis_means_matches_eval() {
+    let source = "\
+type Block =
+  | Block { w: tensor[1, 1, 7, 7, f32] }
+type Model =
+  | Model { blocks: List[Block] }
+def loss(p: Model) -> f32 = {
+  init = reshape(insert(scalar_to_tensor(1.0f32), 0i32, 49i64), [1i64, 1i64, 7i64, 7i64])
+  y = fold(fn (acc: tensor[1, 1, 7, 7, f32], blk: Block) -> add(acc, blk.w), init, copy(p.blocks))
+  pooled = mean(mean(y, 3i32), 2i32)
+  tensor_to_scalar(sum(sum(pooled, 0i32), 0i32))
+}
+def gradient_total(p: Model) -> f32 = {
+  g = grad(loss)(p)
+  match index(g.blocks, 0i64) with {
+    | Block { w } => tensor_to_scalar(sum(sum(sum(sum(w, 0i32), 0i32), 0i32), 0i32))
+  }
+}
+p = Model { blocks: [Block { w: reshape(insert(scalar_to_tensor(2.0f32), 0i32, 49i64), [1i64, 1i64, 7i64, 7i64]) }] }
+value = loss(p)
+g = gradient_total(p)
+";
+    let evaluated = eval_source(source, "runtime_adt_two_axis_means_eval");
+    let compiled = build_and_run_c_source(source, "runtime_adt_two_axis_means");
+    assert!(
+        compiled.status.success(),
+        "C two-axis mean gradient failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let c_stdout = String::from_utf8(compiled.stdout).expect("C stdout utf-8");
+    for (name, expected) in [("value", 3.0), ("g", 1.0)] {
+        assert_close(
+            &[parse_numeric_result(&evaluated, name)],
+            &[expected],
+            1e-5,
+            name,
+        );
+        assert_close(
+            &[parse_numeric_result(&c_stdout, name)],
+            &[expected],
+            1e-5,
+            name,
+        );
+    }
 }

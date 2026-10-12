@@ -1,0 +1,1 @@
+Reverse-mode gradients of `fold` and `scan` over runtime-length tensor lists now use the executed trip count in eval and compiled C. Compiled gradients of `fold` over runtime ADT lists also propagate cotangents through tensor fields. See [#3366](https://github.com/Chelis-Lang/chelis/issues/3366).

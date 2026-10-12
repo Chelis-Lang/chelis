@@ -19179,6 +19179,11 @@ impl<'program> LowerCtx<'program> {
                 return self
                     .lower_runtime_tensor_list_recurrence(name, &callback, init, source, app_span);
             }
+            if let Some((length, element)) = runtime_column_list_parts(&list) {
+                return self.lower_runtime_column_list_recurrence(
+                    name, &callback, init, length, &element, app_span,
+                );
+            }
             let unsupported = Unsupported::new(
                 UnsupportedKind::Construct(format!(
                     "`{name}` over a List that is not staged as known items"
@@ -19315,6 +19320,162 @@ impl<'program> LowerCtx<'program> {
             callback: Box::new(callback_dag),
             state: param_ids[0],
             source: crate::dag::RuntimeRecurrenceSource::Tensor { item: param_ids[1] },
+            captures,
+            result,
+            scan,
+        };
+        let result = self.dag.add_node(
+            self.owner(),
+            RiscOp::RuntimeRecurrence(Box::new(recurrence)),
+            inputs,
+            output_ty,
+            self.current_span_id.clone(),
+        );
+        Some(if scan {
+            tensor_list_value(result)
+        } else {
+            LoweredValue::Node(result)
+        })
+    }
+
+    /// Build one callback graph over the numeric columns of a runtime ADT
+    /// List. Each leaf Load receives one gathered row; the enclosing
+    /// recurrence retains that invocation's values for its reverse pass.
+    fn lower_runtime_column_list_recurrence(
+        &mut self,
+        name: &str,
+        callback: &ResolvedFunction,
+        init: &Expr,
+        length: NodeId,
+        element: &LoweredValue,
+        _app_span: Span,
+    ) -> Option<LoweredValue> {
+        let state = self.lower_expr(init).as_single_node()?;
+        let state_ty = self.dag.get(state)?.output_type.clone();
+        let columns = recursive_list_leaf_nodes(element);
+        let item_types = columns
+            .iter()
+            .map(|column| {
+                let column_ty = &self.dag.get(*column)?.output_type;
+                Some(TensorType {
+                    dims: column_ty.dims.get(1..)?.to_vec(),
+                    precision: column_ty.precision,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let (params, body) = self.extract_fn_parts(callback)?;
+        if params.len() != 2 {
+            return None;
+        }
+        let mut subctx = LowerCtx::new(
+            self.program_types.clone(),
+            self.program_defs.clone(),
+            self.program_signatures.clone(),
+            LinearityInfo::default(),
+        );
+        subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
+        subctx.dag.inherit_declarations(&self.dag);
+        subctx.activation_serial = Arc::clone(&self.activation_serial);
+        subctx.decl = self.decl;
+        subctx.allow_host_list_ad_rewrites = true;
+        subctx.current_span_id = self.current_span_id.clone();
+        subctx.prec_substitutions = self.prec_substitutions.clone();
+        subctx.rank_substitutions = self.rank_substitutions.clone();
+        subctx.interface_loads.insert(params[0].clone());
+        let state_load = subctx.dag.add_node(
+            subctx.owner(),
+            RiscOp::Load {
+                name: params[0].as_str().into(),
+            },
+            vec![],
+            state_ty,
+            subctx.current_span_id.clone(),
+        );
+        subctx
+            .bindings
+            .insert(params[0].clone(), LoweredValue::Node(state_load));
+        let mut item_load_names = Vec::new();
+        let item_loads = item_types
+            .into_iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                let load_name = format!("__chelis_recurrence_item_{index}");
+                subctx.interface_loads.insert(load_name.clone());
+                let load = subctx.dag.add_node(
+                    subctx.owner(),
+                    RiscOp::Load {
+                        name: load_name.as_str().into(),
+                    },
+                    vec![],
+                    ty,
+                    subctx.current_span_id.clone(),
+                );
+                item_load_names.push(load_name);
+                LoweredValue::Node(load)
+            })
+            .collect::<Vec<_>>();
+        let mut replacements = item_loads.into_iter();
+        let item_value = rebuild_recursive_list_like(element, &mut replacements, false);
+        subctx.bindings.insert(params[1].clone(), item_value);
+        let captured = self.seed_subctx_with_declaring_scope(&mut subctx, callback, &params, &[]);
+        let result = subctx
+            .lower_resolved_body(callback, &params, body)
+            .as_single_node()?;
+        subctx.dag.add_root(result);
+        for load in subctx
+            .dag
+            .nodes()
+            .iter()
+            .filter_map(|node| matches!(node.op, RiscOp::Load { .. }).then_some(node.id))
+            .collect::<Vec<_>>()
+        {
+            subctx.dag.add_root(load);
+        }
+        let callback_dag = crate::optimize::dead_code_eliminate(&subctx.dag);
+        let result = callback_dag.roots()[0];
+        let find_load = |wanted: &str| {
+            callback_dag.nodes().iter().find_map(|node| {
+                matches!(&node.op, RiscOp::Load { name } if name.as_str() == wanted)
+                    .then_some(node.id)
+            })
+        };
+        let state_load = find_load(&params[0])?;
+        let item_loads = item_load_names
+            .iter()
+            .map(|name| find_load(name))
+            .collect::<Option<Vec<_>>>()?;
+        let captures = captured
+            .to_sorted()
+            .into_iter()
+            .map(|(name, node)| (name.clone(), *node))
+            .collect::<Vec<_>>();
+        let inputs = std::iter::once(length)
+            .chain(std::iter::once(state))
+            .chain(columns.iter().copied())
+            .chain(captures.iter().map(|(_, node)| *node))
+            .collect();
+        let state_result_ty = callback_dag.get(result)?.output_type.clone();
+        let scan = name == "scan";
+        let output_ty = if scan {
+            let leading = columns
+                .first()
+                .and_then(|column| self.dag.get(*column))
+                .and_then(|node| node.output_type.dims.first())
+                .cloned()
+                .unwrap_or_else(|| DimInfo::Named("*".into(), None));
+            TensorType {
+                dims: std::iter::once(leading)
+                    .chain(state_result_ty.dims.iter().cloned())
+                    .collect(),
+                precision: state_result_ty.precision,
+            }
+        } else {
+            state_result_ty
+        };
+        let recurrence = crate::dag::RuntimeRecurrence {
+            callback: Box::new(callback_dag),
+            state: state_load,
+            source: crate::dag::RuntimeRecurrenceSource::Columns { items: item_loads },
             captures,
             result,
             scan,

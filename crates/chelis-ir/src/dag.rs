@@ -1540,6 +1540,8 @@ pub enum RiscAtomIdentity {
     ReduceWindowSum,
     ReduceWindowMean,
     ReduceWindowGrad,
+    RuntimeRecurrence,
+    RuntimeRecurrenceAdjoint,
     ArgmaxReduce,
     ArgminReduce,
     Reshape,
@@ -1627,6 +1629,8 @@ impl RiscAtomIdentity {
         Self::ReduceWindowSum,
         Self::ReduceWindowMean,
         Self::ReduceWindowGrad,
+        Self::RuntimeRecurrence,
+        Self::RuntimeRecurrenceAdjoint,
         Self::ArgmaxReduce,
         Self::ArgminReduce,
         Self::Reshape,
@@ -1714,6 +1718,8 @@ impl RiscAtomIdentity {
             Self::ReduceWindowSum => "reduce_window_sum",
             Self::ReduceWindowMean => "reduce_window_mean",
             Self::ReduceWindowGrad => "ReduceWindowGrad",
+            Self::RuntimeRecurrence => "RuntimeRecurrence",
+            Self::RuntimeRecurrenceAdjoint => "RuntimeRecurrenceAdjoint",
             Self::ArgmaxReduce => "argmax_reduce",
             Self::ArgminReduce => "argmin_reduce",
             Self::Reshape => "reshape",
@@ -1880,6 +1886,8 @@ impl RiscOp {
                 ReduceWindowKind::Mean => Id::ReduceWindowMean,
             }),
             Self::ReduceWindowGrad { .. } => Semantic(Id::ReduceWindowGrad),
+            Self::RuntimeRecurrence(_) => Semantic(Id::RuntimeRecurrence),
+            Self::RuntimeRecurrenceAdjoint { .. } => Semantic(Id::RuntimeRecurrenceAdjoint),
             Self::Argmax { .. } => Semantic(Id::ArgmaxReduce),
             Self::Argmin { .. } => Semantic(Id::ArgminReduce),
             Self::Reshape { .. } => Semantic(Id::Reshape),
@@ -1905,8 +1913,6 @@ impl RiscOp {
             // Its tagged requirements and shape-only dependency are checked
             // by the IR verifier and the runtime-extent oracle.
             Self::ListMapCapture { .. }
-            | Self::RuntimeRecurrence(_)
-            | Self::RuntimeRecurrenceAdjoint { .. }
             | Self::OrderedAdjointSum { .. }
             | Self::Iota
             | Self::ExtentWitness { .. }
