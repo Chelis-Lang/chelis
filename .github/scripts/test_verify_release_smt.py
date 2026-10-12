@@ -127,13 +127,22 @@ class ClarabelReleaseRecordTest(unittest.TestCase):
             "proof_tier": "smt",
             "composite_verdict": "proven_modulo_asserted_axiom",
             "qualifiers": ["real_arithmetic"],
-            "assumptions": [{"name": "clarabel.qp.ideal_optimality"}],
+            "assumptions": [{
+                "name": "clarabel.qp.ideal_optimality",
+                "discharge": {"evidence": {
+                    "provider_archive_sha256": "a" * 64,
+                    "call_fingerprint_sha256": "b" * 64,
+                }},
+            }],
         }
         self.assertTrue(VRS.record_is_clarabel_ideal_proof(record))
         for changed in (
             {**record, "status": "unsupported"},
             {**record, "composite_verdict": "proved"},
             {**record, "assumptions": []},
+            {**record, "assumptions": [{"name": "clarabel.qp.ideal_optimality"}]},
+            {**record, "assumptions": [{"name": "clarabel.qp.ideal_optimality", "discharge": {"evidence": {"provider_archive_sha256": "a" * 64}}}]},
+            {**record, "assumptions": [{"name": "clarabel.qp.ideal_optimality", "discharge": {"evidence": {"provider_archive_sha256": "x" * 64, "call_fingerprint_sha256": "b" * 64}}}]},
             {**record, "qualifiers": []},
         ):
             self.assertFalse(VRS.record_is_clarabel_ideal_proof(changed))

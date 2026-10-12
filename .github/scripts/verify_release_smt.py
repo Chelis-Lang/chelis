@@ -136,16 +136,32 @@ def record_is_cvc5_smt(record: dict) -> bool:
 
 def record_is_clarabel_ideal_proof(record: dict) -> bool:
     """Require the released provider's call-bound, exact-real proof verdict."""
+    def has_call_binding(assumption: object) -> bool:
+        if not isinstance(assumption, dict) or assumption.get("name") != "clarabel.qp.ideal_optimality":
+            return False
+        discharge = assumption.get("discharge")
+        if not isinstance(discharge, dict):
+            return False
+        evidence = discharge.get("evidence")
+        if not isinstance(evidence, dict):
+            return False
+        return all(
+            isinstance(digest, str)
+            and len(digest) == 64
+            and all(character in "0123456789abcdefABCDEF" for character in digest)
+            for digest in (
+                evidence.get("provider_archive_sha256"),
+                evidence.get("call_fingerprint_sha256"),
+            )
+        )
+
     return (
         record.get("kind") == "property"
         and record.get("status") == "passed"
         and record.get("proof_tier") == "smt"
         and record.get("composite_verdict") == "proven_modulo_asserted_axiom"
         and "real_arithmetic" in record.get("qualifiers", [])
-        and any(
-            assumption.get("name") == "clarabel.qp.ideal_optimality"
-            for assumption in record.get("assumptions", [])
-        )
+        and any(has_call_binding(assumption) for assumption in record.get("assumptions", []))
     )
 
 
