@@ -17,6 +17,12 @@ def total(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(running(x), 0i32))
 out = [1.0f32, 2.0f32, 3.0f32] |> to_tensor |> total
 ";
 
+const CASTED_SUM_AXIS: &str = "module Demo.Main
+def running(x: tensor[3, f32]) -> tensor[3, f32] = cumsum(x, 0i32)
+def total(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(running(x), cast(0i64, i32)))
+out = total(to_tensor([1.0f32, 2.0f32, 3.0f32]))
+";
+
 const RECURSIVE_HELPER_SUM: &str = "module Demo.Main
 def double(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)
 def walk(n: i64, x: tensor[4, f32]) -> tensor[4, f32] = if eq(n, 0i64) then x else walk(sub(n, 1i64), double(x))
@@ -26,6 +32,16 @@ def main() -> f32 = tensor_to_scalar(sum(walk(4i64, to_tensor([1.0f32, 2.0f32, 3
 const INLINE_INSERT_SIZE: &str = "module Demo.Main
 def h(xs: List[i64], t: tensor[2, i64]) = insert(t, 0i32, index(xs, 1i64))
 out = h([3i64, 4i64], to_tensor([1i64, 2i64]))
+";
+
+const CASTED_INSERT_AXIS: &str = "module Demo.Main
+def h(xs: List[i64], t: tensor[2, i64]) = insert(t, cast(0i64, i32), index(xs, 0i64))
+out = h([3i64], to_tensor([1i64, 2i64]))
+";
+
+const CASTED_INSERT_AXIS_LITERAL_SIZE: &str = "module Demo.Main
+def h(t: tensor[2, i64]) = insert(t, cast(0i64, i32), 3i64)
+out = h(to_tensor([1i64, 2i64]))
 ";
 
 const INLINE_TENSOR_EXTENT: &str = "module Demo.Main
@@ -65,6 +81,7 @@ fn nested_tensor_operands_agree_with_executable_c() {
     }
     for (name, source, expected) in [
         ("helper_sum", HELPER_SUM, "out = 10.0\n"),
+        ("casted_sum_axis", CASTED_SUM_AXIS, "out = 10.0\n"),
         (
             "recursive_helper_sum",
             RECURSIVE_HELPER_SUM,
@@ -74,6 +91,16 @@ fn nested_tensor_operands_agree_with_executable_c() {
             "inline_insert_size",
             INLINE_INSERT_SIZE,
             "out = tensor(shape=[4, 2], data=[1, 2, 1, 2, 1, 2, 1, 2])\n",
+        ),
+        (
+            "casted_insert_axis",
+            CASTED_INSERT_AXIS,
+            "out = tensor(shape=[3, 2], data=[1, 2, 1, 2, 1, 2])\n",
+        ),
+        (
+            "casted_insert_axis_literal_size",
+            CASTED_INSERT_AXIS_LITERAL_SIZE,
+            "out = tensor(shape=[3, 2], data=[1, 2, 1, 2, 1, 2])\n",
         ),
         (
             "inline_tensor_extent",

@@ -17345,13 +17345,31 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     // This also preserves effects in the other operand when only one has
     // a host-only descendant. Other builtins may carry static axis/list
     // arguments, so this two-tensor boundary is specific to matmul.
-    let hoist_matmul_operands = kids.len() == 3 && direct_var_name(&kids[0]) == Some("matmul");
-    let host_operand = |arg: &Expr| {
-        should_keep_tensor_expr_in_host_lane(arg)
-            || operand_reads_host_record(arg, program, scope)
-            || (hoisted == HoistedOperands::EveryWorkingOperand && operand_does_work(arg))
+    let callee = direct_var_name(&kids[0]);
+    let hoist_matmul_operands = kids.len() == 3 && callee == Some("matmul");
+    // The checker fixes a reduction or insertion axis before this rewrite.
+    // A cast-wrapped integer literal is still a static axis: replacing it
+    // with a host binding turns it into a name and loses that decision in
+    // the tensor DAG. Its constant evaluation has no observable work, so it
+    // can stay at its original argument position while later operands move.
+    let static_axis = |index: usize, arg: &Expr| {
+        ((callee == Some("sum") && index >= 2) || (callee == Some("insert") && index == 2))
+            && crate::lower::extract_int_axis(arg).is_some()
     };
-    if !hoist_matmul_operands && !kids.iter().skip(1).any(host_operand) {
+    let does_work = |index: usize, arg: &Expr| !static_axis(index, arg) && operand_does_work(arg);
+    let host_operand = |index: usize, arg: &Expr| {
+        !static_axis(index, arg)
+            && (should_keep_tensor_expr_in_host_lane(arg)
+                || operand_reads_host_record(arg, program, scope)
+                || (hoisted == HoistedOperands::EveryWorkingOperand && does_work(index, arg)))
+    };
+    if !hoist_matmul_operands
+        && !kids
+            .iter()
+            .enumerate()
+            .skip(1)
+            .any(|(index, arg)| host_operand(index, arg))
+    {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
 
@@ -17364,7 +17382,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
         .iter()
         .enumerate()
         .skip(1)
-        .filter(|(_, arg)| hoist_matmul_operands || host_operand(arg))
+        .filter(|(index, arg)| hoist_matmul_operands || host_operand(*index, arg))
         .map(|(index, _)| index)
         .next_back();
 
@@ -17374,8 +17392,8 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
 
     for (index, arg) in kids.iter().enumerate().skip(1) {
         let precedes_a_hoisted_operand =
-            last_hoisted.is_some_and(|last| index < last) && operand_does_work(arg);
-        if hoist_matmul_operands || host_operand(arg) || precedes_a_hoisted_operand {
+            last_hoisted.is_some_and(|last| index < last) && does_work(index, arg);
+        if hoist_matmul_operands || host_operand(index, arg) || precedes_a_hoisted_operand {
             let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
             let preferred_ty = fn_sig
                 .and_then(|(param_tys, _)| param_tys.get(index - 1))

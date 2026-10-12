@@ -94,7 +94,6 @@ is current when issue state or labels differ from this dated snapshot.
 | [#2925](https://github.com/Chelis-Lang/chelis/issues/2925) | Compiled C releases a record argument read twice through an accessor in one tensor expression | None of these modifiers |
 | [#2929](https://github.com/Chelis-Lang/chelis/issues/2929) | Compiled C rejects i8 and i16 sparse indices that [05-SPARSE-1] admits | None of these modifiers |
 | [#2938](https://github.com/Chelis-Lang/chelis/issues/2938) | A tuple-element runtime extent fails on both lanes in any def with a declared tensor result | None of these modifiers |
-| [#2939](https://github.com/Chelis-Lang/chelis/issues/2939) | chelis build refuses sum over a non-recursive helper's tensor result (builtin sum on host emission), while check and eval accept | None of these modifiers |
 | [#2954](https://github.com/Chelis-Lang/chelis/issues/2954) | Inlined callees see the caller's dimension, precision and rank maps by name during lowering | None of these modifiers |
 | [#2974](https://github.com/Chelis-Lang/chelis/issues/2974) | sum/mean/max_reduce/min_reduce/prod_reduce reject two positional axes on a concrete-rank tensor that spec/04 §4.5.3 admits (only count takes the multi-axis positional path) | None of these modifiers |
 | [#2977](https://github.com/Chelis-Lang/chelis/issues/2977) | uniform_like rejects an f64 template with f64 bounds and accepts f32 bounds instead, against [05-OP-8] | None of these modifiers |
