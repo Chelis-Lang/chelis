@@ -1,0 +1,1933 @@
+# aeneas integration step 175 after cba11f3beb: commit a260f85edb82890029f58a39ff3badb233076b49
+# first parent 690eb2944d53735254235a99592bcb24e97889e1, merged 7be0e8e829b5b1aa493b711ab69d94b31c049e09
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge fix/join-snapshots 7be0e8e into int/r37
+
+diff --git a/src/Translate.ml b/src/Translate.ml
+index ec0c091..580a063 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -255,6 +255,7 @@ let translate_function_to_pure_aux (trans_ctx : trans_ctx)
+       join_snapshots =
+         {
+           snapshots = AbsId.Set.empty;
++          stale = AbsId.Set.empty;
+           may_snapshot = AbsId.Set.empty;
+           unreconciled = AbsId.Set.empty;
+           applied_in = [];
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index d1310f6..4043cef 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -1765,43 +1765,71 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+             in
+             mk_simpl_tuple_texpr span (from_inputs @ from_output)
+           in
++          let last_outputs =
++            mk_simpl_tuple_texpr span
++              (List.map (level_outputs last) back.outputs)
++          in
+           let last_stage =
+             mk_closed_lambdas span
+               (List.map (fun (_, var) -> mk_tpat_from_fvar None var) parameters)
+-              (mk_simpl_tuple_texpr span
+-                 (List.map (level_outputs last) back.outputs))
++              last_outputs
++          in
++          (* Staged: whether the outputs of the last stage read only the
++             parameters of the first stage (see
++             [SymbolicToPureCore.fun_call_stage.first_stage_inputs_only]) *)
++          let first_stage_inputs_only =
++            match early_parameters with
++            | [] -> false
++            | _ :: later ->
++                let read = texpr_get_fvars last_outputs in
++                not
++                  (List.exists
++                     (fun (_, (var : fvar)) -> FVarId.Set.mem var.id read)
++                     (List.concat later @ parameters))
+           in
+           Some
+-            (List.fold_right
+-               (fun (stage, ((early : back_early_sg), params)) next ->
+-                 let early_output =
+-                   mk_simpl_tuple_texpr span
+-                     (List.map (level_outputs stage) early.early_outputs)
+-                 in
+-                 mk_closed_lambdas span
+-                   [
+-                     mk_simpl_tuple_pat
+-                       (List.map
+-                          (fun (_, var) -> mk_tpat_from_fvar None var)
+-                          params);
+-                   ]
+-                   (mk_simpl_tuple_texpr span [ early_output; next ]))
+-               (List.mapi
+-                  (fun stage x -> (stage, x))
+-                  (List.combine back.early early_parameters))
+-               last_stage)))
++            ( gid,
++              List.fold_right
++                (fun (stage, ((early : back_early_sg), params)) next ->
++                  let early_output =
++                    mk_simpl_tuple_texpr span
++                      (List.map (level_outputs stage) early.early_outputs)
++                  in
++                  mk_closed_lambdas span
++                    [
++                      mk_simpl_tuple_pat
++                        (List.map
++                           (fun (_, var) -> mk_tpat_from_fvar None var)
++                           params);
++                    ]
++                    (mk_simpl_tuple_texpr span [ early_output; next ]))
++                (List.mapi
++                   (fun stage x -> (stage, x))
++                   (List.combine back.early early_parameters))
++                last_stage,
++              first_stage_inputs_only )))
+       (T.RegionGroupId.Map.bindings dsg.back_sg)
+   in
+   let output =
+     mk_simpl_tuple_texpr span
+       ((if dsg.fwd_info.ignore_output then [] else [ result ])
+-      @ declared_states @ owned_states @ backs)
++      @ declared_states @ owned_states
++      @ List.map (fun (_, back, _) -> back) backs)
+   in
+-  mk_closed_let span can_fail
+-    (mk_simpl_tuple_pat (List.map (mk_tpat_from_fvar None) vars))
+-    raw_call
+-    (if can_fail then mk_result_ok_texpr span output else output)
++  ( mk_closed_let span can_fail
++      (mk_simpl_tuple_pat (List.map (mk_tpat_from_fvar None) vars))
++      raw_call
++      (if can_fail then mk_result_ok_texpr span output else output),
++    T.RegionGroupId.Set.of_list
++      (List.filter_map
++         (fun (gid, _, first_stage_inputs_only) ->
++           if first_stage_inputs_only then Some gid else None)
++         backs) )
+ 
++(** Adapt a call to a model to its canonical state ABI. Also returns the region
++    groups whose staged backward function, synthesized here, computes the
++    outputs of its last stage from the inputs of its first stage only (see
++    [SymbolicToPureCore.fun_call_stage.first_stage_inputs_only]). *)
+ let adapt_call span ctx fresh fid abi (sg : A.inst_fun_sig)
+     (dsg : decomposed_fun_type) (owned_outputs : owned_state_output list)
+     (func : texpr) (args : texpr list) =
+@@ -1829,7 +1857,7 @@ let adapt_call span ctx fresh fid abi (sg : A.inst_fun_sig)
+         "Lending iterator model does not implement the required nested region \
+          ABI";
+       (* Keep the real model lens and every region-indexed result unchanged. *)
+-      call
++      (call, T.RegionGroupId.Set.empty)
+   | BorrowedStorage index ->
+       [%cassert] span
+         (owned_outputs = [] && dsg.state_outputs = [])
+@@ -1851,7 +1879,7 @@ let adapt_call span ctx fresh fid abi (sg : A.inst_fun_sig)
+          lens ABI";
+       (* Unlike a consuming iterator's residual suffix, this model retains the
+          complete borrowed storage, including cells restored by lending next. *)
+-      call
++      (call, T.RegionGroupId.Set.empty)
+ 
+ (** Reinflate a filtered tuple projection. Only unowned positions come from
+     [original]; each selected mutable position must be present in [projected].
+diff --git a/src/symbolic/SymbolicToPureAbs.ml b/src/symbolic/SymbolicToPureAbs.ml
+index 6fab16c..3435f4d 100644
+--- a/src/symbolic/SymbolicToPureAbs.ml
++++ b/src/symbolic/SymbolicToPureAbs.ml
+@@ -1686,10 +1686,19 @@ let einput_to_texpr ?(snapshot : bool ref option)
+         (* A join continuation applies them itself, in the snapshot of the join
+            (see [join_snapshots]); any other continuation (of a loop or a
+            reborrow) does not receive the inputs of the earlier stages of the
+-           calls it holds (its levels > 0 are not inputs). *)
++           calls it holds (its levels > 0 are not inputs). The snapshot is
++           stale unless the last stage reads only the inputs of the first one
++           (see [join_snapshots.stale]). *)
+         (match (early, snapshot) with
+         | [], _ -> ()
+-        | _, Some snapshot -> snapshot := true
++        | _, Some snapshot ->
++            snapshot := true;
++            if not (Option.get stage).first_stage_inputs_only then
++              Option.iter
++                (fun site ->
++                  ctx.join_snapshots.stale <-
++                    V.AbsId.Set.add site ctx.join_snapshots.stale)
++                within
+         | _, None ->
+             [%craise] span
+               "Nested borrows: the continuation of a loop or reborrow \
+diff --git a/src/symbolic/SymbolicToPureCore.ml b/src/symbolic/SymbolicToPureCore.ml
+index 4ba99bc..2b54138 100644
+--- a/src/symbolic/SymbolicToPureCore.ml
++++ b/src/symbolic/SymbolicToPureCore.ml
+@@ -280,6 +280,16 @@ type fun_call_stage = {
+           outputs of the stages which have been applied, in order. The backward
+           function is then the continuation returned by the last applied stage,
+           which receives the inputs of the next stage. *)
++  first_stage_inputs_only : bool;
++      (** Staged backward functions: the outputs of the last stage depend only
++          on the inputs of the first stage and on values of the forward call,
++          not on the inputs of the later stages (the last one included). This
++          is known for the staged backward functions which the model-state ABI
++          synthesizes at the call (see [ModelStateABI.adapt_call]), whose
++          bodies are checked; [false] for the other calls. A join continuation
++          which applies the earlier stages of such a function in the snapshot
++          of the join computes the output of the in-order application (see
++          [join_snapshots.stale]). *)
+   bound_early_outputs : (int * abs_level) list;
+       (** The stages (before the last one) and levels whose outputs in
+           [early_outputs] have been bound to the values given back by the
+@@ -361,8 +371,21 @@ type owned_state_recovery =
+     is recombined with the current values of its own nested loans (the positions
+     of the regions of the abstractions are replaced as a whole).
+ 
++    The snapshot differs from the in-order application of the stages (each
++    one when the sub-abstraction of its level ends) only by the outputs of the
++    stages it applies: they are dropped, and the program continues with the
++    values at the join instead. The inputs of the first stage of the function
++    are consumed before any of these outputs (the stage is applied in the
++    branch, or it is the first one the snapshot applies): they are the same in
++    both. The inputs of the later stages, the last one included, may be
++    computed from the values at the join instead of these outputs. If the
++    outputs of the last stage do not depend on the inputs of the later stages
++    (see [fun_call_stage.first_stage_inputs_only]), the continuation thus
++    computes the output of the in-order application: it needs no
++    recombination. The other snapshots are [stale].
++
+     Shared by the whole translation of a function body, which checks at its end
+-    that the output of the snapshot joins is only used through such
++    that the output of the stale snapshot joins is only used through such
+     recombinations (see [SymbolicToPureExpressions.check_join_snapshots]): the
+     joins are translated after (in a [let] with early exits) or before the uses
+     of their abstractions, and the loop abstractions end after the body of
+@@ -372,6 +395,12 @@ type join_snapshots = {
+       (** The abstractions output by the joins at the positions whose
+           continuation applies stages in the snapshot of the join in some
+           branch *)
++  mutable stale : V.AbsId.Set.t;
++      (** The abstractions of [snapshots] whose continuation applies, in some
++          branch, the earlier stages of a staged backward function whose last
++          stage may read the inputs of its later stages (see
++          [fun_call_stage.first_stage_inputs_only]): their output is only
++          correct once recombined *)
+   mutable may_snapshot : V.AbsId.Set.t;
+       (** The abstractions output by the [let]s whose bound expression is not
+           translated yet (a [let] with early exits translates its next
+diff --git a/src/symbolic/SymbolicToPureExpressions.ml b/src/symbolic/SymbolicToPureExpressions.ml
+index f2046a8..91bfb82 100644
+--- a/src/symbolic/SymbolicToPureExpressions.ml
++++ b/src/symbolic/SymbolicToPureExpressions.ml
+@@ -1222,6 +1222,7 @@ and make_fun_call_stage (ctx : bs_ctx) (inst_sg : LlbcAst.inst_fun_sig) gid
+     reconstructed_outputs = [];
+     supplied_inputs = [];
+     early_outputs = [];
++    first_stage_inputs_only = false;
+     bound_early_outputs = [];
+     deferred_outputs = [];
+     dropped_twins = [];
+@@ -1927,11 +1928,26 @@ and translate_function_call_aux (call : S.call) (e : S.expr) (ctx : bs_ctx) :
+               context := ctx;
+               var
+             in
+-            let call_e =
++            let call_e, first_stage_inputs_only =
+               ModelStateABI.adapt_call ctx.span ctx.decls_ctx fresh fid contract
+                 sg dsg owned_requests func args
+             in
+-            (!context, call_e))
++            (* See [fun_call_stage.first_stage_inputs_only] *)
++            let ctx = !context in
++            let fun_call_stages =
++              List.fold_left2
++                (fun stages aid (gid, _) ->
++                  match V.AbsId.Map.find_opt aid stages with
++                  | Some stage
++                    when RegionGroupId.Set.mem gid first_stage_inputs_only ->
++                      V.AbsId.Map.add aid
++                        { stage with first_stage_inputs_only = true }
++                        stages
++                  | _ -> stages)
++                ctx.fun_call_stages call.abstractions
++                (RegionGroupId.Map.bindings dsg.back_sg)
++            in
++            ({ ctx with fun_call_stages }, call_e))
+     | _ -> (ctx, call_e)
+   in
+   [%ldebug "call_e: " ^ texpr_to_string ctx call_e];
+@@ -5833,20 +5849,21 @@ and translate_let (ctx0 : bs_ctx) (lete : S.let_expr) : texpr =
+ 
+ (** See [join_snapshots]: once a function body is translated, the outputs of
+     the continuations of the join abstractions which apply stages in the
+-    snapshot of the join in some branch must only have been used through
+-    continuations whose outputs were recombined with the current values of
+-    their nested loans. *)
++    snapshot of the join in some branch, and whose snapshot is stale, must only
++    have been used through continuations whose outputs were recombined with
++    the current values of their nested loans. *)
+ and check_join_snapshots (ctx : bs_ctx) : unit =
+   let snapshots = ctx.join_snapshots in
+   [%cassert] ctx.span
+     (V.AbsId.Set.disjoint
+-       (join_snapshots_reach snapshots snapshots.snapshots)
++       (join_snapshots_reach snapshots snapshots.stale)
+        snapshots.unreconciled)
+     "Nested borrows: the continuation of a join abstraction applies the \
+      earlier stages of a staged backward function of a call in the snapshot of \
+      the join (the values given back at the nested levels of the call are \
+-     those at the join), but its output is used without recombination with \
+-     the current values of its nested loans"
++     those at the join), whose last stage may read the inputs of its later \
++     stages, but its output is used without recombination with the current \
++     values of its nested loans"
+ 
+ and translate_join (ctx : bs_ctx) (join_id : S.symbolic_expr_id)
+     (ectx : C.eval_ctx) (input_values : V.tvalue list) (input_abs : V.abs list)
+diff --git a/tests/lean/NestedBorrowsJoinSnapshotModel.lean b/tests/lean/NestedBorrowsJoinSnapshotModel.lean
+new file mode 100644
+index 0000000..64ec71a
+--- /dev/null
++++ b/tests/lean/NestedBorrowsJoinSnapshotModel.lean
+@@ -0,0 +1 @@
++import NestedBorrowsJoinSnapshotModel.Checks
+diff --git a/tests/lean/NestedBorrowsJoinSnapshotModel/Checks.lean b/tests/lean/NestedBorrowsJoinSnapshotModel/Checks.lean
+new file mode 100644
+index 0000000..361803f
+--- /dev/null
++++ b/tests/lean/NestedBorrowsJoinSnapshotModel/Checks.lean
+@@ -0,0 +1,47 @@
++import NestedBorrowsJoinSnapshotModel.NestedBorrowsJoinSnapshotModel
++
++/-! Evaluate the model of `tests/src/nested-borrows-join-snapshot-model.rs` on
++    the inputs of its `native` test module and compare with the native results
++    (the sink and the budget given back after the join, then written by the
++    caller). -/
++
++namespace nested_borrows_join_snapshot_model.checks
++open Aeneas Aeneas.Std Result
++open nested_borrows_join_snapshot_model
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++
++/-- `(result, errors, first error, last error)` -/
++def runRecover (which a b p : Nat) : Option (Nat × Nat × Nat × Nat) :=
++  match run_recover (u which) (u a) (u b) (u p) with
++  | ok (r, len, first, last) => some (r.val, len.val, first.val, last.val)
++  | _ => none
++
++/-- `(result, deps, sum of deps, depth, first)` -/
++def runApp (a b c n : Nat) (shape : Bool) : Option (Nat × Nat × Nat × Nat × Nat) :=
++  match run_app (u a) (u b) (u c) ⟨BitVec.ofNat _ n⟩ shape with
++  | ok (r, len, sum, depth, first) => some (r.val, len.val, sum.val, depth.val, first.val)
++  | _ => none
++
++-- recover_native
++#guard runRecover 1 1 2 1 == some (31, 3, 12, 12)
++#guard runRecover 1 1 2 5 == some (35, 4, 12, 5)
++#guard runRecover 1 11 2 1 == some (31, 4, 11, 12)
++#guard runRecover 1 11 13 5 == some (35, 6, 11, 5)
++#guard runRecover 1 1 13 4 == some (34, 5, 13, 4)
++#guard runRecover 2 1 2 1 == some (3, 4, 12, 93)
++#guard runRecover 2 1 2 5 == some (3, 5, 12, 93)
++#guard runRecover 2 11 13 5 == some (3, 7, 11, 93)
++#guard runRecover 3 1 2 1 == some (33, 4, 12, 12)
++#guard runRecover 3 11 2 1 == some (33, 6, 11, 12)
++#guard runRecover 3 11 13 5 == some (33, 9, 11, 12)
++
++-- app_native
++#guard runApp 5 2 0 3 false == some (2, 3, 7, 105, 5)
++#guard runApp 5 0 4 3 false == some (2, 3, 5, 105, 4)
++#guard runApp 5 2 0 3 true == some (1, 1, 1, 105, 5)
++#guard runApp 5 2 0 1 false == some (0, 1, 1, 103, 99)
++#guard runApp 5 7 0 2 false == some (1, 2, 15, 104, 99)
++#guard runApp 5 0 0 3 false == some (2, 3, 1, 105, 5)
++
++end nested_borrows_join_snapshot_model.checks
+diff --git a/tests/lean/NestedBorrowsJoinSnapshotModel/NestedBorrowsJoinSnapshotModel.lean b/tests/lean/NestedBorrowsJoinSnapshotModel/NestedBorrowsJoinSnapshotModel.lean
+new file mode 100644
+index 0000000..d574ff1
+--- /dev/null
++++ b/tests/lean/NestedBorrowsJoinSnapshotModel/NestedBorrowsJoinSnapshotModel.lean
+@@ -0,0 +1,1297 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_join_snapshot_model]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_join_snapshot_model
++
++/-- [nested_borrows_join_snapshot_model::Sink]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 21:0-23:1
++    Visibility: public -/
++structure Sink where
++  errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_join_snapshot_model::recover::closure]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 36:58-36:76 -/
++@[reducible]
++def recover.closure := _root_.nested_borrows_join_snapshot_model.Sink
++
++/-- [nested_borrows_join_snapshot_model::recover_then_write::closure]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 48:58-48:76 -/
++@[reducible]
++def recover_then_write.closure :=
++  _root_.nested_borrows_join_snapshot_model.Sink
++
++/-- [nested_borrows_join_snapshot_model::recover_twice::closure]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 58:56-58:74 -/
++@[reducible]
++def recover_twice.closure := _root_.nested_borrows_join_snapshot_model.Sink
++
++/-- [nested_borrows_join_snapshot_model::recover_twice::closure#1]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 62:56-62:74 -/
++@[reducible]
++def recover_twice.closure_1 := _root_.nested_borrows_join_snapshot_model.Sink
++
++/-- [nested_borrows_join_snapshot_model::Record]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 92:0-94:1
++    Visibility: public -/
++structure Record where
++  first : _root_.Option _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_join_snapshot_model::Native]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 88:0-90:1
++    Visibility: public -/
++structure Native where
++  depth : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_join_snapshot_model::Budget]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 96:0-99:1
++    Visibility: public -/
++structure Budget where
++  native : _root_.nested_borrows_join_snapshot_model.Native
++  record : _root_.nested_borrows_join_snapshot_model.Record
++
++/-- [nested_borrows_join_snapshot_model::app::closure]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 111:43-111:64 -/
++@[reducible]
++def app.closure := _root_.nested_borrows_join_snapshot_model.Budget
++
++/-- [nested_borrows_join_snapshot_model::dim]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 25:0-32:1 -/
++def dim
++  (errors : _root_.nested_borrows_join_snapshot_model.Sink)
++  (c : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.Sink ×
++    (_root_.nested_borrows_join_snapshot_model.Sink →
++    _root_.nested_borrows_join_snapshot_model.Sink))
++  := do
++  if c > 10#u32
++  then
++    let v ← _root_.Aeneas.Std.alloc.vec.Vec.push errors.errors c
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err c,
++      { errors := v }, fun errors1 => errors1)
++  else
++    let i ← c + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok i,
++      errors, fun errors1 => errors1)
++
++/-- [nested_borrows_join_snapshot_model::recover::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 36:58-36:76 -/
++def
++  recover.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++  (c : _root_.nested_borrows_join_snapshot_model.recover.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.recover.closure ×
++    (_root_.nested_borrows_join_snapshot_model.recover.closure →
++    _root_.nested_borrows_join_snapshot_model.recover.closure) ×
++    (_root_.nested_borrows_join_snapshot_model.recover.closure →
++    (_root_.nested_borrows_join_snapshot_model.recover.closure ×
++    (_root_.nested_borrows_join_snapshot_model.recover.closure →
++    _root_.nested_borrows_join_snapshot_model.recover.closure))))
++  := do
++  let (r, s, dim_back) ←
++    _root_.nested_borrows_join_snapshot_model.dim c tupled_args
++  let back :=
++    (fun c1 => c1 : _root_.nested_borrows_join_snapshot_model.recover.closure →
++      _root_.nested_borrows_join_snapshot_model.recover.closure)
++  let back1 :=
++    (fun c1 => (c1, fun c2 => let s1 := dim_back c2
++                              s1) :
++      _root_.nested_borrows_join_snapshot_model.recover.closure →
++      (_root_.nested_borrows_join_snapshot_model.recover.closure ×
++      (_root_.nested_borrows_join_snapshot_model.recover.closure →
++      _root_.nested_borrows_join_snapshot_model.recover.closure)))
++  _root_.Aeneas.Std.Result.ok (r, s, back, back1)
++
++/-- [nested_borrows_join_snapshot_model::recover::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover::closure<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 36:58-36:76 -/
++def
++  recover.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32.call_once
++  (c : _root_.nested_borrows_join_snapshot_model.recover.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.recover.closure ×
++    (_root_.nested_borrows_join_snapshot_model.recover.closure →
++    _root_.nested_borrows_join_snapshot_model.recover.closure))
++  := do
++  let (r, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_join_snapshot_model.recover.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 c3
++       let c5 := back1 c4
++       let ⟨ v ⟩ := c5
++       { errors := v } :
++      _root_.nested_borrows_join_snapshot_model.recover.closure →
++      _root_.nested_borrows_join_snapshot_model.recover.closure)
++  _root_.Aeneas.Std.Result.ok (r, c2, back)
++
++/-- Trait implementation: [nested_borrows_join_snapshot_model::recover::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 36:58-36:76 -/
++@[reducible]
++def recover.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_join_snapshot_model.recover.closure
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_join_snapshot_model.recover.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_join_snapshot_model.Sink.mk
++        capture_state1.errors)
++}
++
++/-- Trait implementation: [nested_borrows_join_snapshot_model::recover::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 36:58-36:76 -/
++@[reducible]
++def recover.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_join_snapshot_model.recover.closure
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.nested_borrows_join_snapshot_model.recover.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_join_snapshot_model.recover.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_join_snapshot_model.Sink.mk
++        capture_state1.errors)
++}
++
++/-- [nested_borrows_join_snapshot_model::recover]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 35:0-44:1
++    Visibility: public -/
++def recover
++  (errors : _root_.nested_borrows_join_snapshot_model.Sink)
++  (children : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (p : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.Sink ×
++    (_root_.nested_borrows_join_snapshot_model.Sink →
++    _root_.nested_borrows_join_snapshot_model.Sink))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter children
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32
++      i errors
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover.closure →
++      _root_.nested_borrows_join_snapshot_model.recover.closure)
++  let map_back1 :=
++    (fun state_back => ({ model_state with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.nested_borrows_join_snapshot_model.recover.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover.closure) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover.closure →
++      _root_.nested_borrows_join_snapshot_model.recover.closure)))
++  let (model_state1, model_state2) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32)) model_state
++  let (errors1, back) ←
++    if p > 3#u32
++    then
++      do
++      let s := model_state2.f
++      let c := map_back { model_state with f := model_state2.f }
++      let v ← _root_.Aeneas.Std.alloc.vec.Vec.push c.errors p
++      _root_.Aeneas.Std.Result.ok (({ errors := v } :
++        _root_.nested_borrows_join_snapshot_model.Sink),
++        (fun s1 =>
++           let v1 := s1.errors
++           let ⟨ v2 ⟩ := s
++           let (_, back1) := map_back1 { errors := v1 }
++           let ⟨ v3 ⟩ := back1 { model_state with f := { errors := v2 } }
++           v3 : _root_.nested_borrows_join_snapshot_model.Sink →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    else
++      let s := model_state2.f
++      let c := map_back { model_state with f := model_state2.f }
++      _root_.Aeneas.Std.Result.ok (c,
++        (fun s1 =>
++           let ⟨ v ⟩ := s
++           let (_, back1) := map_back1 s1
++           let ⟨ v1 ⟩ := back1 { model_state with f := { errors := v } }
++           v1 : _root_.nested_borrows_join_snapshot_model.Sink →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len model_state1
++  let i2 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i1)
++  let back1 :=
++    (fun errors2 => let v := back errors2
++                    { errors := v } :
++      _root_.nested_borrows_join_snapshot_model.Sink →
++      _root_.nested_borrows_join_snapshot_model.Sink)
++  _root_.Aeneas.Std.Result.ok ((p, i2), errors1, back1)
++
++/-- [nested_borrows_join_snapshot_model::recover_then_write::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_then_write::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 48:58-48:76 -/
++def
++  recover_then_write.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++  (c : _root_.nested_borrows_join_snapshot_model.recover_then_write.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.recover_then_write.closure ×
++    (_root_.nested_borrows_join_snapshot_model.recover_then_write.closure →
++    _root_.nested_borrows_join_snapshot_model.recover_then_write.closure) ×
++    (_root_.nested_borrows_join_snapshot_model.recover_then_write.closure →
++    (_root_.nested_borrows_join_snapshot_model.recover_then_write.closure ×
++    (_root_.nested_borrows_join_snapshot_model.recover_then_write.closure →
++    _root_.nested_borrows_join_snapshot_model.recover_then_write.closure))))
++  := do
++  let (r, s, dim_back) ←
++    _root_.nested_borrows_join_snapshot_model.dim c tupled_args
++  let back :=
++    (fun c1 => c1 :
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure →
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure)
++  let back1 :=
++    (fun c1 => (c1, fun c2 => let s1 := dim_back c2
++                              s1) :
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure →
++      (_root_.nested_borrows_join_snapshot_model.recover_then_write.closure ×
++      (_root_.nested_borrows_join_snapshot_model.recover_then_write.closure →
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure)))
++  _root_.Aeneas.Std.Result.ok (r, s, back, back1)
++
++/-- [nested_borrows_join_snapshot_model::recover_then_write::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_then_write::closure<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 48:58-48:76 -/
++def
++  recover_then_write.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32.call_once
++  (c : _root_.nested_borrows_join_snapshot_model.recover_then_write.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.recover_then_write.closure ×
++    (_root_.nested_borrows_join_snapshot_model.recover_then_write.closure →
++    _root_.nested_borrows_join_snapshot_model.recover_then_write.closure))
++  := do
++  let (r, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_join_snapshot_model.recover_then_write.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 c3
++       let c5 := back1 c4
++       let ⟨ v ⟩ := c5
++       { errors := v } :
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure →
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure)
++  _root_.Aeneas.Std.Result.ok (r, c2, back)
++
++/-- Trait implementation: [nested_borrows_join_snapshot_model::recover_then_write::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_then_write::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 48:58-48:76 -/
++@[reducible]
++def
++  recover_then_write.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_join_snapshot_model.recover_then_write.closure
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_join_snapshot_model.recover_then_write.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_join_snapshot_model.Sink.mk
++        capture_state1.errors)
++}
++
++/-- Trait implementation: [nested_borrows_join_snapshot_model::recover_then_write::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_then_write::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 48:58-48:76 -/
++@[reducible]
++def
++  recover_then_write.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_join_snapshot_model.recover_then_write.closure
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.nested_borrows_join_snapshot_model.recover_then_write.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_join_snapshot_model.recover_then_write.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_join_snapshot_model.Sink.mk
++        capture_state1.errors)
++}
++
++/-- [nested_borrows_join_snapshot_model::recover_then_write]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 47:0-54:1
++    Visibility: public -/
++def recover_then_write
++  (errors : _root_.nested_borrows_join_snapshot_model.Sink)
++  (children : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (p : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_join_snapshot_model.Sink ×
++    (_root_.nested_borrows_join_snapshot_model.Sink →
++    _root_.nested_borrows_join_snapshot_model.Sink))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter children
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32
++      i errors
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure →
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure)
++  let map_back1 :=
++    (fun state_back => ({ model_state with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure →
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure)))
++  let (model_state1, model_state2) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_then_write.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32)) model_state
++  let (errors1, back) ←
++    if p > 3#u32
++    then
++      do
++      let s := model_state2.f
++      let c := map_back { model_state with f := model_state2.f }
++      let v ← _root_.Aeneas.Std.alloc.vec.Vec.push c.errors p
++      _root_.Aeneas.Std.Result.ok (({ errors := v } :
++        _root_.nested_borrows_join_snapshot_model.Sink),
++        (fun s1 =>
++           let v1 := s1.errors
++           let ⟨ v2 ⟩ := s
++           let (_, back1) := map_back1 { errors := v1 }
++           let ⟨ v3 ⟩ := back1 { model_state with f := { errors := v2 } }
++           v3 : _root_.nested_borrows_join_snapshot_model.Sink →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    else
++      let s := model_state2.f
++      let c := map_back { model_state with f := model_state2.f }
++      _root_.Aeneas.Std.Result.ok (c,
++        (fun s1 =>
++           let ⟨ v ⟩ := s
++           let (_, back1) := map_back1 s1
++           let ⟨ v1 ⟩ := back1 { model_state with f := { errors := v } }
++           v1 : _root_.nested_borrows_join_snapshot_model.Sink →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len model_state1
++  let i2 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i1)
++  let i3 ← 90#u32 + i2
++  let v ← _root_.Aeneas.Std.alloc.vec.Vec.push errors1.errors i3
++  let i4 := _root_.Aeneas.Std.alloc.vec.Vec.len model_state1
++  let i5 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i4)
++  let back1 :=
++    (fun errors2 => let v1 := back errors2
++                    { errors := v1 } :
++      _root_.nested_borrows_join_snapshot_model.Sink →
++      _root_.nested_borrows_join_snapshot_model.Sink)
++  _root_.Aeneas.Std.Result.ok (i5, { errors := v }, back1)
++
++/-- [nested_borrows_join_snapshot_model::recover_twice::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_twice::closure#1<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 62:56-62:74 -/
++def
++  recover_twice.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++  (c : _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 ×
++    (_root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 →
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1) ×
++    (_root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 →
++    (_root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 ×
++    (_root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 →
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1))))
++  := do
++  let (r, s, dim_back) ←
++    _root_.nested_borrows_join_snapshot_model.dim c tupled_args
++  let back :=
++    (fun c1 => c1 :
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 →
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1)
++  let back1 :=
++    (fun c1 => (c1, fun c2 => let s1 := dim_back c2
++                              s1) :
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 →
++      (_root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 ×
++      (_root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 →
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1)))
++  _root_.Aeneas.Std.Result.ok (r, s, back, back1)
++
++/-- [nested_borrows_join_snapshot_model::recover_twice::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_twice::closure#1<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 62:56-62:74 -/
++def
++  recover_twice.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32.call_once
++  (c : _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 ×
++    (_root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 →
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1))
++  := do
++  let (r, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 c3
++       let c5 := back1 c4
++       let ⟨ v ⟩ := c5
++       { errors := v } :
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 →
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1)
++  _root_.Aeneas.Std.Result.ok (r, c2, back)
++
++/-- Trait implementation: [nested_borrows_join_snapshot_model::recover_twice::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_twice::closure#1<0, 1>}]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 62:56-62:74 -/
++@[reducible]
++def
++  recover_twice.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_join_snapshot_model.Sink.mk
++        capture_state1.errors)
++}
++
++/-- Trait implementation: [nested_borrows_join_snapshot_model::recover_twice::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_twice::closure#1<0, 1>}]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 62:56-62:74 -/
++@[reducible]
++def
++  recover_twice.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_join_snapshot_model.Sink.mk
++        capture_state1.errors)
++}
++
++/-- [nested_borrows_join_snapshot_model::recover_twice::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_twice::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 58:56-58:74 -/
++def
++  recover_twice.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++  (c : _root_.nested_borrows_join_snapshot_model.recover_twice.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure ×
++    (_root_.nested_borrows_join_snapshot_model.recover_twice.closure →
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure) ×
++    (_root_.nested_borrows_join_snapshot_model.recover_twice.closure →
++    (_root_.nested_borrows_join_snapshot_model.recover_twice.closure ×
++    (_root_.nested_borrows_join_snapshot_model.recover_twice.closure →
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure))))
++  := do
++  let (r, s, dim_back) ←
++    _root_.nested_borrows_join_snapshot_model.dim c tupled_args
++  let back :=
++    (fun c1 => c1 :
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure →
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure)
++  let back1 :=
++    (fun c1 => (c1, fun c2 => let s1 := dim_back c2
++                              s1) :
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure →
++      (_root_.nested_borrows_join_snapshot_model.recover_twice.closure ×
++      (_root_.nested_borrows_join_snapshot_model.recover_twice.closure →
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure)))
++  _root_.Aeneas.Std.Result.ok (r, s, back, back1)
++
++/-- [nested_borrows_join_snapshot_model::recover_twice::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_twice::closure<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 58:56-58:74 -/
++def
++  recover_twice.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32.call_once
++  (c : _root_.nested_borrows_join_snapshot_model.recover_twice.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure ×
++    (_root_.nested_borrows_join_snapshot_model.recover_twice.closure →
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure))
++  := do
++  let (r, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 c3
++       let c5 := back1 c4
++       let ⟨ v ⟩ := c5
++       { errors := v } :
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure →
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure)
++  _root_.Aeneas.Std.Result.ok (r, c2, back)
++
++/-- Trait implementation: [nested_borrows_join_snapshot_model::recover_twice::{core::ops::function::FnOnce<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_twice::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 58:56-58:74 -/
++@[reducible]
++def recover_twice.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_join_snapshot_model.recover_twice.closure
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_join_snapshot_model.recover_twice.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_join_snapshot_model.Sink.mk
++        capture_state1.errors)
++}
++
++/-- Trait implementation: [nested_borrows_join_snapshot_model::recover_twice::{core::ops::function::FnMut<(&'_ (u32)), core::result::Result<u32, u32>> for nested_borrows_join_snapshot_model::recover_twice::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 58:56-58:74 -/
++@[reducible]
++def recover_twice.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_join_snapshot_model.recover_twice.closure
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.core.result.Result
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.nested_borrows_join_snapshot_model.recover_twice.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32ResultU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_join_snapshot_model.recover_twice.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_join_snapshot_model.Sink.mk
++        capture_state1.errors)
++}
++
++/-- [nested_borrows_join_snapshot_model::recover_twice]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 57:0-64:1
++    Visibility: public -/
++def recover_twice
++  (errors : _root_.nested_borrows_join_snapshot_model.Sink)
++  (children : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (p : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_join_snapshot_model.Sink ×
++    (_root_.nested_borrows_join_snapshot_model.Sink →
++    _root_.nested_borrows_join_snapshot_model.Sink))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter children
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32
++      i errors
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure →
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure)
++  let map_back1 :=
++    (fun state_back => ({ model_state with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure →
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure)))
++  let (model_state1, model_state2) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32)) model_state
++  let (errors1, back) ←
++    if p > 3#u32
++    then
++      do
++      let s := model_state2.f
++      let c := map_back { model_state with f := model_state2.f }
++      let v ← _root_.Aeneas.Std.alloc.vec.Vec.push c.errors p
++      _root_.Aeneas.Std.Result.ok (({ errors := v } :
++        _root_.nested_borrows_join_snapshot_model.Sink),
++        (fun s1 =>
++           let v1 := s1.errors
++           let ⟨ v2 ⟩ := s
++           let (_, back1) := map_back1 { errors := v1 }
++           let ⟨ v3 ⟩ := back1 { model_state with f := { errors := v2 } }
++           v3 : _root_.nested_borrows_join_snapshot_model.Sink →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    else
++      let s := model_state2.f
++      let c := map_back { model_state with f := model_state2.f }
++      _root_.Aeneas.Std.Result.ok (c,
++        (fun s1 =>
++           let ⟨ v ⟩ := s
++           let (_, back1) := map_back1 s1
++           let ⟨ v1 ⟩ := back1 { model_state with f := { errors := v } }
++           v1 : _root_.nested_borrows_join_snapshot_model.Sink →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  let model_state3 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32
++      i errors1
++  let map_back2 :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 →
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1)
++  let map_back3 :=
++    (fun state_back => ({ model_state3 with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1 →
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1)))
++  let (model_state4, model_state5) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_join_snapshot_model.recover_twice.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32ResultU32U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++      _root_.Aeneas.Std.U32)) model_state3
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len model_state1
++  let i2 := _root_.Aeneas.Std.alloc.vec.Vec.len model_state4
++  let i3 ← 10#usize * i2
++  let i4 ← i1 + i3
++  let i5 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i4)
++  let c := map_back2 { model_state3 with f := model_state5.f }
++  let back1 :=
++    (fun errors2 =>
++       let (m, back2) := map_back3 errors2
++       let s := m.f
++       let ⟨ v ⟩ := s
++       let c1 := back2 { model_state3 with f := { errors := v } }
++       let ⟨ v1 ⟩ := c1
++       let v2 := back { errors := v1 }
++       { errors := v2 } : _root_.nested_borrows_join_snapshot_model.Sink →
++      _root_.nested_borrows_join_snapshot_model.Sink)
++  _root_.Aeneas.Std.Result.ok (i5, c, back1)
++
++/-- [nested_borrows_join_snapshot_model::run_recover]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 68:0-86:1
++    Visibility: public -/
++def run_recover
++  (which : _root_.Aeneas.Std.U32) (a : _root_.Aeneas.Std.U32)
++  (b : _root_.Aeneas.Std.U32) (p : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let v ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) 7#u32
++  let (sink, r, back) ←
++    if which = 1#u32
++    then
++      do
++      let s ←
++        lift (_root_.Aeneas.Std.Array.to_slice
++          (_root_.Aeneas.Std.Array.make 3#usize [ a, b, 12#u32 ]))
++      let (p1, sink1, recover_back) ←
++        _root_.nested_borrows_join_snapshot_model.recover { errors := v } s p
++      let (q, n) := p1
++      let i ← 10#u32 * n
++      let r1 ← q + i
++      _root_.Aeneas.Std.Result.ok (sink1, r1,
++        (fun s1 => (recover_back s1).errors :
++        _root_.nested_borrows_join_snapshot_model.Sink →
++        _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    else
++      if which = 2#u32
++      then
++        do
++        let s ←
++          lift (_root_.Aeneas.Std.Array.to_slice
++            (_root_.Aeneas.Std.Array.make 3#usize [ a, b, 12#u32 ]))
++        let (r1, sink1, recover_then_write_back) ←
++          _root_.nested_borrows_join_snapshot_model.recover_then_write
++            { errors := v } s p
++        _root_.Aeneas.Std.Result.ok (sink1, r1,
++          (fun s1 => (recover_then_write_back s1).errors :
++          _root_.nested_borrows_join_snapshot_model.Sink →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      else
++        do
++        let s ←
++          lift (_root_.Aeneas.Std.Array.to_slice
++            (_root_.Aeneas.Std.Array.make 3#usize [ a, b, 12#u32 ]))
++        let (r1, sink1, recover_twice_back) ←
++          _root_.nested_borrows_join_snapshot_model.recover_twice
++            { errors := v } s p
++        _root_.Aeneas.Std.Result.ok (sink1, r1,
++          (fun s1 => (recover_twice_back s1).errors :
++          _root_.nested_borrows_join_snapshot_model.Sink →
++          _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  let i ← 200#u32 + r
++  let v1 ← _root_.Aeneas.Std.alloc.vec.Vec.push sink.errors i
++  let v2 := back { errors := v1 }
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len v2
++  let len ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i1)
++  let first ←
++    _root_.Aeneas.Std.alloc.vec.Vec.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.Aeneas.Std.U32) v2 1#usize
++  let i2 := _root_.Aeneas.Std.alloc.vec.Vec.len v2
++  let i3 ← i2 - 2#usize
++  let last ←
++    _root_.Aeneas.Std.alloc.vec.Vec.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.Aeneas.Std.U32) v2 i3
++  _root_.Aeneas.Std.Result.ok (r, len, first, last)
++
++/-- [nested_borrows_join_snapshot_model::analyze]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 101:0-107:1 -/
++def analyze
++  (e : _root_.Aeneas.Std.U32)
++  (stack : _root_.nested_borrows_join_snapshot_model.Budget) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_join_snapshot_model.Budget ×
++    (_root_.nested_borrows_join_snapshot_model.Budget →
++    _root_.nested_borrows_join_snapshot_model.Budget))
++  := do
++  let i ← stack.native.depth + 1#u32
++  if e = 0#u32
++  then
++    _root_.Aeneas.Std.Result.ok (e,
++      { native := { depth := i }, record := { first := (some i) } },
++      fun stack1 => stack1)
++  else
++    _root_.Aeneas.Std.Result.ok (e, { stack with native := { depth := i } },
++      fun stack1 => stack1)
++
++/-- [nested_borrows_join_snapshot_model::app::{core::ops::function::FnMut<(&'_ (u32)), u32> for nested_borrows_join_snapshot_model::app::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 111:43-111:64 -/
++def app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++  (c : _root_.nested_borrows_join_snapshot_model.app.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_join_snapshot_model.app.closure ×
++    (_root_.nested_borrows_join_snapshot_model.app.closure →
++    _root_.nested_borrows_join_snapshot_model.app.closure) ×
++    (_root_.nested_borrows_join_snapshot_model.app.closure →
++    (_root_.nested_borrows_join_snapshot_model.app.closure ×
++    (_root_.nested_borrows_join_snapshot_model.app.closure →
++    _root_.nested_borrows_join_snapshot_model.app.closure))))
++  := do
++  let (i, b, analyze_back) ←
++    _root_.nested_borrows_join_snapshot_model.analyze tupled_args c
++  let back :=
++    (fun c1 => c1 : _root_.nested_borrows_join_snapshot_model.app.closure →
++      _root_.nested_borrows_join_snapshot_model.app.closure)
++  let back1 :=
++    (fun c1 => (c1, fun c2 => let b1 := analyze_back c2
++                              b1) :
++      _root_.nested_borrows_join_snapshot_model.app.closure →
++      (_root_.nested_borrows_join_snapshot_model.app.closure ×
++      (_root_.nested_borrows_join_snapshot_model.app.closure →
++      _root_.nested_borrows_join_snapshot_model.app.closure)))
++  _root_.Aeneas.Std.Result.ok (i, b, back, back1)
++
++/-- [nested_borrows_join_snapshot_model::app::{core::ops::function::FnOnce<(&'_ (u32)), u32> for nested_borrows_join_snapshot_model::app::closure<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 111:43-111:64 -/
++def app.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++  (c : _root_.nested_borrows_join_snapshot_model.app.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_join_snapshot_model.app.closure ×
++    (_root_.nested_borrows_join_snapshot_model.app.closure →
++    _root_.nested_borrows_join_snapshot_model.app.closure))
++  := do
++  let (i1, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_join_snapshot_model.app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 c3
++       let c5 := back1 c4
++       let ⟨ n, r ⟩ := c5
++       { native := n, record := r } :
++      _root_.nested_borrows_join_snapshot_model.app.closure →
++      _root_.nested_borrows_join_snapshot_model.app.closure)
++  _root_.Aeneas.Std.Result.ok (i1, c2, back)
++
++/-- Trait implementation: [nested_borrows_join_snapshot_model::app::{core::ops::function::FnOnce<(&'_ (u32)), u32> for nested_borrows_join_snapshot_model::app::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 111:43-111:64 -/
++@[reducible]
++def app.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_join_snapshot_model.app.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_join_snapshot_model.app.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_join_snapshot_model.Budget.mk
++        capture_state1.native capture_state1.record)
++}
++
++/-- Trait implementation: [nested_borrows_join_snapshot_model::app::{core::ops::function::FnMut<(&'_ (u32)), u32> for nested_borrows_join_snapshot_model::app::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 111:43-111:64 -/
++@[reducible]
++def app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_join_snapshot_model.app.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.nested_borrows_join_snapshot_model.app.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_join_snapshot_model.app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_join_snapshot_model.Budget.mk
++        capture_state1.native capture_state1.record)
++}
++
++/-- [nested_borrows_join_snapshot_model::app]: loop body 0:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 116:8-118:9
++    Visibility: public -/
++@[rust_loop_body]
++def app_loop.body
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (stack : _root_.nested_borrows_join_snapshot_model.Budget)
++  (arg_deps : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32)
++  (s1 : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (back : _root_.nested_borrows_join_snapshot_model.Budget →
++  (_root_.nested_borrows_join_snapshot_model.Native ×
++  _root_.nested_borrows_join_snapshot_model.Record))
++  (deps : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.nested_borrows_join_snapshot_model.Budget →
++    (_root_.nested_borrows_join_snapshot_model.Native ×
++    _root_.nested_borrows_join_snapshot_model.Record)) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.Native ×
++    _root_.nested_borrows_join_snapshot_model.Record ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    (_root_.nested_borrows_join_snapshot_model.Native →
++    _root_.nested_borrows_join_snapshot_model.Record →
++    (_root_.nested_borrows_join_snapshot_model.Native ×
++    _root_.nested_borrows_join_snapshot_model.Record))))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (kids,
++      deps, stack.native, stack.record, arg_deps, s, x, s1, model_state1, (),
++      (), (), (), (), fun n r => back { native := n, record := r }))
++  | some d =>
++    let i ← d + x
++    let deps1 ← _root_.Aeneas.Std.alloc.vec.Vec.push deps i
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1,
++      fun b =>
++        let n := b.native
++        let r := b.record
++        back { native := n, record := r }, deps1))
++
++/-- [nested_borrows_join_snapshot_model::app]: loop 0:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 116:8-118:9
++    Visibility: public -/
++@[rust_loop]
++def app_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (back : _root_.nested_borrows_join_snapshot_model.Budget →
++  (_root_.nested_borrows_join_snapshot_model.Native ×
++  _root_.nested_borrows_join_snapshot_model.Record))
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (deps : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.nested_borrows_join_snapshot_model.Budget)
++  (arg_deps : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (x : _root_.Aeneas.Std.U32)
++  (s1 : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) (t : _root_.Unit)
++  (t1 : _root_.Unit) (t2 : _root_.Unit) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.Native ×
++    _root_.nested_borrows_join_snapshot_model.Record ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++    (_root_.nested_borrows_join_snapshot_model.Native →
++    _root_.nested_borrows_join_snapshot_model.Record →
++    (_root_.nested_borrows_join_snapshot_model.Native ×
++    _root_.nested_borrows_join_snapshot_model.Record)))
++  := do
++  loop
++    (fun (iter1, back1, deps1) =>
++       _root_.nested_borrows_join_snapshot_model.app_loop.body kids stack
++       arg_deps s x s1 iter1 back1 deps1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.nested_borrows_join_snapshot_model.Budget →
++      (_root_.nested_borrows_join_snapshot_model.Native ×
++      _root_.nested_borrows_join_snapshot_model.Record)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.nested_borrows_join_snapshot_model.Budget →
++      (_root_.nested_borrows_join_snapshot_model.Native ×
++      _root_.nested_borrows_join_snapshot_model.Record)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.nested_borrows_join_snapshot_model.Native ×
++      _root_.nested_borrows_join_snapshot_model.Record ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit × _root_.Unit ×
++      (_root_.nested_borrows_join_snapshot_model.Native →
++      _root_.nested_borrows_join_snapshot_model.Record →
++      (_root_.nested_borrows_join_snapshot_model.Native ×
++      _root_.nested_borrows_join_snapshot_model.Record)))))
++    (iter, back, deps)
++
++/-- [nested_borrows_join_snapshot_model::app]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 110:0-121:1
++    Visibility: public -/
++def app
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (deps : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.nested_borrows_join_snapshot_model.Budget)
++  (shape : _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_join_snapshot_model.Budget ×
++    (_root_.nested_borrows_join_snapshot_model.Budget →
++    _root_.nested_borrows_join_snapshot_model.Budget))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter kids
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.skip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) i 1#usize
++  let model_state1 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSkip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      _root_.nested_borrows_join_snapshot_model.app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32
++      model_state stack
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      _root_.nested_borrows_join_snapshot_model.app.closure →
++      _root_.nested_borrows_join_snapshot_model.app.closure)
++  let map_back1 :=
++    (fun state_back => ({ model_state1 with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.nested_borrows_join_snapshot_model.app.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      _root_.nested_borrows_join_snapshot_model.app.closure) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      _root_.nested_borrows_join_snapshot_model.app.closure →
++      _root_.nested_borrows_join_snapshot_model.app.closure)))
++  let (model_state2, model_state3) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSkip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      _root_.nested_borrows_join_snapshot_model.app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state1
++  if shape
++  then
++    let c := map_back { model_state1 with f := model_state3.f }
++    let back :=
++      (fun stack1 =>
++         let (m, back1) := map_back1 stack1
++         let b := m.f
++         let ⟨ n, r ⟩ := b
++         let c1 :=
++           back1 { model_state1 with f := { native := n, record := r } }
++         let ⟨ n1, r1 ⟩ := c1
++         { native := n1, record := r1 } :
++        _root_.nested_borrows_join_snapshot_model.Budget →
++        _root_.nested_borrows_join_snapshot_model.Budget)
++    _root_.Aeneas.Std.Result.ok (1#u32, deps, c, back)
++  else
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref model_state2
++    let o ← _root_.Aeneas.Std.core.slice.Slice.first s
++    let (deps1, stack1, back) ←
++      match o with
++      | none =>
++        let b := model_state3.f
++        let c := map_back { model_state1 with f := model_state3.f }
++        _root_.Aeneas.Std.Result.ok (deps, c,
++          (fun b1 =>
++             let ⟨ n, r ⟩ := b
++             let (_, back1) := map_back1 b1
++             let ⟨ n1, r1 ⟩ :=
++               back1 { model_state1 with f := { native := n, record := r } }
++             (n1, r1) : _root_.nested_borrows_join_snapshot_model.Budget →
++          (_root_.nested_borrows_join_snapshot_model.Native ×
++          _root_.nested_borrows_join_snapshot_model.Record)))
++      | some x =>
++        do
++        let s1 := _root_.Aeneas.Std.alloc.vec.Vec.deref model_state2
++        let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s1
++        let c := map_back { model_state1 with f := model_state3.f }
++        let (_, deps2, n, r, _, _, _, _, _, _, _, _, _, _, back1) ←
++          _root_.nested_borrows_join_snapshot_model.app_loop iter
++            (fun b =>
++              let (m, back2) := map_back1 b
++              let b1 := m.f
++              let ⟨ n1, r1 ⟩ := b1
++              let ⟨ n2, r2 ⟩ :=
++                back2 { model_state1 with f := { native := n1, record := r1 } }
++              (n2, r2)) kids deps c model_state2 s x s1 () () ()
++        _root_.Aeneas.Std.Result.ok (deps2, ({ native := n, record := r } :
++          _root_.nested_borrows_join_snapshot_model.Budget),
++          (fun b => let n1 := b.native
++                    let r1 := b.record
++                    back1 n1 r1 :
++          _root_.nested_borrows_join_snapshot_model.Budget →
++          (_root_.nested_borrows_join_snapshot_model.Native ×
++          _root_.nested_borrows_join_snapshot_model.Record)))
++    let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len model_state2
++    let i2 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i1)
++    let back1 :=
++      (fun stack2 => let (n, r) := back stack2
++                     { native := n, record := r } :
++        _root_.nested_borrows_join_snapshot_model.Budget →
++        _root_.nested_borrows_join_snapshot_model.Budget)
++    _root_.Aeneas.Std.Result.ok (i2, deps1, stack1, back1)
++
++/-- [nested_borrows_join_snapshot_model::run_app]: loop body 0:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 135:4-137:5
++    Visibility: public -/
++@[rust_loop_body]
++def run_app_loop.body
++  (app_back : _root_.nested_borrows_join_snapshot_model.Budget →
++  _root_.nested_borrows_join_snapshot_model.Budget) (i : _root_.Aeneas.Std.U32)
++  (r : _root_.nested_borrows_join_snapshot_model.Record)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (sum : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 ×
++    (_root_.nested_borrows_join_snapshot_model.Native ×
++    _root_.nested_borrows_join_snapshot_model.Record)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (sum,
++      ((app_back { native := { depth := i }, record := r }).native,
++      (app_back { native := { depth := i }, record := r }).record)))
++  | some d =>
++    let sum1 ← sum + d
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, sum1))
++
++/-- [nested_borrows_join_snapshot_model::run_app]: loop 0:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 135:4-137:5
++    Visibility: public -/
++@[rust_loop]
++def run_app_loop
++  (app_back : _root_.nested_borrows_join_snapshot_model.Budget →
++  _root_.nested_borrows_join_snapshot_model.Budget)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32)
++  (r : _root_.nested_borrows_join_snapshot_model.Record)
++  (sum : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.nested_borrows_join_snapshot_model.Native ×
++    _root_.nested_borrows_join_snapshot_model.Record))
++  := do
++  loop
++    (fun (iter1, sum1) =>
++       _root_.nested_borrows_join_snapshot_model.run_app_loop.body app_back i r
++       iter1 sum1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32) (_root_.Aeneas.Std.U32 ×
++      (_root_.nested_borrows_join_snapshot_model.Native ×
++      _root_.nested_borrows_join_snapshot_model.Record))))
++    (iter, sum)
++
++/-- [nested_borrows_join_snapshot_model::run_app]:
++    Source: 'tests/src/nested-borrows-join-snapshot-model.rs', lines 125:0-143:1
++    Visibility: public -/
++def run_app
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) (n : _root_.Aeneas.Std.Usize)
++  (shape : _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let deps ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) 1#u32
++  let s ←
++    _root_.Aeneas.Std.core.array.Array.index
++      (_root_.Aeneas.Std.core.ops.index.IndexSlice
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeToUsizeSlice
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.Array.make 3#usize [ a, b, c ]) { «end» := n }
++  let (r, deps1, stack, app_back) ←
++    _root_.nested_borrows_join_snapshot_model.app s deps
++      { native := { depth := 3#u32 }, record := { first := none } } shape
++  let i ← stack.native.depth + 100#u32
++  let s1 := _root_.Aeneas.Std.alloc.vec.Vec.deref deps1
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s1
++  let (sum, back) ←
++    _root_.nested_borrows_join_snapshot_model.run_app_loop app_back iter i
++      stack.record 0#u32
++  let (native, record1) := back
++  let first ←
++    match record1.first with
++    | none => _root_.Aeneas.Std.Result.ok 99#u32
++    | some f => _root_.Aeneas.Std.Result.ok f
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len deps1
++  let i2 ← lift (_root_.Aeneas.Std.UScalar.cast .U32 i1)
++  _root_.Aeneas.Std.Result.ok (r, i2, sum, native.depth, first)
++
++end nested_borrows_join_snapshot_model
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index c07e23a..5f8bfb7 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -285,3 +285,4 @@ package «tests» {}
+ @[default_target] lean_lib LoopVisitorCapturedSharedRef
+ @[default_target] lean_lib LoopJoinRenamedOwnedRegion
+ @[default_target] lean_lib LoopAfterMapClosureBudget
++@[default_target] lean_lib NestedBorrowsJoinSnapshotModel
+diff --git a/tests/src/nested-borrows-join-snapshot-model.rs b/tests/src/nested-borrows-join-snapshot-model.rs
+new file mode 100644
+index 0000000..2f64d0d
+--- /dev/null
++++ b/tests/src/nested-borrows-join-snapshot-model.rs
+@@ -0,0 +1,173 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsJoinSnapshotModel
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map --include core::iter::adapters::skip::Skip
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A join after collecting `xs.iter().map(|x| f(x, sink))`, the closure
++//! capturing a mutable borrow of a context which holds mutable borrows: in the
++//! branches which do not use the context, the borrow of the closure is still
++//! live at the join, so the continuation of the join abstraction of the inner
++//! region applies the first stage of the staged backward function of
++//! `Iterator::map` in the snapshot of the join (the shapes of
++//! `chelis_types::deep_type::recovery::recover_tensor` and of
++//! `chelis_types::infer::vmap_extent::analyze_app`). Nothing records a nested
++//! loan update to recombine its output with. The backward function of `map`
++//! is synthesized by the model-state ABI and its last stage reads only the
++//! inputs of its first stage (the closure given back at the inner level): the
++//! snapshot computes the output of the in-order application.
++//!
++//! The callers write through the context after the call: the values given
++//! back after the join are those of the native program.
++
++pub struct Sink<'s> {
++    pub errors: &'s mut Vec<u32>,
++}
++
++fn dim(errors: &mut Sink<'_>, c: &u32) -> Result<u32, u32> {
++    if *c > 10 {
++        errors.errors.push(*c);
++        Err(*c)
++    } else {
++        Ok(*c + 1)
++    }
++}
++
++/// The `recover_tensor` shape: a write through the sink in one branch.
++pub fn recover(errors: &mut Sink<'_>, children: &[u32], p: u32) -> (u32, u32) {
++    let dims: Vec<Result<u32, u32>> = children.iter().map(|c| dim(errors, c)).collect();
++    let q = if p > 3 {
++        errors.errors.push(p);
++        p
++    } else {
++        p
++    };
++    (q, dims.len() as u32)
++}
++
++/// A write through the sink after the join.
++pub fn recover_then_write(errors: &mut Sink<'_>, children: &[u32], p: u32) -> u32 {
++    let dims: Vec<Result<u32, u32>> = children.iter().map(|c| dim(errors, c)).collect();
++    if p > 3 {
++        errors.errors.push(p);
++    }
++    errors.errors.push(90 + dims.len() as u32);
++    dims.len() as u32
++}
++
++/// A second closure over the sink after the join.
++pub fn recover_twice(errors: &mut Sink<'_>, children: &[u32], p: u32) -> u32 {
++    let d1: Vec<Result<u32, u32>> = children.iter().map(|c| dim(errors, c)).collect();
++    if p > 3 {
++        errors.errors.push(p);
++    }
++    let d2: Vec<Result<u32, u32>> = children.iter().map(|c| dim(errors, c)).collect();
++    (d1.len() + 10 * d2.len()) as u32
++}
++
++/// `(result, errors, first error, last error)`; the caller writes through the
++/// sink after the call.
++pub fn run_recover(which: u32, a: u32, b: u32, p: u32) -> (u32, u32, u32, u32) {
++    let mut v = Vec::new();
++    v.push(7);
++    let children = [a, b, 12];
++    let mut sink = Sink { errors: &mut v };
++    let r = if which == 1 {
++        let (q, n) = recover(&mut sink, &children, p);
++        q + 10 * n
++    } else if which == 2 {
++        recover_then_write(&mut sink, &children, p)
++    } else {
++        recover_twice(&mut sink, &children, p)
++    };
++    sink.errors.push(200 + r);
++    let len = v.len() as u32;
++    let first = v[1];
++    let last = v[v.len() - 2];
++    (r, len, first, last)
++}
++
++pub struct Native {
++    pub depth: u32,
++}
++
++pub struct Record {
++    pub first: Option<u32>,
++}
++
++pub struct Budget<'a> {
++    pub native: &'a mut Native,
++    pub record: &'a mut Record,
++}
++
++fn analyze(e: &u32, stack: &mut Budget<'_>) -> u32 {
++    stack.native.depth += 1;
++    if *e == 0 {
++        stack.record.first = Some(stack.native.depth);
++    }
++    *e
++}
++
++/// The `analyze_app` shape: `if let Some(x) = arg_deps.first() { loop }`.
++pub fn app(kids: &[u32], deps: &mut Vec<u32>, stack: &mut Budget<'_>, shape: bool) -> u32 {
++    let arg_deps = kids.iter().skip(1).map(|a| analyze(a, stack)).collect::<Vec<_>>();
++    if shape {
++        return 1;
++    }
++    if let Some(x) = arg_deps.first() {
++        for d in arg_deps.iter() {
++            deps.push(*d + *x);
++        }
++    }
++    arg_deps.len() as u32
++}
++
++/// `(result, deps, sum of deps, depth, first)`; the caller writes through the
++/// budget after the call.
++pub fn run_app(a: u32, b: u32, c: u32, n: usize, shape: bool) -> (u32, u32, u32, u32, u32) {
++    let kids = [a, b, c];
++    let mut deps = Vec::new();
++    deps.push(1);
++    let mut native = Native { depth: 3 };
++    let mut record = Record { first: None };
++    let mut stack = Budget { native: &mut native, record: &mut record };
++    let r = app(&kids[..n], &mut deps, &mut stack, shape);
++    stack.native.depth += 100;
++    let mut sum = 0;
++    for d in deps.iter() {
++        sum += *d;
++    }
++    let first = match record.first {
++        Some(f) => f,
++        None => 99,
++    };
++    (r, deps.len() as u32, sum, native.depth, first)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn recover_native() {
++        assert_eq!(run_recover(1, 1, 2, 1), (31, 3, 12, 12));
++        assert_eq!(run_recover(1, 1, 2, 5), (35, 4, 12, 5));
++        assert_eq!(run_recover(1, 11, 2, 1), (31, 4, 11, 12));
++        assert_eq!(run_recover(1, 11, 13, 5), (35, 6, 11, 5));
++        assert_eq!(run_recover(1, 1, 13, 4), (34, 5, 13, 4));
++        assert_eq!(run_recover(2, 1, 2, 1), (3, 4, 12, 93));
++        assert_eq!(run_recover(2, 1, 2, 5), (3, 5, 12, 93));
++        assert_eq!(run_recover(2, 11, 13, 5), (3, 7, 11, 93));
++        assert_eq!(run_recover(3, 1, 2, 1), (33, 4, 12, 12));
++        assert_eq!(run_recover(3, 11, 2, 1), (33, 6, 11, 12));
++        assert_eq!(run_recover(3, 11, 13, 5), (33, 9, 11, 12));
++    }
++
++    #[test]
++    fn app_native() {
++        assert_eq!(run_app(5, 2, 0, 3, false), (2, 3, 7, 105, 5));
++        assert_eq!(run_app(5, 0, 4, 3, false), (2, 3, 5, 105, 4));
++        assert_eq!(run_app(5, 2, 0, 3, true), (1, 1, 1, 105, 5));
++        assert_eq!(run_app(5, 2, 0, 1, false), (0, 1, 1, 103, 99));
++        assert_eq!(run_app(5, 7, 0, 2, false), (1, 2, 15, 104, 99));
++        assert_eq!(run_app(5, 0, 0, 3, false), (2, 3, 1, 105, 5));
++    }
++}
+diff --git a/tests/src/nested-borrows-join-snapshot-stale.lean.out b/tests/src/nested-borrows-join-snapshot-stale.lean.out
+new file mode 100644
+index 0000000..d234b27
+--- /dev/null
++++ b/tests/src/nested-borrows-join-snapshot-stale.lean.out
+@@ -0,0 +1,5 @@
++[[92mInfo[39m ] Imported: tests/llbc/nested_borrows_join_snapshot_stale.llbc
++[[91mError[39m] Nested borrows: the continuation of a join abstraction applies the earlier stages of a staged backward function of a call in the snapshot of the join (the values given back at the nested levels of the call are those at the join), whose last stage may read the inputs of its later stages, but its output is used without recombination with the current values of its nested loans
++Source: 'tests/src/nested-borrows-join-snapshot-stale.rs', lines 39:0-49:1
++Compiler source: symbolic/SymbolicToPureExpressions.ml, line 5610
++
+diff --git a/tests/src/nested-borrows-join-snapshot-stale.rs b/tests/src/nested-borrows-join-snapshot-stale.rs
+new file mode 100644
+index 0000000..ee4f50b
+--- /dev/null
++++ b/tests/src/nested-borrows-join-snapshot-stale.rs
+@@ -0,0 +1,76 @@
++//@ [lean] known-failure
++//@ [!lean] skip
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! The join of `nested-borrows-join-snapshot-model` (`recover`), with the
++//! closure first moved into a struct by a translated function (`make`). The
++//! staged backward function of `make` is translated from its body: its last
++//! stage gives back the closure it finds in the `Apply` it receives, which the
++//! in-order application computes from the output of the first stage and the
++//! snapshot of the join computes from the values at the join. The
++//! continuation of the join abstraction of the inner region is used without
++//! recombination (no nested loan update is recorded), so the translation must
++//! fail: without the check, the model gives back the vector as at the join
++//! (the pushes after the `collect`, in the function and in its caller, are
++//! lost).
++
++pub struct Sink<'s> {
++    pub errors: &'s mut Vec<u32>,
++}
++
++fn dim(errors: &mut Sink<'_>, c: &u32) -> Result<u32, u32> {
++    if *c > 10 {
++        errors.errors.push(*c);
++        Err(*c)
++    } else {
++        Ok(*c + 1)
++    }
++}
++
++pub struct Apply<I, F> {
++    pub iter: I,
++    pub f: F,
++}
++
++fn make<I, F>(iter: I, f: F) -> Apply<I, F> {
++    Apply { iter, f }
++}
++
++pub fn recover(errors: &mut Sink<'_>, children: &[u32], p: u32) -> u32 {
++    let a = make(children.iter(), |c: &u32| dim(errors, c));
++    let dims: Vec<Result<u32, u32>> = a.iter.map(a.f).collect();
++    let q = if p > 3 {
++        errors.errors.push(p);
++        p + 1
++    } else {
++        p
++    };
++    q + 10 * dims.len() as u32
++}
++
++/// `(result, errors, first error, last error)`; the caller writes through the
++/// sink after the call.
++pub fn run_recover(a: u32, b: u32, p: u32) -> (u32, u32, u32, u32) {
++    let mut v = Vec::new();
++    v.push(7);
++    let children = [a, b, 12];
++    let mut sink = Sink { errors: &mut v };
++    let r = recover(&mut sink, &children, p);
++    sink.errors.push(200 + r);
++    let len = v.len() as u32;
++    let first = v[1];
++    let last = v[v.len() - 2];
++    (r, len, first, last)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn recover_native() {
++        assert_eq!(run_recover(1, 2, 1), (31, 3, 12, 12));
++        assert_eq!(run_recover(1, 2, 5), (36, 4, 12, 5));
++        assert_eq!(run_recover(11, 13, 5), (36, 6, 11, 5));
++    }
++}

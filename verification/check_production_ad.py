@@ -1,10 +1,12 @@
 """Accept fresh production AD extraction and Lean compilation, not a correspondence proof."""
 
 import argparse
+import json
 from pathlib import Path
 import subprocess
 
 from extract import generate_model, run
+from native_collection_certificate import add_profiles_argument, select_profile, verify_certificate
 
 
 AD_ENTRY = "chelis_ir::grad::grad_dag_checked"
@@ -26,6 +28,7 @@ def compile_model(model_directory: Path, lean_library: Path) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    add_profiles_argument(parser)
     parser.add_argument(
         "--aeneas-lean-dir",
         type=Path,
@@ -39,10 +42,18 @@ def main() -> None:
 
     # Reuse Lake's build cache, but never accept an old generated production model.
     run(["lake", "build"], lean_library)
-    model_directory = generate_model(entry=AD_ENTRY)
+    model_directory = generate_model(entry=AD_ENTRY, native_profiles=args.native_profiles)
+    certificate_path = model_directory / "extraction-certificate.json"
+    certificate_result = json.loads(certificate_path.read_text())
+    verify_certificate(certificate_result, model_directory.parent / "chelis_ir.llbc")
+    profile = select_profile(source_root=Path(__file__).resolve().parent.parent,
+                             package="chelis-ir", features=[], profiles=args.native_profiles)
+    if certificate_result["native_profile_evidence"] != profile["native_profile_evidence"]:
+        raise RuntimeError("The production AD certificate uses another native profile.")
     compiled = compile_model(model_directory, lean_library)
     print(f"Production AD accepted: {AD_ENTRY}", flush=True)
     print(f"Compiled model: {compiled}", flush=True)
+    print(f"Native certificate: {certificate_path}", flush=True)
     print("Acceptance covers extraction and Lean compilation only; not full-core extraction "
           "or a correspondence theorem.")
 

@@ -1,0 +1,3425 @@
+# aeneas integration step 171 after cba11f3beb: commit 2011a164f0b460cda64461f20c64b47ede5c7dfe
+# first parent 740bd191fae84a05ce7c1a60df2c423a417d3662, merged 597a71a4ebbe7a7f1e158a71adc742237cbbb077
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge fix/collection-contracts-2 597a71a into int/r37
+
+diff --git a/backends/lean/Aeneas/Std/VecDeque.lean b/backends/lean/Aeneas/Std/VecDeque.lean
+index af7574c..c4fe26c 100644
+--- a/backends/lean/Aeneas/Std/VecDeque.lean
++++ b/backends/lean/Aeneas/Std/VecDeque.lean
+@@ -1,6 +1,7 @@
+ import Aeneas.Std.Array.Array
+ import Aeneas.Std.Core.Default
+ import Aeneas.Std.Core.Convert
++import Aeneas.Std.VecIter
+ 
+ namespace Aeneas.Std
+ 
+@@ -47,6 +48,24 @@ def FromVecDequeArray (T : Type) (N : Usize) : core.convert.From (VecDeque T) (A
+   from_ := FromVecDequeArray.from
+ }
+ 
++/-- `FromIterator<T> for VecDeque<T>` (alloc/src/collections/vec_deque/mod.rs:3640, rustc 1.95):
++    `SpecFromIter::spec_from_iter(iter.into_iter())`. Its default (vec_deque/spec_from_iter.rs:8-19)
++    is `Vec::from_iter(iterator).into()`, and `From<Vec<T, A>>` (mod.rs:3736-3750) keeps the
++    vector's elements in order (`head = 0`, no reallocation). Its specializations for
++    `vec::IntoIter<T>` and `vec_deque::IntoIter<T>` (spec_from_iter.rs:21-34, `into_vecdeque`)
++    keep the remaining elements in order without calling `next`, which moves them out without
++    callbacks. The deque therefore holds the items of the Vec collector
++    (`alloc.vec.FromIteratorVec.from_iter`, repeated `next`), and the collection contract
++    (`CollectionContracts`) admits it exactly where it admits the Vec collector. The value given
++    back is the Vec collector's. -/
++@[rust_fun
++  "alloc::collections::vec_deque::{core::iter::traits::collect::FromIterator<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>, @T>}::from_iter"]
++def FromIteratorVecDeque.from_iter {T I IntoIter : Type}
++    (into : core.iter.traits.collect.IntoIterator I T IntoIter)
++    (input : I) : Result (VecDeque T × I) := do
++  let (items, input) ← alloc.vec.FromIteratorVec.from_iter into input
++  .ok (⟨items.val⟩, input)
++
+ /-- `VecDeque::len`: the element count. A native deque never holds more than
+     `usize::MAX` elements (`push_back`/`push_front` panic with "capacity
+     overflow" first, see `VecDeque.push_back`), so the failing branch is
+@@ -121,4 +140,11 @@ def VecDeque.back {T : Type} (self : VecDeque T) : Result (Option T) :=
+ 
+ end alloc.collections.vec_deque
+ 
++@[reducible, rust_trait_impl
++  "core::iter::traits::collect::FromIterator<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>, @T>"]
++def core.iter.traits.collect.FromIteratorVecDeque (T : Type) :
++    core.iter.traits.collect.FromIterator (alloc.collections.vec_deque.VecDeque T) T := {
++  from_iter := alloc.collections.vec_deque.FromIteratorVecDeque.from_iter
++}
++
+ end Aeneas.Std
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 866125f..56b3e78 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -32,7 +32,7 @@ let lean_builtin_types = [
+   mk_type "alloc::collections::btree::set::IntoIter" "_root_.Aeneas.Std.alloc.collections.btree.set.IntoIter" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 23 *)
+   mk_type "alloc::collections::btree::set::Iter" "_root_.Aeneas.Std.alloc.collections.btree.set.Iter";
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 14 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 15 *)
+   mk_type "alloc::collections::vec_deque::VecDeque" "_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/Sync.lean", line: 32 *)
+   mk_type "alloc::rc::Rc" "_root_.Aeneas.Std.alloc.rc.Rc";
+@@ -490,30 +490,32 @@ let lean_builtin_funs = [
+   mk_fun "alloc::collections::btree::set::{core::iter::traits::iterator::Iterator<alloc::collections::btree::set::Iter<'a, @T>, &'a @T>}::next" "_root_.Aeneas.Std.alloc.collections.btree.set.IteratorIter.next";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 208 *)
+   mk_fun "alloc::collections::btree::set::{core::iter::traits::iterator::Iterator<alloc::collections::btree::set::Iter<'a, @T>, &'a @T>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.set.IteratorIter.size_hint";
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 117 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 136 *)
+   mk_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::back" "_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.back" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 69 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 88 *)
+   mk_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::clear" "_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.clear" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 111 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 130 *)
+   mk_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::front" "_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.front" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 62 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 81 *)
+   mk_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::is_empty" "_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.is_empty" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 54 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 73 *)
+   mk_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::len" "_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.len" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 102 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 121 *)
+   mk_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::pop_back" "_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.pop_back" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 93 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 112 *)
+   mk_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::pop_front" "_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.pop_front" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 77 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 96 *)
+   mk_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::push_back" "_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.push_back" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 85 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 104 *)
+   mk_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, @A>}::push_front" "_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.push_front" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 22 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 23 *)
+   mk_fun "alloc::collections::vec_deque::{alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>}::new" "_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.new";
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 39 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 40 *)
+   mk_fun "alloc::collections::vec_deque::{core::convert::From<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>, [@T; @N]>}::from" "_root_.Aeneas.Std.alloc.collections.vec_deque.FromVecDequeArray.from";
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 27 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 28 *)
+   mk_fun "alloc::collections::vec_deque::{core::default::Default<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>>}::default" "_root_.Aeneas.Std.alloc.collections.vec_deque.DefaultVecDeque.default";
++  (* file: "Aeneas/Std/VecDeque.lean", line: 61 *)
++  mk_fun "alloc::collections::vec_deque::{core::iter::traits::collect::FromIterator<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>, @T>}::from_iter" "_root_.Aeneas.Std.alloc.collections.vec_deque.FromIteratorVecDeque.from_iter";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 199 *)
+   mk_fun "alloc::fmt::format" "_root_.Aeneas.Std.alloc.fmt.format";
+   (* file: "Aeneas/Std/Sync.lean", line: 38 *)
+@@ -3064,7 +3066,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::convert::From<Box<str>, alloc::string::String>" "_root_.Aeneas.Std.core.convert.FromStringBoxStr";
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 739 *)
+   mk_trait_impl "core::convert::From<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, [(@K, @V); @N]>" "_root_.Aeneas.Std.core.convert.FromBTreeMapArray";
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 44 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 45 *)
+   mk_trait_impl "core::convert::From<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>, [@T; @N]>" "_root_.Aeneas.Std.alloc.collections.vec_deque.FromVecDequeArray";
+   (* file: "Aeneas/Std/String.lean", line: 608 *)
+   mk_trait_impl "core::convert::From<alloc::string::String, &'0 alloc::string::String>" "_root_.Aeneas.Std.core.convert.FromSharedStringString";
+@@ -3128,7 +3130,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::default::Default<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>" "_root_.Aeneas.Std.alloc.collections.btree.map.DefaultBTreeMap";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 120 *)
+   mk_trait_impl "core::default::Default<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>" "_root_.Aeneas.Std.alloc.collections.btree.set.DefaultBTreeSet";
+-  (* file: "Aeneas/Std/VecDeque.lean", line: 31 *)
++  (* file: "Aeneas/Std/VecDeque.lean", line: 32 *)
+   mk_trait_impl "core::default::Default<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>>" "_root_.Aeneas.Std.alloc.collections.vec_deque.DefaultVecDeque";
+   (* file: "Aeneas/Std/Sync.lean", line: 117 *)
+   mk_trait_impl "core::default::Default<alloc::rc::Rc<@T>>" "_root_.Aeneas.Std.core.default.DefaultRc" ~keep_params:(Some [true; false]);
+@@ -3350,6 +3352,8 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorBTreeMap";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 277 *)
+   mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>, @T>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorBTreeSet";
++  (* file: "Aeneas/Std/VecDeque.lean", line: 143 *)
++  mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>, @T>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVecDeque";
+   (* file: "Aeneas/Std/VecIter.lean", line: 275 *)
+   mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::string::String, char>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorStringChar";
+   (* file: "Aeneas/Std/VecIter.lean", line: 251 *)
+diff --git a/src/llbc/CollectionContracts.ml b/src/llbc/CollectionContracts.ml
+index 54914ce..829fdec 100644
+--- a/src/llbc/CollectionContracts.ml
++++ b/src/llbc/CollectionContracts.ml
+@@ -405,14 +405,26 @@ let check ~(evidence : crate) (crate : crate) : crate =
+          option::Iter and option::IntoIter (core option.rs) define only next
+          (Item::next is opt.take()) and the exact size_hint (len, Some(len));
+          they are TrustedLen but not TrustedRandomAccess, so the collectors'
+-         TrustedLen path folds them with the next-driven default. *)
++         TrustedLen path folds them with the next-driven default.
++         vec::Drain (alloc vec/drain.rs, rustc 1.95, 152-163) defines only
++         next (the inner slice iterator's next, read out of the vector) and
++         size_hint (that slice iterator's exact hint); it is TrustedLen (250)
++         and FusedIterator (253), but neither TrustedRandomAccess nor
++         SourceIter (no in-place collection), so the collectors' TrustedLen
++         path folds it with the next-driven default fold and every other
++         consumer is next-driven. Its Drop (174-241) removes the whole
++         drained range, exhausted or not, and moves the tail back: the
++         vector given back is the same whichever consumer ran (modeled in
++         VecDrain.lean, whose kept vector is fixed when the drain is
++         created). *)
+       | Some name when
+           List.mem name
+             (List.map (( ^ ) iterator)
+                [ "SliceIter"; "ArrayIntoIter"; "VecIntoIter"; "BTreeIter";
+                  "BTreeIntoIter"; "BTreeSetIntoIter"; "BTreeSetIter"; "Chunks"; "ChunksExact"; "Windows";
+                  "Once"; "Chars"; "Lines"; "Split"; "RSplit"; "SplitN"; "BTreeKeys";
+-                 "BTreeValues"; "BTreeIntoValues"; "OptionIter"; "OptionIntoIter" ]) -> ()
++                 "BTreeValues"; "BTreeIntoValues"; "OptionIter"; "OptionIntoIter";
++                 "VecDrain" ]) -> ()
+       (* SkipWhile (core skip_while.rs, rustc 1.95): next is the base's find
+          with the flag-guarded predicate, size_hint (0, upper of the base),
+          and fold/try_fold take one next while the flag is unset, then fold
+@@ -489,7 +501,7 @@ let check ~(evidence : crate) (crate : crate) : crate =
+          (modeled in IteratorCombinators.lean), so that repeated next has the
+          native schedule. Otherwise the model's repeated next differs from the
+          native fold only by that surplus left next and one right next that
+-         returns None: see vec_into_iter_copy for the sides where neither is
++         returns None: see surplus_free for the sides where neither is
+          observable. *)
+       | Some name when name = iterator ^ "Zip" -> (
+           match List.filter (fun tr -> ref_name tr = Some iterator) args with
+@@ -499,14 +511,16 @@ let check ~(evidence : crate) (crate : crate) : crate =
+               if
+                 not
+                   ((random_access span a && random_access span b)
+-                  || (vec_into_iter_copy span a && indexed_next span b))
++                  || (surplus_free span a && indexed_next span b))
+               then
+                 reject span
+                   "Zip over iterators that are not both TrustedRandomAccess, \
+-                   nor a vec::IntoIter of a Copy element zipped with an \
+-                   iterator whose next is its indexed access: native \
+-                   collectors fold it without the surplus left next of \
+-                   repeated Zip::next"
++                   nor a left side whose next is a callback-free indexed \
++                   access to an item without drop glue (a Copy vec::IntoIter, \
++                   a slice-like source, or Copied, Enumerate or Zip of them) \
++                   zipped with an iterator whose next is its indexed access: \
++                   native collectors fold it without the surplus left next \
++                   of repeated Zip::next"
+           | _ -> reject span "missing or ambiguous Zip iterator evidence")
+       (* A crate iterator that only defines next, and possibly size_hint
+          (check_default_consumers): every native consumer (fold, try_fold,
+@@ -587,7 +601,8 @@ let check ~(evidence : crate) (crate : crate) : crate =
+        None without callbacks, and before that yields the element that the
+        indexed access would, with the same callbacks, when b is
+        indexed_next. A left side with callbacks (e.g. Map), or an element
+-       type with drop glue, stays rejected. *)
++       type with drop glue, stays rejected. surplus_free extends this to the
++       other left sides whose surplus next is as unobservable. *)
+     and vec_into_iter_copy span (tr : trait_ref) =
+       let tr = normalize span tr in
+       (not (generic_root tr))
+@@ -598,6 +613,50 @@ let check ~(evidence : crate) (crate : crate) : crate =
+       match tr.trait_decl_ref.binder_value.generics.types with
+       | [ _; item ] -> copy_ty item
+       | _ -> false
++    (* Left sides of a Zip whose surplus next (one past the right side's end,
++       which the native indexed or TrustedLen fold never takes) is
++       unobservable: TrustedRandomAccessNoCoerce iterators whose next yields
++       their next indexed access (so that before the end, the model's next
++       yields what the native fold reads), runs no callback, and yields an
++       item without drop glue. A Copy vec::IntoIter (vec_into_iter_copy);
++       slice Iter, Windows, Chunks and ChunksExact (core slice/iter.rs: next
++       advances a pointer and yields &T or &[T]; __iterator_get_unchecked
++       reads the same element or window without advancing); a std integer
++       Range (core iter/range.rs: Step::forward_unchecked, checked in
++       check_iterator; the index is start + i); Copied (core copied.rs: a
++       bitwise copy of a Copy item, no Clone call) and Enumerate (core
++       enumerate.rs: next and get_unchecked pair the inner item with
++       count + i) of one; and a Zip of two (TrustedRandomAccess when both
++       sides are: its next and get_unchecked read index + i of both sides,
++       core zip.rs 305-319 and 267-273; otherwise the NoCoerce ZipImpl, whose
++       general next takes a.next() then b.next(), both callback-free, while
++       its get_unchecked reads both sides at i relative to where they
++       stand). Its surplus item is a pair of such items. The production
++       shape is chelis-types app_tensor.rs compute_concrete_conv_spatial:
++       a zip of two slice iterators (TrustedRandomAccess) zipped with a
++       vec::IntoIter<(i64, i64, i64)>. Map and Cloned (callbacks), Skip (its
++       next calls nth first) and generic dictionaries are excluded. *)
++    and surplus_free span (tr : trait_ref) =
++      vec_into_iter_copy span tr
++      ||
++      let tr = normalize span tr in
++      (not (generic_root tr))
++      &&
++      let impl, args, _ = resolve span tr in
++      match impl_name impl with
++      | Some name
++        when List.mem name
++               (List.map (( ^ ) iterator)
++                  [ "SliceIter"; "Windows"; "Chunks"; "ChunksExact"; "Range" ]) ->
++          true
++      | Some name
++        when List.mem name (List.map (( ^ ) iterator) [ "Copied"; "Enumerate" ]) ->
++          surplus_free span (one span iterator args)
++      | Some name when name = iterator ^ "Zip" -> (
++          match List.filter (fun tr -> ref_name tr = Some iterator) args with
++          | [ a; b ] -> surplus_free span a && surplus_free span b
++          | _ -> false)
++      | _ -> false
+     (* TrustedRandomAccessNoCoerce iterators whose next yields their next
+        indexed access and runs the same callbacks (no Skip: its first next
+        calls nth, which maps the skipped items, while its indexed access
+@@ -795,6 +854,12 @@ let check ~(evidence : crate) (crate : crate) : crate =
+         [ "core.iter.traits.collect.FromIteratorVec";
+           "core.iter.traits.collect.FromIteratorBTreeMap";
+           "core.iter.traits.collect.FromIteratorBTreeSet";
++          (* VecDeque's collector (alloc/src/collections/vec_deque/mod.rs:3640,
++             spec_from_iter.rs): Vec::from_iter(iterator).into(), or, for a
++             vec::IntoIter or vec_deque::IntoIter source, into_vecdeque,
++             which keeps the remaining elements in order without callbacks:
++             the Vec collector's schedule and items (VecDeque.lean) *)
++          "core.iter.traits.collect.FromIteratorVecDeque";
+           (* String's collector of chars (alloc/src/string.rs): String::new,
+              then Extend<char>, which reserves the lower size bound (the
+              capacity is not modeled, as for Vec) and pushes each char through
+@@ -894,6 +959,7 @@ let check ~(evidence : crate) (crate : crate) : crate =
+                    [ "alloc.vec.FromIteratorVec.from_iter";
+                      "alloc.collections.btree.map.FromIteratorBTreeMap.from_iter";
+                      "alloc.collections.btree.set.FromIteratorBTreeSet.from_iter";
++                     "alloc.collections.vec_deque.FromIteratorVecDeque.from_iter";
+                      "alloc.vec.ExtendVec.extend";
+                      "alloc.collections.btree.map.ExtendBTreeMap.extend";
+                      "alloc.collections.btree.set.ExtendBTreeSet.extend" ]) ->
+diff --git a/tests/lean/CollectDrainFilter.lean b/tests/lean/CollectDrainFilter.lean
+new file mode 100644
+index 0000000..542b12b
+--- /dev/null
++++ b/tests/lean/CollectDrainFilter.lean
+@@ -0,0 +1 @@
++import CollectDrainFilter.Checks
+diff --git a/tests/lean/CollectDrainFilter/Checks.lean b/tests/lean/CollectDrainFilter/Checks.lean
+new file mode 100644
+index 0000000..3a80394
+--- /dev/null
++++ b/tests/lean/CollectDrainFilter/Checks.lean
+@@ -0,0 +1,61 @@
++import CollectDrainFilter.CollectDrainFilter
++
++/-! Evaluate the model of `tests/src/collect-drain-filter.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++namespace collect_drain_filter.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def us (x : Nat) : Usize := ⟨BitVec.ofNat _ x⟩
++def vec (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def nats (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++def hintOf (h : Usize × Option Usize) : Nat × Option Nat := (h.1.val, h.2.map (·.val))
++
++def evenOf (xs : List Nat) (offset : Nat) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Option (List Nat × Nat) :=
++  match retain_even (vec xs) (us offset) with
++  | ok (v, calls) => some (nats v, calls.val)
++  | _ => none
++
++#guard evenOf [1, 2, 3, 4, 5, 6] 2 == some ([1, 2, 4, 6], 4)
++#guard evenOf [1, 3] 0 == some ([], 2)
++#guard evenOf [1, 3] 2 == some ([1, 3], 0)
++-- `retain_past_the_end`: the drain range starts past the end (native panic).
++#guard evenOf [1, 2] 3 == none
++
++def belowOf (xs : List Nat) (offset bound : Nat) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Option (List Nat) :=
++  match retain_below (vec xs) (us offset) (u bound) with
++  | ok v => some (nats v)
++  | _ => none
++
++#guard belowOf [9, 1, 7, 2, 8] 1 8 == some [9, 1, 7, 2]
++#guard belowOf [9, 1, 7, 2, 8] 5 8 == some [9, 1, 7, 2, 8]
++
++def drainedOf (xs : List Nat) (start end_ : Nat) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Option (List Nat × List Nat) :=
++  match drained (vec xs) (us start) (us end_) with
++  | ok (out, v) => some (nats out, nats v)
++  | _ => none
++
++#guard drainedOf [1, 2, 3, 4] 1 3 == some ([2, 3], [1, 4])
++#guard drainedOf [1, 2, 3, 4] 0 4 == some ([1, 2, 3, 4], [])
++#guard drainedOf [1, 2, 3, 4] 2 2 == some ([], [1, 2, 3, 4])
++
++#guard (match drain_hint (vec [1, 2, 3, 4]) (us 1) with
++  | ok (h, v) => some (hintOf h, nats v) | _ => none) == some ((3, some 3), [1])
++#guard (match filter_hint (vec [1, 2, 3, 4]) (us 1) with
++  | ok (h, v) => some (hintOf h, nats v) | _ => none) == some ((0, some 3), [1])
++
++def checkedOf (xs : List Nat) (limit : Nat) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Option (Option (List Nat) × List Nat) :=
++  match drained_checked (vec xs) (u limit) with
++  | ok (out, v) => some (out.map nats, nats v)
++  | _ => none
++
++#guard checkedOf [1, 2, 9, 3] 5 == some (none, [1])
++#guard checkedOf [1, 2, 3] 5 == some (some [2, 3], [1])
++#guard checkedOf [1] 5 == some (some [], [1])
++
++end collect_drain_filter.checks
+diff --git a/tests/lean/CollectDrainFilter/CollectDrainFilter.lean b/tests/lean/CollectDrainFilter/CollectDrainFilter.lean
+new file mode 100644
+index 0000000..c5b9d00
+--- /dev/null
++++ b/tests/lean/CollectDrainFilter/CollectDrainFilter.lean
+@@ -0,0 +1,787 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [collect_drain_filter]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace collect_drain_filter
++
++/-- [collect_drain_filter::{collect_drain_filter::Sink}::retain_since::closure]
++    Source: 'tests/src/collect-drain-filter.rs', lines 23:20-23:39 -/
++@[reducible]
++def Sink.retain_since.closure {T0 : Type}
++  (coreopsfunctionFnMutT0TupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Bool) :=
++  T0
++
++/-- [collect_drain_filter::retain_even::closure]
++    Source: 'tests/src/collect-drain-filter.rs', lines 34:30-37:5 -/
++@[reducible]
++def retain_even.closure := _root_.Aeneas.Std.U32
++
++/-- [collect_drain_filter::{collect_drain_filter::Sink}::retain_since::closure::<0, collect_drain_filter::retain_even::closure<1>>]
++    Source: 'tests/src/collect-drain-filter.rs', lines 23:20-23:39 -/
++@[reducible]
++def Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++  (coreopsfunctionFnMutclosureTupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_drain_filter.retain_even.closure _root_.Aeneas.Std.U32
++  _root_.Bool) :=
++  _root_.collect_drain_filter.retain_even.closure
++
++/-- [collect_drain_filter::Sink]
++    Source: 'tests/src/collect-drain-filter.rs', lines 13:0-15:1
++    Visibility: public -/
++structure Sink where
++  errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [collect_drain_filter::{collect_drain_filter::Sink}::retain_since::{core::ops::function::FnMut<(&'_ (u32)), bool> for collect_drain_filter::{collect_drain_filter::Sink}::retain_since::closure<0, T0>[TraitClause@0]}::call_mut]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 23:20-23:39 -/
++def
++  Sink.retain_since.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++  {T0 : Type} (coreopsfunctionFnMutT0TupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Bool)
++  (c : _root_.collect_drain_filter.Sink.retain_since.closure
++  coreopsfunctionFnMutT0TupleShared0U32BoolInst)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    (_root_.collect_drain_filter.Sink.retain_since.closure
++    coreopsfunctionFnMutT0TupleShared0U32BoolInst) ×
++    (_root_.collect_drain_filter.Sink.retain_since.closure
++    coreopsfunctionFnMutT0TupleShared0U32BoolInst →
++    _root_.collect_drain_filter.Sink.retain_since.closure
++    coreopsfunctionFnMutT0TupleShared0U32BoolInst))
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutT0TupleShared0U32BoolInst.call_mut c tupled_args
++  let back :=
++    (fun c1 => c1 : _root_.collect_drain_filter.Sink.retain_since.closure
++      coreopsfunctionFnMutT0TupleShared0U32BoolInst →
++      _root_.collect_drain_filter.Sink.retain_since.closure
++      coreopsfunctionFnMutT0TupleShared0U32BoolInst)
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, back)
++
++/-- [collect_drain_filter::{collect_drain_filter::Sink}::retain_since::{core::ops::function::FnOnce<(&'_ (u32)), bool> for collect_drain_filter::{collect_drain_filter::Sink}::retain_since::closure<0, T0>[TraitClause@0]}::call_once]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 23:20-23:39 -/
++def
++  Sink.retain_since.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++  {T0 : Type} (coreopsfunctionFnMutT0TupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Bool)
++  (c : _root_.collect_drain_filter.Sink.retain_since.closure
++  coreopsfunctionFnMutT0TupleShared0U32BoolInst) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    (_root_.collect_drain_filter.Sink.retain_since.closure
++    coreopsfunctionFnMutT0TupleShared0U32BoolInst))
++  := do
++  let (b, c1, call_mut_back) ←
++    _root_.collect_drain_filter.Sink.retain_since.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++      coreopsfunctionFnMutT0TupleShared0U32BoolInst c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (b, c2)
++
++/-- Trait implementation: [collect_drain_filter::{collect_drain_filter::Sink}::retain_since::{core::ops::function::FnOnce<(&'_ (u32)), bool> for collect_drain_filter::{collect_drain_filter::Sink}::retain_since::closure<0, T0>[TraitClause@0]}]
++    Source: 'tests/src/collect-drain-filter.rs', lines 23:20-23:39 -/
++@[reducible]
++def Sink.retain_since.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool {T0
++  : Type} (coreopsfunctionFnMutT0TupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Bool) : _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.collect_drain_filter.Sink.retain_since.closure
++  coreopsfunctionFnMutT0TupleShared0U32BoolInst) _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_drain_filter.Sink.retain_since.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++          coreopsfunctionFnMutT0TupleShared0U32BoolInst arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [collect_drain_filter::{collect_drain_filter::Sink}::retain_since::{core::ops::function::FnMut<(&'_ (u32)), bool> for collect_drain_filter::{collect_drain_filter::Sink}::retain_since::closure<0, T0>[TraitClause@0]}]
++    Source: 'tests/src/collect-drain-filter.rs', lines 23:20-23:39 -/
++@[reducible]
++def Sink.retain_since.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool {T0
++  : Type} (coreopsfunctionFnMutT0TupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Bool) : _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.collect_drain_filter.Sink.retain_since.closure
++  coreopsfunctionFnMutT0TupleShared0U32BoolInst) _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  FnOnceInst :=
++    _root_.collect_drain_filter.Sink.retain_since.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool
++    coreopsfunctionFnMutT0TupleShared0U32BoolInst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.collect_drain_filter.Sink.retain_since.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++          coreopsfunctionFnMutT0TupleShared0U32BoolInst arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [collect_drain_filter::{collect_drain_filter::Sink}::retain_since]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 19:4-26:5
++    Visibility: public -/
++def Sink.retain_since
++  {T0 : Type} (coreopsfunctionFnMutT0TupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Bool) (self : _root_.collect_drain_filter.Sink)
++  (offset : _root_.Aeneas.Std.Usize) (keep : T0) :
++  _root_.Aeneas.Std.Result _root_.collect_drain_filter.Sink
++  := do
++  let (d, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFrom
++      _root_.Aeneas.Std.Usize) self.errors { start := offset }
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.filter.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecDrain
++      _root_.Aeneas.Std.U32)
++      (_root_.collect_drain_filter.Sink.retain_since.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool
++      coreopsfunctionFnMutT0TupleShared0U32BoolInst) d keep
++  let filter_back :=
++    (fun state_back => state_back.iter :
++      _root_.Aeneas.Std.core.iter.adapters.filter.Filter
++      (_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++      (_root_.collect_drain_filter.Sink.retain_since.closure
++      coreopsfunctionFnMutT0TupleShared0U32BoolInst) →
++      _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  let (model_state1, model_state2) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFilter
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecDrain
++      _root_.Aeneas.Std.U32)
++      (_root_.collect_drain_filter.Sink.retain_since.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool
++      coreopsfunctionFnMutT0TupleShared0U32BoolInst))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state
++  let d1 := filter_back { model_state with iter := model_state2.iter }
++  let v := drain_back d1
++  let (_, model_state3, _) ←
++    _root_.Aeneas.Std.alloc.vec.ExtendVec.extend
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.U32) v model_state1
++  _root_.Aeneas.Std.Result.ok { errors := model_state3 }
++
++/-- [collect_drain_filter::{collect_drain_filter::Sink}::retain_since::{core::ops::function::FnMut<(&'_ (u32)), bool> for collect_drain_filter::{collect_drain_filter::Sink}::retain_since::closure<0, T0>[TraitClause@0]}::call_mut::<0, 1, 3, collect_drain_filter::retain_even::closure<2>>]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 23:20-23:39 -/
++def
++  Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool_specialized_8c03c3c24e9bde16865f00ff4bf4a0cf.call_mut_specialized_780a9aeb634c26091efa6b138f89855d
++  (coreopsfunctionFnMutclosureTupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_drain_filter.retain_even.closure _root_.Aeneas.Std.U32
++  _root_.Bool)
++  (c :
++  _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++  coreopsfunctionFnMutclosureTupleShared0U32BoolInst)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst) ×
++    (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst →
++    _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst) ×
++    (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst →
++    ((_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst) ×
++    (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst →
++    _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst))))
++  := do
++  let (model_state, model_state1) ←
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst.call_mut c tupled_args
++  let back :=
++    (fun c1 => c1 :
++      _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst →
++      _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst)
++  let back1 :=
++    (fun c1 => (c1, fun c2 => c2) :
++      _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst →
++      ((_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst) ×
++      (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst →
++      _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst)))
++  _root_.Aeneas.Std.Result.ok (model_state, model_state1, back, back1)
++
++/-- [collect_drain_filter::{collect_drain_filter::Sink}::retain_since::{core::ops::function::FnOnce<(&'_ (u32)), bool> for collect_drain_filter::{collect_drain_filter::Sink}::retain_since::closure<0, T0>[TraitClause@0]}::call_once::<0, 1, collect_drain_filter::retain_even::closure<2>>]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 23:20-23:39 -/
++def
++  Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool_specialized_26515e7da1dc3be93323a176dd78de61.call_once_specialized_a82988b4f459bd6c1146789145ca07a6
++  (coreopsfunctionFnMutclosureTupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_drain_filter.retain_even.closure _root_.Aeneas.Std.U32
++  _root_.Bool)
++  (c :
++  _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++  coreopsfunctionFnMutclosureTupleShared0U32BoolInst)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst) ×
++    (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst →
++    _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst))
++  := do
++  let (b, c1, call_mut_back, call_mut_back1) ←
++    _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool_specialized_8c03c3c24e9bde16865f00ff4bf4a0cf.call_mut_specialized_780a9aeb634c26091efa6b138f89855d
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 => let (c4, back1) := call_mut_back1 c3
++               back1 c4 :
++      _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst →
++      _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst)
++  _root_.Aeneas.Std.Result.ok (b, c2, back)
++
++/-- Trait implementation: [collect_drain_filter::{collect_drain_filter::Sink}::retain_since::{core::ops::function::FnOnce<(&'_ (u32)), bool> for collect_drain_filter::{collect_drain_filter::Sink}::retain_since::closure<0, T0>[TraitClause@0]}::<0, 1, collect_drain_filter::retain_even::closure<2>>]
++    Source: 'tests/src/collect-drain-filter.rs', lines 23:20-23:39 -/
++@[reducible]
++def
++  Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool_specialized_26515e7da1dc3be93323a176dd78de61
++  (coreopsfunctionFnMutclosureTupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_drain_filter.retain_even.closure _root_.Aeneas.Std.U32
++  _root_.Bool) : _root_.Aeneas.Std.core.ops.function.FnOnce
++  (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++  coreopsfunctionFnMutclosureTupleShared0U32BoolInst) _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool_specialized_26515e7da1dc3be93323a176dd78de61.call_once_specialized_a82988b4f459bd6c1146789145ca07a6
++          coreopsfunctionFnMutclosureTupleShared0U32BoolInst arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output, capture_state1)
++}
++
++/-- Trait implementation: [collect_drain_filter::{collect_drain_filter::Sink}::retain_since::{core::ops::function::FnMut<(&'_ (u32)), bool> for collect_drain_filter::{collect_drain_filter::Sink}::retain_since::closure<0, T0>[TraitClause@0]}::<0, 1, collect_drain_filter::retain_even::closure<2>>]
++    Source: 'tests/src/collect-drain-filter.rs', lines 23:20-23:39 -/
++@[reducible]
++def
++  Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool_specialized_8c03c3c24e9bde16865f00ff4bf4a0cf
++  (coreopsfunctionFnMutclosureTupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_drain_filter.retain_even.closure _root_.Aeneas.Std.U32
++  _root_.Bool) : _root_.Aeneas.Std.core.ops.function.FnMut
++  (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++  coreopsfunctionFnMutclosureTupleShared0U32BoolInst) _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  FnOnceInst :=
++    _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool_specialized_26515e7da1dc3be93323a176dd78de61
++    coreopsfunctionFnMutclosureTupleShared0U32BoolInst
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool_specialized_8c03c3c24e9bde16865f00ff4bf4a0cf.call_mut_specialized_780a9aeb634c26091efa6b138f89855d
++          coreopsfunctionFnMutclosureTupleShared0U32BoolInst arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output, capture_state1)
++}
++
++/-- [collect_drain_filter::{collect_drain_filter::Sink}::retain_since::<0, collect_drain_filter::retain_even::closure<1>>]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 19:4-26:5
++    Visibility: public -/
++def Sink.retain_since0closure_specialized_5cfa0e6251f25d7ebcf0a7e0d926da18
++  (coreopsfunctionFnMutclosureTupleShared0U32BoolInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_drain_filter.retain_even.closure _root_.Aeneas.Std.U32
++  _root_.Bool) (self : _root_.collect_drain_filter.Sink)
++  (offset : _root_.Aeneas.Std.Usize)
++  (keep : _root_.collect_drain_filter.retain_even.closure) :
++  _root_.Aeneas.Std.Result (_root_.collect_drain_filter.Sink ×
++    _root_.collect_drain_filter.retain_even.closure)
++  := do
++  let (d, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFrom
++      _root_.Aeneas.Std.Usize) self.errors { start := offset }
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.filter.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecDrain
++      _root_.Aeneas.Std.U32)
++      (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool_specialized_8c03c3c24e9bde16865f00ff4bf4a0cf
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst) d keep
++  let filter_back :=
++    (fun state_back => state_back.iter :
++      _root_.Aeneas.Std.core.iter.adapters.filter.Filter
++      (_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++      (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst) →
++      _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  let filter_back1 :=
++    (fun state_back => state_back.predicate :
++      _root_.Aeneas.Std.core.iter.adapters.filter.Filter
++      (_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++      (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst) →
++      _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst)
++  let filter_back2 :=
++    (fun state_back => ({ model_state with predicate := state_back },
++       fun state_back1 => state_back) :
++      _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst →
++      ((_root_.Aeneas.Std.core.iter.adapters.filter.Filter
++      (_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++      (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.filter.Filter
++      (_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++      (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst) →
++      _root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst)))
++  let c := model_state.predicate
++  let (model_state1, model_state2) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFilter
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecDrain
++      _root_.Aeneas.Std.U32)
++      (_root_.collect_drain_filter.Sink.retain_since.closure0closure_specialized_899762852a3af4a12a6b06050a561393.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool_specialized_8c03c3c24e9bde16865f00ff4bf4a0cf
++      coreopsfunctionFnMutclosureTupleShared0U32BoolInst))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) { model_state with predicate := c }
++  let d1 := filter_back { model_state with iter := model_state2.iter }
++  let v := drain_back d1
++  let (_, model_state3, _) ←
++    _root_.Aeneas.Std.alloc.vec.ExtendVec.extend
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.U32) v model_state1
++  let c1 :=
++    filter_back1 { model_state with predicate := model_state2.predicate }
++  let (f, back) := filter_back2 c1
++  let c2 := f.predicate
++  let c3 := back { model_state with predicate := c2 }
++  let i := c3
++  _root_.Aeneas.Std.Result.ok ({ errors := model_state3 }, i)
++
++/-- [collect_drain_filter::retain_even::{core::ops::function::FnMut<(&'_ (u32)), bool> for collect_drain_filter::retain_even::closure<0>}::call_mut]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 34:30-37:5 -/
++def retain_even.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++  (c : _root_.collect_drain_filter.retain_even.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.collect_drain_filter.retain_even.closure ×
++    (_root_.collect_drain_filter.retain_even.closure →
++    _root_.collect_drain_filter.retain_even.closure))
++  := do
++  let i ← c + 1#u32
++  let i1 ← tupled_args % 2#u32
++  let back :=
++    (fun c1 => c1 : _root_.collect_drain_filter.retain_even.closure →
++      _root_.collect_drain_filter.retain_even.closure)
++  _root_.Aeneas.Std.Result.ok (i1 = 0#u32, i, back)
++
++/-- [collect_drain_filter::retain_even::{core::ops::function::FnOnce<(&'_ (u32)), bool> for collect_drain_filter::retain_even::closure<0>}::call_once]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 34:30-37:5 -/
++def retain_even.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++  (c : _root_.collect_drain_filter.retain_even.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.collect_drain_filter.retain_even.closure)
++  := do
++  let (b, c1, call_mut_back) ←
++    _root_.collect_drain_filter.retain_even.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++      c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (b, c2)
++
++/-- Trait implementation: [collect_drain_filter::retain_even::{core::ops::function::FnOnce<(&'_ (u32)), bool> for collect_drain_filter::retain_even::closure<0>}]
++    Source: 'tests/src/collect-drain-filter.rs', lines 34:30-37:5 -/
++@[reducible]
++def retain_even.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_drain_filter.retain_even.closure _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_drain_filter.retain_even.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [collect_drain_filter::retain_even::{core::ops::function::FnMut<(&'_ (u32)), bool> for collect_drain_filter::retain_even::closure<0>}]
++    Source: 'tests/src/collect-drain-filter.rs', lines 34:30-37:5 -/
++@[reducible]
++def retain_even.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_drain_filter.retain_even.closure _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  FnOnceInst :=
++    _root_.collect_drain_filter.retain_even.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.collect_drain_filter.retain_even.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [collect_drain_filter::retain_even]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 31:0-39:1
++    Visibility: public -/
++def retain_even
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (offset : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  let (sink, c) ←
++    _root_.collect_drain_filter.Sink.retain_since0closure_specialized_5cfa0e6251f25d7ebcf0a7e0d926da18
++      _root_.collect_drain_filter.retain_even.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool
++      { errors } offset 0#u32
++  _root_.Aeneas.Std.Result.ok (sink.errors, c)
++
++/-- [collect_drain_filter::retain_below::closure]
++    Source: 'tests/src/collect-drain-filter.rs', lines 45:30-45:52 -/
++@[reducible]
++def retain_below.closure := _root_.Aeneas.Std.U32
++
++/-- [collect_drain_filter::retain_below::{core::ops::function::FnMut<(&'_ (u32)), bool> for collect_drain_filter::retain_below::closure<0>}::call_mut]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 45:30-45:52 -/
++def retain_below.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++  (c : _root_.collect_drain_filter.retain_below.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.collect_drain_filter.retain_below.closure)
++  := do
++  _root_.Aeneas.Std.Result.ok (tupled_args < c, c)
++
++/-- [collect_drain_filter::retain_below::{core::ops::function::FnOnce<(&'_ (u32)), bool> for collect_drain_filter::retain_below::closure<0>}::call_once]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 45:30-45:52 -/
++def
++  retain_below.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++  (c : _root_.collect_drain_filter.retain_below.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let (b, _) ←
++    _root_.collect_drain_filter.retain_below.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok b
++
++/-- Trait implementation: [collect_drain_filter::retain_below::{core::ops::function::FnOnce<(&'_ (u32)), bool> for collect_drain_filter::retain_below::closure<0>}]
++    Source: 'tests/src/collect-drain-filter.rs', lines 45:30-45:52 -/
++@[reducible]
++def retain_below.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_drain_filter.retain_below.closure _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_drain_filter.retain_below.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_drain_filter::retain_below::{core::ops::function::FnMut<(&'_ (u32)), bool> for collect_drain_filter::retain_below::closure<0>}]
++    Source: 'tests/src/collect-drain-filter.rs', lines 45:30-45:52 -/
++@[reducible]
++def retain_below.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_drain_filter.retain_below.closure _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  FnOnceInst :=
++    _root_.collect_drain_filter.retain_below.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_drain_filter.retain_below.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_drain_filter::retain_below]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 43:0-47:1
++    Visibility: public -/
++def retain_below
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (offset : _root_.Aeneas.Std.Usize) (bound : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let sink ←
++    _root_.collect_drain_filter.Sink.retain_since
++      _root_.collect_drain_filter.retain_below.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool
++      { errors } offset bound
++  _root_.Aeneas.Std.Result.ok sink.errors
++
++/-- [collect_drain_filter::drained]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 50:0-53:1
++    Visibility: public -/
++def drained
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (start : _root_.Aeneas.Std.Usize) (end1 : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (d, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRange
++      _root_.Aeneas.Std.Usize) v { start, «end» := end1 }
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecDrain
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) d
++  let v1 := drain_back model_state1
++  _root_.Aeneas.Std.Result.ok (model_state, v1)
++
++/-- [collect_drain_filter::drain_hint]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 55:0-57:1
++    Visibility: public -/
++def drain_hint
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (start : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (d, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFrom
++      _root_.Aeneas.Std.Usize) v { start }
++  let model_state ← _root_.Aeneas.Std.alloc.vec.drain.IteratorDrain.size_hint d
++  let v1 := drain_back d
++  _root_.Aeneas.Std.Result.ok (model_state, v1)
++
++/-- [collect_drain_filter::filter_hint::closure]
++    Source: 'tests/src/collect-drain-filter.rs', lines 60:28-60:38 -/
++@[reducible]
++def filter_hint.closure := _root_.Unit
++
++/-- [collect_drain_filter::filter_hint::{core::ops::function::FnMut<(&'_ (u32)), bool> for collect_drain_filter::filter_hint::closure}::call_mut]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 60:28-60:38 -/
++def filter_hint.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++  (c : _root_.collect_drain_filter.filter_hint.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.collect_drain_filter.filter_hint.closure)
++  := do
++  _root_.Aeneas.Std.Result.ok (tupled_args > 1#u32, c)
++
++/-- [collect_drain_filter::filter_hint::{core::ops::function::FnOnce<(&'_ (u32)), bool> for collect_drain_filter::filter_hint::closure}::call_once]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 60:28-60:38 -/
++def filter_hint.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++  (c : _root_.collect_drain_filter.filter_hint.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let (b, _) ←
++    _root_.collect_drain_filter.filter_hint.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok b
++
++/-- Trait implementation: [collect_drain_filter::filter_hint::{core::ops::function::FnOnce<(&'_ (u32)), bool> for collect_drain_filter::filter_hint::closure}]
++    Source: 'tests/src/collect-drain-filter.rs', lines 60:28-60:38 -/
++@[reducible]
++def filter_hint.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_drain_filter.filter_hint.closure _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_drain_filter.filter_hint.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_drain_filter::filter_hint::{core::ops::function::FnMut<(&'_ (u32)), bool> for collect_drain_filter::filter_hint::closure}]
++    Source: 'tests/src/collect-drain-filter.rs', lines 60:28-60:38 -/
++@[reducible]
++def filter_hint.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_drain_filter.filter_hint.closure _root_.Aeneas.Std.U32
++  _root_.Bool := {
++  FnOnceInst :=
++    _root_.collect_drain_filter.filter_hint.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32Bool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_drain_filter.filter_hint.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_drain_filter::filter_hint]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 59:0-61:1
++    Visibility: public -/
++def filter_hint
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (start : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (d, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFrom
++      _root_.Aeneas.Std.Usize) v { start }
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.filter.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecDrain
++      _root_.Aeneas.Std.U32)
++      _root_.collect_drain_filter.filter_hint.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool
++      d ()
++  let filter_back :=
++    (fun state_back => state_back.iter :
++      _root_.Aeneas.Std.core.iter.adapters.filter.Filter
++      (_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++      _root_.collect_drain_filter.filter_hint.closure →
++      _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  let model_state1 ←
++    _root_.Aeneas.Std.core.iter.adapters.filter.IteratorFilter.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecDrain
++      _root_.Aeneas.Std.U32)
++      _root_.collect_drain_filter.filter_hint.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32Bool
++      model_state
++  let d1 := filter_back model_state
++  let v1 := drain_back d1
++  _root_.Aeneas.Std.Result.ok (model_state1, v1)
++
++/-- [collect_drain_filter::drained_checked::closure]
++    Source: 'tests/src/collect-drain-filter.rs', lines 68:13-68:55 -/
++@[reducible]
++def drained_checked.closure := _root_.Aeneas.Std.U32
++
++/-- [collect_drain_filter::drained_checked::{core::ops::function::FnMut<(u32), core::option::Option<u32>> for collect_drain_filter::drained_checked::closure<0>}::call_mut]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 68:13-68:55 -/
++def
++  drained_checked.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++  (c : _root_.collect_drain_filter.drained_checked.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.collect_drain_filter.drained_checked.closure)
++  := do
++  if tupled_args > c
++  then _root_.Aeneas.Std.Result.ok (none, c)
++  else _root_.Aeneas.Std.Result.ok (some tupled_args, c)
++
++/-- [collect_drain_filter::drained_checked::{core::ops::function::FnOnce<(u32), core::option::Option<u32>> for collect_drain_filter::drained_checked::closure<0>}::call_once]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 68:13-68:55 -/
++def
++  drained_checked.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32.call_once
++  (c : _root_.collect_drain_filter.drained_checked.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let (o, _) ←
++    _root_.collect_drain_filter.drained_checked.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok o
++
++/-- Trait implementation: [collect_drain_filter::drained_checked::{core::ops::function::FnOnce<(u32), core::option::Option<u32>> for collect_drain_filter::drained_checked::closure<0>}]
++    Source: 'tests/src/collect-drain-filter.rs', lines 68:13-68:55 -/
++@[reducible]
++def drained_checked.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_drain_filter.drained_checked.closure _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_drain_filter.drained_checked.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_drain_filter::drained_checked::{core::ops::function::FnMut<(u32), core::option::Option<u32>> for collect_drain_filter::drained_checked::closure<0>}]
++    Source: 'tests/src/collect-drain-filter.rs', lines 68:13-68:55 -/
++@[reducible]
++def drained_checked.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_drain_filter.drained_checked.closure _root_.Aeneas.Std.U32
++  (_root_.Option _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.collect_drain_filter.drained_checked.closure.Insts.CoreOpsFunctionFnOnceTupleU32OptionU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_drain_filter.drained_checked.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_drain_filter::drained_checked]:
++    Source: 'tests/src/collect-drain-filter.rs', lines 65:0-71:1
++    Visibility: public -/
++def drained_checked
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (d, drain_back) ←
++    _root_.Aeneas.Std.alloc.vec.Vec.drain
++      (_root_.Aeneas.Std.core.ops.range.RangeBoundsRangeFrom
++      _root_.Aeneas.Std.Usize) v { start := 1#usize }
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecDrain
++      _root_.Aeneas.Std.U32)
++      _root_.collect_drain_filter.drained_checked.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32
++      d limit
++  let map_back :=
++    (fun state_back => state_back.iter :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++      _root_.collect_drain_filter.drained_checked.closure →
++      _root_.Aeneas.Std.alloc.vec.drain.Drain _root_.Aeneas.Std.U32)
++  let (model_state1, model_state2) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecDrain
++      _root_.Aeneas.Std.U32)
++      _root_.collect_drain_filter.drained_checked.closure.Insts.CoreOpsFunctionFnMutTupleU32OptionU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorOption
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32)) model_state
++  let d1 := map_back { model_state with iter := model_state2.iter }
++  let v1 := drain_back d1
++  _root_.Aeneas.Std.Result.ok (model_state1, v1)
++
++end collect_drain_filter
+diff --git a/tests/lean/CollectVecDeque.lean b/tests/lean/CollectVecDeque.lean
+new file mode 100644
+index 0000000..dcd9b10
+--- /dev/null
++++ b/tests/lean/CollectVecDeque.lean
+@@ -0,0 +1 @@
++import CollectVecDeque.Checks
+diff --git a/tests/lean/CollectVecDeque/Checks.lean b/tests/lean/CollectVecDeque/Checks.lean
+new file mode 100644
+index 0000000..9ac03b0
+--- /dev/null
++++ b/tests/lean/CollectVecDeque/Checks.lean
+@@ -0,0 +1,57 @@
++import CollectVecDeque.CollectVecDeque
++
++/-! Evaluate the model of `tests/src/collect-vec-deque.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++namespace collect_vec_deque.checks
++open Aeneas Aeneas.Std Result
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def vec (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def nats (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++def edges : Slice (alloc.vec.Vec U32) :=
++  ⟨[vec [1, 2], vec [3], vec [3], vec [], vec [0]], by scalar_tac⟩
++
++def reachableOf (roots : List Nat) (h : roots.length ≤ Usize.max := by scalar_tac) : Option (List Nat) :=
++  match reachable edges (sl roots) with | ok v => some (nats v) | _ => none
++
++#guard reachableOf [0] == some [0, 2, 3, 1]
++#guard reachableOf [4, 1] == some [1, 3, 4, 0, 2]
++#guard reachableOf [] == some []
++
++def endsOf (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Option (Nat × Option Nat × Option Nat) :=
++  match ends (sl xs) with
++  | ok (n, front, back) => some (n.val, front.map (·.val), back.map (·.val))
++  | _ => none
++
++#guard endsOf [3, 1, 2] == some (3, some 3, some 2)
++#guard endsOf [] == some (0, none, none)
++
++def restOf (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Option (Option Nat × List Nat) :=
++  match from_rest (vec xs) with
++  | ok (first, rest) => some (first.map (·.val), nats rest)
++  | _ => none
++
++#guard restOf [5, 6, 7] == some (some 5, [6, 7])
++#guard restOf [] == some (none, [])
++
++def filteredOf (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Option (List Nat × Nat) :=
++  match filtered (sl xs) with
++  | ok (v, calls) => some (nats v, calls.val)
++  | _ => none
++
++#guard filteredOf [1, 2, 3, 4, 5] == some ([10, 30, 50], 5)
++#guard filteredOf [] == some ([], 0)
++
++def checkedOf (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Option (Option (List Nat)) :=
++  match checked (sl xs) with | ok v => some (v.map nats) | _ => none
++
++#guard checkedOf [1, 2, 3] == some (some [1, 2, 3])
++#guard checkedOf [1, 0, 3] == some none
++
++end collect_vec_deque.checks
+diff --git a/tests/lean/CollectVecDeque/CollectVecDeque.lean b/tests/lean/CollectVecDeque/CollectVecDeque.lean
+new file mode 100644
+index 0000000..be2a27c
+--- /dev/null
++++ b/tests/lean/CollectVecDeque/CollectVecDeque.lean
+@@ -0,0 +1,624 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [collect_vec_deque]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace collect_vec_deque
++
++/-- [collect_vec_deque::filtered::closure]
++    Source: 'tests/src/collect-vec-deque.rs', lines 68:16-71:9 -/
++@[reducible]
++def filtered.closure := _root_.Aeneas.Std.U32
++
++/-- [collect_vec_deque::reachable]: loop body 1:
++    Source: 'tests/src/collect-vec-deque.rs', lines 25:12-27:13
++    Visibility: public -/
++@[rust_loop_body]
++def reachable_loop0_loop0.body
++  (edges : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))
++  (roots : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Bool)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++    _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.Slice
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Bool) ×
++    (_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (edges,
++      roots, seen, stack, out, model_state1, (), (), (), (), (), ()))
++  | some input =>
++    let stack1 ←
++      _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.push_back stack
++        input
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, stack1))
++
++/-- [collect_vec_deque::reachable]: loop 1:
++    Source: 'tests/src/collect-vec-deque.rs', lines 25:12-27:13
++    Visibility: public -/
++@[rust_loop]
++def reachable_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (edges : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))
++  (roots : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Bool)
++  (stack : _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++  _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (t : _root_.Unit) (t1 : _root_.Unit) (t2 : _root_.Unit) (t3 : _root_.Unit) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Slice
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Bool) ×
++    (_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.core.slice.iter.Iter
++    _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit ×
++    _root_.Unit × _root_.Unit × _root_.Unit)
++  := do
++  loop
++    (fun (iter1, stack1) => _root_.collect_vec_deque.reachable_loop0_loop0.body
++       edges roots seen out iter1 stack1 :
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++      _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.Slice
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Bool) ×
++      (_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × _root_.Unit × _root_.Unit × _root_.Unit ×
++      _root_.Unit × _root_.Unit × _root_.Unit)))
++    (iter, stack)
++
++/-- [collect_vec_deque::reachable]: loop body 0:
++    Source: 'tests/src/collect-vec-deque.rs', lines 1:0-29:5
++    Visibility: public -/
++@[rust_loop_body]
++def reachable_loop0.body
++  (edges : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))
++  (roots : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++  _root_.Aeneas.Std.U32) (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Bool)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Bool) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (o, stack1) ←
++    _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.pop_back stack
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done out)
++  | some id =>
++    let i ← lift (_root_.Aeneas.Std.UScalar.cast .Usize id)
++    let b ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice _root_.Bool)
++        seen i
++    let (seen1, stack2, out1) ←
++      if b
++      then _root_.Aeneas.Std.Result.ok (seen, stack1, out)
++      else
++        do
++        let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .Usize id)
++        let (_, index_mut_back) ←
++          _root_.Aeneas.Std.alloc.vec.Vec.index_mut
++            (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++            _root_.Bool) seen i1
++        let out2 ← _root_.Aeneas.Std.alloc.vec.Vec.push out id
++        let i2 ← lift (_root_.Aeneas.Std.UScalar.cast .Usize id)
++        let o1 ←
++          _root_.Aeneas.Std.core.slice.Slice.get
++            (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++            (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) edges i2
++        let (v, vd) ←
++          match o1 with
++          | none =>
++            let seen2 := index_mut_back true
++            _root_.Aeneas.Std.Result.ok (seen2, stack1)
++          | some inputs =>
++            do
++            let (model_state, _) ←
++              _root_.Aeneas.Std.alloc.vec.IntoIteratorSharedVec.into_iter
++                inputs
++            let seen2 := index_mut_back true
++            let (_, _, seen3, stack3, _, _, _, _, _, _, _, _) ←
++              _root_.collect_vec_deque.reachable_loop0_loop0 model_state edges
++                roots seen2 stack1 out2 () () () ()
++            _root_.Aeneas.Std.Result.ok (seen3, stack3)
++        _root_.Aeneas.Std.Result.ok (v, vd, out2)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (stack2,
++      seen1, out1))
++
++/-- [collect_vec_deque::reachable]: loop 0:
++    Source: 'tests/src/collect-vec-deque.rs', lines 1:0-29:5
++    Visibility: public -/
++@[rust_loop]
++def reachable_loop0
++  (stack : _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++  _root_.Aeneas.Std.U32)
++  (edges : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))
++  (roots : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (seen : _root_.Aeneas.Std.alloc.vec.Vec _root_.Bool)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (stack1, seen1, out1) => _root_.collect_vec_deque.reachable_loop0.body
++       edges roots stack1 seen1 out1 :
++      ((_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Bool) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Bool) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++    (stack, seen, out)
++
++/-- [collect_vec_deque::reachable]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 14:0-31:1
++    Visibility: public -/
++def reachable
++  (edges : _root_.Aeneas.Std.Slice (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U32))
++  (roots : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let i := _root_.Aeneas.Std.Slice.len edges
++  let seen ←
++    _root_.Aeneas.Std.alloc.vec.from_elem
++      _root_.Aeneas.Std.core.clone.CloneBool false i
++  let i1 ← _root_.Aeneas.Std.core.slice.Slice.iter roots
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) i1
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.core.marker.CopyU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVecDeque
++      _root_.Aeneas.Std.U32) c
++  _root_.collect_vec_deque.reachable_loop0 model_state edges roots seen
++    (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++
++/-- [collect_vec_deque::ends]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 34:0-45:1
++    Visibility: public -/
++def ends
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.U32) × (_root_.Option _root_.Aeneas.Std.U32))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter xs
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) i
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.core.marker.CopyU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVecDeque
++      _root_.Aeneas.Std.U32) c
++  let o ←
++    _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.front model_state
++  let front ←
++    match o with
++    | none => _root_.Aeneas.Std.Result.ok none
++    | some _ => _root_.Aeneas.Std.Result.ok o
++  let o1 ←
++    _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.back model_state
++  let back ←
++    match o1 with
++    | none => _root_.Aeneas.Std.Result.ok none
++    | some _ => _root_.Aeneas.Std.Result.ok o1
++  let i1 ←
++    _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.len model_state
++  _root_.Aeneas.Std.Result.ok (i1, front, back)
++
++/-- [collect_vec_deque::drain_front]: loop body 0:
++    Source: 'tests/src/collect-vec-deque.rs', lines 49:4-51:5 -/
++@[rust_loop_body]
++def drain_front_loop.body
++  (queue : _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++  _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (o, queue1) ←
++    _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque.pop_front queue
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done out)
++  | some x =>
++    let out1 ← _root_.Aeneas.Std.alloc.vec.Vec.push out x
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (queue1,
++      out1))
++
++/-- [collect_vec_deque::drain_front]: loop 0:
++    Source: 'tests/src/collect-vec-deque.rs', lines 49:4-51:5 -/
++@[rust_loop]
++def drain_front_loop
++  (queue : _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++  _root_.Aeneas.Std.U32)
++  (out : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (queue1, out1) => _root_.collect_vec_deque.drain_front_loop.body
++       queue1 out1 : ((_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)))
++    (queue, out)
++
++/-- [collect_vec_deque::drain_front]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 47:0-53:1 -/
++@[reducible]
++def drain_front
++  (queue : _root_.Aeneas.Std.alloc.collections.vec_deque.VecDeque
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  _root_.collect_vec_deque.drain_front_loop queue
++    (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++
++/-- [collect_vec_deque::from_rest]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 56:0-61:1
++    Visibility: public -/
++def from_rest
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter v
++  let (model_state1, model_state2) ←
++    _root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.next model_state
++  let (model_state3, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVecDeque
++      _root_.Aeneas.Std.U32) model_state2
++  let v1 ← _root_.collect_vec_deque.drain_front model_state3
++  _root_.Aeneas.Std.Result.ok (model_state1, v1)
++
++/-- [collect_vec_deque::filtered::closure#1]
++    Source: 'tests/src/collect-vec-deque.rs', lines 72:13-72:24 -/
++@[reducible]
++def filtered.closure_1 := _root_.Unit
++
++/-- [collect_vec_deque::filtered::{core::ops::function::FnMut<(&'_ (u32)), u32> for collect_vec_deque::filtered::closure#1}::call_mut]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 72:13-72:24 -/
++def filtered.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++  (c : _root_.collect_vec_deque.filtered.closure_1)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.collect_vec_deque.filtered.closure_1)
++  := do
++  let i ← tupled_args * 10#u32
++  _root_.Aeneas.Std.Result.ok (i, c)
++
++/-- [collect_vec_deque::filtered::{core::ops::function::FnOnce<(&'_ (u32)), u32> for collect_vec_deque::filtered::closure#1}::call_once]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 72:13-72:24 -/
++def filtered.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++  (c : _root_.collect_vec_deque.filtered.closure_1) (i : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  let (i1, _) ←
++    _root_.collect_vec_deque.filtered.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok i1
++
++/-- Trait implementation: [collect_vec_deque::filtered::{core::ops::function::FnOnce<(&'_ (u32)), u32> for collect_vec_deque::filtered::closure#1}]
++    Source: 'tests/src/collect-vec-deque.rs', lines 72:13-72:24 -/
++@[reducible]
++def filtered.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_vec_deque.filtered.closure_1 _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_vec_deque.filtered.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_vec_deque::filtered::{core::ops::function::FnMut<(&'_ (u32)), u32> for collect_vec_deque::filtered::closure#1}]
++    Source: 'tests/src/collect-vec-deque.rs', lines 72:13-72:24 -/
++@[reducible]
++def filtered.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_vec_deque.filtered.closure_1 _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.collect_vec_deque.filtered.closure_1.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_vec_deque.filtered.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_vec_deque::filtered::{core::ops::function::FnMut<(&'_ (&'_ (u32))), bool> for collect_vec_deque::filtered::closure<0>}::call_mut]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 68:16-71:9 -/
++def
++  filtered.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool.call_mut
++  (c : _root_.collect_vec_deque.filtered.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.collect_vec_deque.filtered.closure ×
++    (_root_.collect_vec_deque.filtered.closure →
++    _root_.collect_vec_deque.filtered.closure))
++  := do
++  let i ← c + 1#u32
++  let i1 ← tupled_args % 2#u32
++  let back :=
++    (fun c1 => c1 : _root_.collect_vec_deque.filtered.closure →
++      _root_.collect_vec_deque.filtered.closure)
++  _root_.Aeneas.Std.Result.ok (i1 = 1#u32, i, back)
++
++/-- [collect_vec_deque::filtered::{core::ops::function::FnOnce<(&'_ (&'_ (u32))), bool> for collect_vec_deque::filtered::closure<0>}::call_once]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 68:16-71:9 -/
++def
++  filtered.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedU32Bool.call_once
++  (c : _root_.collect_vec_deque.filtered.closure) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.collect_vec_deque.filtered.closure)
++  := do
++  let (b, c1, call_mut_back) ←
++    _root_.collect_vec_deque.filtered.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool.call_mut
++      c i
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (b, c2)
++
++/-- Trait implementation: [collect_vec_deque::filtered::{core::ops::function::FnOnce<(&'_ (&'_ (u32))), bool> for collect_vec_deque::filtered::closure<0>}]
++    Source: 'tests/src/collect-vec-deque.rs', lines 68:16-71:9 -/
++@[reducible]
++def filtered.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_vec_deque.filtered.closure _root_.Aeneas.Std.U32 _root_.Bool
++  := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_vec_deque.filtered.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedU32Bool.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [collect_vec_deque::filtered::{core::ops::function::FnMut<(&'_ (&'_ (u32))), bool> for collect_vec_deque::filtered::closure<0>}]
++    Source: 'tests/src/collect-vec-deque.rs', lines 68:16-71:9 -/
++@[reducible]
++def filtered.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_vec_deque.filtered.closure _root_.Aeneas.Std.U32 _root_.Bool
++  := {
++  FnOnceInst :=
++    _root_.collect_vec_deque.filtered.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedU32Bool
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.collect_vec_deque.filtered.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [collect_vec_deque::filtered]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 64:0-75:1
++    Visibility: public -/
++def filtered
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter xs
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.filter.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.collect_vec_deque.filtered.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool
++      i 0#u32
++  let filter_back :=
++    (fun state_back => state_back.predicate :
++      _root_.Aeneas.Std.core.iter.adapters.filter.Filter
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.collect_vec_deque.filtered.closure →
++      _root_.collect_vec_deque.filtered.closure)
++  let model_state1 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFilter
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.collect_vec_deque.filtered.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool)
++      _root_.collect_vec_deque.filtered.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32U32
++      model_state ()
++  let map_back :=
++    (fun state_back => state_back.iter :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.filter.Filter
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.collect_vec_deque.filtered.closure)
++      _root_.collect_vec_deque.filtered.closure_1 →
++      _root_.Aeneas.Std.core.iter.adapters.filter.Filter
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.collect_vec_deque.filtered.closure)
++  let (model_state2, model_state3) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFilter
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.collect_vec_deque.filtered.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedU32Bool)
++      _root_.collect_vec_deque.filtered.closure_1.Insts.CoreOpsFunctionFnMutTupleSharedU32U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVecDeque
++      _root_.Aeneas.Std.U32) model_state1
++  let v ← _root_.collect_vec_deque.drain_front model_state2
++  let f :=
++    map_back
++      {
++        model_state1
++          with
++          iter :=
++            { model_state1.iter with predicate := model_state3.iter.predicate }
++      }
++  let c := filter_back { model_state with predicate := f.predicate }
++  _root_.Aeneas.Std.Result.ok (v, c)
++
++/-- [collect_vec_deque::checked::closure]
++    Source: 'tests/src/collect-vec-deque.rs', lines 81:13-81:54 -/
++@[reducible]
++def checked.closure := _root_.Unit
++
++/-- [collect_vec_deque::checked::{core::ops::function::FnMut<(&'_ (u32)), core::option::Option<u32>> for collect_vec_deque::checked::closure}::call_mut]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 81:13-81:54 -/
++def checked.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32.call_mut
++  (c : _root_.collect_vec_deque.checked.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    _root_.collect_vec_deque.checked.closure)
++  := do
++  if tupled_args = 0#u32
++  then _root_.Aeneas.Std.Result.ok (none, c)
++  else _root_.Aeneas.Std.Result.ok (some tupled_args, c)
++
++/-- [collect_vec_deque::checked::{core::ops::function::FnOnce<(&'_ (u32)), core::option::Option<u32>> for collect_vec_deque::checked::closure}::call_once]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 81:13-81:54 -/
++def
++  checked.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32OptionU32.call_once
++  (c : _root_.collect_vec_deque.checked.closure) (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.U32)
++  := do
++  let (o, _) ←
++    _root_.collect_vec_deque.checked.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32.call_mut
++      c i
++  _root_.Aeneas.Std.Result.ok o
++
++/-- Trait implementation: [collect_vec_deque::checked::{core::ops::function::FnOnce<(&'_ (u32)), core::option::Option<u32>> for collect_vec_deque::checked::closure}]
++    Source: 'tests/src/collect-vec-deque.rs', lines 81:13-81:54 -/
++@[reducible]
++def checked.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32OptionU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_vec_deque.checked.closure _root_.Aeneas.Std.U32 (_root_.Option
++  _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_vec_deque.checked.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32OptionU32.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_vec_deque::checked::{core::ops::function::FnMut<(&'_ (u32)), core::option::Option<u32>> for collect_vec_deque::checked::closure}]
++    Source: 'tests/src/collect-vec-deque.rs', lines 81:13-81:54 -/
++@[reducible]
++def checked.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_vec_deque.checked.closure _root_.Aeneas.Std.U32 (_root_.Option
++  _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.collect_vec_deque.checked.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32OptionU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_vec_deque.checked.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_vec_deque::checked]:
++    Source: 'tests/src/collect-vec-deque.rs', lines 78:0-87:1
++    Visibility: public -/
++def checked
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter xs
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.collect_vec_deque.checked.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32
++      i ()
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.collect_vec_deque.checked.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32OptionU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorOption
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVecDeque
++      _root_.Aeneas.Std.U32)) model_state
++  match model_state1 with
++  | none => _root_.Aeneas.Std.Result.ok none
++  | some queue =>
++    let v ← _root_.collect_vec_deque.drain_front queue
++    _root_.Aeneas.Std.Result.ok (some v)
++
++end collect_vec_deque
+diff --git a/tests/lean/CollectZipNested.lean b/tests/lean/CollectZipNested.lean
+new file mode 100644
+index 0000000..d42a6ae
+--- /dev/null
++++ b/tests/lean/CollectZipNested.lean
+@@ -0,0 +1 @@
++import CollectZipNested.Checks
+diff --git a/tests/lean/CollectZipNested/Checks.lean b/tests/lean/CollectZipNested/Checks.lean
+new file mode 100644
+index 0000000..d035850
+--- /dev/null
++++ b/tests/lean/CollectZipNested/Checks.lean
+@@ -0,0 +1,103 @@
++import CollectZipNested.CollectZipNested
++
++/-! Evaluate the model of `tests/src/collect-zip-nested.rs` on the inputs of its
++    `native` test module and compare with the native results. -/
++namespace collect_zip_nested.checks
++open Aeneas Aeneas.Std Result
++
++def i (x : Int) : I64 := ⟨BitVec.ofInt _ x⟩
++def sl (xs : List Int) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice I64 :=
++  ⟨xs.map i, by simpa using h⟩
++def vec {α} (xs : List α) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec α := ⟨xs, h⟩
++def ints (v : alloc.vec.Vec I64) : List Int := v.val.map (·.val)
++def params (xs : List (Int × Int × Int)) (h : xs.length ≤ Usize.max := by scalar_tac) :
++    alloc.vec.Vec (I64 × I64 × I64) := ⟨xs.map fun (a, b, c) => (i a, i b, i c), by simpa using h⟩
++def ivec (xs : List Int) (h : xs.length ≤ Usize.max := by scalar_tac) : alloc.vec.Vec I64 :=
++  ⟨xs.map i, by simpa using h⟩
++
++def spatialOf (a b : Slice I64) (p : alloc.vec.Vec (I64 × I64 × I64)) :
++    Option (Option (List Int) × Nat × List Int) :=
++  match spatial_state a b p with
++  | ok (extents, calls, observed) => some (extents.map ints, calls.val, ints observed)
++  | _ => none
++
++#guard spatialOf (sl [1, 3, 7, 5]) (sl [8, 3, 3, 3]) (params [(1, 0, 0), (2, 1, 1)])
++  == some (some [5, 3], 2, [7, 3, 5, 3])
++#guard spatialOf (sl [1, 3, 7, 5]) (sl [8, 3, 3, 3]) (params [(1, 0, 0)])
++  == some (some [5], 1, [7, 3])
++#guard spatialOf (sl [1, 3, 7]) (sl [8, 3, 3]) (params [(1, 0, 0), (2, 1, 1)])
++  == some (some [5], 1, [7, 3])
++#guard spatialOf (sl [1, 3, 7, -1, 9]) (sl [8, 3, 3, 3, 3]) (params [(1, 0, 0), (1, 0, 0), (1, 0, 0)])
++  == some (none, 2, [7, 3, -1])
++#guard spatialOf (sl [1, 3, 7, 5, 4]) (sl [8, 3, 3, 3, 3]) (params [(0, 0, 0), (1, 0, 0), (1, 0, 0)])
++  == some (none, 1, [7, 3])
++#guard spatialOf (sl [1, 3]) (sl [8, 3]) (params [(1, 0, 0)]) == some (some [], 0, [])
++
++def sumsOf (a b : Slice I64) (c : List (Int × Int)) (h : c.length ≤ Usize.max := by scalar_tac) :
++    Option (List Int × Nat) :=
++  match sums a b ⟨c.map fun (x, y) => (i x, i y), by simpa using h⟩ with
++  | ok (v, calls) => some (ints v, calls.val)
++  | _ => none
++
++#guard sumsOf (sl [1, 2, 3]) (sl [10, 20, 30]) [(100, 1000)] == some ([1111], 1)
++#guard sumsOf (sl [1, 2]) (sl [10, 20, 30]) [(100, 1000), (200, 2000), (300, 3000)]
++  == some ([1111, 2222], 2)
++#guard sumsOf (sl []) (sl [10]) [(100, 1000)] == some ([], 0)
++
++def triplesOf (a b : Slice I64) (c : alloc.vec.Vec I64) : Option (List (Int × Int × Int)) :=
++  match triples a b c with
++  | ok v => some (v.val.map fun (x, y, z) => (x.val, y.val, z.val))
++  | _ => none
++
++#guard triplesOf (sl [1, 2, 3]) (sl [4, 5]) (ivec [7, 8, 9]) == some [(1, 4, 7), (2, 5, 8)]
++#guard triplesOf (sl [1, 2, 3]) (sl [4, 5, 6]) (ivec [7]) == some [(1, 4, 7)]
++
++def hintOf (a b : Slice I64) (c : alloc.vec.Vec I64) : Option (Nat × Option Nat) :=
++  match hint a b c with
++  | ok (l, u) => some (l.val, u.map (·.val))
++  | _ => none
++
++#guard hintOf (sl [1, 2, 3]) (sl [4, 5]) (ivec [7, 8, 9]) == some (2, some 2)
++#guard hintOf (sl [1, 2, 3]) (sl [4, 5, 6]) (ivec [7]) == some (1, some 1)
++#guard hintOf (sl []) (sl [4]) (ivec [7]) == some (0, some 0)
++
++def nextOf (a b : Slice I64) (c : alloc.vec.Vec I64) :
++    Option (Option (Int × Int × Int) × Nat × Option Nat) :=
++  match next_then_hint a b c with
++  | ok (first, l, u) => some (first.map (fun (x, y, z) => (x.val, y.val, z.val)), l.val, u.map (·.val))
++  | _ => none
++
++#guard nextOf (sl [1, 2, 3]) (sl [4, 5, 6]) (ivec [7, 8]) == some (some (1, 4, 7), 1, some 1)
++#guard nextOf (sl [1, 2]) (sl [4, 5]) (ivec []) == some (none, 0, some 0)
++#guard nextOf (sl [1]) (sl [4, 5]) (ivec [7, 8]) == some (some (1, 4, 7), 0, some 0)
++
++def countOf (a b : Slice I64) (c : alloc.vec.Vec I64) : Option Nat :=
++  match count a b c with | ok n => some n.val | _ => none
++
++#guard countOf (sl [1, 2, 3]) (sl [4, 5, 6]) (ivec [7, 8]) == some 2
++#guard countOf (sl [1, 2]) (sl [4, 5, 6]) (ivec [7, 8, 9]) == some 2
++
++def enumOf (a : Slice I64) (c : alloc.vec.Vec I64) : Option (List (Nat × Int × Int)) :=
++  match enumerated a c with
++  | ok v => some (v.val.map fun (n, x, z) => (n.val, x.val, z.val))
++  | _ => none
++
++#guard enumOf (sl [5, 6, 7]) (ivec [1, 2]) == some [(0, 5, 1), (1, 6, 2)]
++#guard enumOf (sl [5]) (ivec [1, 2]) == some [(0, 5, 1)]
++
++def indexedOf (n : Nat) (c : alloc.vec.Vec I64) : Option (List (Nat × Int)) :=
++  match indexed ⟨BitVec.ofNat _ n⟩ c with
++  | ok v => some (v.val.map fun (k, z) => (k.val, z.val))
++  | _ => none
++
++#guard indexedOf 3 (ivec [9, 8]) == some [(0, 9), (1, 8)]
++#guard indexedOf 1 (ivec [9, 8]) == some [(0, 9)]
++
++def checkedOf (a : Slice I64) (c : alloc.vec.Vec I64) : Option (Option (List Int)) :=
++  match checked a c with | ok v => some (v.map ints) | _ => none
++
++#guard checkedOf (sl [5, 6, 7]) (ivec [1, 2]) == some (some [4, 4])
++#guard checkedOf (sl [0, 6]) (ivec [1, 2]) == some none
++#guard checkedOf (sl [5]) (ivec [1, 2]) == some (some [4])
++
++end collect_zip_nested.checks
+diff --git a/tests/lean/CollectZipNested/CollectZipNested.lean b/tests/lean/CollectZipNested/CollectZipNested.lean
+new file mode 100644
+index 0000000..90f2c51
+--- /dev/null
++++ b/tests/lean/CollectZipNested/CollectZipNested.lean
+@@ -0,0 +1,918 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [collect_zip_nested]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace collect_zip_nested
++
++/-- [collect_zip_nested::Subst]
++    Source: 'tests/src/collect-zip-nested.rs', lines 16:0-19:1
++    Visibility: public -/
++structure Subst where
++  calls : _root_.Aeneas.Std.U32
++  observed : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.I64
++
++/-- [collect_zip_nested::spatial::closure]
++    Source: 'tests/src/collect-zip-nested.rs', lines 49:13-54:9 -/
++@[reducible]
++def spatial.closure := _root_.collect_zip_nested.Subst
++
++/-- [collect_zip_nested::sums::closure]
++    Source: 'tests/src/collect-zip-nested.rs', lines 77:13-80:9 -/
++@[reducible]
++def sums.closure := _root_.Aeneas.Std.U32
++
++/-- [collect_zip_nested::{collect_zip_nested::Subst}::observe]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 24:4-27:5 -/
++def Subst.observe
++  (self : _root_.collect_zip_nested.Subst) (extent : _root_.Aeneas.Std.I64) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.I64) ×
++    _root_.collect_zip_nested.Subst)
++  := do
++  let v ← _root_.Aeneas.Std.alloc.vec.Vec.push self.observed extent
++  if extent < 0#i64
++  then _root_.Aeneas.Std.Result.ok (none, { self with observed := v })
++  else _root_.Aeneas.Std.Result.ok (some extent, { self with observed := v })
++
++/-- [collect_zip_nested::conv_output_extent]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 30:0-36:1
++    Visibility: public -/
++def conv_output_extent
++  (input : _root_.Aeneas.Std.I64) (kernel : _root_.Aeneas.Std.I64)
++  (stride : _root_.Aeneas.Std.I64) (low : _root_.Aeneas.Std.I64)
++  (high : _root_.Aeneas.Std.I64) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.I64)
++  := do
++  let i ← input + low
++  let i1 ← i + high
++  let span ← i1 - kernel
++  if stride <= 0#i64
++  then _root_.Aeneas.Std.Result.ok none
++  else
++    if span < 0#i64
++    then _root_.Aeneas.Std.Result.ok none
++    else
++      let i2 ← span / stride
++      let i3 ← i2 + 1#i64
++      _root_.Aeneas.Std.Result.ok (some i3)
++
++/-- [collect_zip_nested::spatial::{core::ops::function::FnMut<(((&'_ (i64), &'_ (i64)), (i64, i64, i64))), core::option::Option<i64>> for collect_zip_nested::spatial::closure<0>}::call_mut]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 49:13-54:9 -/
++def
++  spatial.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64TupleI64I64I64OptionI64.call_mut
++  (c : _root_.collect_zip_nested.spatial.closure)
++  (tupled_args : ((_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64) ×
++  (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.I64) ×
++    _root_.collect_zip_nested.spatial.closure ×
++    (_root_.collect_zip_nested.spatial.closure →
++    _root_.collect_zip_nested.spatial.closure))
++  := do
++  let (p, t) := tupled_args
++  let (input, kernel) := p
++  let (stride, low, high) := t
++  let i ← c.calls + 1#u32
++  let (o, s) ←
++    _root_.collect_zip_nested.Subst.observe { c with calls := i } input
++  match o with
++  | none =>
++    let back :=
++      (fun c1 => c1 : _root_.collect_zip_nested.spatial.closure →
++        _root_.collect_zip_nested.spatial.closure)
++    _root_.Aeneas.Std.Result.ok (none, s, back)
++  | some input1 =>
++    let (o1, s1) ← _root_.collect_zip_nested.Subst.observe s kernel
++    match o1 with
++    | none =>
++      let back :=
++        (fun c1 => c1 : _root_.collect_zip_nested.spatial.closure →
++          _root_.collect_zip_nested.spatial.closure)
++      _root_.Aeneas.Std.Result.ok (none, s1, back)
++    | some kernel1 =>
++      let o2 ←
++        _root_.collect_zip_nested.conv_output_extent input1 kernel1 stride low
++          high
++      let back :=
++        (fun c1 => c1 : _root_.collect_zip_nested.spatial.closure →
++          _root_.collect_zip_nested.spatial.closure)
++      _root_.Aeneas.Std.Result.ok (o2, s1, back)
++
++/-- [collect_zip_nested::spatial::{core::ops::function::FnOnce<(((&'_ (i64), &'_ (i64)), (i64, i64, i64))), core::option::Option<i64>> for collect_zip_nested::spatial::closure<0>}::call_once]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 49:13-54:9 -/
++def
++  spatial.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64TupleI64I64I64OptionI64.call_once
++  (c : _root_.collect_zip_nested.spatial.closure)
++  (p : ((_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64) ×
++  (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.I64) ×
++    _root_.collect_zip_nested.spatial.closure)
++  := do
++  let (o, c1, call_mut_back) ←
++    _root_.collect_zip_nested.spatial.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64TupleI64I64I64OptionI64.call_mut
++      c p
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (o, c2)
++
++/-- Trait implementation: [collect_zip_nested::spatial::{core::ops::function::FnOnce<(((&'_ (i64), &'_ (i64)), (i64, i64, i64))), core::option::Option<i64>> for collect_zip_nested::spatial::closure<0>}]
++    Source: 'tests/src/collect-zip-nested.rs', lines 49:13-54:9 -/
++@[reducible]
++def
++  spatial.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64TupleI64I64I64OptionI64
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_zip_nested.spatial.closure ((_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64) × (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64)) (_root_.Option _root_.Aeneas.Std.I64) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_zip_nested.spatial.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64TupleI64I64I64OptionI64.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [collect_zip_nested::spatial::{core::ops::function::FnMut<(((&'_ (i64), &'_ (i64)), (i64, i64, i64))), core::option::Option<i64>> for collect_zip_nested::spatial::closure<0>}]
++    Source: 'tests/src/collect-zip-nested.rs', lines 49:13-54:9 -/
++@[reducible]
++def
++  spatial.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64TupleI64I64I64OptionI64
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_zip_nested.spatial.closure ((_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64) × (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64)) (_root_.Option _root_.Aeneas.Std.I64) := {
++  FnOnceInst :=
++    _root_.collect_zip_nested.spatial.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64TupleI64I64I64OptionI64
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.collect_zip_nested.spatial.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64TupleI64I64I64OptionI64.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [collect_zip_nested::spatial]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 39:0-56:1
++    Visibility: public -/
++def spatial
++  (input_dims : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (kernel_dims : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (params : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))
++  (subst : _root_.collect_zip_nested.Subst) :
++  _root_.Aeneas.Std.Result ((_root_.Option (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.I64)) × _root_.collect_zip_nested.Subst)
++  := do
++  let s ←
++    _root_.Aeneas.Std.core.slice.index.Slice.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice
++      _root_.Aeneas.Std.I64) input_dims { start := 2#usize }
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let s1 ←
++    _root_.Aeneas.Std.core.slice.index.Slice.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexRangeFromUsizeSlice
++      _root_.Aeneas.Std.I64) kernel_dims { start := 2#usize }
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice
++      _root_.Aeneas.Std.I64) i s1
++  let (model_state1, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))
++      model_state params
++  let model_state2 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)))
++      _root_.collect_zip_nested.spatial.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64TupleI64I64I64OptionI64
++      model_state1 subst
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.zip.Zip
++      (_root_.Aeneas.Std.core.iter.adapters.zip.Zip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.Aeneas.Std.I64 ×
++      _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)))
++      _root_.collect_zip_nested.spatial.closure →
++      _root_.collect_zip_nested.spatial.closure)
++  let (model_state3, model_state4) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)))
++      _root_.collect_zip_nested.spatial.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64TupleI64I64I64OptionI64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorOption
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.I64)) model_state2
++  let c := map_back { model_state2 with f := model_state4.f }
++  _root_.Aeneas.Std.Result.ok (model_state3, c)
++
++/-- [collect_zip_nested::spatial_state]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 59:0-67:1
++    Visibility: public -/
++def spatial_state
++  (input_dims : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (kernel_dims : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (params : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)) :
++  _root_.Aeneas.Std.Result ((_root_.Option (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.I64)) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.I64))
++  := do
++  let (extents, subst) ←
++    _root_.collect_zip_nested.spatial input_dims kernel_dims params
++      {
++        calls := 0#u32,
++        observed := (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.I64)
++      }
++  _root_.Aeneas.Std.Result.ok (extents, subst.calls, subst.observed)
++
++/-- [collect_zip_nested::sums::{core::ops::function::FnMut<(((&'_ (i64), &'_ (i64)), (i64, i64))), i64> for collect_zip_nested::sums::closure<0>}::call_mut]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 77:13-80:9 -/
++def
++  sums.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64PairI64I64I64.call_mut
++  (c : _root_.collect_zip_nested.sums.closure)
++  (tupled_args : ((_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64) ×
++  (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.I64 ×
++    _root_.collect_zip_nested.sums.closure ×
++    (_root_.collect_zip_nested.sums.closure →
++    _root_.collect_zip_nested.sums.closure))
++  := do
++  let (p, p1) := tupled_args
++  let (x, y) := p
++  let (z, w) := p1
++  let i ← c + 1#u32
++  let i1 ← x + y
++  let i2 ← i1 + z
++  let i3 ← i2 + w
++  let back :=
++    (fun c1 => c1 : _root_.collect_zip_nested.sums.closure →
++      _root_.collect_zip_nested.sums.closure)
++  _root_.Aeneas.Std.Result.ok (i3, i, back)
++
++/-- [collect_zip_nested::sums::{core::ops::function::FnOnce<(((&'_ (i64), &'_ (i64)), (i64, i64))), i64> for collect_zip_nested::sums::closure<0>}::call_once]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 77:13-80:9 -/
++def
++  sums.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64PairI64I64I64.call_once
++  (c : _root_.collect_zip_nested.sums.closure)
++  (p : ((_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64) ×
++  (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.I64 ×
++    _root_.collect_zip_nested.sums.closure)
++  := do
++  let (i, c1, call_mut_back) ←
++    _root_.collect_zip_nested.sums.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64PairI64I64I64.call_mut
++      c p
++  let c2 := call_mut_back c1
++  _root_.Aeneas.Std.Result.ok (i, c2)
++
++/-- Trait implementation: [collect_zip_nested::sums::{core::ops::function::FnOnce<(((&'_ (i64), &'_ (i64)), (i64, i64))), i64> for collect_zip_nested::sums::closure<0>}]
++    Source: 'tests/src/collect-zip-nested.rs', lines 77:13-80:9 -/
++@[reducible]
++def
++  sums.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64PairI64I64I64
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_zip_nested.sums.closure ((_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64) × (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))
++  _root_.Aeneas.Std.I64 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_zip_nested.sums.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64PairI64I64I64.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- Trait implementation: [collect_zip_nested::sums::{core::ops::function::FnMut<(((&'_ (i64), &'_ (i64)), (i64, i64))), i64> for collect_zip_nested::sums::closure<0>}]
++    Source: 'tests/src/collect-zip-nested.rs', lines 77:13-80:9 -/
++@[reducible]
++def
++  sums.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64PairI64I64I64
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_zip_nested.sums.closure ((_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64) × (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))
++  _root_.Aeneas.Std.I64 := {
++  FnOnceInst :=
++    _root_.collect_zip_nested.sums.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64PairI64I64I64
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.collect_zip_nested.sums.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64PairI64I64I64.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, capture_state)
++}
++
++/-- [collect_zip_nested::sums]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 71:0-83:1
++    Visibility: public -/
++def sums
++  (a : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (b : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (c : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.I64) × _root_.Aeneas.Std.U32)
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter a
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice
++      _root_.Aeneas.Std.I64) i b
++  let (model_state1, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)) model_state c
++  let model_state2 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)))
++      _root_.collect_zip_nested.sums.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64PairI64I64I64
++      model_state1 0#u32
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.zip.Zip
++      (_root_.Aeneas.Std.core.iter.adapters.zip.Zip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.Aeneas.Std.I64 ×
++      _root_.Aeneas.Std.I64))) _root_.collect_zip_nested.sums.closure →
++      _root_.collect_zip_nested.sums.closure)
++  let (model_state3, model_state4) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)))
++      _root_.collect_zip_nested.sums.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64PairI64I64I64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.I64) model_state2
++  let c1 := map_back { model_state2 with f := model_state4.f }
++  _root_.Aeneas.Std.Result.ok (model_state3, c1)
++
++/-- [collect_zip_nested::triples::closure]
++    Source: 'tests/src/collect-zip-nested.rs', lines 87:31-87:56 -/
++@[reducible]
++def triples.closure := _root_.Unit
++
++/-- [collect_zip_nested::triples::{core::ops::function::FnMut<(((&'_ (i64), &'_ (i64)), i64)), (i64, i64, i64)> for collect_zip_nested::triples::closure}::call_mut]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 87:31-87:56 -/
++def
++  triples.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64I64TupleI64I64I64.call_mut
++  (c : _root_.collect_zip_nested.triples.closure)
++  (tupled_args : ((_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64) ×
++  _root_.Aeneas.Std.I64)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 ×
++    _root_.Aeneas.Std.I64) × _root_.collect_zip_nested.triples.closure)
++  := do
++  let (p, z) := tupled_args
++  let (x, y) := p
++  _root_.Aeneas.Std.Result.ok ((x, y, z), c)
++
++/-- [collect_zip_nested::triples::{core::ops::function::FnOnce<(((&'_ (i64), &'_ (i64)), i64)), (i64, i64, i64)> for collect_zip_nested::triples::closure}::call_once]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 87:31-87:56 -/
++def
++  triples.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64I64TupleI64I64I64.call_once
++  (c : _root_.collect_zip_nested.triples.closure)
++  (p : ((_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64) ×
++  _root_.Aeneas.Std.I64)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 ×
++    _root_.Aeneas.Std.I64)
++  := do
++  let (t, _) ←
++    _root_.collect_zip_nested.triples.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64I64TupleI64I64I64.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok t
++
++/-- Trait implementation: [collect_zip_nested::triples::{core::ops::function::FnOnce<(((&'_ (i64), &'_ (i64)), i64)), (i64, i64, i64)> for collect_zip_nested::triples::closure}]
++    Source: 'tests/src/collect-zip-nested.rs', lines 87:31-87:56 -/
++@[reducible]
++def
++  triples.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64I64TupleI64I64I64
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_zip_nested.triples.closure ((_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64) × _root_.Aeneas.Std.I64) (_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_zip_nested.triples.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64I64TupleI64I64I64.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_zip_nested::triples::{core::ops::function::FnMut<(((&'_ (i64), &'_ (i64)), i64)), (i64, i64, i64)> for collect_zip_nested::triples::closure}]
++    Source: 'tests/src/collect-zip-nested.rs', lines 87:31-87:56 -/
++@[reducible]
++def
++  triples.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64I64TupleI64I64I64
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_zip_nested.triples.closure ((_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64) × _root_.Aeneas.Std.I64) (_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64) := {
++  FnOnceInst :=
++    _root_.collect_zip_nested.triples.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairSharedI64SharedI64I64TupleI64I64I64
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_zip_nested.triples.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64I64TupleI64I64I64.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_zip_nested::triples]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 86:0-88:1
++    Visibility: public -/
++def triples
++  (a : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (b : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (c : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.I64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter a
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice
++      _root_.Aeneas.Std.I64) i b
++  let (model_state1, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.I64) model_state c
++  let model_state2 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.I64))
++      _root_.collect_zip_nested.triples.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64I64TupleI64I64I64
++      model_state1 ()
++  let (model_state3, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.I64))
++      _root_.collect_zip_nested.triples.closure.Insts.CoreOpsFunctionFnMutTuplePairPairSharedI64SharedI64I64TupleI64I64I64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))
++      model_state2
++  _root_.Aeneas.Std.Result.ok model_state3
++
++/-- [collect_zip_nested::hint]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 90:0-92:1
++    Visibility: public -/
++def hint
++  (a : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (b : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (c : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.I64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter a
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice
++      _root_.Aeneas.Std.I64) i b
++  let (model_state1, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.I64) model_state c
++  _root_.Aeneas.Std.core.iter.adapters.zip.IteratorZip.size_hint
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++    _root_.Aeneas.Std.I64)
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++    _root_.Aeneas.Std.I64))
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++    _root_.Aeneas.Std.I64) model_state1
++
++/-- [collect_zip_nested::next_then_hint]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 95:0-103:1
++    Visibility: public -/
++def next_then_hint
++  (a : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (b : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (c : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.I64) :
++  _root_.Aeneas.Std.Result ((_root_.Option (_root_.Aeneas.Std.I64 ×
++    _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)) × _root_.Aeneas.Std.Usize ×
++    (_root_.Option _root_.Aeneas.Std.Usize))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter a
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice
++      _root_.Aeneas.Std.I64) i b
++  let (model_state1, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.I64) model_state c
++  let (model_state2, model_state3) ←
++    _root_.Aeneas.Std.core.iter.adapters.zip.IteratorZip.next
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.I64) model_state1
++  let first ←
++    match model_state2 with
++    | none => _root_.Aeneas.Std.Result.ok none
++    | some p =>
++      let (p1, z) := p
++      let (x, y) := p1
++      _root_.Aeneas.Std.Result.ok (some (x, y, z))
++  let (lower, upper) ←
++    _root_.Aeneas.Std.core.iter.adapters.zip.IteratorZip.size_hint
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.I64) model_state3
++  _root_.Aeneas.Std.Result.ok (first, lower, upper)
++
++/-- [collect_zip_nested::count]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 106:0-108:1
++    Visibility: public -/
++def count
++  (a : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (b : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (c : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.I64) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.Usize
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter a
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice
++      _root_.Aeneas.Std.I64) i b
++  let (model_state1, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.I64) model_state c
++  let (model_state2, _) ←
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.I64)).count model_state1
++  _root_.Aeneas.Std.Result.ok model_state2
++
++/-- [collect_zip_nested::enumerated::closure]
++    Source: 'tests/src/collect-zip-nested.rs', lines 112:45-112:68 -/
++@[reducible]
++def enumerated.closure := _root_.Unit
++
++/-- [collect_zip_nested::enumerated::{core::ops::function::FnMut<(((usize, i64), i64)), (usize, i64, i64)> for collect_zip_nested::enumerated::closure}::call_mut]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 112:45-112:68 -/
++def
++  enumerated.closure.Insts.CoreOpsFunctionFnMutTuplePairPairUsizeI64I64TupleUsizeI64I64.call_mut
++  (c : _root_.collect_zip_nested.enumerated.closure)
++  (tupled_args : ((_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.I64) ×
++  _root_.Aeneas.Std.I64)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.I64 ×
++    _root_.Aeneas.Std.I64) × _root_.collect_zip_nested.enumerated.closure)
++  := do
++  let (p, z) := tupled_args
++  let (i, x) := p
++  _root_.Aeneas.Std.Result.ok ((i, x, z), c)
++
++/-- [collect_zip_nested::enumerated::{core::ops::function::FnOnce<(((usize, i64), i64)), (usize, i64, i64)> for collect_zip_nested::enumerated::closure}::call_once]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 112:45-112:68 -/
++def
++  enumerated.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairUsizeI64I64TupleUsizeI64I64.call_once
++  (c : _root_.collect_zip_nested.enumerated.closure)
++  (p : ((_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.I64) ×
++  _root_.Aeneas.Std.I64)) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.I64 ×
++    _root_.Aeneas.Std.I64)
++  := do
++  let (t, _) ←
++    _root_.collect_zip_nested.enumerated.closure.Insts.CoreOpsFunctionFnMutTuplePairPairUsizeI64I64TupleUsizeI64I64.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok t
++
++/-- Trait implementation: [collect_zip_nested::enumerated::{core::ops::function::FnOnce<(((usize, i64), i64)), (usize, i64, i64)> for collect_zip_nested::enumerated::closure}]
++    Source: 'tests/src/collect-zip-nested.rs', lines 112:45-112:68 -/
++@[reducible]
++def
++  enumerated.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairUsizeI64I64TupleUsizeI64I64
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_zip_nested.enumerated.closure ((_root_.Aeneas.Std.Usize ×
++  _root_.Aeneas.Std.I64) × _root_.Aeneas.Std.I64) (_root_.Aeneas.Std.Usize ×
++  _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_zip_nested.enumerated.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairUsizeI64I64TupleUsizeI64I64.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_zip_nested::enumerated::{core::ops::function::FnMut<(((usize, i64), i64)), (usize, i64, i64)> for collect_zip_nested::enumerated::closure}]
++    Source: 'tests/src/collect-zip-nested.rs', lines 112:45-112:68 -/
++@[reducible]
++def
++  enumerated.closure.Insts.CoreOpsFunctionFnMutTuplePairPairUsizeI64I64TupleUsizeI64I64
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_zip_nested.enumerated.closure ((_root_.Aeneas.Std.Usize ×
++  _root_.Aeneas.Std.I64) × _root_.Aeneas.Std.I64) (_root_.Aeneas.Std.Usize ×
++  _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64) := {
++  FnOnceInst :=
++    _root_.collect_zip_nested.enumerated.closure.Insts.CoreOpsFunctionFnOnceTuplePairPairUsizeI64I64TupleUsizeI64I64
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_zip_nested.enumerated.closure.Insts.CoreOpsFunctionFnMutTuplePairPairUsizeI64I64TupleUsizeI64I64.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_zip_nested::enumerated]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 111:0-113:1
++    Visibility: public -/
++def enumerated
++  (a : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (c : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.I64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter a
++  let c1 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64) _root_.Aeneas.Std.core.marker.CopyI64
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64) i
++  let model_state ←
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64) _root_.Aeneas.Std.core.marker.CopyI64).enumerate
++      c1
++  let (model_state1, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorEnumerate
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64) _root_.Aeneas.Std.core.marker.CopyI64))
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.I64) model_state c
++  let model_state2 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorEnumerate
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64) _root_.Aeneas.Std.core.marker.CopyI64))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.I64))
++      _root_.collect_zip_nested.enumerated.closure.Insts.CoreOpsFunctionFnMutTuplePairPairUsizeI64I64TupleUsizeI64I64
++      model_state1 ()
++  let (model_state3, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorEnumerate
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64) _root_.Aeneas.Std.core.marker.CopyI64))
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.I64))
++      _root_.collect_zip_nested.enumerated.closure.Insts.CoreOpsFunctionFnMutTuplePairPairUsizeI64I64TupleUsizeI64I64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.I64 ×
++      _root_.Aeneas.Std.I64)) model_state2
++  _root_.Aeneas.Std.Result.ok model_state3
++
++/-- [collect_zip_nested::indexed]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 116:0-118:1
++    Visibility: public -/
++def indexed
++  (n : _root_.Aeneas.Std.Usize)
++  (c : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.I64) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.I64))
++  := do
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.I64) { start := 0#usize, «end» := n } c
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorRange
++      _root_.Aeneas.Std.core.iter.range.StepUsize)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.I64))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      (_root_.Aeneas.Std.Usize × _root_.Aeneas.Std.I64)) model_state
++  _root_.Aeneas.Std.Result.ok model_state1
++
++/-- [collect_zip_nested::checked::closure]
++    Source: 'tests/src/collect-zip-nested.rs', lines 122:24-122:73 -/
++@[reducible]
++def checked.closure := _root_.Unit
++
++/-- [collect_zip_nested::checked::{core::ops::function::FnMut<((&'_ (i64), i64)), core::option::Option<i64>> for collect_zip_nested::checked::closure}::call_mut]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 122:24-122:73 -/
++def
++  checked.closure.Insts.CoreOpsFunctionFnMutTuplePairSharedI64I64OptionI64.call_mut
++  (c : _root_.collect_zip_nested.checked.closure)
++  (tupled_args : (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.I64) ×
++    _root_.collect_zip_nested.checked.closure)
++  := do
++  let (x, z) := tupled_args
++  if x < z
++  then _root_.Aeneas.Std.Result.ok (none, c)
++  else let i ← x - z
++       _root_.Aeneas.Std.Result.ok (some i, c)
++
++/-- [collect_zip_nested::checked::{core::ops::function::FnOnce<((&'_ (i64), i64)), core::option::Option<i64>> for collect_zip_nested::checked::closure}::call_once]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 122:24-122:73 -/
++def
++  checked.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedI64I64OptionI64.call_once
++  (c : _root_.collect_zip_nested.checked.closure)
++  (p : (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.I64)) :
++  _root_.Aeneas.Std.Result (_root_.Option _root_.Aeneas.Std.I64)
++  := do
++  let (o, _) ←
++    _root_.collect_zip_nested.checked.closure.Insts.CoreOpsFunctionFnMutTuplePairSharedI64I64OptionI64.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok o
++
++/-- Trait implementation: [collect_zip_nested::checked::{core::ops::function::FnOnce<((&'_ (i64), i64)), core::option::Option<i64>> for collect_zip_nested::checked::closure}]
++    Source: 'tests/src/collect-zip-nested.rs', lines 122:24-122:73 -/
++@[reducible]
++def checked.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedI64I64OptionI64 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.collect_zip_nested.checked.closure (_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64) (_root_.Option _root_.Aeneas.Std.I64) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.collect_zip_nested.checked.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedI64I64OptionI64.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [collect_zip_nested::checked::{core::ops::function::FnMut<((&'_ (i64), i64)), core::option::Option<i64>> for collect_zip_nested::checked::closure}]
++    Source: 'tests/src/collect-zip-nested.rs', lines 122:24-122:73 -/
++@[reducible]
++def checked.closure.Insts.CoreOpsFunctionFnMutTuplePairSharedI64I64OptionI64 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.collect_zip_nested.checked.closure (_root_.Aeneas.Std.I64 ×
++  _root_.Aeneas.Std.I64) (_root_.Option _root_.Aeneas.Std.I64) := {
++  FnOnceInst :=
++    _root_.collect_zip_nested.checked.closure.Insts.CoreOpsFunctionFnOnceTuplePairSharedI64I64OptionI64
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.collect_zip_nested.checked.closure.Insts.CoreOpsFunctionFnMutTuplePairSharedI64I64OptionI64.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [collect_zip_nested::checked]:
++    Source: 'tests/src/collect-zip-nested.rs', lines 121:0-123:1
++    Visibility: public -/
++def checked
++  (a : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.I64)
++  (c : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.I64) :
++  _root_.Aeneas.Std.Result (_root_.Option (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.I64))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter a
++  let (model_state, _, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.zip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.I64) i c
++  let model_state1 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.I64))
++      _root_.collect_zip_nested.checked.closure.Insts.CoreOpsFunctionFnMutTuplePairSharedI64I64OptionI64
++      model_state ()
++  let (model_state2, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorZip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.I64)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorVecIntoIter
++      _root_.Aeneas.Std.I64))
++      _root_.collect_zip_nested.checked.closure.Insts.CoreOpsFunctionFnMutTuplePairSharedI64I64OptionI64)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorOption
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.I64)) model_state1
++  _root_.Aeneas.Std.Result.ok model_state2
++
++end collect_zip_nested
+diff --git a/tests/lean/StrSplitn/Checks.lean b/tests/lean/StrSplitn/Checks.lean
+index ea1d737..8914dff 100644
+--- a/tests/lean/StrSplitn/Checks.lean
++++ b/tests/lean/StrSplitn/Checks.lean
+@@ -44,4 +44,13 @@ def fusedOf (text : Str) (n : Nat) (pattern : Str) :
+ #guard fusedOf (toStr "a,b") 0 (toStr ",") == some (0, some none, some none)
+ #guard fusedOf (toStr "a,b") 5 (toStr ",") == some (2, some none, some none)
+ 
++def hintsOf (text : Str) (n : Nat) (pattern : Str) :
++    Option ((Nat × Option Nat) × (Nat × Option Nat)) :=
++  match hints text (usize n) pattern with
++  | ok ((l1, u1), (l2, u2)) => some ((l1.val, u1.map (·.val)), (l2.val, u2.map (·.val)))
++  | _ => none
++
++#guard hintsOf (toStr "a: b: c") 2 (toStr ": ") == some ((0, none), (0, none))
++#guard hintsOf (toStr "") 0 (toStr ": ") == some ((0, none), (0, none))
++
+ end str_splitn.checks
+diff --git a/tests/lean/StrSplitn/StrSplitn.lean b/tests/lean/StrSplitn/StrSplitn.lean
+index 943931f..fe04bdb 100644
+--- a/tests/lean/StrSplitn/StrSplitn.lean
++++ b/tests/lean/StrSplitn/StrSplitn.lean
+@@ -97,8 +97,33 @@ def sides
+       _root_.Aeneas.Std.Result.ok (some (s1, s2))
+     else _root_.Aeneas.Std.Result.ok none
+ 
++/-- [str_splitn::hints]:
++    Source: 'tests/src/str-splitn.rs', lines 26:0-31:1
++    Visibility: public -/
++def hints
++  (text : _root_.Aeneas.Std.Str) (n : _root_.Aeneas.Std.Usize)
++  (pattern : _root_.Aeneas.Std.Str) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)) × (_root_.Aeneas.Std.Usize × (_root_.Option
++    _root_.Aeneas.Std.Usize)))
++  := do
++  let iter ←
++    _root_.Aeneas.Std.core.str.Str.splitn
++      _root_.Aeneas.Std.core.str.pattern.PatternSharedStr text n pattern
++  let model_state ←
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSplitN
++      _root_.Aeneas.Std.core.str.pattern.PatternSharedStr).size_hint iter
++  let (_, model_state1) ←
++    _root_.Aeneas.Std.core.str.iter.IteratorSplitN.next
++      _root_.Aeneas.Std.core.str.pattern.PatternSharedStr iter
++  let model_state2 ←
++    (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSplitN
++      _root_.Aeneas.Std.core.str.pattern.PatternSharedStr).size_hint
++      model_state1
++  _root_.Aeneas.Std.Result.ok (model_state, model_state2)
++
+ /-- [str_splitn::fused]: loop body 0:
+-    Source: 'tests/src/str-splitn.rs', lines 28:4-30:5
++    Source: 'tests/src/str-splitn.rs', lines 37:4-39:5
+     Visibility: public -/
+ @[rust_loop_body]
+ def fused_loop.body
+@@ -123,7 +148,7 @@ def fused_loop.body
+       (model_state1, count))
+ 
+ /-- [str_splitn::fused]: loop 0:
+-    Source: 'tests/src/str-splitn.rs', lines 28:4-30:5
++    Source: 'tests/src/str-splitn.rs', lines 37:4-39:5
+     Visibility: public -/
+ @[rust_loop]
+ def fused_loop
+@@ -143,7 +168,7 @@ def fused_loop
+     (iter, count)
+ 
+ /-- [str_splitn::fused]:
+-    Source: 'tests/src/str-splitn.rs', lines 25:0-32:1
++    Source: 'tests/src/str-splitn.rs', lines 34:0-41:1
+     Visibility: public -/
+ def fused
+   (text : _root_.Aeneas.Std.Str) (n : _root_.Aeneas.Std.Usize)
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 9787218..beafe7f 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -81,6 +81,7 @@ package «tests» {}
+ @[default_target] lean_lib NestedBorrowsFourLevelsJoinLoop
+ @[default_target] lean_lib ConstShadow
+ @[default_target] lean_lib CollectAdapters
++@[default_target] lean_lib CollectDrainFilter
+ @[default_target] lean_lib BtreeEntry
+ @[default_target] lean_lib CollectDispatch
+ @[default_target] lean_lib CollectFlatten
+@@ -90,6 +91,8 @@ package «tests» {}
+ @[default_target] lean_lib CollectUserIterator
+ @[default_target] lean_lib CollectUserIteratorHint
+ @[default_target] lean_lib CollectUserIteratorPanickingHint
++@[default_target] lean_lib CollectVecDeque
++@[default_target] lean_lib CollectZipNested
+ @[default_target] lean_lib DoubleEndedAdapters
+ @[default_target] lean_lib Constants
+ @[default_target] lean_lib ConstantsLean
+diff --git a/tests/src/collect-drain-filter.rs b/tests/src/collect-drain-filter.rs
+new file mode 100644
+index 0000000..2cac218
+--- /dev/null
++++ b/tests/src/collect-drain-filter.rs
+@@ -0,0 +1,103 @@
++//@ [!lean] skip
++//@ [lean] subdir=CollectDrainFilter
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map --include core::iter::adapters::filter::Filter
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Collectors over `Vec::drain` and a Filter of it (chelis-types session.rs
++//! DiagnosticSink::retain_since): the Vec collector drives the drain by next,
++//! the filter calls its predicate once per drained element, and dropping the
++//! drain removes the whole range, whether or not it was exhausted.
++//! CollectDrainFilter/Checks.lean compares the model with the native results
++//! asserted in the native test module, including the size hints, the early
++//! exits and the vectors and predicate states given back.
++
++pub struct Sink {
++    pub errors: Vec<u32>,
++}
++
++impl Sink {
++    /// chelis-types session.rs retain_since.
++    pub fn retain_since(&mut self, offset: usize, mut keep: impl FnMut(&u32) -> bool) {
++        let retained = self
++            .errors
++            .drain(offset..)
++            .filter(|error| keep(error))
++            .collect::<Vec<_>>();
++        self.errors.extend(retained);
++    }
++}
++
++/// retain_since with a predicate that counts its calls: the sink and the
++/// predicate state given back.
++pub fn retain_even(errors: Vec<u32>, offset: usize) -> (Vec<u32>, u32) {
++    let mut sink = Sink { errors };
++    let mut calls = 0;
++    sink.retain_since(offset, |error| {
++        calls += 1;
++        *error % 2 == 0
++    });
++    (sink.errors, calls)
++}
++
++/// A second instance of the generic retain_since, whose predicate reads a
++/// captured bound.
++pub fn retain_below(errors: Vec<u32>, offset: usize, bound: u32) -> Vec<u32> {
++    let mut sink = Sink { errors };
++    sink.retain_since(offset, |error| *error < bound);
++    sink.errors
++}
++
++/// The drained range collected, and the vector given back.
++pub fn drained(mut v: Vec<u32>, start: usize, end: usize) -> (Vec<u32>, Vec<u32>) {
++    let out = v.drain(start..end).collect::<Vec<_>>();
++    (out, v)
++}
++
++pub fn drain_hint(v: &mut Vec<u32>, start: usize) -> (usize, Option<usize>) {
++    v.drain(start..).size_hint()
++}
++
++pub fn filter_hint(v: &mut Vec<u32>, start: usize) -> (usize, Option<usize>) {
++    v.drain(start..).filter(|x| *x > 1).size_hint()
++}
++
++/// An Option collector over a drain stops at the first None; the rest of
++/// the range is removed all the same.
++pub fn drained_checked(mut v: Vec<u32>, limit: u32) -> (Option<Vec<u32>>, Vec<u32>) {
++    let out = v
++        .drain(1..)
++        .map(|x| if x > limit { None } else { Some(x) })
++        .collect::<Option<Vec<_>>>();
++    (out, v)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drain_collectors() {
++        assert_eq!(retain_even(vec![1, 2, 3, 4, 5, 6], 2), (vec![1, 2, 4, 6], 4));
++        assert_eq!(retain_even(vec![1, 3], 0), (vec![], 2));
++        assert_eq!(retain_even(vec![1, 3], 2), (vec![1, 3], 0));
++        assert_eq!(retain_below(vec![9, 1, 7, 2, 8], 1, 8), vec![9, 1, 7, 2]);
++        assert_eq!(retain_below(vec![9, 1, 7, 2, 8], 5, 8), vec![9, 1, 7, 2, 8]);
++        assert_eq!(drained(vec![1, 2, 3, 4], 1, 3), (vec![2, 3], vec![1, 4]));
++        assert_eq!(drained(vec![1, 2, 3, 4], 0, 4), (vec![1, 2, 3, 4], vec![]));
++        assert_eq!(drained(vec![1, 2, 3, 4], 2, 2), (vec![], vec![1, 2, 3, 4]));
++        let mut v = vec![1, 2, 3, 4];
++        assert_eq!(drain_hint(&mut v, 1), (3, Some(3)));
++        assert_eq!(v, vec![1]);
++        let mut v = vec![1, 2, 3, 4];
++        assert_eq!(filter_hint(&mut v, 1), (0, Some(3)));
++        assert_eq!(v, vec![1]);
++        assert_eq!(drained_checked(vec![1, 2, 9, 3], 5), (None, vec![1]));
++        assert_eq!(drained_checked(vec![1, 2, 3], 5), (Some(vec![2, 3]), vec![1]));
++        assert_eq!(drained_checked(vec![1], 5), (Some(vec![]), vec![1]));
++    }
++
++    #[test]
++    #[should_panic]
++    fn retain_past_the_end() {
++        retain_even(vec![1, 2], 3);
++    }
++}
+diff --git a/tests/src/collect-vec-deque.rs b/tests/src/collect-vec-deque.rs
+new file mode 100644
+index 0000000..ee81658
+--- /dev/null
++++ b/tests/src/collect-vec-deque.rs
+@@ -0,0 +1,108 @@
++//@ [!lean] skip
++//@ [lean] subdir=CollectVecDeque
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map --include core::iter::adapters::filter::Filter
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `FromIterator for VecDeque` (alloc vec_deque/mod.rs: `Vec::from_iter(..).into()`,
++//! or `into_vecdeque` for a vec::IntoIter source) and the deque operations of its
++//! chelis-ir users (analysis.rs reachable_nodes: a stack seeded by collecting the
++//! roots, popped from the back). CollectVecDeque/Checks.lean compares the model
++//! with the native results asserted in the native test module, including the
++//! early exits and the closure states given back.
++use std::collections::VecDeque;
++
++/// chelis-ir analysis.rs reachable_nodes (with a visited vector for the set).
++pub fn reachable(edges: &[Vec<u32>], roots: &[u32]) -> Vec<u32> {
++    let mut seen = vec![false; edges.len()];
++    let mut stack = roots.iter().copied().collect::<VecDeque<_>>();
++    let mut out = Vec::new();
++    while let Some(id) = stack.pop_back() {
++        if seen[id as usize] {
++            continue;
++        }
++        seen[id as usize] = true;
++        out.push(id);
++        if let Some(inputs) = edges.get(id as usize) {
++            for input in inputs {
++                stack.push_back(*input);
++            }
++        }
++    }
++    out
++}
++
++/// The length and both ends of a collected deque.
++pub fn ends(xs: &[u32]) -> (usize, Option<u32>, Option<u32>) {
++    let queue = xs.iter().copied().collect::<VecDeque<_>>();
++    let front = match queue.front() {
++        Some(x) => Some(*x),
++        None => None,
++    };
++    let back = match queue.back() {
++        Some(x) => Some(*x),
++        None => None,
++    };
++    (queue.len(), front, back)
++}
++
++fn drain_front(mut queue: VecDeque<u32>) -> Vec<u32> {
++    let mut out = Vec::new();
++    while let Some(x) = queue.pop_front() {
++        out.push(x);
++    }
++    out
++}
++
++/// A vec::IntoIter source after one next (native: into_vecdeque keeps the rest).
++pub fn from_rest(v: Vec<u32>) -> (Option<u32>, Vec<u32>) {
++    let mut iter = v.into_iter();
++    let first = iter.next();
++    let queue: VecDeque<u32> = iter.collect();
++    (first, drain_front(queue))
++}
++
++/// A filtering mapper that counts its calls: the state it gives back.
++pub fn filtered(xs: &[u32]) -> (Vec<u32>, u32) {
++    let mut calls = 0;
++    let queue = xs
++        .iter()
++        .filter(|x| {
++            calls += 1;
++            **x % 2 == 1
++        })
++        .map(|x| *x * 10)
++        .collect::<VecDeque<_>>();
++    (drain_front(queue), calls)
++}
++
++/// Collected through Option: stops at the first None.
++pub fn checked(xs: &[u32]) -> Option<Vec<u32>> {
++    let queue = xs
++        .iter()
++        .map(|x| if *x == 0 { None } else { Some(*x) })
++        .collect::<Option<VecDeque<u32>>>();
++    match queue {
++        Some(queue) => Some(drain_front(queue)),
++        None => None,
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn deques() {
++        let edges = vec![vec![1, 2], vec![3], vec![3], vec![], vec![0]];
++        assert_eq!(reachable(&edges, &[0]), vec![0, 2, 3, 1]);
++        assert_eq!(reachable(&edges, &[4, 1]), vec![1, 3, 4, 0, 2]);
++        assert_eq!(reachable(&edges, &[]), Vec::<u32>::new());
++        assert_eq!(ends(&[3, 1, 2]), (3, Some(3), Some(2)));
++        assert_eq!(ends(&[]), (0, None, None));
++        assert_eq!(from_rest(vec![5, 6, 7]), (Some(5), vec![6, 7]));
++        assert_eq!(from_rest(vec![]), (None, vec![]));
++        assert_eq!(filtered(&[1, 2, 3, 4, 5]), (vec![10, 30, 50], 5));
++        assert_eq!(filtered(&[]), (vec![], 0));
++        assert_eq!(checked(&[1, 2, 3]), Some(vec![1, 2, 3]));
++        assert_eq!(checked(&[1, 0, 3]), None);
++    }
++}
+diff --git a/tests/src/collect-zip-nested.rs b/tests/src/collect-zip-nested.rs
+new file mode 100644
+index 0000000..ffa156e
+--- /dev/null
++++ b/tests/src/collect-zip-nested.rs
+@@ -0,0 +1,179 @@
++//@ [!lean] skip
++//@ [lean] subdir=CollectZipNested
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Collectors over a Zip whose left side is itself a TrustedRandomAccess zip of
++//! two slice iterators (or another callback-free indexed source) and whose
++//! right side is a vec::IntoIter of a Copy element (chelis-types app_tensor.rs
++//! compute_concrete_conv_spatial). Native collectors fold this
++//! TrustedRandomAccessNoCoerce zip over the shorter length (Vec) or drive it
++//! by next (Option through GenericShunt); the model collects by repeated next,
++//! whose surplus left next reads one more pair of references without a
++//! callback. CollectZipNested/Checks.lean compares the model with the native
++//! results asserted in the native test module, including the size hints, the
++//! early exits and the state the mapping closures give back.
++
++pub struct Subst {
++    pub calls: u32,
++    pub observed: Vec<i64>,
++}
++
++impl Subst {
++    /// Records the extent and rejects negative ones (the shape of
++    /// `subst.observe_dim(dim).known_extent()?`).
++    fn observe(&mut self, extent: &i64) -> Option<i64> {
++        self.observed.push(*extent);
++        if *extent < 0 { None } else { Some(*extent) }
++    }
++}
++
++pub fn conv_output_extent(input: i64, kernel: i64, stride: i64, low: i64, high: i64) -> Option<i64> {
++    let span = input + low + high - kernel;
++    if stride <= 0 || span < 0 {
++        return None;
++    }
++    Some(span / stride + 1)
++}
++
++/// chelis-types app_tensor.rs compute_concrete_conv_spatial.
++pub fn spatial(
++    input_dims: &[i64],
++    kernel_dims: &[i64],
++    params: Vec<(i64, i64, i64)>,
++    subst: &mut Subst,
++) -> Option<Vec<i64>> {
++    input_dims[2..]
++        .iter()
++        .zip(&kernel_dims[2..])
++        .zip(params)
++        .map(|((input, kernel), (stride, low, high))| {
++            subst.calls += 1;
++            let Some(input) = subst.observe(input) else { return None };
++            let Some(kernel) = subst.observe(kernel) else { return None };
++            conv_output_extent(input, kernel, stride, low, high)
++        })
++        .collect()
++}
++
++/// `spatial` with the closure state it gives back.
++pub fn spatial_state(
++    input_dims: &[i64],
++    kernel_dims: &[i64],
++    params: Vec<(i64, i64, i64)>,
++) -> (Option<Vec<i64>>, u32, Vec<i64>) {
++    let mut subst = Subst { calls: 0, observed: Vec::new() };
++    let extents = spatial(input_dims, kernel_dims, params, &mut subst);
++    (extents, subst.calls, subst.observed)
++}
++
++/// The Vec collector (TrustedLen: the native fold reads min(len) indices and
++/// never takes the surplus left pair); the mapper counts its calls.
++pub fn sums(a: &[i64], b: &[i64], c: Vec<(i64, i64)>) -> (Vec<i64>, u32) {
++    let mut calls = 0;
++    let values = a
++        .iter()
++        .zip(b)
++        .zip(c)
++        .map(|((x, y), (z, w))| {
++            calls += 1;
++            *x + *y + z + w
++        })
++        .collect();
++    (values, calls)
++}
++
++/// The zipped pairs themselves.
++pub fn triples(a: &[i64], b: &[i64], c: Vec<i64>) -> Vec<(i64, i64, i64)> {
++    a.iter().zip(b).zip(c).map(|((x, y), z)| (*x, *y, z)).collect()
++}
++
++pub fn hint(a: &[i64], b: &[i64], c: Vec<i64>) -> (usize, Option<usize>) {
++    a.iter().zip(b).zip(c).size_hint()
++}
++
++/// One next, then the size hint of the rest.
++pub fn next_then_hint(a: &[i64], b: &[i64], c: Vec<i64>) -> (Option<(i64, i64, i64)>, usize, Option<usize>) {
++    let mut zip = a.iter().zip(b).zip(c);
++    let first = match zip.next() {
++        Some(((x, y), z)) => Some((*x, *y, z)),
++        None => None,
++    };
++    let (lower, upper) = zip.size_hint();
++    (first, lower, upper)
++}
++
++/// Zip::count is its fold.
++pub fn count(a: &[i64], b: &[i64], c: Vec<i64>) -> usize {
++    a.iter().zip(b).zip(c).count()
++}
++
++/// A Copied and Enumerate left side.
++pub fn enumerated(a: &[i64], c: Vec<i64>) -> Vec<(usize, i64, i64)> {
++    a.iter().copied().enumerate().zip(c).map(|((i, x), z)| (i, x, z)).collect()
++}
++
++/// A std integer range on the left.
++pub fn indexed(n: usize, c: Vec<i64>) -> Vec<(usize, i64)> {
++    (0..n).zip(c).collect()
++}
++
++/// A slice iterator on the left, collected into an Option.
++pub fn checked(a: &[i64], c: Vec<i64>) -> Option<Vec<i64>> {
++    a.iter().zip(c).map(|(x, z)| if *x < z { None } else { Some(*x - z) }).collect()
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn nested_zips() {
++        // conv: inputs [n, c, 7, 5], kernels [o, c, 3, 3], strides/padding per spatial axis.
++        assert_eq!(
++            spatial_state(&[1, 3, 7, 5], &[8, 3, 3, 3], vec![(1, 0, 0), (2, 1, 1)]),
++            (Some(vec![5, 3]), 2, vec![7, 3, 5, 3])
++        );
++        // params shorter than the dims: the surplus left pair is read, never mapped.
++        assert_eq!(
++            spatial_state(&[1, 3, 7, 5], &[8, 3, 3, 3], vec![(1, 0, 0)]),
++            (Some(vec![5]), 1, vec![7, 3])
++        );
++        // params longer than the dims.
++        assert_eq!(
++            spatial_state(&[1, 3, 7], &[8, 3, 3], vec![(1, 0, 0), (2, 1, 1)]),
++            (Some(vec![5]), 1, vec![7, 3])
++        );
++        // An early exit: the second input extent is negative.
++        assert_eq!(
++            spatial_state(&[1, 3, 7, -1, 9], &[8, 3, 3, 3, 3], vec![(1, 0, 0), (1, 0, 0), (1, 0, 0)]),
++            (None, 2, vec![7, 3, -1])
++        );
++        // An early exit in conv_output_extent (stride 0), before the kernel of axis 2 is observed.
++        assert_eq!(
++            spatial_state(&[1, 3, 7, 5, 4], &[8, 3, 3, 3, 3], vec![(0, 0, 0), (1, 0, 0), (1, 0, 0)]),
++            (None, 1, vec![7, 3])
++        );
++        assert_eq!(spatial_state(&[1, 3], &[8, 3], vec![(1, 0, 0)]), (Some(vec![]), 0, vec![]));
++        assert_eq!(sums(&[1, 2, 3], &[10, 20, 30], vec![(100, 1000)]), (vec![1111], 1));
++        assert_eq!(sums(&[1, 2], &[10, 20, 30], vec![(100, 1000), (200, 2000), (300, 3000)]), (vec![1111, 2222], 2));
++        assert_eq!(sums(&[], &[10], vec![(100, 1000)]), (vec![], 0));
++        assert_eq!(triples(&[1, 2, 3], &[4, 5], vec![7, 8, 9]), vec![(1, 4, 7), (2, 5, 8)]);
++        assert_eq!(triples(&[1, 2, 3], &[4, 5, 6], vec![7]), vec![(1, 4, 7)]);
++        assert_eq!(hint(&[1, 2, 3], &[4, 5], vec![7, 8, 9]), (2, Some(2)));
++        assert_eq!(hint(&[1, 2, 3], &[4, 5, 6], vec![7]), (1, Some(1)));
++        assert_eq!(hint(&[], &[4], vec![7]), (0, Some(0)));
++        assert_eq!(next_then_hint(&[1, 2, 3], &[4, 5, 6], vec![7, 8]), (Some((1, 4, 7)), 1, Some(1)));
++        // The surplus left pair is consumed by next: the left zip is then exhausted too.
++        assert_eq!(next_then_hint(&[1, 2], &[4, 5], vec![]), (None, 0, Some(0)));
++        assert_eq!(next_then_hint(&[1], &[4, 5], vec![7, 8]), (Some((1, 4, 7)), 0, Some(0)));
++        assert_eq!(count(&[1, 2, 3], &[4, 5, 6], vec![7, 8]), 2);
++        assert_eq!(count(&[1, 2], &[4, 5, 6], vec![7, 8, 9]), 2);
++        assert_eq!(enumerated(&[5, 6, 7], vec![1, 2]), vec![(0, 5, 1), (1, 6, 2)]);
++        assert_eq!(enumerated(&[5], vec![1, 2]), vec![(0, 5, 1)]);
++        assert_eq!(indexed(3, vec![9, 8]), vec![(0, 9), (1, 8)]);
++        assert_eq!(indexed(1, vec![9, 8]), vec![(0, 9)]);
++        assert_eq!(checked(&[5, 6, 7], vec![1, 2]), Some(vec![4, 4]));
++        assert_eq!(checked(&[0, 6], vec![1, 2]), None);
++        assert_eq!(checked(&[5], vec![1, 2]), Some(vec![4]));
++    }
++}
+diff --git a/tests/src/str-splitn.rs b/tests/src/str-splitn.rs
+index 12cd795..538a7f4 100644
+--- a/tests/src/str-splitn.rs
++++ b/tests/src/str-splitn.rs
+@@ -21,6 +21,15 @@ pub fn sides(message: &str) -> Option<(&str, &str)> {
+     if sides.len() == 2 { Some((sides[0], sides[1])) } else { None }
+ }
+ 
++/// SplitN's Iterator impl (generate_pattern_iterators!) defines only next: the default size_hint
++/// (0, None), which the Vec collector reads for its capacity, before and after the first piece.
++pub fn hints(text: &str, n: usize, pattern: &str) -> ((usize, Option<usize>), (usize, Option<usize>)) {
++    let mut iter = text.splitn(n, pattern);
++    let before = iter.size_hint();
++    let _ = iter.next();
++    (before, iter.size_hint())
++}
++
+ /// The number of pieces, then two more calls after the end.
+ pub fn fused<'a>(text: &'a str, n: usize, pattern: &str) -> (usize, Option<&'a str>, Option<&'a str>) {
+     let mut iter = text.splitn(n, pattern);
+@@ -53,5 +62,7 @@ mod native {
+         assert_eq!(fused("a,b,,c", 3, ","), (3, None, None));
+         assert_eq!(fused("a,b", 0, ","), (0, None, None));
+         assert_eq!(fused("a,b", 5, ","), (2, None, None));
++        assert_eq!(hints("a: b: c", 2, ": "), ((0, None), (0, None)));
++        assert_eq!(hints("", 0, ": "), ((0, None), (0, None)));
+     }
+ }

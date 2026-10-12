@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub struct One(pub bool);
 
@@ -170,6 +170,75 @@ pub fn reject_drop_vec_zip() -> Vec<(String, i64)> {
         .collect()
 }
 
+// A mapped left side under the inner zip: the native NoCoerce fold of the
+// outer zip reads min(len) pairs by index and never maps the surplus left
+// pair, while repeated next maps it once more.
+pub fn reject_mapped_nested_zip() -> (Vec<(i64, i64)>, u32) {
+    let mut calls = 0;
+    let left = [1i64, 2];
+    let values = left
+        .iter()
+        .map(|x| {
+            calls += 1;
+            *x
+        })
+        .zip(&[3i64, 4])
+        .zip(vec![5i64])
+        .map(|((x, _), z)| (x, z))
+        .collect();
+    (values, calls)
+}
+
+// A borrowed left side: &mut Zip is not TrustedRandomAccessNoCoerce, so the
+// native TrustedLen fold takes no surplus left pair, which the caller then
+// observes in the iterator it gets back.
+pub fn reject_borrowed_zip_left() -> (Vec<i64>, Option<(i64, i64)>) {
+    let mut left = [1i64, 2, 3].iter().zip(&[4i64, 5, 6]);
+    let values = left.by_ref().zip(vec![7i64]).map(|((x, _), z)| *x + z).collect();
+    (values, left.next().map(|(x, y)| (*x, *y)))
+}
+
+// A Cloned left side runs Clone::clone and yields values with drop glue.
+pub fn reject_cloned_zip_left() -> Vec<(String, i64)> {
+    let names = [String::from("a"), String::from("b")];
+    names.iter().cloned().zip(vec![1i64]).collect()
+}
+
+// VecDeque's collector is Vec::from_iter(..).into(): the same observable
+// size_hint callback as reject_vec_hint.
+pub fn reject_deque_hint() -> VecDeque<u8> {
+    One(false).collect()
+}
+
+// Native indexed collection invokes no skipped callback after exhaustion.
+pub fn reject_take_mapped_skip() -> (Vec<i64>, u32) {
+    let mut calls = 0;
+    let values = [1i64, 2, 3]
+        .iter()
+        .map(|x| {
+            calls += 1;
+            *x
+        })
+        .skip(5)
+        .take(2)
+        .collect();
+    (values, calls)
+}
+
+// Native in-place collection uses only indices that remain after the skip.
+pub fn reject_skip_in_place() -> (Vec<i64>, u32) {
+    let mut calls = 0;
+    let values = vec![1i64, 2, 3]
+        .into_iter()
+        .map(|x| {
+            calls += 1;
+            x
+        })
+        .skip(5)
+        .collect();
+    (values, calls)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +258,7 @@ mod tests {
         );
         assert!(std::panic::catch_unwind(reject_dispatch_method).is_err());
         assert!(std::panic::catch_unwind(reject_dispatch_impl).is_err());
+        assert!(std::panic::catch_unwind(reject_deque_hint).is_err());
     }
 
     #[test]
@@ -197,5 +267,14 @@ mod tests {
         assert_eq!(reject_zip_consumer(), (vec![(1, 7)], 1));
         assert_eq!(reject_mapped_vec_zip(), (vec![(5, 1)], 1));
         assert_eq!(reject_drop_vec_zip(), vec![(String::from("a"), 1)]);
+        assert_eq!(reject_mapped_nested_zip(), (vec![(1, 5)], 1));
+        assert_eq!(reject_borrowed_zip_left(), (vec![8], Some((2, 5))));
+        assert_eq!(reject_cloned_zip_left(), vec![(String::from("a"), 1)]);
+    }
+
+    #[test]
+    fn indexed_skip_maps_no_skipped_item() {
+        assert_eq!(reject_take_mapped_skip(), (vec![], 0));
+        assert_eq!(reject_skip_in_place(), (vec![], 0));
     }
 }

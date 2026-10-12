@@ -253,6 +253,35 @@ requires schedule-independent comparison and key callbacks.
 specialized `try_fold` dispatch, source and callback restoration, and effectful
 `by_ref` overrides. For admitted calls, collection delegates to the supplied
 `FromIterator` rather than precollecting values or forcing fused iterator behavior.
+
+Native collection profiles bind each measured row to its actual compiler, target,
+source, flags, feature request, and supplier. Cargo rows retain their actual
+compiler-artifact units. The binder preserves every row and binds it to the
+original successful Charon receipt and exact LLBC bytes.
+
+Standard-library requests use `supplier_package: "rustc"`, `method: "public"`,
+and an explicit `standard_library_supplier`. This supplier contains `crate_name`,
+`source_archive`, `source_archive_command`, and `declaration_sources`.
+Declaration entries record the owning crate, LLBC file, archive member,
+extracted source identity, and declaration evidence identity.
+The producer adds actual compiler and target identities, target library
+artifacts, and successful compiler query receipts. Missing or changed artifacts
+cause rejection. This route does not create a Cargo supplier or use an
+implicit fallback.
+
+Declaration evidence retains its original LLBC identity.
+Its numeric declaration and file IDs belong only to that artifact.
+Each job certificate binds its own successful Charon receipt and exact LLBC bytes.
+The consumer matches current membership by canonical type, owning crate, and exact source file.
+Historical numeric IDs and equal layouts do not establish current membership.
+
+For `String`, the canonical descriptor remains `alloc::string::String`.
+The public measurement uses `std::string::String`. The native smoke measures
+24 bytes with alignment 8 on the pinned `aarch64-apple-darwin` target.
+The retained binder smoke preserves all seven authenticated rows.
+These measurements do not prove fresh consumer execution, complete collector
+body translation, or whole-core correspondence.
+
 Use the built Lean library from the patched `aeneas-source` package, not the
 unmodified upstream library:
 
@@ -395,10 +424,11 @@ acceptance gate. The former Charon/Hax closure-region failure was addressed in
 Charon `5a71617`; the new source integration `5b825fa` also retains imported
 closure bodies from promoted MIR and rejects stale or missing metadata. Its
 isolated Charon regression and strict two-crate native/Lean closure smoke pass.
-An independent `verification/toolchain/series.py check` reconstructs the new
-Charon, charon-ml, and round-36 Aeneas (`5cd0e4a`) integration sources exactly
-(47, 9, and 165 patches). Four patched Nix outputs are built and rooted under
-`.work/diag/toolchain-pin-r36/`:
+The last committed source pin (`c9e1a14`) passed an independent
+`verification/toolchain/series.py check`, reconstructing Charon, charon-ml,
+and round-36 Aeneas (`5cd0e4a`) exactly (47, 9, and 165 patches). The four
+rooted Nix outputs under `.work/diag/toolchain-pin-r36/` belong to that
+committed pin, not the uncommitted local Aeneas patch 166:
 
 - `nix-charon`: `/nix/store/afr91mk38byjxgmx1hiwhlfbh5ks2p9j-charon-0.1.184`
 - `nix-charon-ml`: `/nix/store/cq3v51mignvx8ddrqnb8ka92b32a3sl8-ocaml5.2.1-charon-0.1.0`
@@ -415,14 +445,71 @@ Both have no Charon dump errors and validate all 54 native-shell entries
 (73 selected local members). These are plans, not extracted or Lean-checked
 whole-core models.
 
+The first fresh strict **accepting-mode** default extraction
+(`.work/diag/toolchain-pin-r36/extract-default-strict-v3/summary.json`) is
+**not accepted**. Charon succeeded on chunk 05 `chelis_deep_03`, but Aeneas
+failed there (rc 2) on `crates/chelis-deep/src/annotations.rs:734-801`:
+`Can't end abstraction 4 as it is set as non-endable`
+(`interp/InterpBorrows.ml:1404`). This 52-chunk run predates the local source
+changes and has **not** been rerun; the 53-chunk lowering-trace run is unrun.
+The minimal visitor fixture `nested-borrows-closure-capture-outlives.rs`
+failed the same way before the RegionHierarchy source repair (`a3f369e`).
+That repair removes the non-endable-abstraction error in the same strict LLBC,
+but a fresh strict saved-visitor replay still fails rc 2: the pending native
+function-call stage lacks a genuine level 3 (`aid833/abs990`). Baseline h1/h2
+four-level visitor replays also fail rc 2 at `SymbolicToPureAbs.ml:1328`.
+Source-only inspection finds the live full-closure level 3 absent in the local
+join: it must return through the active parent `&mut FC`, and saved traces
+do not establish the original borrow ID and current symbolic `sv` mapping.
+The translator remains fail-closed; no borrowed snapshot or scalar can stand
+in for that return.
+
+On 2026-09-29, a guarded root
+`nix develop <repo>#aeneas --command dune build --profile release main.exe`
+completed rc 0; `_build/default/main.exe -version` reported
+`aeneas a3f369e-dirty`. The strict single-capture
+`NestedBorrowsClosureOnceState.llbc` translated, but `disk_guard` refused its
+Lean compile rc 3 below the 13 GiB launch threshold. On 2026-09-30 two Data
+free samples recovered to 22,583,960/22,606,688 KiB, and a guarded root
+`#aeneas` Dune baseline build completed rc 0. Subsequent uncommitted k-stage
+Core/Abs indexed pending/exchange and Expressions indexed EndAbs/protocol
+prepass semantic edits are **not compiled or verified together**: the guarded
+rc 0 Dune build used an intermediate source. `InterpAbs.ml` has comments-only
+changes; `InterpBorrows.ml` is unchanged. A trace-enabled strict
+saved-visitor launch was refused by `disk_guard` rc 3 below 13 GiB;
+no post-change h1/h2, native, Lean or proof check ran.
+Temporary debug hooks were removed from compiled source; scoped replay
+recipes are in `.work/diag/toolchain-pin-r36/{abs-stage-admission,expr-stage-admission,interp-parent-provenance}-scratch.txt`.
+
+At 19:08:55Z Data free was 8,135,816 KiB, 5,495,672 KiB short of 13 GiB
+and below the 8.25 GiB runtime floor. One Kache age-12h GC request reported
+`skipped: true` and zero reclaimed; daemon GC reclaimed zero. Unrelated
+user-owned `nix`/`cargo test` PID 56488/OMP 48428 were active; no causal
+attribution was made, their owner's tty was warned, and no processes were
+signaled or files deleted. The last committed source pin and four rooted Nix
+outputs still contain 165 Aeneas patches; the working
+`verification/toolchain/aeneas/SERIES` lists uncommitted patch 166
+(`0166-infer-captured-closure-outlives-from-instantiated-fields.patch`).
+Neither strict default nor lowering-trace extraction has been rerun; no
+whole-core model, Lean proof/Audit, or final acceptance has passed.
+
+Preserved evidence: `.work/diag/toolchain-pin-r36/extract-default-strict-v3/chunks/05-chelis_deep_03/aeneas.log`,
+`.work/diag/toolchain-pin-r36/repro-closure-capture-before.llbc`,
+`.work/diag/toolchain-pin-r36/repro-closure-capture-stagepending-before.aeneas.log`,
+`.work/diag/toolchain-pin-r36/repro-closure-capture-stagepending-after.aeneas.log`,
+`.work/diag/toolchain-pin-r36/repro-closure-capture-stagepending-owner-trace.log`,
+and `.work/diag/toolchain-pin-r36/repro-closure-capture-stagepending-owner-signature-trace.log`.
+
 The earlier round-32, 52-chunk diagnostic run reached only 38 chunks and is
 not acceptance evidence. The round-36 Aeneas local gate compiled 258 Lean
 libraries (637 modules), regenerated 270/270 fixtures without strict stale
-drift, passed 78/78 model cases and a 23/23 canary. Fresh strict default and
-lowering-trace chunk extraction, full-core proof/Audit, and native hook/unwind
-correspondence remain open. Preparing the matching pinned Aeneas Lean library
-and running extraction require more shared APFS headroom above the 8.25 GiB
-guard. The AD slice is not the full core.
+drift, passed 78/78 model cases and a 23/23 canary. The matching pinned
+165-patch Aeneas Lean library now builds successfully (1,681 Lake jobs) from
+a fresh source copy whose 257 files match the Nix source; only the matching
+Mathlib package/cache was cloned, not old Aeneas compiled outputs. The
+strict default extraction must be completed from its first failure;
+lowering-trace extraction, full-core proof/Audit, and native hook/unwind
+correspondence remain open. The AD slice is not the full core.
 
 There is a checked **fragment** correspondence theorem, not a whole-core acceptance
 claim. On actual Aeneas-extracted `grad_dag_checked`, `lower_dag_ownership`, and

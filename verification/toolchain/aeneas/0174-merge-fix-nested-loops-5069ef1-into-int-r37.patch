@@ -1,0 +1,2811 @@
+# aeneas integration step 174 after cba11f3beb: commit 690eb2944d53735254235a99592bcb24e97889e1
+# first parent 7f4f82d022e9c597fb71ef309ce0aa5b64b35095, merged 5069ef171935ccc98ca8ca43b17b18dc2ada558e
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge fix/nested-loops 5069ef1 into int/r37
+
+diff --git a/src/interp/InterpAbs.ml b/src/interp/InterpAbs.ml
+index ab44eed..203ca11 100644
+--- a/src/interp/InterpAbs.ml
++++ b/src/interp/InterpAbs.ml
+@@ -811,8 +811,8 @@ let abs_call_level_output_svs (abs : abs) : SymbolicValueId.Set.t =
+     **Remark:** we assume the abstractions have been destructured and that the
+     markers have been split (if markers are allowed). *)
+ let merge_abstractions_merge_loan_borrow_pairs (span : Meta.span)
+-    ~(allow_markers : bool) (ctx : eval_ctx) (abs0 : abs) (abs1 : abs) :
+-    tavalue list * MarkedNormSymbProjSet.t =
++    ~(allow_markers : bool) ~(with_abs_conts : bool) (ctx : eval_ctx)
++    (abs0 : abs) (abs1 : abs) : tavalue list * MarkedNormSymbProjSet.t =
+   [%ltrace ""];
+ 
+   (* Sanity check: no markers appear unless we allow merging duplicates.
+@@ -1060,9 +1060,20 @@ let merge_abstractions_merge_loan_borrow_pairs (span : Meta.span)
+           { av with value = ASymbolic (pm, ended) }
+         else ignored ()
+     | ASymbolic (pm, AProjLoans { proj; consumed = []; borrows = [] })
+-      when SymbolicValueId.Set.mem proj.sv_id left_level_output_svs ->
++      when (not with_abs_conts)
++           || SymbolicValueId.Set.mem proj.sv_id left_level_output_svs ->
+         (* Nested borrows: a level-1 output of the call of the left
+-           abstraction, which the right abstraction lends *)
++           abstraction, which the right abstraction lends. Without
++           continuations (the shapes of a loop fixed point, see
++           {!InterpLoopsFixedPoint}), the left abstraction lost the call which
++           identified the value as such an output (e.g., the budget given back
++           by [collect] to the closure of [map], whose abstractions lend each
++           other the inner borrows of the budget): a borrow projector of the
++           left and a loan projector of the right over the same value and
++           projection type also cancel out. The fixed point is only a shape:
++           each context matched with it is reduced with continuations, which
++           cancel the pair only through this rule, and the match fails
++           otherwise. *)
+         let norm_proj_ty = normalize_proj_ty abs1.regions.owned proj.proj_ty in
+         let matched = ref false in
+         map_left (fun left ->
+@@ -3203,8 +3214,89 @@ let split_call_cont_level_outputs (span : Meta.span) (ctx : eval_ctx)
+                 | _ -> super#visit_ESymbolic env pm proj
+             end
+           in
++          (* The level-1 outputs of each argument of level 0, which is the
++             value given back to an output of the call. The stage of the
++             backward function which gives back the outputs of level 1 gives
++             back, for such an output, the whole value (see
++             [SymbolicToPureAbs.apply_call_level_outputs]): when the value given
++             back to a borrow of the output is nested in an ADT (e.g., the
++             budget captured by [&mut] in the closure of a [Map] returned by
++             [Iterator::map]), the output of level 1 is the ADT, with the value
++             given back at the position of the borrow and the other fields
++             ignored, not the value given back alone. *)
++          let level_outputs_of (v : tevalue) : tevalue list =
++            let saved = !outputs in
++            outputs := [];
++            ignore (strip#visit_tevalue () v);
++            let collected = List.rev !outputs in
++            outputs := saved;
++            collected
++          in
++          let rec skeleton (v : tevalue) : tevalue option =
++            match v.value with
++            | ELoan (EEndedIgnoredMutLoan { child; given_back; _ })
++              when tevalue_has_proj_borrows given_back ->
++                [%cassert] span
++                  (level_outputs_of child = [])
++                  "Nested borrows: a value given back to an output of a \
++                   function call holds level-1 outputs of the call at several \
++                   depths";
++                Some given_back
++            | ESymbolic
++                ( pm,
++                  EProjLoans
++                    {
++                      consumed = [];
++                      borrows = [ (_, EProjBorrows { proj; loans = [] }) ];
++                      _;
++                    } ) ->
++                (* The value given back to the projected value (see
++                   {!InterpBorrows.give_back_symbolic_value}): the borrows
++                   project it with the type of the projected value *)
++                Some
++                  {
++                    value = ESymbolic (pm, EProjBorrows { proj; loans = [] });
++                    ty = proj.proj_ty;
++                  }
++            | EAdt adt ->
++                let fields = List.map skeleton adt.fields in
++                if List.for_all Option.is_none fields then None
++                else
++                  Some
++                    {
++                      v with
++                      value =
++                        EAdt
++                          {
++                            adt with
++                            fields =
++                              List.map2
++                                (fun (field : tevalue) skel ->
++                                  match skel with
++                                  | Some skel -> skel
++                                  | None -> mk_eignored field.ty)
++                                adt.fields fields;
++                          };
++                    }
++            | _ ->
++                [%cassert] span
++                  (level_outputs_of v = [])
++                  "Nested borrows: a level-1 output of a function call nested \
++                   in a value given back to its output is not the value given \
++                   back to a borrow of that output";
++                None
++          in
++          let level_outputs =
++            List.concat_map
++              (fun (v : tevalue) ->
++                match (level_outputs_of v, v.value) with
++                | [], _ -> []
++                | outputs, (ELoan _ | ESymbolic _) -> outputs
++                | _ -> Option.to_list (skeleton v))
++              args0
++          in
+           let args0 = List.map (strip#visit_tevalue ()) args0 in
+-          let level_outputs = List.rev !outputs in
++          outputs := level_outputs;
+           [%cassert] span (level_outputs <> []) "Unreachable";
+           (* Only the level-1 outputs are supported *)
+           let above = !outputs in
+@@ -3693,7 +3785,8 @@ let merge_abstractions (span : Meta.span) (abs_kind : abs_kind)
+   (* Phase 2: simplify the loans coming from the left abstraction with
+      the borrows coming from the right abstraction. *)
+   let avalues, discharged_shared_projs =
+-    merge_abstractions_merge_loan_borrow_pairs span ~allow_markers ctx abs0 abs1
++    merge_abstractions_merge_loan_borrow_pairs span ~allow_markers
++      ~with_abs_conts ctx abs0 abs1
+   in
+   [%ldebug
+     "avalues after merging the loans from the left with the borrows from the \
+diff --git a/src/interp/InterpJoin.ml b/src/interp/InterpJoin.ml
+index 2cf0c4f..194c373 100644
+--- a/src/interp/InterpJoin.ml
++++ b/src/interp/InterpJoin.ml
+@@ -830,9 +830,16 @@ let join_ctxs (span : Meta.span) ?(loop : bool = false)
+      then ends one of them (e.g., the other branch drops the vector), the
+      region is ended while the other one still owns it, and every value whose
+      type mentions it reads as partially bottom. Such lifetimes are unrelated
+-     unless a symbolic value present in both branches mentions them (its
+-     projections are then reconciled by the join): the right branch is
+-     renamed for the unrelated ones only. *)
++     unless a symbolic value present in both branches mentions them in both
++     branches (its projections are then reconciled by the join): the right
++     branch is renamed for the unrelated ones only. A region which a common
++     symbolic value mentions in one branch only is not reconciled through it:
++     the value has distinct types in the two branches with or without the
++     renaming (e.g., the loan of a reborrowed [&[(_, &'r T)]] whose inner
++     region a join in the loop body renamed to the region of the abstraction
++     of an earlier call it merged, which still owns that region at the loop
++     entry), and the join introduces a fresh value for it either way (see
++     [match_symbolic_values]). *)
+   let ctx1 =
+     let owned_by_own_abs (ctx : eval_ctx) (other : eval_ctx) =
+       let other_ids = env_get_abs_ids other.env in
+@@ -894,7 +901,7 @@ let join_ctxs (span : Meta.span) ?(loop : bool = false)
+           (fun id rids0 shared ->
+             match SymbolicValueId.Map.find_opt id regions1 with
+             | Some rids1 ->
+-                RegionId.Set.union shared (RegionId.Set.union rids0 rids1)
++                RegionId.Set.union shared (RegionId.Set.inter rids0 rids1)
+             | None -> shared)
+           regions0 RegionId.Set.empty
+       in
+diff --git a/src/interp/InterpMatchCtxs.ml b/src/interp/InterpMatchCtxs.ml
+index 3e9ab14..df2779c 100644
+--- a/src/interp/InterpMatchCtxs.ml
++++ b/src/interp/InterpMatchCtxs.ml
+@@ -681,6 +681,15 @@ module MakeMatcher (M : PrimMatcher) : Matcher = struct
+             (M.match_etys ctx0 ctx1 (ty_erase_regions v0.ty)
+                (ty_erase_regions v1.ty));
+           v1.ty
++      | ABorrow (ASharedBorrow _), ABorrow (AProjSharedBorrow (_, [ AsbBorrow _ ]))
++        ->
++          (* See the matching of the values below: the projection's type is the
++             type of the value it projects (e.g., [&'a &'b T] for the borrow of
++             region ['b]), not the type of the borrow. *)
++          v0.ty
++      | ABorrow (AProjSharedBorrow (_, [ AsbBorrow _ ])), ABorrow (ASharedBorrow _)
++        ->
++          v1.ty
+       | _ -> M.match_rtys ctx0 ctx1 v0.ty v1.ty
+     in
+     match (v0.value, v1.value) with
+@@ -726,6 +735,21 @@ module MakeMatcher (M : PrimMatcher) : Matcher = struct
+             let given_back = match_arec given_back0 given_back1 in
+             M.match_aended_ignored_mut_borrow match_rec ctx0 ctx1 (v0.ty, bc0)
+               (v1.ty, bc1) ty child given_back
++        | ASharedBorrow (pm0, bid0, sid0), AProjSharedBorrow (pm1, [ AsbBorrow (bid1, sid1) ])
++        | AProjSharedBorrow (pm0, [ AsbBorrow (bid0, sid0) ]), ASharedBorrow (pm1, bid1, sid1)
++          ->
++            (* One context holds the shared borrow of a loan in the region of
++               the abstraction as a plain borrow, the other as the projection of
++               a value holding only that borrow: the same ownership (see the
++               merge of such a pair in {!InterpAbs.merge_abstractions}, which
++               turns it into a plain borrow). E.g., the collapse of the join of
++               a loop fixed point with a context whose call projected a
++               captured [&'a &'b str] merges the borrow of the fixed point with
++               the projection of the target; the target context, projected
++               before the collapse, keeps the projection. Both end the same
++               shared borrow and give nothing back. *)
++            M.match_ashared_borrows match_rec ctx0 ctx1 v0.ty pm0 bid0 sid0
++              v1.ty pm1 bid1 sid1 ty
+         | AProjSharedBorrow (pm0, asb0), AProjSharedBorrow (pm1, asb1) ->
+             [%sanity_check_recover] M.recover M.span (pm0 = pm1);
+             [%sanity_check_recover] M.recover M.span
+diff --git a/tests/lean/LoopAfterMapClosureBudget.lean b/tests/lean/LoopAfterMapClosureBudget.lean
+new file mode 100644
+index 0000000..f3628fd
+--- /dev/null
++++ b/tests/lean/LoopAfterMapClosureBudget.lean
+@@ -0,0 +1,2 @@
++import LoopAfterMapClosureBudget.Checks
++import LoopAfterMapClosureBudget.LoopAfterMapClosureBudget
+diff --git a/tests/lean/LoopAfterMapClosureBudget/Checks.lean b/tests/lean/LoopAfterMapClosureBudget/Checks.lean
+new file mode 100644
+index 0000000..3c0b582
+--- /dev/null
++++ b/tests/lean/LoopAfterMapClosureBudget/Checks.lean
+@@ -0,0 +1,37 @@
++import LoopAfterMapClosureBudget.LoopAfterMapClosureBudget
++
++/-! Evaluate the model of `tests/src/loop-after-map-closure-budget.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (incl. the budget given back through both levels of the mutable borrow,
++    after a write by the caller). -/
++
++namespace loop_after_map_closure_budget.checks
++open Aeneas Aeneas.Std Result
++
++/-- The depth, the first zero recorded (99 if none), the result, a length and
++    a last entry. -/
++def val (r : Result (U32 × U32 × U32 × Usize × U32)) : Option (Nat × Nat × Nat × Nat × Nat) :=
++  match r with
++  | ok (d, f, x, n, l) => some (d.val, f.val, x.val, n.val, l.val)
++  | _ => none
++
++-- native::drives
++#guard val (drive_app 1#u32 2#u32 3#u32 0#u32) == some (7, 99, 0, 3, 3)
++#guard val (drive_app 1#u32 2#u32 3#u32 10#u32) == some (17, 99, 0, 3, 3)
++#guard val (drive_app 0#u32 0#u32 4#u32 0#u32) == some (7, 6, 0, 3, 4)
++#guard val (drive_app 0#u32 0#u32 4#u32 10#u32) == some (17, 6, 0, 3, 4)
++#guard val (drive_app 8#u32 5#u32 0#u32 0#u32) == some (7, 7, 0, 3, 0)
++#guard val (drive_app 8#u32 5#u32 0#u32 10#u32) == some (17, 7, 0, 3, 0)
++#guard val (drive_app 3#u32 0#u32 0#u32 0#u32) == some (7, 7, 0, 3, 0)
++#guard val (drive_app 3#u32 0#u32 0#u32 10#u32) == some (17, 7, 0, 3, 0)
++#guard val (drive_app_logged 1#u32 2#u32 3#u32 4#u32 4#u32 0#u32) == some (3, 99, 103, 3, 6)
++#guard val (drive_app_logged 1#u32 2#u32 3#u32 4#u32 8#u32 3#u32) == some (6, 99, 12, 3, 6)
++#guard val (drive_app_logged 1#u32 2#u32 3#u32 4#u32 1#u32 1#u32) == some (4, 99, 12, 3, 6)
++#guard val (drive_app_logged 0#u32 0#u32 7#u32 0#u32 4#u32 0#u32) == some (3, 3, 10, 3, 2)
++#guard val (drive_app_logged 0#u32 0#u32 7#u32 0#u32 8#u32 3#u32) == some (6, 3, 101, 3, 2)
++#guard val (drive_app_logged 0#u32 0#u32 7#u32 0#u32 1#u32 1#u32) == some (4, 3, 100, 3, 2)
++#guard val (drive_app_logged 9#u32 4#u32 0#u32 6#u32 4#u32 0#u32) == some (3, 2, 13, 3, 8)
++#guard val (drive_app_logged 9#u32 4#u32 0#u32 6#u32 8#u32 3#u32) == some (6, 2, 13, 3, 8)
++#guard val (drive_app_logged 9#u32 4#u32 0#u32 6#u32 1#u32 1#u32) == some (4, 2, 105, 3, 8)
++
++end loop_after_map_closure_budget.checks
+diff --git a/tests/lean/LoopAfterMapClosureBudget/LoopAfterMapClosureBudget.lean b/tests/lean/LoopAfterMapClosureBudget/LoopAfterMapClosureBudget.lean
+new file mode 100644
+index 0000000..b364212
+--- /dev/null
++++ b/tests/lean/LoopAfterMapClosureBudget/LoopAfterMapClosureBudget.lean
+@@ -0,0 +1,705 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_after_map_closure_budget]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_after_map_closure_budget
++
++/-- [loop_after_map_closure_budget::Record]
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 16:0-18:1
++    Visibility: public -/
++structure Record where
++  first : _root_.Option _root_.Aeneas.Std.U32
++
++/-- [loop_after_map_closure_budget::Native]
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 12:0-14:1
++    Visibility: public -/
++structure Native where
++  depth : _root_.Aeneas.Std.U32
++
++/-- [loop_after_map_closure_budget::Budget]
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 20:0-23:1
++    Visibility: public -/
++structure Budget where
++  native : _root_.loop_after_map_closure_budget.Native
++  record : _root_.loop_after_map_closure_budget.Record
++
++/-- [loop_after_map_closure_budget::app::closure]
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 35:43-35:64 -/
++@[reducible]
++def app.closure := _root_.loop_after_map_closure_budget.Budget
++
++/-- [loop_after_map_closure_budget::app_logged::closure]
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 53:13-53:46 -/
++def app_logged.closure :=
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 ×
++  _root_.loop_after_map_closure_budget.Budget
++
++/-- [loop_after_map_closure_budget::analyze]:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 25:0-31:1 -/
++def analyze
++  (e : _root_.Aeneas.Std.U32)
++  (stack : _root_.loop_after_map_closure_budget.Budget) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_after_map_closure_budget.Budget ×
++    (_root_.loop_after_map_closure_budget.Budget →
++    _root_.loop_after_map_closure_budget.Budget))
++  := do
++  let i ← stack.native.depth + 1#u32
++  if e = 0#u32
++  then
++    _root_.Aeneas.Std.Result.ok (e,
++      { native := { depth := i }, record := { first := (some i) } },
++      fun stack1 => stack1)
++  else
++    _root_.Aeneas.Std.Result.ok (e, { stack with native := { depth := i } },
++      fun stack1 => stack1)
++
++/-- [loop_after_map_closure_budget::app::{core::ops::function::FnMut<(&'_ (u32)), u32> for loop_after_map_closure_budget::app::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 35:43-35:64 -/
++def app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++  (c : _root_.loop_after_map_closure_budget.app.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_after_map_closure_budget.app.closure ×
++    (_root_.loop_after_map_closure_budget.app.closure →
++    _root_.loop_after_map_closure_budget.app.closure) ×
++    (_root_.loop_after_map_closure_budget.app.closure →
++    (_root_.loop_after_map_closure_budget.app.closure ×
++    (_root_.loop_after_map_closure_budget.app.closure →
++    _root_.loop_after_map_closure_budget.app.closure))))
++  := do
++  let (i, b, analyze_back) ←
++    _root_.loop_after_map_closure_budget.analyze tupled_args c
++  let back :=
++    (fun c1 => c1 : _root_.loop_after_map_closure_budget.app.closure →
++      _root_.loop_after_map_closure_budget.app.closure)
++  let back1 :=
++    (fun c1 => (c1, fun c2 => let b1 := analyze_back c2
++                              b1) :
++      _root_.loop_after_map_closure_budget.app.closure →
++      (_root_.loop_after_map_closure_budget.app.closure ×
++      (_root_.loop_after_map_closure_budget.app.closure →
++      _root_.loop_after_map_closure_budget.app.closure)))
++  _root_.Aeneas.Std.Result.ok (i, b, back, back1)
++
++/-- [loop_after_map_closure_budget::app::{core::ops::function::FnOnce<(&'_ (u32)), u32> for loop_after_map_closure_budget::app::closure<0, 1>}::call_once]:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 35:43-35:64 -/
++def app.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++  (c : _root_.loop_after_map_closure_budget.app.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_after_map_closure_budget.app.closure ×
++    (_root_.loop_after_map_closure_budget.app.closure →
++    _root_.loop_after_map_closure_budget.app.closure))
++  := do
++  let (i1, c1, call_mut_back, call_mut_back1) ←
++    _root_.loop_after_map_closure_budget.app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 c3
++       let c5 := back1 c4
++       let ⟨ n, r ⟩ := c5
++       { native := n, record := r } :
++      _root_.loop_after_map_closure_budget.app.closure →
++      _root_.loop_after_map_closure_budget.app.closure)
++  _root_.Aeneas.Std.Result.ok (i1, c2, back)
++
++/-- Trait implementation: [loop_after_map_closure_budget::app::{core::ops::function::FnOnce<(&'_ (u32)), u32> for loop_after_map_closure_budget::app::closure<0, 1>}]
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 35:43-35:64 -/
++@[reducible]
++def app.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_after_map_closure_budget.app.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.loop_after_map_closure_budget.app.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.loop_after_map_closure_budget.Budget.mk capture_state1.native
++        capture_state1.record)
++}
++
++/-- Trait implementation: [loop_after_map_closure_budget::app::{core::ops::function::FnMut<(&'_ (u32)), u32> for loop_after_map_closure_budget::app::closure<0, 1>}]
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 35:43-35:64 -/
++@[reducible]
++def app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_after_map_closure_budget.app.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.loop_after_map_closure_budget.app.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.loop_after_map_closure_budget.app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.loop_after_map_closure_budget.Budget.mk capture_state1.native
++        capture_state1.record)
++}
++
++/-- [loop_after_map_closure_budget::app]: loop body 0:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 36:4-38:5
++    Visibility: public -/
++@[rust_loop_body]
++def app_loop.body
++  (stack : _root_.loop_after_map_closure_budget.Budget)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (back : _root_.loop_after_map_closure_budget.Budget →
++  (_root_.loop_after_map_closure_budget.Native ×
++  _root_.loop_after_map_closure_budget.Record))
++  (deps : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.loop_after_map_closure_budget.Budget →
++    (_root_.loop_after_map_closure_budget.Native ×
++    _root_.loop_after_map_closure_budget.Record)) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.loop_after_map_closure_budget.Native ×
++    _root_.loop_after_map_closure_budget.Record ×
++    (_root_.loop_after_map_closure_budget.Native →
++    _root_.loop_after_map_closure_budget.Record →
++    (_root_.loop_after_map_closure_budget.Native ×
++    _root_.loop_after_map_closure_budget.Record))))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (deps,
++      stack.native, stack.record,
++      fun n r => back { native := n, record := r }))
++  | some d =>
++    let deps1 ← _root_.Aeneas.Std.alloc.vec.Vec.push deps d
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1,
++      fun b =>
++        let n := b.native
++        let r := b.record
++        back { native := n, record := r }, deps1))
++
++/-- [loop_after_map_closure_budget::app]: loop 0:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 36:4-38:5
++    Visibility: public -/
++@[rust_loop]
++def app_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (back : _root_.loop_after_map_closure_budget.Budget →
++  (_root_.loop_after_map_closure_budget.Native ×
++  _root_.loop_after_map_closure_budget.Record))
++  (deps : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.loop_after_map_closure_budget.Budget) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.loop_after_map_closure_budget.Native ×
++    _root_.loop_after_map_closure_budget.Record ×
++    (_root_.loop_after_map_closure_budget.Native →
++    _root_.loop_after_map_closure_budget.Record →
++    (_root_.loop_after_map_closure_budget.Native ×
++    _root_.loop_after_map_closure_budget.Record)))
++  := do
++  loop
++    (fun (iter1, back1, deps1) =>
++       _root_.loop_after_map_closure_budget.app_loop.body stack iter1 back1
++       deps1 : ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      × (_root_.loop_after_map_closure_budget.Budget →
++      (_root_.loop_after_map_closure_budget.Native ×
++      _root_.loop_after_map_closure_budget.Record)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.loop_after_map_closure_budget.Budget →
++      (_root_.loop_after_map_closure_budget.Native ×
++      _root_.loop_after_map_closure_budget.Record)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.loop_after_map_closure_budget.Native ×
++      _root_.loop_after_map_closure_budget.Record ×
++      (_root_.loop_after_map_closure_budget.Native →
++      _root_.loop_after_map_closure_budget.Record →
++      (_root_.loop_after_map_closure_budget.Native ×
++      _root_.loop_after_map_closure_budget.Record)))))
++    (iter, back, deps)
++
++/-- [loop_after_map_closure_budget::app]:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 34:0-40:1
++    Visibility: public -/
++def app
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (deps : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.loop_after_map_closure_budget.Budget) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.loop_after_map_closure_budget.Budget ×
++    (_root_.loop_after_map_closure_budget.Budget →
++    _root_.loop_after_map_closure_budget.Budget))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter kids
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.skip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) i 1#usize
++  let model_state1 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSkip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      _root_.loop_after_map_closure_budget.app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32
++      model_state stack
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      _root_.loop_after_map_closure_budget.app.closure →
++      _root_.loop_after_map_closure_budget.app.closure)
++  let map_back1 :=
++    (fun state_back => ({ model_state1 with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.loop_after_map_closure_budget.app.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      _root_.loop_after_map_closure_budget.app.closure) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      _root_.loop_after_map_closure_budget.app.closure →
++      _root_.loop_after_map_closure_budget.app.closure)))
++  let (model_state2, model_state3) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSkip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      _root_.loop_after_map_closure_budget.app.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state1
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref model_state2
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let c := map_back { model_state1 with f := model_state3.f }
++  let (deps1, n, r, back) ←
++    _root_.loop_after_map_closure_budget.app_loop iter
++      (fun b =>
++        let (m, back1) := map_back1 b
++        let b1 := m.f
++        let ⟨ n1, r1 ⟩ := b1
++        let ⟨ n2, r2 ⟩ :=
++          back1 { model_state1 with f := { native := n1, record := r1 } }
++        (n2, r2)) deps c
++  let back1 :=
++    (fun stack1 =>
++       let (n1, r1) := back stack1.native stack1.record
++       { native := n1, record := r1 } :
++      _root_.loop_after_map_closure_budget.Budget →
++      _root_.loop_after_map_closure_budget.Budget)
++  _root_.Aeneas.Std.Result.ok (0#u32, deps1, { native := n, record := r },
++    back1)
++
++/-- [loop_after_map_closure_budget::analyze_logged]:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 42:0-45:1 -/
++def analyze_logged
++  (e : _root_.Aeneas.Std.U32)
++  (log : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.loop_after_map_closure_budget.Budget) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.loop_after_map_closure_budget.Budget ×
++    (_root_.loop_after_map_closure_budget.Budget →
++    _root_.loop_after_map_closure_budget.Budget))
++  := do
++  let i ← e + stack.native.depth
++  let log1 ← _root_.Aeneas.Std.alloc.vec.Vec.push log i
++  let (i1, stack1, analyze_back) ←
++    _root_.loop_after_map_closure_budget.analyze e stack
++  let i2 ← i1 + 1#u32
++  let back :=
++    (fun stack2 => analyze_back stack2 :
++      _root_.loop_after_map_closure_budget.Budget →
++      _root_.loop_after_map_closure_budget.Budget)
++  _root_.Aeneas.Std.Result.ok (i2, log1, stack1, back)
++
++/-- [loop_after_map_closure_budget::app_logged::{core::ops::function::FnMut<(&'_ (u32)), u32> for loop_after_map_closure_budget::app_logged::closure<0, 1, 2>}::call_mut]:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 53:13-53:46 -/
++def app_logged.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++  (c : _root_.loop_after_map_closure_budget.app_logged.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_after_map_closure_budget.app_logged.closure ×
++    (_root_.loop_after_map_closure_budget.app_logged.closure →
++    _root_.loop_after_map_closure_budget.app_logged.closure) ×
++    (_root_.loop_after_map_closure_budget.app_logged.closure →
++    _root_.loop_after_map_closure_budget.app_logged.closure) ×
++    (_root_.loop_after_map_closure_budget.app_logged.closure →
++    (_root_.loop_after_map_closure_budget.app_logged.closure ×
++    (_root_.loop_after_map_closure_budget.app_logged.closure →
++    _root_.loop_after_map_closure_budget.app_logged.closure))))
++  := do
++  let (v, b) := c
++  let (i, v1, b1, analyze_logged_back) ←
++    _root_.loop_after_map_closure_budget.analyze_logged tupled_args v b
++  let back :=
++    (fun c1 => let (v2, _) := c1
++               (v2, b) :
++      _root_.loop_after_map_closure_budget.app_logged.closure →
++      _root_.loop_after_map_closure_budget.app_logged.closure)
++  let back1 :=
++    (fun c1 => let (_, b2) := c1
++               (v, b2) :
++      _root_.loop_after_map_closure_budget.app_logged.closure →
++      _root_.loop_after_map_closure_budget.app_logged.closure)
++  let back2 :=
++    (fun c1 =>
++       let (_, b2) := c1
++       ((v1, b2),
++         fun c2 => let (_, b3) := c2
++                   let b4 := analyze_logged_back b3
++                   (v, b4)) :
++      _root_.loop_after_map_closure_budget.app_logged.closure →
++      (_root_.loop_after_map_closure_budget.app_logged.closure ×
++      (_root_.loop_after_map_closure_budget.app_logged.closure →
++      _root_.loop_after_map_closure_budget.app_logged.closure)))
++  _root_.Aeneas.Std.Result.ok (i, (v1, b1), back, back1, back2)
++
++/-- [loop_after_map_closure_budget::app_logged::{core::ops::function::FnOnce<(&'_ (u32)), u32> for loop_after_map_closure_budget::app_logged::closure<0, 1, 2>}::call_once]:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 53:13-53:46 -/
++def app_logged.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++  (c : _root_.loop_after_map_closure_budget.app_logged.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_after_map_closure_budget.app_logged.closure ×
++    _root_.loop_after_map_closure_budget.app_logged.closure ×
++    (_root_.loop_after_map_closure_budget.app_logged.closure →
++    _root_.loop_after_map_closure_budget.app_logged.closure))
++  := do
++  let (v, b) := c
++  let (i1, c1, call_mut_back, call_mut_back1, call_mut_back2) ←
++    _root_.loop_after_map_closure_budget.app_logged.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let (v1, _) := c2
++  let c3 := call_mut_back1 c1
++  let (_, b1) := c3
++  let back :=
++    (fun c4 =>
++       let (_, b2) := c4
++       let (c5, back1) := call_mut_back2 (v, b2)
++       let c6 := back1 c5
++       let (_, ⟨ n, r ⟩) := c6
++       (v, { native := n, record := r }) :
++      _root_.loop_after_map_closure_budget.app_logged.closure →
++      _root_.loop_after_map_closure_budget.app_logged.closure)
++  _root_.Aeneas.Std.Result.ok (i1, (v1, b), (v, b1), back)
++
++/-- Trait implementation: [loop_after_map_closure_budget::app_logged::{core::ops::function::FnOnce<(&'_ (u32)), u32> for loop_after_map_closure_budget::app_logged::closure<0, 1, 2>}]
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 53:13-53:46 -/
++@[reducible]
++def app_logged.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_after_map_closure_budget.app_logged.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.loop_after_map_closure_budget.app_logged.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        _root_.loop_after_map_closure_budget.Budget.mk
++        (capture_state2.#1).native (capture_state2.#1).record))
++}
++
++/-- Trait implementation: [loop_after_map_closure_budget::app_logged::{core::ops::function::FnMut<(&'_ (u32)), u32> for loop_after_map_closure_budget::app_logged::closure<0, 1, 2>}]
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 53:13-53:46 -/
++@[reducible]
++def app_logged.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_after_map_closure_budget.app_logged.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.loop_after_map_closure_budget.app_logged.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2, captured3) ←
++        _root_.loop_after_map_closure_budget.app_logged.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      let (c, back) := captured3 captured
++      let capture_state2 := back c
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        _root_.loop_after_map_closure_budget.Budget.mk
++        (capture_state2.#1).native (capture_state2.#1).record))
++}
++
++/-- [loop_after_map_closure_budget::app_logged]: loop body 0:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 56:4-63:1
++    Visibility: public -/
++@[rust_loop_body]
++def app_logged_loop.body
++  (stop : _root_.Aeneas.Std.U32)
++  (stack : _root_.loop_after_map_closure_budget.Budget)
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (back : _root_.loop_after_map_closure_budget.Budget →
++  (_root_.loop_after_map_closure_budget.Native ×
++  _root_.loop_after_map_closure_budget.Record)) (sum : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++    (_root_.loop_after_map_closure_budget.Budget →
++    (_root_.loop_after_map_closure_budget.Native ×
++    _root_.loop_after_map_closure_budget.Record)) × _root_.Aeneas.Std.U32)
++    (_root_.Aeneas.Std.U32 × _root_.loop_after_map_closure_budget.Native ×
++    _root_.loop_after_map_closure_budget.Record ×
++    (_root_.loop_after_map_closure_budget.Native →
++    _root_.loop_after_map_closure_budget.Record →
++    (_root_.loop_after_map_closure_budget.Native ×
++    _root_.loop_after_map_closure_budget.Record))))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorSliceIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (sum,
++      stack.native, stack.record,
++      fun n r => back { native := n, record := r }))
++  | some d =>
++    if d = stop
++    then
++      let sum1 ← sum + 100#u32
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (sum1,
++        stack.native, stack.record,
++        fun n r => back { native := n, record := r }))
++    else
++      let sum1 ← sum + d
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++        (model_state1,
++        fun b =>
++          let n := b.native
++          let r := b.record
++          back { native := n, record := r }, sum1))
++
++/-- [loop_after_map_closure_budget::app_logged]: loop 0:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 56:4-63:1
++    Visibility: public -/
++@[rust_loop]
++def app_logged_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++  (back : _root_.loop_after_map_closure_budget.Budget →
++  (_root_.loop_after_map_closure_budget.Native ×
++  _root_.loop_after_map_closure_budget.Record)) (stop : _root_.Aeneas.Std.U32)
++  (stack : _root_.loop_after_map_closure_budget.Budget)
++  (sum : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.loop_after_map_closure_budget.Native ×
++    _root_.loop_after_map_closure_budget.Record ×
++    (_root_.loop_after_map_closure_budget.Native →
++    _root_.loop_after_map_closure_budget.Record →
++    (_root_.loop_after_map_closure_budget.Native ×
++    _root_.loop_after_map_closure_budget.Record)))
++  := do
++  loop
++    (fun (iter1, back1, sum1) =>
++       _root_.loop_after_map_closure_budget.app_logged_loop.body stop stack
++       iter1 back1 sum1 : ((_root_.Aeneas.Std.core.slice.iter.Iter
++      _root_.Aeneas.Std.U32) × (_root_.loop_after_map_closure_budget.Budget →
++      (_root_.loop_after_map_closure_budget.Native ×
++      _root_.loop_after_map_closure_budget.Record)) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32) ×
++      (_root_.loop_after_map_closure_budget.Budget →
++      (_root_.loop_after_map_closure_budget.Native ×
++      _root_.loop_after_map_closure_budget.Record)) × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.U32 × _root_.loop_after_map_closure_budget.Native ×
++      _root_.loop_after_map_closure_budget.Record ×
++      (_root_.loop_after_map_closure_budget.Native →
++      _root_.loop_after_map_closure_budget.Record →
++      (_root_.loop_after_map_closure_budget.Native ×
++      _root_.loop_after_map_closure_budget.Record)))))
++    (iter, back, sum)
++
++/-- [loop_after_map_closure_budget::app_logged]:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 49:0-63:1
++    Visibility: public -/
++def app_logged
++  (kids : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (stop : _root_.Aeneas.Std.U32)
++  (log : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.loop_after_map_closure_budget.Budget) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.loop_after_map_closure_budget.Budget ×
++    (_root_.loop_after_map_closure_budget.Budget →
++    _root_.loop_after_map_closure_budget.Budget))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter kids
++  let (model_state, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.skip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) i 1#usize
++  let model_state1 ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSkip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      _root_.loop_after_map_closure_budget.app_logged.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32
++      model_state (log, stack)
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      _root_.loop_after_map_closure_budget.app_logged.closure →
++      _root_.loop_after_map_closure_budget.app_logged.closure)
++  let map_back1 :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      _root_.loop_after_map_closure_budget.app_logged.closure →
++      _root_.loop_after_map_closure_budget.app_logged.closure)
++  let map_back2 :=
++    (fun state_back => ({ model_state1 with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.loop_after_map_closure_budget.app_logged.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      _root_.loop_after_map_closure_budget.app_logged.closure) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      _root_.loop_after_map_closure_budget.app_logged.closure →
++      _root_.loop_after_map_closure_budget.app_logged.closure)))
++  let (v, b) := model_state1.f
++  let (model_state2, model_state3) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSkip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32))
++      _root_.loop_after_map_closure_budget.app_logged.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state1
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref model_state2
++  let iter ← _root_.Aeneas.Std.core.slice.Slice.iter s
++  let (_, b1) := model_state3.f
++  let (v1, _) := model_state3.f
++  let c := map_back1 { model_state1 with f := (v, b1) }
++  let (_, stack1) := c
++  let c1 := map_back { model_state1 with f := (v1, b) }
++  let (log1, _) := c1
++  let (i1, n, r, back) ←
++    _root_.loop_after_map_closure_budget.app_logged_loop iter
++      (fun b2 =>
++        let (m, back1) := map_back2 (log, b2)
++        let (_, b3) := m.f
++        let (_, ⟨ n1, r1 ⟩) := (v, b3)
++        let (_, ⟨ n2, r2 ⟩) :=
++          back1 { model_state1 with f := (v, { native := n1, record := r1 }) }
++        (n2, r2)) stop stack1 0#u32
++  let back1 :=
++    (fun stack2 =>
++       let (n1, r1) := back stack2.native stack2.record
++       { native := n1, record := r1 } :
++      _root_.loop_after_map_closure_budget.Budget →
++      _root_.loop_after_map_closure_budget.Budget)
++  _root_.Aeneas.Std.Result.ok (i1, log1, { native := n, record := r }, back1)
++
++/-- [loop_after_map_closure_budget::drive_app]:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 68:0-89:1
++    Visibility: public -/
++def drive_app
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) (bump : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32)
++  := do
++  let deps ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) 9#u32
++  let kids ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) a
++  let kids1 ← _root_.Aeneas.Std.alloc.vec.Vec.push kids b
++  let kids2 ← _root_.Aeneas.Std.alloc.vec.Vec.push kids1 c
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref kids2
++  let (r, deps1, budget, app_back) ←
++    _root_.loop_after_map_closure_budget.app s deps
++      { native := { depth := 5#u32 }, record := { first := none } }
++  let i ← budget.native.depth + bump
++  let b1 := app_back { budget with native := { depth := i } }
++  let first ←
++    match b1.record.first with
++    | none => _root_.Aeneas.Std.Result.ok 99#u32
++    | some x => _root_.Aeneas.Std.Result.ok x
++  let n := _root_.Aeneas.Std.alloc.vec.Vec.len deps1
++  let i1 ← n - 1#usize
++  let i2 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.Aeneas.Std.U32) deps1 i1
++  _root_.Aeneas.Std.Result.ok (b1.native.depth, first, r, n, i2)
++
++/-- [loop_after_map_closure_budget::drive_app_logged]:
++    Source: 'tests/src/loop-after-map-closure-budget.rs', lines 94:0-116:1
++    Visibility: public -/
++def drive_app_logged
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) (d : _root_.Aeneas.Std.U32)
++  (stop : _root_.Aeneas.Std.U32) (bump : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.U32)
++  := do
++  let kids ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) a
++  let kids1 ← _root_.Aeneas.Std.alloc.vec.Vec.push kids b
++  let kids2 ← _root_.Aeneas.Std.alloc.vec.Vec.push kids1 c
++  let kids3 ← _root_.Aeneas.Std.alloc.vec.Vec.push kids2 d
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref kids3
++  let (r, log, budget, app_logged_back) ←
++    _root_.loop_after_map_closure_budget.app_logged s stop
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32)
++      { native := { depth := 0#u32 }, record := { first := none } }
++  let i ← budget.native.depth + bump
++  let b1 := app_logged_back { budget with native := { depth := i } }
++  let first ←
++    match b1.record.first with
++    | none => _root_.Aeneas.Std.Result.ok 99#u32
++    | some x => _root_.Aeneas.Std.Result.ok x
++  let n := _root_.Aeneas.Std.alloc.vec.Vec.len log
++  if n > 0#usize
++  then
++    let i1 ← n - 1#usize
++    let last ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) log i1
++    _root_.Aeneas.Std.Result.ok (b1.native.depth, first, r, n, last)
++  else _root_.Aeneas.Std.Result.ok (b1.native.depth, first, r, n, 77#u32)
++
++end loop_after_map_closure_budget
+diff --git a/tests/lean/LoopJoinRenamedOwnedRegion.lean b/tests/lean/LoopJoinRenamedOwnedRegion.lean
+new file mode 100644
+index 0000000..6bbf752
+--- /dev/null
++++ b/tests/lean/LoopJoinRenamedOwnedRegion.lean
+@@ -0,0 +1,2 @@
++import LoopJoinRenamedOwnedRegion.Checks
++import LoopJoinRenamedOwnedRegion.LoopJoinRenamedOwnedRegion
+diff --git a/tests/lean/LoopJoinRenamedOwnedRegion/Checks.lean b/tests/lean/LoopJoinRenamedOwnedRegion/Checks.lean
+new file mode 100644
+index 0000000..ea6981b
+--- /dev/null
++++ b/tests/lean/LoopJoinRenamedOwnedRegion/Checks.lean
+@@ -0,0 +1,32 @@
++import LoopJoinRenamedOwnedRegion.LoopJoinRenamedOwnedRegion
++
++/-! Evaluate the model of `tests/src/loop-join-renamed-owned-region.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (incl. the error log given back through the mutable borrow). -/
++
++namespace loop_join_renamed_owned_region.checks
++open Aeneas Aeneas.Std Result
++
++/-- The total, the number of failures, the first and the last failed index,
++    the length of the error log given back and its last entry. -/
++def val (r : Result (U32 × Usize × Usize × Usize × Usize × U32)) :
++    Option (Nat × Nat × Nat × Nat × Nat × Nat) :=
++  match r with
++  | ok (t, n, f, l, m, e) => some (t.val, n.val, f.val, l.val, m.val, e.val)
++  | _ => none
++
++-- native::drives
++#guard val (drive_prebind 2#u32 4#u32 12#u32 14#u32 4#u32) == some (2, 2, 2, 3, 3, 14)
++#guard val (drive_prebind 2#u32 4#u32 12#u32 14#u32 12#u32) == some (6, 1, 3, 3, 2, 14)
++#guard val (drive_prebind 2#u32 4#u32 12#u32 14#u32 99#u32) == some (6, 2, 2, 3, 3, 14)
++#guard val (drive_prebind 1#u32 6#u32 3#u32 8#u32 4#u32) == some (14, 0, 9, 9, 1, 1000)
++#guard val (drive_prebind 1#u32 6#u32 3#u32 8#u32 12#u32) == some (14, 0, 9, 9, 1, 1000)
++#guard val (drive_prebind 1#u32 6#u32 3#u32 8#u32 99#u32) == some (14, 0, 9, 9, 1, 1000)
++#guard val (drive_prebind 20#u32 3#u32 22#u32 24#u32 4#u32) == some (0, 3, 0, 3, 4, 24)
++#guard val (drive_prebind 20#u32 3#u32 22#u32 24#u32 12#u32) == some (0, 3, 0, 3, 4, 24)
++#guard val (drive_prebind 20#u32 3#u32 22#u32 24#u32 99#u32) == some (0, 3, 0, 3, 4, 24)
++#guard val (drive_prebind 10#u32 10#u32 11#u32 7#u32 4#u32) == some (20, 0, 9, 9, 1, 1000)
++#guard val (drive_prebind 10#u32 10#u32 11#u32 7#u32 12#u32) == some (20, 0, 9, 9, 1, 1000)
++#guard val (drive_prebind 10#u32 10#u32 11#u32 7#u32 99#u32) == some (20, 0, 9, 9, 1, 1000)
++
++end loop_join_renamed_owned_region.checks
+diff --git a/tests/lean/LoopJoinRenamedOwnedRegion/LoopJoinRenamedOwnedRegion.lean b/tests/lean/LoopJoinRenamedOwnedRegion/LoopJoinRenamedOwnedRegion.lean
+new file mode 100644
+index 0000000..e033204
+--- /dev/null
++++ b/tests/lean/LoopJoinRenamedOwnedRegion/LoopJoinRenamedOwnedRegion.lean
+@@ -0,0 +1,408 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_join_renamed_owned_region]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_join_renamed_owned_region
++
++/-- [loop_join_renamed_owned_region::Expr]
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 19:0-21:1
++    Visibility: public -/
++structure Expr where
++  v : _root_.Aeneas.Std.U32
++
++/-- [loop_join_renamed_owned_region::Collected]
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 23:0-26:1
++    Visibility: public -/
++structure Collected where
++  env : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.loop_join_renamed_owned_region.Expr)
++  origin : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize
++
++/-- [loop_join_renamed_owned_region::collect]: loop body 0:
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 32:4-36:5 -/
++@[rust_loop_body]
++def collect_loop.body
++  {I : Type} (coreitertraitsiteratorIteratorISharedExprInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator I
++  _root_.loop_join_renamed_owned_region.Expr) (iter : I)
++  (env : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.loop_join_renamed_owned_region.Expr))
++  (origin : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow (I ×
++    (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++    _root_.loop_join_renamed_owned_region.Expr)) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize) ×
++    _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.loop_join_renamed_owned_region.Expr)) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize)))
++  := do
++  let (model_state, model_state1) ←
++    coreitertraitsiteratorIteratorISharedExprInst.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (env,
++      origin))
++  | some e =>
++    let env1 ← _root_.Aeneas.Std.alloc.vec.Vec.push env (e.v, e)
++    let origin1 ← _root_.Aeneas.Std.alloc.vec.Vec.push origin i
++    let i1 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, env1, origin1, i1))
++
++/-- [loop_join_renamed_owned_region::collect]: loop 0:
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 32:4-36:5 -/
++@[rust_loop]
++def collect_loop
++  {I : Type} (coreitertraitsiteratorIteratorISharedExprInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator I
++  _root_.loop_join_renamed_owned_region.Expr) (iter : I)
++  (env : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++  _root_.loop_join_renamed_owned_region.Expr))
++  (origin : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.U32 × _root_.loop_join_renamed_owned_region.Expr)) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize))
++  := do
++  loop
++    (fun (iter1, env1, origin1, i1) =>
++       _root_.loop_join_renamed_owned_region.collect_loop.body
++       coreitertraitsiteratorIteratorISharedExprInst iter1 env1 origin1 i1 : (I
++      × (_root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.U32 ×
++      _root_.loop_join_renamed_owned_region.Expr)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow (I × (_root_.Aeneas.Std.alloc.vec.Vec
++      (_root_.Aeneas.Std.U32 × _root_.loop_join_renamed_owned_region.Expr)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize) ×
++      _root_.Aeneas.Std.Usize) ((_root_.Aeneas.Std.alloc.vec.Vec
++      (_root_.Aeneas.Std.U32 × _root_.loop_join_renamed_owned_region.Expr)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize))))
++    (iter, env, origin, i)
++
++/-- [loop_join_renamed_owned_region::collect]:
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 28:0-38:1 -/
++def collect
++  {I : Type} (coreitertraitsiteratorIteratorISharedAExprInst :
++  _root_.Aeneas.Std.core.iter.traits.iterator.Iterator I
++  _root_.loop_join_renamed_owned_region.Expr) (it : I) :
++  _root_.Aeneas.Std.Result _root_.loop_join_renamed_owned_region.Collected
++  := do
++  let (env, origin) ←
++    _root_.loop_join_renamed_owned_region.collect_loop
++      coreitertraitsiteratorIteratorISharedAExprInst it
++      (_root_.Aeneas.Std.alloc.vec.Vec.new (_root_.Aeneas.Std.U32 ×
++      _root_.loop_join_renamed_owned_region.Expr))
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.Usize) 0#usize
++  _root_.Aeneas.Std.Result.ok { env, origin }
++
++/-- [loop_join_renamed_owned_region::owns]:
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 40:0-42:1 -/
++def owns
++  (e : _root_.loop_join_renamed_owned_region.Expr) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  let i ← e.v % 2#u32
++  _root_.Aeneas.Std.Result.ok (i = 0#u32)
++
++/-- [loop_join_renamed_owned_region::resolve]:
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 44:0-51:1 -/
++def resolve
++  (e : _root_.loop_join_renamed_owned_region.Expr)
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  if e.v > 10#u32
++  then
++    let errors1 ← _root_.Aeneas.Std.alloc.vec.Vec.push errors e.v
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err 
++      e.v, errors1)
++  else
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Ok 
++      e.v, errors)
++
++/-- [loop_join_renamed_owned_region::prebind::closure]
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 61:61-61:78 -/
++@[reducible]
++def prebind.closure := _root_.Unit
++
++/-- [loop_join_renamed_owned_region::prebind::{core::ops::function::FnMut<(&'_ ((core::option::Option<u32>, &'_ (loop_join_renamed_owned_region::Expr)))), &'_ (loop_join_renamed_owned_region::Expr)> for loop_join_renamed_owned_region::prebind::closure}::call_mut]:
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 61:61-61:78 -/
++def
++  prebind.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairOptionU32SharedExprSharedExpr.call_mut
++  (c : _root_.loop_join_renamed_owned_region.prebind.closure)
++  (tupled_args : ((_root_.Option _root_.Aeneas.Std.U32) ×
++  _root_.loop_join_renamed_owned_region.Expr)) :
++  _root_.Aeneas.Std.Result (_root_.loop_join_renamed_owned_region.Expr ×
++    _root_.loop_join_renamed_owned_region.prebind.closure)
++  := do
++  let (_, expr) := tupled_args
++  _root_.Aeneas.Std.Result.ok (expr, c)
++
++/-- [loop_join_renamed_owned_region::prebind::{core::ops::function::FnOnce<(&'_ ((core::option::Option<u32>, &'_ (loop_join_renamed_owned_region::Expr)))), &'_ (loop_join_renamed_owned_region::Expr)> for loop_join_renamed_owned_region::prebind::closure}::call_once]:
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 61:61-61:78 -/
++def
++  prebind.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairOptionU32SharedExprSharedExpr.call_once
++  (c : _root_.loop_join_renamed_owned_region.prebind.closure)
++  (p : ((_root_.Option _root_.Aeneas.Std.U32) ×
++  _root_.loop_join_renamed_owned_region.Expr)) :
++  _root_.Aeneas.Std.Result _root_.loop_join_renamed_owned_region.Expr
++  := do
++  let (e, _) ←
++    _root_.loop_join_renamed_owned_region.prebind.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairOptionU32SharedExprSharedExpr.call_mut
++      c p
++  _root_.Aeneas.Std.Result.ok e
++
++/-- Trait implementation: [loop_join_renamed_owned_region::prebind::{core::ops::function::FnOnce<(&'_ ((core::option::Option<u32>, &'_ (loop_join_renamed_owned_region::Expr)))), &'_ (loop_join_renamed_owned_region::Expr)> for loop_join_renamed_owned_region::prebind::closure}]
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 61:61-61:78 -/
++@[reducible]
++def
++  prebind.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairOptionU32SharedExprSharedExpr
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_join_renamed_owned_region.prebind.closure ((_root_.Option
++  _root_.Aeneas.Std.U32) × _root_.loop_join_renamed_owned_region.Expr)
++  _root_.loop_join_renamed_owned_region.Expr := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let output ←
++        _root_.loop_join_renamed_owned_region.prebind.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairOptionU32SharedExprSharedExpr.call_once
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, arg)
++}
++
++/-- Trait implementation: [loop_join_renamed_owned_region::prebind::{core::ops::function::FnMut<(&'_ ((core::option::Option<u32>, &'_ (loop_join_renamed_owned_region::Expr)))), &'_ (loop_join_renamed_owned_region::Expr)> for loop_join_renamed_owned_region::prebind::closure}]
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 61:61-61:78 -/
++@[reducible]
++def
++  prebind.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairOptionU32SharedExprSharedExpr
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_join_renamed_owned_region.prebind.closure ((_root_.Option
++  _root_.Aeneas.Std.U32) × _root_.loop_join_renamed_owned_region.Expr)
++  _root_.loop_join_renamed_owned_region.Expr := {
++  FnOnceInst :=
++    _root_.loop_join_renamed_owned_region.prebind.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairOptionU32SharedExprSharedExpr
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.loop_join_renamed_owned_region.prebind.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairOptionU32SharedExprSharedExpr.call_mut
++          arg arg1
++      _root_.Aeneas.Std.Result.ok (output, captured)
++}
++
++/-- [loop_join_renamed_owned_region::prebind]: loop body 0:
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 1:0-75:5
++    Visibility: public -/
++@[rust_loop_body]
++def prebind_loop.body
++  (items : _root_.Aeneas.Std.Slice ((_root_.Option _root_.Aeneas.Std.U32) ×
++  _root_.loop_join_renamed_owned_region.Expr))
++  (declared : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (origin : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize)
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.Aeneas.Std.U32
++  × _root_.loop_join_renamed_owned_region.Expr))
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (total : _root_.Aeneas.Std.U32)
++  (failures : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize)
++  (k : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.Aeneas.Std.U32 ×
++    _root_.loop_join_renamed_owned_region.Expr)) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.Usize) × _root_.Aeneas.Std.Usize)
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.Usize)))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (errors,
++      total, failures))
++  | some p =>
++    let (name1, ty_expr) := p
++    let idx ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.Usize) origin k
++    let k1 ← k + 1#usize
++    let s := _root_.Aeneas.Std.alloc.vec.Vec.deref declared
++    let b ←
++      _root_.Aeneas.Std.core.slice.Slice.contains
++        _root_.Aeneas.Std.core.cmp.PartialEqU32 s name1
++    let (errors1, total1, failures1, iter1) ←
++      if b
++      then _root_.Aeneas.Std.Result.ok (errors, total, failures, model_state1)
++      else
++        do
++        let (_, e) ← _root_.Aeneas.Std.Slice.index_usize items idx
++        let b1 ← _root_.loop_join_renamed_owned_region.owns e
++        if b1
++        then
++          let (r, errors2) ←
++            _root_.loop_join_renamed_owned_region.resolve ty_expr errors
++          let (i, v) ←
++            match r with
++            | _root_.Aeneas.Std.core.result.Result.Ok t =>
++              do
++              let total2 ← total + t
++              _root_.Aeneas.Std.Result.ok (total2, failures)
++            | _root_.Aeneas.Std.core.result.Result.Err _ =>
++              do
++              let failures2 ← _root_.Aeneas.Std.alloc.vec.Vec.push failures idx
++              _root_.Aeneas.Std.Result.ok (total, failures2)
++          _root_.Aeneas.Std.Result.ok (errors2, i, v, model_state1)
++        else
++          _root_.Aeneas.Std.Result.ok (errors, total, failures, model_state1)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      errors1, total1, failures1, k1))
++
++/-- [loop_join_renamed_owned_region::prebind]: loop 0:
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 1:0-75:5
++    Visibility: public -/
++@[rust_loop]
++def prebind_loop
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.Aeneas.Std.U32
++  × _root_.loop_join_renamed_owned_region.Expr))
++  (items : _root_.Aeneas.Std.Slice ((_root_.Option _root_.Aeneas.Std.U32) ×
++  _root_.loop_join_renamed_owned_region.Expr))
++  (declared : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (origin : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize)
++  (total : _root_.Aeneas.Std.U32)
++  (failures : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize)
++  (k : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize))
++  := do
++  loop
++    (fun (iter1, errors1, total1, failures1, k1) =>
++       _root_.loop_join_renamed_owned_region.prebind_loop.body items declared
++       origin iter1 errors1 total1 failures1 k1 :
++      ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.Aeneas.Std.U32 ×
++      _root_.loop_join_renamed_owned_region.Expr)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.Usize) × _root_.Aeneas.Std.Usize) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.Aeneas.Std.U32 ×
++      _root_.loop_join_renamed_owned_region.Expr)) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.Usize) × _root_.Aeneas.Std.Usize)
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.Usize))))
++    (iter, errors, total, failures, k)
++
++/-- [loop_join_renamed_owned_region::prebind]:
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 56:0-77:1
++    Visibility: public -/
++def prebind
++  (items : _root_.Aeneas.Std.Slice ((_root_.Option _root_.Aeneas.Std.U32) ×
++  _root_.loop_join_renamed_owned_region.Expr))
++  (declared : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.Usize)) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter items
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      ((_root_.Option _root_.Aeneas.Std.U32) ×
++      _root_.loop_join_renamed_owned_region.Expr))
++      _root_.loop_join_renamed_owned_region.prebind.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairOptionU32SharedExprSharedExpr
++      i ()
++  let c ←
++    _root_.loop_join_renamed_owned_region.collect
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      ((_root_.Option _root_.Aeneas.Std.U32) ×
++      _root_.loop_join_renamed_owned_region.Expr))
++      _root_.loop_join_renamed_owned_region.prebind.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairOptionU32SharedExprSharedExpr)
++      model_state
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter c.env
++  let (errors1, total, failures) ←
++    _root_.loop_join_renamed_owned_region.prebind_loop model_state1 items
++      declared errors c.origin 0#u32 (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.Usize) 0#usize
++  _root_.Aeneas.Std.Result.ok ((total, failures), errors1)
++
++/-- [loop_join_renamed_owned_region::drive_prebind]:
++    Source: 'tests/src/loop-join-renamed-owned-region.rs', lines 83:0-103:1
++    Visibility: public -/
++def drive_prebind
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) (d : _root_.Aeneas.Std.U32)
++  (declared0 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize × _root_.Aeneas.Std.Usize
++    × _root_.Aeneas.Std.U32)
++  := do
++  let items ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      ((_root_.Option _root_.Aeneas.Std.U32) ×
++      _root_.loop_join_renamed_owned_region.Expr)) (none, ({ v := a } :
++      _root_.loop_join_renamed_owned_region.Expr))
++  let items1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push items (some 1#u32, ({ v := b } :
++      _root_.loop_join_renamed_owned_region.Expr))
++  let items2 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push items1 (none, ({ v := c } :
++      _root_.loop_join_renamed_owned_region.Expr))
++  let items3 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push items2 (some 3#u32, ({ v := d } :
++      _root_.loop_join_renamed_owned_region.Expr))
++  let declared ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) declared0
++  let errors ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) 1000#u32
++  let s := _root_.Aeneas.Std.alloc.vec.Vec.deref items3
++  let (p, errors1) ←
++    _root_.loop_join_renamed_owned_region.prebind s declared errors
++  let (total, failures) := p
++  let n := _root_.Aeneas.Std.alloc.vec.Vec.len failures
++  let first ←
++    if n > 0#usize
++    then
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.Usize) failures 0#usize
++    else _root_.Aeneas.Std.Result.ok 9#usize
++  let last ←
++    if n > 0#usize
++    then
++      do
++      let i ← n - 1#usize
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.Usize) failures i
++    else _root_.Aeneas.Std.Result.ok 9#usize
++  let m := _root_.Aeneas.Std.alloc.vec.Vec.len errors1
++  let i ← m - 1#usize
++  let i1 ←
++    _root_.Aeneas.Std.alloc.vec.Vec.index
++      (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++      _root_.Aeneas.Std.U32) errors1 i
++  _root_.Aeneas.Std.Result.ok (total, n, first, last, m, i1)
++
++end loop_join_renamed_owned_region
+diff --git a/tests/lean/LoopVisitorCapturedSharedRef.lean b/tests/lean/LoopVisitorCapturedSharedRef.lean
+new file mode 100644
+index 0000000..a26126f
+--- /dev/null
++++ b/tests/lean/LoopVisitorCapturedSharedRef.lean
+@@ -0,0 +1,2 @@
++import LoopVisitorCapturedSharedRef.Checks
++import LoopVisitorCapturedSharedRef.LoopVisitorCapturedSharedRef
+diff --git a/tests/lean/LoopVisitorCapturedSharedRef/Checks.lean b/tests/lean/LoopVisitorCapturedSharedRef/Checks.lean
+new file mode 100644
+index 0000000..9e58cb6
+--- /dev/null
++++ b/tests/lean/LoopVisitorCapturedSharedRef/Checks.lean
+@@ -0,0 +1,49 @@
++import LoopVisitorCapturedSharedRef.LoopVisitorCapturedSharedRef
++
++/-! Evaluate the model of `tests/src/loop-visitor-captured-shared-ref.rs` on
++    the inputs of its `native` test module and compare with the native results
++    (the visits and the recorded entries given back through the sink). -/
++
++namespace loop_visitor_captured_shared_ref.checks
++open Aeneas Aeneas.Std Result
++
++/-- The number of visits, the number of recorded entries, the first and the
++    last recorded entries. -/
++def valV (r : Result (U32 × Usize × U32 × U32)) : Option (Nat × Nat × Nat × Nat) :=
++  match r with
++  | ok (s, n, f, l) => some (s.val, n.val, f.val, l.val)
++  | _ => none
++
++/-- Whether the stop entry was found, and the count given back through the sink. -/
++def valC (r : Result (Bool × U32)) : Option (Bool × Nat) :=
++  match r with
++  | ok (found, s) => some (found, s.val)
++  | _ => none
++
++-- native::drives
++#guard valV (drive_validate 2#u32 3#u32 4#u32 5#u32 10#u32 true) == some (3, 3, 12, 14)
++#guard valV (drive_validate 2#u32 3#u32 4#u32 100#u32 1#u32 false) == some (3, 3, 2, 4)
++#guard valV (drive_validate 2#u32 3#u32 4#u32 0#u32 3#u32 true) == some (3, 0, 0, 0)
++#guard valC (drive_count_until 2#u32 3#u32 4#u32 5#u32 3#u32) == some (true, 1)
++#guard valC (drive_count_until 2#u32 3#u32 4#u32 100#u32 99#u32) == some (false, 3)
++#guard valC (drive_count_until 2#u32 3#u32 4#u32 7#u32 2#u32) == some (true, 2)
++#guard valV (drive_validate 1#u32 9#u32 6#u32 5#u32 10#u32 true) == some (2, 0, 0, 0)
++#guard valV (drive_validate 1#u32 9#u32 6#u32 100#u32 1#u32 false) == some (2, 2, 10, 6)
++#guard valV (drive_validate 1#u32 9#u32 6#u32 0#u32 3#u32 true) == some (2, 0, 0, 0)
++#guard valC (drive_count_until 1#u32 9#u32 6#u32 5#u32 3#u32) == some (false, 1)
++#guard valC (drive_count_until 1#u32 9#u32 6#u32 100#u32 99#u32) == some (false, 3)
++#guard valC (drive_count_until 1#u32 9#u32 6#u32 7#u32 2#u32) == some (false, 2)
++#guard valV (drive_validate 5#u32 7#u32 11#u32 5#u32 10#u32 true) == some (0, 0, 0, 0)
++#guard valV (drive_validate 5#u32 7#u32 11#u32 100#u32 1#u32 false) == some (0, 0, 0, 0)
++#guard valV (drive_validate 5#u32 7#u32 11#u32 0#u32 3#u32 true) == some (0, 0, 0, 0)
++#guard valC (drive_count_until 5#u32 7#u32 11#u32 5#u32 3#u32) == some (false, 0)
++#guard valC (drive_count_until 5#u32 7#u32 11#u32 100#u32 99#u32) == some (false, 3)
++#guard valC (drive_count_until 5#u32 7#u32 11#u32 7#u32 2#u32) == some (false, 1)
++#guard valV (drive_validate 8#u32 0#u32 12#u32 5#u32 10#u32 true) == some (3, 1, 10, 10)
++#guard valV (drive_validate 8#u32 0#u32 12#u32 100#u32 1#u32 false) == some (3, 3, 8, 12)
++#guard valV (drive_validate 8#u32 0#u32 12#u32 0#u32 3#u32 true) == some (3, 0, 0, 0)
++#guard valC (drive_count_until 8#u32 0#u32 12#u32 5#u32 3#u32) == some (false, 1)
++#guard valC (drive_count_until 8#u32 0#u32 12#u32 100#u32 99#u32) == some (false, 3)
++#guard valC (drive_count_until 8#u32 0#u32 12#u32 7#u32 2#u32) == some (false, 1)
++
++end loop_visitor_captured_shared_ref.checks
+diff --git a/tests/lean/LoopVisitorCapturedSharedRef/LoopVisitorCapturedSharedRef.lean b/tests/lean/LoopVisitorCapturedSharedRef/LoopVisitorCapturedSharedRef.lean
+new file mode 100644
+index 0000000..882f200
+--- /dev/null
++++ b/tests/lean/LoopVisitorCapturedSharedRef/LoopVisitorCapturedSharedRef.lean
+@@ -0,0 +1,873 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [loop_visitor_captured_shared_ref]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace loop_visitor_captured_shared_ref
++
++/-- [loop_visitor_captured_shared_ref::validate::closure]
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 53:24-58:5 -/
++def validate.closure :=
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++  × _root_.Aeneas.Std.U32 × _root_.Option _root_.Aeneas.Std.U32
++
++/-- [loop_visitor_captured_shared_ref::count_until::closure]
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 81:31-85:5 -/
++def count_until.closure := _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++
++/-- [loop_visitor_captured_shared_ref::Sink]
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 17:0-20:1
++    Visibility: public -/
++structure Sink where
++  errors : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++  seen : _root_.Aeneas.Std.U32
++
++/-- [loop_visitor_captured_shared_ref::below]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 22:0-24:1 -/
++def below
++  (limit : _root_.Aeneas.Std.U32) (x : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Bool
++  := do
++  _root_.Aeneas.Std.Result.ok (x < limit)
++
++/-- [loop_visitor_captured_shared_ref::bonus]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 26:0-31:1 -/
++def bonus
++  (hint : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
++  := do
++  match hint with
++  | none => _root_.Aeneas.Std.Result.ok 0#u32
++  | some h => _root_.Aeneas.Std.Result.ok h
++
++/-- [loop_visitor_captured_shared_ref::visit_uses]: loop body 0:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 38:4-48:5
++    Visibility: public -/
++@[rust_loop_body]
++def visit_uses_loop.body
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Unit) (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (visitor : T0) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × T0) T0)
++  := do
++  let (o, stack1) ← _root_.Aeneas.Std.alloc.vec.Vec.pop stack
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done visitor)
++  | some i =>
++    let i1 ← lift (_root_.Aeneas.Std.UScalar.cast .Usize i)
++    let i2 := _root_.Aeneas.Std.alloc.vec.Vec.len xs
++    let (visitor1, stack2) ←
++      if i1 < i2
++      then
++        do
++        let i3 ← lift (_root_.Aeneas.Std.UScalar.cast .Usize i)
++        let x ←
++          _root_.Aeneas.Std.alloc.vec.Vec.index
++            (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++            _root_.Aeneas.Std.U32) xs i3
++        let i4 ← x % 2#u32
++        let (visitor2, stack3) ←
++          if i4 = 0#u32
++          then
++            do
++            let (_, model_state) ←
++              coreopsfunctionFnMutT0TupleU32TupleInst.call_mut visitor x
++            _root_.Aeneas.Std.Result.ok (model_state, stack1)
++          else
++            do
++            let i5 ← x % 3#u32
++            let t ←
++              if i5 = 0#u32
++              then
++                do
++                let i6 ← x + 1#u32
++                let (_, model_state) ←
++                  coreopsfunctionFnMutT0TupleU32TupleInst.call_mut visitor i6
++                _root_.Aeneas.Std.Result.ok model_state
++              else _root_.Aeneas.Std.Result.ok visitor
++            _root_.Aeneas.Std.Result.ok (t, stack1)
++        let i5 ← i + 1#u32
++        let stack4 ← _root_.Aeneas.Std.alloc.vec.Vec.push stack3 i5
++        _root_.Aeneas.Std.Result.ok (visitor2, stack4)
++      else _root_.Aeneas.Std.Result.ok (visitor, stack1)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (stack2,
++      visitor1))
++
++/-- [loop_visitor_captured_shared_ref::visit_uses]: loop 0:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 38:4-48:5
++    Visibility: public -/
++@[rust_loop]
++def visit_uses_loop
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Unit) (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) (visitor : T0) :
++  _root_.Aeneas.Std.Result T0
++  := do
++  loop
++    (fun (stack1, visitor1) =>
++       _root_.loop_visitor_captured_shared_ref.visit_uses_loop.body
++       coreopsfunctionFnMutT0TupleU32TupleInst xs stack1 visitor1 :
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × T0) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × T0) T0))
++    (stack, visitor)
++
++/-- [loop_visitor_captured_shared_ref::visit_uses]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 35:0-49:1
++    Visibility: public -/
++def visit_uses
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Unit) (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (visitor : T0) :
++  _root_.Aeneas.Std.Result T0
++  := do
++  let stack ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) 0#u32
++  _root_.loop_visitor_captured_shared_ref.visit_uses_loop
++    coreopsfunctionFnMutT0TupleU32TupleInst stack xs visitor
++
++/-- [loop_visitor_captured_shared_ref::visit_uses::<0, 1, loop_visitor_captured_shared_ref::validate::closure<2, 3, 4, 5, 6, 7>>]: loop body 0:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 38:4-48:5
++    Visibility: public -/
++@[rust_loop_body]
++def visit_uses01closure_specialized_046bde8b48b9186a19a9ed9adaead8cb_loop.body
++  (coreopsfunctionFnMutclosureTupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_visitor_captured_shared_ref.validate.closure
++  _root_.Aeneas.Std.U32 _root_.Unit)
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (back1 : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) (i1 : _root_.Aeneas.Std.U32)
++  (o : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × (_root_.Option
++    _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)))
++  := do
++  let (o1, stack1) ← _root_.Aeneas.Std.alloc.vec.Vec.pop stack
++  match o1 with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (v, i, i1,
++      o, back, back1))
++  | some i2 =>
++    let i3 ← lift (_root_.Aeneas.Std.UScalar.cast .Usize i2)
++    let i4 := _root_.Aeneas.Std.alloc.vec.Vec.len xs
++    let (v1, i5, i6, o2, stack2, back2, back3) ←
++      if i3 < i4
++      then
++        do
++        let i7 ← lift (_root_.Aeneas.Std.UScalar.cast .Usize i2)
++        let x ←
++          _root_.Aeneas.Std.alloc.vec.Vec.index
++            (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++            _root_.Aeneas.Std.U32) xs i7
++        let i8 ← x % 2#u32
++        let (v2, i9, i10, o3, stack3, back4, back5) ←
++          if i8 = 0#u32
++          then
++            do
++            let (_, model_state) ←
++              coreopsfunctionFnMutclosureTupleU32TupleInst.call_mut (v, i, i1,
++                o) x
++            let (v3, i11, i12, o4) := model_state
++            _root_.Aeneas.Std.Result.ok (v3, i11, i12, o4, stack1,
++              (fun i13 => let (_, i14, _, _) := (v3, i13, i12, o4)
++                          back1 i14 : _root_.Aeneas.Std.U32 →
++              _root_.Aeneas.Std.U32),
++              (fun v4 => let (v5, _, _, _) := (v4, i11, i12, o4)
++                         back v5 : _root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++              _root_.Aeneas.Std.U32))
++          else
++            do
++            let i11 ← x % 3#u32
++            let (v3, i12, i13, o4, back6, back7) ←
++              if i11 = 0#u32
++              then
++                do
++                let i14 ← x + 1#u32
++                let (_, model_state) ←
++                  coreopsfunctionFnMutclosureTupleU32TupleInst.call_mut (v, i,
++                    i1, o) i14
++                let (v4, i15, i16, o5) := model_state
++                _root_.Aeneas.Std.Result.ok (v4, i15, i16, o5,
++                  (fun i17 =>
++                     let (_, i18, _, _) := (v4, i17, i16, o5)
++                     back1 i18 : _root_.Aeneas.Std.U32 →
++                  _root_.Aeneas.Std.U32),
++                  (fun v5 => let (v6, _, _, _) := (v5, i15, i16, o5)
++                             back v6 : _root_.Aeneas.Std.alloc.vec.Vec
++                  _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++                  _root_.Aeneas.Std.U32))
++              else _root_.Aeneas.Std.Result.ok (v, i, i1, o, back1, back)
++            _root_.Aeneas.Std.Result.ok (v3, i12, i13, o4, stack1, back6,
++              back7)
++        let i11 ← i2 + 1#u32
++        let stack4 ← _root_.Aeneas.Std.alloc.vec.Vec.push stack3 i11
++        _root_.Aeneas.Std.Result.ok (v2, i9, i10, o3, stack4, back4, back5)
++      else _root_.Aeneas.Std.Result.ok (v, i, i1, o, stack1, back1, back)
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (stack2,
++      back3, back2, v1, i5, i6, o2))
++
++/-- [loop_visitor_captured_shared_ref::visit_uses::<0, 1, loop_visitor_captured_shared_ref::validate::closure<2, 3, 4, 5, 6, 7>>]: loop 0:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 38:4-48:5
++    Visibility: public -/
++@[rust_loop]
++def visit_uses01closure_specialized_046bde8b48b9186a19a9ed9adaead8cb_loop
++  (coreopsfunctionFnMutclosureTupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_visitor_captured_shared_ref.validate.closure
++  _root_.Aeneas.Std.U32 _root_.Unit)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (back1 : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) (i1 : _root_.Aeneas.Std.U32)
++  (o : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++    (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (stack1, back2, back3, v1, i2, i3, o1) =>
++       _root_.loop_visitor_captured_shared_ref.visit_uses01closure_specialized_046bde8b48b9186a19a9ed9adaead8cb_loop.body
++       coreopsfunctionFnMutclosureTupleU32TupleInst xs stack1 back2 back3 v1 i2
++       i3 o1 : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × (_root_.Option
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++      × (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × (_root_.Option
++      _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 ×
++      (_root_.Option _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.U32))))
++    (stack, back, back1, v, i, i1, o)
++
++/-- [loop_visitor_captured_shared_ref::visit_uses::<0, 1, loop_visitor_captured_shared_ref::validate::closure<2, 3, 4, 5, 6, 7>>]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 35:0-49:1
++    Visibility: public -/
++def visit_uses01closure_specialized_046bde8b48b9186a19a9ed9adaead8cb
++  (coreopsfunctionFnMutclosureTupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_visitor_captured_shared_ref.validate.closure
++  _root_.Aeneas.Std.U32 _root_.Unit)
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (visitor : _root_.loop_visitor_captured_shared_ref.validate.closure) :
++  _root_.Aeneas.Std.Result
++    (_root_.loop_visitor_captured_shared_ref.validate.closure ×
++    (_root_.loop_visitor_captured_shared_ref.validate.closure →
++    _root_.loop_visitor_captured_shared_ref.validate.closure) ×
++    (_root_.loop_visitor_captured_shared_ref.validate.closure →
++    _root_.loop_visitor_captured_shared_ref.validate.closure))
++  := do
++  let (v, i, i1, o) := visitor
++  let stack ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) 0#u32
++  let (v1, i2, i3, o1, back, back1) ←
++    _root_.loop_visitor_captured_shared_ref.visit_uses01closure_specialized_046bde8b48b9186a19a9ed9adaead8cb_loop
++      coreopsfunctionFnMutclosureTupleU32TupleInst stack (fun v2 => v2)
++      (fun i4 => i4) xs v i i1 o
++  let back2 :=
++    (fun visitor1 =>
++       let (v2, _, _, _) := visitor1
++       let v3 := back v2
++       (v3, i, i1, o) :
++      _root_.loop_visitor_captured_shared_ref.validate.closure →
++      _root_.loop_visitor_captured_shared_ref.validate.closure)
++  let back3 :=
++    (fun visitor1 =>
++       let (_, i4, _, _) := visitor1
++       let i5 := back1 i4
++       (v, i5, i1, o) :
++      _root_.loop_visitor_captured_shared_ref.validate.closure →
++      _root_.loop_visitor_captured_shared_ref.validate.closure)
++  _root_.Aeneas.Std.Result.ok ((v1, i2, i3, o1), back2, back3)
++
++/-- [loop_visitor_captured_shared_ref::validate::{core::ops::function::FnMut<(u32), ()> for loop_visitor_captured_shared_ref::validate::closure<0, 1, 2, 3, 4, 5>}::call_mut]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 53:24-58:5 -/
++def validate.closure.Insts.CoreOpsFunctionFnMutTupleU32Tuple.call_mut
++  (c : _root_.loop_visitor_captured_shared_ref.validate.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    _root_.loop_visitor_captured_shared_ref.validate.closure ×
++    (_root_.loop_visitor_captured_shared_ref.validate.closure →
++    _root_.loop_visitor_captured_shared_ref.validate.closure) ×
++    (_root_.loop_visitor_captured_shared_ref.validate.closure →
++    _root_.loop_visitor_captured_shared_ref.validate.closure))
++  := do
++  let (v, i, i1, o) := c
++  let i2 ← i + 1#u32
++  let b ← _root_.loop_visitor_captured_shared_ref.below i1 tupled_args
++  if b
++  then
++    let i3 ← _root_.loop_visitor_captured_shared_ref.bonus o
++    let i4 ← tupled_args + i3
++    let v1 ← _root_.Aeneas.Std.alloc.vec.Vec.push v i4
++    let back :=
++      (fun c1 => let (v2, _, _, _) := c1
++                 (v2, i, i1, o) :
++        _root_.loop_visitor_captured_shared_ref.validate.closure →
++        _root_.loop_visitor_captured_shared_ref.validate.closure)
++    let back1 :=
++      (fun c1 => let (_, i5, _, _) := c1
++                 (v, i5, i1, o) :
++        _root_.loop_visitor_captured_shared_ref.validate.closure →
++        _root_.loop_visitor_captured_shared_ref.validate.closure)
++    _root_.Aeneas.Std.Result.ok ((), (v1, i2, i1, o), back, back1)
++  else
++    let back :=
++      (fun c1 => let (v1, _, _, _) := c1
++                 (v1, i, i1, o) :
++        _root_.loop_visitor_captured_shared_ref.validate.closure →
++        _root_.loop_visitor_captured_shared_ref.validate.closure)
++    let back1 :=
++      (fun c1 => let (_, i3, _, _) := c1
++                 (v, i3, i1, o) :
++        _root_.loop_visitor_captured_shared_ref.validate.closure →
++        _root_.loop_visitor_captured_shared_ref.validate.closure)
++    _root_.Aeneas.Std.Result.ok ((), (v, i2, i1, o), back, back1)
++
++/-- [loop_visitor_captured_shared_ref::validate::{core::ops::function::FnOnce<(u32), ()> for loop_visitor_captured_shared_ref::validate::closure<0, 1, 2, 3, 4, 5>}::call_once]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 53:24-58:5 -/
++def validate.closure.Insts.CoreOpsFunctionFnOnceTupleU32Tuple.call_once
++  (c : _root_.loop_visitor_captured_shared_ref.validate.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    _root_.loop_visitor_captured_shared_ref.validate.closure ×
++    _root_.loop_visitor_captured_shared_ref.validate.closure)
++  := do
++  let (v, i1, i2, o) := c
++  let (_, c1, call_mut_back, call_mut_back1) ←
++    _root_.loop_visitor_captured_shared_ref.validate.closure.Insts.CoreOpsFunctionFnMutTupleU32Tuple.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let (v1, _, _, _) := c2
++  let c3 := call_mut_back1 c1
++  let (_, i3, _, _) := c3
++  _root_.Aeneas.Std.Result.ok ((), (v1, i1, i2, o), (v, i3, i2, o))
++
++/-- Trait implementation: [loop_visitor_captured_shared_ref::validate::{core::ops::function::FnOnce<(u32), ()> for loop_visitor_captured_shared_ref::validate::closure<0, 1, 2, 3, 4, 5>}]
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 53:24-58:5 -/
++@[reducible]
++def validate.closure.Insts.CoreOpsFunctionFnOnceTupleU32Tuple :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_visitor_captured_shared_ref.validate.closure
++  _root_.Aeneas.Std.U32 _root_.Unit := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.loop_visitor_captured_shared_ref.validate.closure.Insts.CoreOpsFunctionFnOnceTupleU32Tuple.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1, arg.#2, arg.#3))
++}
++
++/-- Trait implementation: [loop_visitor_captured_shared_ref::validate::{core::ops::function::FnMut<(u32), ()> for loop_visitor_captured_shared_ref::validate::closure<0, 1, 2, 3, 4, 5>}]
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 53:24-58:5 -/
++@[reducible]
++def validate.closure.Insts.CoreOpsFunctionFnMutTupleU32Tuple :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_visitor_captured_shared_ref.validate.closure
++  _root_.Aeneas.Std.U32 _root_.Unit := {
++  FnOnceInst :=
++    _root_.loop_visitor_captured_shared_ref.validate.closure.Insts.CoreOpsFunctionFnOnceTupleU32Tuple
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.loop_visitor_captured_shared_ref.validate.closure.Insts.CoreOpsFunctionFnMutTupleU32Tuple.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        capture_state1.#1, captured.#2, captured.#3))
++}
++
++/-- [loop_visitor_captured_shared_ref::validate]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 52:0-59:1
++    Visibility: public -/
++def validate
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) (hint : _root_.Option _root_.Aeneas.Std.U32)
++  (sink : _root_.loop_visitor_captured_shared_ref.Sink) :
++  _root_.Aeneas.Std.Result _root_.loop_visitor_captured_shared_ref.Sink
++  := do
++  let (c, visit_uses_back, visit_uses_back1) ←
++    _root_.loop_visitor_captured_shared_ref.visit_uses01closure_specialized_046bde8b48b9186a19a9ed9adaead8cb
++      _root_.loop_visitor_captured_shared_ref.validate.closure.Insts.CoreOpsFunctionFnMutTupleU32Tuple
++      xs (sink.errors, sink.seen, limit, hint)
++  let c1 := visit_uses_back c
++  let (v, _, _, _) := c1
++  let c2 := visit_uses_back1 c
++  let (_, i, _, _) := c2
++  _root_.Aeneas.Std.Result.ok { errors := v, seen := i }
++
++/-- [loop_visitor_captured_shared_ref::visit_until]: loop body 0:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 66:4-69:5
++    Visibility: public -/
++@[rust_loop_body]
++def visit_until_loop0.body
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len xs
++  if i < i1
++  then
++    let i2 ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) xs i
++    let stack1 ← _root_.Aeneas.Std.alloc.vec.Vec.push stack i2
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (stack1,
++      i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done stack)
++
++/-- [loop_visitor_captured_shared_ref::visit_until]: loop 0:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 66:4-69:5
++    Visibility: public -/
++@[rust_loop]
++def visit_until_loop0
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (stack1, i1) =>
++       _root_.loop_visitor_captured_shared_ref.visit_until_loop0.body xs stack1
++       i1 : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.Usize)
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++    (stack, i)
++
++/-- [loop_visitor_captured_shared_ref::visit_until]: loop body 1:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 70:4-77:1
++    Visibility: public -/
++@[rust_loop_body]
++def visit_until_loop1.body
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Unit) (stop : _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (visitor : T0) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × T0) (_root_.Bool
++    × T0))
++  := do
++  let (o, stack1) ← _root_.Aeneas.Std.alloc.vec.Vec.pop stack
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (false,
++      visitor))
++  | some x =>
++    if x = stop
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (true,
++        visitor))
++    else
++      let (_, model_state) ←
++        coreopsfunctionFnMutT0TupleU32TupleInst.call_mut visitor x
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (stack1,
++        model_state))
++
++/-- [loop_visitor_captured_shared_ref::visit_until]: loop 1:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 70:4-77:1
++    Visibility: public -/
++@[rust_loop]
++def visit_until_loop1
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Unit) (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stop : _root_.Aeneas.Std.U32) (visitor : T0) :
++  _root_.Aeneas.Std.Result (_root_.Bool × T0)
++  := do
++  loop
++    (fun (stack1, visitor1) =>
++       _root_.loop_visitor_captured_shared_ref.visit_until_loop1.body
++       coreopsfunctionFnMutT0TupleU32TupleInst stop stack1 visitor1 :
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × T0) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × T0)
++      (_root_.Bool × T0)))
++    (stack, visitor)
++
++/-- [loop_visitor_captured_shared_ref::visit_until]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 63:0-77:1
++    Visibility: public -/
++def visit_until
++  {T0 : Type} (coreopsfunctionFnMutT0TupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut T0 _root_.Aeneas.Std.U32
++  _root_.Unit) (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stop : _root_.Aeneas.Std.U32) (visitor : T0) :
++  _root_.Aeneas.Std.Result (_root_.Bool × T0)
++  := do
++  let stack ←
++    _root_.loop_visitor_captured_shared_ref.visit_until_loop0 xs
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) 0#usize
++  _root_.loop_visitor_captured_shared_ref.visit_until_loop1
++    coreopsfunctionFnMutT0TupleU32TupleInst stack stop visitor
++
++/-- [loop_visitor_captured_shared_ref::visit_until::<0, 1, loop_visitor_captured_shared_ref::count_until::closure<2, 3, 4>>]: loop body 0:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 66:4-69:5
++    Visibility: public -/
++@[rust_loop_body]
++def
++  visit_until01closure_specialized_f0106e4a7b35a837c7d818a5ecedd801_loop0.body
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.Usize) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let i1 := _root_.Aeneas.Std.alloc.vec.Vec.len xs
++  if i < i1
++  then
++    let i2 ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) xs i
++    let stack1 ← _root_.Aeneas.Std.alloc.vec.Vec.push stack i2
++    let i3 ← i + 1#usize
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (stack1,
++      i3))
++  else _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done stack)
++
++/-- [loop_visitor_captured_shared_ref::visit_until::<0, 1, loop_visitor_captured_shared_ref::count_until::closure<2, 3, 4>>]: loop 0:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 66:4-69:5
++    Visibility: public -/
++@[rust_loop]
++def visit_until01closure_specialized_f0106e4a7b35a837c7d818a5ecedd801_loop0
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.Usize) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (stack1, i1) =>
++       _root_.loop_visitor_captured_shared_ref.visit_until01closure_specialized_f0106e4a7b35a837c7d818a5ecedd801_loop0.body
++       xs stack1 i1 : ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++      × _root_.Aeneas.Std.Usize) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.Usize)
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++    (stack, i)
++
++/-- [loop_visitor_captured_shared_ref::visit_until::<0, 1, loop_visitor_captured_shared_ref::count_until::closure<2, 3, 4>>]: loop body 1:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 70:4-77:1
++    Visibility: public -/
++@[rust_loop_body]
++def
++  visit_until01closure_specialized_f0106e4a7b35a837c7d818a5ecedd801_loop1.body
++  (coreopsfunctionFnMutclosureTupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_visitor_captured_shared_ref.count_until.closure
++  _root_.Aeneas.Std.U32 _root_.Unit) (stop : _root_.Aeneas.Std.U32)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++  (i : _root_.Aeneas.Std.U32) (i1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32) (_root_.Bool × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)))
++  := do
++  let (o, stack1) ← _root_.Aeneas.Std.alloc.vec.Vec.pop stack
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (false, i,
++      i1, back))
++  | some x =>
++    if x = stop
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (true, i,
++        i1, back))
++    else
++      let (_, model_state) ←
++        coreopsfunctionFnMutclosureTupleU32TupleInst.call_mut (i, i1) x
++      let (i2, i3) := model_state
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (stack1,
++        fun i4 => let (_, i5) := (i2, i4)
++                  back i5, i2, i3))
++
++/-- [loop_visitor_captured_shared_ref::visit_until::<0, 1, loop_visitor_captured_shared_ref::count_until::closure<2, 3, 4>>]: loop 1:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 70:4-77:1
++    Visibility: public -/
++@[rust_loop]
++def visit_until01closure_specialized_f0106e4a7b35a837c7d818a5ecedd801_loop1
++  (coreopsfunctionFnMutclosureTupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_visitor_captured_shared_ref.count_until.closure
++  _root_.Aeneas.Std.U32 _root_.Unit)
++  (stack : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++  (stop : _root_.Aeneas.Std.U32) (i : _root_.Aeneas.Std.U32)
++  (i1 : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (stack1, back1, i2, i3) =>
++       _root_.loop_visitor_captured_shared_ref.visit_until01closure_specialized_f0106e4a7b35a837c7d818a5ecedd801_loop1.body
++       coreopsfunctionFnMutclosureTupleU32TupleInst stop stack1 back1 i2 i3 :
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 ×
++      _root_.Aeneas.Std.U32) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow ((_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.U32 → _root_.Aeneas.Std.U32)
++      × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) (_root_.Bool ×
++      _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32 × (_root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.U32))))
++    (stack, back, i, i1)
++
++/-- [loop_visitor_captured_shared_ref::visit_until::<0, 1, loop_visitor_captured_shared_ref::count_until::closure<2, 3, 4>>]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 63:0-77:1
++    Visibility: public -/
++def visit_until01closure_specialized_f0106e4a7b35a837c7d818a5ecedd801
++  (coreopsfunctionFnMutclosureTupleU32TupleInst :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_visitor_captured_shared_ref.count_until.closure
++  _root_.Aeneas.Std.U32 _root_.Unit)
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stop : _root_.Aeneas.Std.U32)
++  (visitor : _root_.loop_visitor_captured_shared_ref.count_until.closure) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.loop_visitor_captured_shared_ref.count_until.closure ×
++    (_root_.loop_visitor_captured_shared_ref.count_until.closure →
++    _root_.loop_visitor_captured_shared_ref.count_until.closure))
++  := do
++  let (i, i1) := visitor
++  let stack ←
++    _root_.loop_visitor_captured_shared_ref.visit_until01closure_specialized_f0106e4a7b35a837c7d818a5ecedd801_loop0
++      xs (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) 0#usize
++  let (b, i2, i3, back) ←
++    _root_.loop_visitor_captured_shared_ref.visit_until01closure_specialized_f0106e4a7b35a837c7d818a5ecedd801_loop1
++      coreopsfunctionFnMutclosureTupleU32TupleInst stack (fun i4 => i4) stop i
++      i1
++  let back1 :=
++    (fun visitor1 => let (_, i4) := visitor1
++                     let i5 := back i4
++                     (i, i5) :
++      _root_.loop_visitor_captured_shared_ref.count_until.closure →
++      _root_.loop_visitor_captured_shared_ref.count_until.closure)
++  _root_.Aeneas.Std.Result.ok (b, (i2, i3), back1)
++
++/-- [loop_visitor_captured_shared_ref::count_until::{core::ops::function::FnMut<(u32), ()> for loop_visitor_captured_shared_ref::count_until::closure<0, 1, 2>}::call_mut]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 81:31-85:5 -/
++def count_until.closure.Insts.CoreOpsFunctionFnMutTupleU32Tuple.call_mut
++  (c : _root_.loop_visitor_captured_shared_ref.count_until.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    _root_.loop_visitor_captured_shared_ref.count_until.closure ×
++    (_root_.loop_visitor_captured_shared_ref.count_until.closure →
++    _root_.loop_visitor_captured_shared_ref.count_until.closure))
++  := do
++  let (i, i1) := c
++  let b ← _root_.loop_visitor_captured_shared_ref.below i tupled_args
++  if b
++  then
++    let i2 ← i1 + 1#u32
++    let back :=
++      (fun c1 => let (_, i3) := c1
++                 (i, i3) :
++        _root_.loop_visitor_captured_shared_ref.count_until.closure →
++        _root_.loop_visitor_captured_shared_ref.count_until.closure)
++    _root_.Aeneas.Std.Result.ok ((), (i, i2), back)
++  else
++    let back :=
++      (fun c1 => let (_, i2) := c1
++                 (i, i2) :
++        _root_.loop_visitor_captured_shared_ref.count_until.closure →
++        _root_.loop_visitor_captured_shared_ref.count_until.closure)
++    _root_.Aeneas.Std.Result.ok ((), c, back)
++
++/-- [loop_visitor_captured_shared_ref::count_until::{core::ops::function::FnOnce<(u32), ()> for loop_visitor_captured_shared_ref::count_until::closure<0, 1, 2>}::call_once]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 81:31-85:5 -/
++def count_until.closure.Insts.CoreOpsFunctionFnOnceTupleU32Tuple.call_once
++  (c : _root_.loop_visitor_captured_shared_ref.count_until.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Unit ×
++    _root_.loop_visitor_captured_shared_ref.count_until.closure)
++  := do
++  let (i1, _) := c
++  let (_, c1, call_mut_back) ←
++    _root_.loop_visitor_captured_shared_ref.count_until.closure.Insts.CoreOpsFunctionFnMutTupleU32Tuple.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let (_, i2) := c2
++  _root_.Aeneas.Std.Result.ok ((), (i1, i2))
++
++/-- Trait implementation: [loop_visitor_captured_shared_ref::count_until::{core::ops::function::FnOnce<(u32), ()> for loop_visitor_captured_shared_ref::count_until::closure<0, 1, 2>}]
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 81:31-85:5 -/
++@[reducible]
++def count_until.closure.Insts.CoreOpsFunctionFnOnceTupleU32Tuple :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.loop_visitor_captured_shared_ref.count_until.closure
++  _root_.Aeneas.Std.U32 _root_.Unit := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured) ←
++        _root_.loop_visitor_captured_shared_ref.count_until.closure.Insts.CoreOpsFunctionFnOnceTupleU32Tuple.call_once
++          arg arg1
++      let capture_state := captured
++      _root_.Aeneas.Std.Result.ok (output, (arg.#0, capture_state.#1))
++}
++
++/-- Trait implementation: [loop_visitor_captured_shared_ref::count_until::{core::ops::function::FnMut<(u32), ()> for loop_visitor_captured_shared_ref::count_until::closure<0, 1, 2>}]
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 81:31-85:5 -/
++@[reducible]
++def count_until.closure.Insts.CoreOpsFunctionFnMutTupleU32Tuple :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.loop_visitor_captured_shared_ref.count_until.closure
++  _root_.Aeneas.Std.U32 _root_.Unit := {
++  FnOnceInst :=
++    _root_.loop_visitor_captured_shared_ref.count_until.closure.Insts.CoreOpsFunctionFnOnceTupleU32Tuple
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.loop_visitor_captured_shared_ref.count_until.closure.Insts.CoreOpsFunctionFnMutTupleU32Tuple.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      _root_.Aeneas.Std.Result.ok (output, (captured.#0, capture_state.#1))
++}
++
++/-- [loop_visitor_captured_shared_ref::count_until]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 80:0-86:1
++    Visibility: public -/
++def count_until
++  (xs : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (limit : _root_.Aeneas.Std.U32) (stop : _root_.Aeneas.Std.U32)
++  (sink : _root_.loop_visitor_captured_shared_ref.Sink) :
++  _root_.Aeneas.Std.Result (_root_.Bool ×
++    _root_.loop_visitor_captured_shared_ref.Sink)
++  := do
++  let (b, c, visit_until_back) ←
++    _root_.loop_visitor_captured_shared_ref.visit_until01closure_specialized_f0106e4a7b35a837c7d818a5ecedd801
++      _root_.loop_visitor_captured_shared_ref.count_until.closure.Insts.CoreOpsFunctionFnMutTupleU32Tuple
++      xs stop (limit, sink.seen)
++  let c1 := visit_until_back c
++  let (_, i) := c1
++  _root_.Aeneas.Std.Result.ok (b, { sink with seen := i })
++
++/-- [loop_visitor_captured_shared_ref::drive_validate]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 90:0-102:1
++    Visibility: public -/
++def drive_validate
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) (limit : _root_.Aeneas.Std.U32)
++  (h : _root_.Aeneas.Std.U32) (with_hint : _root_.Bool) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 × _root_.Aeneas.Std.Usize ×
++    _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let xs ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) a
++  let xs1 ← _root_.Aeneas.Std.alloc.vec.Vec.push xs b
++  let xs2 ← _root_.Aeneas.Std.alloc.vec.Vec.push xs1 c
++  let hint ←
++    if with_hint
++    then _root_.Aeneas.Std.Result.ok (some h)
++    else _root_.Aeneas.Std.Result.ok none
++  let sink ←
++    _root_.loop_visitor_captured_shared_ref.validate xs2 limit hint
++      {
++        errors := (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32),
++        seen := 0#u32
++      }
++  let n := _root_.Aeneas.Std.alloc.vec.Vec.len sink.errors
++  let first ←
++    if n > 0#usize
++    then
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) sink.errors 0#usize
++    else _root_.Aeneas.Std.Result.ok 0#u32
++  if n > 0#usize
++  then
++    let i ← n - 1#usize
++    let last ←
++      _root_.Aeneas.Std.alloc.vec.Vec.index
++        (_root_.Aeneas.Std.core.slice.index.SliceIndexUsizeSlice
++        _root_.Aeneas.Std.U32) sink.errors i
++    _root_.Aeneas.Std.Result.ok (sink.seen, n, first, last)
++  else _root_.Aeneas.Std.Result.ok (sink.seen, n, first, 0#u32)
++
++/-- [loop_visitor_captured_shared_ref::drive_count_until]:
++    Source: 'tests/src/loop-visitor-captured-shared-ref.rs', lines 105:0-113:1
++    Visibility: public -/
++def drive_count_until
++  (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U32)
++  (c : _root_.Aeneas.Std.U32) (limit : _root_.Aeneas.Std.U32)
++  (stop : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Bool × _root_.Aeneas.Std.U32)
++  := do
++  let xs ←
++    _root_.Aeneas.Std.alloc.vec.Vec.push (_root_.Aeneas.Std.alloc.vec.Vec.new
++      _root_.Aeneas.Std.U32) a
++  let xs1 ← _root_.Aeneas.Std.alloc.vec.Vec.push xs b
++  let xs2 ← _root_.Aeneas.Std.alloc.vec.Vec.push xs1 c
++  let (found, sink) ←
++    _root_.loop_visitor_captured_shared_ref.count_until xs2 limit stop
++      {
++        errors := (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32),
++        seen := 0#u32
++      }
++  _root_.Aeneas.Std.Result.ok (found, sink.seen)
++
++end loop_visitor_captured_shared_ref
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index beafe7f..c07e23a 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -282,3 +282,6 @@ package «tests» {}
+ @[default_target] lean_lib DynUpcastMutBorrow
+ @[default_target] lean_lib ClosurePhantomParams
+ @[default_target] lean_lib SerdeWireEnum
++@[default_target] lean_lib LoopVisitorCapturedSharedRef
++@[default_target] lean_lib LoopJoinRenamedOwnedRegion
++@[default_target] lean_lib LoopAfterMapClosureBudget
+diff --git a/tests/src/loop-after-map-closure-budget.rs b/tests/src/loop-after-map-closure-budget.rs
+new file mode 100644
+index 0000000..fe31809
+--- /dev/null
++++ b/tests/src/loop-after-map-closure-budget.rs
+@@ -0,0 +1,139 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopAfterMapClosureBudget
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map --include core::iter::adapters::skip::Skip
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A loop after collecting `kids.iter().skip(1).map(|a| analyze(a, stack))`
++//! where `stack: &mut Budget<'_>` holds mutable borrows (the shape of
++//! `chelis_types::infer::vmap_extent::analyze_app`). At the loop entry, the
++//! abstractions of the calls of `map` and `collect` lend each other the inner
++//! borrows of the budget: the budget given back by `collect` to the closure of
++//! the `Map` is an output of level 1 of the call of `map`, nested in the `Map`.
++
++pub struct Native {
++    pub depth: u32,
++}
++
++pub struct Record {
++    pub first: Option<u32>,
++}
++
++pub struct Budget<'a> {
++    native: &'a mut Native,
++    record: &'a mut Record,
++}
++
++fn analyze(e: &u32, stack: &mut Budget<'_>) -> u32 {
++    stack.native.depth += 1;
++    if *e == 0 {
++        stack.record.first = Some(stack.native.depth);
++    }
++    *e
++}
++
++/// Push the analyses of the kids after the first one.
++pub fn app(kids: &[u32], deps: &mut Vec<u32>, stack: &mut Budget<'_>) -> u32 {
++    let arg_deps = kids.iter().skip(1).map(|a| analyze(a, stack)).collect::<Vec<_>>();
++    for d in arg_deps.iter() {
++        deps.push(*d);
++    }
++    0
++}
++
++fn analyze_logged(e: &u32, log: &mut Vec<u32>, stack: &mut Budget<'_>) -> u32 {
++    log.push(*e + stack.native.depth);
++    analyze(e, stack) + 1
++}
++
++/// The same with a closure which also captures a log, and a loop which stops
++/// at the first analysis equal to `stop`.
++pub fn app_logged(kids: &[u32], stop: u32, log: &mut Vec<u32>, stack: &mut Budget<'_>) -> u32 {
++    let arg_deps = kids
++        .iter()
++        .skip(1)
++        .map(|a| analyze_logged(a, log, stack))
++        .collect::<Vec<_>>();
++    let mut sum = 0;
++    for d in arg_deps.iter() {
++        if *d == stop {
++            return sum + 100;
++        }
++        sum += *d;
++    }
++    sum
++}
++
++/// `app` on `[a, b, c]`, then a write of `bump` through the budget: the depth
++/// and the first zero recorded, the result, the number of dependencies and
++/// the last one.
++pub fn drive_app(a: u32, b: u32, c: u32, bump: u32) -> (u32, u32, u32, usize, u32) {
++    let mut native = Native { depth: 5 };
++    let mut record = Record { first: None };
++    let mut deps = Vec::new();
++    deps.push(9);
++    let mut kids = Vec::new();
++    kids.push(a);
++    kids.push(b);
++    kids.push(c);
++    let r;
++    {
++        let mut budget = Budget { native: &mut native, record: &mut record };
++        r = app(&kids, &mut deps, &mut budget);
++        budget.native.depth += bump;
++    }
++    let first = match record.first {
++        Some(x) => x,
++        None => 99,
++    };
++    let n = deps.len();
++    (native.depth, first, r, n, deps[n - 1])
++}
++
++/// `app_logged` on `[a, b, c, d]`, then a write of `bump` through the budget:
++/// the depth, the first zero recorded, the result, the length of the log and
++/// its last entry.
++pub fn drive_app_logged(a: u32, b: u32, c: u32, d: u32, stop: u32, bump: u32) -> (u32, u32, u32, usize, u32) {
++    let mut native = Native { depth: 0 };
++    let mut record = Record { first: None };
++    let mut log = Vec::new();
++    let mut kids = Vec::new();
++    kids.push(a);
++    kids.push(b);
++    kids.push(c);
++    kids.push(d);
++    let r;
++    {
++        let mut budget = Budget { native: &mut native, record: &mut record };
++        r = app_logged(&kids, stop, &mut log, &mut budget);
++        budget.native.depth += bump;
++    }
++    let first = match record.first {
++        Some(x) => x,
++        None => 99,
++    };
++    let n = log.len();
++    let last = if n > 0 { log[n - 1] } else { 77 };
++    (native.depth, first, r, n, last)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for (a, b, c) in [(1u32, 2u32, 3u32), (0, 0, 4), (8, 5, 0), (3, 0, 0)] {
++            for bump in [0u32, 10] {
++                println!("app {} {} {} {} {:?}", a, b, c, bump, drive_app(a, b, c, bump));
++            }
++        }
++        for (a, b, c, d) in [(1u32, 2u32, 3u32, 4u32), (0, 0, 7, 0), (9, 4, 0, 6)] {
++            for (stop, bump) in [(4u32, 0u32), (8, 3), (1, 1)] {
++                println!(
++                    "app_logged {} {} {} {} {} {} {:?}",
++                    a, b, c, d, stop, bump,
++                    drive_app_logged(a, b, c, d, stop, bump)
++                );
++            }
++        }
++    }
++}
+diff --git a/tests/src/loop-join-renamed-owned-region.rs b/tests/src/loop-join-renamed-owned-region.rs
+new file mode 100644
+index 0000000..c1211b0
+--- /dev/null
++++ b/tests/src/loop-join-renamed-owned-region.rs
+@@ -0,0 +1,121 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopJoinRenamedOwnedRegion
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A loop over the pairs collected from `items.iter().map(|(_, e)| *e)`
++//! which indexes `items` again in a short-circuit condition guarding a
++//! `continue` (the shape of
++//! `chelis_types::infer::program::prebind_defsig_less_function_body_types`).
++//! At the loop entry, the reborrow of `items` has a nested abstraction for the
++//! region of the elements, and the abstraction of the `map` call still owns
++//! its own region. The join after the short-circuit condition merges the
++//! abstraction of the `map` call into the nested abstraction of the reborrow,
++//! which keeps the region of the `map` call. Joining the loop entry with that
++//! continue context then had two distinct abstractions owning that region: the
++//! collapse ended one of them, and the loan of `items` read as bottom in the
++//! next iteration ("There should be no bottoms in the value at *(items)", or,
++//! in the production body, "Could not match the contexts").
++
++pub struct Expr {
++    pub v: u32,
++}
++
++pub struct Collected<'a> {
++    pub env: Vec<(u32, &'a Expr)>,
++    pub origin: Vec<usize>,
++}
++
++fn collect<'a, I: Iterator<Item = &'a Expr>>(it: I) -> Collected<'a> {
++    let mut env = Vec::new();
++    let mut origin = Vec::new();
++    let mut i = 0;
++    for e in it {
++        env.push((e.v, e));
++        origin.push(i);
++        i += 1;
++    }
++    Collected { env, origin }
++}
++
++fn owns(e: &Expr) -> bool {
++    e.v % 2 == 0
++}
++
++fn resolve(e: &Expr, errors: &mut Vec<u32>) -> Result<u32, u32> {
++    if e.v > 10 {
++        errors.push(e.v);
++        Err(e.v)
++    } else {
++        Ok(e.v)
++    }
++}
++
++/// The sum of the resolved entries which are not declared and own their
++/// expression, and the indices of the entries which failed to resolve (their
++/// values are pushed to `errors`).
++pub fn prebind(
++    items: &[(Option<u32>, &Expr)],
++    declared: &Vec<u32>,
++    errors: &mut Vec<u32>,
++) -> (u32, Vec<usize>) {
++    let Collected { env, origin } = collect(items.iter().map(|(_, expr)| *expr));
++    let mut total = 0;
++    let mut failures = Vec::new();
++    let mut k = 0;
++    for (name, ty_expr) in env {
++        let idx = origin[k];
++        k += 1;
++        if declared.contains(&name) || !owns(items[idx].1) {
++            continue;
++        }
++        match resolve(ty_expr, errors) {
++            Ok(t) => total += t,
++            Err(_) => failures.push(idx),
++        }
++    }
++    (total, failures)
++}
++
++/// `prebind` on four entries with the values `a`, `b`, `c`, `d`, the
++/// declared value `declared0`, and an error log already holding one entry:
++/// the total, the number of failures, the first and the last failed index (9
++/// if none), the length of the error log given back and its last entry.
++pub fn drive_prebind(a: u32, b: u32, c: u32, d: u32, declared0: u32) -> (u32, usize, usize, usize, usize, u32) {
++    let ea = Expr { v: a };
++    let eb = Expr { v: b };
++    let ec = Expr { v: c };
++    let ed = Expr { v: d };
++    let mut items = Vec::new();
++    items.push((None, &ea));
++    items.push((Some(1), &eb));
++    items.push((None, &ec));
++    items.push((Some(3), &ed));
++    let mut declared = Vec::new();
++    declared.push(declared0);
++    let mut errors = Vec::new();
++    errors.push(1000);
++    let (total, failures) = prebind(&items, &declared, &mut errors);
++    let n = failures.len();
++    let first = if n > 0 { failures[0] } else { 9 };
++    let last = if n > 0 { failures[n - 1] } else { 9 };
++    let m = errors.len();
++    (total, n, first, last, m, errors[m - 1])
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for (a, b, c, d) in [(2u32, 4u32, 12u32, 14u32), (1, 6, 3, 8), (20, 3, 22, 24), (10, 10, 11, 7)] {
++            for declared0 in [4u32, 12, 99] {
++                println!(
++                    "prebind {} {} {} {} {} {:?}",
++                    a, b, c, d, declared0,
++                    drive_prebind(a, b, c, d, declared0)
++                );
++            }
++        }
++    }
++}
+diff --git a/tests/src/loop-visitor-captured-shared-ref.rs b/tests/src/loop-visitor-captured-shared-ref.rs
+new file mode 100644
+index 0000000..c225bfc
+--- /dev/null
++++ b/tests/src/loop-visitor-captured-shared-ref.rs
+@@ -0,0 +1,138 @@
++//@ [!lean] skip
++//@ [lean] subdir=LoopVisitorCapturedSharedRef
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Loops calling a `&mut` visitor closure which captures a shared reference to
++//! a local shared reference (`&'a &'b u32`) next to a mutable borrow of a sink
++//! (the shape of `chelis_deep::literal_source::visit_binder_literal_uses`
++//! called by
++//! `chelis_types::infer::binder_literal::validate_binder_literal_adoption_in_program`).
++//! In the loop fixed point, the collapse merges the borrow of region `'b` held
++//! by the abstraction of the loop entry with the shared projection of the
++//! captured value held by the abstraction of the call: a plain shared borrow.
++//! The context matched with the fixed point at the end of the loop body is
++//! projected on the target before the collapse, and keeps the projection: both
++//! are the same ownership.
++
++pub struct Sink {
++    pub errors: Vec<u32>,
++    pub seen: u32,
++}
++
++fn below(limit: &&u32, x: u32) -> bool {
++    x < **limit
++}
++
++fn bonus(hint: &Option<&u32>) -> u32 {
++    match hint {
++        Some(h) => **h,
++        None => 0,
++    }
++}
++
++/// Visit the entries of `xs` from index 0 with an explicit stack, calling the
++/// visitor on the even entries and on the odd multiples of 3 (plus one).
++pub fn visit_uses<'a>(xs: &'a Vec<u32>, visitor: &mut impl FnMut(u32)) {
++    let mut stack: Vec<u32> = Vec::new();
++    stack.push(0);
++    while let Some(i) = stack.pop() {
++        if (i as usize) < xs.len() {
++            let x = xs[i as usize];
++            if x % 2 == 0 {
++                visitor(x);
++            } else if x % 3 == 0 {
++                visitor(x + 1);
++            }
++            stack.push(i + 1);
++        }
++    }
++}
++
++/// Record in the sink the visited entries below the limit (plus the hint).
++pub fn validate(xs: &Vec<u32>, limit: &u32, hint: Option<&u32>, sink: &mut Sink) {
++    visit_uses(xs, &mut |x| {
++        sink.seen += 1;
++        if below(&limit, x) {
++            sink.errors.push(x + bonus(&hint));
++        }
++    });
++}
++
++/// Visit the entries of `xs` from the last one, stopping at the first entry
++/// equal to `stop`; the visitor sees the others.
++pub fn visit_until<'a>(xs: &'a Vec<u32>, stop: u32, visitor: &mut impl FnMut(u32)) -> bool {
++    let mut stack: Vec<u32> = Vec::new();
++    let mut i = 0;
++    while i < xs.len() {
++        stack.push(xs[i]);
++        i += 1;
++    }
++    while let Some(x) = stack.pop() {
++        if x == stop {
++            return true;
++        }
++        visitor(x);
++    }
++    false
++}
++
++/// Count the entries below the limit seen before `stop`.
++pub fn count_until(xs: &Vec<u32>, limit: &u32, stop: u32, sink: &mut Sink) -> bool {
++    visit_until(xs, stop, &mut |x| {
++        if below(&limit, x) {
++            sink.seen += 1;
++        }
++    })
++}
++
++/// The number of visits, the number of recorded entries, the first and the
++/// last recorded entries (0 if none) of `validate` on `[a, b, c]`.
++pub fn drive_validate(a: u32, b: u32, c: u32, limit: u32, h: u32, with_hint: bool) -> (u32, usize, u32, u32) {
++    let mut xs = Vec::new();
++    xs.push(a);
++    xs.push(b);
++    xs.push(c);
++    let mut sink = Sink { errors: Vec::new(), seen: 0 };
++    let hint = if with_hint { Some(&h) } else { None };
++    validate(&xs, &limit, hint, &mut sink);
++    let n = sink.errors.len();
++    let first = if n > 0 { sink.errors[0] } else { 0 };
++    let last = if n > 0 { sink.errors[n - 1] } else { 0 };
++    (sink.seen, n, first, last)
++}
++
++/// Whether `stop` was found, and the count of `count_until` on `[a, b, c]`.
++pub fn drive_count_until(a: u32, b: u32, c: u32, limit: u32, stop: u32) -> (bool, u32) {
++    let mut xs = Vec::new();
++    xs.push(a);
++    xs.push(b);
++    xs.push(c);
++    let mut sink = Sink { errors: Vec::new(), seen: 0 };
++    let found = count_until(&xs, &limit, stop, &mut sink);
++    (found, sink.seen)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drives() {
++        for (a, b, c) in [(2u32, 3u32, 4u32), (1, 9, 6), (5, 7, 11), (8, 0, 12)] {
++            for (limit, h, with_hint) in [(5u32, 10u32, true), (100, 1, false), (0, 3, true)] {
++                println!(
++                    "validate {} {} {} {} {} {} {:?}",
++                    a, b, c, limit, h, with_hint,
++                    drive_validate(a, b, c, limit, h, with_hint)
++                );
++            }
++            for (limit, stop) in [(5u32, 3u32), (100, 99), (7, 2)] {
++                println!(
++                    "count_until {} {} {} {} {} {:?}",
++                    a, b, c, limit, stop,
++                    drive_count_until(a, b, c, limit, stop)
++                );
++            }
++        }
++    }
++}

@@ -1,0 +1,1408 @@
+# aeneas integration step 173 after cba11f3beb: commit 7f4f82d022e9c597fb71ef309ce0aa5b64b35095
+# first parent b121134c1176bbdcfa81da0cd6fed13f266a598b, merged e8365e82f3942e0d9fa2bc015b008ca58952dd16
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge models/chelis-native e8365e8 into int/r37
+
+diff --git a/backends/lean/Aeneas/Std/ChelisNative.lean b/backends/lean/Aeneas/Std/ChelisNative.lean
+index 34a0b15..ba74ab3 100644
+--- a/backends/lean/Aeneas/Std/ChelisNative.lean
++++ b/backends/lean/Aeneas/Std/ChelisNative.lean
+@@ -133,12 +133,19 @@ reference to one fails closed as an unknown external. -/
+ /-- `chelis_ir::lowering_runtime::LoweringRuntime`: the handle names this thread's
+     lowering state, which the model threads explicitly.
+     * `u`, `o`: the speculation and quiet-output flags.
+-    * `hook`: the `(u, o)` flags at every raise, oldest first. The process hook's
+-      observable behavior depends only on them: when neither is set it forwards to
+-      the previous hook, which prints the same `Box<dyn Any>` description for both
+-      payload types. The payload type itself is static: `observe_raise` has exactly
+-      two monomorphic callers (`raise_unrepresentable` with `UnrepresentableDag`,
+-      `raise_lowering_diagnostic` with `LowerDiagnostic`).
++    * `installed`: a lower bound of the process flag "the Chelis panic hook is
++      installed". The function `catch_native_unwind` installs the hook before its body.
++      Thus it sets the bound. No code removes the hook. Another thread can install
++      it. Thus `false` does not mean "not installed".
++
++    * `hook`: the `(u, o, installed)` values at each raise, oldest first. The process
++      hook suppresses a raise iff the hook is installed and `u || o` holds. Else the
++      previous hook observes the raise. The previous hook prints the same
++      `Box<dyn Any>` description for both payload types. The payload type is static.
++      The function `observe_raise` has exactly two monomorphic callers. They are
++      `raise_unrepresentable` with `UnrepresentableDag` and `raise_lowering_diagnostic`
++      with `LowerDiagnostic`.
++
+     * `builds`: the persistent summary-probe count.
+     * `nextPreflightFrame`: this thread's next tensor-helper preflight frame id.
+     * `hostVar n`: the `n`-th id this thread draws from the process-global host
+@@ -153,7 +160,8 @@ reference to one fails closed as an unknown external. -/
+ structure chelis_ir.lowering_runtime.LoweringRuntime where
+   u : Bool
+   o : Bool
+-  hook : List (Bool × Bool)
++  installed : Bool
++  hook : List (Bool × Bool × Bool)
+   builds : U64
+   nextPreflightFrame : U64
+   hostVar : Nat → U32
+@@ -214,15 +222,16 @@ def set_unrepresentable_panic_suppressed (s : LoweringRuntime) (value : Bool) :
+ def set_output_suppressed (s : LoweringRuntime) (value : Bool) : Result LoweringRuntime :=
+   .ok { s with o := value }
+ 
+-/-- `observe_raise`: append the current `(u, o)` to the hook trace and return the
+-    payload (see `LoweringRuntime` for why the payload type is not recorded). -/
++/-- `observe_raise`: append the current `(u, o, installed)` to the hook trace. Return the
++    payload. The `LoweringRuntime` comment tells why the model records no payload type. -/
+ @[rust_fun
+   "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::observe_raise"]
+ def observe_raise {P : Type} (_anyInst : core.any.Any P) (s : LoweringRuntime) (payload : P) :
+     Result (P × LoweringRuntime) :=
+-  .ok (payload, { s with hook := s.hook ++ [(s.u, s.o)] })
++  .ok (payload, { s with hook := s.hook ++ [(s.u, s.o, s.installed)] })
+ 
+-/-- `catch_native_unwind`: `o := true; let r := f self state; o := false; r`.
++/-- `catch_native_unwind`: `install the hook. o := true. let r := f self state. o := false. r`.
++    The installation sets the lower bound `installed`.
+     The conversions `marker` and `message` apply only to an unexpected native
+     unwind, which is outside the modeled domain: the failure of `f` propagates.
+     The grown stack segment is not observable. `F : FnOnce(&mut Self, &mut S)` is
+@@ -236,7 +245,7 @@ def catch_native_unwind {S T D F Marker Message : Type} (_cloneInst : core.clone
+     (_messageInst : core.ops.function.FnOnce Message (Option String) D)
+     (s : LoweringRuntime) (state : S) (f : F) (_marker : Marker) (_message : Message) :
+     Result (core.result.Result T D × LoweringRuntime × S) := do
+-  let (result, s, state) ← fInst.call_once f ({ s with o := true }, state)
++  let (result, s, state) ← fInst.call_once f ({ s with o := true, installed := true }, state)
+   .ok (result, { s with o := false }, state)
+ 
+ /-- `fresh_host_inference_var`: the next element of this thread's draws from the
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 56b3e78..0723d89 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -48,7 +48,7 @@ let lean_builtin_types = [
+   mk_type "alloc::vec::into_iter::IntoIter" "_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 29 *)
+   mk_type "chelis_ir::capacity_key::CapacityScopeSupply" "_root_.Aeneas.Std.chelis_ir.capacity_key.CapacityScopeSupply";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 152 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 159 *)
+   mk_type "chelis_ir::lowering_runtime::LoweringRuntime" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime";
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 55 *)
+   mk_type "chelis_types::native::NativeServices" "_root_.Aeneas.Std.chelis_types.native.NativeServices";
+@@ -754,41 +754,41 @@ let lean_builtin_funs = [
+   mk_fun "alloc::vec::{core::ops::index::IndexMut<alloc::vec::Vec<@T>, @I, @O>}::index_mut" "_root_.Aeneas.Std.alloc.vec.Vec.index_mut" ~keep_params:(Some [true; true; false; true]);
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 36 *)
+   mk_fun "chelis_ir::capacity_key::{chelis_ir::capacity_key::CapacityScopeSupply}::fresh_id" "_root_.Aeneas.Std.chelis_ir.capacity_key.CapacityScopeSupply.fresh_id";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 191 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 199 *)
+   mk_fun "chelis_ir::lowering_runtime::grow_stack_if_needed" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.grow_stack_if_needed";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 169 *)
+-  mk_fun "chelis_ir::lowering_runtime::resume_native_unwind" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.resume_native_unwind";
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 177 *)
++  mk_fun "chelis_ir::lowering_runtime::resume_native_unwind" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.resume_native_unwind";
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 185 *)
+   mk_fun "chelis_ir::lowering_runtime::scoped" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.scoped";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 231 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 240 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_native_unwind" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.catch_native_unwind";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 311 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 320 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_declaration" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_declaration";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 302 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 311 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_declaration_start" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_declaration_start";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 294 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 303 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_phase" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_phase";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 285 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 294 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::detail_profile_start" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.detail_profile_start";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 244 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 253 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::fresh_host_inference_var" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.fresh_host_inference_var";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 269 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 278 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::fresh_preflight_frame" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.fresh_preflight_frame";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 219 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 227 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::observe_raise" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.observe_raise";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 250 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 259 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::record_summary_probe_build" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.record_summary_probe_build";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 319 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 328 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::report_internal" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.report_internal";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 262 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 271 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::reset_summary_probe_builds" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.reset_summary_probe_builds";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 212 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 220 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::set_output_suppressed" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.set_output_suppressed";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 205 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 213 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::set_unrepresentable_panic_suppressed" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.set_unrepresentable_panic_suppressed";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 256 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 265 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::summary_probe_builds" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.summary_probe_builds";
+-  (* file: "Aeneas/Std/ChelisNative.lean", line: 199 *)
++  (* file: "Aeneas/Std/ChelisNative.lean", line: 207 *)
+   mk_fun "chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::unrepresentable_panic_suppressed" "_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.unrepresentable_panic_suppressed";
+   (* file: "Aeneas/Std/ChelisNative.lean", line: 119 *)
+   mk_fun "chelis_types::native::sha256_concat" "_root_.Aeneas.Std.chelis_types.native.sha256_concat";
+diff --git a/tests/lean/ShellBorrowingStates/Checks.lean b/tests/lean/ShellBorrowingStates/Checks.lean
+index 8f6ad62..cc15348 100644
+--- a/tests/lean/ShellBorrowingStates/Checks.lean
++++ b/tests/lean/ShellBorrowingStates/Checks.lean
+@@ -22,11 +22,11 @@ def res {α : Type} (f : α → Nat) (r : Result (α × U32 × U64)) : Option (N
+ #guard res (·.val) (tuple_state (u 4) (w 3)) == some (14, 14, 16)
+ #guard res (·.val) (tuple_state (u 4294967295) (w 1)) == some (4, 4, 5)
+ 
+-/-- A lowering runtime in its initial state. -/
++/-- A lowering runtime in its initial state. No catch installed the hook. -/
+ def runtime : _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime :=
+-  { u := false, o := false, hook := [], builds := 0#u64, nextPreflightFrame := 0#u64,
+-    hostVar := fun _ => 0#u32, hostVarsTaken := 0, profileEnv := fun _ => false,
+-    profileEnvReads := 0, profileMarks := 0#usize }
++  { u := false, o := false, installed := false, hook := [], builds := 0#u64,
++    nextPreflightFrame := 0#u64, hostVar := fun _ => 0#u32, hostVarsTaken := 0,
++    profileEnv := fun _ => false, profileEnvReads := 0, profileMarks := 0#usize }
+ 
+ /-- The result (`true` for `Ok`), the final session, the quiet-output flag of the
+     runtime and the final native state. -/
+@@ -44,4 +44,26 @@ def host (checked invocation log native : Nat) :
+ #guard host 3 9 4 10 == some ((true, 3), 9, 5, false, 14)
+ #guard host 6 9 4 10 == some ((false, 107), 9, 5, false, 17)
+ 
++/-- The results of `hook_installation`, its hook entries `(u, o, installed)`, and the
++    final `o` and `installed`. -/
++def hooks : Option ((Nat × (Bool × Nat) × Nat × Nat) × List (Bool × Bool × Bool) × Bool × Bool) :=
++  match hook_installation runtime with
++  | ok ((first, caught, after, quiet), rt) =>
++    let caught := match caught with
++      | .Ok v => (true, v.val)
++      | .Err e => (false, e.val)
++    some ((first.val, caught, after.val, quiet.val), rt.hook, rt.o, rt.installed)
++  | _ => none
++
++/-- The raise codes that reach the previous hook. The raise order is `1, 2, 3, 4`. The
++    Chelis hook forwards a raise iff the hook is not installed or both flags are clear. -/
++def visible (hook : List (Bool × Bool × Bool)) : List Nat :=
++  ((hook.zip [1, 2, 3, 4]).filter fun ((u, o, i), _) => !(i && (u || o))).map (·.2)
++
++#guard hooks == some ((1, (false, 102), 3, 4),
++  [(false, true, false), (false, true, true), (false, false, true), (false, true, true)],
++  true, true)
++-- The native child process observes exactly the raises `1` and `3`.
++#guard (hooks.map fun (_, hook, _) => visible hook) == some [1, 3]
++
+ end chelis_ir.checks
+diff --git a/tests/lean/ShellBorrowingStates/ChelisIr.lean b/tests/lean/ShellBorrowingStates/ChelisIr.lean
+index d004d66..e97bd07 100644
+--- a/tests/lean/ShellBorrowingStates/ChelisIr.lean
++++ b/tests/lean/ShellBorrowingStates/ChelisIr.lean
+@@ -12,7 +12,7 @@ set_option maxHeartbeats 1000000
+ namespace chelis_ir
+ 
+ /-- [chelis_ir::Cx]
+-    Source: 'tests/src/chelis_ir.rs', lines 94:0-98:1
++    Source: 'tests/src/chelis_ir.rs', lines 166:0-170:1
+     Visibility: public -/
+ structure Cx where
+   depth : _root_.Aeneas.Std.U32
+@@ -32,14 +32,14 @@ structure
+     _root_.chelis_ir.Cx × (_root_.chelis_ir.Cx → _root_.chelis_ir.Cx))
+ 
+ /-- [chelis_ir::Session]
+-    Source: 'tests/src/chelis_ir.rs', lines 149:0-152:1
++    Source: 'tests/src/chelis_ir.rs', lines 221:0-224:1
+     Visibility: public -/
+ structure Session where
+   invocation : _root_.Aeneas.Std.U32
+   log : _root_.Aeneas.Std.U64
+ 
+ /-- [chelis_ir::HostCx]
+-    Source: 'tests/src/chelis_ir.rs', lines 155:0-160:1
++    Source: 'tests/src/chelis_ir.rs', lines 227:0-232:1
+     Visibility: public -/
+ structure HostCx where
+   checked : _root_.Aeneas.Std.U32
+@@ -122,9 +122,9 @@ structure
+     T3) × (T2 → T2) × (T3 → T3))
+ 
+ /-- [chelis_ir::lowering_runtime::scoped::<0, chelis_ir::Cx<1>, T0, T1, T2, T3, T4>]:
+-    Source: 'tests/src/chelis_ir.rs', lines 23:4-33:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 33:4-43:5 -/
+ def
+-  lowering_runtime.scoped0CxT0T1T2T3T4_specialized_31d433a7ad6968f49a612833d9963271
++  lowering_runtime.scoped0CxT0T1T2T3T4_specialized_6569a76ee3db0b514ff07332324ed41f
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type} {T4 : Type}
+   (coreopsfunctionFnOnceT2TupleMut0CxT0_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
+   :
+@@ -151,9 +151,9 @@ def
+     (state, fun x => x) t t1 t2
+ 
+ /-- [chelis_ir::lowering_runtime::scoped::<0, (&1 mut (T0), &2 mut (T1)), T2, T3, T4, T5, T6>]:
+-    Source: 'tests/src/chelis_ir.rs', lines 23:4-33:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 33:4-43:5 -/
+ def
+-  lowering_runtime.scoped0PairMut1T0Mut2T1T2T3T4T5T6_specialized_4d262d12de61b8bc0798b958d176da23
++  lowering_runtime.scoped0PairMut1T0Mut2T1T2T3T4T5T6_specialized_ebffd4bf78d79a1730a48eaf7b24763b
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type} {T4 : Type} {T5 : Type} {T6 :
+   Type}
+   (coreopsfunctionFnOnceT4TupleMut0PairMut1T0Mut2T1T2_specialized_45289d3993d6dfd5837acd9ac03cfc8fInst
+@@ -180,9 +180,9 @@ def
+     (state, (fun x => x, fun x => x)) t t1 t2
+ 
+ /-- [chelis_ir::lowering_runtime::scoped::<0, chelis_ir::HostCx<1>, T0, T1, T2, T3, T4>]:
+-    Source: 'tests/src/chelis_ir.rs', lines 23:4-33:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 33:4-43:5 -/
+ def
+-  lowering_runtime.scoped0HostCxT0T1T2T3T4_specialized_644f005e5eac346358b3b4ab35723c08
++  lowering_runtime.scoped0HostCxT0T1T2T3T4_specialized_513fc5847fb7aae1bcb85b5af812cfb5
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type} {T4 : Type}
+   (coreopsfunctionFnOnceT2TupleMut0HostCxT0_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
+   :
+@@ -209,9 +209,9 @@ def
+     (state, fun x => x) t t1 t2
+ 
+ /-- [chelis_ir::lowering_runtime::grow_stack_if_needed::<0, chelis_ir::Cx<1>, T0, T1>]:
+-    Source: 'tests/src/chelis_ir.rs', lines 36:4-44:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 46:4-54:5 -/
+ def
+-  lowering_runtime.grow_stack_if_needed0CxT0T1_specialized_947018c010dc96f5e56d816834585903
++  lowering_runtime.grow_stack_if_needed0CxT0T1_specialized_984a17124abb5cc8869c72d29429efde
+   {T0 : Type} {T1 : Type}
+   (coreopsfunctionFnOnceT1TupleMut0CxT0_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
+   :
+@@ -227,9 +227,9 @@ def
+     (state, fun x => x) i i1 t
+ 
+ /-- [chelis_ir::lowering_runtime::grow_stack_if_needed::<0, (&1 mut (T0), &2 mut (T1)), T2, T3>]:
+-    Source: 'tests/src/chelis_ir.rs', lines 36:4-44:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 46:4-54:5 -/
+ def
+-  lowering_runtime.grow_stack_if_needed0PairMut1T0Mut2T1T2T3_specialized_ba83ddf71367a1d82ca7a9195ddf9cee
++  lowering_runtime.grow_stack_if_needed0PairMut1T0Mut2T1T2T3_specialized_aa8e7fbaad84555ebde68953e395c716
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+   (coreopsfunctionFnOnceT3TupleMut0PairMut1T0Mut2T1T2_specialized_45289d3993d6dfd5837acd9ac03cfc8fInst
+   :
+@@ -244,7 +244,7 @@ def
+     (state, (fun x => x, fun x => x)) i i1 t
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#2]
+-    Source: 'tests/src/chelis_ir.rs', lines 73:16-73:21 -/
++    Source: 'tests/src/chelis_ir.rs', lines 83:16-83:21 -/
+ @[reducible]
+ def lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2 {S : Type}
+   {R : Type} {T2 : Type}
+@@ -255,7 +255,7 @@ def lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2 {S : Type}
+ _root_.Unit
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce<(core::option::Option<alloc::string::String>), u32> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#2<S, R, T2>[TraitClause@0]}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 73:16-73:21 -/
++    Source: 'tests/src/chelis_ir.rs', lines 83:16-83:21 -/
+ def
+   lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32.call_once
+   {S : Type} {R : Type} {T2 : Type}
+@@ -272,7 +272,7 @@ def
+   _root_.Aeneas.Std.Result.ok 2#u32
+ 
+ /-- Trait implementation: [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce<(core::option::Option<alloc::string::String>), u32> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#2<S, R, T2>[TraitClause@0]}]
+-    Source: 'tests/src/chelis_ir.rs', lines 73:16-73:21 -/
++    Source: 'tests/src/chelis_ir.rs', lines 83:16-83:21 -/
+ @[reducible]
+ def
+   lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32
+@@ -296,7 +296,7 @@ def
+ }
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#1]
+-    Source: 'tests/src/chelis_ir.rs', lines 72:16-72:20 -/
++    Source: 'tests/src/chelis_ir.rs', lines 82:16-82:20 -/
+ @[reducible]
+ def lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1 {S : Type}
+   {R : Type} {T2 : Type}
+@@ -307,7 +307,7 @@ def lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1 {S : Type}
+ _root_.Unit
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce<(), u32> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#1<S, R, T2>[TraitClause@0]}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 72:16-72:20 -/
++    Source: 'tests/src/chelis_ir.rs', lines 82:16-82:20 -/
+ def
+   lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32.call_once
+   {S : Type} {R : Type} {T2 : Type}
+@@ -324,7 +324,7 @@ def
+   _root_.Aeneas.Std.Result.ok 1#u32
+ 
+ /-- Trait implementation: [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce<(), u32> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#1<S, R, T2>[TraitClause@0]}]
+-    Source: 'tests/src/chelis_ir.rs', lines 72:16-72:20 -/
++    Source: 'tests/src/chelis_ir.rs', lines 82:16-82:20 -/
+ @[reducible]
+ def
+   lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1.Insts.CoreOpsFunctionFnOnceTupleU32
+@@ -348,7 +348,7 @@ def
+ }
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 68:16-71:17 -/
++    Source: 'tests/src/chelis_ir.rs', lines 78:16-81:17 -/
+ @[reducible]
+ def lowering_runtime.LoweringRuntime.catch_lowering_with.closure {S : Type} {R
+   : Type} {T2 : Type}
+@@ -359,7 +359,7 @@ def lowering_runtime.LoweringRuntime.catch_lowering_with.closure {S : Type} {R
+   T2
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, chelis_ir::lowering_runtime::LoweringRuntime, S, core::result::Result<R, u32>> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure<S, R, T2>[TraitClause@0]}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 68:16-71:17 -/
++    Source: 'tests/src/chelis_ir.rs', lines 78:16-81:17 -/
+ def
+   lowering_runtime.LoweringRuntime.catch_lowering_with.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutSResultRU32_specialized_8d158b4d6c3de772f5459eb4ab3f927c.call_once
+   {S : Type} {R : Type} {T2 : Type}
+@@ -388,7 +388,7 @@ def
+       tupled_args1, tupled_args2)
+ 
+ /-- Trait implementation: [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, chelis_ir::lowering_runtime::LoweringRuntime, S, core::result::Result<R, u32>> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure<S, R, T2>[TraitClause@0]}]
+-    Source: 'tests/src/chelis_ir.rs', lines 68:16-71:17 -/
++    Source: 'tests/src/chelis_ir.rs', lines 78:16-81:17 -/
+ @[reducible]
+ def
+   lowering_runtime.LoweringRuntime.catch_lowering_with.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutSResultRU32_specialized_8d158b4d6c3de772f5459eb4ab3f927c
+@@ -408,7 +408,7 @@ def
+ }
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with]:
+-    Source: 'tests/src/chelis_ir.rs', lines 61:8-75:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 71:8-85:9 -/
+ def lowering_runtime.LoweringRuntime.catch_lowering_with
+   {S : Type} {R : Type} {T2 : Type}
+   (coreopsfunctionFnOnceT2PairMut0LoweringRuntimeMut1SResultRU32_specialized_8d158b4d6c3de772f5459eb4ab3f927cInst
+@@ -432,9 +432,9 @@ def lowering_runtime.LoweringRuntime.catch_lowering_with
+     self state f () ()
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_native_unwind::<0, 1, (&2 mut (T0), &3 mut (T1)), T2, T3, T4, T5, T6>]:
+-    Source: 'tests/src/chelis_ir.rs', lines 78:8-87:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 89:8-110:9 -/
+ def
+-  lowering_runtime.LoweringRuntime.catch_native_unwind01PairMut2T0Mut3T1T2T3T4T5T6_specialized_9fc25189876826647a8de1cdd8ca7783
++  lowering_runtime.LoweringRuntime.catch_native_unwind01PairMut2T0Mut3T1T2T3T4T5T6_specialized_042361b8ec156956b039c11785c96f3d
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type} {T4 : Type} {T5 : Type} {T6 :
+   Type} (corecloneCloneInst : _root_.Aeneas.Std.core.clone.Clone T3)
+   (coreopsfunctionFnOnceT4PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1Result_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+@@ -461,9 +461,9 @@ def
+     fun x => x)) t t1 t2
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#2::<(&0 mut (T0), &1 mut (T1)), T2, T3>]
+-    Source: 'tests/src/chelis_ir.rs', lines 73:16-73:21 -/
++    Source: 'tests/src/chelis_ir.rs', lines 83:16-83:21 -/
+ @[reducible]
+-def lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_9b8df958436faa72708fae775df6fbe3
++def lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_4cd6ddc0519a9b64e1fc1c16dbddd9ed
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+   (coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+   :
+@@ -473,9 +473,9 @@ def lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1
+ _root_.Unit
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce<(core::option::Option<alloc::string::String>), u32> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#2<S, R, T2>[TraitClause@0]}::call_once::<(&0 mut (T0), &1 mut (T1)), T2, T3>]:
+-    Source: 'tests/src/chelis_ir.rs', lines 73:16-73:21 -/
++    Source: 'tests/src/chelis_ir.rs', lines 83:16-83:21 -/
+ def
+-  lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_9b8df958436faa72708fae775df6fbe3.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32_specialized_f88b51af43098f3111b7509d8ec1a8e9.call_once_specialized_35f1e73580984d6155a0696a93d0e92c
++  lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_4cd6ddc0519a9b64e1fc1c16dbddd9ed.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32_specialized_d4832c63ae7fabfcd023b6bdad2e9281.call_once_specialized_b405828a7e5ab7e692f059b2a0802122
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+   (coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+   :
+@@ -483,7 +483,7 @@ def
+   T3 _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime T0 T1
+   (_root_.Aeneas.Std.core.result.Result T2 _root_.Aeneas.Std.U32))
+   (c :
+-  _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_9b8df958436faa72708fae775df6fbe3
++  _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_4cd6ddc0519a9b64e1fc1c16dbddd9ed
+   coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst)
+   (tupled_args : _root_.Option _root_.String) :
+   _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
+@@ -491,10 +491,10 @@ def
+   _root_.Aeneas.Std.Result.ok 2#u32
+ 
+ /-- Trait implementation: [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce<(core::option::Option<alloc::string::String>), u32> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#2<S, R, T2>[TraitClause@0]}::<(&0 mut (T0), &1 mut (T1)), T2, T3>]
+-    Source: 'tests/src/chelis_ir.rs', lines 73:16-73:21 -/
++    Source: 'tests/src/chelis_ir.rs', lines 83:16-83:21 -/
+ @[reducible]
+ def
+-  lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_9b8df958436faa72708fae775df6fbe3.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32_specialized_f88b51af43098f3111b7509d8ec1a8e9
++  lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_4cd6ddc0519a9b64e1fc1c16dbddd9ed.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32_specialized_d4832c63ae7fabfcd023b6bdad2e9281
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+   (coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+   :
+@@ -502,23 +502,23 @@ def
+   T3 _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime T0 T1
+   (_root_.Aeneas.Std.core.result.Result T2 _root_.Aeneas.Std.U32)) :
+   _root_.Aeneas.Std.core.ops.function.FnOnce
+-  (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_9b8df958436faa72708fae775df6fbe3
++  (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_4cd6ddc0519a9b64e1fc1c16dbddd9ed
+   coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst)
+   (_root_.Option _root_.String) _root_.Aeneas.Std.U32 := {
+   call_once :=
+     fun arg arg1 =>
+       do
+       let output ←
+-        _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_9b8df958436faa72708fae775df6fbe3.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32_specialized_f88b51af43098f3111b7509d8ec1a8e9.call_once_specialized_35f1e73580984d6155a0696a93d0e92c
++        _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_4cd6ddc0519a9b64e1fc1c16dbddd9ed.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32_specialized_d4832c63ae7fabfcd023b6bdad2e9281.call_once_specialized_b405828a7e5ab7e692f059b2a0802122
+           coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+           arg arg1
+       _root_.Aeneas.Std.Result.ok (output, arg)
+ }
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#1::<(&0 mut (T0), &1 mut (T1)), T2, T3>]
+-    Source: 'tests/src/chelis_ir.rs', lines 72:16-72:20 -/
++    Source: 'tests/src/chelis_ir.rs', lines 82:16-82:20 -/
+ @[reducible]
+-def lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_0d9045f2e2fadb9991dd09f6ad162a71
++def lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_e5ff817fb0279903afae4a0f235a12fe
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+   (coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+   :
+@@ -528,9 +528,9 @@ def lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1
+ _root_.Unit
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce<(), u32> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#1<S, R, T2>[TraitClause@0]}::call_once::<(&0 mut (T0), &1 mut (T1)), T2, T3>]:
+-    Source: 'tests/src/chelis_ir.rs', lines 72:16-72:20 -/
++    Source: 'tests/src/chelis_ir.rs', lines 82:16-82:20 -/
+ def
+-  lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_0d9045f2e2fadb9991dd09f6ad162a71.Insts.CoreOpsFunctionFnOnceTupleU32_specialized_2bf347727ec8e2e81729933197cf7fcd.call_once_specialized_73dd40a69e241bff1b3f2e6841059991
++  lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_e5ff817fb0279903afae4a0f235a12fe.Insts.CoreOpsFunctionFnOnceTupleU32_specialized_ee3fc61ba9fea6e2150a32be42b9b2fc.call_once_specialized_c11c7c4e74fabc34bc0fac4daa35b9a2
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+   (coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+   :
+@@ -538,7 +538,7 @@ def
+   T3 _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime T0 T1
+   (_root_.Aeneas.Std.core.result.Result T2 _root_.Aeneas.Std.U32))
+   (c :
+-  _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_0d9045f2e2fadb9991dd09f6ad162a71
++  _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_e5ff817fb0279903afae4a0f235a12fe
+   coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst)
+   (_ : _root_.Unit) :
+   _root_.Aeneas.Std.Result _root_.Aeneas.Std.U32
+@@ -546,10 +546,10 @@ def
+   _root_.Aeneas.Std.Result.ok 1#u32
+ 
+ /-- Trait implementation: [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce<(), u32> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure#1<S, R, T2>[TraitClause@0]}::<(&0 mut (T0), &1 mut (T1)), T2, T3>]
+-    Source: 'tests/src/chelis_ir.rs', lines 72:16-72:20 -/
++    Source: 'tests/src/chelis_ir.rs', lines 82:16-82:20 -/
+ @[reducible]
+ def
+-  lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_0d9045f2e2fadb9991dd09f6ad162a71.Insts.CoreOpsFunctionFnOnceTupleU32_specialized_2bf347727ec8e2e81729933197cf7fcd
++  lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_e5ff817fb0279903afae4a0f235a12fe.Insts.CoreOpsFunctionFnOnceTupleU32_specialized_ee3fc61ba9fea6e2150a32be42b9b2fc
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+   (coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+   :
+@@ -557,23 +557,23 @@ def
+   T3 _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime T0 T1
+   (_root_.Aeneas.Std.core.result.Result T2 _root_.Aeneas.Std.U32)) :
+   _root_.Aeneas.Std.core.ops.function.FnOnce
+-  (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_0d9045f2e2fadb9991dd09f6ad162a71
++  (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_e5ff817fb0279903afae4a0f235a12fe
+   coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst)
+   _root_.Unit _root_.Aeneas.Std.U32 := {
+   call_once :=
+     fun arg arg1 =>
+       do
+       let output ←
+-        _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_0d9045f2e2fadb9991dd09f6ad162a71.Insts.CoreOpsFunctionFnOnceTupleU32_specialized_2bf347727ec8e2e81729933197cf7fcd.call_once_specialized_73dd40a69e241bff1b3f2e6841059991
++        _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_e5ff817fb0279903afae4a0f235a12fe.Insts.CoreOpsFunctionFnOnceTupleU32_specialized_ee3fc61ba9fea6e2150a32be42b9b2fc.call_once_specialized_c11c7c4e74fabc34bc0fac4daa35b9a2
+           coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+           arg arg1
+       _root_.Aeneas.Std.Result.ok (output, arg)
+ }
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure::<(&0 mut (T0), &1 mut (T1)), T2, T3>]
+-    Source: 'tests/src/chelis_ir.rs', lines 68:16-71:17 -/
++    Source: 'tests/src/chelis_ir.rs', lines 78:16-81:17 -/
+ @[reducible]
+-def lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut0T0Mut1T1T2T3_specialized_9898ddbff7919b1dae9cfd851f3c2de0
++def lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut0T0Mut1T1T2T3_specialized_26d97622c28614f094526d4366c06aa0
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+   (coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut0T0Mut1T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+   :
+@@ -583,9 +583,9 @@ def lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut0T0Mut1T1
+   T3
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, chelis_ir::lowering_runtime::LoweringRuntime, S, core::result::Result<R, u32>> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure<S, R, T2>[TraitClause@0]}::call_once::<0, 1, (&2 mut (T0), &3 mut (T1)), T2, T3>]:
+-    Source: 'tests/src/chelis_ir.rs', lines 68:16-71:17 -/
++    Source: 'tests/src/chelis_ir.rs', lines 78:16-81:17 -/
+ def
+-  lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut2T0Mut3T1T2T3_specialized_9898ddbff7919b1dae9cfd851f3c2de0.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92_specialized_f0e8a87fa9b696fb01f99d7914d5417a.call_once_specialized_cf1af30dd2901c8f793299d153ed296f
++  lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut2T0Mut3T1T2T3_specialized_26d97622c28614f094526d4366c06aa0.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92_specialized_e550851b55f241e3a911a20c41f49ff5.call_once_specialized_f9fb4046bc5f1fd1aae4b77bcb6b3f8d
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+   (coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+   :
+@@ -593,7 +593,7 @@ def
+   T3 _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime T0 T1
+   (_root_.Aeneas.Std.core.result.Result T2 _root_.Aeneas.Std.U32))
+   (c :
+-  _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut0T0Mut1T1T2T3_specialized_9898ddbff7919b1dae9cfd851f3c2de0
++  _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut0T0Mut1T1T2T3_specialized_26d97622c28614f094526d4366c06aa0
+   coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst)
+   (tupled_args : (_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime
+   × (T0 × T1))) :
+@@ -626,10 +626,10 @@ def
+       tupled_args1, tupled_args2, back, back1)
+ 
+ /-- Trait implementation: [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, chelis_ir::lowering_runtime::LoweringRuntime, S, core::result::Result<R, u32>> for chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::closure<S, R, T2>[TraitClause@0]}::<0, 1, (&2 mut (T0), &3 mut (T1)), T2, T3>]
+-    Source: 'tests/src/chelis_ir.rs', lines 68:16-71:17 -/
++    Source: 'tests/src/chelis_ir.rs', lines 78:16-81:17 -/
+ @[reducible]
+ def
+-  lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut2T0Mut3T1T2T3_specialized_9898ddbff7919b1dae9cfd851f3c2de0.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92_specialized_f0e8a87fa9b696fb01f99d7914d5417a
++  lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut2T0Mut3T1T2T3_specialized_26d97622c28614f094526d4366c06aa0.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92_specialized_e550851b55f241e3a911a20c41f49ff5
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+   (coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+   :
+@@ -637,19 +637,19 @@ def
+   T3 _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime T0 T1
+   (_root_.Aeneas.Std.core.result.Result T2 _root_.Aeneas.Std.U32)) :
+   _root_.chelis_ir.core.ops.function.FnOnceT0PairMut0T1Mut1PairMut2T2Mut3T3T4_specialized_ebd49ec0b3325f713f29c67874adcf92
+-  (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut0T0Mut1T1T2T3_specialized_9898ddbff7919b1dae9cfd851f3c2de0
++  (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut0T0Mut1T1T2T3_specialized_26d97622c28614f094526d4366c06aa0
+   coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst)
+   _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime T0 T1
+   (_root_.Aeneas.Std.core.result.Result T2 _root_.Aeneas.Std.U32) := {
+   call_once :=
+-    _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut2T0Mut3T1T2T3_specialized_9898ddbff7919b1dae9cfd851f3c2de0.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92_specialized_f0e8a87fa9b696fb01f99d7914d5417a.call_once_specialized_cf1af30dd2901c8f793299d153ed296f
++    _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut2T0Mut3T1T2T3_specialized_26d97622c28614f094526d4366c06aa0.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92_specialized_e550851b55f241e3a911a20c41f49ff5.call_once_specialized_f9fb4046bc5f1fd1aae4b77bcb6b3f8d
+     coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+ }
+ 
+ /-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_lowering_with::<0, 1, (&2 mut (T0), &3 mut (T1)), T2, T3>]:
+-    Source: 'tests/src/chelis_ir.rs', lines 61:8-75:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 71:8-85:9 -/
+ def
+-  lowering_runtime.LoweringRuntime.catch_lowering_with01PairMut2T0Mut3T1T2T3_specialized_2427b581b64d8435b681e23a90d02f06
++  lowering_runtime.LoweringRuntime.catch_lowering_with01PairMut2T0Mut3T1T2T3_specialized_ba910c64598979e5b2aa143f4533b543
+   {T0 : Type} {T1 : Type} {T2 : Type} {T3 : Type}
+   (coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst
+   :
+@@ -664,13 +664,13 @@ def
+     (T0 → T0) × (T1 → T1))
+   := do
+   let (r, self1, state1, catch_native_unwind_back, catch_native_unwind_back1) ←
+-    _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_native_unwind01PairMut2T0Mut3T1T2T3T4T5T6_specialized_9fc25189876826647a8de1cdd8ca7783
++    _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_native_unwind01PairMut2T0Mut3T1T2T3T4T5T6_specialized_042361b8ec156956b039c11785c96f3d
+       _root_.Aeneas.Std.core.clone.CloneU32
+-      (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut2T0Mut3T1T2T3_specialized_9898ddbff7919b1dae9cfd851f3c2de0.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92_specialized_f0e8a87fa9b696fb01f99d7914d5417a
++      (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closurePairMut2T0Mut3T1T2T3_specialized_26d97622c28614f094526d4366c06aa0.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92_specialized_e550851b55f241e3a911a20c41f49ff5
+       coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst)
+-      (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_0d9045f2e2fadb9991dd09f6ad162a71.Insts.CoreOpsFunctionFnOnceTupleU32_specialized_2bf347727ec8e2e81729933197cf7fcd
++      (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_1PairMut0T0Mut1T1T2T3_specialized_e5ff817fb0279903afae4a0f235a12fe.Insts.CoreOpsFunctionFnOnceTupleU32_specialized_ee3fc61ba9fea6e2150a32be42b9b2fc
+       coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst)
+-      (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_9b8df958436faa72708fae775df6fbe3.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32_specialized_f88b51af43098f3111b7509d8ec1a8e9
++      (_root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with.closure_2PairMut0T0Mut1T1T2T3_specialized_4cd6ddc0519a9b64e1fc1c16dbddd9ed.Insts.CoreOpsFunctionFnOnceTupleOptionStringU32_specialized_d4832c63ae7fabfcd023b6bdad2e9281
+       coreopsfunctionFnOnceT3PairMut0LoweringRuntimeMut1PairMut2T0Mut3T1ResultT2U32_specialized_ebd49ec0b3325f713f29c67874adcf92Inst)
+       self state f () ()
+   let back :=
+@@ -679,8 +679,33 @@ def
+     (fun state2 => catch_native_unwind_back1 (state1.#0, state2).#1 : T1 → T1)
+   _root_.Aeneas.Std.Result.ok (r, self1, state1, back, back1)
+ 
++/-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::raise]:
++    Source: 'tests/src/chelis_ir.rs', lines 133:8-135:9 -/
++def lowering_runtime.LoweringRuntime.raise
++  (self : _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime)
++  (code : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime)
++  := do
++  _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.observe_raise
++    (_root_.Aeneas.Std.core.any.AnyBlanket _root_.Aeneas.Std.U32) self code
++
++/-- [chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::raise_fatal]:
++    Source: 'tests/src/chelis_ir.rs', lines 138:8-141:9 -/
++def lowering_runtime.LoweringRuntime.raise_fatal
++  (self : _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime)
++  (code : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime)
++  := do
++  let self1 ←
++    _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.set_output_suppressed
++      self true
++  _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.observe_raise
++    (_root_.Aeneas.Std.core.any.AnyBlanket _root_.Aeneas.Std.U32) self1 code
++
+ /-- [chelis_ir::with_bump::closure#1]
+-    Source: 'tests/src/chelis_ir.rs', lines 109:8-112:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 181:8-184:9 -/
+ @[reducible]
+ def with_bump.closure_1 {R : Type} {T1 : Type}
+   (coreopsfunctionFnOnceT1TupleMutCxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
+@@ -690,7 +715,7 @@ def with_bump.closure_1 {R : Type} {T1 : Type}
+ _root_.Unit
+ 
+ /-- [chelis_ir::with_bump::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>), T1), T2><'_, '_, u32, ()> for chelis_ir::with_bump::closure#1<R, T1>[TraitClause@0]}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 109:8-112:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 181:8-184:9 -/
+ def
+   with_bump.closure_1.Insts.CoreOpsFunctionFnOncePairMutCxU32Tuple_specialized_f4750442fb4f013eff7e56a40d604da1.call_once
+   {R : Type} {T1 : Type}
+@@ -714,7 +739,7 @@ def
+   _root_.Aeneas.Std.Result.ok ((), { c1 with depth := i, b := i2 }, back)
+ 
+ /-- Trait implementation: [chelis_ir::with_bump::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>), T1), T2><'_, '_, u32, ()> for chelis_ir::with_bump::closure#1<R, T1>[TraitClause@0]}]
+-    Source: 'tests/src/chelis_ir.rs', lines 109:8-112:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 181:8-184:9 -/
+ @[reducible]
+ def
+   with_bump.closure_1.Insts.CoreOpsFunctionFnOncePairMutCxU32Tuple_specialized_f4750442fb4f013eff7e56a40d604da1
+@@ -733,7 +758,7 @@ def
+ }
+ 
+ /-- [chelis_ir::with_bump::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 103:8-108:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 175:8-180:9 -/
+ @[reducible]
+ def with_bump.closure {R : Type} {T1 : Type}
+   (coreopsfunctionFnOnceT1TupleMutCxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
+@@ -743,7 +768,7 @@ def with_bump.closure {R : Type} {T1 : Type}
+ _root_.Unit
+ 
+ /-- [chelis_ir::with_bump::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u32> for chelis_ir::with_bump::closure<R, T1>[TraitClause@0]}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 103:8-108:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 175:8-180:9 -/
+ def
+   with_bump.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b.call_once
+   {R : Type} {T1 : Type}
+@@ -767,7 +792,7 @@ def
+     { tupled_args with depth := i, a := i1 }, back)
+ 
+ /-- Trait implementation: [chelis_ir::with_bump::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u32> for chelis_ir::with_bump::closure<R, T1>[TraitClause@0]}]
+-    Source: 'tests/src/chelis_ir.rs', lines 103:8-108:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 175:8-180:9 -/
+ @[reducible]
+ def
+   with_bump.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b
+@@ -786,7 +811,7 @@ def
+ }
+ 
+ /-- [chelis_ir::with_bump]:
+-    Source: 'tests/src/chelis_ir.rs', lines 100:0-115:1 -/
++    Source: 'tests/src/chelis_ir.rs', lines 172:0-187:1 -/
+ def with_bump
+   {R : Type} {T1 : Type}
+   (coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst
+@@ -797,7 +822,7 @@ def with_bump
+     _root_.chelis_ir.Cx))
+   := do
+   let (t, cx1, scoped_back) ←
+-    _root_.chelis_ir.lowering_runtime.scoped0CxT0T1T2T3T4_specialized_31d433a7ad6968f49a612833d9963271
++    _root_.chelis_ir.lowering_runtime.scoped0CxT0T1T2T3T4_specialized_6569a76ee3db0b514ff07332324ed41f
+       (_root_.chelis_ir.with_bump.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b
+       coreopsfunctionFnOnceT1TupleMut0CxR_specialized_1cc27a78f9eaca9b0c1398935b466d2bInst)
+       (_root_.chelis_ir.with_bump.closure_1.Insts.CoreOpsFunctionFnOncePairMutCxU32Tuple_specialized_f4750442fb4f013eff7e56a40d604da1
+@@ -812,12 +837,12 @@ def with_bump
+   _root_.Aeneas.Std.Result.ok (t, cx1, back)
+ 
+ /-- [chelis_ir::struct_state::closure::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 121:50-124:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 193:50-196:9 -/
+ @[reducible]
+ def struct_state.closure.closure := _root_.Unit
+ 
+ /-- [chelis_ir::struct_state::closure::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u32> for chelis_ir::struct_state::closure::closure}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 121:50-124:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 193:50-196:9 -/
+ def
+   struct_state.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b.call_once
+   (c : _root_.chelis_ir.struct_state.closure.closure)
+@@ -834,7 +859,7 @@ def
+     back)
+ 
+ /-- Trait implementation: [chelis_ir::struct_state::closure::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u32> for chelis_ir::struct_state::closure::closure}]
+-    Source: 'tests/src/chelis_ir.rs', lines 121:50-124:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 193:50-196:9 -/
+ @[reducible]
+ def
+   struct_state.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b
+@@ -846,12 +871,12 @@ def
+ }
+ 
+ /-- [chelis_ir::struct_state::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 120:31-126:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 192:31-198:5 -/
+ @[reducible]
+ def struct_state.closure := _root_.Unit
+ 
+ /-- [chelis_ir::struct_state::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u64> for chelis_ir::struct_state::closure}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 120:31-126:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 192:31-198:5 -/
+ def
+   struct_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU64_specialized_1cc27a78f9eaca9b0c1398935b466d2b.call_once
+   (c : _root_.chelis_ir.struct_state.closure)
+@@ -860,7 +885,7 @@ def
+     (_root_.chelis_ir.Cx → _root_.chelis_ir.Cx))
+   := do
+   let (seen, cx, grow_stack_if_needed_back) ←
+-    _root_.chelis_ir.lowering_runtime.grow_stack_if_needed0CxT0T1_specialized_947018c010dc96f5e56d816834585903
++    _root_.chelis_ir.lowering_runtime.grow_stack_if_needed0CxT0T1_specialized_984a17124abb5cc8869c72d29429efde
+       _root_.chelis_ir.struct_state.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU32_specialized_1cc27a78f9eaca9b0c1398935b466d2b
+       tupled_args 1#usize 2#usize ()
+   let i ← lift (_root_.Aeneas.Std.UScalar.cast .U64 cx.a)
+@@ -876,7 +901,7 @@ def
+   _root_.Aeneas.Std.Result.ok (i3, cx, back)
+ 
+ /-- Trait implementation: [chelis_ir::struct_state::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::Cx<1>)), T1><'_, '_, u64> for chelis_ir::struct_state::closure}]
+-    Source: 'tests/src/chelis_ir.rs', lines 120:31-126:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 192:31-198:5 -/
+ @[reducible]
+ def
+   struct_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutCxU64_specialized_1cc27a78f9eaca9b0c1398935b466d2b
+@@ -888,7 +913,7 @@ def
+ }
+ 
+ /-- [chelis_ir::struct_state]:
+-    Source: 'tests/src/chelis_ir.rs', lines 118:0-128:1
++    Source: 'tests/src/chelis_ir.rs', lines 190:0-200:1
+     Visibility: public -/
+ def struct_state
+   (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U64) :
+@@ -905,12 +930,12 @@ def struct_state
+   _root_.Aeneas.Std.Result.ok (i1, c.a, c.b)
+ 
+ /-- [chelis_ir::tuple_state::closure#2::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 140:66-144:13 -/
++    Source: 'tests/src/chelis_ir.rs', lines 212:66-216:13 -/
+ @[reducible]
+ def tuple_state.closure_2.closure := _root_.Unit
+ 
+ /-- [chelis_ir::tuple_state::closure#2::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure#2::closure}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 140:66-144:13 -/
++    Source: 'tests/src/chelis_ir.rs', lines 212:66-216:13 -/
+ def
+   tuple_state.closure_2.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f.call_once
+   (c : _root_.chelis_ir.tuple_state.closure_2.closure)
+@@ -926,7 +951,7 @@ def
+     fun tupled_args1 => tupled_args1)
+ 
+ /-- Trait implementation: [chelis_ir::tuple_state::closure#2::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure#2::closure}]
+-    Source: 'tests/src/chelis_ir.rs', lines 140:66-144:13 -/
++    Source: 'tests/src/chelis_ir.rs', lines 212:66-216:13 -/
+ @[reducible]
+ def
+   tuple_state.closure_2.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
+@@ -939,12 +964,12 @@ def
+ }
+ 
+ /-- [chelis_ir::tuple_state::closure#2]
+-    Source: 'tests/src/chelis_ir.rs', lines 139:8-145:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 211:8-217:9 -/
+ @[reducible]
+ def tuple_state.closure_2 := _root_.Unit
+ 
+ /-- [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure#2}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 139:8-145:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 211:8-217:9 -/
+ def
+   tuple_state.closure_2.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f.call_once
+   (c : _root_.chelis_ir.tuple_state.closure_2)
+@@ -954,7 +979,7 @@ def
+     (_root_.Aeneas.Std.U64 → _root_.Aeneas.Std.U64))
+   := do
+   let (i, p, grow_stack_if_needed_back, grow_stack_if_needed_back1) ←
+-    _root_.chelis_ir.lowering_runtime.grow_stack_if_needed0PairMut1T0Mut2T1T2T3_specialized_ba83ddf71367a1d82ca7a9195ddf9cee
++    _root_.chelis_ir.lowering_runtime.grow_stack_if_needed0PairMut1T0Mut2T1T2T3_specialized_aa8e7fbaad84555ebde68953e395c716
+       _root_.chelis_ir.tuple_state.closure_2.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
+       tupled_args 1#usize 2#usize ()
+   let (i1, i2) := p
+@@ -964,7 +989,7 @@ def
+     fun tupled_args1 => tupled_args1)
+ 
+ /-- Trait implementation: [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure#2}]
+-    Source: 'tests/src/chelis_ir.rs', lines 139:8-145:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 211:8-217:9 -/
+ @[reducible]
+ def
+   tuple_state.closure_2.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
+@@ -977,12 +1002,12 @@ def
+ }
+ 
+ /-- [chelis_ir::tuple_state::closure#1]
+-    Source: 'tests/src/chelis_ir.rs', lines 138:8-138:50 -/
++    Source: 'tests/src/chelis_ir.rs', lines 210:8-210:50 -/
+ @[reducible]
+ def tuple_state.closure_1 := _root_.Unit
+ 
+ /-- [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2))), T3), T4><'_, '_, '_, u32, u64, u32, ()> for chelis_ir::tuple_state::closure#1}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 138:8-138:50 -/
++    Source: 'tests/src/chelis_ir.rs', lines 210:8-210:50 -/
+ def
+   tuple_state.closure_1.Insts.CoreOpsFunctionFnOncePairMutPairMutU32MutU64U32Tuple_specialized_8105c2216879d8d0b41e91e8c5b10a0b.call_once
+   (c : _root_.chelis_ir.tuple_state.closure_1)
+@@ -1000,7 +1025,7 @@ def
+     fun tupled_args1 => tupled_args1)
+ 
+ /-- Trait implementation: [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2))), T3), T4><'_, '_, '_, u32, u64, u32, ()> for chelis_ir::tuple_state::closure#1}]
+-    Source: 'tests/src/chelis_ir.rs', lines 138:8-138:50 -/
++    Source: 'tests/src/chelis_ir.rs', lines 210:8-210:50 -/
+ @[reducible]
+ def
+   tuple_state.closure_1.Insts.CoreOpsFunctionFnOncePairMutPairMutU32MutU64U32Tuple_specialized_8105c2216879d8d0b41e91e8c5b10a0b
+@@ -1013,12 +1038,12 @@ def
+ }
+ 
+ /-- [chelis_ir::tuple_state::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 134:8-137:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 206:8-209:9 -/
+ @[reducible]
+ def tuple_state.closure := _root_.Unit
+ 
+ /-- [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 134:8-137:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 206:8-209:9 -/
+ def
+   tuple_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f.call_once
+   (c : _root_.chelis_ir.tuple_state.closure)
+@@ -1033,7 +1058,7 @@ def
+     fun tupled_args1 => tupled_args1)
+ 
+ /-- Trait implementation: [chelis_ir::tuple_state::{core::ops::function::FnOnce::<T0, (&0 mut ((&1 mut (T1), &2 mut (T2)))), T3><'_, '_, '_, u32, u64, u32> for chelis_ir::tuple_state::closure}]
+-    Source: 'tests/src/chelis_ir.rs', lines 134:8-137:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 206:8-209:9 -/
+ @[reducible]
+ def
+   tuple_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
+@@ -1046,7 +1071,7 @@ def
+ }
+ 
+ /-- [chelis_ir::tuple_state]:
+-    Source: 'tests/src/chelis_ir.rs', lines 131:0-147:1
++    Source: 'tests/src/chelis_ir.rs', lines 203:0-219:1
+     Visibility: public -/
+ def tuple_state
+   (a : _root_.Aeneas.Std.U32) (b : _root_.Aeneas.Std.U64) :
+@@ -1054,7 +1079,7 @@ def tuple_state
+     _root_.Aeneas.Std.U64)
+   := do
+   let (i, p, scoped_back, scoped_back1) ←
+-    _root_.chelis_ir.lowering_runtime.scoped0PairMut1T0Mut2T1T2T3T4T5T6_specialized_4d262d12de61b8bc0798b958d176da23
++    _root_.chelis_ir.lowering_runtime.scoped0PairMut1T0Mut2T1T2T3T4T5T6_specialized_ebffd4bf78d79a1730a48eaf7b24763b
+       _root_.chelis_ir.tuple_state.closure.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
+       _root_.chelis_ir.tuple_state.closure_1.Insts.CoreOpsFunctionFnOncePairMutPairMutU32MutU64U32Tuple_specialized_8105c2216879d8d0b41e91e8c5b10a0b
+       _root_.chelis_ir.tuple_state.closure_2.Insts.CoreOpsFunctionFnOnceTupleMutPairMutU32MutU64U32_specialized_45289d3993d6dfd5837acd9ac03cfc8f
+@@ -1065,7 +1090,7 @@ def tuple_state
+   _root_.Aeneas.Std.Result.ok (i, a1, b1)
+ 
+ /-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_lowering::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 174:12-182:13 -/
++    Source: 'tests/src/chelis_ir.rs', lines 246:12-254:13 -/
+ def HostCx.catch_lowering.closure {R : Type} {T2 : Type}
+   (coreopsfunctionFnOnceT2TupleMut0HostCxResultRU32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
+   :
+@@ -1075,7 +1100,7 @@ def HostCx.catch_lowering.closure {R : Type} {T2 : Type}
+   _root_.Aeneas.Std.U32
+ 
+ /-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_lowering::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut ((&2 mut (T2), &3 mut (T3)))), T4><'_, '_, '_, '_, chelis_ir::lowering_runtime::LoweringRuntime, chelis_ir::Session, u64, core::result::Result<R, u32>> for chelis_ir::{chelis_ir::HostCx<0>}::catch_lowering::closure<0, 1, R, T2>[TraitClause@0]}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 174:12-182:13 -/
++    Source: 'tests/src/chelis_ir.rs', lines 246:12-254:13 -/
+ def
+   HostCx.catch_lowering.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMutSessionMutU64ResultRU32_specialized_ebd49ec0b3325f713f29c67874adcf92.call_once
+   {R : Type} {T2 : Type}
+@@ -1105,7 +1130,7 @@ def
+     fun tupled_args1 => tupled_args1, fun tupled_args1 => tupled_args1)
+ 
+ /-- Trait implementation: [chelis_ir::{chelis_ir::HostCx<0>}::catch_lowering::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut ((&2 mut (T2), &3 mut (T3)))), T4><'_, '_, '_, '_, chelis_ir::lowering_runtime::LoweringRuntime, chelis_ir::Session, u64, core::result::Result<R, u32>> for chelis_ir::{chelis_ir::HostCx<0>}::catch_lowering::closure<0, 1, R, T2>[TraitClause@0]}]
+-    Source: 'tests/src/chelis_ir.rs', lines 174:12-182:13 -/
++    Source: 'tests/src/chelis_ir.rs', lines 246:12-254:13 -/
+ @[reducible]
+ def
+   HostCx.catch_lowering.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMutSessionMutU64ResultRU32_specialized_ebd49ec0b3325f713f29c67874adcf92
+@@ -1126,7 +1151,7 @@ def
+ }
+ 
+ /-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_lowering]:
+-    Source: 'tests/src/chelis_ir.rs', lines 166:4-184:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 238:4-256:5 -/
+ def HostCx.catch_lowering
+   {R : Type} {T2 : Type}
+   (coreopsfunctionFnOnceT2TupleMut0HostCxResultRU32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
+@@ -1139,7 +1164,7 @@ def HostCx.catch_lowering
+     → _root_.chelis_ir.HostCx))
+   := do
+   let (r, lr, p, catch_lowering_with_back, catch_lowering_with_back1) ←
+-    _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with01PairMut2T0Mut3T1T2T3_specialized_2427b581b64d8435b681e23a90d02f06
++    _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with01PairMut2T0Mut3T1T2T3_specialized_ba910c64598979e5b2aa143f4533b543
+       (_root_.chelis_ir.HostCx.catch_lowering.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutPairMutSessionMutU64ResultRU32_specialized_ebd49ec0b3325f713f29c67874adcf92
+       coreopsfunctionFnOnceT2TupleMut0HostCxResultRU32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
+       self.runtime (self.state, self.native) (body, self.checked)
+@@ -1153,12 +1178,12 @@ def HostCx.catch_lowering
+     { self with state := s1, runtime := lr, native := i1 }, back)
+ 
+ /-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 188:28-195:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 260:28-267:9 -/
+ @[reducible]
+ def HostCx.catch_invocation.closure := _root_.Unit
+ 
+ /-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, core::result::Result<u32, u32>> for chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure<0>}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 188:28-195:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 260:28-267:9 -/
+ def
+   HostCx.catch_invocation.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
+   (c : _root_.chelis_ir.HostCx.catch_invocation.closure)
+@@ -1186,7 +1211,7 @@ def
+       tupled_args.state.invocation, { tupled_args with native := i1 }, back)
+ 
+ /-- Trait implementation: [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, core::result::Result<u32, u32>> for chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation::closure<0>}]
+-    Source: 'tests/src/chelis_ir.rs', lines 188:28-195:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 260:28-267:9 -/
+ @[reducible]
+ def
+   HostCx.catch_invocation.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
+@@ -1200,7 +1225,7 @@ def
+ }
+ 
+ /-- [chelis_ir::{chelis_ir::HostCx<0>}::catch_invocation]:
+-    Source: 'tests/src/chelis_ir.rs', lines 187:4-196:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 259:4-268:5 -/
+ def HostCx.catch_invocation
+   (self : _root_.chelis_ir.HostCx) :
+   _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
+@@ -1219,7 +1244,7 @@ def HostCx.catch_invocation
+   _root_.Aeneas.Std.Result.ok (r, self1, back)
+ 
+ /-- [chelis_ir::with_invocation::closure#1]
+-    Source: 'tests/src/chelis_ir.rs', lines 204:8-204:53 -/
++    Source: 'tests/src/chelis_ir.rs', lines 276:8-276:53 -/
+ @[reducible]
+ def with_invocation.closure_1 {R : Type} {T1 : Type}
+   (coreopsfunctionFnOnceT1TupleMutHostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
+@@ -1229,7 +1254,7 @@ def with_invocation.closure_1 {R : Type} {T1 : Type}
+ _root_.Unit
+ 
+ /-- [chelis_ir::with_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>), T1), T2><'_, '_, u32, ()> for chelis_ir::with_invocation::closure#1<R, T1>[TraitClause@0]}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 204:8-204:53 -/
++    Source: 'tests/src/chelis_ir.rs', lines 276:8-276:53 -/
+ def
+   with_invocation.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU32Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613.call_once
+   {R : Type} {T1 : Type}
+@@ -1251,7 +1276,7 @@ def
+     { hc with state := { hc.state with invocation := previous } }, back)
+ 
+ /-- Trait implementation: [chelis_ir::with_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>), T1), T2><'_, '_, u32, ()> for chelis_ir::with_invocation::closure#1<R, T1>[TraitClause@0]}]
+-    Source: 'tests/src/chelis_ir.rs', lines 204:8-204:53 -/
++    Source: 'tests/src/chelis_ir.rs', lines 276:8-276:53 -/
+ @[reducible]
+ def
+   with_invocation.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU32Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613
+@@ -1270,7 +1295,7 @@ def
+ }
+ 
+ /-- [chelis_ir::with_invocation::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 203:8-203:59 -/
++    Source: 'tests/src/chelis_ir.rs', lines 275:8-275:59 -/
+ @[reducible]
+ def with_invocation.closure {R : Type} {T1 : Type}
+   (coreopsfunctionFnOnceT1TupleMutHostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
+@@ -1280,7 +1305,7 @@ def with_invocation.closure {R : Type} {T1 : Type}
+ _root_.Unit
+ 
+ /-- [chelis_ir::with_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, u32> for chelis_ir::with_invocation::closure<R, T1>[TraitClause@0]}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 203:8-203:59 -/
++    Source: 'tests/src/chelis_ir.rs', lines 275:8-275:59 -/
+ def
+   with_invocation.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
+   {R : Type} {T1 : Type}
+@@ -1304,7 +1329,7 @@ def
+     back)
+ 
+ /-- Trait implementation: [chelis_ir::with_invocation::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, u32> for chelis_ir::with_invocation::closure<R, T1>[TraitClause@0]}]
+-    Source: 'tests/src/chelis_ir.rs', lines 203:8-203:59 -/
++    Source: 'tests/src/chelis_ir.rs', lines 275:8-275:59 -/
+ @[reducible]
+ def
+   with_invocation.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
+@@ -1323,7 +1348,7 @@ def
+ }
+ 
+ /-- [chelis_ir::with_invocation]:
+-    Source: 'tests/src/chelis_ir.rs', lines 200:0-207:1 -/
++    Source: 'tests/src/chelis_ir.rs', lines 272:0-279:1 -/
+ def with_invocation
+   {R : Type} {T1 : Type}
+   (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
+@@ -1334,7 +1359,7 @@ def with_invocation
+     (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
+   := do
+   let (t, cx1, scoped_back) ←
+-    _root_.chelis_ir.lowering_runtime.scoped0HostCxT0T1T2T3T4_specialized_644f005e5eac346358b3b4ab35723c08
++    _root_.chelis_ir.lowering_runtime.scoped0HostCxT0T1T2T3T4_specialized_513fc5847fb7aae1bcb85b5af812cfb5
+       (_root_.chelis_ir.with_invocation.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
+       coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
+       (_root_.chelis_ir.with_invocation.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU32Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613
+@@ -1349,7 +1374,7 @@ def with_invocation
+   _root_.Aeneas.Std.Result.ok (t, cx1, back)
+ 
+ /-- [chelis_ir::with_probe::closure#1]
+-    Source: 'tests/src/chelis_ir.rs', lines 211:34-211:72 -/
++    Source: 'tests/src/chelis_ir.rs', lines 283:34-283:72 -/
+ @[reducible]
+ def with_probe.closure_1 {R : Type} {T1 : Type}
+   (coreopsfunctionFnOnceT1TupleMutHostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
+@@ -1359,7 +1384,7 @@ def with_probe.closure_1 {R : Type} {T1 : Type}
+ _root_.Unit
+ 
+ /-- [chelis_ir::with_probe::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>), T1), T2><'_, '_, u64, ()> for chelis_ir::with_probe::closure#1<R, T1>[TraitClause@0]}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 211:34-211:72 -/
++    Source: 'tests/src/chelis_ir.rs', lines 283:34-283:72 -/
+ def
+   with_probe.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU64Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613.call_once
+   {R : Type} {T1 : Type}
+@@ -1381,7 +1406,7 @@ def
+     { hc with state := { hc.state with log := snapshot } }, back)
+ 
+ /-- Trait implementation: [chelis_ir::with_probe::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>), T1), T2><'_, '_, u64, ()> for chelis_ir::with_probe::closure#1<R, T1>[TraitClause@0]}]
+-    Source: 'tests/src/chelis_ir.rs', lines 211:34-211:72 -/
++    Source: 'tests/src/chelis_ir.rs', lines 283:34-283:72 -/
+ @[reducible]
+ def
+   with_probe.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU64Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613
+@@ -1400,7 +1425,7 @@ def
+ }
+ 
+ /-- [chelis_ir::with_probe::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 211:15-211:32 -/
++    Source: 'tests/src/chelis_ir.rs', lines 283:15-283:32 -/
+ @[reducible]
+ def with_probe.closure {R : Type} {T1 : Type}
+   (coreopsfunctionFnOnceT1TupleMutHostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
+@@ -1410,7 +1435,7 @@ def with_probe.closure {R : Type} {T1 : Type}
+ _root_.Unit
+ 
+ /-- [chelis_ir::with_probe::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, u64> for chelis_ir::with_probe::closure<R, T1>[TraitClause@0]}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 211:15-211:32 -/
++    Source: 'tests/src/chelis_ir.rs', lines 283:15-283:32 -/
+ def
+   with_probe.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU64_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
+   {R : Type} {T1 : Type}
+@@ -1430,7 +1455,7 @@ def
+   _root_.Aeneas.Std.Result.ok (tupled_args.state.log, tupled_args, back)
+ 
+ /-- Trait implementation: [chelis_ir::with_probe::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, u64> for chelis_ir::with_probe::closure<R, T1>[TraitClause@0]}]
+-    Source: 'tests/src/chelis_ir.rs', lines 211:15-211:32 -/
++    Source: 'tests/src/chelis_ir.rs', lines 283:15-283:32 -/
+ @[reducible]
+ def
+   with_probe.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU64_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
+@@ -1449,7 +1474,7 @@ def
+ }
+ 
+ /-- [chelis_ir::with_probe]:
+-    Source: 'tests/src/chelis_ir.rs', lines 210:0-212:1 -/
++    Source: 'tests/src/chelis_ir.rs', lines 282:0-284:1 -/
+ def with_probe
+   {R : Type} {T1 : Type}
+   (coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst
+@@ -1460,7 +1485,7 @@ def with_probe
+     (_root_.chelis_ir.HostCx → _root_.chelis_ir.HostCx))
+   := do
+   let (t, cx1, scoped_back) ←
+-    _root_.chelis_ir.lowering_runtime.scoped0HostCxT0T1T2T3T4_specialized_644f005e5eac346358b3b4ab35723c08
++    _root_.chelis_ir.lowering_runtime.scoped0HostCxT0T1T2T3T4_specialized_513fc5847fb7aae1bcb85b5af812cfb5
+       (_root_.chelis_ir.with_probe.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxU64_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
+       coreopsfunctionFnOnceT1TupleMut0HostCxR_specialized_0e5f18a3f381bb961adc7a9bfb4d98cdInst)
+       (_root_.chelis_ir.with_probe.closure_1.Insts.CoreOpsFunctionFnOncePairMutHostCxU64Tuple_specialized_64d5935a70d0f55ff5526f41ca0be613
+@@ -1475,12 +1500,12 @@ def with_probe
+   _root_.Aeneas.Std.Result.ok (t, cx1, back)
+ 
+ /-- [chelis_ir::host_scenario::closure::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 229:23-233:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 301:23-305:9 -/
+ @[reducible]
+ def host_scenario.closure.closure := _root_.Unit
+ 
+ /-- [chelis_ir::host_scenario::closure::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, core::result::Result<u32, u32>> for chelis_ir::host_scenario::closure::closure}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 229:23-233:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 301:23-305:9 -/
+ def
+   host_scenario.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
+   (c : _root_.chelis_ir.host_scenario.closure.closure)
+@@ -1511,7 +1536,7 @@ def
+   _root_.Aeneas.Std.Result.ok (r, tupled_args1, back)
+ 
+ /-- Trait implementation: [chelis_ir::host_scenario::closure::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, core::result::Result<u32, u32>> for chelis_ir::host_scenario::closure::closure}]
+-    Source: 'tests/src/chelis_ir.rs', lines 229:23-233:9 -/
++    Source: 'tests/src/chelis_ir.rs', lines 301:23-305:9 -/
+ @[reducible]
+ def
+   host_scenario.closure.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
+@@ -1525,12 +1550,12 @@ def
+ }
+ 
+ /-- [chelis_ir::host_scenario::closure]
+-    Source: 'tests/src/chelis_ir.rs', lines 227:37-234:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 299:37-306:5 -/
+ @[reducible]
+ def host_scenario.closure := _root_.Unit
+ 
+ /-- [chelis_ir::host_scenario::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, core::result::Result<u32, u32>> for chelis_ir::host_scenario::closure}::call_once]:
+-    Source: 'tests/src/chelis_ir.rs', lines 227:37-234:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 299:37-306:5 -/
+ def
+   host_scenario.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd.call_once
+   (c : _root_.chelis_ir.host_scenario.closure)
+@@ -1556,7 +1581,7 @@ def
+   _root_.Aeneas.Std.Result.ok (r, tupled_args1, back)
+ 
+ /-- Trait implementation: [chelis_ir::host_scenario::{core::ops::function::FnOnce::<T0, (&0 mut (chelis_ir::HostCx<1>)), T1><'_, '_, core::result::Result<u32, u32>> for chelis_ir::host_scenario::closure}]
+-    Source: 'tests/src/chelis_ir.rs', lines 227:37-234:5 -/
++    Source: 'tests/src/chelis_ir.rs', lines 299:37-306:5 -/
+ @[reducible]
+ def
+   host_scenario.closure.Insts.CoreOpsFunctionFnOnceTupleMutHostCxResultU32U32_specialized_0e5f18a3f381bb961adc7a9bfb4d98cd
+@@ -1569,7 +1594,7 @@ def
+ }
+ 
+ /-- [chelis_ir::host_scenario]:
+-    Source: 'tests/src/chelis_ir.rs', lines 215:0-237:1
++    Source: 'tests/src/chelis_ir.rs', lines 287:0-309:1
+     Visibility: public -/
+ def host_scenario
+   (checked : _root_.Aeneas.Std.U32) (state : _root_.chelis_ir.Session)
+@@ -1589,4 +1614,63 @@ def host_scenario
+     with_invocation_back { cx with state := { cx.state with log := i } }
+   _root_.Aeneas.Std.Result.ok (r, hc.state, hc.runtime, hc.native)
+ 
++/-- [chelis_ir::hook_installation::closure]
++    Source: 'tests/src/chelis_ir.rs', lines 315:54-315:88 -/
++@[reducible]
++def hook_installation.closure := _root_.Unit
++
++/-- [chelis_ir::hook_installation::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, chelis_ir::lowering_runtime::LoweringRuntime, (), core::result::Result<u32, u32>> for chelis_ir::hook_installation::closure}::call_once]:
++    Source: 'tests/src/chelis_ir.rs', lines 315:54-315:88 -/
++def
++  hook_installation.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutTupleResultU32U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c.call_once
++  (c : _root_.chelis_ir.hook_installation.closure)
++  (tupled_args : (_root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime
++  × _root_.Unit)) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime × _root_.Unit)
++  := do
++  let (runtime, _) := tupled_args
++  let (i, tupled_args1) ←
++    _root_.chelis_ir.lowering_runtime.LoweringRuntime.raise runtime 2#u32
++  _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.core.result.Result.Err i,
++    tupled_args1, ())
++
++/-- Trait implementation: [chelis_ir::hook_installation::{core::ops::function::FnOnce::<T0, (&0 mut (T1), &1 mut (T2)), T3><'_, '_, chelis_ir::lowering_runtime::LoweringRuntime, (), core::result::Result<u32, u32>> for chelis_ir::hook_installation::closure}]
++    Source: 'tests/src/chelis_ir.rs', lines 315:54-315:88 -/
++@[reducible]
++def
++  hook_installation.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutTupleResultU32U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c
++  : _root_.Aeneas.Std.core.ops.function.FnOnceMutArgMutArg
++  _root_.chelis_ir.hook_installation.closure
++  _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime _root_.Unit
++  (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) := {
++  call_once :=
++    _root_.chelis_ir.hook_installation.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutTupleResultU32U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c.call_once
++}
++
++/-- [chelis_ir::hook_installation]:
++    Source: 'tests/src/chelis_ir.rs', lines 313:0-319:1
++    Visibility: public -/
++def hook_installation
++  (runtime : _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.core.result.Result _root_.Aeneas.Std.U32
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32) ×
++    _root_.Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime)
++  := do
++  let (first, runtime1) ←
++    _root_.chelis_ir.lowering_runtime.LoweringRuntime.raise_fatal runtime 1#u32
++  let (caught, runtime2, _) ←
++    _root_.chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with
++      _root_.chelis_ir.hook_installation.closure.Insts.CoreOpsFunctionFnOncePairMutLoweringRuntimeMutTupleResultU32U32_specialized_8d158b4d6c3de772f5459eb4ab3f927c
++      runtime1 () ()
++  let (after, runtime3) ←
++    _root_.chelis_ir.lowering_runtime.LoweringRuntime.raise runtime2 3#u32
++  let (quiet, runtime4) ←
++    _root_.chelis_ir.lowering_runtime.LoweringRuntime.raise_fatal runtime3
++      4#u32
++  _root_.Aeneas.Std.Result.ok ((first, caught, after, quiet), runtime4)
++
+ end chelis_ir
+diff --git a/tests/src/chelis_ir.rs b/tests/src/chelis_ir.rs
+index 5a1b439..d847e2b 100644
+--- a/tests/src/chelis_ir.rs
++++ b/tests/src/chelis_ir.rs
+@@ -1,6 +1,8 @@
+ //@ [!lean] skip
+ //@ [lean] subdir=ShellBorrowingStates
+ //@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --opaque-hard=chelis_ir::lowering_runtime::scoped --opaque-hard=chelis_ir::lowering_runtime::grow_stack_if_needed --opaque-hard=chelis_ir::lowering_runtime::LoweringRuntime --opaque-hard=chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::catch_native_unwind
++//@ charon-args=--opaque-hard=chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::observe_raise --opaque-hard=chelis_ir::lowering_runtime::{chelis_ir::lowering_runtime::LoweringRuntime}::set_output_suppressed
++//@ charon-args=--exclude=chelis_ir::lowering_runtime::QUIET_OUTPUT --exclude=chelis_ir::lowering_runtime::install_chelis_panic_hook
+ //@ [lean] aeneas-args=-strict-joins -warnings-as-errors
+ //! The native shell primitives of `chelis_ir::lowering_runtime` (models in
+ //! `Aeneas/Std/ChelisNative.lean`; this crate is named `chelis_ir` so that the
+@@ -14,9 +16,17 @@
+ //! (see `ModelStateABI.threaded_fun_instance`).
+ //! `ShellBorrowingStates/Checks.lean` evaluates the models on the inputs of the
+ //! `native` test module below and compares with the native results.
++//! `hook_installation` is the hook model of the same file. A raise records
++//! `(u, o, installed)`. The native module runs it in a child process before
++//! any other installation of the hook, and records each raise that reaches the
++//! previous hook. The checks compare these raises with the hook entries that
++//! the model predicts as visible.
+ 
+ pub mod lowering_runtime {
++    use std::any::Any;
++    use std::cell::Cell;
+     use std::marker::PhantomData;
++    use std::sync::LazyLock;
+ 
+     /// Primitive (hard-opaque). Model: `let t := enter s; let r := body s;
+     /// exit s t; r`.
+@@ -74,7 +84,8 @@ pub mod lowering_runtime {
+             )
+         }
+ 
+-        /// Primitive (hard-opaque). Model: `f self state` with quiet output.
++        /// Primitive (hard-opaque). Model: install the hook, then `f self state`
++        /// with quiet output.
+         pub(crate) fn catch_native_unwind<S, T, D: Clone + 'static>(
+             &mut self,
+             state: &mut S,
+@@ -82,9 +93,70 @@ pub mod lowering_runtime {
+             marker: impl FnOnce() -> D,
+             message: impl FnOnce(Option<String>) -> D,
+         ) -> Result<T, D> {
+-            let _ = (marker, message);
+-            f(self, state)
++            install_chelis_panic_hook();
++            self.set_output_suppressed(true);
++            let borrowed = std::panic::AssertUnwindSafe((self, state, f));
++            let result = std::panic::catch_unwind(move || {
++                let wrapped = borrowed;
++                let (runtime, state, f) = wrapped.0;
++                f(runtime, state)
++            });
++            QUIET_OUTPUT.with(|quiet| quiet.set(false));
++            let _ = message;
++            match result {
++                Ok(result) => result,
++                Err(_) => Err(marker()),
++            }
++        }
++
++        /// Primitive (hard-opaque). Model: `o := value`.
++        pub(crate) fn set_output_suppressed(&mut self, value: bool) {
++            QUIET_OUTPUT.with(|quiet| quiet.set(value));
++        }
++
++        /// Primitive (hard-opaque). Run the panic hook for an explicit raise.
++        /// Model: append `(u, o, installed)` to the hook trace and return the payload.
++        pub(crate) fn observe_raise<P: Any + Send>(&mut self, payload: P) -> P {
++            let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
++                std::panic::panic_any(payload)
++            }));
++            match raised {
++                Ok(never) => never,
++                Err(caught) => match caught.downcast::<P>() {
++                    Ok(payload) => *payload,
++                    Err(_) => unreachable!("the caught payload is the one just raised"),
++                },
++            }
+         }
++
++        /// `raise_lowering_diagnostic` with a diagnostic reduced to a code.
++        pub(crate) fn raise(&mut self, code: u32) -> u32 {
++            self.observe_raise(code)
++        }
++
++        /// `raise_fatal_lowering_diagnostic`: set quiet output, then raise.
++        pub(crate) fn raise_fatal(&mut self, code: u32) -> u32 {
++            self.set_output_suppressed(true);
++            self.observe_raise(code)
++        }
++    }
++
++    thread_local! {
++        /// `o`: the quiet-output flag of this thread. This test has no `u`.
++        static QUIET_OUTPUT: Cell<bool> = const { Cell::new(false) };
++    }
++
++    /// Install the hook once. The hook keeps the previous hook.
++    pub fn install_chelis_panic_hook() {
++        static CHELIS_PANIC_HOOK_INSTALLED: LazyLock<()> = LazyLock::new(|| {
++            let previous = std::panic::take_hook();
++            std::panic::set_hook(Box::new(move |info| {
++                if !QUIET_OUTPUT.with(Cell::get) {
++                    previous(info);
++                }
++            }));
++        });
++        LazyLock::force(&CHELIS_PANIC_HOOK_INSTALLED);
+     }
+ }
+ 
+@@ -236,6 +308,16 @@ pub fn host_scenario(
+     r
+ }
+ 
++/// The hook installation of `catch_native_unwind`. It raises quietly before the
++/// first catch, raises in the catch, then raises without and with quiet output.
++pub fn hook_installation(runtime: &mut LoweringRuntime) -> (u32, Result<u32, u32>, u32, u32) {
++    let first = runtime.raise_fatal(1);
++    let caught = runtime.catch_lowering_with(&mut (), |runtime, _| Err(runtime.raise(2)));
++    let after = runtime.raise(3);
++    let quiet = runtime.raise_fatal(4);
++    (first, caught, after, quiet)
++}
++
+ #[cfg(test)]
+ mod native {
+     use super::*;
+@@ -272,4 +354,46 @@ mod native {
+         assert_eq!(host_scenario(&6, &mut state, &mut runtime, &mut native), Err(107));
+         assert_eq!((state.invocation, state.log, native), (9, 5, 17));
+     }
++
++    const HOOK_CHILD: &str = "CHELIS_NATIVE_HOOK_INSTALLATION_CHILD";
++    const HOOK_CHILD_DONE: &str = "hook installation observations passed";
++
++    thread_local! {
++        /// The raise codes that reach the previous hook. The hook runs on the
++        /// thread of the raise.
++        static VISIBLE: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
++    }
++
++    #[test]
++    fn hook_installation_is_visible_before_the_first_catch() {
++        if std::env::var_os(HOOK_CHILD).is_some() {
++            std::panic::set_hook(Box::new(|info| {
++                if let Some(code) = info.payload().downcast_ref::<u32>() {
++                    VISIBLE.with(|visible| visible.borrow_mut().push(*code));
++                }
++            }));
++            let mut runtime = LoweringRuntime::for_test();
++            assert_eq!(hook_installation(&mut runtime), (1, Err(102), 3, 4));
++            assert_eq!(VISIBLE.with(|visible| visible.borrow().clone()), [1, 3]);
++            println!("{HOOK_CHILD_DONE}");
++            return;
++        }
++        // A child process isolates the process-global hook installation.
++        let child = std::process::Command::new(std::env::current_exe().unwrap())
++            .args([
++                "--exact",
++                "native::hook_installation_is_visible_before_the_first_catch",
++                "--nocapture",
++            ])
++            .env(HOOK_CHILD, "1")
++            .output()
++            .unwrap();
++        let stdout = String::from_utf8_lossy(&child.stdout);
++        assert!(
++            child.status.success() && stdout.lines().any(|line| line == HOOK_CHILD_DONE),
++            "hook child failed: {}\n{stdout}\n{}",
++            child.status,
++            String::from_utf8_lossy(&child.stderr),
++        );
++    }
+ }

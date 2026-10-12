@@ -1,0 +1,1233 @@
+# aeneas integration step 172 after cba11f3beb: commit b121134c1176bbdcfa81da0cd6fed13f266a598b
+# first parent 2011a164f0b460cda64461f20c64b47ede5c7dfe, merged ed36ad741bd5673a8e374b0afcda475963199927
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge fix/cross-chunk-sort ed36ad7 into int/r37
+
+diff --git a/src/Translate.ml b/src/Translate.ml
+index c8fc4e0..ec0c091 100644
+--- a/src/Translate.ml
++++ b/src/Translate.ml
+@@ -935,6 +935,7 @@ let sc_record (ctx : gen_ctx) (id : item_id) : unit =
+                       List.map sc_digest (Option.value sigs ~default:[]);
+                   })
+                 i.members;
++            sort_order = None;
+           }
+     | _ ->
+         [%craise_opt_span] None
+@@ -1006,7 +1007,9 @@ let sc_check_external_views (ctx : gen_ctx) : unit =
+   in
+   (* A view which cannot be computed because of a previous error (which is
+      registered: the run fails) is not checked *)
++  let checked = Hashtbl.create 64 in
+   let check (id : item_id) =
++    Hashtbl.replace checked id ();
+     try [%recover_internal_errors_opt_span] None (fun () -> check_view id)
+     with CFailure _ -> ()
+   in
+@@ -1026,7 +1029,25 @@ let sc_check_external_views (ctx : gen_ctx) : unit =
+               | _ -> check id)
+           | _ -> check id)
+         (Charon.GAstUtils.declaration_group_to_list g))
+-    ctx.crate.declarations
++    ctx.crate.declarations;
++  (* A sort admission used the derived-order evidence of the owner of these
++     external types (see [SortContracts]). The fields of each type in this
++     chunk must be the fields of the owner's view, which the derived impls
++     compare. *)
++  List.iter
++    (fun id ->
++      let translated =
++        match id with
++        | IdType tid -> Pure.TypeDeclId.Map.mem tid ctx.trans_types
++        | _ -> false
++      in
++      if not translated then
++        SC.fail
++          ("Separate compilation: a sort admission depends on the view of ["
++          ^ Option.value (SC.item_key ctx.crate id) ~default:"<unnamed>"
++          ^ "], but this chunk does not translate it")
++      else if not (Hashtbl.mem checked id) then check id)
++    !SC.sort_order_views
+ 
+ (** Export a type declaration.
+ 
+diff --git a/src/llbc/SeparateCompilation.ml b/src/llbc/SeparateCompilation.ml
+index 31f1acc..b4c1478 100644
+--- a/src/llbc/SeparateCompilation.ml
++++ b/src/llbc/SeparateCompilation.ml
+@@ -55,6 +55,33 @@ type fun_facts = {
+           which therefore read as [None]. *)
+ }
+ 
++(** Evidence that a trait implementation is a reviewed derived [Ord] or
++    [PartialOrd] implementation of a non-generic type (see [SortContracts]).
++    Only the chunk which emits the implementation records it, from its own LLBC
++    view. The LLBC of a later chunk can contain the type without its
++    implementations. That chunk uses the evidence only after
++    [external_derived_order] checks it against the other manifest entries.
++
++    [Translate] then checks the view of the type in that chunk against the
++    owner's. [type_fingerprint] is the fingerprint of the type entry when the
++    owner wrote its manifest. For [Ord], [partial_ord_impl_key] is the key of
++    the [PartialOrd] implementation of its supertrait clause. *)
++type sort_order_impl = {
++  type_key : string;
++  type_fingerprint : string;
++  trait_name : string;
++  partial_ord_impl_key : string option;
++}
++
++(** A derived implementation which this chunk reviewed: its evidence without
++    the type fingerprint. [write_manifest] takes the fingerprint from the
++    entry of the type. *)
++type sort_order_candidate = {
++  candidate_type_key : string;
++  candidate_trait_name : string;
++  candidate_partial_ord_impl_key : string option;
++}
++
+ type entry = {
+   key : string;
+   lean_module : string;  (** The Lean module which emits the declaration *)
+@@ -71,6 +98,9 @@ type entry = {
+   members : members option;
+       (** Trait declarations and implementations (absent from the manifests
+           which predate them) *)
++  sort_order : sort_order_impl option;
++      (** Trait implementations: the reviewed derived-order evidence. Older
++          manifests and the other implementations have none. *)
+ }
+ 
+ (** The interface of a trait declaration or implementation, member by member:
+@@ -178,6 +208,16 @@ let emitted : (string, entry) Hashtbl.t = Hashtbl.create 1024
+ 
+ let emitted_order : string list ref = ref []
+ 
++(** The derived implementations which this chunk reviewed, by key (see
++    [register_sort_order_impl]) *)
++let sort_order_candidates : (string, sort_order_candidate) Hashtbl.t =
++  Hashtbl.create 32
++
++(** The external types whose view in this chunk an admitted sort depends on
++    (see [require_sort_order_view]). [Translate] checks each of them against
++    the entry of its owner. *)
++let sort_order_views : item_id list ref = ref []
++
+ (** Whether an incomplete manifest was loaded (only with [-diagnostic-manifest]):
+     the manifest of this chunk is then incomplete too *)
+ let loaded_incomplete : bool ref = ref false
+@@ -204,6 +244,82 @@ let external_collection_obligations (id : FunDeclId.id) :
+     the inconsistencies are reported, even with [-abort-on-error]. *)
+ let fail (msg : string) : unit = Errors.push_error __FILE__ __LINE__ None msg
+ 
++let has_prefix (prefix : string) (s : string) : bool =
++  String.length s >= String.length prefix
++  && String.sub s 0 (String.length prefix) = prefix
++
++let has_suffix (suffix : string) (s : string) : bool =
++  let n = String.length s in
++  let k = String.length suffix in
++  n >= k && String.sub s (n - k) k = suffix
++
++let ord_trait = "core::cmp::Ord"
++let partial_ord_trait = "core::cmp::PartialOrd"
++
++(** The end of the key of an implementation of [trait_name] for the type of
++    key [type_key]. Only the module path of the implementation comes before it.
++    The two forms are [::{core::cmp::Ord for T}] and
++    [::{core::cmp::PartialOrd<T> for T}]. *)
++let sort_order_impl_key_suffix (type_key : string) (trait_name : string) :
++    string option =
++  if not (has_prefix "type " type_key) then None
++  else
++    let ty = String.sub type_key 5 (String.length type_key - 5) in
++    if trait_name = ord_trait then Some ("::{core::cmp::Ord for " ^ ty ^ "}")
++    else if trait_name = partial_ord_trait then
++      Some ("::{core::cmp::PartialOrd<" ^ ty ^ "> for " ^ ty ^ "}")
++    else None
++
++(** Whether [impl_key] is the key of an implementation of [trait_name] for the
++    type of key [type_key] *)
++let names_sort_order_impl (type_key : string) (trait_name : string)
++    (impl_key : string) : bool =
++  has_prefix "trait_impl " impl_key
++  &&
++  match sort_order_impl_key_suffix type_key trait_name with
++  | Some suffix -> has_suffix suffix impl_key
++  | None -> false
++
++(** Whether the evidence of the implementation [impl_key] names an
++    implementation of its trait for its type. The evidence of an [Ord]
++    implementation must also name a [PartialOrd] implementation for that
++    type. *)
++let sort_order_well_formed (impl_key : string) (type_key : string)
++    (trait_name : string) (partial_ord_impl_key : string option) : bool =
++  names_sort_order_impl type_key trait_name impl_key
++  &&
++  match partial_ord_impl_key with
++  | Some key ->
++      trait_name = ord_trait
++      && names_sort_order_impl type_key partial_ord_trait key
++  | None -> trait_name = partial_ord_trait
++
++(** [SortContracts] calls this function for each derived [Ord] or [PartialOrd]
++    implementation which it reviewed in the LLBC of this chunk.
++    [write_manifest] attaches the evidence to the entry of the implementation
++    if this chunk emits it. This function records no evidence whose keys do
++    not name the implementation of the trait for the type. A later chunk then
++    rejects each sort which needs that evidence. *)
++let register_sort_order_impl ~(impl_key : string) ~(type_key : string)
++    ~(trait_name : string) ~(partial_ord_impl_key : string option) : unit =
++  if
++    enabled ()
++    && sort_order_well_formed impl_key type_key trait_name partial_ord_impl_key
++  then
++    let candidate =
++      {
++        candidate_type_key = type_key;
++        candidate_trait_name = trait_name;
++        candidate_partial_ord_impl_key = partial_ord_impl_key;
++      }
++    in
++    match Hashtbl.find_opt sort_order_candidates impl_key with
++    | Some previous when previous <> candidate ->
++        fail
++          ("Separate compilation: two different derived-order reviews of ["
++         ^ impl_key ^ "]")
++    | _ -> Hashtbl.replace sort_order_candidates impl_key candidate
++
+ let collection_obligation_to_json (o : collection_obligation) : Yojson.Basic.t =
+   `Assoc
+     [
+@@ -233,6 +349,18 @@ let facts_to_json (f : fun_facts) : Yojson.Basic.t =
+     | Some l ->
+         [ ("collection_obligations", `List (List.map collection_obligation_to_json l)) ])
+ 
++let sort_order_impl_to_json (s : sort_order_impl) : Yojson.Basic.t =
++  `Assoc
++    [
++      ("type_key", `String s.type_key);
++      ("type_fingerprint", `String s.type_fingerprint);
++      ("trait", `String s.trait_name);
++      ( "partial_ord_impl_key",
++        match s.partial_ord_impl_key with
++        | None -> `Null
++        | Some key -> `String key );
++    ]
++
+ let entry_to_json (e : entry) : Yojson.Basic.t =
+   let strings l = `List (List.map (fun s -> `String s) l) in
+   `Assoc
+@@ -248,6 +376,9 @@ let entry_to_json (e : entry) : Yojson.Basic.t =
+     @ (match e.methods with
+       | None -> []
+       | Some l -> [ ("methods", strings l) ])
++    @ (match e.sort_order with
++      | None -> []
++      | Some s -> [ ("sort_order", sort_order_impl_to_json s) ])
+     @
+     match e.members with
+     | None -> []
+@@ -263,6 +394,29 @@ let entry_to_json (e : entry) : Yojson.Basic.t =
+ 
+ exception Malformed of string
+ 
++let sort_order_impl_of_json (entry_key : string) (js : Yojson.Basic.t) :
++    sort_order_impl =
++  let open Yojson.Basic.Util in
++  let type_key = to_string (member "type_key" js) in
++  let type_fingerprint = to_string (member "type_fingerprint" js) in
++  let trait_name = to_string (member "trait" js) in
++  let partial_ord_impl_key =
++    match member "partial_ord_impl_key" js with
++    | `Null -> None
++    | key -> Some (to_string key)
++  in
++  if
++    type_fingerprint = ""
++    || not
++         (sort_order_well_formed entry_key type_key trait_name
++            partial_ord_impl_key)
++  then
++    raise
++      (Malformed
++         ("the derived-order evidence of [" ^ entry_key
++        ^ "] does not name an Ord or PartialOrd implementation of its type"))
++  else { type_key; type_fingerprint; trait_name; partial_ord_impl_key }
++
+ let facts_of_json (js : Yojson.Basic.t) : fun_facts =
+   let open Yojson.Basic.Util in
+   let ints js = List.map to_int (to_list js) in
+@@ -292,10 +446,11 @@ let facts_of_json (js : Yojson.Basic.t) : fun_facts =
+ let entry_of_json (js : Yojson.Basic.t) : entry =
+   let open Yojson.Basic.Util in
+   let strings js = List.map to_string (to_list js) in
++  let key = to_string (member "key" js) in
+   let lean_names = strings (member "names" js) in
+   if lean_names = [] then raise (Malformed "an entry has no Lean name");
+   {
+-    key = to_string (member "key" js);
++    key;
+     lean_module = to_string (member "module" js);
+     lean_names;
+     fingerprint = to_string (member "fingerprint" js);
+@@ -316,6 +471,10 @@ let entry_of_json (js : Yojson.Basic.t) : entry =
+               header = to_string (member "header" m);
+               method_fingerprints = strings (member "method_fingerprints" m);
+             });
++    sort_order =
++      (match member "sort_order" js with
++      | `Null -> None
++      | s -> Some (sort_order_impl_of_json key s));
+   }
+ 
+ let namespace_to_json () : Yojson.Basic.t =
+@@ -441,6 +600,98 @@ let init (crate : crate) : unit =
+         | _ -> ())
+       externals)
+ 
++(** {1 Derived sort orders} *)
++
++(** The evidence of the earlier chunks for the external type [id]. The result
++    is the pair of the keys of its derived [Ord] implementation and of the
++    [PartialOrd] implementation of its supertrait clause. Else it is the
++    reason for a rejection. Each evidence entry must record the fingerprint of
++    the type entry in the manifests. Exactly one entry must record an [Ord]
++    implementation. Each [PartialOrd] entry must be the implementation which it
++    names.
++
++    The caller checks the implementations and methods of its own LLBC against
++    these keys. [Translate] checks the view of the type in this chunk against
++    its entry (see [require_sort_order_view]). *)
++let external_derived_order (id : item_id) : (string * string, string) result =
++  match external_entry id with
++  | None ->
++      Error "has no Ord impl in the crate, and no -external manifest emits it"
++  | Some t when not (has_prefix "type " t.key) ->
++      Error ("has the external entry [" ^ t.key ^ "], which is not a type")
++  | Some t -> (
++      let evidence =
++        List.sort compare
++          (Hashtbl.fold
++             (fun key (e : entry) found ->
++               match e.sort_order with
++               | Some s when s.type_key = t.key -> (key, s) :: found
++               | _ -> found)
++             loaded [])
++      in
++      let with_trait name =
++        List.filter
++          (fun (_, (s : sort_order_impl)) -> s.trait_name = name)
++          evidence
++      in
++      let stale =
++        List.filter
++          (fun (_, (s : sort_order_impl)) -> s.type_fingerprint <> t.fingerprint)
++          evidence
++      in
++      let partials = with_trait partial_ord_trait in
++      let owner = " (owner module " ^ t.lean_module ^ ")" in
++      match (stale, with_trait ord_trait) with
++      | (key, s) :: _, _ ->
++          Error
++            ("has stale derived-order evidence: the entry of [" ^ key
++           ^ "] records the type fingerprint " ^ s.type_fingerprint
++           ^ ", but the manifests emit [" ^ t.key ^ "] with the fingerprint "
++           ^ t.fingerprint ^ owner)
++      | [], [] ->
++          Error
++            ("has no Ord impl in the crate, and no manifest records \
++              derived-order evidence for an Ord impl of [" ^ t.key ^ "]"
++           ^ owner)
++      | [], (_ :: _ :: _ as ords) ->
++          Error
++            ("has several Ord impls with derived-order evidence: "
++            ^ String.concat ", " (List.map (fun (k, _) -> "[" ^ k ^ "]") ords))
++      | [], (ord_key, (ord : sort_order_impl)) :: [] -> (
++          match ord.partial_ord_impl_key with
++          | None ->
++              Error
++                ("has Ord evidence in [" ^ ord_key
++               ^ "] without a PartialOrd implementation")
++          | Some partial_key -> (
++              match
++                ( Hashtbl.mem loaded partial_key,
++                  List.mem_assoc partial_key partials,
++                  List.filter (fun (k, _) -> k <> partial_key) partials )
++              with
++              | false, _, _ ->
++                  Error
++                    ("needs the PartialOrd impl [" ^ partial_key
++                   ^ "], which the evidence of [" ^ ord_key
++                   ^ "] names, but no manifest emits it")
++              | true, false, _ ->
++                  Error
++                    ("needs derived-order evidence for the PartialOrd impl ["
++                   ^ partial_key ^ "], which the evidence of [" ^ ord_key
++                   ^ "] names, but its manifest entry has none")
++              | true, true, (other, _) :: _ ->
++                  Error
++                    ("has PartialOrd evidence in [" ^ other
++                   ^ "], but the Ord evidence of [" ^ ord_key ^ "] names ["
++                   ^ partial_key ^ "]")
++              | true, true, [] -> Ok (ord_key, partial_key))))
++
++(** Record that an admitted sort depends on the view of the external type
++    [id] in this chunk *)
++let require_sort_order_view (id : item_id) : unit =
++  if not (List.mem id !sort_order_views) then
++    sort_order_views := id :: !sort_order_views
++
+ (** Only the owner chunk translates the body of an external function. *)
+ let hide_external_bodies (crate : crate) : crate =
+   if Hashtbl.length externals = 0 then crate
+@@ -512,9 +763,42 @@ let check_emitted () : unit =
+     complete only if the chunk has no error and uses no incomplete manifest;
+     incomplete manifests are written only with [-diagnostic-manifest]. *)
+ let write_manifest (file : string) ~(complete : bool) : unit =
++  let find_entry (key : string) : entry option =
++    match Hashtbl.find_opt emitted key with
++    | Some e -> Some e
++    | None -> Hashtbl.find_opt loaded key
++  in
++  let sort_order_for (e : entry) : sort_order_impl option =
++    match Hashtbl.find_opt sort_order_candidates e.key with
++    | None -> None
++    | Some candidate -> (
++        match find_entry candidate.candidate_type_key with
++        | None -> None
++        | Some type_entry ->
++            let partial_ord_impl_key =
++              match
++                ( candidate.candidate_trait_name,
++                  candidate.candidate_partial_ord_impl_key )
++              with
++              | "core::cmp::PartialOrd", None -> Some None
++              | "core::cmp::Ord", Some key -> Some (Some key)
++              | _ -> None
++            in
++            Option.map
++              (fun partial_ord_impl_key ->
++                {
++                  type_key = candidate.candidate_type_key;
++                  type_fingerprint = type_entry.fingerprint;
++                  trait_name = candidate.candidate_trait_name;
++                  partial_ord_impl_key;
++                })
++              partial_ord_impl_key)
++  in
+   let entries =
+     List.map
+-      (fun key -> entry_to_json (Hashtbl.find emitted key))
++      (fun key ->
++        let e = Hashtbl.find emitted key in
++        entry_to_json { e with sort_order = sort_order_for e })
+       (List.rev !emitted_order)
+   in
+   let header =
+diff --git a/src/llbc/SortContracts.ml b/src/llbc/SortContracts.ml
+index 33ab7b2..77380e9 100644
+--- a/src/llbc/SortContracts.ml
++++ b/src/llbc/SortContracts.ml
+@@ -13,10 +13,19 @@
+     [String] and [BigUint], for references, boxes, slices, arrays, tuples,
+     [Option] and [Reverse] of such types, and for non-generic crate types whose
+     [Ord] and [PartialOrd] impls are derived and whose fields all have such
+-    types (the derived [cmp] and [partial_cmp] compare the variants, then the
+-    fields in order; the models call [lt] of the [PartialOrd] impl, as the
+-    native entry points do). A derived impl is the one rustc marks
+-    [#[automatically_derived]], which Charon keeps as an unknown attribute.
++    types. The derived [cmp] and [partial_cmp] compare the variants, then the
++    fields in order. The models call [lt] of the [PartialOrd] impl, as the
++    native entry points do. Charon marks each derived impl with
++    [#[automatically_derived]], which it keeps as an unknown attribute.
++
++    The LLBC of a later chunk can contain such a type without its impls, which
++    an earlier chunk owns. Then the evidence in the manifest of that chunk
++    replaces the attribute (see [SeparateCompilation.external_derived_order]).
++    Each [Ord] or [PartialOrd] impl of the type in this chunk must be an
++    external, derived impl which the evidence names. Each of their methods in
++    this chunk must belong to such an impl. [Translate] checks the fields of
++    the type in this chunk against the owner's. Without that evidence, the
++    sort is rejected.
+ 
+     [sort_unstable_by] is admitted when its comparator is a closure whose body
+     returns [Ord::cmp(a, b)] (ascending) or [Ord::cmp(b, a)] (descending) of its
+@@ -146,31 +155,194 @@ let check (crate : crate) : crate =
+           | _ -> false)
+         impl.item_meta.attr_info.attributes
+     in
+-    let ord_impl (adt : TypeDeclId.id) =
++    let ord_impls (adt : TypeDeclId.id) =
+       TraitImplId.Map.fold
+-        (fun _ (impl : trait_impl) found ->
+-          match found with
+-          | Some _ -> found
+-          | None -> (
+-              if trait_name impl.impl_trait.id <> "core::cmp::Ord" then None
+-              else
+-                match impl.impl_trait.generics.types with
+-                | [ TAdt { id = TAdtId id; _ } ] when id = adt -> Some impl
+-                | _ -> None))
+-        crate.trait_impls None
++        (fun impl_id (impl : trait_impl) found ->
++          if trait_name impl.impl_trait.id <> "core::cmp::Ord" then found
++          else
++            match impl.impl_trait.generics.types with
++            | [ TAdt { id = TAdtId impl_adt; _ } ] when impl_adt = adt ->
++                (impl_id, impl) :: found
++            | _ -> found)
++        crate.trait_impls []
+     in
+-    (* The [PartialOrd] impl that an [Ord] impl extends (its supertrait clause):
+-       the models, like the native entry points, call its [lt]. *)
++    (* Resolve the exact PartialOrd implementation referenced by Ord's
++       supertrait clause. The identity, not just the trait name, is needed by
++       separate compilation. *)
+     let partial_ord_impl (impl : trait_impl) =
+-      List.find_map
+-        (fun (tr : trait_ref) ->
+-          match tr.kind with
+-          | TraitImpl impl_ref
+-            when trait_name tr.trait_decl_ref.binder_value.id
+-                 = "core::cmp::PartialOrd" ->
+-              TraitImplId.Map.find_opt impl_ref.id crate.trait_impls
+-          | _ -> None)
+-        impl.implied_trait_refs
++      let refs =
++        List.filter
++          (fun (tr : trait_ref) ->
++            trait_name tr.trait_decl_ref.binder_value.id
++            = "core::cmp::PartialOrd")
++          impl.implied_trait_refs
++      in
++      match refs with
++      | [ { kind = TraitImpl impl_ref; _ } ] ->
++          Option.map
++            (fun partial -> (impl_ref.id, partial))
++            (TraitImplId.Map.find_opt impl_ref.id crate.trait_impls)
++      | _ -> None
++    in
++    let partial_ord_self_is (adt : TypeDeclId.id) (impl : trait_impl) =
++      trait_name impl.impl_trait.id = "core::cmp::PartialOrd"
++      &&
++      match impl.impl_trait.generics.types with
++      | TAdt { id = TAdtId impl_adt; _ } :: _ -> impl_adt = adt
++      | _ -> false
++    in
++    let non_generic_type (adt : TypeDeclId.id) =
++      match TypeDeclId.Map.find_opt adt crate.type_decls with
++      | Some decl ->
++          decl.generics.types = [] && decl.generics.const_generics = []
++      | None -> false
++    in
++    let register_order_facts () =
++      if SeparateCompilation.enabled () then (
++        let register impl_id adt trait_name partial_ord_impl_key =
++          match
++            ( SeparateCompilation.item_key crate (IdTraitImpl impl_id),
++              SeparateCompilation.item_key crate (IdType adt) )
++          with
++          | Some impl_key, Some type_key ->
++              SeparateCompilation.register_sort_order_impl ~impl_key ~type_key
++                ~trait_name ~partial_ord_impl_key
++          | _ -> ()
++        in
++        TraitImplId.Map.iter
++          (fun impl_id (impl : trait_impl) ->
++            if
++              not (SeparateCompilation.is_external (IdTraitImpl impl_id))
++              && derived impl
++              && trait_name impl.impl_trait.id = "core::cmp::PartialOrd"
++            then
++              match impl.impl_trait.generics.types with
++              | TAdt { id = TAdtId adt; _ } :: _ when non_generic_type adt ->
++                  register impl_id adt "core::cmp::PartialOrd" None
++              | _ -> ())
++          crate.trait_impls;
++        TraitImplId.Map.iter
++          (fun impl_id (impl : trait_impl) ->
++            if
++              not (SeparateCompilation.is_external (IdTraitImpl impl_id))
++              && derived impl
++              && trait_name impl.impl_trait.id = "core::cmp::Ord"
++            then
++              match impl.impl_trait.generics.types with
++              | [ TAdt { id = TAdtId adt; _ } ] when non_generic_type adt -> (
++                  match partial_ord_impl impl with
++                  | Some (partial_id, partial)
++                    when derived partial && partial_ord_self_is adt partial ->
++                      let partial_key =
++                        SeparateCompilation.item_key crate
++                          (IdTraitImpl partial_id)
++                      in
++                      Option.iter
++                        (fun partial_ord_impl_key ->
++                          register impl_id adt "core::cmp::Ord"
++                            (Some partial_ord_impl_key))
++                        partial_key
++                  | _ -> ())
++              | _ -> ())
++          crate.trait_impls)
++    in
++    register_order_facts ();
++    (* The evidence of the earlier chunks for an external type without an Ord
++       impl in this chunk, checked against the LLBC of this chunk (see the
++       header). The result of each type is kept. *)
++    let external_orders = Hashtbl.create 8 in
++    let external_order (adt : TypeDeclId.id) : (unit, string) result =
++      let trait_name_opt id =
++        Option.map
++          (fun (d : trait_decl) -> name_of d.item_meta.name)
++          (TraitDeclId.Map.find_opt id crate.trait_decls)
++      in
++      let is_self (ty : ty) =
++        match ty with
++        | TAdt tref -> tref.id = TAdtId adt
++        | _ -> false
++      in
++      (* The expected key of an impl of [trait_id] whose type arguments are
++         [types], if it is an Ord impl or a PartialOrd<T> impl of the type *)
++      let expected_impl ord_key partial_key trait_id (types : ty list) =
++        match (trait_name_opt trait_id, types) with
++        | Some "core::cmp::Ord", self_ty :: [] when is_self self_ty ->
++            Some ord_key
++        | Some "core::cmp::PartialOrd", self_ty :: rhs :: []
++          when is_self self_ty && is_self rhs ->
++            Some partial_key
++        | _ -> None
++      in
++      let check ord_key partial_key =
++        let impl_error =
++          TraitImplId.Map.fold
++            (fun impl_id (impl : trait_impl) found ->
++              match
++                ( found,
++                  expected_impl ord_key partial_key impl.impl_trait.id
++                    impl.impl_trait.generics.types )
++              with
++              | Some _, _ | None, None -> found
++              | None, Some expected ->
++                  let key =
++                    SeparateCompilation.item_key crate (IdTraitImpl impl_id)
++                  in
++                  if
++                    key = Some expected
++                    && SeparateCompilation.is_external (IdTraitImpl impl_id)
++                    && derived impl
++                  then None
++                  else
++                    Some
++                      ("has the impl "
++                      ^ Option.value key ~default:"<unnamed>"
++                      ^ " in this chunk, which is not the external derived \
++                         impl [" ^ expected
++                      ^ "] of the owner evidence"))
++            crate.trait_impls None
++        in
++        let method_error =
++          FunDeclId.Map.fold
++            (fun fid (f : fun_decl) found ->
++              match (found, f.src) with
++              | None, TraitImplItem (_, trait_ref, method_name, _) -> (
++                  match
++                    expected_impl ord_key partial_key trait_ref.id
++                      trait_ref.generics.types
++                  with
++                  | None -> None
++                  | Some expected ->
++                      let path =
++                        String.sub expected 11 (String.length expected - 11)
++                      in
++                      let expected_fun = "fun " ^ path ^ "::" ^ method_name in
++                      let key = SeparateCompilation.item_key crate (IdFun fid) in
++                      if key = Some expected_fun then None
++                      else
++                        Some
++                          ("has the method "
++                          ^ Option.value key ~default:"<unnamed>"
++                          ^ " in this chunk, which is not the method ["
++                          ^ expected_fun ^ "] of the owner evidence"))
++              | _ -> found)
++            crate.fun_decls None
++        in
++        match (impl_error, method_error) with
++        | Some why, _ | None, Some why -> Stdlib.Error why
++        | None, None ->
++            let () = SeparateCompilation.require_sort_order_view (IdType adt) in
++            Stdlib.Ok ()
++      in
++      match Hashtbl.find_opt external_orders adt with
++      | Some result -> result
++      | None ->
++          let result =
++            match SeparateCompilation.external_derived_order (IdType adt) with
++            | Stdlib.Error why -> Stdlib.Error why
++            | Ok (ord_key, partial_key) -> check ord_key partial_key
++          in
++          let () = Hashtbl.replace external_orders adt result in
++          result
+     in
+     (* Generic std types whose [Ord] and [PartialOrd] are total orders with
+        [Equal] exactly for indistinguishable values when their type arguments'
+@@ -209,31 +381,40 @@ let check (crate : crate) : crate =
+           else if generics.types <> [] || generics.const_generics <> [] then
+             unsupported "is generic"
+           else
+-            match ord_impl id with
+-            | None -> unsupported "has no Ord impl in the crate"
+-            | Some impl when not (derived impl) ->
+-                unsupported
+-                  "has an Ord impl without #[automatically_derived] (a \
+-                   hand-written Equal may hold between distinct values)"
+-            | Some impl -> (
+-                (match partial_ord_impl impl with
+-                | Some partial when derived partial -> ()
+-                | Some _ ->
+-                    unsupported
+-                      "has a PartialOrd impl without #[automatically_derived] \
+-                       (its lt may disagree with the derived cmp)"
+-                | None -> unsupported "has no PartialOrd impl in the crate");
+-                let fields =
+-                  match decl.kind with
+-                  | Struct fields -> fields
+-                  | Enum variants ->
+-                      List.concat_map (fun (v : variant) -> v.fields) variants
+-                  | _ -> unsupported "is not a struct or an enum"
+-                in
+-                List.iter
+-                  (fun (field : field) ->
+-                    structural span (id :: visiting) field.field_ty)
+-                  fields))
++          let recurse_fields () =
++            let fields =
++              match decl.kind with
++              | Struct fields -> fields
++              | Enum variants ->
++                  List.concat_map (fun (v : variant) -> v.fields) variants
++              | _ -> unsupported "is not a struct or an enum"
++            in
++            List.iter
++              (fun (field : field) ->
++                structural span (id :: visiting) field.field_ty)
++              fields
++          in
++          match ord_impls id with
++          | [] -> (
++              match external_order id with
++              | Stdlib.Ok () -> recurse_fields ()
++              | Stdlib.Error why -> unsupported why)
++          | [ (_, impl) ] when not (derived impl) ->
++              unsupported
++                "has an Ord impl without #[automatically_derived] (a \
++                 hand-written Equal may hold between distinct values)"
++          | [ (_, impl) ] -> (
++              match partial_ord_impl impl with
++              | Some (_, partial)
++                when derived partial && partial_ord_self_is id partial ->
++                  recurse_fields ()
++              | Some _ ->
++                  unsupported
++                    "has a PartialOrd impl without #[automatically_derived] \
++                     for Ord's exact supertrait implementation (its lt may \
++                     disagree with the derived cmp)"
++              | None -> unsupported "has no exact PartialOrd impl in the crate")
++          | _ -> unsupported "has multiple Ord impls in the crate")
+       | _ -> unsupported "is not a reviewed Ord type"
+     in
+     let structural = structural_with unstable_message in
+diff --git a/tests/README.md b/tests/README.md
+index e417e11..feebe04 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -88,3 +88,10 @@ and the generated files can be checked by the backend like the files of any othe
+ The separate compilation options (`-canonical-names`, `-emit-manifest`, `-external`,
+ `-diagnostic-manifest`) need several `charon`/`aeneas` calls per test. Their tests are the scripts
+ of `tests/separate-compilation/`, run by `make separate-compilation-tests` (part of `make test`).
++
++`sort.sh` checks the derived-order evidence of the manifests. A later chunk sorts values of a
++type whose order derives from a type of an earlier chunk. Lean guards compare its results with
++native Rust, and a flipped guard must fail. The script also changes the manifest of the owner. The
++later chunk must reject stale, missing, duplicate, mismatched and malformed evidence, a stale type
++view and a hand-written order. It needs `lake` and the built Lean library (`AENEAS_LEAN`, default
++`backends/lean`).
+diff --git a/tests/separate-compilation/sort.rs b/tests/separate-compilation/sort.rs
+new file mode 100644
+index 0000000..c069a25
+--- /dev/null
++++ b/tests/separate-compilation/sort.rs
+@@ -0,0 +1,181 @@
++// Cross-chunk derived orders (see sort.sh). The owner chunk emits the types
++// and the Ord, PartialOrd, PartialEq and Eq impls of Source, Canon, Parity and
++// Holder. The consumer chunk keeps them opaque, as a later chunk of a
++// workspace does. The shapes follow chelis_ir::capacity_key, where
++// ValidityDomain::new sorts CapacityPredicate values.
++use std::cmp::Ordering;
++
++// The owner derives the order of Source (as CapacitySource).
++#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
++pub enum Source {
++    Axis { scope: u32, axis: u32 },
++    Scalar { scope: u32 },
++}
++
++// The owner derives the order of Canon (as CanonicalCapacity). Its Ord impl is
++// in the LLBC of the consumer, but the impls of Source are not.
++#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
++pub enum Canon {
++    Literal(u32),
++    Src(Source),
++}
++
++// The owner writes the order of Parity by hand: Equal holds between distinct
++// values.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct Parity(pub u32);
++
++impl PartialOrd for Parity {
++    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
++        Some(self.cmp(other))
++    }
++}
++
++impl Ord for Parity {
++    fn cmp(&self, other: &Self) -> Ordering {
++        (self.0 % 2).cmp(&(other.0 % 2))
++    }
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
++pub struct Holder {
++    pub parity: Parity,
++}
++
++// The consumer derives the order of Pred (as CapacityPredicate).
++#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
++pub enum Pred {
++    NonZero(Canon),
++    Divides { dividend: Canon, divisor: Canon },
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
++pub struct Wrapped {
++    pub holder: Holder,
++    pub tag: u32,
++}
++
++fn source_code(s: &Source) -> u32 {
++    match s {
++        Source::Axis { scope, axis } => 100 + *scope * 10 + *axis,
++        Source::Scalar { scope } => 200 + *scope,
++    }
++}
++
++fn canon_code(c: &Canon) -> u32 {
++    match c {
++        Canon::Literal(n) => *n,
++        Canon::Src(s) => 1000 + source_code(s),
++    }
++}
++
++pub fn pred_code(p: &Pred) -> u32 {
++    match p {
++        Pred::NonZero(c) => canon_code(c),
++        Pred::Divides { dividend, divisor } => 100000 + canon_code(dividend) * 2000 + canon_code(divisor),
++    }
++}
++
++fn preds() -> Vec<Pred> {
++    vec![
++        Pred::Divides { dividend: Canon::Literal(2), divisor: Canon::Src(Source::Axis { scope: 1, axis: 0 }) },
++        Pred::NonZero(Canon::Src(Source::Scalar { scope: 0 })),
++        Pred::NonZero(Canon::Src(Source::Axis { scope: 2, axis: 1 })),
++        Pred::NonZero(Canon::Literal(7)),
++        Pred::NonZero(Canon::Src(Source::Axis { scope: 2, axis: 0 })),
++        Pred::Divides { dividend: Canon::Literal(2), divisor: Canon::Literal(9) },
++    ]
++}
++
++// The caller observes the write-back of the sorted vector.
++pub fn sort_preds(values: &mut Vec<Pred>) {
++    values.sort();
++}
++
++pub fn sort_preds_unstable(values: &mut Vec<Pred>) {
++    values.sort_unstable();
++}
++
++pub fn sorted_codes() -> (u32, u32, u32, u32, u32, u32) {
++    let mut values = preds();
++    sort_preds(&mut values);
++    (
++        pred_code(&values[0]),
++        pred_code(&values[1]),
++        pred_code(&values[2]),
++        pred_code(&values[3]),
++        pred_code(&values[4]),
++        pred_code(&values[5]),
++    )
++}
++
++pub fn sorted_unstable_codes() -> (u32, u32, u32, u32, u32, u32) {
++    let mut values = preds();
++    sort_preds_unstable(&mut values);
++    (
++        pred_code(&values[0]),
++        pred_code(&values[1]),
++        pred_code(&values[2]),
++        pred_code(&values[3]),
++        pred_code(&values[4]),
++        pred_code(&values[5]),
++    )
++}
++
++// A direct comparison puts the PartialOrd impl of Source (but not its Ord
++// impl) in the LLBC of the consumer.
++pub fn source_order(a: Source, b: Source) -> u8 {
++    match a.partial_cmp(&b) {
++        Some(Ordering::Less) => 0,
++        Some(Ordering::Equal) => 1,
++        Some(Ordering::Greater) => 2,
++        None => 3,
++    }
++}
++
++pub fn source_orders() -> (u8, u8, u8) {
++    (
++        source_order(Source::Axis { scope: 3, axis: 9 }, Source::Scalar { scope: 0 }),
++        source_order(Source::Axis { scope: 3, axis: 9 }, Source::Axis { scope: 3, axis: 9 }),
++        source_order(Source::Axis { scope: 4, axis: 0 }, Source::Axis { scope: 3, axis: 9 }),
++    )
++}
++
++// Rejected: Holder compares a Parity, whose hand-written Equal holds between
++// distinct values.
++pub fn sorted_wrapped() -> (u32, u32) {
++    let mut values = vec![
++        Wrapped { holder: Holder { parity: Parity(3) }, tag: 0 },
++        Wrapped { holder: Holder { parity: Parity(1) }, tag: 0 },
++    ];
++    values.sort();
++    (values[0].holder.parity.0, values[1].holder.parity.0)
++}
++
++pub fn main() {
++    let a = sorted_codes();
++    let b = sorted_unstable_codes();
++    let c = source_orders();
++    println!("{},{},{},{},{},{}", a.0, a.1, a.2, a.3, a.4, a.5);
++    println!("{},{},{},{},{},{}", b.0, b.1, b.2, b.3, b.4, b.5);
++    println!("{},{},{}", c.0, c.1, c.2);
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn derived_orders() {
++        let expected = (7, 1120, 1121, 1200, 104009, 105110);
++        assert_eq!(sorted_codes(), expected);
++        assert_eq!(sorted_unstable_codes(), expected);
++        assert_eq!(source_orders(), (0, 1, 2));
++    }
++
++    #[test]
++    fn hand_written_order() {
++        // Parity(3) and Parity(1) compare Equal: the stable sort keeps them.
++        assert_eq!(sorted_wrapped(), (3, 1));
++    }
++}
+diff --git a/tests/separate-compilation/sort.sh b/tests/separate-compilation/sort.sh
+new file mode 100755
+index 0000000..8279e51
+--- /dev/null
++++ b/tests/separate-compilation/sort.sh
+@@ -0,0 +1,285 @@
++#!/usr/bin/env bash
++# Derived orders across chunks (SortContracts, the sort_order evidence of
++# SeparateCompilation).
++#
++# Usage: sort.sh <charon> <aeneas> [<work directory>]
++# AENEAS_LEAN selects the built Aeneas Lean library (default: backends/lean of
++# this tree). The Lean checks need lake and git on PATH.
++#
++# The owner chunk emits Source, Canon, Parity and Holder with their Ord,
++# PartialOrd, PartialEq and Eq impls. It records derived-order evidence for the
++# derived impls in its manifest. The consumer chunk keeps these impls opaque,
++# as a later chunk of a workspace does.
++#
++# The consumer sorts Pred values. Pred derives its order from Canon, whose Ord
++# impl is in the LLBC of the consumer, and Canon from Source, whose Ord impl is
++# not. This is the shape of chelis_ir capacity_key.rs (ValidityDomain::new).
++# The consumer also compares two Source values, so that the PartialOrd impl of
++# Source is in its LLBC.
++#
++# - The native results equal the Lean results of the consumer (#guard), and a
++#   flipped guard fails.
++# - A Holder holds a Parity, whose order is hand-written. The owner records no
++#   evidence for it, and the consumer rejects the sort of Wrapped values.
++# - Changed manifests: the consumer rejects stale, missing, duplicate and
++#   mismatched evidence with E_UNSUPPORTED_SORT. It also rejects a malformed
++#   manifest, an incomplete manifest, and a stale type view.
++set -uo pipefail
++
++charon=$1
++aeneas=$2
++here=$(cd "$(dirname "$0")" && pwd)
++repo=$(cd "$here/../.." && pwd)
++work=${3:-$(mktemp -d)}
++mkdir -p "$work"
++work=$(cd "$work" && pwd)
++lib=${AENEAS_LEAN:-$repo/backends/lean}
++failures=0
++
++check() { # check <description> <command...>
++  local what=$1
++  shift
++  if "$@"; then
++    echo "ok: $what"
++  else
++    echo "FAILED: $what"
++    failures=$((failures + 1))
++  fi
++}
++
++owner_items=()
++consumer_opaque=()
++for t in Source Canon Parity Holder; do
++  for item in "sort::$t" "sort::{impl core::cmp::Ord for sort::$t}" \
++    "sort::{impl core::cmp::PartialOrd<sort::$t> for sort::$t}" \
++    "sort::{impl core::cmp::PartialEq<sort::$t> for sort::$t}" \
++    "sort::{impl core::cmp::Eq for sort::$t}"; do
++    owner_items+=(--start-from "$item")
++    case $item in
++      *"{impl"*) consumer_opaque+=(--opaque "$item") ;;
++    esac
++  done
++done
++
++llbc() { # llbc <name> <charon options...>
++  local name=$1
++  shift
++  RUSTC_WRAPPER= "$charon" rustc --preset=aeneas --mir=promoted \
++    --monomorphize-mut=except-types --remove-adt-clauses \
++    "--lift-associated-types=*" --error-on-warnings --abort-on-error "$@" \
++    --dest-file "$work/$name.llbc" -- "$here/sort.rs" --crate-name=sort \
++    --crate-type=rlib --edition=2021 >"$work/$name.charon.log" 2>&1
++}
++
++aeneas_run() { # aeneas_run <name> <module> <llbc> <aeneas options...>
++  local name=$1 module=$2 input=$3
++  shift 3
++  rm -rf "$work/$name"
++  mkdir -p "$work/$name"
++  "$aeneas" -backend lean -checks -abort-on-error -warnings-as-errors \
++    -strict-joins -sequential -no-progress-bar -canonical-names -split-files \
++    -subdir "$module" -dest "$work/$name/lean" \
++    -emit-manifest "$work/$name/manifest.json" "$@" "$work/$input.llbc" \
++    >"$work/$name/log" 2>&1
++}
++
++rejects() { # rejects <name> <message regex> <module> <llbc> <aeneas options...>
++  local name=$1 message=$2
++  shift 2
++  if aeneas_run "$name" "$@"; then
++    echo "  $name was admitted"
++    return 1
++  fi
++  grep -qE "$message" "$work/$name/log" || {
++    echo "  $name failed without /$message/:"
++    grep -A2 '^\[Error\]' "$work/$name/log" | head -6
++    return 1
++  }
++}
++
++check "Charon: the owner chunk" llbc owner "${owner_items[@]}"
++check "Charon: the consumer chunk" llbc consumer "${consumer_opaque[@]}" \
++  --start-from sort::sorted_codes --start-from sort::sorted_unstable_codes \
++  --start-from sort::source_orders
++check "Charon: the consumer of the hand-written order" llbc hand \
++  "${consumer_opaque[@]}" --start-from sort::sorted_wrapped
++
++check "Aeneas: the owner chunk" aeneas_run owner ChunkOwner owner
++owner=$work/owner/manifest.json
++check "Aeneas: the consumer chunk admits the sorts" \
++  aeneas_run consumer ChunkConsumer consumer -external "$owner"
++
++# The evidence of the owner: one entry per derived Ord and PartialOrd impl of
++# Source, Canon and Holder, and none for Parity.
++check "the owner records the evidence of the derived impls" python3 - "$owner" <<'PY'
++import json, sys
++entries = json.load(open(sys.argv[1]))["entries"]
++evidence = {e["key"]: e["sort_order"] for e in entries if "sort_order" in e}
++want = set()
++for t in ("Source", "Canon", "Holder"):
++    want.add(f"trait_impl sort::{{core::cmp::Ord for sort::{t}}}")
++    want.add(f"trait_impl sort::{{core::cmp::PartialOrd<sort::{t}> for sort::{t}}}")
++assert set(evidence) == want, sorted(evidence)
++for key, s in evidence.items():
++    if "Ord for" in key:
++        assert s["trait"] == "core::cmp::Ord", s
++        assert s["partial_ord_impl_key"] in want, s
++    else:
++        assert s["trait"] == "core::cmp::PartialOrd" and s["partial_ord_impl_key"] is None, s
++PY
++no_owner_defs() {
++  ! grep -rqE '^(noncomputable )?(def|instance|structure|inductive) sort\.(Source|Canon|Parity|Holder)\b' \
++    "$work/consumer/lean/ChunkConsumer"
++}
++check "the consumer does not emit the items of the owner" no_owner_defs
++
++# Native results
++native=$work/native
++toolchain=$("$charon" toolchain-path)
++check "native: rustc" "$toolchain/bin/rustc" --edition=2021 -A unused "$here/sort.rs" -o "$native"
++check "native: rustc --test" "$toolchain/bin/rustc" --edition=2021 --test -A unused "$here/sort.rs" -o "$native-test"
++check "native: the tests of sort.rs" "$native-test" -q
++results=()
++while IFS= read -r line; do results+=("$line"); done < <("$native")
++check "native: three result lines" test "${#results[@]}" -eq 3
++
++guards() { # guards <file> <first value delta>
++  local codes unstable orders
++  IFS=, read -r -a codes <<<"${results[0]}"
++  IFS=, read -r -a unstable <<<"${results[1]}"
++  IFS=, read -r -a orders <<<"${results[2]}"
++  codes[0]=$((codes[0] + $2))
++  cat >"$1" <<LEAN
++import ChunkOwner.Funs
++import ChunkConsumer.Funs
++
++open Aeneas Aeneas.Std Result
++
++#guard sort.sorted_codes == ok (${codes[0]}#u32, ${codes[1]}#u32, ${codes[2]}#u32, ${codes[3]}#u32, ${codes[4]}#u32, ${codes[5]}#u32)
++#guard sort.sorted_unstable_codes == ok (${unstable[0]}#u32, ${unstable[1]}#u32, ${unstable[2]}#u32, ${unstable[3]}#u32, ${unstable[4]}#u32, ${unstable[5]}#u32)
++#guard sort.source_orders == ok (${orders[0]}#u8, ${orders[1]}#u8, ${orders[2]}#u8)
++LEAN
++}
++
++# Compile the modules of both chunks, imports first, then the checks.
++olean=$work/olean
++rm -rf "$olean"
++mkdir -p "$olean"
++compile() { # compile <module>
++  local module=$1 path file root dep
++  path=${module//.//}
++  file=""
++  for root in "$work/owner/lean" "$work/consumer/lean"; do
++    if [ -f "$root/$path.lean" ]; then
++      file=$root/$path.lean
++      break
++    fi
++  done
++  # Lake builds the modules of the library. A chunk module must exist.
++  if [ -z "$file" ]; then
++    case $module in
++      Chunk*) echo "  no file for $module"; return 1 ;;
++      *) return 0 ;;
++    esac
++  fi
++  [ -f "$olean/$path.olean" ] && return 0
++  for dep in $(sed -n 's/^import \([A-Za-z0-9_.]*\).*/\1/p' "$file"); do
++    compile "$dep" || return 1
++  done
++  mkdir -p "$(dirname "$olean/$path.olean")"
++  (cd "$lib" && LEAN_PATH="$olean${LEAN_PATH:+:$LEAN_PATH}" lake env lean \
++    --root="$root" -o "$olean/$path.olean" "$file") >"$work/lean-$module.log" 2>&1 || {
++    tail -20 "$work/lean-$module.log"
++    return 1
++  }
++}
++check "Lean: the modules of both chunks compile" compile ChunkConsumer.Funs
++lean_checks() { # lean_checks <file>
++  (cd "$lib" && LEAN_PATH="$olean${LEAN_PATH:+:$LEAN_PATH}" lake env lean "$1") \
++    >"$1.log" 2>&1
++}
++guards "$work/Checks.lean" 0
++check "Lean: the guards equal the native results" lean_checks "$work/Checks.lean"
++guards "$work/Flipped.lean" 1
++flipped_fails() { ! lean_checks "$work/Flipped.lean"; }
++check "Lean: a flipped guard fails" flipped_fails
++
++# Rejections
++check "a hand-written order is rejected" rejects hand \
++  'E_UNSUPPORTED_SORT: the type sort::Parity has no Ord impl in the crate, and no manifest records derived-order evidence' \
++  ChunkHand hand -external "$owner"
++
++# change <name> <python statements>: write <name>.json, a copy of the owner
++# manifest after the statements. They see the entries as E (by key), the
++# Source keys as TY, ORD and PO, and copy() for a renamed entry.
++change() {
++  python3 - "$owner" "$work/$1.json" "$2" <<'PY'
++import copy as _copy, json, sys
++manifest = json.load(open(sys.argv[1]))
++E = {e["key"]: e for e in manifest["entries"]}
++TY = "type sort::Source"
++ORD = "trait_impl sort::{core::cmp::Ord for sort::Source}"
++PO = "trait_impl sort::{core::cmp::PartialOrd<sort::Source> for sort::Source}"
++def copy(key, new_key):
++    e = _copy.deepcopy(E[key])
++    e["key"] = new_key
++    e["names"] = [n + "Copy" for n in e["names"]]
++    manifest["entries"].append(e)
++    return e
++exec(sys.argv[3])
++json.dump(manifest, open(sys.argv[2], "w"))
++PY
++}
++consumer_rejects() { # consumer_rejects <name> <message regex>
++  rejects "$1" "$2" ChunkConsumer consumer -external "$work/$1.json"
++}
++
++change stale-evidence 'E[ORD]["sort_order"]["type_fingerprint"] = "0" * 32'
++check "stale evidence is rejected" consumer_rejects stale-evidence \
++  'the type sort::Source has stale derived-order evidence: the entry of \[trait_impl sort::\{core::cmp::Ord for sort::Source\}\] records the type fingerprint 0{32}'
++change stale-view '
++for e in manifest["entries"]:
++    if e["key"] == TY:
++        e["fingerprint"] = "0" * 32
++    if e.get("sort_order", {}).get("type_key") == TY:
++        e["sort_order"]["type_fingerprint"] = "0" * 32'
++check "a stale type view is rejected" consumer_rejects stale-view \
++  'the interface of \[type sort::Source\] in this chunk differs from the one emitted by its owner module'
++change missing-ord-evidence 'del E[ORD]["sort_order"]'
++check "missing Ord evidence is rejected" consumer_rejects missing-ord-evidence \
++  'the type sort::Source has no Ord impl in the crate, and no manifest records derived-order evidence'
++change missing-partial-entry 'manifest["entries"].remove(E[PO])'
++check "a missing PartialOrd entry is rejected" consumer_rejects missing-partial-entry \
++  'needs the PartialOrd impl \[trait_impl sort::\{core::cmp::PartialOrd<sort::Source> for sort::Source\}\], which the evidence of \[trait_impl sort::\{core::cmp::Ord for sort::Source\}\] names, but no manifest emits it'
++change missing-partial-evidence 'del E[PO]["sort_order"]'
++check "missing PartialOrd evidence is rejected" consumer_rejects missing-partial-evidence \
++  'needs derived-order evidence for the PartialOrd impl .* but its manifest entry has none'
++change duplicate-ord 'copy(ORD, ORD.replace("sort::{", "sort::other::{"))'
++check "duplicate Ord evidence is rejected" consumer_rejects duplicate-ord \
++  'the type sort::Source has several Ord impls with derived-order evidence'
++change duplicate-partial 'copy(PO, PO.replace("sort::{", "sort::other::{"))'
++check "PartialOrd evidence for another impl is rejected" consumer_rejects duplicate-partial \
++  'has PartialOrd evidence in \[trait_impl sort::other::.*\], but the Ord evidence of .* names'
++change mismatched-impl '
++other = PO.replace("sort::{", "sort::other::{")
++copy(PO, other)
++del E[PO]["sort_order"]
++E[ORD]["sort_order"]["partial_ord_impl_key"] = other'
++check "evidence for another impl than the one of the consumer is rejected" \
++  consumer_rejects mismatched-impl \
++  'the type sort::Source has the impl trait_impl sort::\{core::cmp::PartialOrd<sort::Source> for sort::Source\} in this chunk, which is not the external derived impl \[trait_impl sort::other::'
++change malformed 'E[ORD]["sort_order"]["type_key"] = "type sort::Canon"'
++check "evidence for another type is a malformed manifest" consumer_rejects malformed \
++  'malformed manifest .*: the derived-order evidence of \[trait_impl sort::\{core::cmp::Ord for sort::Source\}\] does not name an Ord or PartialOrd implementation of its type'
++change missing-type 'manifest["entries"].remove(E[TY])'
++check "evidence for a type which no manifest emits is rejected" consumer_rejects missing-type \
++  'the type sort::Source has no Ord impl in the crate, and no -external manifest emits it'
++change incomplete 'manifest["version"] = 2
++manifest["complete"] = False'
++check "an incomplete manifest is rejected" consumer_rejects incomplete 'is incomplete'
++
++if [ "$failures" -ne 0 ]; then
++  echo "sort.sh: $failures failure(s) (work directory $work)"
++  exit 1
++fi
++echo "sort.sh: all checks passed"

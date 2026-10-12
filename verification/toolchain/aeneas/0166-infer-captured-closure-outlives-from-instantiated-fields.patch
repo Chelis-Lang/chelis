@@ -1,0 +1,196 @@
+# aeneas integration step 166 after cba11f3beb: commit a3f369e355be108b3220507c3676b62b52f66197
+# first parent 5cd0e4a0b17206f3f7a42019e936c96ff55d0eab
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Infer captured closure outlives from instantiated fields
+
+diff --git a/src/llbc/RegionsHierarchy.ml b/src/llbc/RegionsHierarchy.ml
+index 5ddc874..ce53340 100644
+--- a/src/llbc/RegionsHierarchy.ml
++++ b/src/llbc/RegionsHierarchy.ml
+@@ -1,10 +1,8 @@
+ (** This module analyzes function signatures to compute the hierarchy between
+     regions.
+ 
+-    Note that we don't need to analyze the types: when there is a non-trivial
+-    relation between lifetimes in a type definition, the Rust compiler will
+-    automatically introduce the relevant where clauses. For instance, in the
+-    definition below:
++    Normally we don't need to analyze type declarations: Rust records their
++    outlives constraints as predicates. For example, for
+ 
+     {[
+       struct Wrapper<'a, 'b, T> {
+@@ -12,17 +10,12 @@
+       }
+     ]}
+ 
+-    the Rust compiler will introduce the where clauses:
+-    {[
+-      'b : 'a
+-      T : 'b
+-    ]}
+-
+-    However, it doesn't do so for the function signatures, which means we have
+-    to compute the constraints between the lifetimes ourselves, then that we
+-    have to compute the SCCs of the lifetimes (two lifetimes 'a and 'b may
+-    satisfy 'a : 'b and 'b : 'a, meaning they are actually equal and should be
+-    grouped together).
++    Rust adds ['b : 'a] and [T : 'b]. Function signatures do not get the same
++    implicit predicates, so we infer their nested lifetime constraints here.
++    Synthetic closure types are another exception: Charon may record no
++    predicates for a captured [&'a mut Closure<'b>], even though storing that
++    inner borrow requires ['b : 'a]. Inspect instantiated closure fields, not
++    every pair of their captured lifetimes.
+ 
+     TODO: we don't handle locally bound regions yet. *)
+ 
+@@ -137,7 +130,20 @@ let compute_regions_hierarchy_for_sig (span : Meta.span option) (crate : crate)
+             in
+             List.iter
+               (add_edges_from_region_binder add_edges_from_types_outlive)
+-              predicates.types_outlive
++              predicates.types_outlive;
++            (* Closure captures can contain nested borrows without corresponding
++               outlives predicates on the synthetic type. In particular a
++               captured [&'a mut Closure<'b>] stores the inner borrow for as
++               long as 'a, so ending 'b must first release the 'a borrow.
++               Inspect fields, not all generic lifetimes: separate captures
++               of independent references must remain independent. *)
++            (match (decl.src, decl.kind) with
++            | ClosureItem _, Struct fields ->
++                List.iter
++                  (fun (field : field) ->
++                    explore_ty outer (Subst.ty_substitute subst field.field_ty))
++                  fields
++            | _ -> ())
+         | TTuple -> (* No clauses for tuples *) ()
+         | TBuiltin aid -> (
+             match aid with
+diff --git a/tests/src/nested-borrows-closure-capture-outlives.rs b/tests/src/nested-borrows-closure-capture-outlives.rs
+new file mode 100644
+index 0000000..e694d1e
+--- /dev/null
++++ b/tests/src/nested-borrows-closure-capture-outlives.rs
+@@ -0,0 +1,121 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsClosureCaptureOutlives
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::option::{core::option::Option}
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! A callback returning a borrow is captured by a visitor closure. A caller
++//! also captures that callback in another closure: the inner capture lives
++//! inside a mutable borrow of the outer closure, not beside it. Separate
++//! captured references with independent lifetimes must not be conflated.
++
++pub struct Expr(pub u32);
++
++pub enum MetadataValue {
++    Type(Expr),
++    Nested(Box<Metadata>),
++    Ignore,
++}
++
++pub struct Metadata {
++    values: Vec<MetadataValue>,
++}
++
++impl Metadata {
++    pub fn visit_expressions<'a>(&'a self, visit: &mut impl FnMut(&'a Expr, u8)) {
++        for value in &self.values {
++            match value {
++                MetadataValue::Type(expr) => visit(expr, 0),
++                MetadataValue::Nested(meta) => meta.visit_expressions(visit),
++                MetadataValue::Ignore => {}
++            }
++        }
++    }
++
++    pub fn find_expression<'a, T>(&'a self, mut f: impl FnMut(&'a Expr) -> Option<T>) -> Option<T> {
++        let mut result = None;
++        self.visit_expressions(&mut |value, _| {
++            if result.is_none() {
++                result = f(value);
++            }
++        });
++        result
++    }
++
++    pub fn any_expression(&self, mut f: impl FnMut(&Expr) -> bool) -> bool {
++        self.find_expression(|value| f(value).then_some(())).is_some()
++    }
++}
++
++pub fn find_value(meta: &Metadata, needle: u32) -> Option<&Expr> {
++    meta.find_expression(|value| (value.0 == needle).then_some(value))
++}
++
++pub fn has_value(meta: &Metadata, needle: u32) -> bool {
++    meta.any_expression(|value| value.0 == needle)
++}
++
++pub fn count_until(meta: &Metadata, needle: u32) -> (bool, u32) {
++    let mut calls = 0u32;
++    let found = meta.any_expression(|value| {
++        calls += 1;
++        value.0 == needle
++    });
++    (found, calls)
++}
++
++fn metadata(values: Vec<MetadataValue>) -> Metadata {
++    Metadata { values }
++}
++
++pub fn run_case(a: u32, b: u32, c: u32, needle: u32) -> (Option<u32>, bool) {
++    let meta = metadata(vec![
++        MetadataValue::Ignore,
++        MetadataValue::Type(Expr(a)),
++        MetadataValue::Nested(Box::new(metadata(vec![MetadataValue::Type(Expr(b))]))),
++        MetadataValue::Type(Expr(c)),
++    ]);
++    (find_value(&meta, needle).map(|value| value.0), has_value(&meta, needle))
++}
++
++pub fn touch_independent<'a, 'b>(left: &'a mut u32, right: &'b mut u32) -> &'a mut u32 {
++    let mut visit = || {
++        *left = left.wrapping_add(1);
++        *right = right.wrapping_add(2);
++    };
++    visit();
++    left
++}
++
++pub fn run_independent(a: u32, b: u32) -> (u32, u32) {
++    let mut left = a;
++    let mut right = b;
++    let borrowed = touch_independent(&mut left, &mut right);
++    *borrowed = borrowed.wrapping_add(3);
++    (left, right)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn preserves_borrow_identity_and_distinct_capture_lifetimes() {
++        let meta = metadata(vec![
++            MetadataValue::Ignore,
++            MetadataValue::Type(Expr(3)),
++            MetadataValue::Nested(Box::new(metadata(vec![MetadataValue::Type(Expr(7))]))),
++            MetadataValue::Type(Expr(7)),
++        ]);
++        let found = find_value(&meta, 7).unwrap();
++        let MetadataValue::Nested(inner) = &meta.values[2] else { unreachable!() };
++        let MetadataValue::Type(expected) = &inner.values[0] else { unreachable!() };
++        assert!(std::ptr::eq(found, expected));
++        assert!(has_value(&meta, 7));
++        assert!(!has_value(&meta, 8));
++        assert_eq!(count_until(&meta, 7), (true, 2));
++        assert_eq!(count_until(&meta, 8), (false, 3));
++        assert_eq!(run_case(3, 7, 7, 8), (None, false));
++        assert_eq!(run_case(3, 7, 7, 7), (Some(7), true));
++        assert_eq!(run_case(3, 7, 7, 3), (Some(3), true));
++        assert_eq!(run_independent(4, 5), (8, 7));
++    }
++}

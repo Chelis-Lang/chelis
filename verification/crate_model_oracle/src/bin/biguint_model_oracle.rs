@@ -1,6 +1,6 @@
-//! Native oracle for BigUintModelChecks.lean: compare stdout verbatim. Exercises
-//! the num-bigint 0.4.6 `BigUint` operations modeled in `Aeneas/Std/BigUint.lean`,
-//! including the zero-divisor panics and the bytes `Hash` writes.
+//! Native oracle for `BigUintModelChecks.lean`.
+//! Compare stdout with the registered `num-bigint 0.4.6` models.
+//! The checks include zero-divisor panics, hash bytes, and formatter flags.
 
 use num_bigint::BigUint;
 use std::cmp::Ordering;
@@ -30,6 +30,14 @@ fn show(r: std::thread::Result<BigUint>) -> String {
         Ok(v) => v.to_string(),
         Err(_) => "panic".to_string(),
     }
+}
+
+/// These variants use the production capacity enum field shapes.
+#[derive(Debug)]
+#[allow(dead_code)]
+enum Capacity {
+    Literal(BigUint),
+    Quotient { dividend: BigUint, divisor: BigUint },
 }
 
 fn ord(o: Ordering) -> &'static str {
@@ -101,5 +109,31 @@ fn main() {
         let mut log = Log::default();
         v.hash(&mut log);
         println!("hash-{i}={} {:?}", log.writes, log.bytes);
+    }
+    // Decimal display and debug use the same native integral formatter.
+    let shown = [0usize, 3, 7, 8, 11];
+    for i in shown {
+        let v = &values[i];
+        println!("fmt-{i}-display=[{v}]");
+        println!("fmt-{i}-debug=[{v:?}]");
+        println!("fmt-{i}-plus=[{v:+}]");
+        println!("fmt-{i}-alt=[{v:#?}]");
+        println!("fmt-{i}-lowerhex-debug=[{v:x?}]");
+        println!("fmt-{i}-upperhex-debug=[{v:#X?}]");
+        println!("fmt-{i}-width=[{v:8}]");
+        println!("fmt-{i}-width-debug=[{v:8?}]");
+        println!("fmt-{i}-left=[{v:<8}]");
+        println!("fmt-{i}-center=[{v:^9?}]");
+        println!("fmt-{i}-right=[{v:>8}]");
+        println!("fmt-{i}-fill=[{v:*^9}]");
+        println!("fmt-{i}-fill-utf8=[{v:é>6?}]");
+        println!("fmt-{i}-zero=[{v:08}]");
+        println!("fmt-{i}-zero-plus=[{v:+08?}]");
+        println!("fmt-{i}-zero-left=[{v:*<+08}]");
+        println!("fmt-{i}-wide=[{v:>+44?}]");
+        println!("fmt-{i}-narrow=[{v:1}]");
+        println!("fmt-{i}-derived=[{:?}]", Capacity::Literal(v.clone()));
+        println!("fmt-{i}-derived-width=[{:06?}]", Capacity::Quotient { dividend: v.clone(), divisor: values[3].clone() });
+        println!("fmt-{i}-derived-pretty=[{:#?}]", Capacity::Quotient { dividend: v.clone(), divisor: values[1].clone() });
     }
 }

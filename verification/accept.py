@@ -76,6 +76,8 @@ import subprocess
 import sys
 import time
 
+from native_collection_certificate import add_profiles_argument, select_profile, verify_certificate
+
 ROOT = Path(__file__).resolve().parent.parent
 VERIFICATION = ROOT / "verification"
 TOOLCHAIN = json.loads((VERIFICATION / "toolchain.json").read_text())
@@ -188,6 +190,8 @@ class Run:
         self.directory.mkdir(parents=True)
         self.report = {"revision": head, "dirty": bool(dirty), "stages": {}}
         self.env = {"RUSTC_WRAPPER": "", "CARGO_INCREMENTAL": "0"}
+        if args.native_profiles is not None:
+            self.env["NATIVE_COLLECTION_PROFILES"] = str(args.native_profiles.expanduser().resolve())
         # Filled by the toolchain stage and consumed by later stages.
         self.tools: dict[str, Path] = {}
         self.lean_library: Path | None = None
@@ -671,7 +675,15 @@ def stage_production_ad(context: Run):
     if len(compiled) != 1:
         raise AcceptanceFailure(f"the production AD gate reported no compiled model; log: {log}")
     model = fresh(Path(compiled[0]), begun)
-    return {"compiled": str(model), "sha256": sha256_file(model)}
+    certificate_path = fresh(model.parent / "extraction-certificate.json", begun)
+    certificate_result = json.loads(certificate_path.read_text())
+    verify_certificate(certificate_result, model.parent.parent / "chelis_ir.llbc")
+    profile = select_profile(source_root=ROOT, package="chelis-ir", features=[],
+                             profiles=context.args.native_profiles)
+    if certificate_result["native_profile_evidence"] != profile["native_profile_evidence"]:
+        raise AcceptanceFailure("The production AD certificate uses another native profile.")
+    return {"compiled": str(model), "sha256": sha256_file(model),
+            "certificate_result": certificate_result}
 
 
 def stage_plan(context: Run):
@@ -713,6 +725,24 @@ def stage_whole_core(context: Run):
         for tool in ("charon", "aeneas"):
             if summary.get("binaries", {}).get(tool) != sha256_file(context.tools[tool]):
                 raise AcceptanceFailure(f"{chain}: extraction did not use the pinned {tool}")
+        plan = json.loads(context.whole_core[f"plan:{chain}"].read_text())
+        fields = ("name", "package", "features")
+        expected = [[chunk[field] for field in fields] for chunk in plan["chunks"]]
+        actual = [[chunk[field] for field in fields] for chunk in summary["chunks"]]
+        if actual != expected:
+            raise AcceptanceFailure(f"{chain}: native jobs differ from the chunk plan")
+        for chunk in summary["chunks"]:
+            llbc = Path(chunk["llbc"]["path"])
+            if not llbc.is_file():
+                llbc = llbc.with_suffix(llbc.suffix + ".gz")
+            certificate = verify_certificate(chunk["certificate_result"], llbc)
+            for field in ("path", "sha256", "bytes"):
+                if chunk["llbc"][field] != certificate["llbc_input"][field]:
+                    raise AcceptanceFailure(f"{chain}/{chunk['name']}: LLBC identity differs from the certificate")
+            profile = select_profile(source_root=ROOT, package=chunk["package"], features=chunk["features"],
+                                     profiles=context.args.native_profiles)
+            if chunk["certificate_result"]["native_profile_evidence"] != profile["native_profile_evidence"]:
+                raise AcceptanceFailure(f"{chain}/{chunk['name']}: native profile differs")
         fresh(out / "coverage.json", begun)
         fresh(out / "lean", begun)
         context.obligations[chain] = read_obligations(chain, fresh(out / "obligations.json", begun))
@@ -1042,6 +1072,7 @@ STAGES = [
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_profiles_argument(parser)
     parser.add_argument("--lacadile", type=Path,
                         help="Local LaCaDiLE checkout at the pinned revision (not publicly clonable)")
     parser.add_argument("--allow-dirty", action="store_true",

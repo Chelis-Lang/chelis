@@ -1,0 +1,1974 @@
+# aeneas integration step 167 after cba11f3beb: commit 5b4f4e2b689ba8945c377400570a2d78653926b3
+# first parent a3f369e355be108b3220507c3676b62b52f66197, merged 357cba58fcb11596107af65e400322c298a92226
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge fix/state-abi 357cba5 into int/r37
+
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index c1a6dc7..d1310f6 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -1185,6 +1185,138 @@ let constructor_update span (ctx : Contexts.decls_ctx) (inputs : T.ty list)
+      per updated input";
+   value
+ 
++(** Nested borrows: the recombination interface of the output of a model
++    constructor with state (the contract [ConstructorWithState indices]: its
++    output is an opaque model type, e.g. [FlatMap]), through which the values
++    of the inputs moved into the output at the levels > 0 are read and
++    written. The model type's recombination operation (its [stateMerge], see
++    [Pure.builtin_type_info.state_merge]) replaces the state of its type
++    parameters, and the model's restoration lens of a state input reads the
++    input back from the output. A state input is identified with the one
++    recombined type parameter of the output type whose type argument is the
++    input's type (before erasure), which no other state input may have: the
++    model moves the input unchanged into this parameter's position, the one
++    the lens reads. The type arguments of the other parameters must not hold
++    mutable borrows of the region group [keep_region]: the recombination
++    cannot update them. Returns the model type's information, its
++    recombination operation and parameters, and the parameter of each state
++    input (raises if an input has none). *)
++let constructor_state_interface span (ctx : Contexts.decls_ctx)
++    (keep_region : T.region -> bool) (indices : int list) (inputs : T.ty list)
++    output_ty =
++  let id, generics =
++    match output_ty with
++    | T.TAdt { id = T.TAdtId id; generics } -> (id, generics)
++    | _ ->
++        [%craise] span
++          "Model constructor recovery with state requires an output of a \
++           model type"
++  in
++  let decl = T.TypeDeclId.Map.find id ctx.type_ctx.type_decls in
++  let info, name, parameters =
++    match
++      ExtractBuiltin.NameMatcherMap.find_opt
++        (NameMatcher.ctx_from_crate ctx.crate)
++        decl.item_meta.name
++        (ExtractBuiltin.builtin_types_map ())
++    with
++    | Some ({ state_merge = Some (name, parameters); _ } as info) ->
++        (info, name, parameters)
++    | _ ->
++        [%craise] span
++          "Model constructor recovery with state requires a model output type \
++           with a recombination operation"
++  in
++  let has_mut =
++    TypesUtils.ty_has_mut_borrow_for_region_in_pred ctx.type_ctx.type_infos
++      keep_region
++  in
++  [%cassert] span
++    ((not (List.exists keep_region generics.regions))
++    && List.for_all
++         (fun (j, ty) -> List.mem j parameters || not (has_mut ty))
++         (List.mapi (fun j ty -> (j, ty)) generics.types))
++    "Model constructor recovery with state: the output holds mutable borrows \
++     outside the recombination interface of its model type";
++  let slot i =
++    let ty = List.nth inputs i in
++    [%cassert] span
++      (List.mem i indices
++      && List.for_all (fun j -> j = i || List.nth inputs j <> ty) indices)
++      "Model constructor recovery with state requires an input which is the \
++       only state input of its type";
++    match List.filter (fun p -> List.nth generics.types p = ty) parameters with
++    | [ p ] -> p
++    | _ ->
++        [%craise] span
++          "Model constructor recovery with state requires one recombined type \
++           parameter of the output holding each input moved into it"
++  in
++  (info, name, parameters, slot)
++
++(** Nested borrows: rebuild the output of a model constructor with state in
++    which the inputs [updates] (input index, new value) moved into the output
++    are replaced by new values, through the recombination operation of the
++    output type (see [constructor_state_interface]): the new value of an input
++    replaces, in the position of its type parameter, the input the model
++    moved there. Without updates, the output is unchanged. *)
++let constructor_state_update span (ctx : Contexts.decls_ctx) fresh
++    (keep_region : T.region -> bool) (indices : int list) (inputs : T.ty list)
++    output_ty (output : texpr) (updates : (int * texpr) list) : texpr =
++  let info, name, parameters, slot =
++    constructor_state_interface span ctx keep_region indices inputs output_ty
++  in
++  let slots = List.map (fun (i, value) -> (slot i, value)) updates in
++  if slots = [] then output
++  else
++  let pure_generics =
++    match output.ty with
++    | TAdt (_, generics) -> generics
++    | _ -> [%internal_error] span
++  in
++  let callbacks =
++    List.map
++      (fun p ->
++        let ty = List.nth pure_generics.types p in
++        let original = fresh (Some "original") ty in
++        let current = fresh (Some "current") ty in
++        let body =
++          match List.assoc_opt p slots with
++          | Some (value : texpr) ->
++              [%cassert] span (value.ty = ty)
++                "Model constructor recovery with state: an input gives back a \
++                 value of another shape than the one the output holds";
++              value
++          | None -> mk_texpr_from_fvar original
++        in
++        mk_closed_lambdas span
++          (List.map (mk_tpat_from_fvar None) [ original; current ])
++          body)
++      parameters
++  in
++  let types =
++    match info.keep_params with
++    | None -> pure_generics.types
++    | Some keep ->
++        [%sanity_check] span (List.length keep = List.length pure_generics.types);
++        List.filter_map
++          (fun (keep, ty) -> if keep then Some ty else None)
++          (List.combine keep pure_generics.types)
++  in
++  let args = callbacks @ [ output; output ] in
++  let func =
++    {
++      e =
++        Qualif
++          {
++            id = FunOrOp (Fun (Pure (ModelStateMerge name)));
++            generics = { pure_generics with types };
++          };
++      ty = mk_arrows (List.map (fun (e : texpr) -> e.ty) args) output.ty;
++    }
++  in
++  [%add_loc] mk_apps span func args
++
+ let check_callable_args span ctx (fid : A.fn_ptr_kind) (sg : A.inst_fun_sig) =
+   let callable =
+     match fid with
+@@ -1381,6 +1513,17 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+           let nested =
+             back_sig_is_nested (Some span) ctx get_group gid sg.inputs sg.output
+           in
++          (* The regions of the region group *)
++          let keep_region = function
++            | T.RVar (Free _) as r -> get_group r = gid
++            | _ -> false
++          in
++          (* Constructors move their inputs into their output *)
++          let is_constructor =
++            match contract with
++            | Constructor | ConstructorWithState _ -> true
++            | State _ | IntoIterator -> false
++          in
+           [%cassert] span
+             ((not staged) || not back.effect_info.can_fail)
+             "Model state recovery does not support failing staged backward \
+@@ -1508,12 +1651,18 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+                             "Model state recovery: a stage gives back a value \
+                              of another shape than the one it receives";
+                           Some e
+-                      | [] when level > 0 && contract = Constructor -> (
++                      | [] when level > 0 && is_constructor -> (
+                           (* A constructor moves its inputs into its output: a
+                              stage pairs the positions of an input with the
+                              positions of the output at the same paths, so the
+                              input gives back at this level the value it holds
+-                             in the output received by the stage *)
++                             in the output received by the stage: read
++                             structurally in the output of a constructor, and
++                             with the model's restoration lens of the input in
++                             the output of a constructor with state (the lens
++                             reads the position of the output where the model
++                             moved the input, which [constructor_state_update]
++                             writes) *)
+                           match
+                             List.filter_map
+                               (fun ((s, l, source), e) ->
+@@ -1523,7 +1672,30 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+                               supplied
+                           with
+                           | [ output ] ->
+-                              let e = constructor_input span ctx ty sg.output output in
++                              let e =
++                                match contract with
++                                | ConstructorWithState indices -> (
++                                    (* Checks that the lens reads the
++                                       position of the output which the
++                                       recombination of its type writes *)
++                                    let _, _, _, slot =
++                                      constructor_state_interface span ctx
++                                        keep_region indices sg.inputs sg.output
++                                    in
++                                    ignore (slot i);
++                                    match
++                                      List.assoc_opt i constructor_restorers
++                                    with
++                                    | Some restore ->
++                                        [%add_loc] mk_app span restore output
++                                    | None ->
++                                        [%craise] span
++                                          "Model constructor did not return \
++                                           recovery for a required input")
++                                | _ ->
++                                    constructor_input span ctx ty sg.output
++                                      output
++                              in
+                               [%cassert] span (e.ty = target)
+                                 "Model constructor recovery: an input gives back \
+                                  a value of another shape than the one it holds \
+@@ -1556,12 +1728,16 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+                positions of the inputs at the same paths, or else in the
+                latest stage before it which received one. An input which holds
+                values of this level in several stages (one view per stage, see
+-               [SymbolicToPureTypes.back_adt_view_keys]) is replaced once. *)
++               [SymbolicToPureTypes.back_adt_view_keys]) is replaced once. The
++               inputs are replaced structurally in the output of a constructor
++               ([constructor_update]) and through the recombination operation
++               of the model type in the output of a constructor with state
++               ([constructor_state_update]). *)
+             let from_output =
+               match output_ty ~from_input:false sg.output with
+               | None -> []
+               | Some target ->
+-                  [%cassert] span (contract = Constructor)
++                  [%cassert] span is_constructor
+                     ("Model state recovery supports backward outputs of level "
+                     ^ string_of_int level
+                     ^ " for the output only for constructors");
+@@ -1575,8 +1751,13 @@ let adapt_canonical_call span ctx fresh fid contract ~translated_body
+                       [] supplied
+                   in
+                   let value =
+-                    constructor_update span ctx sg.inputs sg.output result
+-                      updates
++                    match contract with
++                    | ConstructorWithState indices ->
++                        constructor_state_update span ctx fresh keep_region
++                          indices sg.inputs sg.output result updates
++                    | _ ->
++                        constructor_update span ctx sg.inputs sg.output result
++                          updates
+                   in
+                   [%cassert] span (value.ty = target)
+                     "Model constructor recovery has an incompatible type";
+diff --git a/tests/lean/NestedBorrowsFlatMapState.lean b/tests/lean/NestedBorrowsFlatMapState.lean
+new file mode 100644
+index 0000000..b588937
+--- /dev/null
++++ b/tests/lean/NestedBorrowsFlatMapState.lean
+@@ -0,0 +1 @@
++import NestedBorrowsFlatMapState.Checks
+diff --git a/tests/lean/NestedBorrowsFlatMapState/Checks.lean b/tests/lean/NestedBorrowsFlatMapState/Checks.lean
+new file mode 100644
+index 0000000..9c5540a
+--- /dev/null
++++ b/tests/lean/NestedBorrowsFlatMapState/Checks.lean
+@@ -0,0 +1,85 @@
++import NestedBorrowsFlatMapState.NestedBorrowsFlatMapState
++
++/-! Evaluate the model of `tests/src/nested-borrows-flat-map-state.rs` on the
++    inputs of its `native` test module and compare with the native results
++    (the writes of the closures moved into `flat_map`, `skip` and `chain`
++    through the nested borrows of their captures, two and three levels, read
++    after the call). -/
++
++namespace nested_borrows_flat_map_state.checks
++open Aeneas Aeneas.Std Result
++open nested_borrows_flat_map_state
++
++def u (x : Nat) : U32 := ⟨BitVec.ofNat _ x⟩
++def sl (xs : List Nat) (h : xs.length ≤ Usize.max := by scalar_tac) : Slice U32 :=
++  ⟨xs.map u, by simpa using h⟩
++def nats (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++
++def max : Nat := 4294967295
++
++/-- `(deps, locals, grown, frames)` -/
++def runDrive (children : List Nat) (scale grown : Nat)
++    (h : children.length ≤ Usize.max := by scalar_tac) :
++    Option (List Nat × List Nat × Nat × Nat) :=
++  match drive (sl children h) (u scale) (u grown) with
++  | ok (d, l, g, f) => some (nats d, nats l, g.val, f.val)
++  | _ => none
++
++/-- `(values, locals, depth)` -/
++def runVec (children : List Nat) (depth : Nat)
++    (h : children.length ≤ Usize.max := by scalar_tac) :
++    Option (List Nat × List Nat × Nat) :=
++  match drive_vec (sl children h) (u depth) with
++  | ok (v, l, d) => some (nats v, nats l, d.val)
++  | _ => none
++
++/-- `(values, depth)` -/
++def runSkip (xs : List Nat) (depth : Nat)
++    (h : xs.length ≤ Usize.max := by scalar_tac) : Option (List Nat × Nat) :=
++  match drive_skip (sl xs h) (u depth) with
++  | ok (v, d) => some (nats v, d.val)
++  | _ => none
++
++/-- `(values, depth)` -/
++def runChain (xs ys : List Nat) (depth : Nat)
++    (hx : xs.length ≤ Usize.max := by scalar_tac)
++    (hy : ys.length ≤ Usize.max := by scalar_tac) : Option (List Nat × Nat) :=
++  match drive_chain (sl xs hx) (sl ys hy) (u depth) with
++  | ok (v, d) => some (nats v, d.val)
++  | _ => none
++
++/-- `(values, calls, n)` -/
++def runDrive3 (xs : List Nat) (n : Nat)
++    (h : xs.length ≤ Usize.max := by scalar_tac) :
++    Option (List Nat × Nat × Nat) :=
++  match drive3 (sl xs h) (u n) with
++  | ok (v, c, m) => some (nats v, c.val, m.val)
++  | _ => none
++
++-- drive_native
++#guard runDrive [1, 2, 3] 10 5 == some ([1, 2, 3, 10, 20, 30], [1, 2, 3], 11, 3)
++#guard runDrive [4, 4] 1 0 == some ([4], [4, 4], 8, 2)
++#guard runDrive [] 7 9 == some ([], [], 9, 0)
++#guard runDrive [max] 2 1 == some ([max - 1, max], [max], 0, 1)
++
++-- drive_vec_native
++#guard runVec [1, 2] 0 == some ([1, 101, 2, 102], [1, 2], 2)
++#guard runVec [] 40 == some ([], [], 40)
++#guard runVec [7, 8, 9] max == some ([7, 107, 8, 108, 9, 109], [7, 8, 9], 2)
++
++-- drive_skip_native
++#guard runSkip [1, 2, 3] 10 == some ([4, 6], 16)
++#guard runSkip [5] 0 == some ([], 5)
++#guard runSkip [] 3 == some ([], 3)
++
++-- drive3_native
++#guard runDrive3 [1, 2] 10 == some ([1, 2, 2, 3], 2, 13)
++#guard runDrive3 [] 7 == some ([], 0, 7)
++#guard runDrive3 [max, 3] 1 == some ([max, 0, 3, 4], 2, 3)
++
++-- drive_chain_native
++#guard runChain [1, 2] [3, 4] 10 == some ([1, 2, 6, 8], 17)
++#guard runChain [] [5] 0 == some ([10], 5)
++#guard runChain [9] [] 3 == some ([9], 3)
++
++end nested_borrows_flat_map_state.checks
+diff --git a/tests/lean/NestedBorrowsFlatMapState/NestedBorrowsFlatMapState.lean b/tests/lean/NestedBorrowsFlatMapState/NestedBorrowsFlatMapState.lean
+new file mode 100644
+index 0000000..f331f05
+--- /dev/null
++++ b/tests/lean/NestedBorrowsFlatMapState/NestedBorrowsFlatMapState.lean
+@@ -0,0 +1,1389 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [nested_borrows_flat_map_state]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace nested_borrows_flat_map_state
++
++/-- [nested_borrows_flat_map_state::Depth]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 76:0-78:1
++    Visibility: public -/
++structure Depth where
++  depth : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_flat_map_state::chain_map::closure]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 114:43-114:61 -/
++@[reducible]
++def chain_map.closure := _root_.nested_borrows_flat_map_state.Depth
++
++/-- [nested_borrows_flat_map_state::StackBailRecord]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 25:0-27:1
++    Visibility: public -/
++structure StackBailRecord where
++  frames : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_flat_map_state::NativeServices]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 21:0-23:1
++    Visibility: public -/
++structure NativeServices where
++  grown : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_flat_map_state::StackBudget]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 30:0-33:1
++    Visibility: public -/
++structure StackBudget where
++  native : _root_.nested_borrows_flat_map_state.NativeServices
++  record : _root_.nested_borrows_flat_map_state.StackBailRecord
++
++/-- [nested_borrows_flat_map_state::union_children::closure]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 59:18-59:62 -/
++def union_children.closure :=
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32
++  × _root_.nested_borrows_flat_map_state.StackBudget
++
++/-- [nested_borrows_flat_map_state::flat_vec::closure]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 88:29-88:65 -/
++def flat_vec.closure :=
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32 ×
++  _root_.nested_borrows_flat_map_state.Depth
++
++/-- [nested_borrows_flat_map_state::Ctx]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 135:0-138:1
++    Visibility: public -/
++structure Ctx where
++  n : _root_.Aeneas.Std.U32
++  calls : _root_.Aeneas.Std.U32
++
++/-- [nested_borrows_flat_map_state::Frame]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 140:0-142:1
++    Visibility: public -/
++structure Frame where
++  ctx : _root_.nested_borrows_flat_map_state.Ctx
++
++/-- [nested_borrows_flat_map_state::flat3::closure]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 155:23-155:40 -/
++@[reducible]
++def flat3.closure := _root_.nested_borrows_flat_map_state.Frame
++
++/-- [nested_borrows_flat_map_state::skip_map::closure]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 108:18-108:36 -/
++@[reducible]
++def skip_map.closure := _root_.nested_borrows_flat_map_state.Depth
++
++/-- [nested_borrows_flat_map_state::analyze]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 35:0-48:1
++    Visibility: public -/
++def analyze
++  (child : _root_.Aeneas.Std.U32)
++  (locals : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (scale : _root_.Aeneas.Std.U32)
++  (stack : _root_.nested_borrows_flat_map_state.StackBudget) :
++  _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.nested_borrows_flat_map_state.StackBudget ×
++    (_root_.nested_borrows_flat_map_state.StackBudget →
++    _root_.nested_borrows_flat_map_state.StackBudget))
++  := do
++  let i ←
++    lift (_root_.Aeneas.Std.core.num.U32.wrapping_add stack.native.grown child)
++  let i1 ←
++    lift (_root_.Aeneas.Std.core.num.U32.wrapping_add stack.record.frames
++      1#u32)
++  let locals1 ← _root_.Aeneas.Std.alloc.vec.Vec.push locals child
++  let deps ←
++    _root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet.new
++      _root_.Aeneas.Std.U32
++  let (_, deps1) ←
++    _root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet.insert
++      _root_.Aeneas.Std.core.cmp.OrdU32 deps child
++  let i2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul child scale)
++  let (_, deps2) ←
++    _root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet.insert
++      _root_.Aeneas.Std.core.cmp.OrdU32 deps1 i2
++  _root_.Aeneas.Std.Result.ok (deps2, locals1,
++    { native := { grown := i }, record := { frames := i1 } },
++    fun stack1 => stack1)
++
++/-- [nested_borrows_flat_map_state::union_children::{core::ops::function::FnMut<(&'_ (u32)), alloc::collections::btree::set::BTreeSet<u32, alloc::alloc::Global>> for nested_borrows_flat_map_state::union_children::closure<0, 1, 2, 3>}::call_mut]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 59:18-59:62 -/
++def
++  union_children.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32BTreeSetU32Global.call_mut
++  (c : _root_.nested_borrows_flat_map_state.union_children.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++    _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_flat_map_state.union_children.closure ×
++    (_root_.nested_borrows_flat_map_state.union_children.closure →
++    _root_.nested_borrows_flat_map_state.union_children.closure) ×
++    (_root_.nested_borrows_flat_map_state.union_children.closure →
++    _root_.nested_borrows_flat_map_state.union_children.closure) ×
++    (_root_.nested_borrows_flat_map_state.union_children.closure →
++    (_root_.nested_borrows_flat_map_state.union_children.closure ×
++    (_root_.nested_borrows_flat_map_state.union_children.closure →
++    _root_.nested_borrows_flat_map_state.union_children.closure))))
++  := do
++  let (v, i, sb) := c
++  let (bs, v1, sb1, analyze_back) ←
++    _root_.nested_borrows_flat_map_state.analyze tupled_args v i sb
++  let back :=
++    (fun c1 => let (v2, _, _) := c1
++               (v2, i, sb) :
++      _root_.nested_borrows_flat_map_state.union_children.closure →
++      _root_.nested_borrows_flat_map_state.union_children.closure)
++  let back1 :=
++    (fun c1 => let (_, _, sb2) := c1
++               (v, i, sb2) :
++      _root_.nested_borrows_flat_map_state.union_children.closure →
++      _root_.nested_borrows_flat_map_state.union_children.closure)
++  let back2 :=
++    (fun c1 =>
++       let (_, _, sb2) := c1
++       ((v1, i, sb2),
++         fun c2 =>
++           let (_, _, sb3) := c2
++           let sb4 := analyze_back sb3
++           (v, i, sb4)) :
++      _root_.nested_borrows_flat_map_state.union_children.closure →
++      (_root_.nested_borrows_flat_map_state.union_children.closure ×
++      (_root_.nested_borrows_flat_map_state.union_children.closure →
++      _root_.nested_borrows_flat_map_state.union_children.closure)))
++  _root_.Aeneas.Std.Result.ok (bs, (v1, i, sb1), back, back1, back2)
++
++/-- [nested_borrows_flat_map_state::union_children::{core::ops::function::FnOnce<(&'_ (u32)), alloc::collections::btree::set::BTreeSet<u32, alloc::alloc::Global>> for nested_borrows_flat_map_state::union_children::closure<0, 1, 2, 3>}::call_once]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 59:18-59:62 -/
++def
++  union_children.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32BTreeSetU32Global.call_once
++  (c : _root_.nested_borrows_flat_map_state.union_children.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++    _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_flat_map_state.union_children.closure ×
++    _root_.nested_borrows_flat_map_state.union_children.closure ×
++    (_root_.nested_borrows_flat_map_state.union_children.closure →
++    _root_.nested_borrows_flat_map_state.union_children.closure))
++  := do
++  let (v, i1, sb) := c
++  let (bs, c1, call_mut_back, call_mut_back1, call_mut_back2) ←
++    _root_.nested_borrows_flat_map_state.union_children.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32BTreeSetU32Global.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let (v1, _, _) := c2
++  let c3 := call_mut_back1 c1
++  let (_, _, sb1) := c3
++  let back :=
++    (fun c4 =>
++       let (_, _, sb2) := c4
++       let (c5, back1) := call_mut_back2 (v, i1, sb2)
++       let c6 := back1 c5
++       let (_, _, ⟨ ns, sbr ⟩) := c6
++       (v, i1, { native := ns, record := sbr }) :
++      _root_.nested_borrows_flat_map_state.union_children.closure →
++      _root_.nested_borrows_flat_map_state.union_children.closure)
++  _root_.Aeneas.Std.Result.ok (bs, (v1, i1, sb), (v, i1, sb1), back)
++
++/-- Trait implementation: [nested_borrows_flat_map_state::union_children::{core::ops::function::FnOnce<(&'_ (u32)), alloc::collections::btree::set::BTreeSet<u32, alloc::alloc::Global>> for nested_borrows_flat_map_state::union_children::closure<0, 1, 2, 3>}]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 59:18-59:62 -/
++@[reducible]
++def
++  union_children.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32BTreeSetU32Global
++  : _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_flat_map_state.union_children.closure
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++  _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_flat_map_state.union_children.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32BTreeSetU32Global.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      let observed_state := (captured.#0, arg.#1, captured1.#2)
++      let capture_state2 := captured2 observed_state
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, arg.#1,
++        _root_.nested_borrows_flat_map_state.StackBudget.mk
++        (capture_state2.#2).native (capture_state2.#2).record))
++}
++
++/-- Trait implementation: [nested_borrows_flat_map_state::union_children::{core::ops::function::FnMut<(&'_ (u32)), alloc::collections::btree::set::BTreeSet<u32, alloc::alloc::Global>> for nested_borrows_flat_map_state::union_children::closure<0, 1, 2, 3>}]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 59:18-59:62 -/
++@[reducible]
++def
++  union_children.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32BTreeSetU32Global
++  : _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_flat_map_state.union_children.closure
++  _root_.Aeneas.Std.U32 (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++  _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.nested_borrows_flat_map_state.union_children.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32BTreeSetU32Global
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2, captured3) ←
++        _root_.nested_borrows_flat_map_state.union_children.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32BTreeSetU32Global.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      let (c, back) := captured3 captured
++      let capture_state2 := back c
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0, captured.#1,
++        _root_.nested_borrows_flat_map_state.StackBudget.mk
++        (capture_state2.#2).native (capture_state2.#2).record))
++}
++
++/-- [nested_borrows_flat_map_state::union_children]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 51:0-61:1
++    Visibility: public -/
++def union_children
++  (children : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (locals : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (scale : _root_.Aeneas.Std.U32)
++  (stack : _root_.nested_borrows_flat_map_state.StackBudget) :
++  _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.nested_borrows_flat_map_state.StackBudget ×
++    (_root_.nested_borrows_flat_map_state.StackBudget →
++    _root_.nested_borrows_flat_map_state.StackBudget))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter children
++  let (model_state, _, model_state1) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flat_map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeSet
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.union_children.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32BTreeSetU32Global
++      i (locals, scale, stack)
++  let flat_map_back :=
++    (fun state_back => (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++       (fun original current => original) (fun original current => state_back)
++       model_state model_state, fun state_back1 => state_back) :
++      _root_.nested_borrows_flat_map_state.union_children.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.union_children.closure
++      (_root_.Aeneas.Std.alloc.collections.btree.set.IntoIter
++      _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.union_children.closure
++      (_root_.Aeneas.Std.alloc.collections.btree.set.IntoIter
++      _root_.Aeneas.Std.U32) →
++      _root_.nested_borrows_flat_map_state.union_children.closure)))
++  let (model_state2, model_state3) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeSet
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.union_children.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32BTreeSetU32Global)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorBTreeSet
++      _root_.Aeneas.Std.core.cmp.OrdU32) model_state
++  let c :=
++    model_state1 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++      (fun original current => original)
++      (fun original current => (current.#0, original.#1, original.#2))
++      model_state model_state3)
++  let (locals1, _, _) := c
++  let c1 :=
++    model_state1 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++      (fun original current => original)
++      (fun original current => (original.#0, original.#1, current.#2))
++      model_state model_state3)
++  let (_, _, stack1) := c1
++  let back :=
++    (fun stack2 =>
++       let (fm, back1) := flat_map_back (locals, scale, stack2)
++       let fm1 :=
++         Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++           (fun original current => original)
++           (fun original current => (original.#0, original.#1, current.#2))
++           model_state3 fm
++       let c2 :=
++         back1 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++           (fun original current => original)
++           (fun original current => (original.#0, original.#1, current.#2))
++           model_state fm1)
++       let (_, _, ⟨ ns, sbr ⟩) := c2
++       { native := ns, record := sbr } :
++      _root_.nested_borrows_flat_map_state.StackBudget →
++      _root_.nested_borrows_flat_map_state.StackBudget)
++  _root_.Aeneas.Std.Result.ok (model_state2, locals1, stack1, back)
++
++/-- [nested_borrows_flat_map_state::drive]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 65:0-74:1
++    Visibility: public -/
++def drive
++  (children : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (scale : _root_.Aeneas.Std.U32) (grown : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (deps, locals, sb, union_children_back) ←
++    _root_.nested_borrows_flat_map_state.union_children children
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) scale
++      { native := { grown }, record := { frames := 0#u32 } }
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.collections.btree.set.IntoIteratorBTreeSet.into_iter
++      deps
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeSetIntoIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state
++  let sb1 := union_children_back sb
++  _root_.Aeneas.Std.Result.ok (model_state1, locals, sb1.native.grown,
++    sb1.record.frames)
++
++/-- [nested_borrows_flat_map_state::expand]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 80:0-84:1
++    Visibility: public -/
++def expand
++  (child : _root_.Aeneas.Std.U32)
++  (locals : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.nested_borrows_flat_map_state.Depth) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.nested_borrows_flat_map_state.Depth ×
++    (_root_.nested_borrows_flat_map_state.Depth →
++    _root_.nested_borrows_flat_map_state.Depth))
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add stack.depth 1#u32)
++  let locals1 ← _root_.Aeneas.Std.alloc.vec.Vec.push locals child
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add child 100#u32)
++  let s ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [ child, i1 ] :
++      _root_.Aeneas.Std.Array _root_.Aeneas.Std.U32 2#usize))
++  let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  _root_.Aeneas.Std.Result.ok (v, locals1, { depth := i },
++    fun stack1 => stack1)
++
++/-- [nested_borrows_flat_map_state::flat_vec::{core::ops::function::FnMut<(&'_ (u32)), alloc::vec::Vec<u32>> for nested_borrows_flat_map_state::flat_vec::closure<0, 1, 2>}::call_mut]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 88:29-88:65 -/
++def flat_vec.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32.call_mut
++  (c : _root_.nested_borrows_flat_map_state.flat_vec.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_flat_map_state.flat_vec.closure ×
++    (_root_.nested_borrows_flat_map_state.flat_vec.closure →
++    _root_.nested_borrows_flat_map_state.flat_vec.closure) ×
++    (_root_.nested_borrows_flat_map_state.flat_vec.closure →
++    _root_.nested_borrows_flat_map_state.flat_vec.closure) ×
++    (_root_.nested_borrows_flat_map_state.flat_vec.closure →
++    (_root_.nested_borrows_flat_map_state.flat_vec.closure ×
++    (_root_.nested_borrows_flat_map_state.flat_vec.closure →
++    _root_.nested_borrows_flat_map_state.flat_vec.closure))))
++  := do
++  let (v, d) := c
++  let (v1, v2, d1, expand_back) ←
++    _root_.nested_borrows_flat_map_state.expand tupled_args v d
++  let back :=
++    (fun c1 => let (v3, _) := c1
++               (v3, d) : _root_.nested_borrows_flat_map_state.flat_vec.closure
++      → _root_.nested_borrows_flat_map_state.flat_vec.closure)
++  let back1 :=
++    (fun c1 => let (_, d2) := c1
++               (v, d2) : _root_.nested_borrows_flat_map_state.flat_vec.closure
++      → _root_.nested_borrows_flat_map_state.flat_vec.closure)
++  let back2 :=
++    (fun c1 =>
++       let (_, d2) := c1
++       ((v2, d2), fun c2 => let (_, d3) := c2
++                            let d4 := expand_back d3
++                            (v, d4)) :
++      _root_.nested_borrows_flat_map_state.flat_vec.closure →
++      (_root_.nested_borrows_flat_map_state.flat_vec.closure ×
++      (_root_.nested_borrows_flat_map_state.flat_vec.closure →
++      _root_.nested_borrows_flat_map_state.flat_vec.closure)))
++  _root_.Aeneas.Std.Result.ok (v1, (v2, d1), back, back1, back2)
++
++/-- [nested_borrows_flat_map_state::flat_vec::{core::ops::function::FnOnce<(&'_ (u32)), alloc::vec::Vec<u32>> for nested_borrows_flat_map_state::flat_vec::closure<0, 1, 2>}::call_once]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 88:29-88:65 -/
++def flat_vec.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32VecU32.call_once
++  (c : _root_.nested_borrows_flat_map_state.flat_vec.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) ×
++    _root_.nested_borrows_flat_map_state.flat_vec.closure ×
++    _root_.nested_borrows_flat_map_state.flat_vec.closure ×
++    (_root_.nested_borrows_flat_map_state.flat_vec.closure →
++    _root_.nested_borrows_flat_map_state.flat_vec.closure))
++  := do
++  let (v, d) := c
++  let (v1, c1, call_mut_back, call_mut_back1, call_mut_back2) ←
++    _root_.nested_borrows_flat_map_state.flat_vec.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let (v2, _) := c2
++  let c3 := call_mut_back1 c1
++  let (_, d1) := c3
++  let back :=
++    (fun c4 =>
++       let (_, d2) := c4
++       let (c5, back1) := call_mut_back2 (v, d2)
++       let c6 := back1 c5
++       let (_, ⟨ i1 ⟩) := c6
++       (v, { depth := i1 }) :
++      _root_.nested_borrows_flat_map_state.flat_vec.closure →
++      _root_.nested_borrows_flat_map_state.flat_vec.closure)
++  _root_.Aeneas.Std.Result.ok (v1, (v2, d), (v, d1), back)
++
++/-- Trait implementation: [nested_borrows_flat_map_state::flat_vec::{core::ops::function::FnOnce<(&'_ (u32)), alloc::vec::Vec<u32>> for nested_borrows_flat_map_state::flat_vec::closure<0, 1, 2>}]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 88:29-88:65 -/
++@[reducible]
++def flat_vec.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32VecU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_flat_map_state.flat_vec.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_flat_map_state.flat_vec.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32VecU32.call_once
++          arg arg1
++      let capture_state := captured
++      let capture_state1 := captured1
++      let observed_state := (captured.#0, captured1.#1)
++      let capture_state2 := captured2 observed_state
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        _root_.nested_borrows_flat_map_state.Depth.mk
++        (capture_state2.#1).depth))
++}
++
++/-- Trait implementation: [nested_borrows_flat_map_state::flat_vec::{core::ops::function::FnMut<(&'_ (u32)), alloc::vec::Vec<u32>> for nested_borrows_flat_map_state::flat_vec::closure<0, 1, 2>}]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 88:29-88:65 -/
++@[reducible]
++def flat_vec.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_flat_map_state.flat_vec.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.nested_borrows_flat_map_state.flat_vec.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32VecU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2, captured3) ←
++        _root_.nested_borrows_flat_map_state.flat_vec.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let capture_state1 := captured2 captured
++      let (c, back) := captured3 captured
++      let capture_state2 := back c
++      _root_.Aeneas.Std.Result.ok (output, (capture_state.#0,
++        _root_.nested_borrows_flat_map_state.Depth.mk
++        (capture_state2.#1).depth))
++}
++
++/-- [nested_borrows_flat_map_state::flat_vec]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 87:0-89:1
++    Visibility: public -/
++def flat_vec
++  (children : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (locals : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (stack : _root_.nested_borrows_flat_map_state.Depth) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.nested_borrows_flat_map_state.Depth ×
++    (_root_.nested_borrows_flat_map_state.Depth →
++    _root_.nested_borrows_flat_map_state.Depth))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter children
++  let (model_state, _, model_state1) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flat_map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat_vec.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32
++      i (locals, stack)
++  let flat_map_back :=
++    (fun state_back => (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++       (fun original current => original) (fun original current => state_back)
++       model_state model_state, fun state_back1 => state_back) :
++      _root_.nested_borrows_flat_map_state.flat_vec.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat_vec.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat_vec.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) →
++      _root_.nested_borrows_flat_map_state.flat_vec.closure)))
++  let (model_state2, model_state3) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat_vec.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state
++  let c :=
++    model_state1 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++      (fun original current => original)
++      (fun original current => (current.#0, original.#1)) model_state
++      model_state3)
++  let (locals1, _) := c
++  let c1 :=
++    model_state1 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++      (fun original current => original)
++      (fun original current => (original.#0, current.#1)) model_state
++      model_state3)
++  let (_, stack1) := c1
++  let back :=
++    (fun stack2 =>
++       let (fm, back1) := flat_map_back (locals, stack2)
++       let fm1 :=
++         Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++           (fun original current => original)
++           (fun original current => (original.#0, current.#1)) model_state3 fm
++       let c2 :=
++         back1 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++           (fun original current => original)
++           (fun original current => (original.#0, current.#1)) model_state fm1)
++       let (_, ⟨ i1 ⟩) := c2
++       { depth := i1 } : _root_.nested_borrows_flat_map_state.Depth →
++      _root_.nested_borrows_flat_map_state.Depth)
++  _root_.Aeneas.Std.Result.ok (model_state2, locals1, stack1, back)
++
++/-- [nested_borrows_flat_map_state::drive_vec]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 91:0-99:1
++    Visibility: public -/
++def drive_vec
++  (children : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (depth : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  let (v, locals, d, flat_vec_back) ←
++    _root_.nested_borrows_flat_map_state.flat_vec children
++      (_root_.Aeneas.Std.alloc.vec.Vec.new _root_.Aeneas.Std.U32) { depth }
++  let d1 := flat_vec_back d
++  _root_.Aeneas.Std.Result.ok (v, locals, d1.depth)
++
++/-- [nested_borrows_flat_map_state::bump]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 101:0-104:1
++    Visibility: public -/
++def bump
++  (x : _root_.Aeneas.Std.U32)
++  (stack : _root_.nested_borrows_flat_map_state.Depth) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_flat_map_state.Depth ×
++    (_root_.nested_borrows_flat_map_state.Depth →
++    _root_.nested_borrows_flat_map_state.Depth))
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add stack.depth x)
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_mul x 2#u32)
++  _root_.Aeneas.Std.Result.ok (i1, { depth := i }, fun stack1 => stack1)
++
++/-- [nested_borrows_flat_map_state::skip_map::{core::ops::function::FnMut<(&'_ (u32)), u32> for nested_borrows_flat_map_state::skip_map::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 108:18-108:36 -/
++def skip_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++  (c : _root_.nested_borrows_flat_map_state.skip_map.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_flat_map_state.skip_map.closure ×
++    (_root_.nested_borrows_flat_map_state.skip_map.closure →
++    _root_.nested_borrows_flat_map_state.skip_map.closure) ×
++    (_root_.nested_borrows_flat_map_state.skip_map.closure →
++    (_root_.nested_borrows_flat_map_state.skip_map.closure ×
++    (_root_.nested_borrows_flat_map_state.skip_map.closure →
++    _root_.nested_borrows_flat_map_state.skip_map.closure))))
++  := do
++  let (i, d, bump_back) ←
++    _root_.nested_borrows_flat_map_state.bump tupled_args c
++  let back :=
++    (fun c1 => c1 : _root_.nested_borrows_flat_map_state.skip_map.closure →
++      _root_.nested_borrows_flat_map_state.skip_map.closure)
++  let back1 :=
++    (fun c1 => (c1, fun c2 => let d1 := bump_back c2
++                              d1) :
++      _root_.nested_borrows_flat_map_state.skip_map.closure →
++      (_root_.nested_borrows_flat_map_state.skip_map.closure ×
++      (_root_.nested_borrows_flat_map_state.skip_map.closure →
++      _root_.nested_borrows_flat_map_state.skip_map.closure)))
++  _root_.Aeneas.Std.Result.ok (i, d, back, back1)
++
++/-- [nested_borrows_flat_map_state::skip_map::{core::ops::function::FnOnce<(&'_ (u32)), u32> for nested_borrows_flat_map_state::skip_map::closure<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 108:18-108:36 -/
++def skip_map.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++  (c : _root_.nested_borrows_flat_map_state.skip_map.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_flat_map_state.skip_map.closure ×
++    (_root_.nested_borrows_flat_map_state.skip_map.closure →
++    _root_.nested_borrows_flat_map_state.skip_map.closure))
++  := do
++  let (i1, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_flat_map_state.skip_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 c3
++       let c5 := back1 c4
++       let ⟨ i2 ⟩ := c5
++       { depth := i2 } : _root_.nested_borrows_flat_map_state.skip_map.closure
++      → _root_.nested_borrows_flat_map_state.skip_map.closure)
++  _root_.Aeneas.Std.Result.ok (i1, c2, back)
++
++/-- Trait implementation: [nested_borrows_flat_map_state::skip_map::{core::ops::function::FnOnce<(&'_ (u32)), u32> for nested_borrows_flat_map_state::skip_map::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 108:18-108:36 -/
++@[reducible]
++def skip_map.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_flat_map_state.skip_map.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_flat_map_state.skip_map.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_flat_map_state.Depth.mk capture_state1.depth)
++}
++
++/-- Trait implementation: [nested_borrows_flat_map_state::skip_map::{core::ops::function::FnMut<(&'_ (u32)), u32> for nested_borrows_flat_map_state::skip_map::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 108:18-108:36 -/
++@[reducible]
++def skip_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_flat_map_state.skip_map.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.nested_borrows_flat_map_state.skip_map.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_flat_map_state.skip_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_flat_map_state.Depth.mk capture_state1.depth)
++}
++
++/-- [nested_borrows_flat_map_state::skip_map]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 107:0-109:1
++    Visibility: public -/
++def skip_map
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (stack : _root_.nested_borrows_flat_map_state.Depth) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.nested_borrows_flat_map_state.Depth ×
++    (_root_.nested_borrows_flat_map_state.Depth →
++    _root_.nested_borrows_flat_map_state.Depth))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter xs
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.skip_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32
++      i stack
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.skip_map.closure →
++      _root_.nested_borrows_flat_map_state.skip_map.closure)
++  let map_back1 :=
++    (fun state_back => ({ model_state with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.nested_borrows_flat_map_state.skip_map.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.skip_map.closure) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.skip_map.closure →
++      _root_.nested_borrows_flat_map_state.skip_map.closure)))
++  let (model_state1, model_state2) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.skip.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.skip_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32)
++      model_state 1#usize
++  let skip_back :=
++    (fun state_back => (Aeneas.Std.core.iter.adapters.skip.Skip.recombine
++       (fun original current => state_back) model_state1 model_state1,
++       fun state_back1 => state_back) :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.skip_map.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.skip_map.closure)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.skip_map.closure) →
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.skip_map.closure)))
++  let (model_state3, model_state4) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSkip
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.skip_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state1
++  let m :=
++    model_state2 (Aeneas.Std.core.iter.adapters.skip.Skip.recombine
++      (fun original current => { original with f := current.f }) model_state1
++      model_state4)
++  let c := map_back { model_state with f := m.f }
++  let back :=
++    (fun stack1 =>
++       let (m1, back1) := map_back1 stack1
++       let (s, back2) := skip_back { model_state with f := m1.f }
++       let s1 :=
++         Aeneas.Std.core.iter.adapters.skip.Skip.recombine
++           (fun original current => { original with f := current.f })
++           model_state4 s
++       let m2 :=
++         back2 (Aeneas.Std.core.iter.adapters.skip.Skip.recombine
++           (fun original current => { original with f := current.f })
++           model_state1 s1)
++       let ⟨ i1 ⟩ := m2.f
++       let c1 := back1 { model_state with f := { depth := i1 } }
++       let ⟨ i2 ⟩ := c1
++       { depth := i2 } : _root_.nested_borrows_flat_map_state.Depth →
++      _root_.nested_borrows_flat_map_state.Depth)
++  _root_.Aeneas.Std.Result.ok (model_state3, c, back)
++
++/-- [nested_borrows_flat_map_state::chain_map::{core::ops::function::FnMut<(&'_ (u32)), u32> for nested_borrows_flat_map_state::chain_map::closure<0, 1>}::call_mut]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 114:43-114:61 -/
++def chain_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++  (c : _root_.nested_borrows_flat_map_state.chain_map.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_flat_map_state.chain_map.closure ×
++    (_root_.nested_borrows_flat_map_state.chain_map.closure →
++    _root_.nested_borrows_flat_map_state.chain_map.closure) ×
++    (_root_.nested_borrows_flat_map_state.chain_map.closure →
++    (_root_.nested_borrows_flat_map_state.chain_map.closure ×
++    (_root_.nested_borrows_flat_map_state.chain_map.closure →
++    _root_.nested_borrows_flat_map_state.chain_map.closure))))
++  := do
++  let (i, d, bump_back) ←
++    _root_.nested_borrows_flat_map_state.bump tupled_args c
++  let back :=
++    (fun c1 => c1 : _root_.nested_borrows_flat_map_state.chain_map.closure →
++      _root_.nested_borrows_flat_map_state.chain_map.closure)
++  let back1 :=
++    (fun c1 => (c1, fun c2 => let d1 := bump_back c2
++                              d1) :
++      _root_.nested_borrows_flat_map_state.chain_map.closure →
++      (_root_.nested_borrows_flat_map_state.chain_map.closure ×
++      (_root_.nested_borrows_flat_map_state.chain_map.closure →
++      _root_.nested_borrows_flat_map_state.chain_map.closure)))
++  _root_.Aeneas.Std.Result.ok (i, d, back, back1)
++
++/-- [nested_borrows_flat_map_state::chain_map::{core::ops::function::FnOnce<(&'_ (u32)), u32> for nested_borrows_flat_map_state::chain_map::closure<0, 1>}::call_once]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 114:43-114:61 -/
++def chain_map.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++  (c : _root_.nested_borrows_flat_map_state.chain_map.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    _root_.nested_borrows_flat_map_state.chain_map.closure ×
++    (_root_.nested_borrows_flat_map_state.chain_map.closure →
++    _root_.nested_borrows_flat_map_state.chain_map.closure))
++  := do
++  let (i1, c1, call_mut_back, call_mut_back1) ←
++    _root_.nested_borrows_flat_map_state.chain_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 c3
++       let c5 := back1 c4
++       let ⟨ i2 ⟩ := c5
++       { depth := i2 } : _root_.nested_borrows_flat_map_state.chain_map.closure
++      → _root_.nested_borrows_flat_map_state.chain_map.closure)
++  _root_.Aeneas.Std.Result.ok (i1, c2, back)
++
++/-- Trait implementation: [nested_borrows_flat_map_state::chain_map::{core::ops::function::FnOnce<(&'_ (u32)), u32> for nested_borrows_flat_map_state::chain_map::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 114:43-114:61 -/
++@[reducible]
++def chain_map.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_flat_map_state.chain_map.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1) ←
++        _root_.nested_borrows_flat_map_state.chain_map.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_flat_map_state.Depth.mk capture_state1.depth)
++}
++
++/-- Trait implementation: [nested_borrows_flat_map_state::chain_map::{core::ops::function::FnMut<(&'_ (u32)), u32> for nested_borrows_flat_map_state::chain_map::closure<0, 1>}]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 114:43-114:61 -/
++@[reducible]
++def chain_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_flat_map_state.chain_map.closure _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 := {
++  FnOnceInst :=
++    _root_.nested_borrows_flat_map_state.chain_map.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32U32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_flat_map_state.chain_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_flat_map_state.Depth.mk capture_state1.depth)
++}
++
++/-- [nested_borrows_flat_map_state::chain_map]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 113:0-115:1
++    Visibility: public -/
++def chain_map
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (ys : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (stack : _root_.nested_borrows_flat_map_state.Depth) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.nested_borrows_flat_map_state.Depth ×
++    (_root_.nested_borrows_flat_map_state.Depth →
++    _root_.nested_borrows_flat_map_state.Depth))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter xs
++  let c ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.copied.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.core.marker.CopyU32
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) i
++  let i1 ← _root_.Aeneas.Std.core.slice.Slice.iter ys
++  let model_state ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.chain_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32
++      i1 stack
++  let map_back :=
++    (fun state_back => state_back.f :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.chain_map.closure →
++      _root_.nested_borrows_flat_map_state.chain_map.closure)
++  let map_back1 :=
++    (fun state_back => ({ model_state with f := state_back },
++       fun state_back1 => state_back) :
++      _root_.nested_borrows_flat_map_state.chain_map.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.chain_map.closure) ×
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.chain_map.closure →
++      _root_.nested_borrows_flat_map_state.chain_map.closure)))
++  let (model_state1, _, model_state2) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.chain.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.core.marker.CopyU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIterator.Blanket
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.chain_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32))
++      c model_state
++  let chain_back :=
++    (fun state_back => (Aeneas.Std.core.iter.adapters.chain.Chain.recombine
++       (fun original current => original) (fun original current => state_back)
++       model_state1 model_state1, fun state_back1 => state_back) :
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.chain_map.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.chain.Chain
++      (_root_.Aeneas.Std.core.iter.adapters.copied.Copied
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.chain_map.closure)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.chain.Chain
++      (_root_.Aeneas.Std.core.iter.adapters.copied.Copied
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.chain_map.closure) →
++      _root_.Aeneas.Std.core.iter.adapters.map.Map
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.chain_map.closure)))
++  let (model_state3, model_state4) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorChain
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorCopied
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32) _root_.Aeneas.Std.core.marker.CopyU32)
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.chain_map.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32U32))
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state1
++  let m :=
++    model_state2 (Aeneas.Std.core.iter.adapters.chain.Chain.recombine
++      (fun original current => original)
++      (fun original current => { original with f := current.f }) model_state1
++      model_state4)
++  let c1 := map_back { model_state with f := m.f }
++  let back :=
++    (fun stack1 =>
++       let (m1, back1) := map_back1 stack1
++       let (c2, back2) := chain_back { model_state with f := m1.f }
++       let c3 :=
++         Aeneas.Std.core.iter.adapters.chain.Chain.recombine
++           (fun original current => original)
++           (fun original current => { original with f := current.f })
++           model_state4 c2
++       let m2 :=
++         back2 (Aeneas.Std.core.iter.adapters.chain.Chain.recombine
++           (fun original current => original)
++           (fun original current => { original with f := current.f })
++           model_state1 c3)
++       let ⟨ i2 ⟩ := m2.f
++       let c4 := back1 { model_state with f := { depth := i2 } }
++       let ⟨ i3 ⟩ := c4
++       { depth := i3 } : _root_.nested_borrows_flat_map_state.Depth →
++      _root_.nested_borrows_flat_map_state.Depth)
++  _root_.Aeneas.Std.Result.ok (model_state3, c1, back)
++
++/-- [nested_borrows_flat_map_state::drive_skip]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 117:0-124:1
++    Visibility: public -/
++def drive_skip
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (depth : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  let (v, d, skip_map_back) ←
++    _root_.nested_borrows_flat_map_state.skip_map xs { depth }
++  let d1 := skip_map_back d
++  _root_.Aeneas.Std.Result.ok (v, d1.depth)
++
++/-- [nested_borrows_flat_map_state::drive_chain]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 126:0-133:1
++    Visibility: public -/
++def drive_chain
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (ys : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (depth : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  let (v, d, chain_map_back) ←
++    _root_.nested_borrows_flat_map_state.chain_map xs ys { depth }
++  let d1 := chain_map_back d
++  _root_.Aeneas.Std.Result.ok (v, d1.depth)
++
++/-- [nested_borrows_flat_map_state::expand3]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 144:0-148:1
++    Visibility: public -/
++def expand3
++  (x : _root_.Aeneas.Std.U32) (f : _root_.nested_borrows_flat_map_state.Frame)
++  :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.nested_borrows_flat_map_state.Frame ×
++    (_root_.nested_borrows_flat_map_state.Frame →
++    _root_.nested_borrows_flat_map_state.Frame) ×
++    (_root_.nested_borrows_flat_map_state.Frame →
++    (_root_.nested_borrows_flat_map_state.Frame ×
++    (_root_.nested_borrows_flat_map_state.Frame →
++    _root_.nested_borrows_flat_map_state.Frame))))
++  := do
++  let i ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add f.ctx.n x)
++  let i1 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add f.ctx.calls 1#u32)
++  let i2 ← lift (_root_.Aeneas.Std.core.num.U32.wrapping_add x 1#u32)
++  let s ←
++    lift (_root_.Aeneas.Std.Array.to_slice
++      (_root_.Aeneas.Std.Array.make 2#usize [ x, i2 ] : _root_.Aeneas.Std.Array
++      _root_.Aeneas.Std.U32 2#usize))
++  let v := _root_.Aeneas.Std.alloc.slice.Slice.into_vec s
++  let back :=
++    (fun f1 => (f1, fun f2 => { ctx := { f.ctx with n := f2.ctx.n } }) :
++      _root_.nested_borrows_flat_map_state.Frame →
++      (_root_.nested_borrows_flat_map_state.Frame ×
++      (_root_.nested_borrows_flat_map_state.Frame →
++      _root_.nested_borrows_flat_map_state.Frame)))
++  _root_.Aeneas.Std.Result.ok (v, { ctx := { n := i, calls := i1 } },
++    fun f1 => f1, back)
++
++/-- [nested_borrows_flat_map_state::flat3::{core::ops::function::FnMut<(&'_ (u32)), alloc::vec::Vec<u32>> for nested_borrows_flat_map_state::flat3::closure<0, 1, 2>}::call_mut]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 155:23-155:40 -/
++def flat3.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32.call_mut
++  (c : _root_.nested_borrows_flat_map_state.flat3.closure)
++  (tupled_args : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.nested_borrows_flat_map_state.flat3.closure
++    × (_root_.nested_borrows_flat_map_state.flat3.closure →
++    _root_.nested_borrows_flat_map_state.flat3.closure) ×
++    (_root_.nested_borrows_flat_map_state.flat3.closure →
++    (_root_.nested_borrows_flat_map_state.flat3.closure ×
++    (_root_.nested_borrows_flat_map_state.flat3.closure →
++    _root_.nested_borrows_flat_map_state.flat3.closure))) ×
++    (_root_.nested_borrows_flat_map_state.flat3.closure →
++    (_root_.nested_borrows_flat_map_state.flat3.closure ×
++    (_root_.nested_borrows_flat_map_state.flat3.closure →
++    (_root_.nested_borrows_flat_map_state.flat3.closure ×
++    (_root_.nested_borrows_flat_map_state.flat3.closure →
++    (_root_.nested_borrows_flat_map_state.flat3.closure ×
++    (_root_.nested_borrows_flat_map_state.flat3.closure →
++    _root_.nested_borrows_flat_map_state.flat3.closure))))))))
++  := do
++  let (v, f, expand3_back, expand3_back1) ←
++    _root_.nested_borrows_flat_map_state.expand3 tupled_args c
++  let back :=
++    (fun c1 => c1 : _root_.nested_borrows_flat_map_state.flat3.closure →
++      _root_.nested_borrows_flat_map_state.flat3.closure)
++  let back1 :=
++    (fun c1 => (c1, fun c2 => let f1 := expand3_back c2
++                              f1) :
++      _root_.nested_borrows_flat_map_state.flat3.closure →
++      (_root_.nested_borrows_flat_map_state.flat3.closure ×
++      (_root_.nested_borrows_flat_map_state.flat3.closure →
++      _root_.nested_borrows_flat_map_state.flat3.closure)))
++  let back2 :=
++    (fun c1 =>
++       let ⟨ c2 ⟩ := c1
++       let (f1, _) := expand3_back1 { ctx := c2 }
++       (f1,
++         fun c3 => (c3,
++           fun c4 => (c4,
++             fun c5 =>
++               let ⟨ c6 ⟩ := c1
++               let (_, back3) := expand3_back1 { ctx := c6 }
++               let f2 := back3 { ctx := { f.ctx with n := c5.ctx.n } }
++               { ctx := { c.ctx with n := f2.ctx.n } }))) :
++      _root_.nested_borrows_flat_map_state.flat3.closure →
++      (_root_.nested_borrows_flat_map_state.flat3.closure ×
++      (_root_.nested_borrows_flat_map_state.flat3.closure →
++      (_root_.nested_borrows_flat_map_state.flat3.closure ×
++      (_root_.nested_borrows_flat_map_state.flat3.closure →
++      (_root_.nested_borrows_flat_map_state.flat3.closure ×
++      (_root_.nested_borrows_flat_map_state.flat3.closure →
++      _root_.nested_borrows_flat_map_state.flat3.closure)))))))
++  _root_.Aeneas.Std.Result.ok (v, f, back, back1, back2)
++
++/-- [nested_borrows_flat_map_state::flat3::{core::ops::function::FnOnce<(&'_ (u32)), alloc::vec::Vec<u32>> for nested_borrows_flat_map_state::flat3::closure<0, 1, 2>}::call_once]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 155:23-155:40 -/
++def flat3.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32VecU32.call_once
++  (c : _root_.nested_borrows_flat_map_state.flat3.closure)
++  (i : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.nested_borrows_flat_map_state.flat3.closure
++    × (_root_.nested_borrows_flat_map_state.flat3.closure →
++    _root_.nested_borrows_flat_map_state.flat3.closure) ×
++    (_root_.nested_borrows_flat_map_state.flat3.closure →
++    (_root_.nested_borrows_flat_map_state.flat3.closure ×
++    (_root_.nested_borrows_flat_map_state.flat3.closure →
++    _root_.nested_borrows_flat_map_state.flat3.closure))))
++  := do
++  let (v, c1, call_mut_back, call_mut_back1, call_mut_back2) ←
++    _root_.nested_borrows_flat_map_state.flat3.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32.call_mut
++      c i
++  let c2 := call_mut_back c1
++  let back :=
++    (fun c3 =>
++       let (c4, back1) := call_mut_back1 c3
++       let c5 := back1 c4
++       let ⟨ c6 ⟩ := c5
++       { ctx := c6 } : _root_.nested_borrows_flat_map_state.flat3.closure →
++      _root_.nested_borrows_flat_map_state.flat3.closure)
++  let back1 :=
++    (fun c3 =>
++       let ⟨ c4 ⟩ := c3
++       let (c5, back2) := call_mut_back2 { ctx := c4 }
++       let (c6, _) := back2 c5
++       (c6,
++         fun c7 =>
++           let ⟨ c8 ⟩ := c3
++           let (c9, back3) := call_mut_back2 { ctx := c8 }
++           let (_, back4) := back3 c9
++           let (c10, back5) := back4 { ctx := { c2.ctx with n := c7.ctx.n } }
++           let c11 := back5 c10
++           let ⟨ ⟨ i1, _ ⟩ ⟩ := c11
++           { ctx := { c.ctx with n := i1 } }) :
++      _root_.nested_borrows_flat_map_state.flat3.closure →
++      (_root_.nested_borrows_flat_map_state.flat3.closure ×
++      (_root_.nested_borrows_flat_map_state.flat3.closure →
++      _root_.nested_borrows_flat_map_state.flat3.closure)))
++  _root_.Aeneas.Std.Result.ok (v, c2, back, back1)
++
++/-- Trait implementation: [nested_borrows_flat_map_state::flat3::{core::ops::function::FnOnce<(&'_ (u32)), alloc::vec::Vec<u32>> for nested_borrows_flat_map_state::flat3::closure<0, 1, 2>}]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 155:23-155:40 -/
++@[reducible]
++def flat3.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32VecU32 :
++  _root_.Aeneas.Std.core.ops.function.FnOnce
++  _root_.nested_borrows_flat_map_state.flat3.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) := {
++  call_once :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2) ←
++        _root_.nested_borrows_flat_map_state.flat3.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32VecU32.call_once
++          arg arg1
++      let capture_state := captured
++      let observed_state := captured
++      let capture_state1 := captured1 observed_state
++      let (c, back) := captured2 observed_state
++      let capture_state2 := back c
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_flat_map_state.Frame.mk
++        (_root_.nested_borrows_flat_map_state.Ctx.mk capture_state2.ctx.n
++        capture_state1.ctx.calls))
++}
++
++/-- Trait implementation: [nested_borrows_flat_map_state::flat3::{core::ops::function::FnMut<(&'_ (u32)), alloc::vec::Vec<u32>> for nested_borrows_flat_map_state::flat3::closure<0, 1, 2>}]
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 155:23-155:40 -/
++@[reducible]
++def flat3.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32 :
++  _root_.Aeneas.Std.core.ops.function.FnMut
++  _root_.nested_borrows_flat_map_state.flat3.closure _root_.Aeneas.Std.U32
++  (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) := {
++  FnOnceInst :=
++    _root_.nested_borrows_flat_map_state.flat3.closure.Insts.CoreOpsFunctionFnOnceTupleSharedU32VecU32
++  call_mut :=
++    fun arg arg1 =>
++      do
++      let (output, captured, captured1, captured2, captured3) ←
++        _root_.nested_borrows_flat_map_state.flat3.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32.call_mut
++          arg arg1
++      let capture_state := captured1 captured
++      let (c, back) := captured2 captured
++      let capture_state1 := back c
++      let (c1, back1) := captured3 captured
++      let (c2, back2) := back1 captured
++      let (c3, back3) := back2 c2
++      let capture_state2 := back3 c3
++      _root_.Aeneas.Std.Result.ok (output,
++        _root_.nested_borrows_flat_map_state.Frame.mk
++        (_root_.nested_borrows_flat_map_state.Ctx.mk capture_state2.ctx.n
++        capture_state1.ctx.calls))
++}
++
++/-- [nested_borrows_flat_map_state::flat3]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 154:0-156:1
++    Visibility: public -/
++def flat3
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (f : _root_.nested_borrows_flat_map_state.Frame) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.nested_borrows_flat_map_state.Frame ×
++    (_root_.nested_borrows_flat_map_state.Frame →
++    _root_.nested_borrows_flat_map_state.Frame) ×
++    (_root_.nested_borrows_flat_map_state.Frame →
++    (_root_.nested_borrows_flat_map_state.Frame ×
++    (_root_.nested_borrows_flat_map_state.Frame →
++    _root_.nested_borrows_flat_map_state.Frame))))
++  := do
++  let i ← _root_.Aeneas.Std.core.slice.Slice.iter xs
++  let (model_state, _, model_state1) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.flat_map.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32
++      i f
++  let flat_map_back :=
++    (fun state_back => (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++       (fun original current => original) (fun original current => state_back)
++       model_state model_state, fun state_back1 => state_back) :
++      _root_.nested_borrows_flat_map_state.flat3.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) →
++      _root_.nested_borrows_flat_map_state.flat3.closure)))
++  let flat_map_back1 :=
++    (fun state_back => (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++       (fun original current => original) (fun original current => state_back)
++       model_state model_state,
++       fun state_back1 => (model_state1 state_back1,
++         fun state_back2 =>
++           (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++           (fun original current => original)
++           (fun original current => state_back2) model_state model_state,
++           fun state_back3 => state_back))) :
++      _root_.nested_borrows_flat_map_state.flat3.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) →
++      (_root_.nested_borrows_flat_map_state.flat3.closure ×
++      (_root_.nested_borrows_flat_map_state.flat3.closure →
++      ((_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) →
++      _root_.nested_borrows_flat_map_state.flat3.closure)))))))
++  let (model_state2, model_state3) ←
++    _root_.Aeneas.Std.core.iter.traits.iterator.Iterator.collect.default
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorFlatMap
++      (_root_.Aeneas.Std.core.iter.traits.iterator.IteratorSliceIter
++      _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorVec
++      _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure.Insts.CoreOpsFunctionFnMutTupleSharedU32VecU32)
++      (_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorVec
++      _root_.Aeneas.Std.U32) model_state
++  let collect_back :=
++    (fun state_back => (state_back, fun state_back1 => state_back1) :
++      _root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) →
++      ((_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.core.iter.adapters.flatten.FlatMap
++      (_root_.Aeneas.Std.core.slice.iter.Iter _root_.Aeneas.Std.U32)
++      _root_.nested_borrows_flat_map_state.flat3.closure
++      (_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32))))
++  let c :=
++    model_state1 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++      (fun original current => original) (fun original current => current)
++      model_state model_state3)
++  let back :=
++    (fun f1 =>
++       let (fm, back1) := flat_map_back f1
++       let fm1 :=
++         Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++           (fun original current => original) (fun original current => current)
++           model_state3 fm
++       let c1 :=
++         back1 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++           (fun original current => original) (fun original current => current)
++           model_state fm1)
++       let ⟨ c2 ⟩ := c1
++       { ctx := c2 } : _root_.nested_borrows_flat_map_state.Frame →
++      _root_.nested_borrows_flat_map_state.Frame)
++  let back1 :=
++    (fun f1 =>
++       let (fm, back2) := flat_map_back1 f1
++       let (fm1, _) :=
++         collect_back (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++           (fun original current => original)
++           (fun original current =>
++             { ctx := { original.ctx with n := current.ctx.n } }) fm fm)
++       let (c1, _) :=
++         back2 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++           (fun original current => original)
++           (fun original current =>
++             { ctx := { original.ctx with n := current.ctx.n } }) fm1 fm1)
++       (c1,
++         fun f2 =>
++           let c2 :=
++             model_state1
++               (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++               (fun original current => original)
++               (fun original current => current) model_state model_state3)
++           let (fm2, back3) :=
++             collect_back
++               (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++               (fun original current => original)
++               (fun original current =>
++                 { ctx := { original.ctx with n := current.ctx.n } }) fm fm)
++           let (_, back4) :=
++             back2 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++               (fun original current => original)
++               (fun original current =>
++                 { ctx := { original.ctx with n := current.ctx.n } }) fm2 fm2)
++           let (fm3, back5) :=
++             back4 { ctx := { f2.ctx with calls := c2.ctx.calls } }
++           let fm4 :=
++             back3 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++               (fun original current => original)
++               (fun original current =>
++                 { ctx := { original.ctx with n := current.ctx.n } })
++               model_state3 fm3)
++           let c3 :=
++             back5 (Aeneas.Std.core.iter.adapters.flatten.FlatMap.recombine
++               (fun original current => original)
++               (fun original current =>
++                 { ctx := { original.ctx with n := current.ctx.n } })
++               model_state fm4)
++           let ⟨ ⟨ i1, _ ⟩ ⟩ := c3
++           { ctx := { f.ctx with n := i1 } }) :
++      _root_.nested_borrows_flat_map_state.Frame →
++      (_root_.nested_borrows_flat_map_state.Frame ×
++      (_root_.nested_borrows_flat_map_state.Frame →
++      _root_.nested_borrows_flat_map_state.Frame)))
++  _root_.Aeneas.Std.Result.ok (model_state2, c, back, back1)
++
++/-- [nested_borrows_flat_map_state::drive3]:
++    Source: 'tests/src/nested-borrows-flat-map-state.rs', lines 159:0-170:1
++    Visibility: public -/
++def drive3
++  (xs : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (n : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32 × _root_.Aeneas.Std.U32)
++  := do
++  let (r, f, flat3_back, flat3_back1) ←
++    _root_.nested_borrows_flat_map_state.flat3 xs
++      { ctx := { n, calls := 0#u32 } }
++  let f1 := flat3_back f
++  let (f2, back) := flat3_back1 { ctx := { f1.ctx with calls := 0#u32 } }
++  let f3 := back { ctx := { f.ctx with n := f2.ctx.n } }
++  _root_.Aeneas.Std.Result.ok (r, f1.ctx.calls, f3.ctx.n)
++
++end nested_borrows_flat_map_state
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index 71ee114..0116639 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -263,3 +263,4 @@ package «tests» {}
+ @[default_target] lean_lib SlicePatternEnumLoop
+ @[default_target] lean_lib CharCasts
+ @[default_target] lean_lib SlicePatternMut
++@[default_target] lean_lib NestedBorrowsFlatMapState
+diff --git a/tests/src/nested-borrows-flat-map-state.rs b/tests/src/nested-borrows-flat-map-state.rs
+new file mode 100644
+index 0000000..18f4474
+--- /dev/null
++++ b/tests/src/nested-borrows-flat-map-state.rs
+@@ -0,0 +1,211 @@
++//@ [!lean] skip
++//@ [lean] subdir=NestedBorrowsFlatMapState
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings --include core::iter::adapters::map::Map
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! Iterator adapters whose model is a constructor with state
++//! (`ModelStateABI.ConstructorWithState`: `flat_map`, `skip`, `chain`) moving
++//! a closure which captures a mutable borrow of a struct holding mutable
++//! borrows (production: chelis-types `vmap_extent::union_children`,
++//! `children.iter().flat_map(|c| analyze_expr(c, locals, .., stack)).collect()`
++//! with `stack: &mut StackBudget<'_>`). The backward function of the inner
++//! region gives back, at level 1, the output of the adapter in which the
++//! closure is replaced with the value received for it
++//! (`ModelStateABI.constructor_state_update`, through the model type's
++//! recombination operation), and the closure gives back, at level 2 (three
++//! levels), the value its restoration lens reads in the output received. The
++//! writes of the closure through the inner borrows are observable after the
++//! call.
++
++use std::collections::BTreeSet;
++
++pub struct NativeServices {
++    pub grown: u32,
++}
++
++pub struct StackBailRecord {
++    pub frames: u32,
++}
++
++/// Two mutable borrows of the same region (production: `infer::stack`)
++pub struct StackBudget<'a> {
++    pub native: &'a mut NativeServices,
++    pub record: &'a mut StackBailRecord,
++}
++
++pub fn analyze(
++    child: &u32,
++    locals: &mut Vec<u32>,
++    scale: &u32,
++    stack: &mut StackBudget<'_>,
++) -> BTreeSet<u32> {
++    stack.native.grown = stack.native.grown.wrapping_add(*child);
++    stack.record.frames = stack.record.frames.wrapping_add(1);
++    locals.push(*child);
++    let mut deps = BTreeSet::new();
++    deps.insert(*child);
++    deps.insert(child.wrapping_mul(*scale));
++    deps
++}
++
++/// The production shape: `flat_map` then `collect` into a `BTreeSet`
++pub fn union_children(
++    children: &[u32],
++    locals: &mut Vec<u32>,
++    scale: &u32,
++    stack: &mut StackBudget<'_>,
++) -> BTreeSet<u32> {
++    children
++        .iter()
++        .flat_map(|child| analyze(child, locals, scale, stack))
++        .collect()
++}
++
++/// `(deps, locals, grown, frames)`: the caller reads the borrowed state after
++/// the call
++pub fn drive(children: &[u32], scale: u32, grown: u32) -> (Vec<u32>, Vec<u32>, u32, u32) {
++    let mut native = NativeServices { grown };
++    let mut record = StackBailRecord { frames: 0 };
++    let mut locals = Vec::new();
++    let deps = {
++        let mut stack = StackBudget { native: &mut native, record: &mut record };
++        union_children(children, &mut locals, &scale, &mut stack)
++    };
++    (deps.into_iter().collect(), locals, native.grown, record.frames)
++}
++
++pub struct Depth<'a> {
++    pub depth: &'a mut u32,
++}
++
++pub fn expand(child: &u32, locals: &mut Vec<u32>, stack: &mut Depth<'_>) -> Vec<u32> {
++    *stack.depth = stack.depth.wrapping_add(1);
++    locals.push(*child);
++    vec![*child, child.wrapping_add(100)]
++}
++
++/// `flat_map` into a `Vec`, with a struct holding one mutable borrow
++pub fn flat_vec(children: &[u32], locals: &mut Vec<u32>, stack: &mut Depth<'_>) -> Vec<u32> {
++    children.iter().flat_map(|child| expand(child, locals, stack)).collect()
++}
++
++pub fn drive_vec(children: &[u32], depth: u32) -> (Vec<u32>, Vec<u32>, u32) {
++    let mut d = depth;
++    let mut locals = Vec::new();
++    let v = {
++        let mut stack = Depth { depth: &mut d };
++        flat_vec(children, &mut locals, &mut stack)
++    };
++    (v, locals, d)
++}
++
++pub fn bump(x: &u32, stack: &mut Depth<'_>) -> u32 {
++    *stack.depth = stack.depth.wrapping_add(*x);
++    x.wrapping_mul(2)
++}
++
++/// `skip` moves a `Map` whose closure captures `&mut Depth<'_>`
++pub fn skip_map(xs: &[u32], stack: &mut Depth<'_>) -> Vec<u32> {
++    xs.iter().map(|x| bump(x, stack)).skip(1).collect()
++}
++
++/// `chain` moves a `Map` whose closure captures `&mut Depth<'_>` as its
++/// second iterator
++pub fn chain_map(xs: &[u32], ys: &[u32], stack: &mut Depth<'_>) -> Vec<u32> {
++    xs.iter().copied().chain(ys.iter().map(|y| bump(y, stack))).collect()
++}
++
++pub fn drive_skip(xs: &[u32], depth: u32) -> (Vec<u32>, u32) {
++    let mut d = depth;
++    let v = {
++        let mut stack = Depth { depth: &mut d };
++        skip_map(xs, &mut stack)
++    };
++    (v, d)
++}
++
++pub fn drive_chain(xs: &[u32], ys: &[u32], depth: u32) -> (Vec<u32>, u32) {
++    let mut d = depth;
++    let v = {
++        let mut stack = Depth { depth: &mut d };
++        chain_map(xs, ys, &mut stack)
++    };
++    (v, d)
++}
++
++pub struct Ctx<'b> {
++    pub n: &'b mut u32,
++    pub calls: u32,
++}
++
++pub struct Frame<'a, 'b> {
++    pub ctx: &'a mut Ctx<'b>,
++}
++
++pub fn expand3(x: &u32, f: &mut Frame<'_, '_>) -> Vec<u32> {
++    *f.ctx.n = f.ctx.n.wrapping_add(*x);
++    f.ctx.calls = f.ctx.calls.wrapping_add(1);
++    vec![*x, x.wrapping_add(1)]
++}
++
++/// Three levels: the closure captures `&mut Frame<'a, 'b>`, `Frame` holds
++/// `&'a mut Ctx<'b>`, `Ctx` holds `&'b mut u32`. The backward function of
++/// `'b` is staged; `flat_map` gives back the closure at level 2 with its
++/// restoration lens applied to the output it receives.
++pub fn flat3(xs: &[u32], f: &mut Frame<'_, '_>) -> Vec<u32> {
++    xs.iter().flat_map(|x| expand3(x, f)).collect()
++}
++
++/// `(values, calls, n)`
++pub fn drive3(xs: &[u32], n: u32) -> (Vec<u32>, u32, u32) {
++    let mut v = n;
++    let (r, calls) = {
++        let mut ctx = Ctx { n: &mut v, calls: 0 };
++        let r = {
++            let mut f = Frame { ctx: &mut ctx };
++            flat3(xs, &mut f)
++        };
++        (r, ctx.calls)
++    };
++    (r, calls, v)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn drive_native() {
++        assert_eq!(drive(&[1, 2, 3], 10, 5), (vec![1, 2, 3, 10, 20, 30], vec![1, 2, 3], 11, 3));
++        assert_eq!(drive(&[4, 4], 1, 0), (vec![4], vec![4, 4], 8, 2));
++        assert_eq!(drive(&[], 7, 9), (vec![], vec![], 9, 0));
++        assert_eq!(drive(&[u32::MAX], 2, 1), (vec![u32::MAX - 1, u32::MAX], vec![u32::MAX], 0, 1));
++    }
++
++    #[test]
++    fn drive_vec_native() {
++        assert_eq!(drive_vec(&[1, 2], 0), (vec![1, 101, 2, 102], vec![1, 2], 2));
++        assert_eq!(drive_vec(&[], 40), (vec![], vec![], 40));
++        assert_eq!(drive_vec(&[7, 8, 9], u32::MAX), (vec![7, 107, 8, 108, 9, 109], vec![7, 8, 9], 2));
++    }
++
++    #[test]
++    fn drive_skip_native() {
++        assert_eq!(drive_skip(&[1, 2, 3], 10), (vec![4, 6], 16));
++        assert_eq!(drive_skip(&[5], 0), (vec![], 5));
++        assert_eq!(drive_skip(&[], 3), (vec![], 3));
++    }
++
++    #[test]
++    fn drive3_native() {
++        assert_eq!(drive3(&[1, 2], 10), (vec![1, 2, 2, 3], 2, 13));
++        assert_eq!(drive3(&[], 7), (vec![], 0, 7));
++        assert_eq!(drive3(&[u32::MAX, 3], 1), (vec![u32::MAX, 0, 3, 4], 2, 3));
++    }
++
++    #[test]
++    fn drive_chain_native() {
++        assert_eq!(drive_chain(&[1, 2], &[3, 4], 10), (vec![1, 2, 6, 8], 17));
++        assert_eq!(drive_chain(&[], &[5], 0), (vec![10], 5));
++        assert_eq!(drive_chain(&[9], &[], 3), (vec![9], 3));
++    }
++}

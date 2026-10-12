@@ -531,6 +531,92 @@ theorem preflightLens_set_pop (s : HCx) :
     have := s.state.invocation.preflight.property; simp; omega
   simp only [preflightLens, List.tail_reverse, List.reverse_reverse, dif_pos hl]
 
+/-- Every successful entry leaves capacity for the source frame push. -/
+
+theorem preflightEntry_room (expr : chelis_deep.ast.Expr) (s s₀ : HCx)
+
+    (fr : chelis_ir.host.PreflightFrame)
+
+    (h : preflightEntry expr s = some (s₀, fr)) :
+
+    s₀.state.invocation.preflight.val.length < Usize.max := by
+
+  unfold preflightEntry at h
+
+  split at h
+
+  · split at h
+
+    · simp_all
+
+    · cases h
+
+  · cases h
+
+/-- The bounded lens update stores exactly the supplied source stack. -/
+
+theorem preflightLens_get_set (s : HCx)
+
+    (stack : List chelis_ir.host.PreflightFrame)
+
+    (h : stack.length ≤ Usize.max) :
+
+    preflightLens.get (preflightLens.set stack s) = stack := by
+
+  simp [preflightLens, h]
+
+/-- A successful entry gives the exact pushed stack, not only a nonempty stack. -/
+
+theorem preflightEntry_push (expr : chelis_deep.ast.Expr) (s s₀ : HCx)
+
+    (fr : chelis_ir.host.PreflightFrame)
+
+    (h : preflightEntry expr s = some (s₀, fr)) :
+
+    preflightLens.get (preflightLens.set (fr :: preflightLens.get s₀) s₀) =
+
+      fr :: preflightLens.get s₀ := by
+
+  apply preflightLens_get_set
+
+  have hr := preflightEntry_room expr s s₀ fr h
+
+  simp only [preflightLens, List.length_cons, List.length_reverse]
+
+  omega
+
+/-- The source body must preserve both the new frame and all older frames. -/
+
+def PreflightBodyBalanced (fr : chelis_ir.host.PreflightFrame) (entry after : HCx) : Prop :=
+
+  preflightLens.get after = fr :: preflightLens.get entry
+
+/-- The balanced source exit restores the entry stack and keeps all other fields. -/
+
+theorem preflightBalanced_exit (fr : chelis_ir.host.PreflightFrame)
+
+    (entry after : HCx) (h : PreflightBodyBalanced fr entry after) :
+
+    preflightLens.get after ≠ [] ∧
+
+      preflightLens.set (preflightLens.get after).tail after =
+
+        preflightLens.set (preflightLens.get entry) after ∧
+
+      preflightLens.get (preflightLens.set (preflightLens.get after).tail after) =
+
+        preflightLens.get entry := by
+
+  change preflightLens.get after = fr :: preflightLens.get entry at h
+
+  have hb : (preflightLens.get entry).length ≤ Usize.max := by
+
+    simpa [preflightLens] using entry.state.invocation.preflight.property
+
+  rw [h]
+
+  exact ⟨List.cons_ne_nil _ _, rfl, preflightLens_get_set after _ hb⟩
+
 /-- **`with_preflight expr`, every instance**: on a successful entry (`preflightEntry`: fresh
 frame id, filled summary cache, analyzed facts, room on the stack) the body runs on the context
 with the frame `{id, facts}` pushed and receives the frame's root node `{frame := id, node := 0}`;
@@ -627,5 +713,139 @@ theorem withPreflight_obligation (expr : chelis_deep.ast.Expr) (γ : Type) :
   | some x =>
     obtain ⟨s₁, r⟩ := x
     simp [hleave s₁ r hb]
+
+/-- Exact frame balance gives the source exit equation for every returned Rust result. -/
+
+theorem withPreflight_balanced {R T1 : Type} (inst)
+
+    (expr : chelis_deep.ast.Expr) (body : T1) (s entry : HCx)
+
+    (fr : chelis_ir.host.PreflightFrame)
+
+    (hentry : preflightEntry expr s = some (entry, fr))
+
+    (hbody : ∀ after result,
+
+      okHost (inst.call_once body
+
+        (preflightLens.set (fr :: preflightLens.get entry) entry,
+
+          ({ frame := fr.id, node := 0#usize } : chelis_ir.host.PreflightNode))) =
+
+            some (after, result) →
+
+      PreflightBodyBalanced fr entry after) :
+
+    okHost (chelis_ir.host.with_preflight (R := R) (T1 := T1) inst expr s body) =
+
+      (okHost (inst.call_once body
+
+        (preflightLens.set (fr :: preflightLens.get entry) entry,
+
+          ({ frame := fr.id, node := 0#usize } : chelis_ir.host.PreflightNode)))).map
+
+        (fun returned => (preflightLens.set (preflightLens.get entry) returned.1,
+
+          returned.2)) := by
+
+  rw [withPreflight_spec, hentry]
+
+  cases hb : okHost (inst.call_once body
+
+      (preflightLens.set (fr :: preflightLens.get entry) entry,
+
+        ({ frame := fr.id, node := 0#usize } : chelis_ir.host.PreflightNode))) with
+
+  | none => rfl
+
+  | some returned =>
+
+    obtain ⟨after, result⟩ := returned
+
+    have hexit := preflightBalanced_exit fr entry after (hbody after result hb)
+
+    rw [if_neg hexit.1, hexit.2.1]
+
+    rfl
+
+/-- A preflight stack update preserves every field outside that stack. -/
+
+theorem preflightLens_preserves_nonstack (s : HCx)
+
+    (stack : List chelis_ir.host.PreflightFrame) :
+
+    let after := preflightLens.set stack s
+
+    after.checked = s.checked ∧ after.runtime = s.runtime ∧ after.native = s.native ∧
+
+      after.state.facts = s.state.facts ∧
+
+      after.state.invocation.inlining = s.state.invocation.inlining ∧
+
+      after.state.invocation.type_subst = s.state.invocation.type_subst ∧
+
+      after.state.invocation.mono = s.state.invocation.mono := by
+
+  unfold preflightLens
+
+  split
+
+  · exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+  · exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- Only ids of frames still in this invocation must differ. Popped ids can recur. -/
+
+def PreflightLiveDistinct (s : HCx) : Prop :=
+
+  ((preflightLens.get s).map (fun frame => frame.id)).Nodup
+
+/-- The wrapping allocator's returned id must avoid the live source stack. -/
+
+def PreflightOutsideLive (frame : chelis_ir.host.PreflightFrame) (s : HCx) : Prop :=
+
+  frame.id ∉ (preflightLens.get s).map (fun live => live.id)
+
+/-- Source push preserves distinct live ids exactly when the returned id is unused. -/
+
+theorem preflightEntry_live_distinct_iff (expr : chelis_deep.ast.Expr)
+
+    (s entry : HCx) (frame : chelis_ir.host.PreflightFrame)
+
+    (hentry : preflightEntry expr s = some (entry, frame)) :
+
+    PreflightLiveDistinct
+
+        (preflightLens.set (frame :: preflightLens.get entry) entry) ↔
+
+      PreflightOutsideLive frame entry ∧ PreflightLiveDistinct entry := by
+
+  simp only [PreflightLiveDistinct, PreflightOutsideLive,
+
+    preflightEntry_push expr s entry frame hentry, List.map_cons, List.nodup_cons]
+
+/-- Exact body balance restores the older live ids even when the counter wraps. -/
+
+theorem preflightBalanced_exit_live_distinct (frame : chelis_ir.host.PreflightFrame)
+
+    (entry after : HCx) (hbody : PreflightBodyBalanced frame entry after)
+
+    (hlive : PreflightLiveDistinct entry) :
+
+    PreflightLiveDistinct (preflightLens.set (preflightLens.get after).tail after) := by
+
+  unfold PreflightLiveDistinct
+
+  rw [(preflightBalanced_exit frame entry after hbody).2.2]
+
+  exact hlive
+
+/-!
+These transition laws do not prove the allocation or body hypotheses for callers.
+Nested invocation guards can retain older stacks outside the current invocation.
+
+Caller proofs must prevent collisions with all live frames needed by those guards.
+The counter remains a wrapping u64. No lifetime-wide uniqueness claim follows.
+-/
 
 end ChelisBridge.Runtime.ExtractedHostScopes

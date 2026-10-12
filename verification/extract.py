@@ -2,10 +2,16 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
 import tempfile
+
+if __package__:
+    from . import native_collection_certificate as native_certificate
+else:
+    import native_collection_certificate as native_certificate
 
 # Translation options shared by every extraction (single root or whole core).
 CHARON_OPTIONS = (
@@ -59,8 +65,31 @@ def charon_includes(crates) -> list[str]:
     return command
 
 
-def run(command: list[str], root: Path, *, capture: bool = False) -> str:
+def run(command: list[str], root: Path, *, capture: bool = False, receipt: Path | None = None) -> str:
     print("+ " + shlex.join(command), flush=True)
+    if receipt is not None:
+        environment = os.environ.copy()
+        log = receipt.with_suffix(".log")
+        lines = []
+        with log.open("x") as handle:
+            process = subprocess.Popen(command, cwd=root, env=environment, text=True,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            for line in process.stdout:
+                handle.write(line)
+                if capture:
+                    lines.append(line)
+                else:
+                    print(line, end="", flush=True)
+            returncode = process.wait()
+        native_certificate.save(receipt, {
+            "command": command, "cwd": str(root.resolve()), "returncode": returncode,
+            "status": "ok" if returncode == 0 else "failed",
+            "log": native_certificate.identity(log),
+            "environment": {name: environment.get(name) for name in native_certificate.RUST_FLAGS},
+        })
+        if returncode:
+            raise subprocess.CalledProcessError(returncode, command)
+        return "".join(lines) if capture else ""
     result = subprocess.run(
         command,
         cwd=root,
@@ -71,7 +100,8 @@ def run(command: list[str], root: Path, *, capture: bool = False) -> str:
     return result.stdout if capture else ""
 
 
-def generate_model(*, entry: str | None = None, mir: str = "promoted") -> Path:
+def generate_model(*, entry: str | None = None, mir: str = "promoted",
+                   native_profiles: Path | None = None) -> Path:
     root = Path(__file__).resolve().parent.parent
     metadata = json.loads(
         run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--locked"], root, capture=True)
@@ -85,6 +115,8 @@ def generate_model(*, entry: str | None = None, mir: str = "promoted") -> Path:
     crate = entry.split("::", 1)[0] if entry else "chelis_pipeline_core"
     if crate not in crates:
         raise ValueError("entry must belong to a retained workspace crate")
+    selected_profile = native_certificate.select_profile(
+        source_root=root, package=crates[crate], features=[], profiles=native_profiles)
 
     target = root / "target" / "agents" / "aeneas-charon"
     host = next(
@@ -114,11 +146,19 @@ def generate_model(*, entry: str | None = None, mir: str = "promoted") -> Path:
     ])
     print(f"Extraction scope: {entry or 'whole chelis_pipeline_core'}", flush=True)
     print(f"Artifacts: {output}", flush=True)
-    run(command, root)
+    before = native_certificate.save(output / "core-before.json", native_certificate.source_manifest(root))
+    extraction_command = output / "charon-command.json"
+    run(command, root, receipt=extraction_command)
+    after = native_certificate.save(output / "core-after.json", native_certificate.source_manifest(root))
     if not llbc.is_file() or llbc.stat().st_size == 0:
         raise RuntimeError("Charon returned without a fresh nonempty LLBC model")
+    certificate_result = native_certificate.bind_certificate(
+        profile_certificate=selected_profile["profile_certificate"], llbc=llbc,
+        extraction_command=extraction_command, core_before=before["path"], core_after=after["path"],
+        feature_chain=selected_profile["feature_chain"], output=output / "native-certificate")
     lean = output / "lean"
     lean.mkdir()
+    native_certificate.save(lean / "extraction-certificate.json", certificate_result)
     # Propositions that admitted collections rely on (e.g. a crate iterator's total
     # size_hint); checked theorems must prove them.
     obligations = output / "obligations.json"
@@ -126,6 +166,7 @@ def generate_model(*, entry: str | None = None, mir: str = "promoted") -> Path:
     run([
         "aeneas", "-backend", "lean", "-checks", "-abort-on-error", "-warnings-as-errors",
         "-strict-joins", "-sequential", "-emit-collection-obligations", str(obligations),
+        "-native-collection-layouts", certificate_result["certificate"]["path"],
         "-dest", str(lean), str(llbc),
     ], root)
     if not any(lean.rglob("*.lean")):
@@ -149,9 +190,10 @@ def main() -> None:
         choices=("built", "promoted", "elaborated", "optimized"),
         default="promoted",
     )
+    native_certificate.add_profiles_argument(parser)
     args = parser.parse_args()
     try:
-        generate_model(entry=args.entry, mir=args.mir)
+        generate_model(entry=args.entry, mir=args.mir, native_profiles=args.native_profiles)
     except ValueError as error:
         parser.error(str(error))
 

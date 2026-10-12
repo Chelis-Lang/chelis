@@ -38,6 +38,36 @@ def tryStr {ty} : core.result.Result (UScalar ty) (num_bigint.TryFromBigIntError
   | .Ok n => s!"ok {n.val}"
   | .Err e => s!"err {e.original}"
 
+/-- Options use the pinned native formatting layout. -/
+def opts (fill : Char := ' ') (align : Nat := 3) (plus alt zero lowerHex upperHex : Bool := false)
+    (width : Option Nat := none) : core.fmt.Options :=
+  let bit (b : Bool) (n : Nat) := if b then 2 ^ n else 0
+  { flags := fill.toNat + bit plus 21 + bit alt 23 + bit zero 24 + bit lowerHex 25 +
+      bit upperHex 26 + bit width.isSome 27 + align * 2 ^ 29
+    width := width.getD 0 }
+
+def run (k : core.fmt.Formatter → core.fmt.Outcome) (o : core.fmt.Options := {}) : String :=
+  match k { options := o } with
+  | .ok (.Ok (), f) => f.output
+  | _ => "error"
+
+def dbg (v : Nat) : core.fmt.DebugValue := ⟨Nat, num_bigint.DebugBigUint, v⟩
+
+/-- The native oracle uses this `Capacity` enum with derived `Debug`. -/
+def literal (v : Nat) : core.fmt.Formatter → core.fmt.Outcome := fun f =>
+  f.debug_tuple_field1_finish (toStr "Literal") (dbg v)
+
+def quotient (a b : Nat) : core.fmt.Formatter → core.fmt.Outcome := fun f =>
+  f.debug_struct_field2_finish (toStr "Quotient") (toStr "dividend") (dbg a) (toStr "divisor") (dbg b)
+
+-- The sign precedes zero padding. Alternate and hex flags do not change decimal output.
+#guard run (DebugBigUint.fmt 42) (opts (plus := true) (zero := true) (width := some 6)) == "+00042"
+
+#guard run (DisplayBigUint.fmt 7) (opts (alt := true) (lowerHex := true)) == "7"
+
+#guard run (DisplayBigUint.fmt (2 ^ 64)) (opts (fill := '*') (align := 2) (width := some 23)) ==
+  "*18446744073709551616**"
+
 -- Kernel reduction of the models: exact arithmetic and the zero-divisor panic.
 example : RemShared.rem (2 ^ 64 * 3) 7 = .ok ((2 ^ 64 * 3) % 7) := rfl
 example : DivShared.div 5 0 = .fail .panic := rfl
@@ -83,6 +113,34 @@ def main : IO Unit := do
   for (v, i) in values.zipIdx do
     let (bytes, writes) := ok! (HashBigUint.hash logHasher v ([], 0))
     IO.println s!"hash-{i}={writes} {bytes}"
+  for i in [0, 3, 7, 8, 11] do
+    let v := values[i]!
+    let line (label : String) (k : core.fmt.Formatter → core.fmt.Outcome)
+        (o : core.fmt.Options) : IO Unit :=
+      IO.println s!"fmt-{i}-{label}=[{run k o}]"
+    let disp := DisplayBigUint.fmt v
+    let debug := DebugBigUint.fmt v
+    line "display" disp {}
+    line "debug" debug {}
+    line "plus" disp (opts (plus := true))
+    line "alt" debug (opts (alt := true))
+    line "lowerhex-debug" debug (opts (lowerHex := true))
+    line "upperhex-debug" debug (opts (alt := true) (upperHex := true))
+    line "width" disp (opts (width := some 8))
+    line "width-debug" debug (opts (width := some 8))
+    line "left" disp (opts (align := 0) (width := some 8))
+    line "center" debug (opts (align := 2) (width := some 9))
+    line "right" disp (opts (align := 1) (width := some 8))
+    line "fill" disp (opts (fill := '*') (align := 2) (width := some 9))
+    line "fill-utf8" debug (opts (fill := 'é') (align := 1) (width := some 6))
+    line "zero" disp (opts (zero := true) (width := some 8))
+    line "zero-plus" debug (opts (plus := true) (zero := true) (width := some 8))
+    line "zero-left" disp (opts (fill := '*') (align := 0) (plus := true) (zero := true) (width := some 8))
+    line "wide" debug (opts (align := 1) (plus := true) (width := some 44))
+    line "narrow" disp (opts (width := some 1))
+    line "derived" (literal v) {}
+    line "derived-width" (quotient v values[3]!) (opts (zero := true) (width := some 6))
+    line "derived-pretty" (quotient v values[1]!) (opts (alt := true))
 
 #eval main
 

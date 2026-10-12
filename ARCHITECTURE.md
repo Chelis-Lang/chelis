@@ -536,18 +536,50 @@ The previous Charon/Hax closure-region failure for
 in Charon `5a71617`. The new `5b825fa` source integration additionally retains
 foreign closure bodies in promoted MIR, rejects stale or missing sidecars, and
 passes its isolated Charon regression plus strict two-crate native/Lean smoke.
-The independently checked patch series reconstructs the new Charon and
-charon-ml sources and round-36 Aeneas (`5cd0e4a`) exactly (47, 9, and 165
-patches). All four patched Nix outputs (Charon, charon-ml, Aeneas source, and
-Aeneas) are now built and rooted; their exact store paths are recorded in
+The last committed source pin (`c9e1a14`) independently reconstructs
+Charon, charon-ml and round-36 Aeneas (`5cd0e4a`) exactly (47, 9, and
+165 patches). Its four patched Nix outputs (Charon, charon-ml, Aeneas
+source, and Aeneas) are built and rooted; their exact store paths are in
 [README.md](README.md#verification-status-and-remaining-boundaries). Fresh
 strict Charon callgraphs for both feature chains produced 52 default and 53
 lowering-trace chunks without Charon dump errors, error tolerance, or dump
 reuse; both validate 54 native-shell entries and 73 selected local members.
-Their plan paths and SHA256 hashes are recorded in README. Neither plan is a
-strict eight-crate extraction, Lean whole-core build, or correspondence proof;
-matching pinned Lean-library preparation, both chunk extractions, and round-36
-proof/model/Audit still await adequate shared APFS headroom.
+Their plan paths and SHA256 hashes are recorded in README. The matching
+165-patch Aeneas Lean library was built from the new pinned source (1,681
+Lake jobs; no old Aeneas `.olean` reuse). Neither plan itself is a strict
+eight-crate extraction, Lean whole-core build, or correspondence proof;
+both chunk extractions and round-36 proof/model/Audit remain open.
+
+The first fresh strict accepting-mode default extraction is **not accepted**:
+chunk 05 `chelis_deep_03` failed in Aeneas at
+`crates/chelis-deep/src/annotations.rs:734-801` with non-endable
+abstraction 4 (`interp/InterpBorrows.ml:1404`). That 52-chunk run predates
+the local source changes and has not been rerun; the 53-chunk lowering-trace
+run remains unrun. The strict borrowed-visitor LLBC reproduced the first
+failure before the RegionHierarchy source repair `a3f369e`. The fresh strict
+saved visitor still fails rc 2: a pending native function-call stage lacks
+genuine level 3 (`aid833/abs990`); baseline h1/h2 also fail rc 2 at
+`SymbolicToPureAbs.ml:1328`. The level-3 full closure must return through
+the active parent `&mut FC`, but saved traces do not link its original borrow
+ID to the current symbolic `sv`; translation stays fail-closed. A guarded
+root `#aeneas` Dune baseline built rc 0 after two 2026-09-30 Data free
+samples of 22,583,960/22,606,688 KiB. Later uncommitted k-stage
+Core/Abs indexed pending/exchange and Expressions indexed EndAbs/protocol
+prepass semantic edits have **not** been compiled together: a guarded rc 0
+build used an intermediate source. `InterpAbs.ml` has comments-only changes;
+`InterpBorrows.ml` is unchanged. A trace-enabled strict
+saved-visitor launch was refused by `disk_guard` rc 3 below 13 GiB.
+No post-change h1/h2, native, Lean or proof check ran. At 19:08:55Z
+Data free was 8,135,816 KiB (5,495,672 KiB short of 13 GiB and below
+the 8.25 GiB runtime floor); one age-12h Kache request was skipped with
+zero reclaimed, daemon GC reclaimed zero. Concurrent unrelated user-owned
+`nix`/`cargo test` PID 56488/OMP 48428 were not assigned causality; the
+owner's tty was warned, with no signals or deletions. The four old rooted
+Nix outputs and 165-patch committed source pin are unchanged; working
+`verification/toolchain/aeneas/SERIES` still lists uncommitted patch 166.
+No strict default/trace rerun, whole-core extraction, Lean proof/Audit, or
+final acceptance has passed. Temporary debug hooks were removed; scoped
+replay recipes are listed in README.
 
 The earlier round-32 diagnostic 52-chunk run reached only 38 chunks; its
 incomplete manifests and error-tolerant settings cannot serve as acceptance.

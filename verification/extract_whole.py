@@ -118,6 +118,10 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extract import CHARON_OPTIONS, CHARON_STRICT, charon_includes  # noqa: E402
+from native_collection_certificate import (  # noqa: E402
+    add_profiles_argument, bind_certificate, identity, save as save_artifact,
+    select_profile, source_manifest, verify_certificate,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE_CRATES = (
@@ -346,12 +350,16 @@ class Runner:
         peak = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
         result = {
             "status": "ok" if process.returncode == 0 else "failed",
+            "command": command,
+            "cwd": str(Path(cwd).resolve()),
+            "environment": {**merged, "RUSTFLAGS": merged.get("RUSTFLAGS"),
+                            "CARGO_ENCODED_RUSTFLAGS": merged.get("CARGO_ENCODED_RUSTFLAGS")},
             "returncode": process.returncode,
             "wall_seconds": round(time.time() - started, 2),
             "peak_rss_bytes": peak,
             "peak_tree_footprint_bytes": max(peak_tree, peak),
             "memory_cap_killed": capped,
-            "log": str(log),
+            "log": str(log.resolve()),
             "started": started,
         }
         print(f"  -> {result['status']} rc={process.returncode} {result['wall_seconds']}s "
@@ -670,6 +678,8 @@ def reusable_chunks(earlier: Path, plan: dict, charon: dict, aeneas: dict) -> di
 
 def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: list[dict],
             reuse: dict[str, dict]) -> None:
+    if args.clear_start_from:
+        raise ExtractionFailure("--clear-start-from changes source-bound LLBC bytes and is not allowed")
     lean = out / "lean"
     lean.mkdir(parents=True)
     target = Path(args.target_dir).resolve()
@@ -686,8 +696,21 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
     for index, chunk in enumerate(plan["chunks"]):
         work = out / "chunks" / f"{index:02d}-{chunk['name']}"
         work.mkdir(parents=True)
+        profile = select_profile(source_root=ROOT, package=chunk["package"],
+                                 features=chunk["features"], profiles=args.native_profiles)
         if chunk["name"] in reuse:
             record = dict(reuse[chunk["name"]], reused_from=str(args.reuse))
+            if not record.get("llbc") or not record.get("certificate_result"):
+                raise ExtractionFailure(f"reused chunk {chunk['name']} lacks source-bound certificate evidence")
+            retained_llbc = Path(record["llbc"]["path"])
+            if not retained_llbc.is_file():
+                retained_llbc = retained_llbc.with_suffix(retained_llbc.suffix + ".gz")
+            certificate = verify_certificate(record["certificate_result"], retained_llbc)
+            for field in ("path", "sha256", "bytes"):
+                if record["llbc"][field] != certificate["llbc_input"][field]:
+                    raise ExtractionFailure(f"reused LLBC identity of {chunk['name']} differs")
+            if record["certificate_result"]["native_profile_evidence"] != profile["native_profile_evidence"]:
+                raise ExtractionFailure(f"reused native profile of {chunk['name']} differs")
             results.append(record)
             print(f"== chunk {index}: {chunk['name']} reused from {args.reuse}", flush=True)
             if (args.reuse / "lean" / chunk["module"]).is_dir():
@@ -708,6 +731,7 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
                   "package": chunk["package"], "features": chunk["features"],
                   "roots": len(chunk["roots"]), "opaque": len(chunk["opaque"]),
                   "charon": None, "aeneas": None, "llbc": None, "manifest": None,
+                  "certificate_result": None,
                   "errors": [], "missing_externals": [], "partial_externals": []}
         results.append(record)
         degraded[chunk["name"]] = "missing"  # until its manifest is read
@@ -724,12 +748,20 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
         clean_package(runner, args.charon, chunk["package"], target, work / "clean.log")
         charon_env = {"CHARON_COVERAGE_REPORT": str(work / "charon-coverage.json"),
                       "CHARON_CALLGRAPH": str(work / "callgraph.json")}
+        before = work / "core-before.json"
+        after = work / "core-after.json"
+        save_artifact(before, source_manifest(ROOT))
         step = runner.run(charon_command(
             args.charon, package=chunk["package"], features=chunk["features"], llbc=llbc,
             target=target, strict=not args.diagnostic, shell_file=shell, roots_file=roots,
             opaque_file=opaque if chunk["opaque"] else None, transparent=chunk.get("transparent", []),
         ), log=work / "charon.log", env=charon_env)
+        save_artifact(after, source_manifest(ROOT))
         record["charon"] = step
+        receipt = work / "charon-command.json"
+        if step["status"] == "ok":
+            record["charon_receipt"] = save_artifact(
+                receipt, {**step, "log": identity(work / "charon.log")})
         record["errors"] += [dict(error, stage="charon") for error in parse_charon_log(work / "charon.log")]
         if step["status"] != "ok" and not args.diagnostic:
             raise ExtractionFailure(f"Charon failed on chunk {chunk['name']}; log: {step['log']}")
@@ -767,19 +799,35 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
             raise ExtractionFailure(f"chunk {chunk['name']}: root selection defects or opaque owned "
                                     f"items; see {out / 'summary.json'}")
 
-        if args.clear_start_from:
-            # Diagnostic workaround: Aeneas re-parses the recorded --start-from patterns with
-            # charon-ml's name-pattern parser, which rejects Charon's `{impl ...}` elements
-            # ("Cannot parse Charon's --start-from pattern"). With none recorded, Aeneas takes
-            # every local item of the LLBC as a root: the chunk's own items plus opaque
-            # signatures (earlier chunks' items come from their manifests).
-            data = json.loads(llbc.read_text())
-            record["cleared_start_from"] = len(data["translated"]["options"]["start_from"])
-            data["translated"]["options"]["start_from"] = []
-            llbc.write_text(json.dumps(data, separators=(",", ":")))
-            del data
+        # Coverage justifies unemitted type aliases and required trait methods from the LLBC.
+        try:
+            record["llbc_facts"] = llbc_item_facts(llbc, work / "callgraph.json")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            if not args.diagnostic:
+                raise ExtractionFailure(f"chunk {chunk['name']}: unreadable LLBC: {error}") from None
+            record["errors"].append({"stage": "charon", "level": "error", "message": f"unreadable LLBC: {error}",
+                                     "source": None, "compiler": "extract_whole"})
+        if record["charon"]["status"] != "ok":
+            record["aeneas"] = {"status": "skipped"}
+            compress(llbc)
+            continue
+        try:
+            record["certificate_result"] = bind_certificate(
+                profile_certificate=profile["profile_certificate"], llbc=llbc,
+                extraction_command=receipt, core_before=before, core_after=after,
+                feature_chain=profile["feature_chain"], output=work / "native-collection",
+            )
+        except (OSError, ValueError, KeyError) as error:
+            if not args.diagnostic:
+                raise ExtractionFailure(f"chunk {chunk['name']}: native certificate rejected: {error}") from None
+            record["errors"].append({"stage": "charon", "level": "error", "message": str(error),
+                                     "source": None, "compiler": "native_collection_certificate"})
+            record["aeneas"] = {"status": "skipped"}
+            compress(llbc)
+            continue
         manifest = work / "manifest.json"
-        command = [args.aeneas, *AENEAS_ACCEPTANCE]
+        command = [args.aeneas, *AENEAS_ACCEPTANCE, "-native-collection-layouts",
+                   record["certificate_result"]["certificate"]["path"]]
         if args.diagnostic:
             command.remove("-abort-on-error")
             command += AENEAS_DIAGNOSTIC
@@ -824,14 +872,6 @@ def extract(plan: dict, out: Path, args, runner: Runner, charon: dict, results: 
                 tag = "UNKNOWN_EXTERNAL definition without model or manifest"
             record["errors"].append({"stage": "aeneas", "level": "error", "message": f"{tag}: {name}",
                                      "source": None, "compiler": "External_Template"})
-        # Coverage justifies unemitted type aliases and required trait methods from the LLBC.
-        try:
-            record["llbc_facts"] = llbc_item_facts(llbc, work / "callgraph.json")
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            if not args.diagnostic:
-                raise ExtractionFailure(f"chunk {chunk['name']}: unreadable LLBC: {error}") from None
-            record["errors"].append({"stage": "charon", "level": "error", "message": f"unreadable LLBC: {error}",
-                                     "source": None, "compiler": "extract_whole"})
         compress(llbc)
         if step["status"] != "ok" and not args.diagnostic:
             raise ExtractionFailure(f"Aeneas failed on chunk {chunk['name']}; log: {step['log']}")
@@ -1741,6 +1781,7 @@ def main() -> None:
     parser.add_argument("--aeneas", default=os.environ.get("AENEAS", "aeneas"))
     parser.add_argument("--aeneas-lean-dir", type=Path, required=True,
                         help="built Aeneas Lean library (backends/lean) matching --aeneas")
+    add_profiles_argument(parser)
     parser.add_argument("--diagnostic", action="store_true",
                         help="never accept: continue past failures and enumerate every error")
     parser.add_argument("--target-dir", default=str(ROOT / "target" / "agents" / "wholecore"))
@@ -1753,14 +1794,15 @@ def main() -> None:
                         help="slot limiter prefixed to every heavy step (default: $HEAVY_WRAPPER)")
     parser.add_argument("--no-lean", action="store_true", help="diagnostic only: skip lake build")
     parser.add_argument("--clear-start-from", action="store_true",
-                        help="diagnostic only: clear the LLBC's recorded --start-from patterns before "
-                             "Aeneas (workaround for Aeneas rejecting `{impl ...}` pattern elements)")
+                        help="rejected: this option changes source-bound LLBC bytes")
     parser.add_argument("--reuse", type=Path,
                         help="diagnostic only: take the chunks that are identical in this plan from an "
                              "earlier run's --out (e.g. the shared crates of the lowering-trace chain)")
     args = parser.parse_args()
-    if (args.no_lean or args.reuse or args.clear_start_from) and not args.diagnostic:
-        parser.error("--no-lean, --reuse and --clear-start-from are only allowed with --diagnostic")
+    if args.clear_start_from:
+        parser.error("--clear-start-from changes source-bound LLBC bytes and is not allowed")
+    if (args.no_lean or args.reuse) and not args.diagnostic:
+        parser.error("--no-lean and --reuse are only allowed with --diagnostic")
     out = args.out.resolve()
     if out.exists():
         raise ExtractionFailure(f"output directory already exists: {out}")
@@ -1845,6 +1887,6 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except (ExtractionFailure, subprocess.CalledProcessError, OSError, KeyError) as error:
+    except (ExtractionFailure, subprocess.CalledProcessError, OSError, KeyError, ValueError) as error:
         print(f"EXTRACTION REJECTED: {error}", file=sys.stderr)
         raise SystemExit(1) from None

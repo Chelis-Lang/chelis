@@ -201,6 +201,25 @@ theorem catchLoweringWith_spec {S R T2 : Type}
         cases hd'
         rfl
 
+/-- A body that preserves hook installation leaves the catch with the hook installed. -/
+theorem catchLoweringWith_installed {S R T2 : Type}
+    (inst : core.ops.function.FnOnceMutArgMutArg T2 RT S
+      (core.result.Result R chelis_ir.lowering_runtime.LoweringFailure))
+
+    (rt rt' : RT) (st st' : S) (f : T2)
+    (r' : core.result.Result R chelis_ir.lower.LowerDiagnostic)
+
+    (hbody : ∀ r rt₁ st₁,
+      inst.call_once f ({ rt with o := true, installed := true }, st) = .ok (r, rt₁, st₁) →
+        rt₁.installed = true)
+
+    (h : chelis_ir.lowering_runtime.LoweringRuntime.catch_lowering_with inst rt st f =
+      .ok (r', rt', st')) :
+    rt'.installed = true := by
+  rcases catchLoweringWith_spec inst rt rt' st st' f r' h with ⟨r, rt₁, hb, hr, _, _, _⟩
+  rw [hr]
+  exact hbody r rt₁ st' hb
+
 /-- The catch's output flag is cleared on every successful exit (clear, not restore). -/
 theorem catchLoweringWith_clears {S R T2 : Type}
     (inst : core.ops.function.FnOnceMutArgMutArg T2 RT S

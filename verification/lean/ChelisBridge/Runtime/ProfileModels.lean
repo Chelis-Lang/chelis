@@ -125,4 +125,123 @@ theorem report_internal_core (s : chelis_ir.lowering_runtime.LoweringRuntime) (l
     chelis_ir.lowering_runtime.LoweringRuntime.report_internal s line = .ok s :=
   rfl
 
+/-!
+## Hook installation in native primitives
+
+These laws apply to successful receiver calls, including returned Rust errors.
+Lean failure and divergence return no receiver state.
+The profile laws retain the non-profile state, which includes `installed`.
+Constructors receive no runtime, so these laws do not apply to constructors.
+Actual catch bodies need separate proofs with their extracted definitions.
+Successful profile calls need no clock bound for installation preservation.
+The existing profile contracts retain their failure and clock-overflow conditions.
+Primitive preservation does not discharge the actual body premise of O5.
+-/
+
+abbrev Runtime := chelis_ir.lowering_runtime.LoweringRuntime
+open chelis_ir.lowering_runtime.LoweringRuntime
+
+theorem runtimeCore_installed {before after : Runtime}
+    (h : runtimeCore after = runtimeCore before) :
+    after.installed = before.installed :=
+  congrArg (fun core => core.2.2.1) h
+
+theorem unrepresentable_panic_suppressed_installed (s s' : Runtime) (value : Bool)
+    (h : unrepresentable_panic_suppressed s = .ok (value, s')) :
+    s'.installed = s.installed := by
+  cases h
+  rfl
+
+theorem set_unrepresentable_panic_suppressed_installed (s s' : Runtime) (value : Bool)
+    (h : set_unrepresentable_panic_suppressed s value = .ok s') :
+    s'.installed = s.installed := by
+  cases h
+  rfl
+
+theorem set_output_suppressed_installed (s s' : Runtime) (value : Bool)
+    (h : set_output_suppressed s value = .ok s') :
+    s'.installed = s.installed := by
+  cases h
+  rfl
+
+theorem observe_raise_installed {Payload : Type} (inst : core.any.Any Payload)
+    (s s' : Runtime) (payload returned : Payload)
+
+    (h : observe_raise inst s payload = .ok (returned, s')) :
+    s'.installed = s.installed := by
+  cases h
+  rfl
+
+theorem fresh_host_inference_var_installed (s s' : Runtime) (value : U32)
+    (h : fresh_host_inference_var s = .ok (value, s')) :
+    s'.installed = s.installed := by
+  cases h
+  rfl
+
+theorem record_summary_probe_build_installed (s s' : Runtime)
+    (h : record_summary_probe_build s = .ok s') :
+    s'.installed = s.installed := by
+  cases h
+  rfl
+
+theorem summary_probe_builds_installed (s s' : Runtime) (value : U64)
+    (h : summary_probe_builds s = .ok (value, s')) :
+    s'.installed = s.installed := by
+  cases h
+  rfl
+
+theorem reset_summary_probe_builds_installed (s s' : Runtime)
+    (h : reset_summary_probe_builds s = .ok s') :
+    s'.installed = s.installed := by
+  cases h
+  rfl
+
+theorem fresh_preflight_frame_installed (s s' : Runtime) (value : U64)
+    (h : fresh_preflight_frame s = .ok (value, s')) :
+    s'.installed = s.installed := by
+  cases h
+  rfl
+
+theorem profile_mark_installed (s s' : Runtime) (value : Usize)
+    (h : profile_mark s = .ok (value, s')) :
+    s'.installed = s.installed :=
+  runtimeCore_installed ((profile_mark_core s).1 _ h)
+
+theorem detail_profile_start_installed (s s' : Runtime) (value : Usize)
+    (h : detail_profile_start s = .ok (value, s')) :
+    s'.installed = s.installed :=
+  runtimeCore_installed ((detail_profile_start_core s).1 _ h)
+
+theorem detail_profile_phase_installed (s s' : Runtime) (mark : Usize) (label : Str)
+
+    (h : detail_profile_phase s mark label = .ok s') :
+    s'.installed = s.installed := by
+  rw [detail_profile_phase_core] at h
+  cases h
+  rfl
+
+theorem detail_profile_declaration_start_installed (s s' : Runtime) (mark value : Usize)
+
+    (h : detail_profile_declaration_start s mark = .ok (value, s')) :
+    s'.installed = s.installed :=
+  runtimeCore_installed ((detail_profile_declaration_start_core s mark).1 _ h)
+
+theorem detail_profile_declaration_installed (s s' : Runtime)
+    (start lastDagSize dagTotal returned : Usize) (label : Str)
+
+    (h : detail_profile_declaration s start lastDagSize dagTotal label =
+      .ok (s', returned)) :
+    s'.installed = s.installed := by
+  rw [detail_profile_declaration_core] at h
+  cases h
+  rfl
+
+theorem report_internal_installed (s s' : Runtime) (line : Str)
+
+    (h : report_internal s line = .ok s') :
+    s'.installed = s.installed := by
+  rw [report_internal_core] at h
+  cases h
+  rfl
+
 end ChelisBridge.Runtime.ProfileModels
