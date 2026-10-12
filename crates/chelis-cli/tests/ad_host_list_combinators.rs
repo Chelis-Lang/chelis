@@ -822,6 +822,106 @@ g3 = derivative(loss, 3i64, to_tensor([2.0], f32))
 }
 
 #[test]
+fn c_grad_runtime_range_keeps_taped_capture_owned_across_two_roots() {
+    let source = "\
+def loss(theta: tensor[1, f32], n: i64) -> f32 = {
+  x = tensor_to_scalar(sum(theta, 0i32))
+  fold(fn (acc: f32, i: i64) -> add(acc, x), 0.0f32, range(0i64, n))
+}
+def derivative(n: i64, theta: tensor[1, f32]) -> tensor[1, f32] = {
+  target = fn (local: tensor[1, f32]) -> loss(local, n)
+  grad(target, wrt=local)(theta)
+}
+g0 = derivative(0i64, to_tensor([1.0f32]))
+g1 = derivative(1i64, to_tensor([1.0f32]))
+";
+    let evaluated = eval_source(source, "runtime_range_capture_two_roots_eval");
+    let compiled = build_and_run_c_source(source, "runtime_range_capture_two_roots_c");
+    assert!(
+        compiled.status.success(),
+        "C captured recurrence failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let c_stdout = String::from_utf8(compiled.stdout).expect("C stdout utf-8");
+    for output in [&evaluated, &c_stdout] {
+        assert_eq!(parse_tensor_data(output, "g0"), vec![0.0]);
+        assert_eq!(parse_tensor_data(output, "g1"), vec![1.0]);
+    }
+}
+
+#[test]
+fn c_grad_runtime_range_non_capture_two_roots_stay_independent() {
+    let source = "\
+def loss(theta: tensor[1, f32], n: i64) -> f32 = fold(fn (acc: f32, i: i64) -> add(acc, tensor_to_scalar(sum(theta, 0i32))), 0.0f32, range(0i64, n))
+def derivative(n: i64, theta: tensor[1, f32]) -> tensor[1, f32] = {
+  target = fn (local: tensor[1, f32]) -> loss(local, n)
+  grad(target, wrt=local)(theta)
+}
+g0 = derivative(0i64, to_tensor([1.0f32]))
+g1 = derivative(1i64, to_tensor([1.0f32]))
+";
+    let evaluated = eval_source(source, "runtime_range_no_capture_two_roots_eval");
+    let compiled = build_and_run_c_source(source, "runtime_range_no_capture_two_roots_c");
+    assert!(
+        compiled.status.success(),
+        "C uncaptured recurrence failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let c_stdout = String::from_utf8(compiled.stdout).expect("C stdout utf-8");
+    for output in [&evaluated, &c_stdout] {
+        assert_eq!(parse_tensor_data(output, "g0"), vec![0.0]);
+        assert_eq!(parse_tensor_data(output, "g1"), vec![1.0]);
+    }
+}
+
+#[test]
+fn c_runtime_recurrence_callback_nan_matches_eval_only_when_visited() {
+    let source = "\
+def loss(theta: tensor[1, f32], n: i64) -> f32 = {
+  x = tensor_to_scalar(sum(theta, 0i32))
+  fold(fn (acc: f32, i: i64) -> add(acc, x), 0.0f32, range(0i64, n))
+}
+value0 = loss(to_tensor([div(0.0f32, 0.0f32)]), 0i64)
+value1 = loss(to_tensor([div(0.0f32, 0.0f32)]), 1i64)
+";
+    let evaluated = eval_source(source, "runtime_recurrence_nan_eval");
+    let compiled = build_and_run_c_source(source, "runtime_recurrence_nan_c");
+    assert!(
+        compiled.status.success(),
+        "C recurrence failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let c_stdout = String::from_utf8(compiled.stdout).expect("C stdout utf-8");
+    for output in [&evaluated, &c_stdout] {
+        assert_eq!(parse_numeric_result(output, "value0"), 0.0);
+        assert!(parse_numeric_result(output, "value1").is_nan());
+    }
+
+    let gradient_source = "\
+def loss(theta: tensor[1, f32], n: i64) -> f32 = {
+  x = tensor_to_scalar(sum(theta, 0i32))
+  fold(fn (acc: f32, i: i64) -> add(acc, x), 0.0f32, range(0i64, n))
+}
+def derivative(n: i64, theta: tensor[1, f32]) -> tensor[1, f32] = {
+  target = fn (local: tensor[1, f32]) -> loss(local, n)
+  grad(target, wrt=local)(theta)
+}
+g1 = derivative(1i64, to_tensor([div(0.0f32, 0.0f32)]))
+";
+    let evaluated = eval_source(gradient_source, "runtime_recurrence_nan_grad_eval");
+    let compiled = build_and_run_c_source(gradient_source, "runtime_recurrence_nan_grad_c");
+    assert!(
+        compiled.status.success(),
+        "C recurrence gradient failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let c_stdout = String::from_utf8(compiled.stdout).expect("C stdout utf-8");
+    for output in [&evaluated, &c_stdout] {
+        assert_eq!(parse_tensor_data(output, "g1"), vec![1.0]);
+    }
+}
+
+#[test]
 fn c_grad_scan_over_runtime_range_reverses_recorded_states() {
     let source = "\
 def loss(theta: tensor[1, f32], n: i64) -> f32 = {

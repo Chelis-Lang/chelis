@@ -1263,7 +1263,10 @@ fn nan_atom_coverage(
             },
             Rows,
         ),
-        Id::RuntimeRecurrence => (RiscOp::RuntimeRecurrence(Box::new(recurrence())), ChildGraph),
+        Id::RuntimeRecurrence => (
+            RiscOp::RuntimeRecurrence(Box::new(recurrence())),
+            ChildGraph,
+        ),
         Id::RuntimeRecurrenceAdjoint => (
             RiscOp::RuntimeRecurrenceAdjoint {
                 recurrence: Box::new(recurrence()),
