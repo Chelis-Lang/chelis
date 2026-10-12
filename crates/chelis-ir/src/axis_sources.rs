@@ -330,6 +330,8 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
         | RiscOp::UniformBoundAdjoint { .. }
         | RiscOp::GuardedFail { .. }
         | RiscOp::Iota
+        | RiscOp::RuntimeRecurrence(_)
+        | RiscOp::RuntimeRecurrenceAdjoint { .. }
         | RiscOp::ListMapCapture { .. }
         | RiscOp::OrderedAdjointSum { .. }
         | RiscOp::Sum { .. }
@@ -502,6 +504,25 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
     let id = node.id;
     let rank = node.output_type.dims.len();
     match &node.op {
+        RiscOp::RuntimeRecurrence(recurrence) if recurrence.scan => or_op_computed(
+            std::iter::once(pass_through(id, 0, 0))
+                .chain((0..rank.saturating_sub(1)).map(|axis| pass_through(id, 1, axis)))
+                .collect(),
+            id,
+            rank,
+        ),
+        RiscOp::RuntimeRecurrence(_) => or_op_computed(
+            (0..rank).map(|axis| pass_through(id, 1, axis)).collect(),
+            id,
+            rank,
+        ),
+        RiscOp::RuntimeRecurrenceAdjoint { target, .. } => or_op_computed(
+            (0..rank)
+                .map(|axis| pass_through(id, target + 1, axis))
+                .collect(),
+            id,
+            rank,
+        ),
         RiscOp::Iota => op_computed(id, rank),
         RiscOp::ListMapCapture { .. } => vec![AxisSource::InputAxis {
             input: 1,

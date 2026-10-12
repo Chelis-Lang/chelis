@@ -789,7 +789,9 @@ fn classify_nodes(
                 | RiscOp::Gather { .. }
                 | RiscOp::ScatterAdd { .. }
                 | RiscOp::Scatter { .. }
-                | RiscOp::ScatterElements { .. } => StoragePlacement::OwnedSlot {
+                | RiscOp::ScatterElements { .. }
+                | RiscOp::RuntimeRecurrence(_)
+                | RiscOp::RuntimeRecurrenceAdjoint { .. } => StoragePlacement::OwnedSlot {
                     slot: StorageSlotId::UNASSIGNED,
                 },
             }

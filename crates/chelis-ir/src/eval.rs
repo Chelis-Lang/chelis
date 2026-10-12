@@ -3798,6 +3798,8 @@ where
     };
 
     let mut values: UnordMap<NodeId, TensorValue> = UnordMap::new();
+    let mut recurrence_tapes: UnordMap<NodeId, Vec<UnordMap<NodeId, TensorValue>>> =
+        UnordMap::new();
     // chelis#828's receipt, sampled once per executed node. `live_elements`
     // is maintained incrementally so the sample costs two comparisons rather
     // than a walk of the map.
@@ -4052,6 +4054,201 @@ where
             _ if inactive_value.is_some() => inactive_value
                 .take()
                 .expect("an inactive node's unchecked value"),
+            RiscOp::RuntimeRecurrence(recurrence) => {
+                let source = &values[&node.inputs[0]];
+                let count = match &recurrence.source {
+                    crate::dag::RuntimeRecurrenceSource::Tensor { .. } => source.shape[0],
+                    crate::dag::RuntimeRecurrenceSource::Columns { .. } => {
+                        let length = source
+                            .storage()
+                            .to_i64_exact_vec()
+                            .and_then(|values| values.first().copied())
+                            .ok_or_else(|| {
+                                "runtime recurrence length is not an i64 scalar".to_string()
+                            })?;
+                        let count = usize::try_from(length).map_err(|_| {
+                            "runtime recurrence length is negative or exceeds the host size"
+                                .to_string()
+                        })?;
+                        count
+                    }
+                };
+                for index in 0..recurrence.item_loads().len() {
+                    let column = &values[&node.inputs[recurrence.item_input_slot(index)]];
+                    if column.shape.first().copied() != Some(count) {
+                        return Err(format!(
+                            "runtime recurrence column {index} length mismatch: expected {count}, observed {:?}",
+                            column.shape.first(),
+                        ));
+                    }
+                }
+                let mut state = values[&node.inputs[1]].clone();
+                let mut states = Vec::with_capacity(count);
+                let mut tape = Vec::with_capacity(count);
+                for row in 0..count {
+                    let items = recurrence
+                        .item_loads()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, load)| {
+                            let column = &values[&node.inputs[recurrence.item_input_slot(index)]];
+                            let row_len = numel(&column.shape[1..]);
+                            (
+                                *load,
+                                TensorValue::from_storage(
+                                    column.shape[1..].to_vec(),
+                                    row_of(column.storage(), row, row_len),
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let mut load_callback = |name: &str| {
+                        if let Some(load) = recurrence.callback.get(recurrence.state)
+                            && matches!(&load.op, RiscOp::Load { name: state_name } if state_name.as_str() == name)
+                        {
+                            return Some(state.clone());
+                        }
+                        for (load_id, item) in &items {
+                            if let Some(load) = recurrence.callback.get(*load_id)
+                                && matches!(&load.op, RiscOp::Load { name: item_name } if item_name.as_str() == name)
+                            {
+                                return Some(item.clone());
+                            }
+                        }
+                        recurrence
+                            .captures
+                            .iter()
+                            .position(|(capture, _)| capture == name)
+                            .map(|capture| {
+                                values[&node.inputs[capture + recurrence.capture_input_offset()]]
+                                    .clone()
+                            })
+                    };
+                    let forward = eval_tensor_internal(
+                        &recurrence.callback,
+                        EvaluationScope::WholeDag,
+                        true,
+                        &mut load_callback as &mut dyn FnMut(&str) -> Option<TensorValue>,
+                    )?
+                    .values;
+                    state = forward
+                        .get(&recurrence.result)
+                        .ok_or_else(|| "runtime recurrence callback has no result".to_string())?
+                        .clone();
+                    if recurrence.scan {
+                        states.push(state.storage().clone());
+                    }
+                    tape.push(forward);
+                }
+                recurrence_tapes.insert(node.id, tape);
+                if recurrence.scan {
+                    let mut shape = Vec::with_capacity(state.shape.len() + 1);
+                    shape.push(count);
+                    shape.extend(&state.shape);
+                    admit_result("scan", &shape, state.prim())?;
+                    TensorValue::from_storage(shape, concat_rows(state.prim(), &states))
+                } else {
+                    state
+                }
+            }
+            RiscOp::RuntimeRecurrenceAdjoint {
+                recurrence,
+                backward,
+                target,
+            } => {
+                let forward_id = node.inputs[0];
+                let tape = recurrence_tapes.get(&forward_id).ok_or_else(|| {
+                    "runtime recurrence reverse has no recorded forward activation".to_string()
+                })?;
+                let zero_like = |value: &TensorValue| -> Result<TensorValue, String> {
+                    Ok(TensorValue::from_storage(
+                        value.shape.clone(),
+                        zero_storage(value.prim(), value.len())?,
+                    ))
+                };
+                let mut state_cotangent = if recurrence.scan {
+                    zero_like(&values[&node.inputs[2]])?
+                } else {
+                    values[&node.inputs[node.inputs.len() - 1]].clone()
+                };
+                let item_target = recurrence.item_target_index(*target).is_some();
+                let mut capture_cotangent = if *target >= recurrence.capture_input_offset() {
+                    Some(zero_like(&values[&node.inputs[target + 1]])?)
+                } else {
+                    None
+                };
+                let mut item_cotangents = Vec::new();
+                let result_cotangent = &values[&node.inputs[node.inputs.len() - 1]];
+                for row in (0..tape.len()).rev() {
+                    if recurrence.scan {
+                        let row_len = numel(&result_cotangent.shape[1..]);
+                        let row_seed = TensorValue::from_storage(
+                            result_cotangent.shape[1..].to_vec(),
+                            row_of(result_cotangent.storage(), row, row_len),
+                        );
+                        state_cotangent =
+                            binary_elementwise(ElementwiseBinOp::Add, &row_seed, &state_cotangent)?;
+                    }
+                    let saved = &tape[row];
+                    let mut load_backward = |name: &str| {
+                        if name == "__chelis_recurrence_seed" {
+                            return Some(state_cotangent.clone());
+                        }
+                        let id = name
+                            .strip_prefix("__chelis_recurrence_tape_")?
+                            .parse::<usize>()
+                            .ok()?;
+                        saved.get(&NodeId(id)).cloned()
+                    };
+                    let grads = eval_tensor_roots_exact(
+                        &backward.dag,
+                        backward.dag.roots(),
+                        &mut load_backward as &mut dyn FnMut(&str) -> Option<TensorValue>,
+                    )?;
+                    let state_root = backward.dag.roots()[0];
+                    state_cotangent = grads[&state_root].clone();
+                    if item_target {
+                        let position = backward
+                            .targets
+                            .iter()
+                            .position(|candidate| candidate == target)
+                            .ok_or_else(|| "runtime recurrence has no item gradient".to_string())?;
+                        item_cotangents
+                            .push(grads[&backward.dag.roots()[position]].storage().clone());
+                    }
+                    if let Some(capture) = &mut capture_cotangent
+                        && let Some(position) = backward
+                            .targets
+                            .iter()
+                            .position(|candidate| candidate == target)
+                    {
+                        let root = backward.dag.roots()[position];
+                        *capture =
+                            binary_elementwise(ElementwiseBinOp::Add, &grads[&root], capture)?;
+                    }
+                }
+                if item_target {
+                    item_cotangents.reverse();
+                    let source = &values[&node.inputs[target + 1]];
+                    let expected_row = numel(&source.shape[1..]);
+                    if item_cotangents.iter().any(|row| row.len() != expected_row) {
+                        return Err(format!(
+                            "runtime recurrence item cotangent row has wrong extent: expected {}, observed {:?}",
+                            expected_row,
+                            item_cotangents
+                                .iter()
+                                .map(TensorStorage::len)
+                                .collect::<Vec<_>>(),
+                        ));
+                    }
+                    TensorValue::from_storage(
+                        source.shape.clone(),
+                        concat_rows(source.prim(), &item_cotangents),
+                    )
+                } else {
+                    capture_cotangent.unwrap_or(state_cotangent)
+                }
+            }
             RiscOp::Const { value } => {
                 // chelis#616: a Const whose symbolic dims resolve neither
                 // statically nor through the runtime bindings may carry a
@@ -6107,6 +6304,138 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    #[test]
+    fn runtime_recurrence_columns_reverse_each_visited_field_and_check_length() {
+        use crate::dag::{Owner, RuntimeRecurrence, RuntimeRecurrenceSource};
+        use crate::grad::grad_dag_checked;
+
+        let mut callback = Dag::new();
+        let owner = Owner::from(callback.declare("column_step"));
+        let state = callback.add_node(
+            owner,
+            RiscOp::Load {
+                name: "state".into(),
+            },
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let weight = callback.add_node(
+            owner,
+            RiscOp::Load {
+                name: "weight".into(),
+            },
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let bias = callback.add_node(
+            owner,
+            RiscOp::Load {
+                name: "bias".into(),
+            },
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let product =
+            callback.add_node(owner, RiscOp::Mul, vec![state, weight], scalar_f32(), None);
+        let next = callback.add_node(owner, RiscOp::Add, vec![product, bias], scalar_f32(), None);
+        callback.add_root(next);
+
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("column_fold"));
+        let length = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "length".into(),
+            },
+            vec![],
+            tensor_ty(&[], Prim::Int64),
+            None,
+        );
+        let seed = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "seed".into(),
+            },
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let weights = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "weights".into(),
+            },
+            vec![],
+            tensor_ty(&[2], Prim::F32),
+            None,
+        );
+        let biases = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "biases".into(),
+            },
+            vec![],
+            tensor_ty(&[2], Prim::F32),
+            None,
+        );
+        let result = dag.add_node(
+            owner,
+            RiscOp::RuntimeRecurrence(Box::new(RuntimeRecurrence {
+                callback: Box::new(callback),
+                state,
+                source: RuntimeRecurrenceSource::Columns {
+                    items: vec![weight, bias],
+                },
+                captures: Vec::new(),
+                result: next,
+                scan: false,
+            })),
+            vec![length, seed, weights, biases],
+            scalar_f32(),
+            None,
+        );
+        dag.add_root(result);
+        assert!(crate::verify::verify(&dag).is_empty());
+        let gradient = grad_dag_checked(&dag, result, &[weights, biases]).expect("column VJP");
+        let inputs = |n| {
+            UnordMap::from([
+                (
+                    "length".into(),
+                    finalize_wide_int("test", Prim::Int64, vec![], vec![n]).unwrap(),
+                ),
+                (
+                    "seed".into(),
+                    finalize_wide("test", Prim::F32, vec![], vec![2.0]).unwrap(),
+                ),
+                (
+                    "weights".into(),
+                    finalize_wide("test", Prim::F32, vec![2], vec![3.0, 4.0]).unwrap(),
+                ),
+                (
+                    "biases".into(),
+                    finalize_wide("test", Prim::F32, vec![2], vec![1.0, 2.0]).unwrap(),
+                ),
+            ])
+        };
+        let values = eval_tensor(&gradient.dag, &inputs(2)).expect("evaluate column VJP");
+        assert_eq!(
+            values[&gradient.grad_nodes[&weights]].to_f64_lossy_vec(),
+            vec![8.0, 7.0]
+        );
+        assert_eq!(
+            values[&gradient.grad_nodes[&biases]].to_f64_lossy_vec(),
+            vec![4.0, 1.0]
+        );
+        assert!(
+            eval_tensor(&dag, &inputs(3))
+                .expect_err("mismatched column length must trap")
+                .contains("column 0 length mismatch")
+        );
     }
 
     #[test]

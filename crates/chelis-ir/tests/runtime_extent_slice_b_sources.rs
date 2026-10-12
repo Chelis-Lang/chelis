@@ -771,6 +771,8 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Erf => 79,
         RiscOp::Erfc => 80,
         RiscOp::Pow => 81,
+        RiscOp::RuntimeRecurrence(_) => 82,
+        RiscOp::RuntimeRecurrenceAdjoint { .. } => 83,
     }
 }
 

@@ -794,6 +794,8 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
     };
     match &node.op {
         RiscOp::ListMapCapture { .. }
+        | RiscOp::RuntimeRecurrence(_)
+        | RiscOp::RuntimeRecurrenceAdjoint { .. }
         | RiscOp::OrderedAdjointSum { .. }
         | RiscOp::Iota
         | RiscOp::Load { .. }

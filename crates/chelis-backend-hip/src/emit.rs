@@ -1520,6 +1520,17 @@ impl HipEmitter {
             Self::elem_kind(&n.output_type)
         };
         Ok(match op {
+            RiscOp::RuntimeRecurrence(_) | RiscOp::RuntimeRecurrenceAdjoint { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op("runtime recurrence".into()),
+                    "runtime recurrence on HIP",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        3366,
+                        "HIP runtime recurrence is not implemented"
+                    ),
+                ));
+            }
             RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op(format!("{:?}", node.op)),
@@ -2434,6 +2445,17 @@ impl HipEmitter {
                 .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
+            RiscOp::RuntimeRecurrence(_) | RiscOp::RuntimeRecurrenceAdjoint { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op("runtime recurrence".into()),
+                    "runtime recurrence on HIP",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        3366,
+                        "HIP runtime recurrence is not implemented"
+                    ),
+                ));
+            }
             RiscOp::Softmax { .. } => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op("softmax".into()),
@@ -5370,7 +5392,11 @@ impl HipEmitter {
     #[allow(dead_code)]
     fn node_is_statically_contiguous(dag: VerifiedDagView<'_>, id: NodeId) -> bool {
         match &dag.get(id).unwrap().op {
-            RiscOp::Iota | RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => true,
+            RiscOp::RuntimeRecurrence(_)
+            | RiscOp::RuntimeRecurrenceAdjoint { .. }
+            | RiscOp::Iota
+            | RiscOp::ListMapCapture { .. }
+            | RiscOp::OrderedAdjointSum { .. } => true,
             RiscOp::Load { .. } => false,
             RiscOp::Const { .. }
             | RiscOp::ConstTensor { .. }

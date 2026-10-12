@@ -1240,7 +1240,9 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         ),
         RiscOp::Stride { strides } => bounds(ExtentSlot::StrideStep, &mut strides.iter()),
         RiscOp::SplitN { count } => bounds(ExtentSlot::SplitCount, &mut std::iter::once(count)),
-        RiscOp::ListMapCapture { .. }
+        RiscOp::RuntimeRecurrence(_)
+        | RiscOp::RuntimeRecurrenceAdjoint { .. }
+        | RiscOp::ListMapCapture { .. }
         | RiscOp::OrderedAdjointSum { .. }
         | RiscOp::Iota
         | RiscOp::Add
@@ -2091,6 +2093,118 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         // Check arity.
         let arity = node.inputs.len();
         match &node.op {
+            RiscOp::RuntimeRecurrence(recurrence) => {
+                let load_at = |id| {
+                    matches!(
+                        recurrence.callback.get(id).map(|node| &node.op),
+                        Some(RiscOp::Load { .. })
+                    )
+                };
+                let callback_valid = load_at(recurrence.state)
+                    && recurrence.item_loads().iter().copied().all(load_at)
+                    && recurrence
+                        .callback
+                        .get(recurrence.result)
+                        .is_some_and(|result| {
+                            result.output_type.precision == node.output_type.precision
+                                && result.output_type.dims.len() + usize::from(recurrence.scan)
+                                    == node.output_type.dims.len()
+                        })
+                    && recurrence.captures.iter().all(|(capture, _)| {
+                        recurrence.callback.nodes().iter().any(|node| {
+                            matches!(&node.op, RiscOp::Load { name } if name.as_str() == capture)
+                        })
+                    });
+                let source_valid = match &recurrence.source {
+                    crate::dag::RuntimeRecurrenceSource::Tensor { item } => node
+                        .inputs
+                        .first()
+                        .and_then(|input| dag.get(*input))
+                        .is_some_and(|source| {
+                            !source.output_type.dims.is_empty()
+                                && recurrence.callback.get(*item).is_some_and(|load| {
+                                    load.output_type.precision == source.output_type.precision
+                                        && load.output_type.dims.len() + 1
+                                            == source.output_type.dims.len()
+                                })
+                        }),
+                    crate::dag::RuntimeRecurrenceSource::Columns { items } => {
+                        node.inputs
+                            .first()
+                            .and_then(|input| dag.get(*input))
+                            .is_some_and(|length| {
+                                length.output_type.dims.is_empty()
+                                    && length.output_type.precision == Prim::Int64
+                            })
+                            && items.iter().enumerate().all(|(index, load)| {
+                                node.inputs
+                                    .get(index + 2)
+                                    .and_then(|input| dag.get(*input))
+                                    .is_some_and(|column| {
+                                        !column.output_type.dims.is_empty()
+                                            && recurrence.callback.get(*load).is_some_and(|item| {
+                                                item.output_type.precision
+                                                    == column.output_type.precision
+                                                    && item.output_type.dims.len() + 1
+                                                        == column.output_type.dims.len()
+                                            })
+                                    })
+                            })
+                    }
+                };
+                if arity != recurrence.captures.len() + recurrence.capture_input_offset()
+                    || !source_valid
+                    || !callback_valid
+                    || !node
+                        .inputs
+                        .get(1)
+                        .and_then(|input| dag.get(*input))
+                        .is_some_and(|state| {
+                            state.output_type.precision == node.output_type.precision
+                                && state.output_type.dims.len() + usize::from(recurrence.scan)
+                                    == node.output_type.dims.len()
+                        })
+                {
+                    errors.push(format!(
+                        "runtime recurrence at node {} requires a tensor List source, a matching state, and one input per capture (inputs: {:?}, output: {:?}, captures: {})",
+                        node.id.0,
+                        node.inputs.iter().map(|id| dag.get(*id).map(|node| &node.output_type)).collect::<Vec<_>>(),
+                        node.output_type,
+                        recurrence.captures.len(),
+                    ));
+                }
+                errors.extend(verify(&recurrence.callback).into_iter().map(|error| {
+                    format!("runtime recurrence at node {} callback: {error}", node.id.0)
+                }));
+            }
+            RiscOp::RuntimeRecurrenceAdjoint {
+                recurrence,
+                backward,
+                target,
+            } => {
+                let forward_arity = recurrence.captures.len() + recurrence.capture_input_offset();
+                if arity != forward_arity + 2
+                    || *target >= forward_arity
+                    || backward.targets.first() != Some(&1)
+                    || backward.targets.len() != backward.dag.roots().len()
+                    || !backward.targets.contains(target)
+                    || !dag.get(node.inputs[*target + 1]).is_some_and(|source| {
+                        source.output_type.precision == node.output_type.precision
+                            && source.output_type.dims.len() == node.output_type.dims.len()
+                    })
+                {
+                    errors.push(format!(
+                        "runtime recurrence adjoint at node {} has an invalid target or output type",
+                        node.id.0
+                    ));
+                }
+                errors.extend(verify(&backward.dag).into_iter().map(|error| {
+                    format!(
+                        "runtime recurrence adjoint at node {} backward: {error}",
+                        node.id.0
+                    )
+                }));
+            }
             RiscOp::ListMapCapture { first } => {
                 let valid = arity == 2
                     && node.output_type.dims.len() == 1

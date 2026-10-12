@@ -7,6 +7,9 @@ use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
 
+#[path = "common/mod.rs"]
+mod common;
+
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write source");
 }
@@ -30,6 +33,37 @@ fn eval_source(source: &str, name: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("utf-8 stdout")
+}
+
+fn build_and_run_c_source(source: &str, name: &str) -> std::process::Output {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join("out");
+    write_file(&path, source);
+    let built = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("C build should run");
+    assert!(
+        built.status.success(),
+        "C build failed for {name}: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let status = common::link_generated(&out_dir, &format!("{name}.c"), name);
+    assert!(status.success(), "C link failed for {name}: {status}");
+    std::process::Command::new(out_dir.join(name))
+        .output()
+        .expect("compiled C executable should run")
 }
 
 fn parse_tensor_data(stdout: &str, name: &str) -> Vec<f64> {
@@ -724,4 +758,213 @@ fn eval_grad_through_fold_and_scan_over_range_is_the_unstaged_list_rejection() {
             "`{name}` over a range must be the named rejection:\n{stderr}"
         );
     }
+}
+
+// chelis#3366: [05-OP-55] reverses exactly the runtime recurrence. The bound
+// is an argument of the differentiated function, so lowering cannot stage a
+// fixed number of callback applications.
+#[test]
+fn eval_grad_fold_over_runtime_range_uses_executed_trip_count() {
+    let stdout = eval_source(
+        "\
+def loss(x: f32, n: i64) -> f32 = fold(fn (acc: f32, i: i64) -> acc * x, 1.0f32, range(0i64, n))
+g0 = grad(loss, wrt=x)(2.0f32, 0i64)
+g1 = grad(loss, wrt=x)(2.0f32, 1i64)
+g3 = grad(loss, wrt=x)(2.0f32, 3i64)
+",
+        "ad_fold_runtime_range",
+    );
+    assert_close(
+        &[parse_numeric_result(&stdout, "g0")],
+        &[0.0],
+        1e-6,
+        "zero steps",
+    );
+    assert_close(
+        &[parse_numeric_result(&stdout, "g1")],
+        &[1.0],
+        1e-6,
+        "one step",
+    );
+    assert_close(
+        &[parse_numeric_result(&stdout, "g3")],
+        &[12.0],
+        1e-6,
+        "three steps",
+    );
+}
+
+#[test]
+fn eval_grad_scan_over_runtime_range_routes_every_recorded_state() {
+    let stdout = eval_source(
+        "\
+def loss(x: f32, n: i64) -> f32 = {
+  states = scan(fn (acc: f32, i: i64) -> acc * x, 1.0f32, range(0i64, n))
+  fold(fn (acc: f32, state: f32) -> acc + state, 0.0f32, states)
+}
+g = grad(loss, wrt=x)(2.0f32, 3i64)
+",
+        "ad_scan_runtime_range",
+    );
+    assert_close(
+        &[parse_numeric_result(&stdout, "g")],
+        &[17.0],
+        1e-6,
+        "scan states",
+    );
+}
+
+#[test]
+fn c_grad_fold_over_runtime_range_matches_executed_trip_count() {
+    let source = "\
+def loss(theta: tensor[1, f32], n: i64) -> f32 = fold(fn (acc: f32, i: i64) -> acc * tensor_to_scalar(sum(theta, 0)), 1.0f32, range(0i64, n))
+def derivative(model: tensor[1, f32] -> i64 -> f32, n: i64, theta: tensor[1, f32]) -> tensor[1, f32] = {
+  target = fn (local: tensor[1, f32]) -> model(local, n)
+  grad(target, wrt=local)(theta)
+}
+g0 = derivative(loss, 0i64, to_tensor([2.0], f32))
+g1 = derivative(loss, 1i64, to_tensor([2.0], f32))
+g3 = derivative(loss, 3i64, to_tensor([2.0], f32))
+";
+    let evaluated = eval_source(source, "runtime_range_c_parity_eval");
+    let compiled = build_and_run_c_source(source, "runtime_range_c_parity");
+    assert!(
+        compiled.status.success(),
+        "C gradient failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let c_stdout = String::from_utf8(compiled.stdout).expect("C stdout utf-8");
+    for (name, expected) in [("g0", 0.0), ("g1", 1.0), ("g3", 12.0)] {
+        assert_close(
+            &parse_tensor_data(&evaluated, name),
+            &[expected],
+            1e-6,
+            name,
+        );
+        assert_close(&parse_tensor_data(&c_stdout, name), &[expected], 1e-6, name);
+    }
+}
+
+#[test]
+fn c_grad_scan_over_runtime_range_reverses_recorded_states() {
+    let source = "\
+def loss(theta: tensor[1, f32], n: i64) -> f32 = {
+  x = tensor_to_scalar(sum(theta, 0))
+  states = scan(fn (acc: f32, i: i64) -> acc * x, 1.0f32, range(0i64, n))
+  fold(fn (acc: f32, state: f32) -> acc + state, 0.0f32, states)
+}
+def derivative(model: tensor[1, f32] -> i64 -> f32, n: i64, theta: tensor[1, f32]) -> tensor[1, f32] = {
+  target = fn (local: tensor[1, f32]) -> model(local, n)
+  grad(target, wrt=local)(theta)
+}
+g = derivative(loss, 3i64, to_tensor([2.0], f32))
+";
+    let evaluated = eval_source(source, "runtime_scan_c_parity_eval");
+    let compiled = build_and_run_c_source(source, "runtime_scan_c_parity");
+    assert!(
+        compiled.status.success(),
+        "C scan gradient failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let c_stdout = String::from_utf8(compiled.stdout).expect("C stdout utf-8");
+    assert_close(
+        &parse_tensor_data(&evaluated, "g"),
+        &[17.0],
+        1e-6,
+        "eval scan",
+    );
+    assert_close(&parse_tensor_data(&c_stdout, "g"), &[17.0], 1e-6, "C scan");
+}
+
+#[test]
+fn runtime_range_callback_trap_occurs_only_at_visited_step() {
+    let source = "\
+def loss(theta: tensor[1, f32], n: i64) -> f32 = fold(fn (acc: f32, i: i64) -> acc * tensor_to_scalar(sum(theta, 0)) + cast(trunc_div(1i64, sub(1i64, i)), f32), 1.0f32, range(0i64, n))
+def derivative(model: tensor[1, f32] -> i64 -> f32, n: i64, theta: tensor[1, f32]) -> tensor[1, f32] = {
+  target = fn (local: tensor[1, f32]) -> model(local, n)
+  grad(target, wrt=local)(theta)
+}
+g = derivative(loss, __TRIP_COUNT__i64, to_tensor([2.0], f32))
+";
+    for (count, expected) in [("0", Some(0.0)), ("1", Some(1.0)), ("2", None)] {
+        let source = source.replace("__TRIP_COUNT__", count);
+        let name = format!("runtime_range_trap_{count}");
+        let eval = {
+            let dir = tempdir().expect("tempdir");
+            let path = dir.path().join(format!("{name}.ch"));
+            write_file(&path, &source);
+            Command::cargo_bin("chelis")
+                .expect("binary")
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .args(["eval", "--file", path.to_str().unwrap()])
+                .output()
+                .expect("eval should run")
+        };
+        let compiled = build_and_run_c_source(&source, &name);
+        if let Some(gradient) = expected {
+            assert!(
+                eval.status.success(),
+                "eval failed: {}",
+                String::from_utf8_lossy(&eval.stderr)
+            );
+            assert!(
+                compiled.status.success(),
+                "C failed: {}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+            assert_close(
+                &parse_tensor_data(&String::from_utf8_lossy(&eval.stdout), "g"),
+                &[gradient],
+                1e-6,
+                "eval visited steps",
+            );
+            assert_close(
+                &parse_tensor_data(&String::from_utf8_lossy(&compiled.stdout), "g"),
+                &[gradient],
+                1e-6,
+                "C visited steps",
+            );
+        } else {
+            assert!(!eval.status.success(), "eval visited step must trap");
+            assert!(!compiled.status.success(), "C visited step must trap");
+            for stderr in [&eval.stderr, &compiled.stderr] {
+                assert!(
+                    String::from_utf8_lossy(stderr)
+                        .contains("division by zero in trunc_div at i64"),
+                    "wrong trap: {}",
+                    String::from_utf8_lossy(stderr)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn c_grad_fold_over_runtime_adt_columns_preserves_field_cotangents() {
+    let source = "\
+type Block =
+  | Block { w: f32, bias: f32 }
+type Model =
+  | Model { blocks: List[Block] }
+def loss(p: Model) -> f32 = fold(fn (acc: f32, blk: Block) -> add(mul(acc, blk.w), blk.bias), 2.0f32, copy(p.blocks))
+def step(p: Model) -> Model = grad(loss)(p)
+two = step(Model { blocks: [Block { w: 3.0f32, bias: 1.0f32 }, Block { w: 4.0f32, bias: 2.0f32 }] })
+empty = step(Model { blocks: [] })
+";
+    let evaluated = eval_source(source, "runtime_adt_columns_eval");
+    assert!(
+        evaluated.contains("two = Model([Block(8.0, 4.0), Block(7.0, 1.0)])"),
+        "{evaluated}"
+    );
+    assert!(evaluated.contains("empty = Model([])"), "{evaluated}");
+    let compiled = build_and_run_c_source(source, "runtime_adt_columns");
+    assert!(
+        compiled.status.success(),
+        "C ADT gradient failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(compiled.stdout).expect("C stdout utf-8"),
+        evaluated
+    );
 }
