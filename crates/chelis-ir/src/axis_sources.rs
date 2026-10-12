@@ -511,8 +511,37 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
             id,
             rank,
         ),
-        RiscOp::RuntimeRecurrence(_) => or_op_computed(
-            (0..rank).map(|axis| pass_through(id, 1, axis)).collect(),
+        RiscOp::RuntimeRecurrence(recurrence) => or_op_computed(
+            (0..rank)
+                .map(|axis| {
+                    let known_extent = |dim: &DimInfo| match dim {
+                        DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => Some(*extent),
+                        DimInfo::Named(_, None) => None,
+                    };
+                    let output = node.output_type.dims.get(axis).and_then(known_extent);
+                    let seed = node
+                        .inputs
+                        .get(1)
+                        .and_then(|input| dag.get(*input))
+                        .and_then(|seed| seed.output_type.dims.get(axis))
+                        .and_then(known_extent);
+                    let state = recurrence
+                        .callback
+                        .get(recurrence.state)
+                        .and_then(|state| state.output_type.dims.get(axis))
+                        .and_then(known_extent);
+                    let result = recurrence
+                        .callback
+                        .get(recurrence.result)
+                        .and_then(|result| result.output_type.dims.get(axis))
+                        .and_then(known_extent);
+                    if output.is_some() && output == seed && seed == state && state == result {
+                        pass_through(id, 1, axis)
+                    } else {
+                        AxisSource::OpComputed { op: id, axis }
+                    }
+                })
+                .collect(),
             id,
             rank,
         ),
@@ -4390,6 +4419,87 @@ mod tests {
 
     fn ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
         TensorType { dims, precision }
+    }
+
+    /// [05-OP-55] fold returns the seed at zero steps and the last callback
+    /// result otherwise. A wildcard accumulator may change its runtime
+    /// extent, so only a fixed matching axis passes through the seed.
+    #[test]
+    fn runtime_fold_axis_source_tracks_last_state_unless_fixed() {
+        let build = |dim: DimInfo| {
+            let mut callback = Dag::new();
+            let callback_decl = callback.declare("callback");
+            let state = callback.add_node(
+                callback_decl,
+                RiscOp::Load {
+                    name: "state".into(),
+                },
+                vec![],
+                ty(vec![dim.clone()], Prim::F32),
+                None,
+            );
+            let item = callback.add_node(
+                callback_decl,
+                RiscOp::Load {
+                    name: "item".into(),
+                },
+                vec![],
+                ty(vec![], Prim::Int64),
+                None,
+            );
+            callback.add_root(state);
+            callback.add_root(item);
+            let mut dag = Dag::new();
+            let decl = dag.declare("recurrence");
+            let source = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "source".into(),
+                },
+                vec![],
+                ty(vec![DimInfo::Named("*".into(), None)], Prim::Int64),
+                None,
+            );
+            let seed = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "seed".into(),
+                },
+                vec![],
+                ty(vec![dim.clone()], Prim::F32),
+                None,
+            );
+            let fold = dag.add_node(
+                decl,
+                RiscOp::RuntimeRecurrence(Box::new(crate::dag::RuntimeRecurrence {
+                    callback: Box::new(callback),
+                    state,
+                    source: crate::dag::RuntimeRecurrenceSource::Tensor { item },
+                    captures: vec![],
+                    result: state,
+                    scan: false,
+                })),
+                vec![source, seed],
+                ty(vec![dim], Prim::F32),
+                None,
+            );
+            (dag, fold)
+        };
+        let (dynamic, fold) = build(DimInfo::Named("*".into(), None));
+        assert_eq!(
+            output_axis_sources(&dynamic, fold),
+            vec![AxisSource::OpComputed { op: fold, axis: 0 }],
+            "the last executed callback supplies a wildcard fold extent"
+        );
+        let (fixed, fold) = build(DimInfo::Lit(2));
+        assert_eq!(
+            output_axis_sources(&fixed, fold),
+            vec![AxisSource::InputAxis {
+                input: 1,
+                axis: RtAxis::Lit(0)
+            }],
+            "a fixed matching accumulator axis may use the seed"
+        );
     }
 
     #[test]

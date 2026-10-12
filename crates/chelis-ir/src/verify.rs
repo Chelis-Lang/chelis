@@ -2109,12 +2109,41 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                             result.output_type.precision == node.output_type.precision
                                 && result.output_type.dims.len() + usize::from(recurrence.scan)
                                     == node.output_type.dims.len()
+                                && !extents_contradict(
+                                    &result.output_type.dims,
+                                    &node.output_type.dims[usize::from(recurrence.scan)..],
+                                )
+                                && recurrence
+                                    .callback
+                                    .get(recurrence.state)
+                                    .is_some_and(|state| {
+                                        state.output_type.precision == result.output_type.precision
+                                            && !extents_contradict(
+                                                &state.output_type.dims,
+                                                &result.output_type.dims,
+                                            )
+                                    })
                         })
-                    && recurrence.captures.iter().all(|(capture, _)| {
-                        recurrence.callback.nodes().iter().any(|node| {
-                            matches!(&node.op, RiscOp::Load { name } if name.as_str() == capture)
+                    && recurrence
+                        .captures
+                        .iter()
+                        .enumerate()
+                        .all(|(index, (capture, _))| {
+                            let outer = node
+                                .inputs
+                                .get(index + recurrence.capture_input_offset())
+                                .and_then(|input| dag.get(*input));
+                            recurrence.callback.nodes().iter().any(|load| {
+                            matches!(&load.op, RiscOp::Load { name } if name.as_str() == capture)
+                                && outer.is_some_and(|outer| {
+                                    load.output_type.precision == outer.output_type.precision
+                                        && !extents_contradict(
+                                            &load.output_type.dims,
+                                            &outer.output_type.dims,
+                                        )
+                                })
                         })
-                    });
+                        });
                 let source_valid = match &recurrence.source {
                     crate::dag::RuntimeRecurrenceSource::Tensor { item } => node
                         .inputs
@@ -2126,7 +2155,18 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                                     load.output_type.precision == source.output_type.precision
                                         && load.output_type.dims.len() + 1
                                             == source.output_type.dims.len()
+                                        && !extents_contradict(
+                                            &load.output_type.dims,
+                                            &source.output_type.dims[1..],
+                                        )
                                 })
+                                && (!recurrence.scan
+                                    || node.output_type.dims.first().is_some_and(|leading| {
+                                        !extents_contradict(
+                                            &source.output_type.dims[..1],
+                                            std::slice::from_ref(leading),
+                                        )
+                                    }))
                         }),
                     crate::dag::RuntimeRecurrenceSource::Columns { items } => {
                         node.inputs
@@ -2147,6 +2187,21 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                                                     == column.output_type.precision
                                                     && item.output_type.dims.len() + 1
                                                         == column.output_type.dims.len()
+                                                    && !extents_contradict(
+                                                        &item.output_type.dims,
+                                                        &column.output_type.dims[1..],
+                                                    )
+                                                    && (!recurrence.scan
+                                                        || node
+                                                            .output_type
+                                                            .dims
+                                                            .first()
+                                                            .is_some_and(|leading| {
+                                                                !extents_contradict(
+                                                                    &column.output_type.dims[..1],
+                                                                    std::slice::from_ref(leading),
+                                                                )
+                                                            }))
                                             })
                                     })
                             })
@@ -2163,6 +2218,16 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                             state.output_type.precision == node.output_type.precision
                                 && state.output_type.dims.len() + usize::from(recurrence.scan)
                                     == node.output_type.dims.len()
+                                && recurrence
+                                    .callback
+                                    .get(recurrence.state)
+                                    .is_some_and(|load| {
+                                        load.output_type.precision == state.output_type.precision
+                                            && !extents_contradict(
+                                                &load.output_type.dims,
+                                                &state.output_type.dims,
+                                            )
+                                    })
                         })
                 {
                     errors.push(format!(
@@ -2191,6 +2256,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     || !dag.get(node.inputs[*target + 1]).is_some_and(|source| {
                         source.output_type.precision == node.output_type.precision
                             && source.output_type.dims.len() == node.output_type.dims.len()
+                            && !extents_contradict(&source.output_type.dims, &node.output_type.dims)
                     })
                 {
                     errors.push(format!(
@@ -4790,7 +4856,10 @@ fn dims_compatible(a: &DimInfo, b: &DimInfo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{DeclId, ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType};
+    use crate::dag::{
+        DeclId, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RuntimeRecurrence,
+        RuntimeRecurrenceBackward, RuntimeRecurrenceSource, TensorType,
+    };
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -4801,6 +4870,186 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    /// [05-OP-55] fixes the callback interface at each invocation. Runtime
+    /// cardinality is free, but statically contradictory state, item, or
+    /// result extents cannot become valid by changing the trip count.
+    #[test]
+    fn runtime_recurrence_verifies_each_interface_extent() {
+        let build = |seed_extent, state_extent, item_extent, output_extent| {
+            let mut callback = Dag::new();
+            let callback_decl = callback.declare("callback");
+            let state = callback.add_node(
+                callback_decl,
+                RiscOp::Load {
+                    name: "state".into(),
+                },
+                vec![],
+                tensor_ty(&[state_extent], Prim::F32),
+                None,
+            );
+            let item = callback.add_node(
+                callback_decl,
+                RiscOp::Load {
+                    name: "item".into(),
+                },
+                vec![],
+                tensor_ty(&[item_extent], Prim::F32),
+                None,
+            );
+            callback.add_root(state);
+            callback.add_root(item);
+            let mut dag = Dag::new();
+            let decl = dag.declare("recurrence");
+            let source = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "source".into(),
+                },
+                vec![],
+                tensor_ty(&[3, 2], Prim::F32),
+                None,
+            );
+            let seed = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "seed".into(),
+                },
+                vec![],
+                tensor_ty(&[seed_extent], Prim::F32),
+                None,
+            );
+            let recurrence = dag.add_node(
+                decl,
+                RiscOp::RuntimeRecurrence(Box::new(RuntimeRecurrence {
+                    callback: Box::new(callback),
+                    state,
+                    source: RuntimeRecurrenceSource::Tensor { item },
+                    captures: vec![],
+                    result: state,
+                    scan: false,
+                })),
+                vec![source, seed],
+                tensor_ty(&[output_extent], Prim::F32),
+                None,
+            );
+            dag.add_root(recurrence);
+            dag
+        };
+        let valid = verify(&build(2, 2, 2, 2));
+        assert!(valid.is_empty(), "matching interface extents: {valid:?}");
+        for (name, dag) in [
+            ("state", build(1, 2, 2, 2)),
+            ("item", build(2, 2, 1, 2)),
+            ("result", build(2, 2, 2, 1)),
+        ] {
+            let errors = verify(&dag);
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.contains("runtime recurrence")),
+                "{name} extent contradiction was admitted: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_recurrence_adjoint_output_matches_its_target_extent() {
+        let build = |gradient_extent| {
+            let mut callback = Dag::new();
+            let callback_decl = callback.declare("callback");
+            let state = callback.add_node(
+                callback_decl,
+                RiscOp::Load {
+                    name: "state".into(),
+                },
+                vec![],
+                tensor_ty(&[2], Prim::F32),
+                None,
+            );
+            let item = callback.add_node(
+                callback_decl,
+                RiscOp::Load {
+                    name: "item".into(),
+                },
+                vec![],
+                tensor_ty(&[], Prim::Int64),
+                None,
+            );
+            callback.add_root(state);
+            callback.add_root(item);
+            let recurrence = RuntimeRecurrence {
+                callback: Box::new(callback),
+                state,
+                source: RuntimeRecurrenceSource::Tensor { item },
+                captures: vec![],
+                result: state,
+                scan: false,
+            };
+            let mut backward = Dag::new();
+            let backward_decl = backward.declare("backward");
+            let gradient = backward.add_node(
+                backward_decl,
+                RiscOp::Load { name: "g".into() },
+                vec![],
+                tensor_ty(&[2], Prim::F32),
+                None,
+            );
+            backward.add_root(gradient);
+            let mut dag = Dag::new();
+            let decl = dag.declare("recurrence");
+            let source = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "source".into(),
+                },
+                vec![],
+                tensor_ty(&[3], Prim::Int64),
+                None,
+            );
+            let seed = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "seed".into(),
+                },
+                vec![],
+                tensor_ty(&[2], Prim::F32),
+                None,
+            );
+            let forward = dag.add_node(
+                decl,
+                RiscOp::RuntimeRecurrence(Box::new(recurrence.clone())),
+                vec![source, seed],
+                tensor_ty(&[2], Prim::F32),
+                None,
+            );
+            let adjoint = dag.add_node(
+                decl,
+                RiscOp::RuntimeRecurrenceAdjoint {
+                    recurrence: Box::new(recurrence),
+                    backward: Box::new(RuntimeRecurrenceBackward {
+                        dag: Box::new(backward),
+                        targets: vec![1],
+                    }),
+                    target: 1,
+                },
+                vec![forward, source, seed, seed],
+                tensor_ty(&[gradient_extent], Prim::F32),
+                None,
+            );
+            dag.add_root(adjoint);
+            dag
+        };
+        let valid = verify(&build(2));
+        assert!(valid.is_empty(), "matching adjoint target: {valid:?}");
+        let invalid = verify(&build(1));
+        assert!(
+            invalid
+                .iter()
+                .any(|error| error.contains("runtime recurrence adjoint")),
+            "mismatched adjoint target extent was admitted: {invalid:?}"
+        );
     }
 
     /// chelis#2907: a scatter's runtime plan compares the observed update
