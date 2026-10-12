@@ -920,6 +920,11 @@ fn parity_grad_host_results() {
 }
 
 #[test]
+fn parity_grad_list_model() {
+    drive_parity(&examples_root().join("grad_list_model.ch"), true);
+}
+
+#[test]
 fn parity_grad_host_selectors() {
     let path = examples_root().join("grad_host_selectors.ch");
     drive_parity(&path, true);

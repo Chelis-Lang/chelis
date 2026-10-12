@@ -80,16 +80,16 @@ unsafe fn tensor(
     if shape.iter().try_fold(1usize, |a, b| a.checked_mul(*b)) != Some(count) {
         return Err(invalid(format!("{field} has inconsistent extents")));
     }
-    let elements = unsafe { chelis_tensor_elements(ptr) };
-    let data = unsafe { (*elements).live() }
-        .iter()
-        .map(|value| unsafe { float(*value, field) })
-        .collect::<Result<Vec<_>, _>>();
-    unsafe { chelis_list_release(elements) };
-    let data = data?;
-    if data.len() != count {
-        return Err(invalid(format!("{field} has inconsistent elements")));
-    }
+    // The validated read view is contiguous. `to_list` preserves tensor rank,
+    // so its first-level elements are rows rather than flat solver scalars.
+    let data = if count == 0 {
+        Vec::new()
+    } else {
+        if view.data.is_null() {
+            return Err(invalid(format!("{field} has no data")));
+        }
+        unsafe { std::slice::from_raw_parts(view.data.cast::<f64>(), count) }.to_vec()
+    };
     Ok((shape, data))
 }
 
@@ -289,6 +289,20 @@ mod tests {
                 )
             },
         ]
+    }
+
+    #[test]
+    fn tensor_reader_keeps_contiguous_rank_two_solver_order() {
+        unsafe {
+            let value = input_tensor(&[2, 2], &[1.0, 2.0, 3.0, 4.0]);
+            let (shape, data) = tensor(value, 2, "matrix").expect("rank-two matrix");
+            assert_eq!(shape, vec![2, 2]);
+            assert_eq!(data, vec![1.0, 2.0, 3.0, 4.0]);
+            assert!(tensor(value, 1, "matrix")
+                .expect_err("wrong rank")
+                .contains("must have rank 1"));
+            chelis_value_release(value);
+        }
     }
 
     #[test]

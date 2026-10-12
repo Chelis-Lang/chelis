@@ -181,9 +181,10 @@ differentiate it.
   gradient. A selected parameter with no differentiable float field is
   rejected. C builds support a direct gradient call inside a function when
   its ADT argument is a lexical variable with one constructor and numeric
-  leaves, including nested fixed model blocks. An exported gradient function
-  over the same shape also builds. Runtime sum-type gradients require compiled
-  tag dispatch.
+  leaves, including nested fixed model blocks and a List of numeric blocks.
+  The List result retains its runtime length and order. An exported gradient
+  function over the same shape also builds. Runtime sum-type gradients require
+  compiled tag dispatch.
 - Differentiation through a `match` works when its selected constructor is
   known during lowering. A runtime-dependent scrutinee or a guarded arm is
   rejected. Scalar `if` conditions can select a branch at runtime; a
