@@ -730,7 +730,8 @@ v = vmap(k)(to_tensor([1i64, 2i64]))
     );
     assert!(
         stderr.contains("could not lower `vmap(...)`")
-            && stderr.contains("runtime range inside vmap requires a shared cardinality representation"),
+            && stderr
+                .contains("runtime range inside vmap requires a shared cardinality representation"),
         "the rejection must not claim a differentiated body under plain vmap:\n{stderr}"
     );
 }
