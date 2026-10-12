@@ -6956,6 +6956,9 @@ fn wire_bound(b: &RtDim) -> WireResult<WireRtDim> {
 
 fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
     Ok(match op {
+        RiscOp::RuntimeRecurrence(_) | RiscOp::RuntimeRecurrenceAdjoint { .. } => {
+            return Err("runtime recurrence has no WireDag schema representation".to_string());
+        }
         RiscOp::Add => WireRiscOp::Add,
         RiscOp::Sub => WireRiscOp::Sub,
         RiscOp::Mul => WireRiscOp::Mul,

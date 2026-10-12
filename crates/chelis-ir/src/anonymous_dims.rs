@@ -183,6 +183,13 @@ pub fn anonymous_axis_names(dag: &Dag, id: NodeId) -> Option<Vec<AnonymousAxisNa
                 .collect(),
         );
     }
+    if matches!(node.op, RiscOp::RuntimeRecurrence(_)) {
+        // A fold's first input is its source List, whose length says nothing
+        // about the final accumulator extent. Follow the operation's axis
+        // sources: a variable fold state gets a fresh result identity, while
+        // scan's leading axis still reads the source length.
+        return Some(by_source(true));
+    }
     if !movement_alters_extents(&node.op)
         && let Some(names) = node.inputs.first().and_then(|input| same_rank(*input))
     {
@@ -250,4 +257,93 @@ pub(crate) fn anonymous_axis_identity(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnonymousAxisName, anonymous_axis_names};
+    use crate::dag::{Dag, DimInfo, RiscOp, RuntimeRecurrence, RuntimeRecurrenceSource};
+    use chelis_types::types::Prim;
+
+    #[test]
+    fn runtime_fold_names_its_computed_extent_independently_of_source_length() {
+        let ty = |dims| crate::dag::TensorType {
+            dims,
+            precision: Prim::F32,
+        };
+        let wildcard = DimInfo::Named("*".into(), None);
+        let mut callback = Dag::new();
+        let callback_decl = callback.declare("callback");
+        let state = callback.add_node(
+            callback_decl,
+            RiscOp::Load {
+                name: "state".into(),
+            },
+            vec![],
+            ty(vec![wildcard.clone()]),
+            None,
+        );
+        let item = callback.add_node(
+            callback_decl,
+            RiscOp::Load {
+                name: "item".into(),
+            },
+            vec![],
+            crate::dag::TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        callback.add_root(state);
+        callback.add_root(item);
+
+        let mut dag = Dag::new();
+        let decl = dag.declare("fold");
+        let source = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "source".into(),
+            },
+            vec![],
+            crate::dag::TensorType {
+                dims: vec![wildcard.clone()],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        let seed = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "seed".into(),
+            },
+            vec![],
+            ty(vec![DimInfo::Lit(1)]),
+            None,
+        );
+        let fold = dag.add_node(
+            decl,
+            RiscOp::RuntimeRecurrence(Box::new(RuntimeRecurrence {
+                callback: Box::new(callback),
+                state,
+                source: RuntimeRecurrenceSource::Tensor { item },
+                captures: vec![],
+                result: state,
+                scan: false,
+            })),
+            vec![source, seed],
+            ty(vec![wildcard]),
+            None,
+        );
+        assert_eq!(
+            anonymous_axis_names(&dag, fold),
+            Some(vec![AnonymousAxisName::Fresh]),
+            "fold output can equal the seed at zero steps or a later callback result"
+        );
+        assert_eq!(
+            anonymous_axis_names(&dag, source),
+            Some(vec![AnonymousAxisName::Fresh]),
+            "the source length keeps its own identity"
+        );
+    }
 }

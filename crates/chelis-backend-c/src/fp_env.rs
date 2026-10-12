@@ -163,7 +163,9 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
                 NanFinalization::Canonical
             }
         }),
-        RiscOp::Iota
+        RiscOp::RuntimeRecurrence(_)
+        | RiscOp::RuntimeRecurrenceAdjoint { .. }
+        | RiscOp::Iota
         | RiscOp::ListMapCapture { .. }
         | RiscOp::TruncDiv
         | RiscOp::Bitwise(..)

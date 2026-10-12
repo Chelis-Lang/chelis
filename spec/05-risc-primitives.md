@@ -4441,6 +4441,9 @@ path even though bare `round` under `grad` remains a structural
 > each output cotangent to its source position, with zero for omitted
 > positions, under spec/06 section 2.10; the mask itself has zero cotangent.
 > Enumeration indices have zero cotangent.
+> The internal `RuntimeRecurrence` identity executes each visited callback
+> once and records its state; `RuntimeRecurrenceAdjoint` reverses that same
+> recorded sequence without invoking the callback again.
 >
 > Accumulator: Fold and scan retain A at each step; each numeric callback
 > result finalizes at its own declared dtype before becoming the next state.

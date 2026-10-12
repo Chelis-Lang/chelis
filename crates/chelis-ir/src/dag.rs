@@ -835,9 +835,86 @@ pub struct ExtentClaim {
     pub requirement_declares: bool,
 }
 
+/// One runtime List recurrence callback. Its graph receives `state`, `item`,
+/// and the named lexical captures as Loads. A recurrence activation executes
+/// it once per visited item and retains each invocation's forward values for
+/// its reverse pass ([05-OP-55], spec/06 §2.10.1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeRecurrence {
+    pub callback: Box<Dag>,
+    pub state: NodeId,
+    pub source: RuntimeRecurrenceSource,
+    pub captures: Vec<(String, NodeId)>,
+    pub result: NodeId,
+    pub scan: bool,
+}
+
+/// The first outer input supplies the executed trip count. Tensor mode reads
+/// that input as a leading-axis tensor; column mode reads its scalar i64
+/// length and gathers each subsequent numeric field column independently.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RuntimeRecurrenceSource {
+    Tensor { item: NodeId },
+    Columns { items: Vec<NodeId> },
+}
+
+impl RuntimeRecurrence {
+    pub fn item_loads(&self) -> &[NodeId] {
+        match &self.source {
+            RuntimeRecurrenceSource::Tensor { item } => std::slice::from_ref(item),
+            RuntimeRecurrenceSource::Columns { items } => items,
+        }
+    }
+
+    pub fn capture_input_offset(&self) -> usize {
+        match &self.source {
+            RuntimeRecurrenceSource::Tensor { .. } => 2,
+            RuntimeRecurrenceSource::Columns { items } => 2 + items.len(),
+        }
+    }
+
+    pub fn item_input_slot(&self, item: usize) -> usize {
+        match &self.source {
+            RuntimeRecurrenceSource::Tensor { .. } => 0,
+            RuntimeRecurrenceSource::Columns { .. } => 2 + item,
+        }
+    }
+
+    pub fn item_target_index(&self, target: usize) -> Option<usize> {
+        self.item_loads()
+            .iter()
+            .enumerate()
+            .find_map(|(item, _)| (self.item_input_slot(item) == target).then_some(item))
+    }
+}
+
+/// Backward-only callback graph. Its roots correspond to `targets` in order;
+/// its private Loads read the recorded forward invocation values and the
+/// incoming state cotangent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeRecurrenceBackward {
+    pub dag: Box<Dag>,
+    pub targets: Vec<usize>,
+}
+
 /// A RISC primitive operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RiscOp {
+    /// Private runtime recurrence. Tensor mode takes the leading-axis source
+    /// at input 0; column mode takes a scalar i64 length at input 0 and one
+    /// leading-axis tensor per item leaf after the seed at input 1. Callback
+    /// captures follow the source columns in either mode.
+    /// `scan` returns a leading-axis stack of post-step states; `fold` returns
+    /// the final state. Both retain the exact forward activation for AD.
+    RuntimeRecurrence(Box<RuntimeRecurrence>),
+    /// Reverse an activation without rerunning its authored callback.
+    /// Inputs are the forward result, source, seed, captures, and result
+    /// cotangent. `target` is an input slot of the forward recurrence.
+    RuntimeRecurrenceAdjoint {
+        recurrence: Box<RuntimeRecurrence>,
+        backward: Box<RuntimeRecurrenceBackward>,
+        target: usize,
+    },
     /// [05-OP-54]: a tensor carrier for the half-open i64 `range(start, end)`.
     /// Inputs are two exact rank-zero i64 values; output is rank-one i64.
     /// The runtime length is max(end-start, 0), checked in mathematical
@@ -1463,6 +1540,8 @@ pub enum RiscAtomIdentity {
     ReduceWindowSum,
     ReduceWindowMean,
     ReduceWindowGrad,
+    RuntimeRecurrence,
+    RuntimeRecurrenceAdjoint,
     ArgmaxReduce,
     ArgminReduce,
     Reshape,
@@ -1550,6 +1629,8 @@ impl RiscAtomIdentity {
         Self::ReduceWindowSum,
         Self::ReduceWindowMean,
         Self::ReduceWindowGrad,
+        Self::RuntimeRecurrence,
+        Self::RuntimeRecurrenceAdjoint,
         Self::ArgmaxReduce,
         Self::ArgminReduce,
         Self::Reshape,
@@ -1637,6 +1718,8 @@ impl RiscAtomIdentity {
             Self::ReduceWindowSum => "reduce_window_sum",
             Self::ReduceWindowMean => "reduce_window_mean",
             Self::ReduceWindowGrad => "ReduceWindowGrad",
+            Self::RuntimeRecurrence => "RuntimeRecurrence",
+            Self::RuntimeRecurrenceAdjoint => "RuntimeRecurrenceAdjoint",
             Self::ArgmaxReduce => "argmax_reduce",
             Self::ArgminReduce => "argmin_reduce",
             Self::Reshape => "reshape",
@@ -1803,6 +1886,8 @@ impl RiscOp {
                 ReduceWindowKind::Mean => Id::ReduceWindowMean,
             }),
             Self::ReduceWindowGrad { .. } => Semantic(Id::ReduceWindowGrad),
+            Self::RuntimeRecurrence(_recurrence) => Semantic(Id::RuntimeRecurrence),
+            Self::RuntimeRecurrenceAdjoint { .. } => Semantic(Id::RuntimeRecurrenceAdjoint),
             Self::Argmax { .. } => Semantic(Id::ArgmaxReduce),
             Self::Argmin { .. } => Semantic(Id::ArgminReduce),
             Self::Reshape { .. } => Semantic(Id::Reshape),
@@ -2201,6 +2286,8 @@ impl RiscOp {
             RiscOp::OneHot { .. }
             | RiscOp::Iota
             | RiscOp::ListMapCapture { .. }
+            | RiscOp::RuntimeRecurrence(_)
+            | RiscOp::RuntimeRecurrenceAdjoint { .. }
             | RiscOp::OrderedAdjointSum { .. } => false,
 
             // `Shape` reads a runtime axis extent as a discrete integer
@@ -2321,7 +2408,7 @@ fn prim_width_rank(p: Prim) -> u32 {
 }
 
 /// A single node in the DAG.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DagNode {
     pub id: NodeId,
     pub op: RiscOp,
@@ -2479,6 +2566,8 @@ impl DagNode {
             }
         };
         match &self.op {
+            RiscOp::RuntimeRecurrence(_) => RuntimeCheck::Abort,
+            RiscOp::RuntimeRecurrenceAdjoint { .. } => RuntimeCheck::Nothing,
             RiscOp::Iota => RuntimeCheck::OperandValues,
             RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
                 RuntimeCheck::Ungated
@@ -2840,7 +2929,7 @@ impl TrapSeeds<'_> {
 }
 
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Dag {
     nodes: Vec<DagNode>,
     roots: Vec<NodeId>,
@@ -5049,6 +5138,14 @@ mod tests {
     /// `every_risc_op_is_classified_for_verifier_subset` fails, so a new
     /// op cannot silently escape classification by either route.
     fn one_of_every_risc_op() -> Vec<RiscOp> {
+        let recurrence = RuntimeRecurrence {
+            callback: Box::new(Dag::new()),
+            state: NodeId(0),
+            source: RuntimeRecurrenceSource::Tensor { item: NodeId(1) },
+            captures: vec![],
+            result: NodeId(0),
+            scan: false,
+        };
         vec![
             RiscOp::Add,
             RiscOp::Mul,
@@ -5113,6 +5210,15 @@ mod tests {
                 reducer: ReduceWindowKind::Max,
                 window_shape: vec![2],
                 strides: vec![1],
+            },
+            RiscOp::RuntimeRecurrence(Box::new(recurrence.clone())),
+            RiscOp::RuntimeRecurrenceAdjoint {
+                recurrence: Box::new(recurrence),
+                backward: Box::new(RuntimeRecurrenceBackward {
+                    dag: Box::new(Dag::new()),
+                    targets: vec![1],
+                }),
+                target: 1,
             },
             RiscOp::Argmax { axis: 0 },
             RiscOp::Argmin { axis: 0 },
@@ -5384,8 +5490,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            72,
-            "one_of_every_risc_op must list all 72 classified samples"
+            74,
+            "one_of_every_risc_op must list all 74 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -5415,13 +5521,14 @@ mod tests {
         // branch's key join (+1 = 32). The internal extrema adjoint
         // remains excluded (+1 = 33); the retained [05-OP-48] Softmax
         // composition has no dedicated transformer (+1 = 34). [05-OP-79]'s
-        // `pow` has no transformer either (+1 = 35).
+        // `pow` has no transformer either (+1 = 35). Runtime List
+        // recurrence and its recorded adjoint are excluded (+2 = 37).
         assert_eq!(
             targetable, 37,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 35,
+            excluded, 37,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 

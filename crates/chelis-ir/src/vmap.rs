@@ -123,6 +123,11 @@ fn vectorize_axis0_impl(
             prepend_batch_type(&node.output_type, &batch_dim)
         };
         let op = match &node.op {
+            RiscOp::RuntimeRecurrence(_) | RiscOp::RuntimeRecurrenceAdjoint { .. } => {
+                return Err(
+                    "batching a runtime recurrence requires per-row execution tapes".into(),
+                );
+            }
             RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
                 return Err(
                     "batching an ordered List cotangent requires nested invocation provenance"

@@ -590,7 +590,7 @@ fn build_storage_plan(
     let owner_of = compute_owner_map(&placements);
     let destructively_dropped = destructively_dropped_owners(&placements, &owner_of);
     let mut requirements = owner_requirements(dag, &placements, &owner_of)?;
-    extend_lifetimes(dag, &placements, &owner_of, &mut requirements);
+    extend_lifetimes(dag, lane, &placements, &owner_of, &mut requirements);
     let AssignedSlots { slots, reusable } = assign_slots(
         dag,
         &mut placements,
@@ -789,7 +789,9 @@ fn classify_nodes(
                 | RiscOp::Gather { .. }
                 | RiscOp::ScatterAdd { .. }
                 | RiscOp::Scatter { .. }
-                | RiscOp::ScatterElements { .. } => StoragePlacement::OwnedSlot {
+                | RiscOp::ScatterElements { .. }
+                | RiscOp::RuntimeRecurrence(_)
+                | RiscOp::RuntimeRecurrenceAdjoint { .. } => StoragePlacement::OwnedSlot {
                     slot: StorageSlotId::UNASSIGNED,
                 },
             }
@@ -866,10 +868,12 @@ fn owner_requirements(
 
 fn extend_lifetimes(
     dag: VerifiedDagView<'_>,
+    lane: StorageLaneKind,
     placements: &[StoragePlacement],
     owner_of: &[Option<NodeId>],
     requirements: &mut BTreeMap<NodeId, OwnerRequirement>,
 ) {
+    let epilogue = dag.len();
     for node in dag.nodes() {
         if matches!(placements[node.id.0], StoragePlacement::Skipped) {
             continue;
@@ -897,8 +901,35 @@ fn extend_lifetimes(
                 requirement.last_use_index = requirement.last_use_index.max(node.id.0);
             }
         }
+        if lane == StorageLaneKind::C
+            && let RiscOp::RuntimeRecurrence(recurrence) = &node.op
+        {
+            // The C callback returns every node into its tape. A Load of the
+            // seed or a lexical capture can retain the parent tensor through
+            // tape cleanup, even after the recurrence node's logical use.
+            // The source and columns are gathered into fresh per-row values.
+            let tape_aliases = std::iter::once(node.inputs[1]).chain(
+                node.inputs[recurrence.capture_input_offset()..]
+                    .iter()
+                    .copied(),
+            );
+            for input in tape_aliases {
+                if let Some(owner) = owner_of[input.0]
+                    && let Some(requirement) = requirements.get_mut(&owner)
+                {
+                    requirement.last_use_index = epilogue;
+                }
+            }
+            // A fold returns the final taped state, or the seed at zero
+            // steps. A scan materializes an independent stacked result.
+            if !recurrence.scan
+                && let Some(owner) = owner_of[node.id.0]
+                && let Some(requirement) = requirements.get_mut(&owner)
+            {
+                requirement.last_use_index = epilogue;
+            }
+        }
     }
-    let epilogue = dag.len();
     for root in dag.roots() {
         if let Some(owner) = owner_of[root.0]
             && let Some(requirement) = requirements.get_mut(&owner)
@@ -1201,7 +1232,10 @@ fn exact_physical_live_bytes(slots: &[StorageSlotPlan]) -> Result<LiveByteBound,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{Dag, FusedInput, FusedStep, FusedStepOp, TensorType};
+    use crate::dag::{
+        Dag, FusedInput, FusedStep, FusedStepOp, RuntimeRecurrence, RuntimeRecurrenceSource,
+        TensorType,
+    };
     use crate::ownership::{lower_dag_ownership, verify_ownership};
     use chelis_types::types::Prim;
 
@@ -1309,6 +1343,13 @@ mod tests {
     fn vector(elements: usize, precision: Prim) -> TensorType {
         TensorType {
             dims: vec![crate::dag::DimInfo::Lit(elements)],
+            precision,
+        }
+    }
+
+    fn scalar(precision: Prim) -> TensorType {
+        TensorType {
+            dims: vec![],
             precision,
         }
     }
@@ -1465,5 +1506,146 @@ mod tests {
         assert_eq!(token.source(), owned);
         assert_eq!(token.consumer(), fused);
         assert!(plan.take_reuse_for(fused).is_err());
+    }
+
+    #[test]
+    fn c_recurrence_tape_pins_seed_capture_and_fold_result_but_not_source() {
+        let mut callback = Dag::new();
+        let callback_decl = callback.declare("callback");
+        let state = callback.add_node(
+            callback_decl,
+            RiscOp::Load {
+                name: "state".into(),
+            },
+            vec![],
+            scalar(Prim::F32),
+            None,
+        );
+        let item = callback.add_node(
+            callback_decl,
+            RiscOp::Load {
+                name: "item".into(),
+            },
+            vec![],
+            scalar(Prim::Int64),
+            None,
+        );
+        let captured = callback.add_node(
+            callback_decl,
+            RiscOp::Load {
+                name: "captured".into(),
+            },
+            vec![],
+            scalar(Prim::F32),
+            None,
+        );
+        let item_float = callback.add_node(
+            callback_decl,
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![item],
+            scalar(Prim::F32),
+            None,
+        );
+        let sum = callback.add_node(
+            callback_decl,
+            RiscOp::Add,
+            vec![state, captured],
+            scalar(Prim::F32),
+            None,
+        );
+        let result = callback.add_node(
+            callback_decl,
+            RiscOp::Add,
+            vec![sum, item_float],
+            scalar(Prim::F32),
+            None,
+        );
+        callback.add_root(result);
+
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let source = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::Int64, 1.0),
+            vec![],
+            vector(1, Prim::Int64),
+            None,
+        );
+        let seed = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            scalar(Prim::F32),
+            None,
+        );
+        let capture = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            scalar(Prim::F32),
+            None,
+        );
+        let fold = dag.add_node(
+            decl,
+            RiscOp::RuntimeRecurrence(Box::new(RuntimeRecurrence {
+                callback: Box::new(callback),
+                state,
+                source: RuntimeRecurrenceSource::Tensor { item },
+                captures: vec![("captured".into(), captured)],
+                result,
+                scan: false,
+            })),
+            vec![source, seed, capture],
+            scalar(Prim::F32),
+            None,
+        );
+        let after_f32_a = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 2.0),
+            vec![],
+            scalar(Prim::F32),
+            None,
+        );
+        let after_f32_b = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 3.0),
+            vec![],
+            scalar(Prim::F32),
+            None,
+        );
+        let after_f32_c = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 4.0),
+            vec![],
+            scalar(Prim::F32),
+            None,
+        );
+        let after_i64 = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::Int64, 2.0),
+            vec![],
+            vector(1, Prim::Int64),
+            None,
+        );
+        for root in [after_f32_a, after_f32_b, after_f32_c, after_i64] {
+            dag.add_root(root);
+        }
+        let plan = plan_c_storage(verified(dag)).expect("C recurrence storage plan");
+        for pinned in [seed, capture, fold] {
+            for after in [after_f32_a, after_f32_b, after_f32_c] {
+                assert_ne!(
+                    plan.slot_for_node(pinned),
+                    plan.slot_for_node(after),
+                    "taped owner {pinned:?} must not be reused by {after:?}"
+                );
+            }
+        }
+        assert_eq!(
+            plan.slot_for_node(source),
+            plan.slot_for_node(after_i64),
+            "the source is gathered per row and need not remain pinned"
+        );
     }
 }

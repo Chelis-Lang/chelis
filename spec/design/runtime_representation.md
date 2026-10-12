@@ -1132,6 +1132,20 @@ inactive and empty rows, and a false forward range claim. Renaming an owner
 or introducing another spelling remains an unclassified scanner hit until it
 has its own semantic authority and execution contract.
 
+Runtime recurrence under [05-OP-55] has three exact private C final forms:
+`CEmitter::emit_runtime_recurrence_forward` owns one
+`backend-element-spelling` and one `load-store-template`, and
+`CEmitter::emit_runtime_recurrence_adjoint` owns one
+`backend-element-spelling`. The forward owner records only executed callback
+tensor values and copies fixed-shape scan rows; the adjoint owner reads those
+values in reverse and copies item cotangents to their source rows. Both use
+tagged tensor handles. Before a row copy, the emitter checks rank, each axis,
+and the declared dtype; no public bare-number channel is introduced. The
+`ad_host_list_combinators` CLI suite builds and executes C alongside Eval for
+empty and visited recurrences, fixed-shape scan, changing-extent fold, and
+numeric fields of runtime List items. A further spelling in either owner is
+classified only by the exact owner/kind identity and its execution contract.
+
 The private C key-callable entries emitted by `append_key_callable_helpers`
 have one exact `load-store-template` final-form owner. The tensor entries read
 and write key or seed storage under [05-OP-69] through [05-OP-72]; they add no

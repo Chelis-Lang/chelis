@@ -289,6 +289,11 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Count { .. }
         // [05-OP-54]: runtime range materializes exact signed i64 elements.
         | RiscOp::Iota
+        // [05-OP-55]: these private carriers execute the callback's exact
+        // primitive graph over the visited steps, then replay recorded
+        // values in reverse. They grant no tolerance beyond those primitives.
+        | RiscOp::RuntimeRecurrence(_)
+        | RiscOp::RuntimeRecurrenceAdjoint { .. }
         | RiscOp::ListMapCapture { .. }
         | RiscOp::OrderedAdjointSum { .. }
         | RiscOp::MaxReduce { .. }

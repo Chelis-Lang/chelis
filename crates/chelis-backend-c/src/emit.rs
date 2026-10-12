@@ -41,10 +41,23 @@ fn unsupported_storage_plan(error: chelis_ir::ownership::OwnershipError) -> Unsu
     )
 }
 
+fn unsupported_recurrence_graph(detail: &str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Op("runtime recurrence callback".into()),
+        detail,
+        Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[05-OP-55]",
+            "a runtime recurrence callback must have an exact private graph"
+        ),
+    )
+}
+
 /// Emits C source code from a RISC DAG.
 pub struct CEmitter {
     lines: Vec<String>,
     indent: usize,
+    function_name: String,
     /// chelis#1374: `(witness node, claim index)` pairs the entry-guard
     /// prologue already compares, so the witness does not emit a second
     /// comparison of the same two axes (spec/04 §4.7, "exactly once").
@@ -280,6 +293,484 @@ impl CEmitter {
         Self::emit_storage_plan_with_options(&mut plan, func_name, options)
     }
 
+    fn emit_recurrence_child(
+        mut child: Dag,
+        name: &str,
+        options: crate::CodegenOptions,
+        record_all: bool,
+    ) -> Result<String, Unsupported> {
+        if child.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::RuntimeRecurrence(_) | RiscOp::RuntimeRecurrenceAdjoint { .. }
+            )
+        }) {
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("nested runtime recurrence".into()),
+                "nested runtime recurrence C callback",
+                Stage::Codegen("c"),
+                chelis_types::unimplemented_rejection!(
+                    3366,
+                    "nested runtime recurrence C callbacks are not implemented"
+                ),
+            ));
+        }
+        if record_all {
+            child.set_roots((0..child.len()).map(NodeId).collect());
+        }
+        let child = crate::prepare_dag_for_codegen(child, options);
+        let child = chelis_ir::ownership::lower_dag_ownership(child)
+            .and_then(chelis_ir::ownership::verify_ownership)
+            .map_err(unsupported_storage_plan)?;
+        let source = Self::emit_dag_with_options(child, name, options)?;
+        let start = source
+            .find(&format!("static void {name}("))
+            .ok_or_else(|| {
+                Unsupported::new(
+                    UnsupportedKind::Op("runtime recurrence callback".into()),
+                    "private callback C definition",
+                    Stage::Codegen("c"),
+                    chelis_types::deliberate_rejection!(
+                        "[05-OP-55]",
+                        "a runtime recurrence callback must have a private C definition"
+                    ),
+                )
+            })?;
+        Ok(source[start..].to_string())
+    }
+
+    fn emit_recurrence_children(
+        dag: VerifiedDagView<'_>,
+        name: &str,
+        options: crate::CodegenOptions,
+    ) -> Result<Vec<String>, Unsupported> {
+        let mut sources = Vec::new();
+        for node in dag.nodes() {
+            match &node.op {
+                RiscOp::RuntimeRecurrence(recurrence) => {
+                    let child_name = format!("{name}__rec_{}_forward", node.id.0);
+                    sources.push(Self::emit_recurrence_child(
+                        (*recurrence.callback).clone(),
+                        &child_name,
+                        crate::CodegenOptions {
+                            static_entry: true,
+                            ..options
+                        },
+                        true,
+                    )?);
+                }
+                RiscOp::RuntimeRecurrenceAdjoint { backward, .. } => {
+                    let child_name = format!("{name}__rec_{}_backward", node.id.0);
+                    sources.push(Self::emit_recurrence_child(
+                        (*backward.dag).clone(),
+                        &child_name,
+                        crate::CodegenOptions {
+                            static_entry: true,
+                            ..options
+                        },
+                        false,
+                    )?);
+                    let RiscOp::RuntimeRecurrenceAdjoint {
+                        recurrence, target, ..
+                    } = &node.op
+                    else {
+                        unreachable!();
+                    };
+                    let state_type = recurrence
+                        .callback
+                        .get(recurrence.state)
+                        .ok_or_else(|| unsupported_recurrence_graph("missing state type"))?
+                        .output_type
+                        .clone();
+                    sources.push(Self::emit_recurrence_add_child(
+                        &recurrence.callback,
+                        &state_type,
+                        &format!("{name}__rec_{}_state_add", node.id.0),
+                        options,
+                    )?);
+                    if *target >= recurrence.capture_input_offset() {
+                        sources.push(Self::emit_recurrence_add_child(
+                            &recurrence.callback,
+                            &node.output_type,
+                            &format!("{name}__rec_{}_capture_add", node.id.0),
+                            options,
+                        )?);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(sources)
+    }
+
+    fn emit_recurrence_add_child(
+        callback: &Dag,
+        ty: &TensorType,
+        name: &str,
+        options: crate::CodegenOptions,
+    ) -> Result<String, Unsupported> {
+        let mut graph = Dag::new();
+        graph.inherit_declarations(callback);
+        let owner = callback
+            .nodes()
+            .first()
+            .ok_or_else(|| unsupported_recurrence_graph("empty callback"))?
+            .owner;
+        let lhs = graph.add_node(
+            owner,
+            RiscOp::Load { name: "lhs".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let rhs = graph.add_node(
+            owner,
+            RiscOp::Load { name: "rhs".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let sum = graph.add_node(owner, RiscOp::Add, vec![lhs, rhs], ty.clone(), None);
+        graph.add_root(sum);
+        Self::emit_recurrence_child(
+            graph,
+            name,
+            crate::CodegenOptions {
+                static_entry: true,
+                ..options
+            },
+            false,
+        )
+    }
+
+    fn emit_runtime_recurrence_forward(
+        &mut self,
+        node: &DagNode,
+        recurrence: &chelis_ir::dag::RuntimeRecurrence,
+    ) -> Result<(), Unsupported> {
+        let id = node.id.0;
+        let callback = &recurrence.callback;
+        let callback_len = callback.len();
+        let state_name = match &callback.get(recurrence.state).map(|node| &node.op) {
+            Some(RiscOp::Load { name }) => name.as_str(),
+            _ => return Err(unsupported_recurrence_graph("missing state Load")),
+        };
+        let item_names = recurrence
+            .item_loads()
+            .iter()
+            .map(|item| match &callback.get(*item).map(|node| &node.op) {
+                Some(RiscOp::Load { name }) => Ok(name.as_str()),
+                _ => Err(unsupported_recurrence_graph("missing item Load")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut inputs = Vec::new();
+        for name in chelis_ir::axis_sources::ordered_interface_loads(callback.nodes())
+            .into_iter()
+            .filter_map(|load| match &load.op {
+                RiscOp::Load { name } => Some(name.as_str()),
+                _ => None,
+            })
+        {
+            let expr = if name == state_name {
+                format!("t{id}_rec_state")
+            } else if let Some(item) = item_names.iter().position(|item_name| *item_name == name) {
+                format!("t{id}_rec_item_{item}")
+            } else if let Some(position) = recurrence
+                .captures
+                .iter()
+                .position(|(capture, _)| capture == name)
+            {
+                format!(
+                    "t{}",
+                    node.inputs[position + recurrence.capture_input_offset()].0
+                )
+            } else {
+                return Err(unsupported_recurrence_graph("unmapped callback capture"));
+            };
+            inputs.push(expr);
+        }
+        let helper = format!("{}__rec_{id}_forward", self.function_name);
+        let source = node.inputs[0].0;
+        let seed = node.inputs[1].0;
+        match &recurrence.source {
+            chelis_ir::dag::RuntimeRecurrenceSource::Tensor { .. } => {
+                self.line(&format!(
+                    "int64_t t{id}_rec_count = chelis_tensor_shape(t{source}, 0);"
+                ));
+            }
+            chelis_ir::dag::RuntimeRecurrenceSource::Columns { items } => {
+                self.line(&format!(
+                    "int64_t t{id}_rec_count = (int64_t)chelis_tensor_to_scalar(t{source}).bits;"
+                ));
+                self.line(&format!("if (t{id}_rec_count < 0) {{ fprintf(stderr, \"runtime recurrence length is negative\\n\"); chelis_flush_and_exit_trap(); }}"));
+                for index in 0..items.len() {
+                    let column = node.inputs[recurrence.item_input_slot(index)].0;
+                    self.line(&format!("if (chelis_tensor_shape(t{column}, 0) != t{id}_rec_count) {{ fprintf(stderr, \"runtime recurrence column length mismatch\\n\"); chelis_flush_and_exit_trap(); }}"));
+                }
+            }
+        }
+        self.line(&format!("chelis_tensor ***t{id}_rec_tape = (chelis_tensor ***)calloc((size_t)(t{id}_rec_count ? t{id}_rec_count : 1), sizeof(chelis_tensor **));"));
+        self.line(&format!("if (t{id}_rec_tape == NULL) {{ fprintf(stderr, \"runtime recurrence tape allocation failed\\n\"); abort(); }}"));
+        self.line(&format!("chelis_tensor *t{id}_rec_state = t{seed};"));
+        self.line(&format!("chelis_tensor_retain(t{id}_rec_state);"));
+        self.line(&format!(
+            "for (int64_t t{id}_rec_row = 0; t{id}_rec_row < t{id}_rec_count; ++t{id}_rec_row) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("chelis_tensor *t{id}_rec_index = chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)t{id}_rec_row));"));
+        for index in 0..recurrence.item_loads().len() {
+            let column = node.inputs[recurrence.item_input_slot(index)].0;
+            self.line(&format!("chelis_tensor *t{id}_rec_item_{index} = chelis_tensor_gather(t{column}, t{id}_rec_index, 0);"));
+        }
+        self.line(&format!(
+            "chelis_tensor *t{id}_rec_inputs[{}] = {{{}}};",
+            inputs.len(),
+            inputs.join(", ")
+        ));
+        self.line(&format!("chelis_tensor **t{id}_rec_values = (chelis_tensor **)calloc({callback_len}, sizeof(chelis_tensor *));"));
+        self.line(&format!("if (t{id}_rec_values == NULL) {{ fprintf(stderr, \"runtime recurrence row allocation failed\\n\"); abort(); }}"));
+        self.line(&format!(
+            "{helper}(t{id}_rec_inputs, {}, t{id}_rec_values, {callback_len});",
+            inputs.len()
+        ));
+        self.line(&format!(
+            "t{id}_rec_tape[t{id}_rec_row] = t{id}_rec_values;"
+        ));
+        self.line(&format!("chelis_tensor_release(t{id}_rec_index);"));
+        for index in 0..recurrence.item_loads().len() {
+            self.line(&format!("chelis_tensor_release(t{id}_rec_item_{index});"));
+        }
+        self.line(&format!("chelis_tensor_release(t{id}_rec_state);"));
+        self.line(&format!(
+            "t{id}_rec_state = t{id}_rec_values[{}];",
+            recurrence.result.0
+        ));
+        self.line(&format!("chelis_tensor_retain(t{id}_rec_state);"));
+        self.indent -= 1;
+        self.line("}");
+        if recurrence.scan {
+            let rank = node.output_type.dims.len();
+            let dtype = Self::dtype_macro(&node.output_type);
+            self.line(&format!("int64_t t{id}_rec_shape[{rank}];"));
+            self.line(&format!("t{id}_rec_shape[0] = t{id}_rec_count;"));
+            for axis in 1..rank {
+                self.line(&format!(
+                    "t{id}_rec_shape[{axis}] = chelis_tensor_shape(t{seed}, {});",
+                    axis - 1
+                ));
+            }
+            self.line(&format!(
+                "chelis_tensor *t{id} = chelis_alloc({rank}, t{id}_rec_shape, {dtype});"
+            ));
+            self.line(&format!(
+                "chelis_tensor_write *t{id}_rec_write = chelis_tensor_begin_write(t{id});"
+            ));
+            self.line(&format!(
+                "chelis_write_view t{id}_rec_view = chelis_tensor_write_view(t{id}_rec_write);"
+            ));
+            self.line(&format!("int64_t t{id}_rec_row_bytes = chelis_tensor_numel(t{seed}) * chelis_dtype_size({dtype});"));
+            self.line(&format!("for (int64_t t{id}_rec_row = 0; t{id}_rec_row < t{id}_rec_count; ++t{id}_rec_row) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "chelis_tensor *t{id}_rec_post = t{id}_rec_tape[t{id}_rec_row][{}];",
+                recurrence.result.0
+            ));
+            self.line(&format!("if (chelis_tensor_rank(t{id}_rec_post) != {}) {{ fprintf(stderr, \"runtime recurrence state rank changed\\n\"); chelis_flush_and_exit_trap(); }}", rank - 1));
+            for axis in 1..rank {
+                self.line(&format!("if (chelis_tensor_shape(t{id}_rec_post, {}) != t{id}_rec_shape[{axis}]) {{ fprintf(stderr, \"runtime recurrence state extent changed\\n\"); chelis_flush_and_exit_trap(); }}", axis - 1));
+            }
+            self.line(&format!("if (chelis_tensor_numel(t{id}_rec_post) != chelis_tensor_numel(t{seed})) {{ fprintf(stderr, \"runtime recurrence state extent changed\\n\"); abort(); }}"));
+            self.line(&format!(
+                "chelis_read_view t{id}_rec_post_view = chelis_tensor_read_view(t{id}_rec_post);"
+            ));
+            self.line(&format!("if (t{id}_rec_post_view.dtype != {dtype}) {{ fprintf(stderr, \"runtime recurrence state dtype changed\\n\"); chelis_flush_and_exit_trap(); }}"));
+            self.line(&format!("memcpy((uint8_t *)t{id}_rec_view.data + t{id}_rec_row * t{id}_rec_row_bytes, t{id}_rec_post_view.data, (size_t)t{id}_rec_row_bytes);"));
+            self.indent -= 1;
+            self.line("}");
+            self.line(&format!("chelis_tensor_end_write(t{id}_rec_write);"));
+            self.line(&format!("chelis_tensor_release(t{id}_rec_state);"));
+        } else {
+            self.line(&format!("chelis_tensor *t{id} = t{id}_rec_state;"));
+        }
+        // A fold can finish at the seed (zero visits) or at any recorded
+        // callback result. Declare its computed extent from the realized
+        // result, after the exact recurrence has run, before a consumer uses
+        // the fresh anonymous name for its own shape checks or allocation.
+        let result_extents = (0..node.output_type.dims.len())
+            .map(|axis| (axis, format!("chelis_tensor_shape(t{id}, {axis})")))
+            .collect::<Vec<_>>();
+        self.emit_runtime_dim_sites(id, &result_extents);
+        self.emit_tensor_snapshot(id, false);
+        Ok(())
+    }
+
+    fn emit_runtime_recurrence_adjoint(
+        &mut self,
+        node: &DagNode,
+        recurrence: &chelis_ir::dag::RuntimeRecurrence,
+        backward: &chelis_ir::dag::RuntimeRecurrenceBackward,
+        target: usize,
+    ) -> Result<(), Unsupported> {
+        let id = node.id.0;
+        let forward = node.inputs[0].0;
+        let item_target = recurrence.item_target_index(target).is_some();
+        let capture_target = target >= recurrence.capture_input_offset();
+        let item_source = item_target.then(|| node.inputs[target + 1].0);
+        let seed = node.inputs[2].0;
+        let incoming = node
+            .inputs
+            .last()
+            .ok_or_else(|| unsupported_recurrence_graph("missing cotangent"))?
+            .0;
+        let callback_len = recurrence.callback.len();
+        let backward_len = backward.dag.roots().len();
+        let state_ty = &recurrence
+            .callback
+            .get(recurrence.state)
+            .ok_or_else(|| unsupported_recurrence_graph("missing state type"))?
+            .output_type;
+        let state_dtype = Self::dtype_macro(state_ty);
+        let state_add = format!("{}__rec_{id}_state_add", self.function_name);
+        let capture_add = format!("{}__rec_{id}_capture_add", self.function_name);
+        let backward_helper = format!("{}__rec_{id}_backward", self.function_name);
+        let wanted = backward
+            .targets
+            .iter()
+            .position(|slot| *slot == target)
+            .ok_or_else(|| unsupported_recurrence_graph("missing requested cotangent target"))?;
+        let mut inputs = Vec::new();
+        for load in chelis_ir::axis_sources::ordered_interface_loads(backward.dag.nodes()) {
+            let RiscOp::Load { name } = &load.op else {
+                unreachable!()
+            };
+            let value = if name.as_str() == "__chelis_recurrence_seed" {
+                format!("t{id}_rec_state_grad")
+            } else {
+                let index = name
+                    .as_str()
+                    .strip_prefix("__chelis_recurrence_tape_")
+                    .and_then(|suffix| suffix.parse::<usize>().ok())
+                    .filter(|index| *index < callback_len)
+                    .ok_or_else(|| unsupported_recurrence_graph("invalid tape Load"))?;
+                format!("t{forward}_rec_tape[t{id}_rec_row][{index}]")
+            };
+            inputs.push(value);
+        }
+        self.line(&format!(
+            "chelis_tensor *t{id}_rec_state_grad = {};",
+            if recurrence.scan {
+                format!(
+                    "chelis_tensor_alloc_like(t{seed}, chelis_scalar_from_bits({state_dtype}, 0))"
+                )
+            } else {
+                format!("t{incoming}")
+            }
+        ));
+        if !recurrence.scan {
+            self.line(&format!("chelis_tensor_retain(t{id}_rec_state_grad);"));
+        }
+        if item_target {
+            self.line(&format!("chelis_tensor **t{id}_rec_items = (chelis_tensor **)calloc((size_t)(t{forward}_rec_count ? t{forward}_rec_count : 1), sizeof(chelis_tensor *));"));
+            self.line(&format!("if (t{id}_rec_items == NULL) {{ fprintf(stderr, \"runtime recurrence item tape allocation failed\\n\"); chelis_flush_and_exit_trap(); }}"));
+        } else if capture_target {
+            let dtype = Self::dtype_macro(&node.output_type);
+            let capture = node.inputs[target + 1].0;
+            self.line(&format!("chelis_tensor *t{id}_rec_capture_grad = chelis_tensor_alloc_like(t{capture}, chelis_scalar_from_bits({dtype}, 0));"));
+        }
+        self.line(&format!(
+            "for (int64_t t{id}_rec_row = t{forward}_rec_count; t{id}_rec_row-- > 0;) {{"
+        ));
+        self.indent += 1;
+        if recurrence.scan {
+            self.line(&format!("chelis_tensor *t{id}_rec_index = chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)t{id}_rec_row));"));
+            self.line(&format!("chelis_tensor *t{id}_rec_row_seed = chelis_tensor_gather(t{incoming}, t{id}_rec_index, 0);"));
+            self.line(&format!("chelis_tensor *t{id}_rec_sum_inputs[2] = {{t{id}_rec_state_grad, t{id}_rec_row_seed}};"));
+            self.line(&format!("chelis_tensor *t{id}_rec_sum_outputs[1];"));
+            self.line(&format!(
+                "{state_add}(t{id}_rec_sum_inputs, 2, t{id}_rec_sum_outputs, 1);"
+            ));
+            self.line(&format!("chelis_tensor_release(t{id}_rec_state_grad);"));
+            self.line(&format!("chelis_tensor_release(t{id}_rec_row_seed);"));
+            self.line(&format!("chelis_tensor_release(t{id}_rec_index);"));
+            self.line(&format!("t{id}_rec_state_grad = t{id}_rec_sum_outputs[0];"));
+        }
+        self.line(&format!(
+            "chelis_tensor *t{id}_rec_backward_inputs[{}] = {{{}}};",
+            inputs.len(),
+            inputs.join(", ")
+        ));
+        self.line(&format!(
+            "chelis_tensor *t{id}_rec_backward_outputs[{backward_len}];"
+        ));
+        self.line(&format!("{backward_helper}(t{id}_rec_backward_inputs, {}, t{id}_rec_backward_outputs, {backward_len});", inputs.len()));
+        self.line(&format!("chelis_tensor_release(t{id}_rec_state_grad);"));
+        self.line(&format!(
+            "t{id}_rec_state_grad = t{id}_rec_backward_outputs[0];"
+        ));
+        if item_target {
+            self.line(&format!(
+                "t{id}_rec_items[t{id}_rec_row] = t{id}_rec_backward_outputs[{wanted}];"
+            ));
+        } else if capture_target {
+            self.line(&format!("chelis_tensor *t{id}_rec_capture_inputs[2] = {{t{id}_rec_capture_grad, t{id}_rec_backward_outputs[{wanted}]}};"));
+            self.line(&format!("chelis_tensor *t{id}_rec_capture_outputs[1];"));
+            self.line(&format!(
+                "{capture_add}(t{id}_rec_capture_inputs, 2, t{id}_rec_capture_outputs, 1);"
+            ));
+            self.line(&format!("chelis_tensor_release(t{id}_rec_capture_grad);"));
+            self.line(&format!(
+                "t{id}_rec_capture_grad = t{id}_rec_capture_outputs[0];"
+            ));
+        }
+        for position in 1..backward_len {
+            if position != wanted || capture_target {
+                self.line(&format!(
+                    "chelis_tensor_release(t{id}_rec_backward_outputs[{position}]);"
+                ));
+            }
+        }
+        self.indent -= 1;
+        self.line("}");
+        if let Some(source) = item_source {
+            let dtype = Self::dtype_macro(&node.output_type);
+            self.line(&format!("chelis_tensor *t{id} = chelis_tensor_alloc_like(t{source}, chelis_scalar_from_bits({dtype}, 0));"));
+            self.line(&format!(
+                "chelis_tensor_write *t{id}_rec_write = chelis_tensor_begin_write(t{id});"
+            ));
+            self.line(&format!(
+                "chelis_write_view t{id}_rec_view = chelis_tensor_write_view(t{id}_rec_write);"
+            ));
+            self.line(&format!("int64_t t{id}_rec_row_bytes = chelis_tensor_numel(t{source}) / (t{forward}_rec_count ? t{forward}_rec_count : 1) * chelis_dtype_size({dtype});"));
+            self.line(&format!("for (int64_t t{id}_rec_row = 0; t{id}_rec_row < t{forward}_rec_count; ++t{id}_rec_row) {{"));
+            self.indent += 1;
+            let rank = node.output_type.dims.len();
+            self.line(&format!("if (chelis_tensor_rank(t{id}_rec_items[t{id}_rec_row]) != {}) {{ fprintf(stderr, \"runtime recurrence item cotangent rank mismatch\\n\"); chelis_flush_and_exit_trap(); }}", rank - 1));
+            for axis in 1..rank {
+                self.line(&format!("if (chelis_tensor_shape(t{id}_rec_items[t{id}_rec_row], {}) != chelis_tensor_shape(t{source}, {axis})) {{ fprintf(stderr, \"runtime recurrence item cotangent extent mismatch\\n\"); chelis_flush_and_exit_trap(); }}", axis - 1));
+            }
+            self.line(&format!("if (chelis_tensor_numel(t{id}_rec_items[t{id}_rec_row]) * chelis_dtype_size({dtype}) != t{id}_rec_row_bytes) {{ fprintf(stderr, \"runtime recurrence item cotangent row extent mismatch\\n\"); chelis_flush_and_exit_trap(); }}"));
+            self.line(&format!("chelis_read_view t{id}_rec_item_view = chelis_tensor_read_view(t{id}_rec_items[t{id}_rec_row]);"));
+            self.line(&format!("if (t{id}_rec_item_view.dtype != {dtype}) {{ fprintf(stderr, \"runtime recurrence item cotangent dtype mismatch\\n\"); chelis_flush_and_exit_trap(); }}"));
+            self.line(&format!("memcpy((uint8_t *)t{id}_rec_view.data + t{id}_rec_row * t{id}_rec_row_bytes, t{id}_rec_item_view.data, (size_t)t{id}_rec_row_bytes);"));
+            self.line(&format!(
+                "chelis_tensor_release(t{id}_rec_items[t{id}_rec_row]);"
+            ));
+            self.indent -= 1;
+            self.line("}");
+            self.line(&format!("chelis_tensor_end_write(t{id}_rec_write);"));
+            self.line(&format!("free(t{id}_rec_items);"));
+        } else if target == 1 {
+            self.line(&format!("chelis_tensor *t{id} = t{id}_rec_state_grad;"));
+        } else {
+            self.line(&format!("chelis_tensor *t{id} = t{id}_rec_capture_grad;"));
+        }
+        if target != 1 {
+            self.line(&format!("chelis_tensor_release(t{id}_rec_state_grad);"));
+        }
+        self.emit_tensor_snapshot(id, false);
+        Ok(())
+    }
+
     fn emit_storage_plan_with_options(
         plan: &mut VerifiedStoragePlan<CStorageLane>,
         func_name: &str,
@@ -355,6 +846,7 @@ impl CEmitter {
         options: crate::CodegenOptions,
         invocation: InvocationEmission<'_>,
     ) -> Result<String, Unsupported> {
+        let recurrence_children = Self::emit_recurrence_children(dag, func_name, options)?;
         let InvocationEmission {
             private_invocation_context,
             entry_coverage,
@@ -493,13 +985,15 @@ impl CEmitter {
         let mut e = CEmitter {
             lines: Vec::new(),
             indent: 0,
+            function_name: func_name.to_string(),
             entry_covered_claims: dag.entry_covered_witness_claims(),
             nan_finalization: None,
             host_entry_coverage: entry_coverage.to_vec(),
             use_blas: dag
                 .nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. })),
+                .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }))
+                || !recurrence_children.is_empty(),
             reduction_inlined: reduction_inlined
                 .to_sorted()
                 .into_iter()
@@ -598,12 +1092,14 @@ impl CEmitter {
         // [05-RNG-2]'s derive, only in a kernel that derives keys, so every
         // other kernel's source is unchanged. `host_emit` carries the same
         // lines after the samplers.
-        if dag.nodes().iter().any(|node| {
-            matches!(
-                node.op,
-                RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. }
-            )
-        }) {
+        if !recurrence_children.is_empty()
+            || dag.nodes().iter().any(|node| {
+                matches!(
+                    node.op,
+                    RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. }
+                )
+            })
+        {
             e.line("static inline uint64_t chelis_key_derive(uint64_t key, uint64_t index) {");
             e.line("    uint64_t mixed = chelis_random_mix(index);");
             e.line("    return chelis_random_mix(key ^ ((mixed << 29) | (mixed >> 35)));");
@@ -628,20 +1124,21 @@ impl CEmitter {
         e.line("}");
         e.line("#endif");
         e.line("");
-        let needs_checked_cast_conversion_helpers = dag.nodes().iter().any(|node| {
-            let RiscOp::Cast { new_precision } = &node.op else {
-                return false;
-            };
-            let Some(source) = node.inputs.first().and_then(|input| dag.get(*input)) else {
-                return false;
-            };
-            let Ok(plan) = CheckedCastPlan::new(source.output_type.precision, *new_precision)
-            else {
-                return false;
-            };
-            plan.kind() != CheckedCastKind::Identity
-                && matches!(plan.target(), Prim::F16 | Prim::Bf16)
-        });
+        let needs_checked_cast_conversion_helpers = !recurrence_children.is_empty()
+            || dag.nodes().iter().any(|node| {
+                let RiscOp::Cast { new_precision } = &node.op else {
+                    return false;
+                };
+                let Some(source) = node.inputs.first().and_then(|input| dag.get(*input)) else {
+                    return false;
+                };
+                let Ok(plan) = CheckedCastPlan::new(source.output_type.precision, *new_precision)
+                else {
+                    return false;
+                };
+                plan.kind() != CheckedCastKind::Identity
+                    && matches!(plan.target(), Prim::F16 | Prim::Bf16)
+            });
         if needs_checked_cast_conversion_helpers {
             let mut scalar_conversion_helpers = Vec::new();
             crate::host_emit::append_checked_cast_conversion_helpers(
@@ -649,6 +1146,13 @@ impl CEmitter {
             );
             for helper_line in scalar_conversion_helpers {
                 e.line(&helper_line);
+            }
+            e.line("");
+        }
+
+        for child in recurrence_children {
+            for line in child.lines() {
+                e.line(line);
             }
             e.line("");
         }
@@ -829,6 +1333,22 @@ impl CEmitter {
             .emit_cleanup_with_drops(&output_ids, &dropped_sources);
         for line in cleanup {
             e.lines.push(line);
+        }
+        for node in dag.nodes() {
+            if let RiscOp::RuntimeRecurrence(recurrence) = &node.op {
+                let id = node.id.0;
+                e.line(&format!("for (int64_t t{id}_rec_row = 0; t{id}_rec_row < t{id}_rec_count; ++t{id}_rec_row) {{"));
+                e.indent += 1;
+                for value in 0..recurrence.callback.len() {
+                    e.line(&format!(
+                        "chelis_tensor_release(t{id}_rec_tape[t{id}_rec_row][{value}]);"
+                    ));
+                }
+                e.line(&format!("free(t{id}_rec_tape[t{id}_rec_row]);"));
+                e.indent -= 1;
+                e.line("}");
+                e.line(&format!("free(t{id}_rec_tape);"));
+            }
         }
         if !options.static_entry {
             e.line(crate::fp_env::EXIT);
@@ -1420,6 +1940,24 @@ impl CEmitter {
 
     fn emit_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let id = node.id.0;
+        if matches!(
+            node.op,
+            RiscOp::RuntimeRecurrence(_) | RiscOp::RuntimeRecurrenceAdjoint { .. }
+        ) {
+            // A callback invocation borrows its operands through the runtime
+            // ABI. Earlier straight-line producers have finished writing by
+            // this point, so close their leases before any retain or gather.
+            let active = self
+                .write_nodes
+                .to_sorted()
+                .into_iter()
+                .copied()
+                .collect::<Vec<_>>();
+            for written in active {
+                self.line(&format!("chelis_tensor_end_write(t{written}_write_guard);"));
+                self.write_nodes.remove(&written);
+            }
+        }
         let first_line = self.lines.len();
         self.nan_finalization = crate::fp_env::risc_nan_finalization(&node.op);
         self.emit_activation_gate(node, dag);
@@ -1435,6 +1973,16 @@ impl CEmitter {
         self.emit_same_shape_result_guards(node);
         self.open_inactive_zeros(node);
         match &node.op {
+            RiscOp::RuntimeRecurrence(recurrence) => {
+                self.emit_runtime_recurrence_forward(node, recurrence)?;
+            }
+            RiscOp::RuntimeRecurrenceAdjoint {
+                recurrence,
+                backward,
+                target,
+            } => {
+                self.emit_runtime_recurrence_adjoint(node, recurrence, backward, *target)?;
+            }
             RiscOp::Softmax { .. } => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op("softmax".into()),
