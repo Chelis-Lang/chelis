@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Post-build verification that a release `chelis` binary discharges
-property obligations through cvc5 (the `smt` feature), not the
-solver-free fuzz fallback.
+"""Post-build verification of release SMT discharge and optional Clarabel support.
+
+The required SMT probe checks cvc5 rather than the solver-free fuzz fallback.
+Release jobs also pass ``--clarabel`` to exercise a native QP solve and a
+call-bound symbolic ideal QP proof on both the built and staged binary.
 
 chelis#422 (WS-4): release.yml builds `chelis-cli --features smt` so the
 shipped binary uses cvc5. The engines are inert in a binary built
@@ -32,6 +34,8 @@ Fail condition (feature-less binary, i.e. the regression we guard):
 Usage:
   verify_release_smt.py <path-to-chelis-binary>
   verify_release_smt.py --tarball <path-to-staged-release.tar.gz>
+  verify_release_smt.py --clarabel <path-to-chelis-binary>
+  verify_release_smt.py --clarabel --tarball <path-to-staged-release.tar.gz>
 
 The `--tarball` form unpacks a staged release `.tar.gz` and verifies the
 EXTRACTED (stripped) `bin/chelis` -- the most faithful chelis#422 guard,
@@ -45,6 +49,7 @@ Exit codes:
   3  `chelis prove` did not run cleanly
   4  no cvc5/smt discharge record found (feature inert -- the regression)
   5  smt-disabled warning emitted (feature inert -- the regression)
+  6  native Clarabel solve or ideal QP proof unavailable
 """
 
 from __future__ import annotations
@@ -129,7 +134,65 @@ def record_is_cvc5_smt(record: dict) -> bool:
     return False
 
 
-def verify_binary(chelis: Path) -> int:
+def record_is_clarabel_ideal_proof(record: dict) -> bool:
+    """Require the released provider's call-bound, exact-real proof verdict."""
+    return (
+        record.get("kind") == "property"
+        and record.get("status") == "passed"
+        and record.get("proof_tier") == "smt"
+        and record.get("composite_verdict") == "proven_modulo_asserted_axiom"
+        and "real_arithmetic" in record.get("qualifiers", [])
+        and any(
+            assumption.get("name") == "clarabel.qp.ideal_optimality"
+            for assumption in record.get("assumptions", [])
+        )
+    )
+
+
+def verify_clarabel(chelis: Path) -> int:
+    """Exercise the native evaluator and symbolic proof on the shipped binary."""
+    root = Path(__file__).resolve().parents[2]
+    probes = [
+        (
+            root / "packages/chelis-clarabel",
+            [str(chelis), "eval", "--file", "tests/nonnegative.ch"],
+            lambda output: output.strip() == "main = true",
+        ),
+        (
+            root / "examples/clarabel_qp",
+            [
+                str(chelis), "prove", "tests/ideal_symbolic_named_step.ch",
+                "--tier", "smt-only", "--json",
+            ],
+            lambda output: any(
+                record_is_clarabel_ideal_proof(record)
+                for record in parse_records(output)
+            ),
+        ),
+    ]
+    for cwd, cmd, accepts in probes:
+        print("+ " + " ".join(cmd), flush=True)
+        try:
+            result = subprocess.run(
+                cmd, cwd=cwd, capture_output=True, text=True, timeout=120
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print(f"verify_release_smt: Clarabel probe failed: {error}", file=sys.stderr)
+            return 6
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, end="")
+        if result.returncode != 0 or not accepts(result.stdout):
+            print(result.stdout, end="")
+            print(
+                "verify_release_smt: Clarabel evaluator or ideal proof unavailable",
+                file=sys.stderr,
+            )
+            return 6
+    print("verify_release_smt: OK -- native Clarabel solve and ideal QP proof")
+    return 0
+
+
+def verify_binary(chelis: Path, *, clarabel: bool = False) -> int:
     """Run the cvc5-discharge probe against `chelis` and return an exit code.
 
     See the module docstring for the exit-code meanings (0 pass; 3 no
@@ -168,7 +231,7 @@ def verify_binary(chelis: Path) -> int:
             "cvc5 (proof_tier=smt, engine=cvc5). The smt feature is live in "
             "this binary."
         )
-        return 0
+        return verify_clarabel(chelis) if clarabel else 0
 
     print(
         "verify_release_smt: FAIL -- no obligation was discharged via cvc5 "
@@ -192,7 +255,7 @@ def find_chelis_in_tree(root: Path) -> Path | None:
     return any_chelis[0] if any_chelis else None
 
 
-def extract_and_verify_tarball(tarball: Path) -> int:
+def extract_and_verify_tarball(tarball: Path, *, clarabel: bool = False) -> int:
     """Unpack a staged release `.tar.gz` and verify the EXTRACTED
     (stripped) `bin/chelis` discharges via cvc5 -- the most faithful
     chelis#422 guard (verify the artifact actually shipped, not a
@@ -217,11 +280,15 @@ def extract_and_verify_tarball(tarball: Path) -> int:
             return 2
         chelis.chmod(0o755)
         print(f"verify_release_smt: verifying extracted artifact {chelis}")
-        return verify_binary(chelis.resolve())
+        return verify_binary(chelis.resolve(), clarabel=clarabel)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--clarabel", action="store_true",
+        help="also require a native Clarabel solve and an SMT ideal QP proof",
+    )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "chelis",
@@ -240,7 +307,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.tarball is not None:
-        return extract_and_verify_tarball(args.tarball.resolve())
+        return extract_and_verify_tarball(args.tarball.resolve(), clarabel=args.clarabel)
 
     chelis = args.chelis.resolve()
     if not chelis.exists():
@@ -249,7 +316,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    return verify_binary(chelis)
+    return verify_binary(chelis, clarabel=args.clarabel)
 
 
 if __name__ == "__main__":

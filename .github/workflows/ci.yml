@@ -804,6 +804,9 @@ jobs:
       - name: Script unit tests (scripts/test_*.py)
         run: python scripts/ci_script_tests.py pr
 
+      - name: Release verifier unit tests
+        run: python .github/scripts/test_verify_release_smt.py
+
       - name: Install local tooling test dependencies
         run: uv pip install --python "$PYO3_PYTHON" -e 'py[test]'
 
