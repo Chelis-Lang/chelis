@@ -12061,15 +12061,19 @@ fn grad_pack_plan(
 /// This is valid for a fixed model struct even when its field tensors have
 /// runtime extents. A sum type needs runtime tag dispatch and is left to the
 /// host transform refusal until that representation exists.
+struct RuntimeGradAdtOutputs<'a> {
+    bindings: &'a mut Vec<HostBinding>,
+    leaf_scope: &'a mut UnordMap<String, HostTypeTerm>,
+    unwitnessed_columns: &'a mut Vec<String>,
+}
+
 fn materialize_runtime_grad_adt(
     actual: &Expr,
     ty: &HostTypeTerm,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     used_names: &mut UnordSet<String>,
-    bindings: &mut Vec<HostBinding>,
-    leaf_scope: &mut UnordMap<String, HostTypeTerm>,
-    unwitnessed_columns: &mut Vec<String>,
+    outputs: RuntimeGradAdtOutputs<'_>,
 ) -> Result<Option<Expr>, crate::lower::LowerDiagnostic> {
     let Some(name) = direct_var_name(actual) else {
         return Ok(None);
@@ -12081,6 +12085,11 @@ fn materialize_runtime_grad_adt(
     let value = HostExpr::new(HostExprKind::Var(name.to_string(), ty.clone()));
     let mut extent_witnesses = BTreeMap::new();
     collect_runtime_grad_extent_witnesses(&value, &ty, program, &mut extent_witnesses);
+    let RuntimeGradAdtOutputs {
+        bindings,
+        leaf_scope,
+        unwitnessed_columns,
+    } = outputs;
     materialize_runtime_grad_adt_value(
         value,
         &ty,
@@ -12953,9 +12962,11 @@ fn try_lower_general_list_grad_app(
             program,
             scope,
             &mut used_names,
-            &mut leaf_bindings,
-            &mut helper_scope,
-            &mut unwitnessed_columns,
+            RuntimeGradAdtOutputs {
+                bindings: &mut leaf_bindings,
+                leaf_scope: &mut helper_scope,
+                unwitnessed_columns: &mut unwitnessed_columns,
+            },
         )?;
         if materialized.is_none() {
             for binding in leaf_bindings.drain(leaf_count_before..) {

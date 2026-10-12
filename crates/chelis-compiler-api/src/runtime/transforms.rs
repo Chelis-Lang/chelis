@@ -639,7 +639,7 @@ impl<'a> EvalContext<'a> {
         let value_roots = lowered.value_roots().to_vec();
         let root_producers: Vec<Option<ResultProducer>> = value_roots
             .iter()
-            .map(|root| tensor_result_producer(&dag, *root))
+            .map(|root| tensor_result_producer(dag, *root))
             .collect();
         let mut empty_packed = None;
         if value_roots.is_empty() {
@@ -778,18 +778,18 @@ impl<'a> EvalContext<'a> {
             }
         };
         let prepared_inputs =
-            chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(&dag, &roots, prepare_input)
+            chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(dag, &roots, prepare_input)
                 .map_err(|error| {
-                if provider_failed || is_numeric_trap_failure(&error) {
-                    error
-                } else {
-                    let kind_label = match kind {
-                        TransformKind::Grad => "grad",
-                        TransformKind::Vmap => "vmap",
-                    };
-                    format!("host runtime `{kind_label}` evaluation failed: {error}")
-                }
-            })?;
+                    if provider_failed || is_numeric_trap_failure(&error) {
+                        error
+                    } else {
+                        let kind_label = match kind {
+                            TransformKind::Grad => "grad",
+                            TransformKind::Vmap => "vmap",
+                        };
+                        format!("host runtime `{kind_label}` evaluation failed: {error}")
+                    }
+                })?;
         // A served capture must match its authored-rank `Load`. Capture-aware
         // vmap preserves that raw load and gives its mapped identity an
         // explicit rank-inserting movement, so the batch axis never widens the
@@ -816,7 +816,7 @@ impl<'a> EvalContext<'a> {
             }
         }
         let load = |name: &str| prepared_inputs.get(name).cloned();
-        let result = chelis_ir::eval::eval_tensor_roots_exact(&dag, &roots, load);
+        let result = chelis_ir::eval::eval_tensor_roots_exact(dag, &roots, load);
         let result = self.mark_numeric_trap_from_trusted_result(result);
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every
@@ -840,7 +840,7 @@ impl<'a> EvalContext<'a> {
             TransformKind::Grad => "grad",
             TransformKind::Vmap => "vmap",
         };
-        let packed = pack_dag_roots(&dag, &value_roots, &values, kind_label)?;
+        let packed = pack_dag_roots(dag, &value_roots, &values, kind_label)?;
         // Restore every selected target's cotangent carrier and recursive
         // shape, including scalar leaves. DAG rank alone cannot distinguish
         // a scalar from a genuine rank-zero tensor (spec/06 §2.1).
