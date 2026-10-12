@@ -23,6 +23,11 @@ def total(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(running(x), cast(0i64
 out = total(to_tensor([1.0f32, 2.0f32, 3.0f32]))
 ";
 
+const DIRECT_NAMED_HELPER_SUM: &str = "module Demo.Main
+def aligned_left[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(x, gain)
+out = sum(aligned_left(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)
+";
+
 const RECURSIVE_HELPER_SUM: &str = "module Demo.Main
 def double(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)
 def walk(n: i64, x: tensor[4, f32]) -> tensor[4, f32] = if eq(n, 0i64) then x else walk(sub(n, 1i64), double(x))
@@ -82,6 +87,11 @@ fn nested_tensor_operands_agree_with_executable_c() {
     for (name, source, expected) in [
         ("helper_sum", HELPER_SUM, "out = 10.0\n"),
         ("casted_sum_axis", CASTED_SUM_AXIS, "out = 10.0\n"),
+        (
+            "direct_named_helper_sum",
+            DIRECT_NAMED_HELPER_SUM,
+            "out = 5.0\n",
+        ),
         (
             "recursive_helper_sum",
             RECURSIVE_HELPER_SUM,
