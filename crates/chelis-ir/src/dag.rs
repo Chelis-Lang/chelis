@@ -1886,7 +1886,7 @@ impl RiscOp {
                 ReduceWindowKind::Mean => Id::ReduceWindowMean,
             }),
             Self::ReduceWindowGrad { .. } => Semantic(Id::ReduceWindowGrad),
-            Self::RuntimeRecurrence(_) => Semantic(Id::RuntimeRecurrence),
+            Self::RuntimeRecurrence(_recurrence) => Semantic(Id::RuntimeRecurrence),
             Self::RuntimeRecurrenceAdjoint { .. } => Semantic(Id::RuntimeRecurrenceAdjoint),
             Self::Argmax { .. } => Semantic(Id::ArgmaxReduce),
             Self::Argmin { .. } => Semantic(Id::ArgminReduce),
@@ -5138,6 +5138,14 @@ mod tests {
     /// `every_risc_op_is_classified_for_verifier_subset` fails, so a new
     /// op cannot silently escape classification by either route.
     fn one_of_every_risc_op() -> Vec<RiscOp> {
+        let recurrence = RuntimeRecurrence {
+            callback: Box::new(Dag::new()),
+            state: NodeId(0),
+            source: RuntimeRecurrenceSource::Tensor { item: NodeId(1) },
+            captures: vec![],
+            result: NodeId(0),
+            scan: false,
+        };
         vec![
             RiscOp::Add,
             RiscOp::Mul,
@@ -5202,6 +5210,15 @@ mod tests {
                 reducer: ReduceWindowKind::Max,
                 window_shape: vec![2],
                 strides: vec![1],
+            },
+            RiscOp::RuntimeRecurrence(Box::new(recurrence.clone())),
+            RiscOp::RuntimeRecurrenceAdjoint {
+                recurrence: Box::new(recurrence),
+                backward: Box::new(RuntimeRecurrenceBackward {
+                    dag: Box::new(Dag::new()),
+                    targets: vec![1],
+                }),
+                target: 1,
             },
             RiscOp::Argmax { axis: 0 },
             RiscOp::Argmin { axis: 0 },
@@ -5473,8 +5490,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            72,
-            "one_of_every_risc_op must list all 72 classified samples"
+            74,
+            "one_of_every_risc_op must list all 74 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -5504,13 +5521,14 @@ mod tests {
         // branch's key join (+1 = 32). The internal extrema adjoint
         // remains excluded (+1 = 33); the retained [05-OP-48] Softmax
         // composition has no dedicated transformer (+1 = 34). [05-OP-79]'s
-        // `pow` has no transformer either (+1 = 35).
+        // `pow` has no transformer either (+1 = 35). Runtime List
+        // recurrence and its recorded adjoint are excluded (+2 = 37).
         assert_eq!(
             targetable, 37,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 35,
+            excluded, 37,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
