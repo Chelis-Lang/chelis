@@ -13360,16 +13360,17 @@ fn lower_program_host_app(
     }
     // [04-TOT-2]: a checked tensor builtin runs in the tensor execution lane.
     // When an operand holds work that lane cannot represent, such as a
-    // `to_tensor` of a run-time List beneath a `cast`, the helper over the
-    // whole application fails. Each operand that does work is then evaluated
-    // on the host, once and in source order, and the builtin runs as a helper
-    // over those values, so its kernel is the one every dtype has
-    // (chelis#2734). An operation the C host lane's own elementwise loop
-    // covers stays on that loop, which needs no rebuilt application.
+    // helper call beneath `sum` or a List `index` used as an `insert` size,
+    // the helper over the whole application fails. Evaluate each working
+    // operand on the host, once and in source order, then retry the checked
+    // builtin over those typed values. The retry is accepted only when its
+    // tensor DAG actually lowers. Elementwise operations already covered by
+    // the C host loop keep that route (chelis#2734).
     if let Some(tensor_ty) = helper_tensor_ty
         && callee_is_builtin
-        && elementwise_function_of_operands(&name)
-        && host_elementwise_loop_admits(&name, tensor_ty.precision) != Some(true)
+        && (matches!(name.as_str(), "sum" | "insert")
+            || (elementwise_function_of_operands(&name)
+                && host_elementwise_loop_admits(&name, tensor_ty.precision) != Some(true)))
         && !should_keep_tensor_expr_in_host_lane(app_expr)
     {
         let (operation, operation_scope, mut bindings) = hoist_host_lane_tensor_bindings(
