@@ -1057,18 +1057,18 @@ fn issue_520_multi_arg_adt_grad_unused_field_shaped_zero() {
     );
 }
 
-/// Compiled lane: `out = grad(fwd_box)` over an ADT-typed param stays
-/// rejected (no ADT values in the C ABI), with the existing loud
-/// unresolved-grad build error.
+/// An exported gradient function over a fixed ADT parameter crosses the C
+/// host ABI with its nominal argument and field-wise gradient result.
 #[test]
-fn issue_520_d2_build_lane_adt_param_grad_export_still_rejected() {
+fn issue_520_d2_build_lane_adt_param_grad_export_runs() {
     let source = "module Repro.Neg5\n\n\
 type Box =\n\
   | Box { t: tensor[2, f32] }\n\n\
 def fwd_box(p: Box) -> f32 = match p with {\n\
     | Box { t } => sum(t, cast(0, i32)) |> tensor_to_scalar\n\
 }\n\n\
-out = grad(fwd_box)\n";
+out = grad(fwd_box)\n\
+result = out(Box { t: to_tensor([1.0f32, 3.0f32]) })\n";
     let dir = tempdir().expect("tempdir");
     let src_path = dir.path().join("neg5.ch");
     fs::write(&src_path, source).expect("write");
@@ -1079,7 +1079,6 @@ out = grad(fwd_box)\n";
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
-            "--emit-c",
             src_path.to_str().unwrap(),
             "--target",
             "c",
@@ -1089,13 +1088,23 @@ out = grad(fwd_box)\n";
         .output()
         .expect("run");
     assert!(
-        !output.status.success(),
-        "ADT-param grad export must stay rejected in the compiled lane"
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let generated = fs::read_to_string(build_dir.join("neg5.h")).expect("generated header");
+    assert!(generated.contains("chelis_adt* chelis_fn_6f7574(chelis_adt* arg0);"));
+    let run = std::process::Command::new(build_dir.join("neg5"))
+        .output()
+        .expect("compiled executable runs");
     assert!(
-        stderr.contains("grad"),
-        "diagnostic must mention grad: {stderr}"
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(run.stdout).unwrap(),
+        "result = Box(tensor(shape=[2], data=[1.0, 1.0]))\n"
     );
 }
 
