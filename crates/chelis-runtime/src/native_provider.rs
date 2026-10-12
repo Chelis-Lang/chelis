@@ -80,17 +80,43 @@ unsafe fn tensor(
     if shape.iter().try_fold(1usize, |a, b| a.checked_mul(*b)) != Some(count) {
         return Err(invalid(format!("{field} has inconsistent extents")));
     }
-    // The validated read view is contiguous. `to_list` preserves tensor rank,
-    // so its first-level elements are rows rather than flat solver scalars.
-    let data = if count == 0 {
-        Vec::new()
-    } else {
-        if view.data.is_null() {
-            return Err(invalid(format!("{field} has no data")));
-        }
-        unsafe { std::slice::from_raw_parts(view.data.cast::<f64>(), count) }.to_vec()
-    };
+    if shape.is_empty() {
+        return Err(invalid(format!("{field} must have rank at least 1")));
+    }
+    // [05-OP-57] preserves each axis as a List level. Traverse those tagged
+    // values in row-major order so the provider never reads a bare element
+    // pointer or loses stored f64 bits while flattening solver input.
+    let elements = unsafe { chelis_tensor_elements(ptr) };
+    let mut data = Vec::with_capacity(count);
+    let result = append_tensor_scalars(unsafe { (*elements).live() }, &shape, field, &mut data);
+    unsafe { chelis_list_release(elements) };
+    result?;
     Ok((shape, data))
+}
+
+fn append_tensor_scalars(
+    values: &[chelis_value],
+    shape: &[usize],
+    field: &str,
+    data: &mut Vec<f64>,
+) -> Result<(), String> {
+    let Some((&width, remaining)) = shape.split_first() else {
+        return Err(invalid(format!("{field} has no List axis")));
+    };
+    if values.len() != width {
+        return Err(invalid(format!("{field} has inconsistent row extents")));
+    }
+    if remaining.is_empty() {
+        for value in values {
+            data.push(unsafe { float(*value, field) }?);
+        }
+    } else {
+        for value in values {
+            let nested = unsafe { list(*value, field) }?;
+            append_tensor_scalars(nested, remaining, field, data)?;
+        }
+    }
+    Ok(())
 }
 
 unsafe fn cone(value: chelis_value) -> Result<Cone, String> {
@@ -294,14 +320,32 @@ mod tests {
     #[test]
     fn tensor_reader_keeps_contiguous_rank_two_solver_order() {
         unsafe {
-            let value = input_tensor(&[2, 2], &[1.0, 2.0, 3.0, 4.0]);
+            let bits = [
+                (-0.0_f64).to_bits(),
+                2.0_f64.to_bits(),
+                f64::NAN.to_bits(),
+                4.0_f64.to_bits(),
+            ];
+            let stored = bits.map(f64::from_bits);
+            let value = input_tensor(&[2, 2], &stored);
             let (shape, data) = tensor(value, 2, "matrix").expect("rank-two matrix");
             assert_eq!(shape, vec![2, 2]);
-            assert_eq!(data, vec![1.0, 2.0, 3.0, 4.0]);
+            assert_eq!(data.into_iter().map(f64::to_bits).collect::<Vec<_>>(), bits);
             assert!(tensor(value, 1, "matrix")
                 .expect_err("wrong rank")
                 .contains("must have rank 1"));
             chelis_value_release(value);
+
+            let empty = input_tensor(&[0, 2], &[]);
+            assert_eq!(tensor(empty, 2, "matrix").unwrap(), (vec![0, 2], vec![]));
+            chelis_value_release(empty);
+
+            let wrong_dtype =
+                chelis_value_take_tensor(chelis_alloc(2, [2_i64, 2].as_ptr(), CHELIS_DTYPE_I64));
+            assert!(tensor(wrong_dtype, 2, "matrix")
+                .expect_err("wrong dtype")
+                .contains("must have dtype f64"));
+            chelis_value_release(wrong_dtype);
         }
     }
 

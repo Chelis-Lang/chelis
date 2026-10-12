@@ -12692,7 +12692,11 @@ fn collect_runtime_grad_columns(
             let HostTypeTerm::Tensor(tensor) = host_expr_type(&root) else {
                 unreachable!("runtime List column root is a tensor")
             };
-            let row_ty = (0..tensor.dims.len().saturating_sub(1)).fold(
+            let (_, trailing_dims) = tensor
+                .dims
+                .split_first()
+                .expect("runtime List column has a leading row axis");
+            let row_ty = trailing_dims.iter().fold(
                 HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(tensor.precision)),
                 |inner, _| HostTypeTerm::List(Box::new(inner)),
             );
