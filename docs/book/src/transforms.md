@@ -182,7 +182,8 @@ differentiate it.
   rejected. C builds support a direct gradient call inside a function when
   its ADT argument is a lexical variable with one constructor and numeric
   leaves, including nested fixed model blocks and a List of numeric blocks.
-  The List result retains its runtime length and order. An exported gradient
+  The List result retains its runtime length and order. An empty List of
+  tensor-valued blocks needs checked trailing extents. An exported gradient
   function over the same shape also builds. Runtime sum-type gradients require
   compiled tag dispatch.
 - Differentiation through a `match` works when its selected constructor is

@@ -66,6 +66,50 @@ empty = step(Model { blocks: [] })
 nonempty = step(Model { blocks: [Block { w: 3.0f32 }, Block { w: 4.0f32 }] })
 "#;
 
+const EMPTY_TENSOR_COLUMN: &str = r#"module Repro.NestedListAdtEmptyTensorGradient
+type Block =
+  | Block { w: tensor[2, f32] }
+type Model =
+  | Model { blocks: List[Block], scale: f32 }
+def loss(p: Model) -> f32 = mul(p.scale, p.scale)
+def step(p: Model) -> Model = grad(loss)(p)
+out = step(Model { blocks: [], scale: 3.0f32 })
+"#;
+
+const EMPTY_TENSOR_COLUMN_INDEX: &str = r#"module Repro.NestedListAdtEmptyTensorIndex
+import Std.Index (list_index)
+type Block =
+  | Block { w: tensor[2, f32] }
+type Model =
+  | Model { blocks: List[Block] }
+def loss(p: Model) -> f32 = {
+  first = list_index(p.blocks, 0i64)
+  tensor_to_scalar(sum(first.w, 0i32))
+}
+def step(p: Model) -> Model = grad(loss)(p)
+out = step(Model { blocks: [] })
+"#;
+
+const EMPTY_UNWITNESSED_TENSOR_COLUMN: &str = r#"module Repro.NestedListAdtEmptyUnwitnessedTensor
+type Block =
+  | Block { w: tensor[*, f32] }
+type Model =
+  | Model { blocks: List[Block], scale: f32 }
+def loss(p: Model) -> f32 = mul(p.scale, p.scale)
+def step(p: Model) -> Model = grad(loss)(p)
+out = step(Model { blocks: [], scale: 3.0f32 })
+"#;
+
+const EMPTY_SYMBOLIC_TENSOR_COLUMN: &str = r#"module Repro.NestedListAdtEmptySymbolicTensor
+type Block[n] =
+  | Block { w: tensor[n, f32] }
+type Model[n] =
+  | Model { blocks: List[Block[n]], reference: tensor[n, f32] }
+def loss[n](p: Model[n]) -> f32 = tensor_to_scalar(sum(mul(p.reference, p.reference), 0i32))
+def step[n](p: Model[n]) -> Model[n] = grad(loss)(p)
+out = step(Model { blocks: [], reference: to_tensor([3.0f32, 4.0f32]) })
+"#;
+
 #[test]
 fn nested_list_adt_gradient_preserves_runtime_length_order_and_zero_elements() {
     let dir = tempdir().unwrap();
@@ -193,5 +237,137 @@ fn nested_list_adt_gradient_preserves_empty_and_disconnected_lengths() {
     );
     if gcc_available() {
         assert_eq!(build_and_run(EMPTY_AND_DISCONNECTED, "empty"), expected);
+    }
+}
+
+#[test]
+fn empty_tensor_column_keeps_declared_rank_and_other_gradients() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("empty_tensor.ch");
+    write_file(&path, EMPTY_TENSOR_COLUMN);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        eval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let expected = String::from_utf8(eval.stdout).unwrap();
+    assert!(expected.contains("out = Model([], 6.0)"), "{expected}");
+    if gcc_available() {
+        assert_eq!(build_and_run(EMPTY_TENSOR_COLUMN, "empty_tensor"), expected);
+    }
+}
+
+#[test]
+fn empty_tensor_column_keeps_index_bounds_failure() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("empty_tensor_index.ch");
+    write_file(&path, EMPTY_TENSOR_COLUMN_INDEX);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!eval.status.success());
+    assert!(String::from_utf8_lossy(&eval.stderr).contains("index"));
+    if gcc_available() {
+        let output = dir.path().join("empty_tensor_index-out");
+        let build = Command::cargo_bin("chelis")
+            .unwrap()
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                output.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = std::process::Command::new(output.join("empty_tensor_index"))
+            .output()
+            .unwrap();
+        assert!(!run.status.success());
+        assert!(String::from_utf8_lossy(&run.stderr).contains("index"));
+    }
+}
+
+#[test]
+fn empty_tensor_column_requires_a_trailing_extent_witness() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("empty_unwitnessed.ch");
+    write_file(&path, EMPTY_UNWITNESSED_TENSOR_COLUMN);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(eval.status.success());
+    if gcc_available() {
+        let output = dir.path().join("empty_unwitnessed-out");
+        let build = Command::cargo_bin("chelis")
+            .unwrap()
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                output.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = std::process::Command::new(output.join("empty_unwitnessed"))
+            .output()
+            .unwrap();
+        assert!(!run.status.success());
+        assert!(
+            String::from_utf8_lossy(&run.stderr)
+                .contains("cannot infer trailing extents for an empty List tensor column"),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+#[test]
+fn empty_tensor_column_reads_checked_symbolic_extent_witness() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("empty_symbolic.ch");
+    write_file(&path, EMPTY_SYMBOLIC_TENSOR_COLUMN);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        eval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let expected = String::from_utf8(eval.stdout).unwrap();
+    assert!(
+        expected.contains("Model([], tensor(shape=[2], data=[6.0, 8.0]))"),
+        "{expected}"
+    );
+    if gcc_available() {
+        assert_eq!(
+            build_and_run(EMPTY_SYMBOLIC_TENSOR_COLUMN, "empty_symbolic"),
+            expected
+        );
     }
 }

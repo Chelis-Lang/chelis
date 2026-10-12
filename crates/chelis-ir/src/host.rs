@@ -12078,6 +12078,8 @@ fn materialize_runtime_grad_adt(
         return Ok(None);
     }
     let value = HostExpr::new(HostExprKind::Var(name.to_string(), ty.clone()));
+    let mut extent_witnesses = BTreeMap::new();
+    collect_runtime_grad_extent_witnesses(&value, &ty, program, &mut extent_witnesses);
     materialize_runtime_grad_adt_value(
         value,
         &ty,
@@ -12086,9 +12088,57 @@ fn materialize_runtime_grad_adt(
         used_names,
         bindings,
         leaf_scope,
+        &extent_witnesses,
     )
 }
 
+/// Record checked, addressable tensor axes before descending into a model's
+/// fields. A List contributes no witness: it may be empty, and its element
+/// type alone does not supply a runtime extent.
+fn collect_runtime_grad_extent_witnesses(
+    value: &HostExpr,
+    ty: &HostTypeTerm,
+    program: &HostLoweringSession<'_>,
+    witnesses: &mut BTreeMap<String, HostExpr>,
+) {
+    let ty = expand_host_type_aliases(program, ty.clone());
+    if let HostTypeTerm::Adt(name, _) = &ty {
+        let AdtConstructorResolution::Unique(definition) =
+            resolve_adt_constructor_definition_for_type(program, name, &ty)
+        else {
+            return;
+        };
+        let Ok(instantiated) = definition.instantiate(&ty) else {
+            return;
+        };
+        for (index, field) in instantiated.fields.iter().enumerate() {
+            let field_value = HostExpr::new(HostExprKind::AdtFieldAccess {
+                base: Box::new(value.clone()),
+                field_index: index,
+                ty: field.ty.clone(),
+            });
+            collect_runtime_grad_extent_witnesses(&field_value, &field.ty, program, witnesses);
+        }
+    } else if let HostTypeTerm::Tensor(tensor) = &ty {
+        for (axis, dim) in tensor.dims.iter().enumerate() {
+            let DimInfo::Named(name, None) = dim else {
+                continue;
+            };
+            if name.is_empty() || name == "*" {
+                continue;
+            }
+            witnesses.entry(name.clone()).or_insert_with(|| {
+                HostExpr::new(HostExprKind::Builtin {
+                    name: "shape".into(),
+                    args: vec![value.clone(), HostExpr::new(HostExprKind::Int(axis as i64))],
+                    ty: HostTypeTerm::Int64,
+                })
+            });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn materialize_runtime_grad_adt_value(
     value: HostExpr,
     ty: &HostTypeTerm,
@@ -12097,10 +12147,18 @@ fn materialize_runtime_grad_adt_value(
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
     leaf_scope: &mut UnordMap<String, HostTypeTerm>,
+    extent_witnesses: &BTreeMap<String, HostExpr>,
 ) -> Result<Option<Expr>, crate::lower::LowerDiagnostic> {
     if let HostTypeTerm::List(element_ty) = ty {
         return Ok(materialize_runtime_grad_list(
-            value, element_ty, span, program, used_names, bindings, leaf_scope,
+            value,
+            element_ty,
+            span,
+            program,
+            used_names,
+            bindings,
+            leaf_scope,
+            extent_witnesses,
         ));
     }
     if let HostTypeTerm::Adt(adt_name, _) = ty {
@@ -12159,6 +12217,7 @@ fn materialize_runtime_grad_adt_value(
                 used_names,
                 bindings,
                 leaf_scope,
+                extent_witnesses,
             )?
             else {
                 return Ok(None);
@@ -12208,6 +12267,7 @@ fn materialize_runtime_grad_adt_value(
 /// leading-axis column for each scalar/tensor field of a fixed element ADT.
 /// The private record marker is consumed only by numeric lowering; it is
 /// never a user-visible constructor or a published ABI value.
+#[allow(clippy::too_many_arguments)]
 fn materialize_runtime_grad_list(
     value: HostExpr,
     element_ty: &HostTypeTerm,
@@ -12216,6 +12276,7 @@ fn materialize_runtime_grad_list(
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
     leaf_scope: &mut UnordMap<String, HostTypeTerm>,
+    extent_witnesses: &BTreeMap<String, HostExpr>,
 ) -> Option<Expr> {
     let fresh = |used_names: &mut UnordSet<String>| {
         let mut index = used_names.len();
@@ -12243,8 +12304,17 @@ fn materialize_runtime_grad_list(
     let item_name = fresh(used_names);
     let item = HostExpr::new(HostExprKind::Var(item_name.clone(), element_ty.clone()));
     let element = materialize_runtime_grad_list_element(
-        element_ty, item, &value, element_ty, &item_name, span, program, used_names, bindings,
+        element_ty,
+        item,
+        &value,
+        element_ty,
+        &item_name,
+        span,
+        program,
+        used_names,
+        bindings,
         leaf_scope,
+        extent_witnesses,
     )?;
     let field = |name: &str, expr: Expr| {
         Expr::node(
@@ -12278,6 +12348,7 @@ fn materialize_runtime_grad_list_element(
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
     leaf_scope: &mut UnordMap<String, HostTypeTerm>,
+    extent_witnesses: &BTreeMap<String, HostExpr>,
 ) -> Option<Expr> {
     let ty = expand_host_type_aliases(program, ty.clone());
     if let HostTypeTerm::Adt(adt_name, _) = &ty {
@@ -12315,6 +12386,7 @@ fn materialize_runtime_grad_list_element(
                 used_names,
                 bindings,
                 leaf_scope,
+                extent_witnesses,
             )?;
             fields.push(Expr::node(
                 DeepTag::Kv,
@@ -12379,10 +12451,62 @@ fn materialize_runtime_grad_list_element(
     });
     let mut column_ty = leaf_ty;
     column_ty.dims.insert(0, DimInfo::Named("*".into(), None));
+    let known_empty_shape = column_ty
+        .dims
+        .iter()
+        .skip(1)
+        .map(|dim| match dim {
+            DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => i64::try_from(*value)
+                .ok()
+                .map(|extent| HostExpr::new(HostExprKind::Int(extent))),
+            DimInfo::Named(name, None) => extent_witnesses.get(name).cloned(),
+        })
+        .collect::<Option<Vec<_>>>();
     let host_column_ty = HostTypeTerm::Tensor(column_ty);
-    let column_value = HostExpr::new(HostExprKind::Builtin {
+    let packed_column = HostExpr::new(HostExprKind::Builtin {
         name: "to_tensor".into(),
         args: vec![mapped],
+        ty: host_column_ty.clone(),
+    });
+    // [05-OP-57]: an empty outer List does not encode its trailing extents.
+    // This private column still has the checked element tensor type, so the
+    // declared trailing literals and checked model tensor axes supply the
+    // shape of its zero rows. Do not invent an extent without a witness.
+    let list_len = HostExpr::new(HostExprKind::Builtin {
+        name: "len".into(),
+        args: vec![list_value.clone()],
+        ty: HostTypeTerm::Int64,
+    });
+    let is_empty = HostExpr::new(HostExprKind::Builtin {
+        name: "eq".into(),
+        args: vec![list_len, HostExpr::new(HostExprKind::Int(0))],
+        ty: HostTypeTerm::Bool,
+    });
+    let empty_column = if let Some(trailing) = known_empty_shape {
+        let shape = HostExpr::new(HostExprKind::List(
+            std::iter::once(HostExpr::new(HostExprKind::Int(0)))
+                .chain(trailing)
+                .collect(),
+            HostTypeTerm::List(Box::new(HostTypeTerm::Int64)),
+        ));
+        HostExpr::new(HostExprKind::Builtin {
+            name: "reshape".into(),
+            args: vec![packed_column.clone(), shape],
+            ty: host_column_ty.clone(),
+        })
+    } else {
+        HostExpr::new(HostExprKind::Builtin {
+            name: "fail".into(),
+            args: vec![HostExpr::new(HostExprKind::String(
+                "C gradient cannot infer trailing extents for an empty List tensor column".into(),
+            ))],
+            ty: host_column_ty.clone(),
+        })
+    };
+    let column_value = HostExpr::new(HostExprKind::If {
+        cond: Box::new(is_empty),
+        then_expr: Box::new(empty_column),
+        else_expr: Box::new(packed_column),
         ty: host_column_ty.clone(),
     });
     let mut index = bindings.len();
