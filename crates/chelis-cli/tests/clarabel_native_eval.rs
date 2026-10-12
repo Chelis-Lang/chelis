@@ -156,6 +156,7 @@ fn compiled_c_matches_evaluator_for_solved_and_stopped() {
         (package(), "tests/nonnegative.ch"),
         (package(), "tests/stopped.ch"),
         (example(), "src/main.ch"),
+        (example(), "tests/generic_bounded_step.ch"),
     ] {
         let directory = tempfile::tempdir().expect("build output");
         let result = Command::cargo_bin("chelis")

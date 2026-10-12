@@ -1183,7 +1183,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                             .map(|(ty, declared)| ParamSpec {
                                 mode: declared.mode,
                                 ty: ty.clone(),
-                                type_pattern: FormalTypePattern::nominal(ty),
+                                type_pattern: FormalTypePattern::from_checked(
+                                    ty,
+                                    declared.checked_type,
+                                ),
                                 callback_modes: declared.callback_modes,
                             })
                             .collect::<Vec<_>>(),
