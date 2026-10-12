@@ -268,7 +268,7 @@ fn runtime_recurrence_backward(
     let callback_len = callback.len();
     let result_ty = callback
         .get(recurrence.result)
-        .ok_or_else(|| AdError::NotSupported {
+        .ok_or(AdError::NotSupported {
             op: "fold",
             reason: AdRejectionReason::EmptyOrMissingOutput,
         })?

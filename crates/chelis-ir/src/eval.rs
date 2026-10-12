@@ -4066,11 +4066,10 @@ where
                             .ok_or_else(|| {
                                 "runtime recurrence length is not an i64 scalar".to_string()
                             })?;
-                        let count = usize::try_from(length).map_err(|_| {
+                        usize::try_from(length).map_err(|_| {
                             "runtime recurrence length is negative or exceeds the host size"
                                 .to_string()
-                        })?;
-                        count
+                        })?
                     }
                 };
                 for index in 0..recurrence.item_loads().len() {
