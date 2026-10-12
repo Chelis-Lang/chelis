@@ -2197,7 +2197,9 @@ pub(crate) fn prepare_checked_subexpr_lowering_context(
     context
 }
 
-pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
+/// Lower a transform application with its ordered runtime List checks.
+/// The same control roots must be checked by Eval and compiled targets.
+pub fn try_lower_subexpr_program_with_context_and_controls(
     expr: &Expr,
     scoped_tensor_types: UnordMap<String, TensorType>,
     context: &SubexprLoweringContext,
@@ -2635,16 +2637,28 @@ fn lower_subexpr_program_inner_impl(
                     operation,
                     argument,
                     value,
+                    activation,
                 } => (
                     RuntimeListCheckDescriptor::NonNegative {
                         operation,
                         argument,
+                        guarded: activation.is_some(),
                     },
-                    vec![value],
+                    std::iter::once(value).chain(activation).collect(),
                 ),
-                RuntimeListCheck::IndexBounds { index, len } => {
-                    (RuntimeListCheckDescriptor::IndexBounds, vec![index, len])
-                }
+                RuntimeListCheck::IndexBounds {
+                    index,
+                    len,
+                    activation,
+                } => (
+                    RuntimeListCheckDescriptor::IndexBounds {
+                        guarded: activation.is_some(),
+                    },
+                    std::iter::once(index)
+                        .chain(std::iter::once(len))
+                        .chain(activation)
+                        .collect(),
+                ),
             };
             for value in values {
                 let output_type = ctx
@@ -6261,6 +6275,37 @@ fn adt_cons_chain_values(value: &LoweredValue) -> Option<Vec<LoweredValue>> {
 // rather than replaying its source expression, evaluates endpoints and map
 // callbacks once and transports the source through normal lexical captures.
 const TENSOR_LIST_CTOR: &str = "__chelis_tensor_list";
+// Compiler-authored, unspellable record carrying a runtime List as ordered
+// numeric columns. The element template contains one leading-List-axis tensor
+// per leaf; its length is a separate discrete value, including for empty Lists.
+const RUNTIME_COLUMN_LIST_CTOR: &str = "$chelis_runtime_column_list";
+fn runtime_column_list_parts(value: &LoweredValue) -> Option<(NodeId, LoweredValue)> {
+    let LoweredValue::Adt {
+        ctor,
+        layout,
+        fields,
+        ..
+    } = value
+    else {
+        return None;
+    };
+    if ctor != RUNTIME_COLUMN_LIST_CTOR
+        || layout.field_names()? != ["len", "element"]
+        || fields.len() != 2
+    {
+        return None;
+    }
+    Some((fields[0].as_single_node()?, fields[1].clone()))
+}
+
+fn rebuild_runtime_column_list(len: NodeId, element: LoweredValue) -> LoweredValue {
+    LoweredValue::Adt {
+        host: None,
+        ctor: RUNTIME_COLUMN_LIST_CTOR.into(),
+        layout: AdtLayout::Written(vec!["len".into(), "element".into()]),
+        fields: vec![LoweredValue::Node(len), element],
+    }
+}
 fn tensor_list_value(source: NodeId) -> LoweredValue {
     LoweredValue::Adt {
         host: None,
@@ -6321,6 +6366,11 @@ fn recursive_list_leaf_nodes(value: &LoweredValue) -> Vec<NodeId> {
                 raise_lowering_error("a host value has no tensor cotangent leaves", None, None)
             }
             LoweredValue::Node(node) => out.push(*node),
+            LoweredValue::Adt { .. } if runtime_column_list_parts(value).is_some() => {
+                let (len, element) = runtime_column_list_parts(value).expect("guarded above");
+                out.push(len);
+                walk(&element, out);
+            }
             LoweredValue::Adt { .. } if adt_cons_chain_values(value).is_some() => {
                 for item in adt_cons_chain_values(value).expect("guarded above") {
                     walk(&item, out);
@@ -6366,6 +6416,20 @@ fn rebuild_recursive_list_like(
             None,
         ),
         LoweredValue::Node(_) => leaves.next().expect("recursive List leaf count mismatch"),
+        LoweredValue::Adt { .. } if runtime_column_list_parts(template).is_some() => {
+            let (len, element) = runtime_column_list_parts(template).expect("guarded above");
+            let replacement_len = leaves.next().expect("runtime List length leaf missing");
+            rebuild_runtime_column_list(
+                if cotangent {
+                    len
+                } else {
+                    replacement_len
+                        .as_single_node()
+                        .expect("runtime List length load is scalar")
+                },
+                rebuild_recursive_list_like(&element, leaves, cotangent),
+            )
+        }
         LoweredValue::Adt { .. } if adt_cons_chain_values(template).is_some() => {
             let items = adt_cons_chain_values(template)
                 .expect("guarded above")
@@ -7681,10 +7745,12 @@ enum RuntimeListCheck {
         operation: &'static str,
         argument: &'static str,
         value: NodeId,
+        activation: Option<NodeId>,
     },
     IndexBounds {
         index: NodeId,
         len: NodeId,
+        activation: Option<NodeId>,
     },
 }
 
@@ -7693,14 +7759,108 @@ pub(crate) enum RuntimeListCheckDescriptor {
     NonNegative {
         operation: &'static str,
         argument: &'static str,
+        guarded: bool,
     },
-    IndexBounds,
+    IndexBounds {
+        guarded: bool,
+    },
 }
 
-pub(crate) struct LoweredSubexprWithControls {
+/// A lowered value and the runtime List checks attached to its execution.
+pub struct LoweredSubexprWithControls {
     pub(crate) dag: Dag,
     pub(crate) value_root_count: usize,
     pub(crate) list_checks: Vec<RuntimeListCheckDescriptor>,
+}
+
+impl LoweredSubexprWithControls {
+    /// The graph whose roots contain value leaves followed by List controls.
+    pub fn dag(&self) -> &Dag {
+        &self.dag
+    }
+
+    /// The value roots, before any appended List controls.
+    pub fn value_roots(&self) -> &[NodeId] {
+        &self.dag.roots()[..self.value_root_count]
+    }
+
+    /// Render the first active runtime List failure in source order.
+    pub fn check_list_controls(
+        &self,
+        values: &UnordMap<NodeId, crate::eval::TensorValue>,
+    ) -> Result<(), String> {
+        let roots = self.dag.roots();
+        let mut offset = self.value_root_count;
+        let scalar_i64 = |root: NodeId| -> Result<i64, String> {
+            let value = values
+                .get(&root)
+                .ok_or_else(|| "runtime List check value root was not evaluated".to_string())?;
+            if !value.shape.is_empty() {
+                return Err("runtime List check value is not scalar".into());
+            }
+            value
+                .storage()
+                .scalar_at(0)
+                .as_i64_exact()
+                .ok_or_else(|| "runtime List check value is not i64".into())
+        };
+        let scalar_bool = |root: NodeId| -> Result<bool, String> {
+            let value = values
+                .get(&root)
+                .ok_or_else(|| "runtime List activation root was not evaluated".to_string())?;
+            if !value.shape.is_empty() {
+                return Err("runtime List activation is not scalar".into());
+            }
+            value
+                .storage()
+                .scalar_at(0)
+                .as_bool_exact()
+                .ok_or_else(|| "runtime List activation is not bool".into())
+        };
+        for check in &self.list_checks {
+            match check {
+                RuntimeListCheckDescriptor::NonNegative {
+                    operation,
+                    argument,
+                    guarded,
+                } => {
+                    let value = scalar_i64(roots[offset])?;
+                    offset += 1;
+                    let active = if *guarded {
+                        let active = scalar_bool(roots[offset])?;
+                        offset += 1;
+                        active
+                    } else {
+                        true
+                    };
+                    if active && value < 0 {
+                        return Err(chelis_abi::failure::list_argument_negative(
+                            operation, argument, value,
+                        ));
+                    }
+                }
+                RuntimeListCheckDescriptor::IndexBounds { guarded } => {
+                    let index = scalar_i64(roots[offset])?;
+                    let len = scalar_i64(roots[offset + 1])?;
+                    offset += 2;
+                    let active = if *guarded {
+                        let active = scalar_bool(roots[offset])?;
+                        offset += 1;
+                        active
+                    } else {
+                        true
+                    };
+                    if active && index >= len {
+                        let len = usize::try_from(len)
+                            .map_err(|_| "runtime List length is negative".to_string())?;
+                        return Err(chelis_abi::failure::list_index_out_of_bounds(index, len));
+                    }
+                }
+            }
+        }
+        debug_assert_eq!(offset, roots.len());
+        Ok(())
+    }
 }
 
 impl LoweredValue {
@@ -12352,6 +12512,9 @@ impl<'program> LowerCtx<'program> {
                         self.current_span_id.clone(),
                     ));
                 }
+                if let Some((len, _)) = runtime_column_list_parts(&list) {
+                    return LoweredValue::Node(len);
+                }
                 if let Some((_, len, _)) = runtime_list_view_parts(&list) {
                     return LoweredValue::Node(len);
                 }
@@ -13303,14 +13466,21 @@ impl<'program> LowerCtx<'program> {
                     operation,
                     argument,
                     value,
+                    activation,
                 } => RuntimeListCheck::NonNegative {
                     operation,
                     argument,
                     value: retain(value),
+                    activation: activation.map(&mut retain),
                 },
-                RuntimeListCheck::IndexBounds { index, len } => RuntimeListCheck::IndexBounds {
+                RuntimeListCheck::IndexBounds {
+                    index,
+                    len,
+                    activation,
+                } => RuntimeListCheck::IndexBounds {
                     index: retain(index),
                     len: retain(len),
+                    activation: activation.map(&mut retain),
                 },
             });
         }
@@ -13419,20 +13589,31 @@ impl<'program> LowerCtx<'program> {
                     operation,
                     argument,
                     value: _,
+                    activation,
                 } => RuntimeListCheck::NonNegative {
                     operation,
                     argument,
                     value: remap[&control_roots
                         .next()
                         .expect("retained List check root must survive AD")],
+                    activation: activation.map(|_| {
+                        remap[&control_roots
+                            .next()
+                            .expect("retained List activation root must survive AD")]
+                    }),
                 },
-                RuntimeListCheck::IndexBounds { .. } => RuntimeListCheck::IndexBounds {
+                RuntimeListCheck::IndexBounds { activation, .. } => RuntimeListCheck::IndexBounds {
                     index: remap[&control_roots
                         .next()
                         .expect("retained List index root must survive AD")],
                     len: remap[&control_roots
                         .next()
                         .expect("retained List length root must survive AD")],
+                    activation: activation.map(|_| {
+                        remap[&control_roots
+                            .next()
+                            .expect("retained List activation root must survive AD")]
+                    }),
                 },
             });
         }
@@ -18260,6 +18441,73 @@ impl<'program> LowerCtx<'program> {
         Some((offset, len, items))
     }
 
+    /// Read one logical List item from every ordered column. Padding each
+    /// column with one private row lets the numeric DAG evaluate even for an
+    /// empty List; the retained public bounds check always rejects that read.
+    fn gather_runtime_column_element(
+        &mut self,
+        element: &LoweredValue,
+        index: NodeId,
+    ) -> Option<LoweredValue> {
+        match element {
+            LoweredValue::Node(column) => {
+                let column_ty = self.dag.get(*column)?.output_type.clone();
+                let (_, tail) = column_ty.dims.split_first()?;
+                let padded = self.dag.add_node(
+                    // The Gather is evaluated eagerly even when its source
+                    // branch is inactive. Its private safety row must exist
+                    // on every path; only the public bounds check is gated
+                    // by the branch activation.
+                    Owner::new(self.decl(), None),
+                    RiscOp::zero_pad(
+                        column_ty.precision,
+                        std::iter::once((RtDim::Lit(0), RtDim::Lit(1)))
+                            .chain(tail.iter().map(|_| (RtDim::Lit(0), RtDim::Lit(0))))
+                            .collect(),
+                    ),
+                    vec![*column],
+                    column_ty.clone(),
+                    self.current_span_id.clone(),
+                );
+                Some(LoweredValue::Node(self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Gather {
+                        axis: 0,
+                        batch_rank: 0,
+                    },
+                    vec![padded, index],
+                    TensorType {
+                        dims: tail.to_vec(),
+                        precision: column_ty.precision,
+                    },
+                    self.current_span_id.clone(),
+                )))
+            }
+            LoweredValue::Tuple(items) => Some(LoweredValue::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.gather_runtime_column_element(item, index))
+                    .collect::<Option<Vec<_>>>()?,
+            )),
+            LoweredValue::Adt {
+                host,
+                ctor,
+                layout,
+                fields,
+            } => Some(LoweredValue::Adt {
+                host: host.clone(),
+                ctor: ctor.clone(),
+                layout: layout.clone(),
+                fields: fields
+                    .iter()
+                    .map(|field| self.gather_runtime_column_element(field, index))
+                    .collect::<Option<Vec<_>>>()?,
+            }),
+            LoweredValue::HostConstant(_) => Some(element.clone()),
+            LoweredValue::Host { .. } => None,
+        }
+    }
+
     /// Select one same-typed scalar/tensor value without evaluating an
     /// arithmetic blend of the candidates.
     ///
@@ -18531,6 +18779,46 @@ impl<'program> LowerCtx<'program> {
         result_ty: &TensorType,
     ) -> Option<LoweredValue> {
         let list = self.lower_expr(list_arg);
+        if let Some((len, element)) = runtime_column_list_parts(&list) {
+            if name != "index" {
+                return None;
+            }
+            let count = self.lower_expr(count_arg).as_single_node()?;
+            self.runtime_list_checks
+                .push(RuntimeListCheck::NonNegative {
+                    operation: "index",
+                    argument: "index",
+                    value: count,
+                    activation: self.branch_path_condition,
+                });
+            self.runtime_list_checks
+                .push(RuntimeListCheck::IndexBounds {
+                    index: count,
+                    len,
+                    activation: self.branch_path_condition,
+                });
+            let zero = self.int64_constant(0);
+            let int_ty = TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            };
+            let nonnegative = self.dag.add_node(
+                self.owner(),
+                RiscOp::MaxElem,
+                vec![count, zero],
+                int_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let effective = tier2::lower_min_elem(
+                self.owner(),
+                &mut self.dag,
+                nonnegative,
+                len,
+                &int_ty,
+                self.current_span_id.as_deref(),
+            );
+            return self.gather_runtime_column_element(&element, effective);
+        }
         if runtime_list_view_parts(&list).is_none()
             && let Some(raw) = self.static_i64_from_expr_or_binding(count_arg)
         {
@@ -18571,17 +18859,20 @@ impl<'program> LowerCtx<'program> {
                 },
                 argument,
                 value: count,
+                activation: self.branch_path_condition,
             });
         if name == "index" {
             self.runtime_list_checks
-                .push(RuntimeListCheck::IndexBounds { index: count, len });
+                .push(RuntimeListCheck::IndexBounds {
+                    index: count,
+                    len,
+                    activation: self.branch_path_condition,
+                });
             if items.is_empty() {
-                // The bounds check above is unconditionally false for an
-                // empty List, so this value is an unreachable typed
-                // placeholder used only to keep the forward/AD DAG valid
-                // until the host check reports the public error. It is never
-                // a silent fallback: both eval and generated C execute the
-                // check before exposing the result.
+                // An executed selection on an empty List fails its bounds
+                // check. This typed placeholder keeps the forward/AD DAG
+                // valid until the host check reports the public error; a
+                // selection in an untaken branch has an inactive check.
                 return Some(LoweredValue::Node(self.zero_tensor_node(result_ty, None)));
             }
             let int_ty = TensorType {

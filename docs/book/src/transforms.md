@@ -181,9 +181,13 @@ differentiate it.
   gradient. A selected parameter with no differentiable float field is
   rejected. C builds support a direct gradient call inside a function when
   its ADT argument is a lexical variable with one constructor and numeric
-  leaves, including nested fixed model blocks. An exported gradient function
-  over the same shape also builds. Runtime sum-type gradients require compiled
-  tag dispatch.
+  leaves, including nested fixed model blocks and a List of numeric blocks.
+  The List result retains its runtime length and order. A C build requires
+  checked trailing extents for each live tensor column, including an empty
+  List. Unused discrete columns require no tensor shape. A C build rejects a
+  live column whose trailing extents have no checked witness. An exported
+  gradient function over the same shape also builds. Runtime sum-type
+  gradients require compiled tag dispatch.
 - Differentiation through a `match` works when its selected constructor is
   known during lowering. A runtime-dependent scrutinee or a guarded arm is
   rejected. Scalar `if` conditions can select a branch at runtime; a

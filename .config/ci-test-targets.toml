@@ -652,6 +652,11 @@ prefix = "examples/grad_runtime_basis.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+[[path_rule]]
+prefix = "examples/grad_list_model.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
 # chelis#606: exercise imported IO and pure controls through a real Reef
 # package. This target does not compile or link generated C.
 [[standing_target]]

@@ -5949,6 +5949,10 @@ pub unsafe extern "C" fn chelis_tensor_from_values(
 pub unsafe extern "C" fn chelis_tensor_elements(tensor: *const chelis_tensor) -> *mut chelis_list {
     // Checked at entry, not per element, so an empty key tensor is rejected.
     let [dtype] = validate_tensor_inputs([(tensor, "chelis_tensor_elements input")]);
+    let shape = (*tensor).shape();
+    if shape.is_empty() {
+        runtime_fail!("Domain: chelis_tensor_elements requires a rank-one-or-higher tensor");
+    }
     let count = metadata_or_fail(
         (*tensor).metadata.elements().scratch_len::<chelis_value>(),
         "tensor elements output",
@@ -6007,7 +6011,34 @@ pub unsafe extern "C" fn chelis_tensor_elements(tensor: *const chelis_tensor) ->
         };
         items.push(value);
     }
-    new_list(items, "chelis_tensor_elements")
+    // [05-OP-57]: every tensor axis becomes one List nesting level. The flat
+    // element read above validates the data only once; this reshaping moves
+    // values into Lists without changing their dtype or stored bits.
+    fn nest_elements(
+        elements: &mut impl Iterator<Item = chelis_value>,
+        shape: &[i64],
+    ) -> Vec<chelis_value> {
+        let width = usize::try_from(shape[0])
+            .unwrap_or_else(|_| runtime_fail!("Overflow: to_list axis extent exceeds usize"));
+        if shape.len() == 1 {
+            return elements.take(width).collect();
+        }
+        (0..width)
+            .map(|_| {
+                let inner = new_list(
+                    nest_elements(elements, &shape[1..]),
+                    "chelis_tensor_elements inner",
+                );
+                unsafe { chelis_value_take_list(inner) }
+            })
+            .collect()
+    }
+    let mut elements = items.into_iter();
+    let nested = nest_elements(&mut elements, shape);
+    if elements.next().is_some() {
+        runtime_fail!("Domain: to_list shape did not consume every tensor element");
+    }
+    new_list(nested, "chelis_tensor_elements")
 }
 
 #[no_mangle]
@@ -9351,6 +9382,91 @@ mod tests {
             assert_eq!(chelis_tensor_to_scalar(tensor), value);
             chelis_tensor_release(tensor);
         }
+    }
+}
+
+#[cfg(test)]
+mod tensor_elements_nested_tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn rank_two_to_list_preserves_rows_order_and_stored_bits() {
+        unsafe {
+            let tensor = chelis_alloc(2, [2_i64, 2].as_ptr(), CHELIS_DTYPE_F32);
+            let bits = [
+                (-0.0_f32).to_bits(),
+                1.0_f32.to_bits(),
+                3.0_f32.to_bits(),
+                4.0_f32.to_bits(),
+            ];
+            for (index, bit) in bits.iter().enumerate() {
+                *(tensor_data(tensor) as *mut u32).add(index) = *bit;
+            }
+            let list = chelis_tensor_elements(tensor);
+            assert_eq!(chelis_list_len(list), 2);
+            for row_index in 0..2 {
+                let row = chelis_list_take_value(chelis_list_index(list, row_index));
+                assert_eq!(chelis_list_len(row), 2);
+                chelis_list_release(row);
+            }
+            let rebuilt = chelis_tensor_from_values(list, CHELIS_DTYPE_F32);
+            assert_eq!((*rebuilt).shape(), &[2, 2]);
+            for (index, bit) in bits.iter().enumerate() {
+                assert_eq!(*(tensor_data(rebuilt) as *const u32).add(index), *bit);
+            }
+            chelis_tensor_release(rebuilt);
+            chelis_list_release(list);
+            chelis_tensor_release(tensor);
+        }
+    }
+
+    #[test]
+    fn empty_inner_axis_still_has_one_list_per_outer_row() {
+        unsafe {
+            let tensor = chelis_alloc(2, [3_i64, 0].as_ptr(), CHELIS_DTYPE_F32);
+            let list = chelis_tensor_elements(tensor);
+            assert_eq!(chelis_list_len(list), 3);
+            for row_index in 0..3 {
+                let row = chelis_list_take_value(chelis_list_index(list, row_index));
+                assert_eq!(chelis_list_len(row), 0);
+                chelis_list_release(row);
+            }
+            chelis_list_release(list);
+            chelis_tensor_release(tensor);
+        }
+    }
+
+    #[test]
+    fn rank_zero_to_list_child() {
+        if std::env::var_os("CHELIS_TEST_RANK_ZERO_TO_LIST").is_none() {
+            return;
+        }
+        unsafe {
+            let scalar = chelis_scalar_from_bits(CHELIS_DTYPE_F32, u64::from(1.0_f32.to_bits()));
+            chelis_tensor_elements(chelis_scalar_tensor(scalar));
+        }
+        panic!("rank-zero to_list unexpectedly succeeded");
+    }
+
+    #[test]
+    fn rank_zero_to_list_is_rejected() {
+        let output = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "tensor_elements_nested_tests::rank_zero_to_list_child",
+                "--nocapture",
+            ])
+            .env("CHELIS_TEST_RANK_ZERO_TO_LIST", "1")
+            .output()
+            .expect("rank-zero child");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("requires a rank-one-or-higher tensor"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
