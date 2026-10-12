@@ -230,6 +230,28 @@ LIST_MAP_BACKEND_FINAL_FORMS = (
         "CEmitter::emit_ordered_adjoint_sum",
     ),
 )
+RUNTIME_RECURRENCE_BACKEND_FINAL_FORMS = (
+    # [05-OP-55]: the private recurrence tape stores typed callback tensors
+    # exactly once per executed row. Scan and item-cotangent copies check rank,
+    # each axis, and the declared dtype before moving element bits. The C/Eval
+    # runtime fold/scan CLI oracles exercise zero and visited rows, changing
+    # fold extents, and structured List items.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_runtime_recurrence_forward",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "load-store-template",
+        "CEmitter::emit_runtime_recurrence_forward",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_runtime_recurrence_adjoint",
+    ),
+)
 # [04-NUM-14], [05-OP-46,49]: closed dtype-directed integer finalization
 # and stored-element expansion. The non-hardware legs and explicit device
 # harnesses below bind these exact identities to positive/negative execution.
@@ -506,6 +528,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         (path, kind, owner) in EXACT_REDUCTION_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in LIST_MAP_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in RUNTIME_RECURRENCE_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in INTEGER_UNARY_BACKEND_FINAL_FORMS
     ) or (
@@ -1100,6 +1124,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *TYPED_NONNUMERIC_BACKEND_FINAL_FORMS,
         *EXACT_REDUCTION_BACKEND_FINAL_FORMS,
         *LIST_MAP_BACKEND_FINAL_FORMS,
+        *RUNTIME_RECURRENCE_BACKEND_FINAL_FORMS,
         *INTEGER_UNARY_BACKEND_FINAL_FORMS,
         *UNIFORM_RANDOM_BACKEND_FINAL_FORMS,
         *KEY_CALLABLE_BACKEND_FINAL_FORMS,

@@ -506,7 +506,14 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
     match &node.op {
         RiscOp::RuntimeRecurrence(recurrence) if recurrence.scan => or_op_computed(
             std::iter::once(pass_through(id, 0, 0))
-                .chain((0..rank.saturating_sub(1)).map(|axis| pass_through(id, 1, axis)))
+                .chain(
+                    node.output_type
+                        .dims
+                        .iter()
+                        .skip(1)
+                        .enumerate()
+                        .map(|(axis, _)| pass_through(id, 1, axis)),
+                )
                 .collect(),
             id,
             rank,

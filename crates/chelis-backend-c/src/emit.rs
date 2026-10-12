@@ -575,10 +575,15 @@ impl CEmitter {
                 "chelis_tensor *t{id}_rec_post = t{id}_rec_tape[t{id}_rec_row][{}];",
                 recurrence.result.0
             ));
+            self.line(&format!("if (chelis_tensor_rank(t{id}_rec_post) != {}) {{ fprintf(stderr, \"runtime recurrence state rank changed\\n\"); chelis_flush_and_exit_trap(); }}", rank - 1));
+            for axis in 1..rank {
+                self.line(&format!("if (chelis_tensor_shape(t{id}_rec_post, {}) != t{id}_rec_shape[{axis}]) {{ fprintf(stderr, \"runtime recurrence state extent changed\\n\"); chelis_flush_and_exit_trap(); }}", axis - 1));
+            }
             self.line(&format!("if (chelis_tensor_numel(t{id}_rec_post) != chelis_tensor_numel(t{seed})) {{ fprintf(stderr, \"runtime recurrence state extent changed\\n\"); abort(); }}"));
             self.line(&format!(
                 "chelis_read_view t{id}_rec_post_view = chelis_tensor_read_view(t{id}_rec_post);"
             ));
+            self.line(&format!("if (t{id}_rec_post_view.dtype != {dtype}) {{ fprintf(stderr, \"runtime recurrence state dtype changed\\n\"); chelis_flush_and_exit_trap(); }}"));
             self.line(&format!("memcpy((uint8_t *)t{id}_rec_view.data + t{id}_rec_row * t{id}_rec_row_bytes, t{id}_rec_post_view.data, (size_t)t{id}_rec_row_bytes);"));
             self.indent -= 1;
             self.line("}");
@@ -738,8 +743,14 @@ impl CEmitter {
             self.line(&format!("int64_t t{id}_rec_row_bytes = chelis_tensor_numel(t{source}) / (t{forward}_rec_count ? t{forward}_rec_count : 1) * chelis_dtype_size({dtype});"));
             self.line(&format!("for (int64_t t{id}_rec_row = 0; t{id}_rec_row < t{forward}_rec_count; ++t{id}_rec_row) {{"));
             self.indent += 1;
+            let rank = node.output_type.dims.len();
+            self.line(&format!("if (chelis_tensor_rank(t{id}_rec_items[t{id}_rec_row]) != {}) {{ fprintf(stderr, \"runtime recurrence item cotangent rank mismatch\\n\"); chelis_flush_and_exit_trap(); }}", rank - 1));
+            for axis in 1..rank {
+                self.line(&format!("if (chelis_tensor_shape(t{id}_rec_items[t{id}_rec_row], {}) != chelis_tensor_shape(t{source}, {axis})) {{ fprintf(stderr, \"runtime recurrence item cotangent extent mismatch\\n\"); chelis_flush_and_exit_trap(); }}", axis - 1));
+            }
             self.line(&format!("if (chelis_tensor_numel(t{id}_rec_items[t{id}_rec_row]) * chelis_dtype_size({dtype}) != t{id}_rec_row_bytes) {{ fprintf(stderr, \"runtime recurrence item cotangent row extent mismatch\\n\"); chelis_flush_and_exit_trap(); }}"));
             self.line(&format!("chelis_read_view t{id}_rec_item_view = chelis_tensor_read_view(t{id}_rec_items[t{id}_rec_row]);"));
+            self.line(&format!("if (t{id}_rec_item_view.dtype != {dtype}) {{ fprintf(stderr, \"runtime recurrence item cotangent dtype mismatch\\n\"); chelis_flush_and_exit_trap(); }}"));
             self.line(&format!("memcpy((uint8_t *)t{id}_rec_view.data + t{id}_rec_row * t{id}_rec_row_bytes, t{id}_rec_item_view.data, (size_t)t{id}_rec_row_bytes);"));
             self.line(&format!(
                 "chelis_tensor_release(t{id}_rec_items[t{id}_rec_row]);"

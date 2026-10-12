@@ -1963,6 +1963,24 @@ class ManifestTests(unittest.TestCase):
             for command in commands
         ))
 
+    def test_runtime_recurrence_backend_final_forms_are_exact(self) -> None:
+        path = "crates/chelis-backend-c/src/emit.rs"
+        expected = (
+            (path, "backend-element-spelling", "CEmitter::emit_runtime_recurrence_forward"),
+            (path, "load-store-template", "CEmitter::emit_runtime_recurrence_forward"),
+            (path, "backend-element-spelling", "CEmitter::emit_runtime_recurrence_adjoint"),
+        )
+        self.assertEqual(oracle.RUNTIME_RECURRENCE_BACKEND_FINAL_FORMS, expected)
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        for owner_path, kind, owner in expected:
+            self.assertTrue(oracle.owner_module_final_form(kind, owner_path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, owner_path, owner + "_unchecked"))
+            self.assertFalse(oracle.owner_module_final_form("width-arithmetic", owner_path, owner))
+            self.assertIn({"kind": kind, "owner": owner}, forms[owner_path])
+        self.assertFalse(oracle.owner_module_final_form(
+            "load-store-template", path, "CEmitter::emit_runtime_recurrence_adjoint"
+        ))
+
     def test_integer_unary_final_forms_are_exact_and_require_execution_controls(self) -> None:
         expected = (
             ("crates/chelis-backend-c/src/integer_float.rs", "backend-element-spelling", "integer_to_float_bits"),
