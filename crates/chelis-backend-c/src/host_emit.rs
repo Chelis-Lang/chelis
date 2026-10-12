@@ -732,9 +732,9 @@ pub(crate) fn emit_host_abi_program(
             .map(|helper| {
                 projected
                     .global_tensor_helper(helper)
-                    .map(verified_helper_result_origin)
+                    .map(verified_helper_result_origins)
                     .transpose()
-                    .map(Option::flatten)
+                    .map(Option::unwrap_or_default)
             })
             .collect::<Result<Vec<_>, _>>()?;
         emit_main(
@@ -4724,7 +4724,7 @@ fn emit_function(
             result_origins: verified_helpers
                 .iter()
                 .copied()
-                .map(verified_helper_result_origin)
+                .map(verified_helper_result_origins)
                 .collect::<Result<Vec<_>, _>>()?,
         },
         ownership_sites,
@@ -5126,7 +5126,7 @@ fn emit_main(
     ownership_sites: &[ProjectedHostSite<'_>],
     internal_names: &UnordMap<String, String>,
     helper_output_types: &[Vec<TensorType>],
-    helper_result_origins: Vec<Option<String>>,
+    helper_result_origins: Vec<Vec<Option<String>>>,
     external_helpers: &UnordSet<String>,
     recursive_functions: &UnordSet<String>,
 ) -> Result<(), Unsupported> {
@@ -5568,25 +5568,28 @@ pub(crate) fn recursive_host_functions(program: &HostProgram) -> UnordSet<String
     recursive
 }
 
-fn verified_helper_result_origin(
+fn verified_helper_result_origins(
     helper: VerifiedHostTensorHelperView<'_>,
-) -> Result<Option<String>, Unsupported> {
+) -> Result<Vec<Option<String>>, Unsupported> {
     let dag = helper.dag();
-    let [root] = dag.roots() else {
-        return Ok(None);
-    };
-    let sites = dag.result_extent_sites(*root);
-    let Some(operation) = sites.first().map(|site| site.operation()) else {
-        return Ok(None);
-    };
-    if sites.iter().all(|site| site.operation() == operation) {
-        Ok(Some(operation.to_string()))
-    } else {
-        Err(invalid_abi_shape(
-            "one returned tensor root has conflicting per-axis producer operations".to_string(),
-            "verified tensor-helper result provenance",
-        ))
-    }
+    dag.roots()
+        .iter()
+        .map(|root| {
+            let sites = dag.result_extent_sites(*root);
+            let Some(operation) = sites.first().map(|site| site.operation()) else {
+                return Ok(None);
+            };
+            if sites.iter().all(|site| site.operation() == operation) {
+                Ok(Some(operation.to_string()))
+            } else {
+                Err(invalid_abi_shape(
+                    "one returned tensor root has conflicting per-axis producer operations"
+                        .to_string(),
+                    "verified tensor-helper result provenance",
+                ))
+            }
+        })
+        .collect()
 }
 
 struct CallbackAt<'a> {
@@ -5618,7 +5621,7 @@ struct HostEmitter<'a> {
     function_specializations: UnordMap<String, HostFunctionSpecialization>,
     tensor_helpers: &'a [HostTensorHelper],
     tensor_helper_output_types: &'a [Vec<TensorType>],
-    tensor_helper_result_origins: Vec<Option<String>>,
+    tensor_helper_result_origins: Vec<Vec<Option<String>>>,
     expression_sites: Vec<ProjectedHostSite<'a>>,
     expression_site_index: usize,
     entry_projection: entry::Projection,
@@ -5797,7 +5800,7 @@ impl FirstSiteFrames {
 struct HostTensorHelpers<'a> {
     helpers: &'a [HostTensorHelper],
     output_types: &'a [Vec<TensorType>],
-    result_origins: Vec<Option<String>>,
+    result_origins: Vec<Vec<Option<String>>>,
 }
 
 /// The verified direct-call operands identify logical owners, independent of
@@ -11464,14 +11467,54 @@ impl<'a> HostEmitter<'a> {
             .tensor_helper_result_origins
             .get(helper)
             .cloned()
-            .flatten();
-        if let Some(producer) = producer {
-            self.stamp_result_origin(target, ty, &producer);
+            .ok_or_else(|| {
+                invalid_abi_shape(
+                    "tensor helper has no verified result provenance".into(),
+                    "tensor helper result",
+                )
+            })?;
+        if producer.len() != root_count {
+            return Err(invalid_abi_shape(
+                "tensor helper result provenance does not match its roots".into(),
+                "tensor helper result",
+            ));
         }
+        self.assign_tensor_result_origins(target, ty, &producer, &mut 0);
         if self.external_helpers.contains(&base) {
             self.emit_result_claim_guard(target, ty, result_claims);
         }
         Ok(())
+    }
+
+    /// Mirror the helper's tuple result when attaching each tensor root's
+    /// verified producer. A single sidecar leaf cannot describe distinct
+    /// roots reconstructed into an ADT by the host caller.
+    fn assign_tensor_result_origins(
+        &mut self,
+        target: &str,
+        ty: &HostType,
+        producers: &[Option<String>],
+        next: &mut usize,
+    ) {
+        if let HostType::Tuple(parts) = ty {
+            let mut children = Vec::with_capacity(parts.len());
+            for part in parts {
+                let child = self.next_temp("tensor_result_origin");
+                self.lines.push(format!(
+                    "{}const __chelis_host_result_origin *{} = NULL;",
+                    self.indent,
+                    result_origin_name(&child)
+                ));
+                self.assign_tensor_result_origins(&child, part, producers, next);
+                children.push(child);
+            }
+            self.assign_aggregate_result_origin(target, &children);
+        } else {
+            if let Some(producer) = &producers[*next] {
+                self.stamp_result_origin(target, ty, producer);
+            }
+            *next += 1;
+        }
     }
 
     /// Consume each owned helper output exactly once. Tensor leaves transfer
@@ -15488,6 +15531,43 @@ mod expression_dispatch_tests {
                 "boxed-root observation restored retired value ABI `{retired}`:\n{emitted}"
             );
         }
+    }
+
+    #[test]
+    fn tensor_helper_tuple_keeps_each_root_origin_and_leaves_missing_origin_null() {
+        let mut emitter = HostEmitter::new(
+            "    ".to_string(),
+            "helper",
+            UnordMap::new(),
+            UnordMap::new(),
+            HostTensorHelpers {
+                helpers: &[],
+                output_types: &[],
+                result_origins: Vec::new(),
+            },
+            &[],
+        );
+        let tensor = HostType::Tensor(TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        });
+        let result = HostType::Tuple(vec![tensor.clone(), tensor]);
+        emitter.assign_tensor_result_origins(
+            "result",
+            &result,
+            &[Some("add".to_string()), None],
+            &mut 0,
+        );
+        let emitted = emitter.lines.join("\n");
+        assert_eq!(
+            emitted.matches("__chelis_host_result_origin_leaf(").count(),
+            1
+        );
+        assert!(emitted.contains("__chelis_host_result_origin_aggregate("));
+        assert!(emitted.contains("__chelis_result_origin___tensor_result_origin_1 = NULL;"));
+        assert!(!emitted.contains(
+            "__chelis_result_origin___tensor_result_origin_1 = __chelis_host_result_origin_leaf"
+        ));
     }
 
     #[test]

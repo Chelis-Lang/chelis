@@ -12036,6 +12036,150 @@ fn grad_pack_plan(
     }
 }
 
+/// Expose the leaves of a runtime, single-constructor ADT to the reverse DAG.
+/// The host keeps the nominal value and projects each field once; the DAG sees
+/// a constructor with statically known topology and ordinary typed loads.
+/// This is valid for a fixed model struct even when its field tensors have
+/// runtime extents. A sum type needs runtime tag dispatch and is left to the
+/// host transform refusal until that representation exists.
+fn materialize_runtime_grad_adt(
+    actual: &Expr,
+    ty: &HostTypeTerm,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    used_names: &mut UnordSet<String>,
+    bindings: &mut Vec<HostBinding>,
+    leaf_scope: &mut UnordMap<String, HostTypeTerm>,
+) -> Result<Option<Expr>, crate::lower::LowerDiagnostic> {
+    let Some(name) = direct_var_name(actual) else {
+        return Ok(None);
+    };
+    let ty = expand_host_type_aliases(program, ty.clone());
+    if !matches!(ty, HostTypeTerm::Adt(..)) || !scope.contains_key(name) {
+        return Ok(None);
+    }
+    let value = HostExpr::new(HostExprKind::Var(name.to_string(), ty.clone()));
+    materialize_runtime_grad_adt_value(
+        value,
+        &ty,
+        actual.span(),
+        program,
+        used_names,
+        bindings,
+        leaf_scope,
+    )
+}
+
+fn materialize_runtime_grad_adt_value(
+    value: HostExpr,
+    ty: &HostTypeTerm,
+    span: chelis_deep::Span,
+    program: &HostLoweringSession<'_>,
+    used_names: &mut UnordSet<String>,
+    bindings: &mut Vec<HostBinding>,
+    leaf_scope: &mut UnordMap<String, HostTypeTerm>,
+) -> Result<Option<Expr>, crate::lower::LowerDiagnostic> {
+    if let HostTypeTerm::Adt(adt_name, _) = ty {
+        let definitions = adt_constructor_definitions(program);
+        // A linked program can import two ADTs with the same terminal name.
+        // The checked type gives the exact owner; use terminal matching only
+        // for an unqualified local type with one unambiguous declaration.
+        let mut variants = definitions
+            .iter()
+            .filter(|definition| definition.adt_name == *adt_name)
+            .collect::<Vec<_>>();
+        if variants.is_empty() {
+            variants = definitions
+                .iter()
+                .filter(|definition| terminal_name_matches(&definition.adt_name, adt_name))
+                .collect();
+        }
+        if variants.is_empty() {
+            return Ok(None);
+        }
+        let [definition] = variants.as_slice() else {
+            let unsupported = chelis_types::unsupported::Unsupported::new(
+                chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                    "runtime ADT gradient for `{adt_name}`"
+                )),
+                format!("C gradient cannot select a constructor of runtime ADT `{adt_name}`"),
+                chelis_types::unsupported::Stage::Lowering,
+                chelis_types::unimplemented_rejection!(
+                    618,
+                    "runtime ADT constructor selection under a C gradient needs compiled tag dispatch"
+                ),
+            );
+            return Err(crate::lower::LowerDiagnostic::new(
+                unsupported.to_string(),
+                Some(span),
+                None,
+            )
+            .fatal());
+        };
+        let Some(instantiated) = definition.instantiate(ty).ok() else {
+            return Ok(None);
+        };
+        let mut fields = Vec::with_capacity(instantiated.fields.len() + 1);
+        fields.push(Expr::Atom(Atom::Name(definition.ctor_name.clone()), span));
+        for (index, field) in instantiated.fields.iter().enumerate() {
+            let field_value = HostExpr::new(HostExprKind::AdtFieldAccess {
+                base: Box::new(value.clone()),
+                field_index: index,
+                ty: field.ty.clone(),
+            });
+            let Some(field_expr) = materialize_runtime_grad_adt_value(
+                field_value,
+                &field.ty,
+                span,
+                program,
+                used_names,
+                bindings,
+                leaf_scope,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(field_name) = field.name.clone() else {
+                return Ok(None);
+            };
+            fields.push(Expr::node(
+                DeepTag::Kv,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Name(field_name), span), field_expr],
+                span,
+            ));
+        }
+        return Ok(Some(Expr::node(
+            DeepTag::Record,
+            Metadata::default(),
+            fields,
+            span,
+        )));
+    }
+    // A numeric leaf is an ordinary helper input, including discrete leaves
+    // whose cotangent is unit. Other host values have no DAG load carrier.
+    if tensor_type_from_host_input(ty).is_none() {
+        return Ok(None);
+    }
+    let mut index = bindings.len();
+    let name = loop {
+        let candidate = format!("__chelis_grad_adt_leaf_{index}");
+        if used_names.insert(candidate.clone()) {
+            break candidate;
+        }
+        index += 1;
+    };
+    bindings.push(HostBinding {
+        name: name.clone(),
+        display_name: None,
+        display_roots: Vec::new(),
+        ty: ty.clone(),
+        value,
+    });
+    leaf_scope.insert(name.clone(), ty.clone());
+    Ok(Some(var_expr_node(&name, span)))
+}
+
 fn tensor_helper_root_expr(
     binding_name: &str,
     binding_ty: &HostTypeTerm,
@@ -12221,6 +12365,19 @@ fn try_lower_general_list_grad_app(
     let declared_param_types = lookup_declared_fn_type(program, fn_name).map(|(params, _)| params);
 
     let mut rewritten_children = kids.to_vec();
+    let mut helper_scope = scope.clone();
+    let mut leaf_bindings = Vec::new();
+    let mut used_names = UnordSet::new();
+    collect_occurring_names(app_expr, &mut used_names);
+    // The differentiated def may read a program value whose name does not
+    // appear at this call site. Its load must never alias a generated leaf.
+    for (name, body) in cached_program_defs(program).iter() {
+        used_names.insert(name.clone());
+        collect_occurring_names(body, &mut used_names);
+    }
+    for (name, _) in scope.to_sorted() {
+        used_names.insert(name.clone());
+    }
     let mut parameter_plans = UnordMap::new();
     for (param_index, param) in params.iter().enumerate() {
         let actual_index = param_index + 1;
@@ -12229,7 +12386,12 @@ fn try_lower_general_list_grad_app(
         };
         // A formal of a type-generic target is instantiated by this call's
         // actual, as the differentiated body is.
-        let Some(param_ty) = param_host_type(param)
+        let lexical_actual_ty = direct_var_name(actual)
+            .and_then(|name| scope.get(name))
+            .filter(|ty| matches!(ty, HostTypeTerm::Adt(..)) && !ty.is_unresolved())
+            .cloned();
+        let Some(param_ty) = lexical_actual_ty
+            .or_else(|| param_host_type(param))
             .or_else(|| {
                 let actual_ty = expr_host_type(actual, program, scope);
                 (!actual_ty.is_unresolved()).then_some(actual_ty)
@@ -12248,7 +12410,23 @@ fn try_lower_general_list_grad_app(
         else {
             return Ok(None);
         };
-        let mut rewritten_actual = actual.clone();
+        let leaf_count_before = leaf_bindings.len();
+        let materialized = materialize_runtime_grad_adt(
+            actual,
+            &param_ty,
+            program,
+            scope,
+            &mut used_names,
+            &mut leaf_bindings,
+            &mut helper_scope,
+        )?;
+        if materialized.is_none() {
+            for binding in leaf_bindings.drain(leaf_count_before..) {
+                helper_scope.remove(&binding.name);
+            }
+        }
+        let mut rewritten_actual = materialized.unwrap_or_else(|| actual.clone());
+        rewritten_children[actual_index] = rewritten_actual.clone();
         if matches!(param_ty, HostTypeTerm::List(_))
             && let Some(name) = direct_var_name(actual)
             && LoadStoreName::top_level_source_for_label(name)
@@ -12332,7 +12510,7 @@ fn try_lower_general_list_grad_app(
     };
     let rewritten = Expr::Node(Box::new(rewritten), app_expr.span());
     let Some(lowered) =
-        lower_tensor_helper_dag_with_controls(&rewritten, program, scope, &expected)
+        lower_tensor_helper_dag_with_controls(&rewritten, program, &helper_scope, &expected)
     else {
         return Ok(None);
     };
@@ -12362,7 +12540,13 @@ fn try_lower_general_list_grad_app(
     }
 
     let helper_number = tensor_helpers.len();
-    let call = finish_tensor_helper_call(lowered.dag, program, scope, tensor_helpers, expected);
+    let call = finish_tensor_helper_call(
+        lowered.dag,
+        program,
+        &helper_scope,
+        tensor_helpers,
+        expected,
+    );
     let binding_name = format!("__grad_result_{helper_number}");
     let binding_ty = host_expr_type(&call);
     let mut value_roots = (0..lowered.value_root_count)
@@ -12489,7 +12673,7 @@ fn try_lower_general_list_grad_app(
         }
     }
     debug_assert_eq!(control_offset, lowered.value_root_count);
-    Ok(Some(HostExpr::new(HostExprKind::Let {
+    let result = HostExpr::new(HostExprKind::Let {
         bindings: vec![HostBinding {
             name: binding_name,
             display_name: None,
@@ -12498,8 +12682,17 @@ fn try_lower_general_list_grad_app(
             value: call,
         }],
         body: Box::new(body),
-        ty: result_ty,
-    })))
+        ty: result_ty.clone(),
+    });
+    if leaf_bindings.is_empty() {
+        Ok(Some(result))
+    } else {
+        Ok(Some(HostExpr::new(HostExprKind::Let {
+            bindings: leaf_bindings,
+            body: Box::new(result),
+            ty: result_ty,
+        })))
+    }
 }
 
 /// The argument whose type a `grad` application's helper result takes: the

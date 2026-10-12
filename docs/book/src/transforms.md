@@ -176,11 +176,14 @@ differentiate it.
   this page. It rejects a top-level value that applies `grad` or `vmap` to a
   lambda, with an error naming the affected definitions; move the lambda into
   a top-level function.
-- In the evaluator, gradients of ADT arguments keep the executed constructor
-  and its fields. A discrete field remains in place as `unit`; a float field
-  receives its gradient. A selected parameter with no differentiable float
-  field is rejected. C builds reject an exported gradient function
-  whose parameter is an ADT.
+- Gradients of ADT arguments keep the executed constructor and its fields. A
+  discrete field remains in place as `unit`; a float field receives its
+  gradient. A selected parameter with no differentiable float field is
+  rejected. C builds support a direct gradient call inside a function when
+  its ADT argument is a lexical variable with one constructor and numeric
+  leaves, including nested fixed model blocks. An exported gradient function
+  over the same shape also builds. Runtime sum-type gradients require compiled
+  tag dispatch.
 - Differentiation through a `match` works when its selected constructor is
   known during lowering. A runtime-dependent scrutinee or a guarded arm is
   rejected. Scalar `if` conditions can select a branch at runtime; a
