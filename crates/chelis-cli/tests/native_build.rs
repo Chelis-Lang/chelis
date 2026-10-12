@@ -1158,6 +1158,9 @@ enum NanAtomCoverage {
     CastRows,
     /// The atom yields no float value: integer, bool, key or shape results.
     NoFloatValue,
+    /// The atom invokes a child graph whose float stores have their own atom
+    /// classifications; the recurrence itself has no NaN finalization step.
+    ChildGraph,
 }
 
 /// One representative operation for each semantic RISC atom, and how the
@@ -1168,16 +1171,25 @@ enum NanAtomCoverage {
 fn nan_atom_coverage(
     atom: chelis_ir::dag::RiscAtomIdentity,
 ) -> (chelis_ir::dag::RiscOp, NanAtomCoverage) {
-    use NanAtomCoverage::{BuiltinInventory, CastRows, NoFloatValue, Rows};
+    use NanAtomCoverage::{BuiltinInventory, CastRows, ChildGraph, NoFloatValue, Rows};
     use chelis_ir::dag::{
-        ComparisonKind, DimExpr, ExtremaKind, ExtremaOperand, KeyBranch, LogicalKind,
-        ReduceWindowKind, RiscAtomIdentity as Id, RiscOp, RtDim, UniformBound,
+        ComparisonKind, Dag, DimExpr, ExtremaKind, ExtremaOperand, KeyBranch, LogicalKind, NodeId,
+        ReduceWindowKind, RiscAtomIdentity as Id, RiscOp, RtDim, RuntimeRecurrence,
+        RuntimeRecurrenceBackward, RuntimeRecurrenceSource, UniformBound,
     };
     use chelis_types::{BitwiseKind, types::Prim};
     let window = |reducer| RiscOp::ReduceWindow {
         reducer,
         window_shape: vec![2],
         strides: vec![1],
+    };
+    let recurrence = || RuntimeRecurrence {
+        callback: Box::new(Dag::new()),
+        state: NodeId(0),
+        source: RuntimeRecurrenceSource::Tensor { item: NodeId(1) },
+        captures: vec![],
+        result: NodeId(0),
+        scan: false,
     };
     match atom {
         Id::Add => (RiscOp::Add, BuiltinInventory),
@@ -1250,6 +1262,18 @@ fn nan_atom_coverage(
                 strides: vec![1],
             },
             Rows,
+        ),
+        Id::RuntimeRecurrence => (RiscOp::RuntimeRecurrence(Box::new(recurrence())), ChildGraph),
+        Id::RuntimeRecurrenceAdjoint => (
+            RiscOp::RuntimeRecurrenceAdjoint {
+                recurrence: Box::new(recurrence()),
+                backward: Box::new(RuntimeRecurrenceBackward {
+                    dag: Box::new(Dag::new()),
+                    targets: vec![1],
+                }),
+                target: 1,
+            },
+            ChildGraph,
         ),
         Id::Reshape => (
             RiscOp::Reshape {
@@ -1730,6 +1754,12 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
                 finalization,
                 None,
                 "`{}` produces a float value; give it kernel rows",
+                atom.as_str()
+            ),
+            NanAtomCoverage::ChildGraph => assert_eq!(
+                finalization,
+                None,
+                "`{}` must leave NaN finalization to its child graph",
                 atom.as_str()
             ),
         }
