@@ -73,6 +73,11 @@ pub enum AdRejectionReason {
     /// The output node's type is not a scalar float — reverse-mode AD
     /// requires a scalar loss.
     NonScalarOutput,
+    /// A callback VJP's supplied cotangent differs from its result type.
+    CotangentSeedMismatch {
+        output: TensorType,
+        seed: TensorType,
+    },
     /// A cotangent the op's adjoint sends out of a branch arm does not carry
     /// the arm's activation on its leading axes, so the arm's untaken rows
     /// cannot be selected away (spec/06 §2.10.1). An activation is rank zero
@@ -175,6 +180,10 @@ impl fmt::Display for AdError {
                 AdRejectionReason::NonScalarOutput => {
                     write!(f, "grad: output of {op} must be a scalar float")
                 }
+                AdRejectionReason::CotangentSeedMismatch { output, seed } => write!(
+                    f,
+                    "grad: callback cotangent seed {seed:?} does not match output {output:?}"
+                ),
                 AdRejectionReason::ActivationNotLeadingAxes => write!(
                     f,
                     "grad: the cotangent {op} sends out of its branch arm does not carry the \
@@ -219,12 +228,25 @@ pub fn grad_dag_checked(
     output: NodeId,
     wrt: &[NodeId],
 ) -> Result<GradResult, AdError> {
-    grad_dag_checked_impl(forward, output, wrt)
+    grad_dag_checked_impl(forward, output, None, wrt)
+}
+
+/// Reverse one callback activation with an explicit cotangent. The seed is a
+/// checked Load in the callback graph, supplied from the recorded recurrence
+/// during replay. Public `grad` still requires a scalar loss and seeds one.
+pub(crate) fn vjp_dag_checked(
+    forward: &Dag,
+    output: NodeId,
+    seed: NodeId,
+    wrt: &[NodeId],
+) -> Result<GradResult, AdError> {
+    grad_dag_checked_impl(forward, output, Some(seed), wrt)
 }
 
 fn grad_dag_checked_impl(
     forward: &Dag,
     output: NodeId,
+    seed: Option<NodeId>,
     wrt: &[NodeId],
 ) -> Result<GradResult, AdError> {
     if forward.is_empty() {
@@ -237,11 +259,28 @@ fn grad_dag_checked_impl(
         op: "<missing>",
         reason: AdRejectionReason::EmptyOrMissingOutput,
     })?;
-    if !is_scalar_float(&out_node.output_type) {
+    if seed.is_none() && !is_scalar_float(&out_node.output_type) {
         return Err(AdError::NotSupported {
             op: risc_op_name(&out_node.op),
             reason: AdRejectionReason::NonScalarOutput,
         });
+    }
+    if let Some(seed) = seed {
+        let seed_node = forward.get(seed).ok_or(AdError::NotSupported {
+            op: "<missing>",
+            reason: AdRejectionReason::EmptyOrMissingOutput,
+        })?;
+        if !out_node.output_type.precision.is_float()
+            || out_node.output_type != seed_node.output_type
+        {
+            return Err(AdError::NotSupported {
+                op: risc_op_name(&out_node.op),
+                reason: AdRejectionReason::CotangentSeedMismatch {
+                    output: out_node.output_type.clone(),
+                    seed: seed_node.output_type.clone(),
+                },
+            });
+        }
     }
 
     // spec/06 §7.5: an operation whose atom structurally rejects `grad` is
@@ -269,7 +308,7 @@ fn grad_dag_checked_impl(
         }
     }
 
-    grad_dag_result(forward, output, wrt).map_err(|failure| match failure {
+    grad_dag_result(forward, output, seed, wrt).map_err(|failure| match failure {
         BackwardFailure::Rejected(error) => error,
         BackwardFailure::Construction(why) => AdError::NotSupported {
             op: "<unknown>",
@@ -983,6 +1022,7 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
 fn grad_dag_result(
     forward: &Dag,
     output: NodeId,
+    explicit_seed: Option<NodeId>,
     wrt: &[NodeId],
 ) -> Result<GradResult, BackwardFailure> {
     if forward.is_empty() {
@@ -993,7 +1033,7 @@ fn grad_dag_result(
         .ok_or_else(|| "grad: output node is missing from the forward DAG".to_string())?
         .output_type
         .clone();
-    if !is_scalar_float(&output_ty) {
+    if explicit_seed.is_none() && !is_scalar_float(&output_ty) {
         return Err(format!("grad: output node type {output_ty:?} is not a scalar float").into());
     }
     // Forward nodes clone span_id + merged_spans unchanged via Dag::clone()
@@ -1020,15 +1060,20 @@ fn grad_dag_result(
     // backward node corresponding to the forward `output`, so it
     // carries the grad marker.
     let output_node = forward.get(output).unwrap().clone();
-    let dag_before_seed = dag.len();
-    let seed = dag.add_node(
-        output_node.owner,
-        RiscOp::synth_const(output_ty.precision, 1.0),
-        vec![],
-        output_ty,
-        None,
-    );
-    stamp_grad_marker(&mut dag, dag_before_seed, &output_node);
+    let seed = if let Some(seed) = explicit_seed {
+        seed
+    } else {
+        let dag_before_seed = dag.len();
+        let seed = dag.add_node(
+            output_node.owner,
+            RiscOp::synth_const(output_ty.precision, 1.0),
+            vec![],
+            output_ty,
+            None,
+        );
+        stamp_grad_marker(&mut dag, dag_before_seed, &output_node);
+        seed
+    };
 
     // Walk forward topological order in reverse.
     let topo = forward.topological_order();
@@ -6315,6 +6360,105 @@ mod tests {
             grad_dag(&dag, y, &[x]).is_none(),
             "non-scalar outputs should be rejected without an explicit seed gradient"
         );
+    }
+
+    #[test]
+    fn runtime_recurrence_callback_vjp_uses_explicit_tensor_seed() {
+        use crate::eval::{TensorValue, eval_tensor};
+
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("recurrence_step"));
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let y = dag.add_node(
+            owner,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let seed = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "seed".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let output = dag.add_node(owner, RiscOp::Mul, vec![x, y], ty, None);
+        let vjp = vjp_dag_checked(&dag, output, seed, &[x, y]).expect("tensor VJP");
+        let inputs = UnordMap::from([
+            ("x".into(), TensorValue::from_vec(vec![2], vec![2.0, 3.0])),
+            ("y".into(), TensorValue::from_vec(vec![2], vec![4.0, 5.0])),
+            (
+                "seed".into(),
+                TensorValue::from_vec(vec![2], vec![7.0, 11.0]),
+            ),
+        ]);
+        let values = eval_tensor(&vjp.dag, &inputs).expect("evaluate VJP");
+        assert_eq!(
+            values[&vjp.grad_nodes[&x]].to_f64_lossy_vec(),
+            vec![28.0, 55.0]
+        );
+        assert_eq!(
+            values[&vjp.grad_nodes[&y]].to_f64_lossy_vec(),
+            vec![14.0, 33.0]
+        );
+    }
+
+    #[test]
+    fn runtime_recurrence_callback_vjp_rejects_seed_shape_and_dtype_mismatch() {
+        let output_ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        for seed_ty in [
+            TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::F32,
+            },
+            TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F64,
+            },
+        ] {
+            let mut dag = Dag::new();
+            let owner = Owner::from(dag.declare("recurrence_step"));
+            let x = dag.add_node(
+                owner,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                output_ty.clone(),
+                None,
+            );
+            let seed = dag.add_node(
+                owner,
+                RiscOp::Load {
+                    name: "seed".into(),
+                },
+                vec![],
+                seed_ty,
+                None,
+            );
+            let output = dag.add_node(owner, RiscOp::Exp, vec![x], output_ty.clone(), None);
+            assert!(matches!(
+                vjp_dag_checked(&dag, output, seed, &[x]),
+                Err(AdError::NotSupported {
+                    reason: AdRejectionReason::CotangentSeedMismatch { .. },
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
