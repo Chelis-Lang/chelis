@@ -1,10 +1,10 @@
 //! [05-OP-9/10/33]: padding preserves exact extents, checked offsets, and bits.
 use chelis_runtime::{
     chelis_dtype, chelis_list, chelis_list_from_values, chelis_list_index, chelis_list_len,
-    chelis_list_release, chelis_pad_sequences, chelis_pad_sequences_to, chelis_scalar_from_bits,
-    chelis_tensor, chelis_tensor_elements, chelis_tensor_numel, chelis_tensor_release,
-    chelis_tensor_shape, chelis_value_box_scalar, chelis_value_release, chelis_value_take_list,
-    chelis_value_unbox_scalar, CHELIS_DTYPE_F32,
+    chelis_list_release, chelis_list_take_value, chelis_pad_sequences, chelis_pad_sequences_to,
+    chelis_scalar_from_bits, chelis_tensor, chelis_tensor_elements, chelis_tensor_numel,
+    chelis_tensor_release, chelis_tensor_shape, chelis_value_box_scalar, chelis_value_release,
+    chelis_value_take_list, chelis_value_unbox_scalar, CHELIS_DTYPE_F32,
 };
 use chelis_vocab::RuntimeDType;
 
@@ -24,11 +24,20 @@ unsafe fn rows(dtype: chelis_dtype, bits: u64) -> *mut chelis_list {
 }
 
 unsafe fn bits(tensor: *const chelis_tensor) -> Vec<u64> {
-    let elements = chelis_tensor_elements(tensor);
-    let result = (0..chelis_list_len(elements))
-        .map(|i| chelis_value_unbox_scalar(chelis_list_index(elements, i)).bits)
-        .collect();
-    chelis_list_release(elements);
+    let rows = chelis_tensor_elements(tensor);
+    assert_eq!(chelis_list_len(rows), chelis_tensor_shape(tensor, 0));
+    let mut result = Vec::new();
+    for row_index in 0..chelis_list_len(rows) {
+        let row = chelis_list_take_value(chelis_list_index(rows, row_index));
+        assert_eq!(chelis_list_len(row), chelis_tensor_shape(tensor, 1));
+        for column_index in 0..chelis_list_len(row) {
+            let value = chelis_list_index(row, column_index);
+            result.push(chelis_value_unbox_scalar(value).bits);
+            chelis_value_release(value);
+        }
+        chelis_list_release(row);
+    }
+    chelis_list_release(rows);
     result
 }
 
