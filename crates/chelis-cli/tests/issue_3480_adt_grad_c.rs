@@ -31,6 +31,34 @@ left = value_then_grad(params)
 right = grad_then_value(params)
 "#;
 
+const GENERIC_MODEL: &str = r#"type Block[n] =
+  | Block { weight: tensor[n, f32] }
+type Model[n] =
+  | Model { first: Block[n], second: Block[n] }
+def loss[n](p: Model[n]) -> f32 = {
+  a = mul(p.first.weight, p.first.weight)
+  b = mul(p.second.weight, p.second.weight)
+  tensor_to_scalar(sum(add(a, b), 0i32))
+}
+def step[n](p: Model[n]) -> Model[n] = grad(loss)(p)
+params = Model { first: Block { weight: to_tensor([1.0f32, 2.0f32]) }, second: Block { weight: to_tensor([3.0f32, 4.0f32]) } }
+out = step(params)
+"#;
+
+const RECONSTRUCTED_ARGUMENT: &str = r#"type Block =
+  | Block { weight: tensor[2, f32] }
+type Model =
+  | Model { first: Block, second: Block }
+def loss(p: Model) -> f32 = {
+  a = mul(p.first.weight, p.first.weight)
+  b = mul(p.second.weight, p.second.weight)
+  tensor_to_scalar(sum(add(a, b), 0i32))
+}
+def step(p: Model) -> Model = grad(loss)(Model { first: p.first, second: p.second })
+params = Model { first: Block { weight: to_tensor([1.0f32, 2.0f32]) }, second: Block { weight: to_tensor([3.0f32, 4.0f32]) } }
+out = step(params)
+"#;
+
 const SUM_TYPE: &str = r#"type Choice =
   | A { weight: tensor[2, f32] }
   | B { weight: tensor[2, f32] }
@@ -90,6 +118,63 @@ fn fixed_adt_blocks_differentiate_on_c_in_both_orders() {
     if gcc_available() {
         assert_eq!(build_and_run(MODEL, "model"), expected);
     }
+}
+
+#[test]
+fn generic_fixed_adt_gradient_retains_tensor_result_provenance_on_c() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("generic_model.ch");
+    write_file(&path, GENERIC_MODEL);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        eval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let expected = String::from_utf8(eval.stdout).unwrap();
+    assert!(expected.contains("data=[2.0, 4.0]"), "{expected}");
+    assert!(expected.contains("data=[6.0, 8.0]"), "{expected}");
+    if gcc_available() {
+        assert_eq!(build_and_run(GENERIC_MODEL, "generic_model"), expected);
+    }
+}
+
+#[test]
+fn reconstructed_adt_argument_does_not_claim_lexical_host_support() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("reconstructed.ch");
+    write_file(&path, RECONSTRUCTED_ARGUMENT);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        eval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    assert!(String::from_utf8_lossy(&eval.stdout).contains("data=[2.0, 4.0]"));
+    let build = Command::cargo_bin("chelis")
+        .unwrap()
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("reconstructed-out").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!build.status.success());
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(stderr.contains("can't lower these defs"), "{stderr}");
+    assert!(stderr.contains("Affected defs: step"), "{stderr}");
 }
 
 #[test]

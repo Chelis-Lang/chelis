@@ -227,8 +227,8 @@ than the evaluator:
   build stops with `supports reduce_window_* (...) on f32 tensors only`; cast
   to `f32` before the windowed reduction.
 - Some gradients through local `List` arguments and ADT parameters do not
-  build. Direct gradient calls over fixed, numeric ADT parameters do build;
-  [Transforms](transforms.md#execution-limits) lists the boundaries.
+  build. Direct gradient calls over fixed, numeric ADT lexical variables do
+  build; [Transforms](transforms.md#execution-limits) lists the boundaries.
 
 When a program uses an unsupported form, `chelis build` stops with an error
 naming the operation; it never substitutes a different calculation. Run
