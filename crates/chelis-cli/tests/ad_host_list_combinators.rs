@@ -791,6 +791,53 @@ g = grad(loss, wrt=x)(2.0f32, 3i64)
 }
 
 #[test]
+fn runtime_scan_with_variable_state_extents_keeps_named_boundary() {
+    // [05-OP-55] permits a List of differently shaped tensor states. The
+    // rectangular private scan carrier cannot ascribe one row shape to all.
+    let source = "\
+def loss(x: f32, n: i64) -> f32 = {
+  states = scan(fn (acc: tensor[*, f32], i: i64) -> insert(scalar_to_tensor(x), 0i32, add(i, 1i64)), insert(scalar_to_tensor(0.0f32), 0i32, 1i64), range(0i64, n))
+  fold(fn (acc: f32, state: tensor[*, f32]) -> add(acc, tensor_to_scalar(sum(state, 0i32))), 0.0f32, states)
+}
+def derivative(model: f32 -> i64 -> f32, n: i64, theta: tensor[1, f32]) -> tensor[1, f32] = {
+  target = fn (local: tensor[1, f32]) -> model(tensor_to_scalar(sum(local, 0i32)), n)
+  grad(target, wrt=local)(theta)
+}
+g = derivative(loss, 3i64, to_tensor([2.0f32]))
+";
+    let eval = eval_failure(source, "runtime_scan_variable_state_eval");
+    assert!(
+        eval.contains("unsupported: `scan`") && eval.contains("unimplemented chelis#3366"),
+        "runtime scan must retain a named boundary in Eval: {eval}"
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("runtime_scan_variable_state.ch");
+    let out_dir = dir.path().join("out");
+    write_file(&path, source);
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("C build should run");
+    assert!(!output.status.success(), "C build unexpectedly succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported: `scan`") && stderr.contains("unimplemented chelis#3366"),
+        "C build must retain the same named boundary before codegen: {stderr}"
+    );
+}
+
+#[test]
 fn c_grad_fold_over_runtime_range_matches_executed_trip_count() {
     let source = "\
 def loss(theta: tensor[1, f32], n: i64) -> f32 = fold(fn (acc: f32, i: i64) -> acc * tensor_to_scalar(sum(theta, 0)), 1.0f32, range(0i64, n))

@@ -6126,6 +6126,38 @@ pub(crate) fn concrete_dim_len(dim: &DimInfo) -> Option<usize> {
     }
 }
 
+/// A runtime scan backed by one tensor can stack post-step states only when
+/// every state axis has one declared concrete extent across invocations.
+fn require_rectangular_runtime_scan_state(
+    state: &TensorType,
+    result: &TensorType,
+    span: Span,
+    span_id: Option<String>,
+) {
+    let fixed = state.dims.len() == result.dims.len()
+        && state.dims.iter().zip(&result.dims).all(|(before, after)| {
+            concrete_dim_len(before)
+                .zip(concrete_dim_len(after))
+                .is_some_and(|(before, after)| before == after)
+        });
+    if !fixed {
+        raise_fatal_unsupported(
+            Unsupported::new(
+                UnsupportedKind::Construct("`scan` with runtime-varying state extents".into()),
+                "the runtime recurrence scan List carrier",
+                Stage::Lowering,
+                chelis_types::unimplemented_rejection!(
+                    3366,
+                    "scan states require a per-step List carrier when their extents are not fixed; \
+                     the rectangular runtime scan carrier cannot preserve each state shape"
+                ),
+            ),
+            Some(span),
+            span_id,
+        );
+    }
+}
+
 /// Helper: is `expr` an `app` of a `var` whose name equals `expected`?
 fn is_app_of_builtin(expr: &Expr, expected: &str) -> bool {
     let kids = match expr.carrier() {
@@ -19222,7 +19254,7 @@ impl<'program> LowerCtx<'program> {
         callback: &ResolvedFunction,
         init: &Expr,
         source: NodeId,
-        _app_span: Span,
+        app_span: Span,
     ) -> Option<LoweredValue> {
         let state = self.lower_expr(init).as_single_node()?;
         let state_ty = self.dag.get(state)?.output_type.clone();
@@ -19306,6 +19338,14 @@ impl<'program> LowerCtx<'program> {
             .collect();
         let state_result_ty = callback_dag.get(result)?.output_type.clone();
         let scan = name == "scan";
+        if scan {
+            require_rectangular_runtime_scan_state(
+                &state_ty,
+                &state_result_ty,
+                app_span,
+                self.current_span_id.clone(),
+            );
+        }
         let output_ty = if scan {
             TensorType {
                 dims: std::iter::once(source_ty.dims[0].clone())
@@ -19348,7 +19388,7 @@ impl<'program> LowerCtx<'program> {
         init: &Expr,
         length: NodeId,
         element: &LoweredValue,
-        _app_span: Span,
+        app_span: Span,
     ) -> Option<LoweredValue> {
         let state = self.lower_expr(init).as_single_node()?;
         let state_ty = self.dag.get(state)?.output_type.clone();
@@ -19456,6 +19496,14 @@ impl<'program> LowerCtx<'program> {
             .collect();
         let state_result_ty = callback_dag.get(result)?.output_type.clone();
         let scan = name == "scan";
+        if scan {
+            require_rectangular_runtime_scan_state(
+                &callback_dag.get(state_load)?.output_type,
+                &state_result_ty,
+                app_span,
+                self.current_span_id.clone(),
+            );
+        }
         let output_ty = if scan {
             let leading = columns
                 .first()
