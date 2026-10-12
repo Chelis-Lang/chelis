@@ -12069,6 +12069,7 @@ fn materialize_runtime_grad_adt(
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
     leaf_scope: &mut UnordMap<String, HostTypeTerm>,
+    unwitnessed_columns: &mut Vec<String>,
 ) -> Result<Option<Expr>, crate::lower::LowerDiagnostic> {
     let Some(name) = direct_var_name(actual) else {
         return Ok(None);
@@ -12089,6 +12090,7 @@ fn materialize_runtime_grad_adt(
         bindings,
         leaf_scope,
         &extent_witnesses,
+        unwitnessed_columns,
     )
 }
 
@@ -12148,6 +12150,7 @@ fn materialize_runtime_grad_adt_value(
     bindings: &mut Vec<HostBinding>,
     leaf_scope: &mut UnordMap<String, HostTypeTerm>,
     extent_witnesses: &BTreeMap<String, HostExpr>,
+    unwitnessed_columns: &mut Vec<String>,
 ) -> Result<Option<Expr>, crate::lower::LowerDiagnostic> {
     if let HostTypeTerm::List(element_ty) = ty {
         return Ok(materialize_runtime_grad_list(
@@ -12159,6 +12162,7 @@ fn materialize_runtime_grad_adt_value(
             bindings,
             leaf_scope,
             extent_witnesses,
+            unwitnessed_columns,
         ));
     }
     if let HostTypeTerm::Adt(adt_name, _) = ty {
@@ -12218,6 +12222,7 @@ fn materialize_runtime_grad_adt_value(
                 bindings,
                 leaf_scope,
                 extent_witnesses,
+                unwitnessed_columns,
             )?
             else {
                 return Ok(None);
@@ -12277,6 +12282,7 @@ fn materialize_runtime_grad_list(
     bindings: &mut Vec<HostBinding>,
     leaf_scope: &mut UnordMap<String, HostTypeTerm>,
     extent_witnesses: &BTreeMap<String, HostExpr>,
+    unwitnessed_columns: &mut Vec<String>,
 ) -> Option<Expr> {
     let fresh = |used_names: &mut UnordSet<String>| {
         let mut index = used_names.len();
@@ -12315,6 +12321,7 @@ fn materialize_runtime_grad_list(
         bindings,
         leaf_scope,
         extent_witnesses,
+        unwitnessed_columns,
     )?;
     let field = |name: &str, expr: Expr| {
         Expr::node(
@@ -12349,6 +12356,7 @@ fn materialize_runtime_grad_list_element(
     bindings: &mut Vec<HostBinding>,
     leaf_scope: &mut UnordMap<String, HostTypeTerm>,
     extent_witnesses: &BTreeMap<String, HostExpr>,
+    unwitnessed_columns: &mut Vec<String>,
 ) -> Option<Expr> {
     let ty = expand_host_type_aliases(program, ty.clone());
     if let HostTypeTerm::Adt(adt_name, _) = &ty {
@@ -12387,6 +12395,7 @@ fn materialize_runtime_grad_list_element(
                 bindings,
                 leaf_scope,
                 extent_witnesses,
+                unwitnessed_columns,
             )?;
             fields.push(Expr::node(
                 DeepTag::Kv,
@@ -12468,6 +12477,7 @@ fn materialize_runtime_grad_list_element(
         args: vec![mapped],
         ty: host_column_ty.clone(),
     });
+    let needs_witness = known_empty_shape.is_none();
     // [05-OP-57]: an empty outer List does not encode its trailing extents.
     // This private column still has the checked element tensor type, so the
     // declared trailing literals and checked model tensor axes supply the
@@ -12524,6 +12534,9 @@ fn materialize_runtime_grad_list_element(
         ty: host_column_ty.clone(),
         value: column_value,
     });
+    if needs_witness {
+        unwitnessed_columns.push(column_name.clone());
+    }
     leaf_scope.insert(column_name.clone(), host_column_ty);
     Some(var_expr_node(&column_name, span))
 }
@@ -12889,6 +12902,7 @@ fn try_lower_general_list_grad_app(
     let mut rewritten_children = kids.to_vec();
     let mut helper_scope = scope.clone();
     let mut leaf_bindings = Vec::new();
+    let mut unwitnessed_columns = Vec::new();
     let mut used_names = UnordSet::new();
     collect_occurring_names(app_expr, &mut used_names);
     // The differentiated def may read a program value whose name does not
@@ -12941,6 +12955,7 @@ fn try_lower_general_list_grad_app(
             &mut used_names,
             &mut leaf_bindings,
             &mut helper_scope,
+            &mut unwitnessed_columns,
         )?;
         if materialized.is_none() {
             for binding in leaf_bindings.drain(leaf_count_before..) {
@@ -13039,6 +13054,38 @@ fn try_lower_general_list_grad_app(
     if lowered.value_root_count != plan.leaf_count() {
         return Ok(None);
     }
+    // The reverse DAG has already removed unused primal Loads. A discrete
+    // field can still be read by the forward body, but it owns no cotangent
+    // root; materialize its host column only when its Load survived DCE.
+    let mut live = tensor_helper_inputs(&lowered.dag)
+        .into_iter()
+        .map(|input| input.name)
+        .collect::<UnordSet<_>>();
+    for binding in leaf_bindings.iter().rev() {
+        if live.contains(&binding.name) {
+            collect_lowered_host_names(&binding.value, &mut live);
+        }
+    }
+    if unwitnessed_columns.iter().any(|name| live.contains(name)) {
+        let unsupported = chelis_types::unsupported::Unsupported::new(
+            chelis_types::unsupported::UnsupportedKind::Construct(
+                "runtime List tensor column without checked trailing extents".into(),
+            ),
+            "C gradient cannot infer trailing extents for a live List tensor column",
+            chelis_types::unsupported::Stage::Lowering,
+            chelis_types::unimplemented_rejection!(
+                3480,
+                "a live runtime List tensor column needs checked trailing extent evidence"
+            ),
+        );
+        return Err(crate::lower::LowerDiagnostic::new(
+            unsupported.to_string(),
+            Some(app_expr.span()),
+            app_expr.span_id().map(str::to_string),
+        )
+        .fatal());
+    }
+    leaf_bindings.retain(|binding| live.contains(&binding.name));
     let root_tys = lowered
         .dag
         .roots()
@@ -13049,8 +13096,12 @@ fn try_lower_general_list_grad_app(
         .list_checks
         .iter()
         .map(|check| match check {
-            crate::lower::RuntimeListCheckDescriptor::NonNegative { .. } => 1,
-            crate::lower::RuntimeListCheckDescriptor::IndexBounds => 2,
+            crate::lower::RuntimeListCheckDescriptor::NonNegative { guarded, .. } => {
+                1 + usize::from(*guarded)
+            }
+            crate::lower::RuntimeListCheckDescriptor::IndexBounds { guarded } => {
+                2 + usize::from(*guarded)
+            }
         })
         .sum::<usize>();
     if root_tys.len() != lowered.value_root_count + expected_control_roots {
@@ -13081,10 +13132,23 @@ fn try_lower_general_list_grad_app(
             crate::lower::RuntimeListCheckDescriptor::NonNegative {
                 operation,
                 argument,
+                guarded,
             } => {
-                control_offset -= 1;
+                control_offset -= 1 + usize::from(*guarded);
                 let value =
                     tensor_helper_root_expr(&binding_name, &binding_ty, &root_tys, control_offset);
+                let activation = guarded.then(|| {
+                    HostExpr::new(HostExprKind::Builtin {
+                        name: "tensor_to_scalar".into(),
+                        args: vec![tensor_helper_root_expr(
+                            &binding_name,
+                            &binding_ty,
+                            &root_tys,
+                            control_offset + 1,
+                        )],
+                        ty: HostTypeTerm::Bool,
+                    })
+                });
                 let value = HostExpr::new(HostExprKind::Builtin {
                     name: "tensor_to_scalar".to_string(),
                     args: vec![value],
@@ -13095,6 +13159,16 @@ fn try_lower_general_list_grad_app(
                     args: vec![value.clone(), HostExpr::new(HostExprKind::Int(0))],
                     ty: HostTypeTerm::Bool,
                 });
+                let cond = if let Some(activation) = activation {
+                    HostExpr::new(HostExprKind::If {
+                        cond: Box::new(activation),
+                        then_expr: Box::new(cond),
+                        else_expr: Box::new(HostExpr::new(HostExprKind::Bool(false))),
+                        ty: HostTypeTerm::Bool,
+                    })
+                } else {
+                    cond
+                };
                 // The shared rendering's prefix, then the value: every lane
                 // reports the same text ([05-OP-54]).
                 let message = HostExpr::new(HostExprKind::Builtin {
@@ -13122,8 +13196,8 @@ fn try_lower_general_list_grad_app(
                     ty: result_ty.clone(),
                 });
             }
-            crate::lower::RuntimeListCheckDescriptor::IndexBounds => {
-                control_offset -= 2;
+            crate::lower::RuntimeListCheckDescriptor::IndexBounds { guarded } => {
+                control_offset -= 2 + usize::from(*guarded);
                 let index =
                     tensor_helper_root_expr(&binding_name, &binding_ty, &root_tys, control_offset);
                 let len = tensor_helper_root_expr(
@@ -13132,6 +13206,18 @@ fn try_lower_general_list_grad_app(
                     &root_tys,
                     control_offset + 1,
                 );
+                let activation = guarded.then(|| {
+                    HostExpr::new(HostExprKind::Builtin {
+                        name: "tensor_to_scalar".into(),
+                        args: vec![tensor_helper_root_expr(
+                            &binding_name,
+                            &binding_ty,
+                            &root_tys,
+                            control_offset + 2,
+                        )],
+                        ty: HostTypeTerm::Bool,
+                    })
+                });
                 let index = HostExpr::new(HostExprKind::Builtin {
                     name: "tensor_to_scalar".to_string(),
                     args: vec![index],
@@ -13181,6 +13267,16 @@ fn try_lower_general_list_grad_app(
                     args: vec![index, len],
                     ty: HostTypeTerm::Bool,
                 });
+                let cond = if let Some(activation) = activation {
+                    HostExpr::new(HostExprKind::If {
+                        cond: Box::new(activation),
+                        then_expr: Box::new(cond),
+                        else_expr: Box::new(HostExpr::new(HostExprKind::Bool(false))),
+                        ty: HostTypeTerm::Bool,
+                    })
+                } else {
+                    cond
+                };
                 body = HostExpr::new(HostExprKind::If {
                     cond: Box::new(cond),
                     then_expr: Box::new(HostExpr::new(HostExprKind::Builtin {

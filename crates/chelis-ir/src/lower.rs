@@ -2635,16 +2635,28 @@ fn lower_subexpr_program_inner_impl(
                     operation,
                     argument,
                     value,
+                    activation,
                 } => (
                     RuntimeListCheckDescriptor::NonNegative {
                         operation,
                         argument,
+                        guarded: activation.is_some(),
                     },
-                    vec![value],
+                    std::iter::once(value).chain(activation).collect(),
                 ),
-                RuntimeListCheck::IndexBounds { index, len } => {
-                    (RuntimeListCheckDescriptor::IndexBounds, vec![index, len])
-                }
+                RuntimeListCheck::IndexBounds {
+                    index,
+                    len,
+                    activation,
+                } => (
+                    RuntimeListCheckDescriptor::IndexBounds {
+                        guarded: activation.is_some(),
+                    },
+                    std::iter::once(index)
+                        .chain(std::iter::once(len))
+                        .chain(activation)
+                        .collect(),
+                ),
             };
             for value in values {
                 let output_type = ctx
@@ -7731,10 +7743,12 @@ enum RuntimeListCheck {
         operation: &'static str,
         argument: &'static str,
         value: NodeId,
+        activation: Option<NodeId>,
     },
     IndexBounds {
         index: NodeId,
         len: NodeId,
+        activation: Option<NodeId>,
     },
 }
 
@@ -7743,8 +7757,11 @@ pub(crate) enum RuntimeListCheckDescriptor {
     NonNegative {
         operation: &'static str,
         argument: &'static str,
+        guarded: bool,
     },
-    IndexBounds,
+    IndexBounds {
+        guarded: bool,
+    },
 }
 
 pub(crate) struct LoweredSubexprWithControls {
@@ -13356,14 +13373,21 @@ impl<'program> LowerCtx<'program> {
                     operation,
                     argument,
                     value,
+                    activation,
                 } => RuntimeListCheck::NonNegative {
                     operation,
                     argument,
                     value: retain(value),
+                    activation: activation.map(&mut retain),
                 },
-                RuntimeListCheck::IndexBounds { index, len } => RuntimeListCheck::IndexBounds {
+                RuntimeListCheck::IndexBounds {
+                    index,
+                    len,
+                    activation,
+                } => RuntimeListCheck::IndexBounds {
                     index: retain(index),
                     len: retain(len),
+                    activation: activation.map(&mut retain),
                 },
             });
         }
@@ -13472,20 +13496,31 @@ impl<'program> LowerCtx<'program> {
                     operation,
                     argument,
                     value: _,
+                    activation,
                 } => RuntimeListCheck::NonNegative {
                     operation,
                     argument,
                     value: remap[&control_roots
                         .next()
                         .expect("retained List check root must survive AD")],
+                    activation: activation.map(|_| {
+                        remap[&control_roots
+                            .next()
+                            .expect("retained List activation root must survive AD")]
+                    }),
                 },
-                RuntimeListCheck::IndexBounds { .. } => RuntimeListCheck::IndexBounds {
+                RuntimeListCheck::IndexBounds { activation, .. } => RuntimeListCheck::IndexBounds {
                     index: remap[&control_roots
                         .next()
                         .expect("retained List index root must survive AD")],
                     len: remap[&control_roots
                         .next()
                         .expect("retained List length root must survive AD")],
+                    activation: activation.map(|_| {
+                        remap[&control_roots
+                            .next()
+                            .expect("retained List activation root must survive AD")]
+                    }),
                 },
             });
         }
@@ -18657,9 +18692,14 @@ impl<'program> LowerCtx<'program> {
                     operation: "index",
                     argument: "index",
                     value: count,
+                    activation: self.branch_path_condition,
                 });
             self.runtime_list_checks
-                .push(RuntimeListCheck::IndexBounds { index: count, len });
+                .push(RuntimeListCheck::IndexBounds {
+                    index: count,
+                    len,
+                    activation: self.branch_path_condition,
+                });
             let zero = self.int64_constant(0);
             let int_ty = TensorType {
                 dims: vec![],
@@ -18722,17 +18762,20 @@ impl<'program> LowerCtx<'program> {
                 },
                 argument,
                 value: count,
+                activation: self.branch_path_condition,
             });
         if name == "index" {
             self.runtime_list_checks
-                .push(RuntimeListCheck::IndexBounds { index: count, len });
+                .push(RuntimeListCheck::IndexBounds {
+                    index: count,
+                    len,
+                    activation: self.branch_path_condition,
+                });
             if items.is_empty() {
-                // The bounds check above is unconditionally false for an
-                // empty List, so this value is an unreachable typed
-                // placeholder used only to keep the forward/AD DAG valid
-                // until the host check reports the public error. It is never
-                // a silent fallback: both eval and generated C execute the
-                // check before exposing the result.
+                // An executed selection on an empty List fails its bounds
+                // check. This typed placeholder keeps the forward/AD DAG
+                // valid until the host check reports the public error; a
+                // selection in an untaken branch has an inactive check.
                 return Some(LoweredValue::Node(self.zero_tensor_node(result_ty, None)));
             }
             let int_ty = TensorType {

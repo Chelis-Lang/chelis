@@ -110,6 +110,49 @@ def step[n](p: Model[n]) -> Model[n] = grad(loss)(p)
 out = step(Model { blocks: [], reference: to_tensor([3.0f32, 4.0f32]) })
 "#;
 
+const EMPTY_DISCRETE_COLUMN: &str = r#"module Repro.NestedListAdtEmptyDiscreteTensor
+type Block =
+  | Block { tag: tensor[*, i64] }
+type Model =
+  | Model { blocks: List[Block], scale: f32 }
+def loss(p: Model) -> f32 = mul(p.scale, p.scale)
+def step(p: Model) -> Model = grad(loss)(p)
+out = step(Model { blocks: [], scale: 3.0f32 })
+"#;
+
+const WITNESSED_DISCRETE_COLUMN: &str = r#"module Repro.NestedListAdtWitnessedDiscreteTensor
+import Std.Index (list_index)
+type Block =
+  | Block { tag: tensor[2, i64] }
+type Model =
+  | Model { blocks: List[Block], scale: f32 }
+def loss(p: Model) -> f32 =
+  if eq(len(p.blocks), 0i64) then mul(p.scale, p.scale) else {
+    first = list_index(p.blocks, 0i64)
+    tag_sum = tensor_to_scalar(sum(first.tag, 0i32))
+    if eq(tag_sum, 1i64) then mul(p.scale, p.scale) else p.scale
+  }
+def step(p: Model) -> Model = grad(loss)(p)
+empty = step(Model { blocks: [], scale: 3.0f32 })
+nonempty = step(Model { blocks: [Block { tag: to_tensor([1i64, 0i64]) }], scale: 3.0f32 })
+"#;
+
+const UNWITNESSED_LIVE_DISCRETE_COLUMN: &str = r#"module Repro.NestedListAdtUnwitnessedLiveDiscreteTensor
+import Std.Index (list_index)
+type Block =
+  | Block { tag: tensor[*, i64] }
+type Model =
+  | Model { blocks: List[Block], scale: f32 }
+def loss(p: Model) -> f32 =
+  if eq(len(p.blocks), 0i64) then mul(p.scale, p.scale) else {
+    first = list_index(p.blocks, 0i64)
+    tag_sum = tensor_to_scalar(sum(first.tag, 0i32))
+    if eq(tag_sum, 1i64) then mul(p.scale, p.scale) else p.scale
+  }
+def step(p: Model) -> Model = grad(loss)(p)
+out = step(Model { blocks: [], scale: 3.0f32 })
+"#;
+
 #[test]
 fn nested_list_adt_gradient_preserves_runtime_length_order_and_zero_elements() {
     let dir = tempdir().unwrap();
@@ -326,21 +369,137 @@ fn empty_tensor_column_requires_a_trailing_extent_witness() {
             ])
             .output()
             .unwrap();
+        assert!(!build.status.success());
+        assert!(
+            String::from_utf8_lossy(&build.stderr)
+                .contains("cannot infer trailing extents for a live List tensor column"),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+}
+
+#[test]
+fn empty_discrete_column_without_a_cotangent_needs_no_extent() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("empty_discrete.ch");
+    write_file(&path, EMPTY_DISCRETE_COLUMN);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(eval.status.success());
+    let expected = String::from_utf8(eval.stdout).unwrap();
+    assert!(expected.contains("out = Model([], 6.0)"), "{expected}");
+    if gcc_available() {
+        assert_eq!(
+            build_and_run(EMPTY_DISCRETE_COLUMN, "empty_discrete"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn live_discrete_column_reads_nonempty_rows_and_preserves_empty_length() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("witnessed_discrete.ch");
+    write_file(&path, WITNESSED_DISCRETE_COLUMN);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(eval.status.success());
+    let expected = String::from_utf8(eval.stdout).unwrap();
+    assert!(expected.contains("empty = Model([], 6.0)"), "{expected}");
+    assert!(
+        expected.contains("nonempty = Model([Block(())], 6.0)"),
+        "{expected}"
+    );
+    if gcc_available() {
+        assert_eq!(
+            build_and_run(WITNESSED_DISCRETE_COLUMN, "witnessed_discrete"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn active_branch_keeps_discrete_column_index_bounds_failure() {
+    let dir = tempdir().unwrap();
+    let source = WITNESSED_DISCRETE_COLUMN
+        .replace("list_index(p.blocks, 0i64)", "list_index(p.blocks, 1i64)")
+        .replace("empty = step(Model { blocks: [], scale: 3.0f32 })\n", "");
+    let path = dir.path().join("active_index.ch");
+    write_file(&path, &source);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!eval.status.success());
+    assert!(String::from_utf8_lossy(&eval.stderr).contains("index 1 out of bounds"));
+    if gcc_available() {
+        let output = dir.path().join("active_index-out");
+        let build = Command::cargo_bin("chelis")
+            .unwrap()
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                output.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
         assert!(
             build.status.success(),
             "{}",
             String::from_utf8_lossy(&build.stderr)
         );
-        let run = std::process::Command::new(output.join("empty_unwitnessed"))
+        let run = std::process::Command::new(output.join("active_index"))
             .output()
             .unwrap();
         assert!(!run.status.success());
+        assert!(String::from_utf8_lossy(&run.stderr).contains("index 1 out of bounds"));
+    }
+}
+
+#[test]
+fn live_discrete_column_without_extent_is_a_typed_c_refusal() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("unwitnessed_live_discrete.ch");
+    write_file(&path, UNWITNESSED_LIVE_DISCRETE_COLUMN);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(eval.status.success());
+    assert!(String::from_utf8_lossy(&eval.stdout).contains("out = Model([], 6.0)"));
+    if gcc_available() {
+        let output = dir.path().join("unwitnessed_live_discrete-out");
+        let build = Command::cargo_bin("chelis")
+            .unwrap()
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                output.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(!build.status.success());
+        let stderr = String::from_utf8_lossy(&build.stderr);
         assert!(
-            String::from_utf8_lossy(&run.stderr)
-                .contains("cannot infer trailing extents for an empty List tensor column"),
-            "{}",
-            String::from_utf8_lossy(&run.stderr)
+            stderr.contains("cannot infer trailing extents for a live List tensor column"),
+            "{stderr}"
         );
+        assert!(stderr.contains("chelis#3480"), "{stderr}");
     }
 }
 
