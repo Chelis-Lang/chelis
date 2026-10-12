@@ -119,6 +119,41 @@ class RecordIsCvc5SmtTest(unittest.TestCase):
         )
 
 
+class ClarabelReleaseRecordTest(unittest.TestCase):
+    def test_accepts_only_call_bound_ideal_proof(self) -> None:
+        record = {
+            "kind": "property",
+            "status": "passed",
+            "proof_tier": "smt",
+            "composite_verdict": "proven_modulo_asserted_axiom",
+            "qualifiers": ["real_arithmetic"],
+            "assumptions": [{
+                "name": "clarabel.qp.ideal_optimality",
+                "discharge": {"evidence": {
+                    "provider_archive_sha256": "a" * 64,
+                    "call_fingerprint_sha256": "b" * 64,
+                }},
+            }],
+        }
+        self.assertTrue(VRS.record_is_clarabel_ideal_proof(record))
+        for changed in (
+            {**record, "status": "unsupported"},
+            {**record, "composite_verdict": "proved"},
+            {**record, "assumptions": []},
+            {**record, "assumptions": [{"name": "clarabel.qp.ideal_optimality"}]},
+            {**record, "assumptions": [{"name": "clarabel.qp.ideal_optimality", "discharge": {"evidence": {"provider_archive_sha256": "a" * 64}}}]},
+            {**record, "assumptions": [{"name": "clarabel.qp.ideal_optimality", "discharge": {"evidence": {"provider_archive_sha256": "x" * 64, "call_fingerprint_sha256": "b" * 64}}}]},
+            {**record, "qualifiers": []},
+        ):
+            self.assertFalse(VRS.record_is_clarabel_ideal_proof(changed))
+
+    def test_each_release_binary_is_built_and_checked_with_provider(self) -> None:
+        workflow = (Path(__file__).resolve().parents[1] / "workflows/release.yml").read_text()
+        self.assertEqual(workflow.count("--features smt,sealed-runtime,clarabel-provider"), 5)
+        self.assertEqual(workflow.count("verify_release_smt.py --clarabel"), 10)
+        self.assertNotIn("--features smt,sealed-runtime\n", workflow)
+
+
 class ParseRecordsTest(unittest.TestCase):
     def test_skips_blank_and_non_json_lines(self) -> None:
         stdout = (

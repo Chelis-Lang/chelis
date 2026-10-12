@@ -90,10 +90,10 @@ jobs:
       # failure still fails on the first attempt, so this job remains the
       # cold-build proof docs/smt_build_setup.md says it is.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime,clarabel-provider
 
       - name: Verify cvc5 discharge path (smt feature live)
-        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
+        run: python3 .github/scripts/verify_release_smt.py --clarabel ./target/release/chelis
 
       - name: Release binary test fixture
         run: |
@@ -147,7 +147,7 @@ jobs:
       - name: Verify shipped tarball discharges via cvc5
         run: |
           set -euo pipefail
-          python3 .github/scripts/verify_release_smt.py \
+          python3 .github/scripts/verify_release_smt.py --clarabel \
             --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz"
 
       - name: Upload build artifact
@@ -211,12 +211,12 @@ jobs:
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime,clarabel-provider
 
       # Run before strip so the prove path exercises a functional
       # binary; the strip below only removes symbols.
       - name: Verify cvc5 discharge path (smt feature live)
-        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
+        run: python3 .github/scripts/verify_release_smt.py --clarabel ./target/release/chelis
 
       # Runs the built binary inside the glibc-2.31 container, proving the
       # shipped artifact actually loads and works on the oldest supported
@@ -278,7 +278,7 @@ jobs:
       - name: Verify shipped tarball discharges via cvc5
         run: |
           set -euo pipefail
-          python3 .github/scripts/verify_release_smt.py \
+          python3 .github/scripts/verify_release_smt.py --clarabel \
             --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64-glibc2.31.tar.gz"
 
       - name: Upload build artifact
@@ -323,7 +323,7 @@ jobs:
       - name: Build chelis-cli (release, smt, static)
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime --target x86_64-unknown-linux-gnu
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime,clarabel-provider --target x86_64-unknown-linux-gnu
 
       # WS-B (chelis#164): the bootstrap installer
       # (crates/chelisup/bootstrap/chelisup.sh) downloads a BARE executable
@@ -354,7 +354,7 @@ jobs:
       # Run before strip so the prove path exercises a functional
       # binary; the strip below only removes symbols.
       - name: Verify cvc5 discharge path (smt feature live)
-        run: python3 .github/scripts/verify_release_smt.py ./target/x86_64-unknown-linux-gnu/release/chelis
+        run: python3 .github/scripts/verify_release_smt.py --clarabel ./target/x86_64-unknown-linux-gnu/release/chelis
 
       - name: Release binary test fixture
         run: |
@@ -401,7 +401,7 @@ jobs:
       - name: Verify shipped tarball discharges via cvc5
         run: |
           set -euo pipefail
-          python3 .github/scripts/verify_release_smt.py \
+          python3 .github/scripts/verify_release_smt.py --clarabel \
             --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64-static.tar.gz"
 
       - name: Stage chelisup asset (bare executable + sha256 + bootstrap script)
@@ -474,7 +474,7 @@ jobs:
       # chelis#1004 fetch-retry rationale. `cargo rustc` passes +crt-static to
       # the final chelis only.
       - name: Build chelis-cli (release, smt, static musl)
-        run: docker exec --env 'RUSTFLAGS=-C target-feature=-crt-static' musl python3 scripts/ci_cvc5_build.py -- cargo rustc --release -p chelis-cli --features smt,sealed-runtime --bin chelis -- -C target-feature=+crt-static
+        run: docker exec --env 'RUSTFLAGS=-C target-feature=-crt-static' musl python3 scripts/ci_cvc5_build.py -- cargo rustc --release -p chelis-cli --features smt,sealed-runtime,clarabel-provider --bin chelis -- -C target-feature=+crt-static
 
       - name: Require a static executable
         run: |
@@ -499,7 +499,7 @@ jobs:
       # Run before strip so the prove path exercises a functional
       # binary; the strip below only removes symbols.
       - name: Verify cvc5 discharge path (smt feature live)
-        run: docker exec musl python3 .github/scripts/verify_release_smt.py ./target/release/chelis
+        run: docker exec musl python3 .github/scripts/verify_release_smt.py --clarabel ./target/release/chelis
 
       - name: Release binary test fixture
         run: docker exec --workdir /work/crates/chelis-cli/tests/fixtures/release_pipe_stage musl ../../../../../target/release/chelis test tests
@@ -543,7 +543,7 @@ jobs:
       # Verify the SHIPPED artifact on musl: the stripped binary inside the
       # tarball still discharges via cvc5 (chelis#422).
       - name: Verify shipped tarball discharges via cvc5
-        run: docker exec musl python3 .github/scripts/verify_release_smt.py --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64-musl.tar.gz"
+        run: docker exec musl python3 .github/scripts/verify_release_smt.py --clarabel --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64-musl.tar.gz"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
@@ -585,7 +585,7 @@ jobs:
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime,clarabel-provider
 
       # WS-B (chelis#164): darwin half of the bare `chelisup-<slug>`
       # bootstrap asset — see the static Linux job for the convention.
@@ -593,7 +593,7 @@ jobs:
         run: cargo build --release -p chelisup
 
       - name: Verify cvc5 discharge path (smt feature live)
-        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
+        run: python3 .github/scripts/verify_release_smt.py --clarabel ./target/release/chelis
 
       - name: Release binary test fixture
         run: |
@@ -656,7 +656,7 @@ jobs:
       - name: Verify shipped tarball discharges via cvc5
         run: |
           set -euo pipefail
-          python3 .github/scripts/verify_release_smt.py \
+          python3 .github/scripts/verify_release_smt.py --clarabel \
             --tarball "chelis-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz"
 
       - name: Stage chelisup asset (bare executable + sha256)

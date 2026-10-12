@@ -14,6 +14,7 @@ CI_CONTRACT_EXACT_PATHS: frozenset[str] = frozenset(
         ".config/ci-test-targets.toml",
         ".github/scripts/secret_scan.py",
         ".github/scripts/verify_release_smt.py",
+        ".github/scripts/test_verify_release_smt.py",
         "AGENTS.md",
         "agent-skills/redteam-exec/SKILL.md",
         "docs/ci_validation.md",
