@@ -19258,6 +19258,20 @@ impl<'program> LowerCtx<'program> {
     ) -> Option<LoweredValue> {
         let state = self.lower_expr(init).as_single_node()?;
         let state_ty = self.dag.get(state)?.output_type.clone();
+        // The seed is only the first value of the recurrence. A wildcard
+        // callback formal can receive a differently sized result on the next
+        // invocation, so its private Load must retain the authored formal
+        // rather than borrowing the seed's concrete extent.
+        let state_formal_ty = callback
+            .parameter_type(0)
+            .map(|formal| {
+                Self::type_from_type_expr_with_subst(
+                    formal,
+                    &self.prec_substitutions,
+                    &self.rank_substitutions,
+                )
+            })
+            .unwrap_or_else(|| state_ty.clone());
         let source_ty = self.dag.get(source)?.output_type.clone();
         let item_ty = TensorType {
             dims: source_ty.dims.get(1..)?.to_vec(),
@@ -19282,7 +19296,7 @@ impl<'program> LowerCtx<'program> {
         subctx.prec_substitutions = self.prec_substitutions.clone();
         subctx.rank_substitutions = self.rank_substitutions.clone();
         let mut param_ids = Vec::new();
-        for (param, ty) in params.iter().zip([state_ty.clone(), item_ty]) {
+        for (param, ty) in params.iter().zip([state_formal_ty.clone(), item_ty]) {
             subctx.interface_loads.insert(param.clone());
             let load = subctx.dag.add_node(
                 subctx.owner(),
@@ -19392,6 +19406,16 @@ impl<'program> LowerCtx<'program> {
     ) -> Option<LoweredValue> {
         let state = self.lower_expr(init).as_single_node()?;
         let state_ty = self.dag.get(state)?.output_type.clone();
+        let state_formal_ty = callback
+            .parameter_type(0)
+            .map(|formal| {
+                Self::type_from_type_expr_with_subst(
+                    formal,
+                    &self.prec_substitutions,
+                    &self.rank_substitutions,
+                )
+            })
+            .unwrap_or_else(|| state_ty.clone());
         let columns = recursive_list_leaf_nodes(element);
         let item_types = columns
             .iter()
@@ -19428,7 +19452,7 @@ impl<'program> LowerCtx<'program> {
                 name: params[0].as_str().into(),
             },
             vec![],
-            state_ty,
+            state_formal_ty,
             subctx.current_span_id.clone(),
         );
         subctx

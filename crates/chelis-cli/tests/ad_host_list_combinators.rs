@@ -845,6 +845,7 @@ def derivative(model: tensor[1, f32] -> i64 -> f32, n: i64, theta: tensor[1, f32
   target = fn (local: tensor[1, f32]) -> model(local, n)
   grad(target, wrt=local)(theta)
 }
+
 g0 = derivative(loss, 0i64, to_tensor([2.0], f32))
 g1 = derivative(loss, 1i64, to_tensor([2.0], f32))
 g3 = derivative(loss, 3i64, to_tensor([2.0], f32))
@@ -868,6 +869,78 @@ g3 = derivative(loss, 3i64, to_tensor([2.0], f32))
     }
 }
 
+#[test]
+fn c_grad_growing_wildcard_fold_state_uses_each_executed_extent() {
+    // [05-OP-55]: the next invocation receives the previous result, even
+    // when a wildcard accumulator changes extent between invocations.
+    let source = "\
+def fold_value(x: f32, n: i64) -> tensor[*, f32] = fold(fn (acc: tensor[*, f32], i: i64) -> insert(scalar_to_tensor(x), 0i32, add(i, 1i64)), insert(scalar_to_tensor(0.0f32), 0i32, 1i64), range(0i64, n))
+def loss(x: f32, n: i64) -> f32 = tensor_to_scalar(sum(fold_value(x, n), 0i32))
+def derivative(n: i64, theta: tensor[1, f32]) -> tensor[1, f32] = {
+  target = fn (local: tensor[1, f32]) -> loss(tensor_to_scalar(sum(local, 0i32)), n)
+  grad(target, wrt=local)(theta)
+}
+g0 = derivative(0i64, to_tensor([2.0f32]))
+g1 = derivative(1i64, to_tensor([2.0f32]))
+g3 = derivative(3i64, to_tensor([2.0f32]))
+";
+    let evaluated = eval_source(source, "wildcard_growing_fold_eval");
+    let compiled = build_and_run_c_source(source, "wildcard_growing_fold_c");
+    assert!(
+        compiled.status.success(),
+        "C growing fold failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let compiled = String::from_utf8(compiled.stdout).expect("C stdout utf-8");
+    for output in [&evaluated, &compiled] {
+        for (name, expected) in [("g0", 0.0), ("g1", 1.0), ("g3", 3.0)] {
+            assert_close(&parse_tensor_data(output, name), &[expected], 1e-6, name);
+        }
+    }
+}
+
+#[test]
+fn growing_fold_state_must_still_respect_a_concrete_callback_formal() {
+    // A statically known length-two seed cannot enter a callback that
+    // requires `acc: tensor[1]`; the private recurrence verifier keeps the
+    // concrete formal even when the outer function returns a wildcard.
+    let source = "\
+def loss(x: f32, n: i64) -> f32 = tensor_to_scalar(sum(fold(fn (acc: tensor[1, f32], i: i64) -> acc, insert(scalar_to_tensor(x), 0i32, n), range(0i64, 1i64)), 0i32))
+def derivative(theta: tensor[1, f32]) -> tensor[1, f32] = {
+  target = fn (local: tensor[1, f32]) -> loss(tensor_to_scalar(sum(local, 0i32)), 2i64)
+  grad(target, wrt=local)(theta)
+}
+g = derivative(to_tensor([2.0f32]))
+";
+    let eval = eval_failure(source, "concrete_growing_fold_eval");
+    assert!(
+        eval.contains("runtime recurrence") && eval.contains("matching state"),
+        "Eval must reject a statically contradictory seed/formal: {eval}"
+    );
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("concrete_growing_fold.ch");
+    write_file(&path, source);
+    let compiled = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("out").to_str().unwrap(),
+        ])
+        .output()
+        .expect("C build should run");
+    assert!(!compiled.status.success(), "C build unexpectedly succeeded");
+    let stderr = String::from_utf8_lossy(&compiled.stderr);
+    assert!(
+        stderr.contains("runtime recurrence") && stderr.contains("matching state"),
+        "C build must reject the same contradictory seed/formal: {stderr}"
+    );
+}
 #[test]
 fn c_grad_runtime_range_keeps_taped_capture_owned_across_two_roots() {
     let source = "\

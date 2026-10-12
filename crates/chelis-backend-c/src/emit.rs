@@ -587,6 +587,14 @@ impl CEmitter {
         } else {
             self.line(&format!("chelis_tensor *t{id} = t{id}_rec_state;"));
         }
+        // A fold can finish at the seed (zero visits) or at any recorded
+        // callback result. Declare its computed extent from the realized
+        // result, after the exact recurrence has run, before a consumer uses
+        // the fresh anonymous name for its own shape checks or allocation.
+        let result_extents = (0..node.output_type.dims.len())
+            .map(|axis| (axis, format!("chelis_tensor_shape(t{id}, {axis})")))
+            .collect::<Vec<_>>();
+        self.emit_runtime_dim_sites(id, &result_extents);
         self.emit_tensor_snapshot(id, false);
         Ok(())
     }
