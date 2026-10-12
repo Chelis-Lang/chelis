@@ -602,12 +602,12 @@ impl<'a> EvalContext<'a> {
                 .with_adt_registry(&self.adt_registry)
             }
         });
-        let lower_result = chelis_ir::lower::try_lower_subexpr_program_with_context(
+        let lower_result = chelis_ir::lower::try_lower_subexpr_program_with_context_and_controls(
             &app_expr,
             scoped_types,
             &lowering,
         );
-        let dag = match lower_result {
+        let lowered = match lower_result {
             Ok(result) => result,
             Err(diagnostic) => {
                 let kind_label = match kind {
@@ -620,6 +620,7 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         };
+        let dag = lowered.dag();
         // An observable root (spec/06 section 5.2: an abort, or a node that
         // can trap) must execute, so a graph that holds one executes even
         // when it has no roots.
@@ -635,12 +636,13 @@ impl<'a> EvalContext<'a> {
         // captured by the inner fn body).
         let tensor_bindings = self.tensor_bindings;
         let roots: Vec<chelis_ir::dag::NodeId> = dag.roots().to_vec();
-        let root_producers: Vec<Option<ResultProducer>> = roots
+        let value_roots = lowered.value_roots().to_vec();
+        let root_producers: Vec<Option<ResultProducer>> = value_roots
             .iter()
             .map(|root| tensor_result_producer(&dag, *root))
             .collect();
         let mut empty_packed = None;
-        if roots.is_empty() {
+        if value_roots.is_empty() {
             // Preserve the historical empty-root early-return behavior. In
             // particular, [] must not turn an empty legacy grad into ALL-node
             // input preparation. A graph with an observable root still
@@ -663,7 +665,7 @@ impl<'a> EvalContext<'a> {
                 } else {
                     RuntimeValue::Tuple(empty_slots.collect::<Result<_, _>>()?)
                 };
-                if !observes {
+                if !observes && roots.is_empty() {
                     return Ok(packed);
                 }
                 empty_packed = Some(packed);
@@ -828,6 +830,7 @@ impl<'a> EvalContext<'a> {
             };
             format!("host runtime `{kind_label}` evaluation failed: {err}")
         })?;
+        lowered.check_list_controls(&values)?;
         if let Some(packed) = empty_packed {
             return Ok(packed);
         }
@@ -837,7 +840,7 @@ impl<'a> EvalContext<'a> {
             TransformKind::Grad => "grad",
             TransformKind::Vmap => "vmap",
         };
-        let packed = pack_dag_roots(&dag, &roots, &values, kind_label)?;
+        let packed = pack_dag_roots(&dag, &value_roots, &values, kind_label)?;
         // Restore every selected target's cotangent carrier and recursive
         // shape, including scalar leaves. DAG rank alone cannot distinguish
         // a scalar from a genuine rank-zero tensor (spec/06 §2.1).

@@ -2197,7 +2197,9 @@ pub(crate) fn prepare_checked_subexpr_lowering_context(
     context
 }
 
-pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
+/// Lower a transform application with its ordered runtime List checks.
+/// The same control roots must be checked by Eval and compiled targets.
+pub fn try_lower_subexpr_program_with_context_and_controls(
     expr: &Expr,
     scoped_tensor_types: UnordMap<String, TensorType>,
     context: &SubexprLoweringContext,
@@ -7764,10 +7766,101 @@ pub(crate) enum RuntimeListCheckDescriptor {
     },
 }
 
-pub(crate) struct LoweredSubexprWithControls {
+/// A lowered value and the runtime List checks attached to its execution.
+pub struct LoweredSubexprWithControls {
     pub(crate) dag: Dag,
     pub(crate) value_root_count: usize,
     pub(crate) list_checks: Vec<RuntimeListCheckDescriptor>,
+}
+
+impl LoweredSubexprWithControls {
+    /// The graph whose roots contain value leaves followed by List controls.
+    pub fn dag(&self) -> &Dag {
+        &self.dag
+    }
+
+    /// The value roots, before any appended List controls.
+    pub fn value_roots(&self) -> &[NodeId] {
+        &self.dag.roots()[..self.value_root_count]
+    }
+
+    /// Render the first active runtime List failure in source order.
+    pub fn check_list_controls(
+        &self,
+        values: &UnordMap<NodeId, crate::eval::TensorValue>,
+    ) -> Result<(), String> {
+        let roots = self.dag.roots();
+        let mut offset = self.value_root_count;
+        let scalar_i64 = |root: NodeId| -> Result<i64, String> {
+            let value = values
+                .get(&root)
+                .ok_or_else(|| "runtime List check value root was not evaluated".to_string())?;
+            if !value.shape.is_empty() {
+                return Err("runtime List check value is not scalar".into());
+            }
+            value
+                .storage()
+                .scalar_at(0)
+                .as_i64_exact()
+                .ok_or_else(|| "runtime List check value is not i64".into())
+        };
+        let scalar_bool = |root: NodeId| -> Result<bool, String> {
+            let value = values
+                .get(&root)
+                .ok_or_else(|| "runtime List activation root was not evaluated".to_string())?;
+            if !value.shape.is_empty() {
+                return Err("runtime List activation is not scalar".into());
+            }
+            value
+                .storage()
+                .scalar_at(0)
+                .as_bool_exact()
+                .ok_or_else(|| "runtime List activation is not bool".into())
+        };
+        for check in &self.list_checks {
+            match check {
+                RuntimeListCheckDescriptor::NonNegative {
+                    operation,
+                    argument,
+                    guarded,
+                } => {
+                    let value = scalar_i64(roots[offset])?;
+                    offset += 1;
+                    let active = if *guarded {
+                        let active = scalar_bool(roots[offset])?;
+                        offset += 1;
+                        active
+                    } else {
+                        true
+                    };
+                    if active && value < 0 {
+                        return Err(chelis_abi::failure::list_argument_negative(
+                            operation, argument, value,
+                        ));
+                    }
+                }
+                RuntimeListCheckDescriptor::IndexBounds { guarded } => {
+                    let index = scalar_i64(roots[offset])?;
+                    let len = scalar_i64(roots[offset + 1])?;
+                    offset += 2;
+                    let active = if *guarded {
+                        let active = scalar_bool(roots[offset])?;
+                        offset += 1;
+                        active
+                    } else {
+                        true
+                    };
+                    if active && index >= len {
+                        let len = usize::try_from(len)
+                            .map_err(|_| "runtime List length is negative".to_string())?;
+                        return Err(chelis_abi::failure::list_index_out_of_bounds(index, len));
+                    }
+                }
+            }
+        }
+        debug_assert_eq!(offset, roots.len());
+        Ok(())
+    }
 }
 
 impl LoweredValue {
@@ -18361,7 +18454,11 @@ impl<'program> LowerCtx<'program> {
                 let column_ty = self.dag.get(*column)?.output_type.clone();
                 let (_, tail) = column_ty.dims.split_first()?;
                 let padded = self.dag.add_node(
-                    self.owner(),
+                    // The Gather is evaluated eagerly even when its source
+                    // branch is inactive. Its private safety row must exist
+                    // on every path; only the public bounds check is gated
+                    // by the branch activation.
+                    Owner::new(self.decl(), None),
                     RiscOp::zero_pad(
                         column_ty.precision,
                         std::iter::once((RtDim::Lit(0), RtDim::Lit(1)))

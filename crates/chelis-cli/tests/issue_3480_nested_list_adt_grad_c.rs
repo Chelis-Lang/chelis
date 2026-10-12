@@ -153,6 +153,38 @@ def step(p: Model) -> Model = grad(loss)(p)
 out = step(Model { blocks: [], scale: 3.0f32 })
 "#;
 
+const NESTED_GUARDED_INDEX: &str = r#"module Repro.NestedGuardGradient
+import Std.Index (list_index)
+type Block =
+  | Block { w: f32 }
+type Model =
+  | Model { blocks: List[Block], flag: i64, secondary: i64, selected: i64 }
+def loss(p: Model) -> f32 =
+  if eq(p.flag, 0i64) then 0.0f32 else if eq(p.secondary, 0i64) then {
+    bad = list_index(p.blocks, p.selected)
+    mul(bad.w, bad.w)
+  } else {
+    good = list_index(p.blocks, 0i64)
+    mul(good.w, good.w)
+  }
+def step(p: Model) -> Model = grad(loss)(p)
+out = step(Model { blocks: [Block { w: 3.0f32 }], flag: 0i64, secondary: 0i64, selected: 3i64 })
+"#;
+
+const DYNAMIC_INDEX_OOB: &str = r#"module Repro.DynamicOobGradient
+import Std.Index (list_index)
+type Block =
+  | Block { w: f32 }
+type Model =
+  | Model { blocks: List[Block], selected: i64 }
+def loss(p: Model) -> f32 = {
+  item = list_index(p.blocks, p.selected)
+  mul(item.w, item.w)
+}
+def step(p: Model) -> Model = grad(loss)(p)
+out = step(Model { blocks: [Block { w: 3.0f32 }], selected: 3i64 })
+"#;
+
 #[test]
 fn nested_list_adt_gradient_preserves_runtime_length_order_and_zero_elements() {
     let dir = tempdir().unwrap();
@@ -500,6 +532,117 @@ fn live_discrete_column_without_extent_is_a_typed_c_refusal() {
             "{stderr}"
         );
         assert!(stderr.contains("chelis#3480"), "{stderr}");
+    }
+}
+
+#[test]
+fn nested_inactive_list_index_never_runs_its_private_gather() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("nested_inactive.ch");
+    write_file(&path, NESTED_GUARDED_INDEX);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        eval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let expected = String::from_utf8(eval.stdout).unwrap();
+    assert!(expected.contains("out = Model([Block(0.0)]"), "{expected}");
+    if gcc_available() {
+        assert_eq!(
+            build_and_run(NESTED_GUARDED_INDEX, "nested_inactive"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn nested_active_good_list_index_preserves_the_selected_gradient() {
+    let source = NESTED_GUARDED_INDEX.replace(
+        "flag: 0i64, secondary: 0i64, selected: 3i64",
+        "flag: 1i64, secondary: 1i64, selected: 3i64",
+    );
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("nested_good.ch");
+    write_file(&path, &source);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        eval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let expected = String::from_utf8(eval.stdout).unwrap();
+    assert!(expected.contains("out = Model([Block(6.0)]"), "{expected}");
+    if gcc_available() {
+        assert_eq!(build_and_run(&source, "nested_good"), expected);
+    }
+}
+
+#[test]
+fn active_dynamic_list_index_matches_direct_loss_bounds_failure() {
+    let direct = DYNAMIC_INDEX_OOB.replace("out = step(", "out = loss(");
+    let dir = tempdir().unwrap();
+    for (name, source) in [("grad_oob", DYNAMIC_INDEX_OOB), ("direct_oob", &direct)] {
+        let path = dir.path().join(format!("{name}.ch"));
+        write_file(&path, source);
+        let eval = Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["eval", "--file", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            !eval.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&eval.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&eval.stderr)
+                .contains("index 3 out of bounds for list of len 1"),
+            "{name}: {}",
+            String::from_utf8_lossy(&eval.stderr)
+        );
+        if gcc_available() {
+            let output = dir.path().join(format!("{name}-out"));
+            let build = Command::cargo_bin("chelis")
+                .unwrap()
+                .args([
+                    "build",
+                    path.to_str().unwrap(),
+                    "--target",
+                    "c",
+                    "--output",
+                    output.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                build.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            let run = std::process::Command::new(output.join(name))
+                .output()
+                .unwrap();
+            assert!(
+                !run.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&run.stdout)
+            );
+            assert!(
+                String::from_utf8_lossy(&run.stderr)
+                    .contains("index 3 out of bounds for list of len 1"),
+                "{name}: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+        }
     }
 }
 
