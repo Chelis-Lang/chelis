@@ -71,7 +71,7 @@ let
       additionalCargoNixArgs = [
         "--no-default-features"
         "--features"
-        "chelis-cli/smt"
+        "chelis-cli/distribution"
       ];
     }).overrideAttrs
       (_: {
@@ -83,8 +83,7 @@ let
   };
   compilerCrate = cargoGraph.workspaceMembers."chelis-cli".build.override {
     features = [
-      "smt"
-      "sealed-runtime"
+      "distribution"
     ];
   };
   chelisupCrate = cargoGraph.workspaceMembers."chelisup".build.override {

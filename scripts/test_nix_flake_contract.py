@@ -72,7 +72,7 @@ def assert_automatic_crate2nix_contract(
         "additionalCargoNixArgs",
         '"--no-default-features"',
         '"--features"',
-        '"chelis-cli/smt"',
+        '"chelis-cli/distribution"',
         'CARGO_NET_OFFLINE = "true";',
         "import generatedCargoNix",
     )

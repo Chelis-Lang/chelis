@@ -15,6 +15,8 @@ The JSON shapes below are copied verbatim from real
 from __future__ import annotations
 
 import importlib.util
+import re
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -148,10 +150,19 @@ class ClarabelReleaseRecordTest(unittest.TestCase):
             self.assertFalse(VRS.record_is_clarabel_ideal_proof(changed))
 
     def test_each_release_binary_is_built_and_checked_with_provider(self) -> None:
-        workflow = (Path(__file__).resolve().parents[1] / "workflows/release.yml").read_text()
-        self.assertEqual(workflow.count("--features smt,sealed-runtime,clarabel-provider"), 5)
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / ".github/workflows/release.yml").read_text()
+        manifest = tomllib.loads((root / "crates/chelis-cli/Cargo.toml").read_text())
+        self.assertLessEqual(
+            {"smt", "sealed-runtime", "clarabel-provider"},
+            set(manifest["features"]["distribution"]),
+        )
+        selected = re.findall(
+            r"cargo (?:build|rustc) --release -p chelis-cli --features (\S+)", workflow
+        )
+        self.assertEqual(selected, ["distribution"] * 5)
+        self.assertEqual(len(re.findall(r"-p chelis-cli\b", workflow)), 5)
         self.assertEqual(workflow.count("verify_release_smt.py --clarabel"), 10)
-        self.assertNotIn("--features smt,sealed-runtime\n", workflow)
 
 
 class ParseRecordsTest(unittest.TestCase):

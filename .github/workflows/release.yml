@@ -76,11 +76,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # `--features smt` links cvc5 so the shipped `chelis prove` uses
-      # the SMT solver instead of degrading to the solver-free fuzz path
-      # (chelis#422). WI-11: the cvc5-sys build forces GMP and disables
-      # the GPL CLN path (ENABLE_GPL=OFF, USE_CLN=OFF), so the artifact
-      # is distributable. The verify step below proves the feature is
+      # `--features distribution` builds the feature set that every
+      # distributed compiler ships (crates/chelis-cli/Cargo.toml).
+      # Its `smt` feature links cvc5. Thus the shipped `chelis prove` uses
+      # the SMT solver and not the solver-free fuzz path (chelis#422).
+      # WI-11: the cvc5-sys build uses GMP and no GPL CLN code
+      # (ENABLE_GPL=OFF, USE_CLN=OFF), so the artifact is distributable.
+      # The set also seals the carried runtime and carries the Clarabel
+      # provider. The verify step below proves that cvc5 and Clarabel are
       # live in the shipped binary.
       #
       # Wrapped in scripts/ci_cvc5_build.py (chelis#1004): the cold build
@@ -90,7 +93,7 @@ jobs:
       # failure still fails on the first attempt, so this job remains the
       # cold-build proof docs/smt_build_setup.md says it is.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime,clarabel-provider
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features distribution
 
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py --clarabel ./target/release/chelis
@@ -211,7 +214,7 @@ jobs:
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime,clarabel-provider
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features distribution
 
       # Run before strip so the prove path exercises a functional
       # binary; the strip below only removes symbols.
@@ -323,7 +326,7 @@ jobs:
       - name: Build chelis-cli (release, smt, static)
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime,clarabel-provider --target x86_64-unknown-linux-gnu
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features distribution --target x86_64-unknown-linux-gnu
 
       # WS-B (chelis#164): the bootstrap installer
       # (crates/chelisup/bootstrap/chelisup.sh) downloads a BARE executable
@@ -474,7 +477,7 @@ jobs:
       # chelis#1004 fetch-retry rationale. `cargo rustc` passes +crt-static to
       # the final chelis only.
       - name: Build chelis-cli (release, smt, static musl)
-        run: docker exec --env 'RUSTFLAGS=-C target-feature=-crt-static' musl python3 scripts/ci_cvc5_build.py -- cargo rustc --release -p chelis-cli --features smt,sealed-runtime,clarabel-provider --bin chelis -- -C target-feature=+crt-static
+        run: docker exec --env 'RUSTFLAGS=-C target-feature=-crt-static' musl python3 scripts/ci_cvc5_build.py -- cargo rustc --release -p chelis-cli --features distribution --bin chelis -- -C target-feature=+crt-static
 
       - name: Require a static executable
         run: |
@@ -585,7 +588,7 @@ jobs:
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime,clarabel-provider
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features distribution
 
       # WS-B (chelis#164): darwin half of the bare `chelisup-<slug>`
       # bootstrap asset — see the static Linux job for the convention.
