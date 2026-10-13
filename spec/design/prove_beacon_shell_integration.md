@@ -65,9 +65,9 @@ separately specified selection policy exists.
 
 ## Published binary compatibility
 
-Beacon's source parser accepts Chelis WireDag schema 27 and the live
-[Chelis-to-Beacon seam gate](https://github.com/Chelis-Lang/beacon/actions/runs/37652862933)
-exercises a built binary. A source gate alone does not qualify a release
+Beacon's source parser accepts the WireDag schema emitted by the candidate
+Chelis compiler, and the live Chelis-to-Beacon seam gate exercises a built
+binary. A source gate alone does not qualify a release
 asset. Release acceptance records the Chelis compiler revision, emitted
 schema, Beacon revision, binary digest, platform, protocol version, and
 enabled proof features as one compatibility tuple. Chelis preflights the
@@ -76,7 +76,7 @@ from the Beacon package version or the Chelis compiler pin.
 
 For each supported published platform, the release acceptance job downloads
 the public asset anonymously, verifies its recorded digest, runs
-`protocol --json` and `--schema-versions`, and sends a real schema-27 Chelis
+`protocol --json` and `--schema-versions`, and sends a real compiler-emitted Chelis
 graph through the shim. The job
 includes a true goal, a false goal, and an unsupported-operation control. It
 uses the downloaded executable, not the source-tree target or a test double.

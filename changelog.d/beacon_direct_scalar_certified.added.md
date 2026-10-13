@@ -1,0 +1,1 @@
+Beacon-only scalar properties can extract checked local bindings, scalar conditionals, literal casts, and Chelis's standard normal CDF graph from imported functions. The certified Arb route proves direct Black–Scholes bounds and reports verified point counterexamples with a real-arithmetic qualifier. See [#3598](https://github.com/Chelis-Lang/chelis/issues/3598).

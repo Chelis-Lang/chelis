@@ -82,6 +82,8 @@ pub enum BeaconOracleMode {
     VerifiedZonotope,
     /// Directed-rounded scalar relaxation over real arithmetic (`relax`).
     ReluLinear,
+    /// Certified one-sided scalar Arb box cover (`scalar-upper-bound`).
+    ScalarCertified,
 }
 
 impl BeaconOracleMode {
@@ -90,6 +92,7 @@ impl BeaconOracleMode {
             Self::VerifiedDefaultArbBox => serde_json::Value::Null,
             Self::VerifiedZonotope => serde_json::json!("zonotope_verified"),
             Self::ReluLinear => serde_json::json!("relu_linear"),
+            Self::ScalarCertified => serde_json::Value::Null,
         }
     }
 }
@@ -280,17 +283,18 @@ impl BeaconShim {
         ops: &impl ProcessOps,
     ) -> SubprocessOutcome {
         // The temp file (if any) must outlive the child, so it is bound here.
-        let mut args = vec![std::ffi::OsString::from(
-            if self.oracle_mode == BeaconOracleMode::ReluLinear {
-                "relax"
-            } else {
-                "dispatch"
-            },
-        )];
+        let mut args = vec![std::ffi::OsString::from(match self.oracle_mode {
+            BeaconOracleMode::ReluLinear => "relax",
+            BeaconOracleMode::ScalarCertified => "scalar-upper-bound",
+            _ => "dispatch",
+        })];
 
         // Select the explicit file-path protocol for large requests. The
         // supervisor also backs the stdin protocol with a file.
-        let transport = if self.oracle_mode == BeaconOracleMode::ReluLinear {
+        let transport = if matches!(
+            self.oracle_mode,
+            BeaconOracleMode::ReluLinear | BeaconOracleMode::ScalarCertified
+        ) {
             // Beacon's relax CLI accepts a request path, not dispatch's `-` stdin form.
             RequestTransport::TempFile
         } else {
@@ -410,7 +414,7 @@ impl DischargeEngine for BeaconShim {
         // Beacon's native form is the box/range goal; the shim claims exactly
         // that shape and nothing else.
         match self.oracle_mode {
-            BeaconOracleMode::ReluLinear => {
+            BeaconOracleMode::ReluLinear | BeaconOracleMode::ScalarCertified => {
                 matches!(goal.shape, GoalShape::ScalarUpperBound { .. })
             }
             _ => matches!(goal.shape, GoalShape::BoxRange { .. }),
@@ -418,7 +422,10 @@ impl DischargeEngine for BeaconShim {
     }
 
     fn discharge(&self, goal: &Goal, timeout_ms: u64) -> Discharge {
-        if self.oracle_mode == BeaconOracleMode::ReluLinear {
+        if matches!(
+            self.oracle_mode,
+            BeaconOracleMode::ReluLinear | BeaconOracleMode::ScalarCertified
+        ) {
             return self.discharge_scalar_upper(goal, timeout_ms);
         }
         let GoalShape::BoxRange { inputs, output } = &goal.shape else {

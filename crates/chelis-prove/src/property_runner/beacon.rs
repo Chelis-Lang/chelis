@@ -647,8 +647,26 @@ pub(super) fn prove(
         let store = WireDagByteStore::new();
         let binary =
             std::env::var_os(crate::BEACON_BIN_ENV).ok_or("CHELIS_BEACON_BIN is not configured")?;
-        let shim = BeaconShim::new(std::path::PathBuf::from(binary), store.clone())
-            .with_oracle_mode(BeaconOracleMode::ReluLinear);
+        let certified = dag.nodes.iter().any(|node| {
+            !matches!(
+                node.op,
+                chelis_compiler_api::schema::WireRiscOp::Load { .. }
+                    | chelis_compiler_api::schema::WireRiscOp::Const { .. }
+                    | chelis_compiler_api::schema::WireRiscOp::Copy
+                    | chelis_compiler_api::schema::WireRiscOp::Add
+                    | chelis_compiler_api::schema::WireRiscOp::Neg
+                    | chelis_compiler_api::schema::WireRiscOp::Mul
+                    | chelis_compiler_api::schema::WireRiscOp::Div
+                    | chelis_compiler_api::schema::WireRiscOp::Relu
+            )
+        });
+        let mode = if certified {
+            BeaconOracleMode::ScalarCertified
+        } else {
+            BeaconOracleMode::ReluLinear
+        };
+        let shim =
+            BeaconShim::new(std::path::PathBuf::from(binary), store.clone()).with_oracle_mode(mode);
         let mut results = Vec::new();
         for (side, bound) in bounds {
             let mut side_dag = dag.clone();
@@ -739,6 +757,8 @@ pub(super) fn prove(
                 qualifiers = qualifiers.union(discharge.qualifier_set());
             }
             TierBResult::Disproved(model) => {
+                soundness = soundness.min(discharge.soundness());
+                qualifiers = qualifiers.union(discharge.qualifier_set());
                 status = PropertyStatus::Failed;
                 witness = Some(model.clone());
                 reason = Some(format!("{} Beacon bound was refuted", side.name()));
@@ -758,7 +778,8 @@ pub(super) fn prove(
             _ => {}
         }
     }
-    let base_discharge = (status == PropertyStatus::Passed).then_some((soundness, qualifiers));
+    let base_discharge = matches!(status, PropertyStatus::Passed | PropertyStatus::Failed)
+        .then_some((soundness, qualifiers));
     let mut outcome = PropertyOutcome::with_base_discharge(
         property.name.clone(),
         status,

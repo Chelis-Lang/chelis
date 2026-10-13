@@ -14,9 +14,11 @@ declarations, including imported pure scalar functions. The original scalar
 functions keep their ordinary host classification. This scalar extractor
 checks the linked declaration set before a property can receive a Beacon
 result, including when the shared runner is called directly or through Tide. It
-accepts finite typed scalar literals, variables, unary negation, addition,
-subtraction, multiplication, division, and direct calls in a pure same-dtype
-closure; other expressions report unsupported. Typed `f32` values are lifted
+accepts finite typed scalar literals, variables, unary negation, arithmetic,
+scalar local bindings, literal casts to the source dtype, finite scalar
+conditionals, selected numeric builtins, and direct calls in a pure same-dtype
+closure. `standard_normal_cdf` uses the shared §3.3 activation graph; unsupported
+expressions stay unsupported. Typed `f32` values are lifted
 exactly to the f64 proof graph; operations in that graph have real-arithmetic
 semantics rather than f32 execution semantics.
 Missing, duplicate or unrecognized constraints are rejected;
@@ -47,7 +49,8 @@ A one-sided bound does not acquire a fictitious finite lower limit.
 The exact WireDag bytes are addressed by SHA256 and a selected node ID. The shim verifies
 that binding, names and scalar types before adding the folded expression
 `output - upper` or `lower - output`. Its request keeps both the original output
-and folded roots, and the unsafe clause references only the folded root. A
+and folded roots. The linear request's unsafe clause references only the folded
+root; the certified Arb request selects that root explicitly. A
 two-sided property dispatches both obligations and passes only when both prove;
 evidence records each side separately. `selected_root` names the goal's selected
 node, `folded_root` names the appended comparison node, and authored property
@@ -55,16 +58,20 @@ evidence also names the original `source_output_root`. For a lower bound, the
 selected node is an appended negation of that source output. A confirmed violation refutes the range,
 while an unknown or unsupported side cannot be masked by the other side.
 
-Beacon's directed-rounded relaxation must exclude the folded nonnegative
-region to certify. This is a sufficient, deliberately strict check for a
-non-strict upper bound; equality can remain unknown. The returned proof has
+The arithmetic/ReLU cone uses Beacon's directed-rounded linear relaxation.
+Graphs with other admitted operations use Beacon's certified Arb box cover.
+Both routes require a strict negative upper bound on the folded root to certify
+the authored non-strict bound; equality can remain unknown. The returned proof has
 `RealArith` and renders `proven_modulo_real_arithmetic`. This covers real
 arithmetic on stored weights, not float32 or float64 execution.
 
-Unknown preserves reason, accumulated hull and the whole split tree. A
-confirmed witness strictly beyond a stated bound maps to refuted with its
-real-arithmetic qualification. A witness exactly on the boundary cannot refute
-the non-strict property.
+Unknown preserves the engine's reason and available search evidence. A
+confirmed Arb singleton witness strictly beyond a stated bound maps to refuted
+with its real-arithmetic qualification. A witness exactly on the boundary
+cannot refute the non-strict property. The certified route checks the response's
+DAG hash, selected folded root, strict limit, finite bound, complete nonempty
+leaf certificate, and in-domain singleton counterexamples before changing a
+property status.
 Unrecognized reports, unconfirmed witnesses, mismatched source bindings and
 abnormal proof exits fail closed. Large output captures must not block on a
 full pipe. The outer process deadline leaves five seconds beyond the requested
