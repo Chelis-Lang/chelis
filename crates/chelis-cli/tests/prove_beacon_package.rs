@@ -131,7 +131,15 @@ fn imported_call_uses_the_selected_linked_declaration_in_the_exact_graph() {
     let request: Value = serde_json::from_slice(&fs::read(&request_path).expect("Beacon request"))
         .expect("request JSON");
     assert_eq!(
-        record["engine_evidence"]["output_root"], request["dag"]["roots"][0],
+        record["engine_evidence"]["selected_root"], request["dag"]["roots"][0],
+        "{record}"
+    );
+    assert_eq!(
+        record["engine_evidence"]["source_output_root"], request["dag"]["roots"][0],
+        "{record}"
+    );
+    assert_eq!(
+        record["engine_evidence"]["folded_root"], request["dag"]["roots"][1],
         "{record}"
     );
     assert_eq!(

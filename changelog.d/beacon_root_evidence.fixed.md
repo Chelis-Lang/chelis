@@ -1,0 +1,1 @@
+Beacon scalar proof evidence identifies the selected goal root, the folded comparison root, and the authored source output separately. Lower-bound reports now expose the selected negation instead of mislabeling the original output as the selected root. See [#3475](https://github.com/Chelis-Lang/chelis/issues/3475).

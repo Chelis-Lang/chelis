@@ -44,12 +44,15 @@ The shared property runner lowers the expression's reachable source closure.
 its exact stored value in that tagged proof carrier. Its `IntervalBox` endpoints
 and the separate `BoxRange` output endpoints also use tagged `ScalarValue`.
 A one-sided bound does not acquire a fictitious finite lower limit.
-The exact WireDag bytes are addressed by SHA256 and a node ID. The shim verifies
+The exact WireDag bytes are addressed by SHA256 and a selected node ID. The shim verifies
 that binding, names and scalar types before adding the folded expression
 `output - upper` or `lower - output`. Its request keeps both the original output
 and folded roots, and the unsafe clause references only the folded root. A
 two-sided property dispatches both obligations and passes only when both prove;
-evidence records each side separately. A confirmed violation refutes the range,
+evidence records each side separately. `selected_root` names the goal's selected
+node, `folded_root` names the appended comparison node, and authored property
+evidence also names the original `source_output_root`. For a lower bound, the
+selected node is an appended negation of that source output. A confirmed violation refutes the range,
 while an unknown or unsupported side cannot be masked by the other side.
 
 Beacon's directed-rounded relaxation must exclude the folded nonnegative

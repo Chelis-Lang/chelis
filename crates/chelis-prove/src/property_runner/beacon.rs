@@ -720,9 +720,9 @@ pub(super) fn prove(
             );
             results.push((side, bound, discharge, folded_goal));
         }
-        Ok((results, input_bindings, source_binding, dtype))
+        Ok((results, input_bindings, source_binding, dtype, root))
     })();
-    let (results, input_bindings, source_binding, dtype) = match prepared {
+    let (results, input_bindings, source_binding, dtype, source_output_root) = match prepared {
         Ok(value) => value,
         Err(reason) => return fail(reason),
     };
@@ -774,6 +774,7 @@ pub(super) fn prove(
     let mut evidence = if results.len() == 1 {
         let (side, bound, discharge, folded_goal) = &results[0];
         let mut evidence = discharge.evidence().clone();
+        evidence["source_output_root"] = serde_json::json!(source_output_root);
         evidence["folded_goal"] = serde_json::json!(folded_goal);
         evidence["bound_side"] = serde_json::json!(side.name());
         evidence["source_bound"] = serde_json::json!(bound);
@@ -788,12 +789,14 @@ pub(super) fn prove(
                 TierBResult::Timeout => "timeout",
                 TierBResult::Error(_) => "error",
             };
+            let mut engine_evidence = discharge.evidence().clone();
+            engine_evidence["source_output_root"] = serde_json::json!(source_output_root);
             sides.insert(
                 side.name().into(),
                 serde_json::json!({
                     "source_bound": bound,
                     "folded_goal": folded_goal,
-                    "engine_evidence": discharge.evidence(),
+                    "engine_evidence": engine_evidence,
                     "result": result,
                 }),
             );
