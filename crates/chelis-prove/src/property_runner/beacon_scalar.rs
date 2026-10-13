@@ -3,10 +3,14 @@
 
 use super::*;
 use chelis_compiler_api::schema::{
-    WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagNode, WireRiscOp, WireTensorType,
+    WIRE_DAG_SCHEMA_VERSION, WireComparisonKind, WireDag, WireDagNode, WireRiscOp, WireTensorType,
 };
-use chelis_surf::ast::{LiteralSuffix, UnaryOp};
-use chelis_types::{dtype_semantics::scalar_from_f64, types::Prim};
+use chelis_surf::ast::{LetPattern, LiteralSuffix, UnaryOp};
+use chelis_types::{
+    activation::{ActivationGraph, DerivedActivation, lower_activation},
+    dtype_semantics::{FloatBinOp, FloatUnOp, scalar_from_f64},
+    types::Prim,
+};
 
 pub(super) fn lower(
     decls: &[Decl],
@@ -66,6 +70,16 @@ struct ScalarGraph<'a> {
 
 impl ScalarGraph<'_> {
     fn node(&mut self, declaration: u64, op: WireRiscOp, inputs: Vec<u64>) -> u64 {
+        self.typed_node(declaration, op, inputs, "f64")
+    }
+
+    fn typed_node(
+        &mut self,
+        declaration: u64,
+        op: WireRiscOp,
+        inputs: Vec<u64>,
+        precision: &str,
+    ) -> u64 {
         let id = self.dag.nodes.len() as u64;
         self.dag.nodes.push(WireDagNode {
             shape_deps: Vec::new(),
@@ -78,7 +92,7 @@ impl ScalarGraph<'_> {
             inputs,
             output_type: WireTensorType {
                 dims: Vec::new(),
-                precision: "f64".into(),
+                precision: precision.into(),
             },
         });
         id
@@ -119,16 +133,42 @@ impl ScalarGraph<'_> {
             {
                 // The proof graph is an f64 carrier for exact real arithmetic.
                 // Every finite f32 stored value widens to f64 without loss.
-                let stored =
-                    scalar_from_f64("Beacon source scalar constant", self.source_dtype, *value)
-                        .map_err(|error| error.to_string())?;
-                let value = scalar_from_f64(
-                    "Beacon scalar graph constant",
-                    Prim::F64,
-                    stored.as_f64_lossy(),
-                )
-                .map_err(|error| error.to_string())?;
-                Ok(self.node(declaration, WireRiscOp::Const { value }, vec![]))
+                self.constant(declaration, *value, self.source_dtype)
+            }
+            Expr::Cast(value, dtype, _, _)
+                if dtype == self.source_dtype.name()
+                    && matches!(value.as_ref(), Expr::Lit(Literal::Float(_), _)) =>
+            {
+                let Expr::Lit(Literal::Float(value), _) = value.as_ref() else {
+                    unreachable!("cast guard requires a bare float literal")
+                };
+                self.constant(declaration, *value, self.source_dtype)
+            }
+            Expr::Block(bindings_in_block, body, _) => {
+                let mut locals = bindings.clone();
+                for binding in bindings_in_block {
+                    let LetPattern::Var(name, _) = &binding.pattern else {
+                        return Err("Beacon scalar graph requires scalar local bindings".into());
+                    };
+                    let value = self.expression(&binding.value, &locals, declaration)?;
+                    if self.dag.nodes[value as usize].output_type.precision != "f64" {
+                        return Err("Beacon scalar local binding must be f64".into());
+                    }
+                    locals.insert(name.clone(), value);
+                }
+                self.expression(body, &locals, declaration)
+            }
+            Expr::If(condition, yes, no, _) => {
+                let condition = self.expression(condition, bindings, declaration)?;
+                let yes = self.expression(yes, bindings, declaration)?;
+                let no = self.expression(no, bindings, declaration)?;
+                if self.dag.nodes[condition as usize].output_type.precision != "bool"
+                    || self.dag.nodes[yes as usize].output_type.precision != "f64"
+                    || self.dag.nodes[no as usize].output_type.precision != "f64"
+                {
+                    return Err("Beacon scalar conditional requires a bool and f64 arms".into());
+                }
+                Ok(self.node(declaration, WireRiscOp::Where {}, vec![condition, yes, no]))
             }
             Expr::Unary(UnaryOp::Neg, value, _) => {
                 let value = self.expression(value, bindings, declaration)?;
@@ -168,6 +208,11 @@ impl ScalarGraph<'_> {
                     .iter()
                     .filter(|decl| matches!(decl, Decl::FunDef { name: defined, .. } if defined == name))
                     .collect::<Vec<_>>();
+                if candidates.is_empty()
+                    && let Some(result) = self.builtin(name, args, bindings, declaration)?
+                {
+                    return Ok(result);
+                }
                 let [
                     Decl::FunDef {
                         type_binders,
@@ -212,6 +257,145 @@ impl ScalarGraph<'_> {
                 result.map(|value| self.node(row, WireRiscOp::Copy, vec![value]))
             }
             _ => Err("Beacon scalar graph has an unsupported expression".into()),
+        }
+    }
+
+    fn constant(&mut self, declaration: u64, raw: f64, prim: Prim) -> Result<u64, String> {
+        let stored = scalar_from_f64("Beacon source scalar constant", prim, raw)
+            .map_err(|error| error.to_string())?;
+        let value = scalar_from_f64(
+            "Beacon scalar graph constant",
+            Prim::F64,
+            stored.as_f64_lossy(),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(self.node(declaration, WireRiscOp::Const { value }, vec![]))
+    }
+
+    fn builtin(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        bindings: &BTreeMap<String, u64>,
+        declaration: u64,
+    ) -> Result<Option<u64>, String> {
+        let arity = match name {
+            "neg" | "log" | "sqrt" | "exp" | "standard_normal_cdf" => 1,
+            "add" | "sub" | "mul" | "div" | "lt" => 2,
+            _ => return Ok(None),
+        };
+        if args.len() != arity {
+            return Err(format!("Beacon scalar builtin `{name}` has wrong arity"));
+        }
+        let operands = args
+            .iter()
+            .map(|arg| self.expression(arg, bindings, declaration))
+            .collect::<Result<Vec<_>, _>>()?;
+        if operands
+            .iter()
+            .any(|id| self.dag.nodes[*id as usize].output_type.precision != "f64")
+        {
+            return Err(format!(
+                "Beacon scalar builtin `{name}` requires f64 operands"
+            ));
+        }
+        let op = match name {
+            "neg" => WireRiscOp::Neg,
+            "log" => WireRiscOp::Log,
+            "sqrt" => WireRiscOp::Sqrt,
+            "exp" => WireRiscOp::Exp,
+            "add" => WireRiscOp::Add,
+            "sub" => WireRiscOp::Sub,
+            "mul" => WireRiscOp::Mul,
+            "div" => WireRiscOp::Div,
+            "lt" => WireRiscOp::Compare {
+                comparison: WireComparisonKind::Lt,
+            },
+            "standard_normal_cdf" => {
+                let mut graph = ScalarActivationGraph {
+                    graph: self,
+                    declaration,
+                };
+                return lower_activation(
+                    &mut graph,
+                    DerivedActivation::StandardNormalCdf,
+                    operands[0],
+                )
+                .map(Some);
+            }
+            _ => unreachable!("builtin arity admitted only known names"),
+        };
+        Ok(Some(if name == "lt" {
+            self.typed_node(declaration, op, operands, "bool")
+        } else {
+            self.node(declaration, op, operands)
+        }))
+    }
+}
+
+struct ScalarActivationGraph<'a, 'b> {
+    graph: &'a mut ScalarGraph<'b>,
+    declaration: u64,
+}
+
+impl ActivationGraph for ScalarActivationGraph<'_, '_> {
+    type Value = u64;
+    type Predicate = u64;
+    type Error = String;
+
+    fn operand_prim(&self) -> Prim {
+        self.graph.source_dtype
+    }
+
+    fn constant(&mut self, value: f64, prim: Prim) -> Result<u64, String> {
+        self.graph.constant(self.declaration, value, prim)
+    }
+
+    fn unary(&mut self, op: FloatUnOp, x: u64) -> Result<u64, String> {
+        let wire = match op {
+            FloatUnOp::Neg => WireRiscOp::Neg,
+            FloatUnOp::Abs => WireRiscOp::Abs,
+            FloatUnOp::Erfc => WireRiscOp::Erfc,
+            FloatUnOp::Exp => WireRiscOp::Exp,
+            _ => return Err(format!("Beacon scalar activation cannot lower `{op:?}`")),
+        };
+        Ok(self.graph.node(self.declaration, wire, vec![x]))
+    }
+
+    fn binary(&mut self, op: FloatBinOp, lhs: u64, rhs: u64) -> Result<u64, String> {
+        let wire = match op {
+            FloatBinOp::Add => WireRiscOp::Add,
+            FloatBinOp::Sub => WireRiscOp::Sub,
+            FloatBinOp::Mul => WireRiscOp::Mul,
+            _ => return Err(format!("Beacon scalar activation cannot lower `{op:?}`")),
+        };
+        Ok(self.graph.node(self.declaration, wire, vec![lhs, rhs]))
+    }
+
+    fn less_than(&mut self, lhs: u64, rhs: u64) -> Result<u64, String> {
+        Ok(self.graph.typed_node(
+            self.declaration,
+            WireRiscOp::Compare {
+                comparison: WireComparisonKind::CmpLt,
+            },
+            vec![lhs, rhs],
+            "bool",
+        ))
+    }
+
+    fn select(&mut self, condition: u64, yes: u64, no: u64) -> Result<u64, String> {
+        Ok(self.graph.node(
+            self.declaration,
+            WireRiscOp::Where {},
+            vec![condition, yes, no],
+        ))
+    }
+
+    fn convert(&mut self, x: u64, prim: Prim) -> Result<u64, String> {
+        if prim == self.graph.source_dtype {
+            Ok(x)
+        } else {
+            Err("Beacon scalar activation cannot change dtype".into())
         }
     }
 }
