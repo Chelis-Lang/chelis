@@ -725,6 +725,11 @@ fn parity_beacon_scalar_range_library_only() {
 }
 
 #[test]
+fn parity_record_sqrt_property_library_only() {
+    drive_parity(&examples_root().join("record_sqrt_property.ch"), false);
+}
+
+#[test]
 fn parity_linreg_library_only() {
     drive_parity(&examples_root().join("linreg.ch"), false);
 }
