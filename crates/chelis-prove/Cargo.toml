@@ -110,6 +110,7 @@ chelis-deep = { path = "../chelis-deep" }
 chelis-pred = { path = "../chelis-pred" }
 chelis-types = { path = "../chelis-types" }
 chelis-compiler-api = { path = "../chelis-compiler-api" }
+chelis-ir.workspace = true
 serde = { workspace = true }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"

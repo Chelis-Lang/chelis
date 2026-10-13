@@ -197,6 +197,15 @@ Mixed dtypes, narrowing, side effects, recursion without a certified
 unfolding, data-dependent shape, and calls outside the extracted closure are
 unsupported.
 
+A direct scalar `grad(f, wrt=x)(...)` extracts a symbolic forward graph from
+the checked linked declaration of `f`, runs the compiler's IR reverse-mode AD
+on that graph, and substitutes the call arguments after differentiation. The
+proof carrier admits the resulting adjoint only when every reachable forward
+and backward operation has an exact real translation. The declaration hash,
+original gradient output root, selected root, and folded bound root remain
+distinct evidence. This route does not infer a textbook derivative or assert
+rounded floating-point AD bounds.
+
 The proof-only graph uses the existing rank-zero f64 WireDag carrier. For an
 f32 source closure, extraction converts each checked f32 input endpoint and
 literal to its exact stored real value in that carrier before graph emission.

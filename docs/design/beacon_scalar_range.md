@@ -18,9 +18,15 @@ accepts finite typed scalar literals, variables, unary negation, arithmetic,
 scalar local bindings, literal casts to the source dtype, finite scalar
 conditionals, selected numeric builtins, and direct calls in a pure same-dtype
 closure. `standard_normal_cdf` uses the shared §3.3 activation graph; unsupported
-expressions stay unsupported. Typed `f32` values are lifted
+expressions stay unsupported. A direct `grad(f, wrt=x)(...)` call uses the
+compiler's reverse-mode IR transform on the checked source call graph before
+substituting the caller's arguments. It requires one explicit `wrt` parameter,
+a pure same-dtype scalar function, and an adjoint whose complete operation
+graph can be translated back to the scalar proof carrier. An unsupported
+forward or adjoint operation stops the proof before Beacon runs. Typed `f32` values are lifted
 exactly to the f64 proof graph; operations in that graph have real-arithmetic
-semantics rather than f32 execution semantics.
+semantics rather than f32 execution semantics. Compiler-generated AD constants
+are rounded to the source dtype before that lift.
 Missing, duplicate or unrecognized constraints are rejected;
 there is no SMT or fuzz fallback in this explicit lane.
 
