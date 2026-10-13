@@ -182,6 +182,108 @@ fn finite_interval(value: &Value) -> Option<(f64, f64)> {
     }
 }
 
+// A reported strict bound applies only to its own closed leaf box. Check the
+// union as a box cover; matching the number of leaves is not domain evidence.
+fn certified_leaves_cover_request(leaves: &[Value], request_inputs: &Value) -> bool {
+    const MAX_CERTIFIED_BOXES: usize = 256;
+    const MAX_COVER_ATOMS: usize = 100_000;
+    let Some(inputs) = request_inputs.as_object() else {
+        return false;
+    };
+    if inputs.is_empty() || leaves.is_empty() || leaves.len() > MAX_CERTIFIED_BOXES {
+        return false;
+    }
+    let Some(domain): Option<Vec<_>> = inputs.values().map(finite_interval).collect() else {
+        return false;
+    };
+    let Some(boxes): Option<Vec<Vec<_>>> = leaves
+        .iter()
+        .map(|leaf| {
+            let values = leaf["inputs"].as_object()?;
+            if values.len() != inputs.len() {
+                return None;
+            }
+            inputs
+                .keys()
+                .enumerate()
+                .map(|(axis, name)| {
+                    let (lo, hi) = finite_interval(values.get(name)?)?;
+                    let (domain_lo, domain_hi) = domain[axis];
+                    (domain_lo <= lo && hi <= domain_hi).then_some((lo, hi))
+                })
+                .collect()
+        })
+        .collect()
+    else {
+        return false;
+    };
+
+    fn covers_axis(
+        domain: &[(f64, f64)],
+        boxes: &[Vec<(f64, f64)>],
+        candidates: &[usize],
+        axis: usize,
+        budget: &mut usize,
+    ) -> bool {
+        if candidates.is_empty() || *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        if axis == domain.len() {
+            return true;
+        }
+        if candidates.iter().any(|&index| {
+            (axis..domain.len()).all(|remaining| {
+                boxes[index][remaining].0 <= domain[remaining].0
+                    && boxes[index][remaining].1 >= domain[remaining].1
+            })
+        }) {
+            return true;
+        }
+
+        let mut endpoints = vec![domain[axis].0, domain[axis].1];
+        for &index in candidates {
+            endpoints.extend([boxes[index][axis].0, boxes[index][axis].1]);
+        }
+        endpoints.sort_by(f64::total_cmp);
+        endpoints.dedup_by(|left, right| *left == *right);
+
+        for (position, &point) in endpoints.iter().enumerate() {
+            let at_point: Vec<_> = candidates
+                .iter()
+                .copied()
+                .filter(|&index| {
+                    let (lo, hi) = boxes[index][axis];
+                    lo <= point && point <= hi
+                })
+                .collect();
+            if !covers_axis(domain, boxes, &at_point, axis + 1, budget) {
+                return false;
+            }
+            if let Some(&next) = endpoints.get(position + 1) {
+                // No leaf endpoint lies inside this open span, so a leaf
+                // covers all of it exactly when it reaches both endpoints.
+                let across_span: Vec<_> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&index| {
+                        let (lo, hi) = boxes[index][axis];
+                        lo <= point && hi >= next
+                    })
+                    .collect();
+                if !covers_axis(domain, boxes, &across_span, axis + 1, budget) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    let candidates: Vec<_> = (0..boxes.len()).collect();
+    let mut budget = MAX_COVER_ATOMS;
+    covers_axis(&domain, &boxes, &candidates, 0, &mut budget)
+}
+
 fn map_certified_scalar(
     stdout: &str,
     stderr: &str,
@@ -265,10 +367,10 @@ fn map_certified_scalar(
         && !leaves.is_empty()
         && certificate["leaves_certified"].as_u64() == Some(leaves.len() as u64)
         && certificate["leaves_unresolved"].as_u64() == Some(0)
-        && leaves.iter().all(|leaf| {
-            finite_interval(&leaf["bound"]).is_some_and(|(_, hi)| hi < 0.0)
-                && leaf["inputs"].is_object()
-        });
+        && leaves
+            .iter()
+            .all(|leaf| finite_interval(&leaf["bound"]).is_some_and(|(_, hi)| hi < 0.0))
+        && certified_leaves_cover_request(leaves, request_inputs);
     if report["verdict"] != "certified" || !complete || !final_bound.is_some_and(|(_, hi)| hi < 0.0)
     {
         return untrusted_error("invalid or incomplete certified scalar report", evidence);
@@ -416,6 +518,98 @@ mod tests {
                 .result(),
             &TierBResult::Proved
         );
+    }
+
+    #[test]
+    fn certified_scalar_requires_exact_named_leaf_domains_and_full_cover() {
+        let input = json!({"s":{"lo":96.0,"hi":104.0}});
+        let mut report = certified_report();
+        let verdict = |report: &Value, input: &Value| {
+            map_certified_scalar(&report.to_string(), "", "request", "exact-dag", 7, input)
+        };
+
+        assert_eq!(verdict(&report, &input).result(), &TierBResult::Proved);
+
+        // Beacon may bisect a closed box: the shared boundary belongs to both leaves.
+        report["certificate"]["leaves"] = json!([
+            {"inputs":{"s":{"lo":96.0,"hi":100.0}},"bound":{"lo":-2.0,"hi":-0.5}},
+            {"inputs":{"s":{"lo":100.0,"hi":104.0}},"bound":{"lo":-2.0,"hi":-0.5}}
+        ]);
+        report["certificate"]["leaves_certified"] = json!(2);
+        assert_eq!(verdict(&report, &input).result(), &TierBResult::Proved);
+
+        for (label, leaves) in [
+            (
+                "narrow singleton",
+                json!([{"inputs":{"s":{"lo":100.0,"hi":100.0}},"bound":{"lo":-2.0,"hi":-0.5}}]),
+            ),
+            (
+                "empty names",
+                json!([{"inputs":{},"bound":{"lo":-2.0,"hi":-0.5}}]),
+            ),
+            (
+                "wrong name",
+                json!([{"inputs":{"wrong_name":{"lo":96.0,"hi":104.0}},"bound":{"lo":-2.0,"hi":-0.5}}]),
+            ),
+            (
+                "extra name",
+                json!([{"inputs":{"s":{"lo":96.0,"hi":104.0},"other":{"lo":0.0,"hi":1.0}},"bound":{"lo":-2.0,"hi":-0.5}}]),
+            ),
+            (
+                "outside box",
+                json!([{"inputs":{"s":{"lo":95.0,"hi":104.0}},"bound":{"lo":-2.0,"hi":-0.5}}]),
+            ),
+            (
+                "invalid endpoint",
+                json!([{"inputs":{"s":{"lo":null,"hi":104.0}},"bound":{"lo":-2.0,"hi":-0.5}}]),
+            ),
+            (
+                "gap between leaves",
+                json!([
+                    {"inputs":{"s":{"lo":96.0,"hi":99.0}},"bound":{"lo":-2.0,"hi":-0.5}},
+                    {"inputs":{"s":{"lo":100.0,"hi":104.0}},"bound":{"lo":-2.0,"hi":-0.5}}
+                ]),
+            ),
+            (
+                "missing endpoint",
+                json!([
+                    {"inputs":{"s":{"lo":96.0,"hi":100.0}},"bound":{"lo":-2.0,"hi":-0.5}},
+                    {"inputs":{"s":{"lo":101.0,"hi":104.0}},"bound":{"lo":-2.0,"hi":-0.5}}
+                ]),
+            ),
+        ] {
+            report["certificate"]["leaves_certified"] = json!(leaves.as_array().unwrap().len());
+            report["certificate"]["leaves"] = leaves;
+            assert_ne!(
+                verdict(&report, &input).result(),
+                &TierBResult::Proved,
+                "{label}"
+            );
+        }
+
+        // Real semantics include the open span between adjacent f64 values.
+        let next = f64::from_bits(100.0f64.to_bits() + 1);
+        report["certificate"]["leaves"] = json!([
+            {"inputs":{"s":{"lo":96.0,"hi":100.0}},"bound":{"lo":-2.0,"hi":-0.5}},
+            {"inputs":{"s":{"lo":next,"hi":104.0}},"bound":{"lo":-2.0,"hi":-0.5}}
+        ]);
+        report["certificate"]["leaves_certified"] = json!(2);
+        assert_ne!(verdict(&report, &input).result(), &TierBResult::Proved);
+
+        // A diagonal collection of boxes leaves an uncovered region even though
+        // each coordinate projection individually covers its full input interval.
+        let input = json!({"x":{"lo":0.0,"hi":2.0},"y":{"lo":0.0,"hi":2.0}});
+        report["certificate"]["leaves"] = json!([
+            {"inputs":{"x":{"lo":0.0,"hi":1.0},"y":{"lo":0.0,"hi":2.0}},"bound":{"lo":-2.0,"hi":-0.5}},
+            {"inputs":{"x":{"lo":1.0,"hi":2.0},"y":{"lo":0.0,"hi":2.0}},"bound":{"lo":-2.0,"hi":-0.5}}
+        ]);
+        report["certificate"]["leaves_certified"] = json!(2);
+        assert_eq!(verdict(&report, &input).result(), &TierBResult::Proved);
+        report["certificate"]["leaves"] = json!([
+            {"inputs":{"x":{"lo":0.0,"hi":1.0},"y":{"lo":0.0,"hi":1.0}},"bound":{"lo":-2.0,"hi":-0.5}},
+            {"inputs":{"x":{"lo":1.0,"hi":2.0},"y":{"lo":1.0,"hi":2.0}},"bound":{"lo":-2.0,"hi":-0.5}}
+        ]);
+        assert_ne!(verdict(&report, &input).result(), &TierBResult::Proved);
     }
 
     #[test]
