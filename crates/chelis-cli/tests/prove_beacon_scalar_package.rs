@@ -84,6 +84,168 @@ fn direct_shoals_call_cone_reaches_beacon_with_no_samples() {
     );
 }
 
+const CHECKED_GREEKS: &str = "module BeaconPkg.Model\nexport (delta, vega)\ndef normal_cdf(x: f32, mean: f32, std: f32) -> f32 = standard_normal_cdf(div(sub(x, mean), std))\ndef d1(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = {\n  num = add(log(div(s, k)), mul(add(r, mul(0.5f32, mul(sigma, sigma))), t))\n  den = mul(sigma, sqrt(t))\n  div(num, den)\n}\ndef d2(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = sub(d1(s, k, r, sigma, t), mul(sigma, sqrt(t)))\ndef call_price(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = {\n  d_1 = d1(s, k, r, sigma, t)\n  d_2 = d2(s, k, r, sigma, t)\n  discount = exp(neg(mul(r, t)))\n  sub(mul(s, normal_cdf(d_1, 0.0f32, 1.0f32)), mul(mul(k, discount), normal_cdf(d_2, 0.0f32, 1.0f32)))\n}\ndef delta(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = grad(call_price, wrt=s)(s, k, r, sigma, t)\ndef vega(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = grad(call_price, wrt=sigma)(s, k, r, sigma, t)\n";
+
+#[test]
+fn imported_checked_ad_greek_calls_reach_beacon_without_sampling() {
+    let (_dir, root) = package(CHECKED_GREEKS);
+    for (name, upper) in [("delta", "1.0f32"), ("vega", "42.0f32")] {
+        let record = prove(
+            &root,
+            &format!(
+                "module BeaconPkg.Main\nimport BeaconPkg.Model ({name})\n@property bound forall(s: f32) where s >= 96.0f32, s <= 104.0f32:\n  {name}(s, 100.0f32, 0.05f32, 0.2f32, 1.0f32) <= {upper}\n"
+            ),
+        );
+        assert_eq!(record["proof_tier"], "beacon", "{record}");
+        assert_eq!(record["samples"], 0, "{record}");
+        assert_eq!(
+            record["reason"], "CHELIS_BEACON_BIN is not configured",
+            "{record}"
+        );
+    }
+}
+
+#[test]
+fn imported_ad_call_with_unsupported_forward_op_fails_closed() {
+    let (_dir, root) = package(
+        "module BeaconPkg.Model\nexport (slope)\ndef f(x: f32) -> f32 = sin(x)\ndef slope(x: f32) -> f32 = grad(f, wrt=x)(x)\n",
+    );
+    let record = prove(
+        &root,
+        "module BeaconPkg.Main\nimport BeaconPkg.Model (slope)\n@property bound forall(x: f32) where x >= 0.0f32, x <= 1.0f32:\n  slope(x) <= 1.0f32\n",
+    );
+    assert_eq!(record["status"], "unsupported", "{record}");
+    assert_eq!(record["samples"], 0, "{record}");
+    assert_ne!(
+        record["reason"], "CHELIS_BEACON_BIN is not configured",
+        "{record}"
+    );
+}
+
+#[test]
+fn imported_ad_call_with_wrong_wrt_never_reaches_beacon() {
+    let (_dir, root) = package(
+        "module BeaconPkg.Model\nexport (slope)\ndef f(x: f32) -> f32 = mul(x, x)\ndef slope(x: f32) -> f32 = grad(f, wrt=y)(x)\n",
+    );
+    fs::write(root.join("src/main.ch"), "module BeaconPkg.Main\nimport BeaconPkg.Model (slope)\n@property bound forall(x: f32) where x >= 0.0f32, x <= 1.0f32:\n  slope(x) <= 2.0f32\n").expect("property");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&root)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env_remove("CHELIS_BEACON_BIN")
+        .args(["prove", "src/main.ch", "--tier", "beacon-only", "--json"])
+        .output()
+        .expect("prove");
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    assert!(!output.status.success(), "{stdout}");
+    assert!(
+        !stdout.contains("CHELIS_BEACON_BIN is not configured"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("\"status\":\"passed\""), "{stdout}");
+}
+
+#[test]
+fn imported_abs_ad_zero_boundary_reaches_beacon_as_a_checked_graph() {
+    let (_dir, root) = package(
+        "module BeaconPkg.Model\nexport (slope)\ndef magnitude(x: f32) -> f32 = abs(x)\ndef slope(x: f32) -> f32 = grad(magnitude, wrt=x)(x)\n",
+    );
+    let record = prove(
+        &root,
+        "module BeaconPkg.Main\nimport BeaconPkg.Model (slope)\n@property wrong_negative forall(x: f32) where x >= 0.0f32, x <= 0.0f32:\n  slope(x) <= -0.1f32\n",
+    );
+    assert_eq!(record["samples"], 0, "{record}");
+    assert_eq!(
+        record["reason"], "CHELIS_BEACON_BIN is not configured",
+        "{record}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn checked_greek_ad_graph_binds_source_and_distinct_roots() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_dir, root) = package(CHECKED_GREEKS);
+    let beacon = root.join("capture-beacon");
+    fs::write(
+        &beacon,
+        "#!/bin/sh\ncp \"$3\" \"$CAPTURE_REQUEST\"\nexit 3\n",
+    )
+    .expect("capture binary");
+    fs::set_permissions(&beacon, fs::Permissions::from_mode(0o755)).expect("executable");
+    let mut source_hashes = Vec::new();
+    let mut graphs = Vec::new();
+    for name in ["delta", "vega"] {
+        fs::write(root.join("src/main.ch"), format!("module BeaconPkg.Main\nimport BeaconPkg.Model ({name})\n@property bound forall(s: f32) where s >= 96.0f32, s <= 104.0f32:\n  {name}(s, 100.0f32, 0.05f32, 0.2f32, 1.0f32) <= 42.0f32\n"))
+            .expect("property");
+        let capture = root.join(format!("captured-{name}.json"));
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .current_dir(&root)
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .env("CHELIS_BEACON_BIN", &beacon)
+            .env("CAPTURE_REQUEST", &capture)
+            .args(["prove", "src/main.ch", "--tier", "beacon-only", "--json"])
+            .output()
+            .expect("prove");
+        let record: Value = String::from_utf8(output.stdout)
+            .expect("utf8")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("NDJSON"))
+            .find(|record| record["kind"] == "property")
+            .expect("property record");
+        assert_eq!(record["samples"], 0, "{record}");
+        assert_ne!(record["status"], "passed", "{record}");
+        assert_eq!(record["engine_evidence"]["source_dtype"], "f32", "{record}");
+        let source_binding = &record["engine_evidence"]["source_binding"];
+        let decls = source_binding["declarations"]
+            .as_array()
+            .expect("declarations");
+        for expected in [name, "call_price", "normal_cdf"] {
+            assert!(
+                decls.iter().any(|decl| decl["name"]
+                    .as_str()
+                    .is_some_and(|value| value.ends_with(expected))),
+                "missing {expected}: {source_binding}"
+            );
+        }
+        source_hashes.push(source_binding["expression_sha256"].clone());
+        let request: Value =
+            serde_json::from_slice(&fs::read(capture).expect("request")).expect("request JSON");
+        graphs.push(request["dag"].clone());
+        let nodes = request["dag"]["nodes"].as_array().expect("nodes");
+        for kind in ["where", "compare", "erfc", "abs", "sqrt", "log", "exp"] {
+            assert!(
+                nodes.iter().any(|node| node["op"]["kind"] == kind),
+                "missing {kind}: {request}"
+            );
+        }
+        assert!(
+            record["engine_evidence"]["source_output_root"].is_u64(),
+            "{record}"
+        );
+        assert_eq!(
+            record["engine_evidence"]["source_output_root"],
+            record["engine_evidence"]["selected_root"],
+            "{record}"
+        );
+        assert_ne!(
+            record["engine_evidence"]["source_output_root"],
+            record["engine_evidence"]["folded_root"],
+            "{record}"
+        );
+    }
+    assert_ne!(
+        source_hashes[0], source_hashes[1],
+        "delta and vega calls have different checked sources"
+    );
+    assert_ne!(
+        graphs[0], graphs[1],
+        "different wrt slots produce different checked AD graphs"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn direct_shoals_call_uses_certified_selected_root_request() {

@@ -12,6 +12,8 @@ use chelis_types::{
     types::Prim,
 };
 
+mod ad;
+
 pub(super) fn lower(
     decls: &[Decl],
     property: &Property,
@@ -197,6 +199,9 @@ impl ScalarGraph<'_> {
                 }
             }
             Expr::Apply(function, args, _) => {
+                if let Expr::Grad(target, wrt, _) = function.as_ref() {
+                    return ad::lower(self, target, wrt, args, bindings, declaration);
+                }
                 let Expr::Var(name, _) = function.as_ref() else {
                     return Err("Beacon scalar graph requires a resolved direct call".into());
                 };
@@ -280,7 +285,7 @@ impl ScalarGraph<'_> {
         declaration: u64,
     ) -> Result<Option<u64>, String> {
         let arity = match name {
-            "neg" | "log" | "sqrt" | "exp" | "standard_normal_cdf" => 1,
+            "neg" | "abs" | "log" | "sqrt" | "exp" | "standard_normal_cdf" => 1,
             "add" | "sub" | "mul" | "div" | "lt" => 2,
             _ => return Ok(None),
         };
@@ -301,6 +306,7 @@ impl ScalarGraph<'_> {
         }
         let op = match name {
             "neg" => WireRiscOp::Neg,
+            "abs" => WireRiscOp::Abs,
             "log" => WireRiscOp::Log,
             "sqrt" => WireRiscOp::Sqrt,
             "exp" => WireRiscOp::Exp,

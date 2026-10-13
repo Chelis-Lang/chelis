@@ -820,6 +820,7 @@ dependencies = [
  "chelis-compiler-api",
  "chelis-crmath",
  "chelis-deep",
+ "chelis-ir",
  "chelis-pred",
  "chelis-reef",
  "chelis-std-bundle",
