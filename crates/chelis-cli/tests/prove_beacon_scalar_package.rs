@@ -123,6 +123,41 @@ fn imported_ad_call_with_unsupported_forward_op_fails_closed() {
 }
 
 #[test]
+fn imported_recursive_ad_call_fails_closed_with_property_record() {
+    let (_dir, root) = package(
+        "module BeaconPkg.Model\nexport (slope)\ndef f(x: f32) -> f32 = if lt(x, 0.0f32) then x else grad(f, wrt=x)(sub(x, 1.0f32))\ndef slope(x: f32) -> f32 = grad(f, wrt=x)(x)\n",
+    );
+    let record = prove(
+        &root,
+        "module BeaconPkg.Main\nimport BeaconPkg.Model (slope)\n@property bound forall(x: f32) where x >= 1.0f32, x <= 2.0f32:\n  slope(x) <= 1.0f32\n",
+    );
+    assert_eq!(record["status"], "unsupported", "{record}");
+    assert_eq!(record["samples"], 0, "{record}");
+    assert!(
+        record["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("recursion")),
+        "{record}"
+    );
+}
+
+#[test]
+fn imported_finite_nested_ad_call_reaches_beacon() {
+    let (_dir, root) = package(
+        "module BeaconPkg.Model\nexport (second)\ndef square(x: f32) -> f32 = mul(x, x)\ndef first(x: f32) -> f32 = grad(square, wrt=x)(x)\ndef second(x: f32) -> f32 = grad(first, wrt=x)(x)\n",
+    );
+    let record = prove(
+        &root,
+        "module BeaconPkg.Main\nimport BeaconPkg.Model (second)\n@property bound forall(x: f32) where x >= 1.0f32, x <= 2.0f32:\n  second(x) <= 3.0f32\n",
+    );
+    assert_eq!(record["samples"], 0, "{record}");
+    assert_eq!(
+        record["reason"], "CHELIS_BEACON_BIN is not configured",
+        "{record}"
+    );
+}
+
+#[test]
 fn imported_ad_call_with_wrong_wrt_never_reaches_beacon() {
     let (_dir, root) = package(
         "module BeaconPkg.Model\nexport (slope)\ndef f(x: f32) -> f32 = mul(x, x)\ndef slope(x: f32) -> f32 = grad(f, wrt=y)(x)\n",

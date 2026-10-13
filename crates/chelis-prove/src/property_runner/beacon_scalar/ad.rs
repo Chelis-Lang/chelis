@@ -66,6 +66,11 @@ pub(super) fn lower(
             "Beacon scalar AD has duplicate parameter `{wrt_name}` in `{name}`"
         ));
     }
+    if outer.active_calls.contains(name) {
+        return Err(format!(
+            "Beacon scalar AD does not unfold recursion in `{name}`"
+        ));
+    }
 
     // Differentiation happens before actual arguments are substituted. In
     // particular, `vega(s, ..., 0.2f32, ...)` differentiates the formal
@@ -79,7 +84,14 @@ pub(super) fn lower(
             nodes: Vec::new(),
             roots: Vec::new(),
         },
-        active_calls: vec![name.clone()],
+        // The expansion path spans ordinary function calls and nested AD
+        // extraction. A fresh DAG must not reset the recursion guard.
+        active_calls: outer
+            .active_calls
+            .iter()
+            .cloned()
+            .chain(std::iter::once(name.clone()))
+            .collect(),
     };
     let row = forward.declaration(name);
     let mut formals = BTreeMap::new();
