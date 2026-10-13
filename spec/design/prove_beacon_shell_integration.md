@@ -287,6 +287,19 @@ above advances [Chelis #637](https://github.com/Chelis-Lang/chelis/issues/637)
 without claiming general Black–Scholes positivity: that issue stays open
 until its full domain and claimed arithmetic model are established.
 
+The raw SVI acceptance uses the exported
+`Shoals.VolSurface.vs_total_variance(SVI { a, b, rho, m, sigma }, k)` directly.
+Tier B reduces checked record projections from that linked source call and
+retains the authored condition `b >= 0`, `|rho| < 1`, `sigma > 0`, and
+`a + b*sigma*sqrt(1-rho*rho) >= 0`. Every square-root argument is proved
+nonnegative from independent, total conjuncts before its unique
+nonnegative algebraic root is introduced into the exact-real SMT query.
+Repeated occurrences of one radical share one root. The positive property
+must prove for all real `k`; dropping the minimum-variance guard must
+produce a counterexample, and a `false` postcondition under the full guard
+must establish guard satisfiability. None of these results establishes
+rounded `f32` execution bounds.
+
 ## Delivery order and evidence
 
 | Delivery | Owner and proof of completion |

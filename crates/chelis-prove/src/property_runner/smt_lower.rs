@@ -16,7 +16,9 @@ use chelis_unord::{UnordMap, UnordSet};
 use std::cell::RefCell;
 
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
-use chelis_surf::ast::{BinOp, Decl, Expr, LetPattern, Literal, Param, TypeExpr, UnaryOp};
+use chelis_surf::ast::{
+    BinOp, Decl, Expr, LetPattern, Literal, Param, TypeExpr, UnaryOp, VariantFields,
+};
 
 use crate::contracts::{
     NORMAL_CDF_IMPLEMENTATION, NORMAL_CDF_MONOTONICITY, NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION,
@@ -471,6 +473,186 @@ fn lookup_fun_body<'a>(decls: &'a [Decl], name: &str) -> Option<(&'a [Param], &'
         } if n == name => Some((params.as_slice(), body)),
         _ => None,
     })
+}
+
+/// Reduce a checked record argument through one source call before scalar SMT
+/// lowering. The SMT term language has no record sort: an access is admitted
+/// only when it selects exactly one field of the supplied constructor. This
+/// happens on the linked source AST, so the surviving scalar expression is
+/// still the expression the author called, with no independent formula.
+fn inline_record_call(name: &str, args: &[Expr], ctx: &InlineCtx) -> Option<Expr> {
+    reduce_record_call(name, args, ctx, ctx.depth, &ctx.call_stack)
+}
+
+fn reduce_record_call(
+    name: &str,
+    args: &[Expr],
+    ctx: &InlineCtx,
+    depth: usize,
+    call_stack: &[String],
+) -> Option<Expr> {
+    if depth >= ctx.max_depth || call_stack.iter().any(|active| active == name) {
+        return None;
+    }
+    let mut candidates = ctx
+        .decls
+        .iter()
+        .filter(|decl| matches!(decl, Decl::FunDef { name: declared, .. } if declared == name));
+    let Decl::FunDef {
+        type_binders,
+        params,
+        ret_ty,
+        effects,
+        body,
+        ..
+    } = candidates.next()?
+    else {
+        unreachable!("candidate filter selects only function definitions")
+    };
+    if candidates.next().is_some()
+        || !type_binders.is_empty()
+        || effects.as_ref().is_some_and(|effects| !effects.is_empty())
+        || !scalar_float_type(ret_ty.as_ref())
+        || params.len() != args.len()
+    {
+        return None;
+    }
+    let mut subst = UnordMap::new();
+    for (param, arg) in params.iter().zip(args) {
+        let normalized = reduce_record_expr(arg, &UnordMap::new(), ctx, depth, call_stack)?;
+        if let Expr::Record(constructor, fields, _) = &normalized {
+            let Some(TypeExpr::Named(type_name, _)) = param.ty.as_ref() else {
+                return None;
+            };
+            let mut type_candidates = ctx.decls.iter().filter_map(|decl| match decl {
+                Decl::TypeDef {
+                    name,
+                    params,
+                    variants,
+                    ..
+                } if name == type_name && params.is_empty() => Some(variants),
+                _ => None,
+            });
+            let variants = type_candidates.next()?;
+            if type_candidates.next().is_some() {
+                return None;
+            }
+            let mut matching = variants.iter().filter_map(|variant| match &variant.fields {
+                VariantFields::Record(declared) if variant.name == *constructor => Some(declared),
+                _ => None,
+            });
+            let declared = matching.next()?;
+            if matching.next().is_some()
+                || declared.len() != fields.len()
+                || !fields
+                    .iter()
+                    .all(|(name, _)| declared.iter().any(|(declared, _)| declared == name))
+            {
+                return None;
+            }
+        }
+        if subst.insert(param.name.clone(), normalized).is_some() {
+            return None;
+        }
+    }
+    let mut nested_stack = call_stack.to_vec();
+    nested_stack.push(name.into());
+    reduce_record_expr(body, &subst, ctx, depth + 1, &nested_stack)
+}
+
+fn reduce_record_expr(
+    expr: &Expr,
+    subst: &UnordMap<String, Expr>,
+    ctx: &InlineCtx,
+    depth: usize,
+    call_stack: &[String],
+) -> Option<Expr> {
+    match expr {
+        Expr::Var(name, _) => Some(subst.get(name).cloned().unwrap_or_else(|| expr.clone())),
+        Expr::Lit(_, _) => Some(expr.clone()),
+        Expr::Record(name, fields, span) => {
+            let mut names = UnordSet::new();
+            let mut reduced = Vec::with_capacity(fields.len());
+            for (field, value) in fields {
+                if !names.insert(field.clone()) {
+                    return None;
+                }
+                reduced.push((
+                    field.clone(),
+                    reduce_record_expr(value, subst, ctx, depth, call_stack)?,
+                ));
+            }
+            Some(Expr::Record(name.clone(), reduced, *span))
+        }
+        Expr::Access(target, field, _) => {
+            let reduced = reduce_record_expr(target, subst, ctx, depth, call_stack)?;
+            let Expr::Record(_, fields, _) = &reduced else {
+                return None;
+            };
+            fields
+                .iter()
+                .find_map(|(name, value)| (name == field).then_some(value.clone()))
+        }
+        Expr::Block(bindings, body, _) => {
+            let mut local = subst.clone();
+            for binding in bindings {
+                let LetPattern::Var(name, _) = &binding.pattern else {
+                    return None;
+                };
+                let value = reduce_record_expr(&binding.value, &local, ctx, depth, call_stack)?;
+                local.insert(name.clone(), value);
+            }
+            reduce_record_expr(body, &local, ctx, depth, call_stack)
+        }
+        Expr::Apply(function, args, span) => {
+            let Expr::Var(name, _) = function.as_ref() else {
+                return None;
+            };
+            if subst.contains_key(name) {
+                return None;
+            }
+            let reduced = args
+                .iter()
+                .map(|arg| reduce_record_expr(arg, subst, ctx, depth, call_stack))
+                .collect::<Option<Vec<_>>>()?;
+            if reduced.iter().any(|arg| matches!(arg, Expr::Record(..))) {
+                reduce_record_call(name, &reduced, ctx, depth, call_stack)
+            } else {
+                Some(Expr::Apply(function.clone(), reduced, *span))
+            }
+        }
+        Expr::Binary(op, left, right, span) => Some(Expr::Binary(
+            *op,
+            Box::new(reduce_record_expr(left, subst, ctx, depth, call_stack)?),
+            Box::new(reduce_record_expr(right, subst, ctx, depth, call_stack)?),
+            *span,
+        )),
+        Expr::Unary(op, value, span) => Some(Expr::Unary(
+            *op,
+            Box::new(reduce_record_expr(value, subst, ctx, depth, call_stack)?),
+            *span,
+        )),
+        Expr::If(condition, yes, no, span) => Some(Expr::If(
+            Box::new(reduce_record_expr(
+                condition, subst, ctx, depth, call_stack,
+            )?),
+            Box::new(reduce_record_expr(yes, subst, ctx, depth, call_stack)?),
+            Box::new(reduce_record_expr(no, subst, ctx, depth, call_stack)?),
+            *span,
+        )),
+        Expr::Cast(value, dtype, mode, span) => Some(Expr::Cast(
+            Box::new(reduce_record_expr(value, subst, ctx, depth, call_stack)?),
+            dtype.clone(),
+            *mode,
+            *span,
+        )),
+        Expr::Annotate(value, ty, span) => Some(Expr::Annotate(
+            Box::new(reduce_record_expr(value, subst, ctx, depth, call_stack)?),
+            ty.clone(),
+            *span,
+        )),
+        _ => None,
+    }
 }
 
 /// The interpreted arithmetic op a call-form arithmetic primitive lowers to,
@@ -1549,6 +1731,9 @@ pub(super) fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::
                 Expr::Var(n, _) => n.clone(),
                 _ => return None,
             };
+            if args.iter().any(|arg| matches!(arg, Expr::Record(..))) {
+                return surf_arith(&inline_record_call(&name, args, ctx)?, ctx);
+            }
             // chelis#979: intercept the real linked quantile call before the
             // generic scalar argument pass. Its tensor operand is identified
             // from the compiler AST and must not be reconstructed or lowered
@@ -1970,6 +2155,30 @@ mod tests {
             call_stack: vec![],
             contracts: None,
             grad_diagnostic: None,
+        }
+    }
+
+    #[test]
+    fn record_field_reduction_rejects_missing_or_duplicate_fields() {
+        let decls = chelis_surf::parser::parse_str(
+            "type Box = | Box { x: f32 }\n\
+             def read_x(p: Box) -> f32 = p.x\n",
+        )
+        .expect("parse record source");
+        for (constructor, fields) in [
+            ("Box", vec![("y".into(), float(1.0))]),
+            (
+                "Box",
+                vec![("x".into(), float(1.0)), ("x".into(), float(2.0))],
+            ),
+            ("Other", vec![("x".into(), float(1.0))]),
+        ] {
+            let record = Expr::Record(constructor.into(), fields, sp());
+            assert_eq!(
+                surf_arith(&apply("read_x", vec![record]), &ctx(&decls)),
+                None,
+                "unresolved or ambiguous field cannot become an SMT term"
+            );
         }
     }
 

@@ -394,6 +394,31 @@ where d > 0.5, r > g, r < 9.5:
 
 #[cfg(feature = "smt")]
 #[test]
+fn checked_record_call_reaches_smt_without_losing_its_fields() {
+    let outcomes = run_surf(
+        "module M\n\
+         type Box = | Box { x: f32, y: f32 }\n\
+         def sum_fields(p: Box) -> f32 = {\n\
+           z = add(p.x, p.y)\n\
+           z\n\
+         }\n\
+         @property record_identity forall(x: f32, y: f32):\n\
+           sum_fields(Box { x, y }) == add(x, y)\n\
+         @property wrong_field forall(x: f32, y: f32):\n\
+           sum_fields(Box { x, y }) == add(x, x)\n",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+    assert_eq!(outcomes[0].status, PropertyStatus::Passed, "{outcomes:?}");
+    assert_eq!(outcomes[0].proof_tier, PropertyTier::Smt, "{outcomes:?}");
+    assert_eq!(outcomes[0].samples, 0, "{outcomes:?}");
+    assert_eq!(outcomes[1].status, PropertyStatus::Failed, "{outcomes:?}");
+    assert_eq!(outcomes[1].proof_tier, PropertyTier::Smt, "{outcomes:?}");
+    assert_eq!(outcomes[1].samples, 0, "{outcomes:?}");
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn scalar_grad_inline_lambda_reaches_smt() {
     let outcomes = run_surf(INLINE_SCALAR_GRAD_PROPERTY, "smt-only");
     assert_eq!(outcomes.len(), 1);

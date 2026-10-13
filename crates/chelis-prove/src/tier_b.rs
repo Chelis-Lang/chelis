@@ -558,6 +558,112 @@ fn authorize_sqrt_domains(
     })
 }
 
+/// Encode a preflight-authorized real square root as its unique nonnegative
+/// algebraic root. For A >= 0, `q >= 0 && q*q == A` has exactly the solution
+/// `q = sqrt(A)`. All occurrences with the same argument share one fresh q.
+/// The caller must run `authorize_sqrt_domains` first: without that proof,
+/// replacing a partial `sqrt` would manufacture a value at negative A.
+#[cfg(feature = "smt")]
+fn algebraic_sqrt_property(
+    property: &SmtProperty,
+    authorized_arguments: &[SmtExpr],
+) -> Result<SmtProperty, String> {
+    let mut names = crate::smt_names::NameSupply::for_property(property);
+    let mut roots = Vec::with_capacity(authorized_arguments.len());
+    for (index, argument) in authorized_arguments.iter().enumerate() {
+        if !is_total_algebraic_numeric_expr(argument) || contains_sqrt(argument) {
+            return Err(sqrt_domain_error(
+                "the algebraic root argument is outside the independently authorized fragment",
+            ));
+        }
+        roots.push((
+            argument.clone(),
+            names.fresh(&format!("__sqrt_root_{index}")),
+        ));
+    }
+    let mut transformed = SmtProperty {
+        variables: property.variables.clone(),
+        preconditions: property
+            .preconditions
+            .iter()
+            .map(|expr| replace_authorized_sqrt(expr, &roots))
+            .collect::<Result<Vec<_>, _>>()?,
+        postcondition: replace_authorized_sqrt(&property.postcondition, &roots)?,
+    };
+    for (argument, name) in roots {
+        let root = SmtExpr::Var(name.clone());
+        transformed.variables.push((name, SmtSort::Real));
+        transformed.preconditions.push(SmtExpr::Cmp(
+            CmpOp::Ge,
+            Box::new(root.clone()),
+            Box::new(SmtExpr::RealLit(0.0)),
+        ));
+        transformed.preconditions.push(SmtExpr::Cmp(
+            CmpOp::Eq,
+            Box::new(SmtExpr::Arith(
+                ArithOp::Mul,
+                Box::new(root.clone()),
+                Box::new(root),
+            )),
+            Box::new(argument),
+        ));
+    }
+    Ok(transformed)
+}
+
+#[cfg(feature = "smt")]
+fn replace_authorized_sqrt(expr: &SmtExpr, roots: &[(SmtExpr, String)]) -> Result<SmtExpr, String> {
+    Ok(match expr {
+        SmtExpr::Apply(name, args) if name == "sqrt" => {
+            let [argument] = args.as_slice() else {
+                return Err(sqrt_domain_error("sqrt has the wrong arity"));
+            };
+            let (_, root) = roots
+                .iter()
+                .find(|(authorized, _)| authorized == argument)
+                .ok_or_else(|| sqrt_domain_error("this exact sqrt argument was not authorized"))?;
+            SmtExpr::Var(root.clone())
+        }
+        SmtExpr::Apply(name, args) => SmtExpr::Apply(
+            name.clone(),
+            args.iter()
+                .map(|arg| replace_authorized_sqrt(arg, roots))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        SmtExpr::Arith(op, left, right) => SmtExpr::Arith(
+            *op,
+            Box::new(replace_authorized_sqrt(left, roots)?),
+            Box::new(replace_authorized_sqrt(right, roots)?),
+        ),
+        SmtExpr::Cmp(op, left, right) => SmtExpr::Cmp(
+            *op,
+            Box::new(replace_authorized_sqrt(left, roots)?),
+            Box::new(replace_authorized_sqrt(right, roots)?),
+        ),
+        SmtExpr::Bool(op, args) => SmtExpr::Bool(
+            *op,
+            args.iter()
+                .map(|arg| replace_authorized_sqrt(arg, roots))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        SmtExpr::Not(inner) => SmtExpr::Not(Box::new(replace_authorized_sqrt(inner, roots)?)),
+        SmtExpr::Forall(bindings, body) => SmtExpr::Forall(
+            bindings.clone(),
+            Box::new(replace_authorized_sqrt(body, roots)?),
+        ),
+        SmtExpr::Exists(bindings, body) => SmtExpr::Exists(
+            bindings.clone(),
+            Box::new(replace_authorized_sqrt(body, roots)?),
+        ),
+        SmtExpr::Ite(condition, yes, no) => SmtExpr::Ite(
+            Box::new(replace_authorized_sqrt(condition, roots)?),
+            Box::new(replace_authorized_sqrt(yes, roots)?),
+            Box::new(replace_authorized_sqrt(no, roots)?),
+        ),
+        other => other.clone(),
+    })
+}
+
 /// Solve a property IN-PROCESS with cvc5. This is the function the isolation
 /// worker child actually runs; the parent reaches it only when isolation is
 /// disabled (every test, and any non-`chelis` host that does not opt in).
@@ -603,6 +709,26 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
         Ok(authorization) => authorization,
         Err(reason) => return TierBResult::Error(reason),
     };
+
+    if !authorized_sqrt_arguments.is_empty() {
+        let transformed = match algebraic_sqrt_property(property, &authorized_sqrt_arguments) {
+            Ok(transformed) => transformed,
+            Err(reason) => return TierBResult::Error(reason),
+        };
+        // The recursive call has no sqrt and therefore uses precisely the
+        // remaining solver budget. QF_NRA decides the algebraic root relation
+        // without cvc5's transcendental SQRT operator. Internal roots are not
+        // source inputs and must not appear in a returned counterexample.
+        return match solve_property_cvc5(&transformed, main_timeout_ms) {
+            TierBResult::Disproved(Value::Object(mut model)) => {
+                for (name, _) in transformed.variables.iter().skip(property.variables.len()) {
+                    model.remove(name);
+                }
+                TierBResult::Disproved(Value::Object(model))
+            }
+            other => other,
+        };
+    }
 
     let tm = TermManager::new();
     let mut solver = Solver::new(&tm);
@@ -2544,6 +2670,137 @@ mod tests {
             ),
         };
         assert_eq!(solve_property(&prop, 5000), TierBResult::Proved);
+    }
+
+    #[test]
+    fn issue3600_algebraic_root_reuses_one_fresh_name_for_repeated_sqrt() {
+        let root = SmtExpr::Apply("sqrt".into(), vec![SmtExpr::Var("x".into())]);
+        let property = SmtProperty {
+            variables: vec![
+                ("x".into(), SmtSort::Real),
+                ("__sqrt_root_0".into(), SmtSort::Real),
+            ],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Var("x".into())),
+                Box::new(SmtExpr::RealLit(0.0)),
+            )],
+            postcondition: SmtExpr::Cmp(CmpOp::Eq, Box::new(root.clone()), Box::new(root)),
+        };
+        let transformed = algebraic_sqrt_property(&property, &[SmtExpr::Var("x".into())])
+            .expect("authorized repeated sqrt has an exact algebraic root");
+        assert_eq!(transformed.variables.len(), property.variables.len() + 1);
+        assert_ne!(transformed.variables[2].0, "__sqrt_root_0");
+        assert!(!contains_sqrt(&transformed.postcondition));
+        assert!(
+            transformed
+                .preconditions
+                .iter()
+                .all(|expr| !contains_sqrt(expr))
+        );
+        let SmtExpr::Cmp(CmpOp::Eq, left, right) = transformed.postcondition else {
+            panic!("both occurrences remain in the equality")
+        };
+        assert_eq!(left, right, "identical radicals must bind to one root");
+    }
+
+    #[test]
+    fn issue3600_algebraic_root_preserves_exact_constant_and_partial_domain() {
+        let sqrt = |argument| SmtExpr::Apply("sqrt".into(), vec![argument]);
+        let constant = SmtProperty {
+            variables: vec![],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Eq,
+                Box::new(sqrt(SmtExpr::RealLit(4.0))),
+                Box::new(SmtExpr::RealLit(2.0)),
+            ),
+        };
+        assert_eq!(solve_property(&constant, 5000), TierBResult::Proved);
+        let false_constant = SmtProperty {
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(sqrt(SmtExpr::RealLit(4.0))),
+                Box::new(SmtExpr::RealLit(3.0)),
+            ),
+            ..constant
+        };
+        let TierBResult::Disproved(model) = solve_property(&false_constant, 5000) else {
+            panic!("sqrt(4) >= 3 is false under exact real arithmetic")
+        };
+        assert_eq!(
+            model,
+            serde_json::json!({}),
+            "internal roots are not source inputs"
+        );
+
+        let negative = SmtProperty {
+            variables: vec![("x".into(), SmtSort::Real)],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Eq,
+                Box::new(SmtExpr::Var("x".into())),
+                Box::new(SmtExpr::RealLit(-1.0)),
+            )],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(sqrt(SmtExpr::Var("x".into()))),
+                Box::new(SmtExpr::RealLit(0.0)),
+            ),
+        };
+        assert!(matches!(
+            solve_property(&negative, 5000),
+            TierBResult::Error(reason) if reason.contains("sqrt")
+        ));
+    }
+
+    #[test]
+    fn issue3600_nested_and_quantified_sqrt_remain_unsupported() {
+        let sqrt = |argument| SmtExpr::Apply("sqrt".into(), vec![argument]);
+        let nested = SmtProperty {
+            variables: vec![],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(sqrt(sqrt(SmtExpr::RealLit(4.0)))),
+                Box::new(SmtExpr::RealLit(0.0)),
+            ),
+        };
+        assert!(matches!(
+            solve_property(&nested, 5000),
+            TierBResult::Error(reason) if reason.contains("nested `sqrt`")
+        ));
+        let quantified = SmtProperty {
+            postcondition: SmtExpr::Forall(
+                vec![("x".into(), SmtSort::Real)],
+                Box::new(SmtExpr::Cmp(
+                    CmpOp::Ge,
+                    Box::new(sqrt(SmtExpr::Var("x".into()))),
+                    Box::new(SmtExpr::RealLit(0.0)),
+                )),
+            ),
+            ..nested
+        };
+        assert!(matches!(
+            solve_property(&quantified, 5000),
+            TierBResult::Error(reason) if reason.contains("quantified `sqrt`")
+        ));
+    }
+
+    #[test]
+    fn issue3600_integer_sqrt_does_not_enter_the_real_root_route() {
+        let property = SmtProperty {
+            variables: vec![],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Eq,
+                Box::new(SmtExpr::Apply("sqrt".into(), vec![SmtExpr::IntLit(4)])),
+                Box::new(SmtExpr::RealLit(2.0)),
+            ),
+        };
+        assert!(matches!(
+            solve_property(&property, 5000),
+            TierBResult::Error(reason) if reason.contains("sqrt")
+        ));
     }
 
     #[test]
