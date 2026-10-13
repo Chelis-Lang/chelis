@@ -5,10 +5,10 @@ The required SMT probe checks cvc5 rather than the solver-free fuzz fallback.
 Release jobs also pass ``--clarabel`` to exercise a native QP solve and a
 call-bound symbolic ideal QP proof on both the built and staged binary.
 
-chelis#422 (WS-4): release.yml builds `chelis-cli --features smt` so the
-shipped binary uses cvc5. The engines are inert in a binary built
-without the feature, and that regression is invisible from the outside
-unless something asserts the discharge path. This script is that
+chelis#422 (WS-4): release.yml builds `chelis-cli --features distribution`,
+which includes `smt`, so the shipped binary uses cvc5. The engines are
+inert in a binary built without `smt`, and that regression is invisible
+from the outside unless something asserts the discharge path. This script is that
 assertion: it runs `chelis prove --json --tier auto` on a small,
 self-contained property whose producer obligation routes to cvc5, then
 checks the emitted NDJSON for the cvc5 discharge signal.
