@@ -126,6 +126,14 @@ establish identical behavior for IEEE floating-point execution. For example,
 may have further qualifications. Read the complete verdict and `qualifiers`, even when the
 exit code is `0`.
 
+For a checked scalar source call that takes a constructed record, SMT substitutes the
+record's fields into the function body before lowering arithmetic. A square root enters
+SMT only after a separate proof establishes that its argument is nonnegative from
+independent, total preconditions. The solver then uses the unique nonnegative root of
+`q*q = argument`. A missing domain proof or an inconclusive solver result stays
+`unsupported`. [The executable record example](../../../examples/record_sqrt_property.ch) shows
+this route.
+
 The command exits `0` when all reported checks pass, `1` when a property or obligation fails,
 `2` when one is unsupported, and `3` for an error. When results differ, an error takes
 precedence, then a failure, then an unsupported result. An input or setup error can stop the
