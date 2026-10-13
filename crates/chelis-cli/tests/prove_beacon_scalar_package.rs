@@ -236,10 +236,21 @@ fn two_sided_property_cannot_hide_an_unknown_upper_side() {
         record["engine_evidence"]["bounds"]["upper"]["result"],
         "unknown"
     );
-    assert_eq!(
-        record["engine_evidence"]["bounds"]["lower"]["engine_evidence"]["output_root"],
-        record["engine_evidence"]["bounds"]["upper"]["engine_evidence"]["output_root"]
+    let lower = &record["engine_evidence"]["bounds"]["lower"]["engine_evidence"];
+    let upper = &record["engine_evidence"]["bounds"]["upper"]["engine_evidence"];
+    assert_eq!(lower["source_output_root"], upper["source_output_root"]);
+    assert!(lower["source_output_root"].is_u64(), "{record}");
+    assert_ne!(lower["selected_root"], upper["selected_root"], "{record}");
+    assert_ne!(
+        lower["selected_root"], lower["source_output_root"],
+        "{record}"
     );
+    assert_eq!(
+        upper["selected_root"], upper["source_output_root"],
+        "{record}"
+    );
+    assert!(lower["folded_root"].is_u64(), "{record}");
+    assert!(upper["folded_root"].is_u64(), "{record}");
 }
 
 #[test]

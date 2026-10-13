@@ -50,7 +50,10 @@ impl BeaconShim {
         evidence["graph_sha256"] = json!(goal.ir.dag_hash());
         evidence["input_box"] = request["inputs"].clone();
         evidence["search_options"] = request["options"].clone();
-        evidence["output_root"] = request["dag"]["roots"][0].clone();
+        // The selected goal root can differ from the graph's first source
+        // output (the lower side selects an appended negation, for example).
+        evidence["selected_root"] = json!(goal.ir.root_index());
+        evidence["folded_root"] = request["dag"]["roots"][1].clone();
         if let GoalShape::ScalarUpperBound { upper, .. } = goal.shape {
             evidence["upper_bound"] = json!(upper);
         }
