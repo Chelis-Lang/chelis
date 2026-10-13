@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.19.4] - 2026-10-13
+
+### Added
+
+- `chelis prove --tier beacon-only` extracts direct imported scalar `grad` calls
+  through the compiler's checked AD graph and submits supported real-arithmetic
+  bounds to Beacon. Unsupported forward and adjoint operations stay unsupported.
+  See [#3601](https://github.com/Chelis-Lang/chelis/issues/3601).
+
+- Beacon-only scalar properties can extract checked local bindings, scalar conditionals, literal casts, and Chelis's standard normal CDF graph from imported functions. The certified Arb route proves direct Black–Scholes bounds and reports verified point counterexamples with a real-arithmetic qualifier. See [#3598](https://github.com/Chelis-Lang/chelis/issues/3598).
+
+- SMT properties can prove scalar calls through checked record construction and field access. For independently authorized nonnegative square roots, the solver uses exact nonnegative algebraic roots; proofs retain the real-arithmetic qualifier. See [#3600](https://github.com/Chelis-Lang/chelis/issues/3600).
+
+### Fixed
+
+- Beacon scalar proof evidence identifies the selected goal root, the folded comparison root, and the authored source output separately. Lower-bound reports now expose the selected negation instead of mislabeling the original output as the selected root. See [#3475](https://github.com/Chelis-Lang/chelis/issues/3475).
+
 ## [0.19.3] - 2026-10-12
 
 ### Fixed

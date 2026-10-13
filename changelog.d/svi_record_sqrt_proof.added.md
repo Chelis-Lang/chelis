@@ -1,1 +1,0 @@
-SMT properties can prove scalar calls through checked record construction and field access. For independently authorized nonnegative square roots, the solver uses exact nonnegative algebraic roots; proofs retain the real-arithmetic qualifier. See [#3600](https://github.com/Chelis-Lang/chelis/issues/3600).
