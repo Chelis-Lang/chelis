@@ -157,6 +157,63 @@ fn imported_finite_nested_ad_call_reaches_beacon() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn imported_ad_pruned_formal_keeps_the_checked_caller_argument() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_dir, root) = package(
+        "module BeaconPkg.Model\nexport (slope)\ndef f(unused: f32, x: f32) -> f32 = mul(x, x)\ndef slope(a: f32, b: f32) -> f32 = grad(f, wrt=x)(a, b)\n",
+    );
+    fs::write(root.join("src/main.ch"), "module BeaconPkg.Main\nimport BeaconPkg.Model (slope)\n@property bound forall(a: f32, b: f32) where a >= 1.0f32, a <= 1.0f32, b >= 2.0f32, b <= 2.0f32:\n  slope(a, b) <= 3.0f32\n").expect("property");
+    let beacon = root.join("capture-beacon");
+    fs::write(
+        &beacon,
+        "#!/bin/sh\ncp \"$3\" \"$CAPTURE_REQUEST\"\nexit 3\n",
+    )
+    .expect("capture binary");
+    fs::set_permissions(&beacon, fs::Permissions::from_mode(0o755)).expect("executable");
+    let capture = root.join("captured-request.json");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&root)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_BEACON_BIN", &beacon)
+        .env("CAPTURE_REQUEST", &capture)
+        .args(["prove", "src/main.ch", "--tier", "beacon-only", "--json"])
+        .output()
+        .expect("prove");
+    let record: Value = String::from_utf8(output.stdout)
+        .expect("utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("NDJSON"))
+        .find(|record| record["kind"] == "property")
+        .expect("property record");
+    assert_eq!(record["samples"], 0, "{record}");
+    let request: Value =
+        serde_json::from_slice(&fs::read(capture).expect("Beacon request")).expect("request JSON");
+    let nodes = request["dag"]["nodes"].as_array().expect("nodes");
+    let root = record["engine_evidence"]["source_output_root"]
+        .as_u64()
+        .expect("source output root");
+    let mut pending = vec![root as usize];
+    let mut loads = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        let node = &nodes[id];
+        if node["op"]["kind"] == "load" {
+            loads.insert(node["op"]["name"].as_str().expect("load name"));
+        }
+        pending.extend(
+            node["inputs"]
+                .as_array()
+                .expect("inputs")
+                .iter()
+                .map(|id| id.as_u64().expect("input id") as usize),
+        );
+    }
+    assert_eq!(loads, std::collections::BTreeSet::from(["b"]));
+}
+
 #[test]
 fn imported_ad_call_with_wrong_wrt_never_reaches_beacon() {
     let (_dir, root) = package(

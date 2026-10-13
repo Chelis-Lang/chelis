@@ -134,7 +134,12 @@ pub(super) fn lower(
         .iter()
         .map(|arg| outer.expression(arg, bindings, declaration))
         .collect::<Result<Vec<_>, _>>()?;
-    splice_ad_graph(outer, &result.dag, &formal_ids, &actuals, gradient)
+    let actuals_by_formal = params
+        .iter()
+        .zip(actuals)
+        .map(|(param, actual)| (param.name.clone(), actual))
+        .collect::<BTreeMap<_, _>>();
+    splice_ad_graph(outer, &result.dag, &actuals_by_formal, gradient)
 }
 
 fn checked_ir_forward(wire: &WireDag, source_dtype: Prim) -> Result<Dag, String> {
@@ -242,30 +247,35 @@ fn wire_comparison(kind: ComparisonKind) -> WireComparisonKind {
 fn splice_ad_graph(
     outer: &mut ScalarGraph<'_>,
     dag: &Dag,
-    formal_ids: &[u64],
-    actuals: &[u64],
+    actuals_by_formal: &BTreeMap<String, u64>,
     gradient: NodeId,
 ) -> Result<u64, String> {
-    let formal_map = formal_ids
-        .iter()
-        .copied()
-        .zip(actuals.iter().copied())
-        .collect::<BTreeMap<_, _>>();
+    let mut seen_formals = std::collections::BTreeSet::new();
     let mut mapped = Vec::with_capacity(dag.nodes().len());
     for node in dag.nodes() {
-        if let Some(actual) = formal_map.get(&(node.id.0 as u64)) {
-            if !matches!(node.op, RiscOp::Load { .. }) {
-                return Err("Beacon scalar AD formal no longer names a load".into());
-            }
-            mapped.push(*actual);
-            continue;
-        }
         if !node.output_type.dims.is_empty()
             || !node.shape_deps.is_empty()
             || !node.result_claim_deps.is_empty()
             || node.owner.activation.is_some()
         {
             return Err("Beacon scalar AD emitted a non-scalar or activated node".into());
+        }
+        if let RiscOp::Load { name } = &node.op {
+            let formal = name.as_str();
+            if !node.inputs.is_empty()
+                || node.output_type.precision != outer.source_dtype
+                || !seen_formals.insert(formal)
+            {
+                return Err(format!(
+                    "Beacon scalar AD emitted an invalid formal load `{formal}`"
+                ));
+            }
+            let actual = actuals_by_formal
+                .get(formal)
+                .copied()
+                .ok_or_else(|| format!("Beacon scalar AD emitted unknown formal `{formal}`"))?;
+            mapped.push(actual);
+            continue;
         }
         let declaration = outer.declaration(&dag.declaration(node.owner.decl).name);
         let inputs = node
@@ -331,4 +341,52 @@ fn splice_ad_graph(
         .get(gradient.0)
         .copied()
         .ok_or("Beacon scalar AD gradient root is missing".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adjoint_loads_require_unique_checked_formal_identity() {
+        for (names, expected) in [
+            (vec!["intruder"], "unknown formal"),
+            (vec!["x", "x"], "invalid formal load"),
+        ] {
+            let mut dag = Dag::new();
+            let declaration = dag.declare("f");
+            for name in names {
+                dag.add_node(
+                    declaration,
+                    RiscOp::Load { name: name.into() },
+                    vec![],
+                    TensorType {
+                        dims: vec![],
+                        precision: Prim::F32,
+                    },
+                    None,
+                );
+            }
+            let mut outer = ScalarGraph {
+                decls: &[],
+                source_dtype: Prim::F32,
+                dag: WireDag {
+                    schema_version: WIRE_DAG_SCHEMA_VERSION,
+                    declarations: vec![],
+                    nodes: vec![],
+                    roots: vec![],
+                },
+                active_calls: vec![],
+            };
+            let gradient = NodeId(dag.nodes().len() - 1);
+            let error = splice_ad_graph(
+                &mut outer,
+                &dag,
+                &BTreeMap::from([("x".into(), 0)]),
+                gradient,
+            )
+            .expect_err("unverified formal must fail closed");
+            assert!(error.contains(expected), "{error}");
+        }
+    }
 }
