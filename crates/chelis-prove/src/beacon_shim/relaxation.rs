@@ -162,7 +162,7 @@ impl BeaconShim {
                 json!({"schema_version":"beacon.scalar_upper_bound.v1", "dag":dag,
                 "inputs":inputs,"selected_root_index":1,"strict_upper":0.0,
                 "options":{"budget_ms":timeout_ms.saturating_sub(5000),
-                    "max_depth":8,"max_boxes":256}}),
+                    "max_depth":9,"max_boxes":256}}),
             )
         } else {
             Ok(
@@ -363,6 +363,18 @@ fn map_certified_scalar(
         return untrusted_error("certified scalar report has no leaf certificate", evidence);
     };
     let final_bound = finite_interval(&report["final_bound"]);
+    let leaf_bounds = leaves
+        .iter()
+        .map(|leaf| finite_interval(&leaf["bound"]))
+        .collect::<Option<Vec<_>>>();
+    let leaf_hull = leaf_bounds.as_ref().and_then(|bounds| {
+        (!bounds.is_empty()).then(|| {
+            bounds.iter().fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(lo, hi), &(leaf_lo, leaf_hi)| (lo.min(leaf_lo), hi.max(leaf_hi)),
+            )
+        })
+    });
     let complete = certificate["method"] == "arb_box_cover_v1"
         && !leaves.is_empty()
         && certificate["leaves_certified"].as_u64() == Some(leaves.len() as u64)
@@ -370,6 +382,7 @@ fn map_certified_scalar(
         && leaves
             .iter()
             .all(|leaf| finite_interval(&leaf["bound"]).is_some_and(|(_, hi)| hi < 0.0))
+        && final_bound == leaf_hull
         && certified_leaves_cover_request(leaves, request_inputs);
     if report["verdict"] != "certified" || !complete || !final_bound.is_some_and(|(_, hi)| hi < 0.0)
     {
@@ -610,6 +623,63 @@ mod tests {
             {"inputs":{"x":{"lo":1.0,"hi":2.0},"y":{"lo":1.0,"hi":2.0}},"bound":{"lo":-2.0,"hi":-0.5}}
         ]);
         assert_ne!(verdict(&report, &input).result(), &TierBResult::Proved);
+    }
+
+    #[test]
+    fn certified_scalar_accepts_exact_256_leaf_cover_and_rejects_corruptions() {
+        let input = json!({"s":{"lo":96.0,"hi":104.0}});
+        let mut report = certified_report();
+        let leaves = (0..256)
+            .map(|index| {
+                let lo = 96.0 + f64::from(index) / 32.0;
+                let hi = 96.0 + f64::from(index + 1) / 32.0;
+                json!({"inputs":{"s":{"lo":lo,"hi":hi}},
+                    "bound":{"lo":-2.0,"hi":-0.5},
+                    "bound_method":"arb_mean_value_256",
+                    "mean_value":{"axis":"s","center":(lo+hi)/2.0,
+                        "center_bound":{"lo":-1.0,"hi":-1.0},
+                        "slope_bound":{"lo":-0.1,"hi":0.1}}})
+            })
+            .collect::<Vec<_>>();
+        report["certificate"]["leaves"] = json!(leaves);
+        report["certificate"]["leaves_certified"] = json!(256);
+        let checked = |report: &Value| {
+            map_certified_scalar(&report.to_string(), "", "request", "exact-dag", 7, &input)
+        };
+        assert_eq!(checked(&report).result(), &TierBResult::Proved);
+
+        let mut missing = report.clone();
+        missing["certificate"]["leaves"]
+            .as_array_mut()
+            .unwrap()
+            .remove(200);
+        missing["certificate"]["leaves_certified"] = json!(255);
+        assert_ne!(checked(&missing).result(), &TierBResult::Proved);
+
+        let mut gap = report.clone();
+        let old_lo = gap["certificate"]["leaves"][200]["inputs"]["s"]["lo"]
+            .as_f64()
+            .unwrap();
+        gap["certificate"]["leaves"][200]["inputs"]["s"]["lo"] =
+            json!(f64::from_bits(old_lo.to_bits() + 1));
+        assert_ne!(checked(&gap).result(), &TierBResult::Proved);
+
+        let mut nonstrict = report.clone();
+        nonstrict["certificate"]["leaves"][200]["bound"]["hi"] = json!(0.0);
+        nonstrict["final_bound"]["hi"] = json!(0.0);
+        assert_ne!(checked(&nonstrict).result(), &TierBResult::Proved);
+
+        let mut forged_hull = report.clone();
+        forged_hull["final_bound"] = json!({"lo":-2.0,"hi":-1.0});
+        assert_ne!(checked(&forged_hull).result(), &TierBResult::Proved);
+
+        let mut oversized = report.clone();
+        oversized["certificate"]["leaves"]
+            .as_array_mut()
+            .unwrap()
+            .push(report["certificate"]["leaves"][0].clone());
+        oversized["certificate"]["leaves_certified"] = json!(257);
+        assert_ne!(checked(&oversized).result(), &TierBResult::Proved);
     }
 
     #[test]

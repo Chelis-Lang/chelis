@@ -206,6 +206,15 @@ original gradient output root, selected root, and folded bound root remain
 distinct evidence. This route does not infer a textbook derivative or assert
 rounded floating-point AD bounds.
 
+For a finite box with one varying input, Beacon may certify the extracted
+adjoint by a complete Arb box cover whose leaves use first-order mean-value
+enclosures. The full checked graph must pass domain and branch admission on
+each leaf before the refinement applies. The reported leaf bound and its
+center and slope evidence remain bound to the original graph hash and selected
+root. Chelis validates closed-box coverage and the leaf-bound hull before
+accepting the engine's result. This remains a real-arithmetic statement about
+the extracted graph.
+
 The proof-only graph uses the existing rank-zero f64 WireDag carrier. For an
 f32 source closure, extraction converts each checked f32 input endpoint and
 literal to its exact stored real value in that carrier before graph emission.

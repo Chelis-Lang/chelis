@@ -77,7 +77,12 @@ with its real-arithmetic qualification. A witness exactly on the boundary
 cannot refute the non-strict property. The certified route checks the response's
 DAG hash, selected folded root, strict limit, finite bound, complete nonempty
 leaf certificate, and in-domain singleton counterexamples before changing a
-property status.
+property status. The Arb certificate may use a one-variable mean-value
+enclosure on a leaf after evaluating the full source-derived graph over that
+leaf for domains, predicates, and activation envelopes. The shim checks that
+the reported final bound is the hull of all certified leaf bounds and that up
+to 256 closed leaf boxes cover the requested box. Its check is limited to the
+reported certificate; it does not independently recompute Arb enclosures.
 Unrecognized reports, unconfirmed witnesses, mismatched source bindings and
 abnormal proof exits fail closed. Large output captures must not block on a
 full pipe. The outer process deadline leaves five seconds beyond the requested
