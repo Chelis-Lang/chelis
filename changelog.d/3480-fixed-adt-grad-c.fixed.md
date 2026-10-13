@@ -1,1 +1,0 @@
-C builds direct gradient calls over fixed ADT model parameters, including nested blocks, with field-wise gradients that agree with evaluation. See [#3480](https://github.com/Chelis-Lang/chelis/issues/3480).

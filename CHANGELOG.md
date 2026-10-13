@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.19.3] - 2026-10-12
+
+### Fixed
+
+- Compiled C now executes `sum` over a non-recursive helper's tensor result and
+  `insert` with an inline list-selected size. The School two-width depthwise
+  helper probe builds and agrees with the evaluator. See
+  [#2939](https://github.com/Chelis-Lang/chelis/issues/2939).
+
+- Reverse-mode gradients of `fold` over runtime-length tensor lists and `scan` with fixed-shape states use the executed trip count in eval and compiled C. Compiled gradients of `fold` over runtime ADT lists also propagate cotangents through tensor fields. See [#3366](https://github.com/Chelis-Lang/chelis/issues/3366).
+
+- C builds direct gradient calls over fixed ADT model parameters, including nested blocks, with field-wise gradients that agree with evaluation. See [#3480](https://github.com/Chelis-Lang/chelis/issues/3480).
+
+- C builds preserve the runtime length and order of gradients for numeric List
+  fields nested inside fixed model ADTs, including tensor-valued block fields
+  with checked trailing extents. Unused discrete columns need no tensor shape;
+  live columns without an extent witness receive a typed build refusal.
+  Eval and C check List index bounds only on the executed branch of a gradient.
+  See [#3480](https://github.com/Chelis-Lang/chelis/issues/3480).
+
+- The macOS nightly runs the compiled wire census in its own job and divides
+  workspace tests across three shards, keeping both censuses and the workspace
+  smoke checks within independent job budgets.
+
+- The scheduled macOS validation runs the compiled Python binding census with
+  its own time budget, so that test can finish without consuming the workspace
+  shard's Clippy and smoke-check allowance. See
+  [#3553](https://github.com/Chelis-Lang/chelis/issues/3553).
+
+- Scheduled Linux Extended Validation runs use hosted runners, so full nightly
+  coverage can proceed without waiting for the warm runner pool. See
+  [#3554](https://github.com/Chelis-Lang/chelis/issues/3554).
+
+- Stop timed-out test evaluators before running later tests in the same worker; report later tests as unrun if a blocking operation prevents the evaluator from stopping.
+
+- Compiled C now keeps each generic tensor helper call's checked dimensions separate, so a model block can compose layers at different widths without a false extent trap. See [#3583](https://github.com/Chelis-Lang/chelis/issues/3583).
+
+- Compiled C accepts native Clarabel QP calls whose checked tensor dimensions are instantiated by a generic caller.
+
+- Release binaries include the Clarabel native provider. The release gate verifies a native QP solve and an ideal QP proof on both the built binary and the staged toolchain artifact.
+
+- `Std.Io.Csv.to_csv` escapes quotes in long fields without scanning and copying the entire field for each character. See [#1784](https://github.com/Chelis-Lang/chelis/issues/1784).
+
+- `Std.Io.Csv.read_csv` parses long quoted fields without copying the full line for each character, including fields with escaped quotes. See [#1784](https://github.com/Chelis-Lang/chelis/issues/1784).
+
+- `Std.Io.Csv.read_csv` parses long unquoted fields without rescanning and copying the full line for each character. See [#1784](https://github.com/Chelis-Lang/chelis/issues/1784).
+
+- `Std.Io.Json` parses and renders long strings without per-character copies of the full text, including Unicode escapes and control characters. See [#1784](https://github.com/Chelis-Lang/chelis/issues/1784).
+
 ## [0.19.2] - 2026-10-10
 
 ### Added
