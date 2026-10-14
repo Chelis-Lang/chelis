@@ -81,6 +81,7 @@ fn build_test_archive(
     name: &str,
     version: &str,
     deps: &[(&str, &str)], // (name, version) pairs
+    schema: u32,
 ) -> Vec<u8> {
     let mut deps_toml = String::new();
     for (dep_name, dep_version) in deps {
@@ -88,13 +89,23 @@ fn build_test_archive(
             "\n[dependencies.{dep_name}]\nversion = \"{dep_version}\"\n"
         ));
     }
+    let schema_header = if schema == 0 {
+        String::new()
+    } else {
+        format!("schema = \"{schema}\"\n")
+    };
+    let resolver = if schema >= 2 {
+        "resolver = \"2\"\n"
+    } else {
+        ""
+    };
     let manifest_text = format!(
-        r#"[package]
+        r#"{schema_header}[package]
 name = "{name}"
 version = "{version}"
 compiler = "{compiler}"
 module_prefix = "Test"
-{deps_toml}"#,
+{resolver}{deps_toml}"#,
         compiler = CURRENT_COMPILER_PIN,
     );
     let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder() -> i32 = 0\n";
@@ -159,7 +170,8 @@ struct SyntheticShell {
     repo: &'static str,
     tag: &'static str,
     version: &'static str,
-    deps: Vec<(&'static str, &'static str)>, // (name, version)
+    deps: Vec<(&'static str, String)>, // (name, requirement)
+    schema: u32,
 }
 
 impl SyntheticShell {
@@ -175,7 +187,11 @@ impl SyntheticShell {
             repo,
             tag,
             version,
-            deps,
+            deps: deps
+                .into_iter()
+                .map(|(name, version)| (name, version.to_string()))
+                .collect(),
+            schema: 0,
         }
     }
     fn spec_string(&self) -> String {
@@ -188,8 +204,12 @@ impl SyntheticShell {
         format!("{}-{}.chb", self.repo, self.version)
     }
     fn archive_bytes(&self) -> Vec<u8> {
-        // Convert (&str, &str) -> (&str, &str) — already correct.
-        build_test_archive(self.repo, self.version, &self.deps)
+        let deps = self
+            .deps
+            .iter()
+            .map(|(name, requirement)| (*name, requirement.as_str()))
+            .collect::<Vec<_>>();
+        build_test_archive(self.repo, self.version, &deps, self.schema)
     }
     fn shell_bytes(&self) -> Vec<u8> {
         let archive = self.archive_bytes();
@@ -416,6 +436,269 @@ fn lib_install_bootstrap(
         }
     }
     result
+}
+
+// Bootstrap runtime checks use the manifest's normal resolver semantics
+// (reef_distribution.md, typed identities and Item 7).
+fn runtime_requirement_fixture(schema: u32, requirement: &str) -> SyntheticShell {
+    let mut shell = SyntheticShell::new("chelis-lang", "runtime-user", "v0.2.0", "0.2.0", vec![]);
+    shell.schema = schema;
+    shell.deps.push(("chelis-std", requirement.to_string()));
+    shell
+}
+
+#[test]
+fn bootstrap_runtime_requirement_forms_match_bundled() {
+    let _g = file_lock();
+    let bundled = chelis_std_bundle::EMBEDDED_RUNTIME.version();
+    let cases = [
+        (1, bundled.to_string()),
+        (2, format!("={bundled}")),
+        (2, bundled.to_string()),
+        (2, format!("^{bundled}")),
+        (2, format!("~{bundled}")),
+        (2, format!(">={bundled}, <99.0.0")),
+        (2, "*".to_string()),
+        (3, format!("={bundled}")),
+    ];
+    for (schema, requirement) in cases {
+        let shell = runtime_requirement_fixture(schema, &requirement);
+        let harness = fixture_for_shells(std::slice::from_ref(&shell));
+        let dir = tempdir().expect("tempdir");
+        let registry = dir.path().join("registry");
+        Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_REEF_HOME", &registry)
+            .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+            .env("GITHUB_TOKEN", "unit-test-token")
+            .env("PATH", "")
+            .args(["reef", "install", "--bootstrap", &shell.spec_string()])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Installed runtime-user 0.2.0"));
+        assert_eq!(harness.install_order(), vec!["runtime-user"]);
+        let index = fs::read_to_string(registry.join("index.json")).expect("registry index");
+        assert!(
+            index.contains("runtime-user"),
+            "schema {schema}: {requirement}"
+        );
+        assert!(
+            !index.contains("chelis-std"),
+            "runtime must remain compiler-bundled"
+        );
+    }
+}
+
+#[test]
+fn bootstrap_runtime_requirement_mismatches_rejected_before_install() {
+    let _g = file_lock();
+    for (schema, requirement) in [(1, "99.0.0"), (2, "=99.0.0"), (2, "^99.0.0"), (2, "<0.0.0")] {
+        let shell = runtime_requirement_fixture(schema, requirement);
+        let harness = fixture_for_shells(std::slice::from_ref(&shell));
+        let dir = tempdir().expect("tempdir");
+        let registry = dir.path().join("registry");
+        let spec = shell.spec_string();
+        let error =
+            lib_install_bootstrap(&[&spec], &harness.uri(), Some("unit-test-token"), &registry)
+                .expect_err("incompatible runtime requirement must fail");
+        assert!(matches!(
+            error,
+            chelis_reef::BootstrapError::Validation { .. }
+        ));
+        let message = error.to_string();
+        assert!(message.contains(requirement), "{message}");
+        assert!(
+            message.contains(chelis_std_bundle::EMBEDDED_RUNTIME.version()),
+            "{message}"
+        );
+        assert!(message.contains("cannot be substituted"), "{message}");
+        Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_REEF_HOME", &registry)
+            .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+            .env("GITHUB_TOKEN", "unit-test-token")
+            .env("PATH", "")
+            .args(["reef", "install", "--bootstrap", &spec])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("cannot be substituted"));
+        assert!(harness.install_order().is_empty());
+        assert!(
+            !registry.exists(),
+            "rejection must precede registry mutation"
+        );
+    }
+}
+
+#[test]
+fn bootstrap_invalid_runtime_requirements_use_manifest_validation() {
+    let _g = file_lock();
+    for (schema, requirement) in [(1, "=0.4.0"), (2, "not-a-version"), (2, "=0.4.0+build")] {
+        let shell = runtime_requirement_fixture(schema, requirement);
+        let harness = fixture_for_shells(std::slice::from_ref(&shell));
+        let dir = tempdir().expect("tempdir");
+        let registry = dir.path().join("registry");
+        let spec = shell.spec_string();
+        let error =
+            lib_install_bootstrap(&[&spec], &harness.uri(), Some("unit-test-token"), &registry)
+                .expect_err("invalid requirement must fail manifest validation");
+        assert!(
+            matches!(error, chelis_reef::BootstrapError::ManifestRead { .. }),
+            "{error}"
+        );
+        assert!(error.to_string().contains(requirement), "{error}");
+        assert!(harness.install_order().is_empty());
+        assert!(!registry.exists());
+    }
+}
+
+fn peer_requirement_fixture(schema: u32, requirement: &str) -> SyntheticShell {
+    let mut shell = SyntheticShell::new("chelis-lang", "peer-user", "v0.2.0", "0.2.0", vec![]);
+    shell.schema = schema;
+    shell.deps.push(("peer", requirement.to_string()));
+    shell
+}
+
+#[test]
+fn bootstrap_peer_requirement_forms_match_selected_version() {
+    let _g = file_lock();
+    for (schema, requirement) in [
+        (1, "0.2.0"),
+        (2, "=0.2.0"),
+        (2, "^0.2.0"),
+        (2, "~0.2"),
+        (2, "0.2.*"),
+        (2, ">=0.2.0, <0.3.0"),
+        (3, "=0.2.0"),
+    ] {
+        let shell = peer_requirement_fixture(schema, requirement);
+        let peer = SyntheticShell::new("chelis-lang", "peer", "v0.2.0", "0.2.0", vec![]);
+        let harness = fixture_for_shells(&[shell.clone(), peer.clone()]);
+        let dir = tempdir().expect("tempdir");
+        let registry = dir.path().join("registry");
+        Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_REEF_HOME", &registry)
+            .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+            .env("GITHUB_TOKEN", "unit-test-token")
+            .env("PATH", "")
+            .args([
+                "reef",
+                "install",
+                "--bootstrap",
+                &shell.spec_string(),
+                &peer.spec_string(),
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Installed peer-user 0.2.0"))
+            .stdout(predicate::str::contains("Installed peer 0.2.0"));
+        assert_eq!(
+            harness.install_order(),
+            vec!["peer", "peer-user"],
+            "schema {schema}: {requirement}"
+        );
+    }
+}
+
+#[test]
+fn bootstrap_incompatible_peer_requirement_rejected_before_install() {
+    let _g = file_lock();
+    for (schema, requirement) in [(1, "0.3.0"), (2, "=0.3.0"), (2, "^0.3.0"), (2, "<0.2.0")] {
+        let shell = peer_requirement_fixture(schema, requirement);
+        let peer = SyntheticShell::new("chelis-lang", "peer", "v0.2.0", "0.2.0", vec![]);
+        let harness = fixture_for_shells(&[shell.clone(), peer.clone()]);
+        let dir = tempdir().expect("tempdir");
+        let registry = dir.path().join("registry");
+        let spec = shell.spec_string();
+        let peer_spec = peer.spec_string();
+        let error = lib_install_bootstrap(
+            &[&spec, &peer_spec],
+            &harness.uri(),
+            Some("unit-test-token"),
+            &registry,
+        )
+        .expect_err("incompatible explicit peer must fail");
+        assert!(
+            matches!(error, chelis_reef::BootstrapError::Validation { .. }),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("peer-user") && message.contains("peer"),
+            "{message}"
+        );
+        assert!(
+            message.contains(requirement) && message.contains("0.2.0"),
+            "{message}"
+        );
+        Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_REEF_HOME", &registry)
+            .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+            .env("GITHUB_TOKEN", "unit-test-token")
+            .env("PATH", "")
+            .args(["reef", "install", "--bootstrap", &spec, &peer_spec])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("selects `0.2.0`"));
+        assert!(harness.install_order().is_empty());
+        assert!(!registry.exists());
+    }
+}
+
+#[test]
+fn bootstrap_invalid_peer_requirements_use_manifest_validation() {
+    let _g = file_lock();
+    for (schema, requirement) in [(1, "=0.2.0"), (2, "not-a-version"), (3, "=0.2.0+build")] {
+        let shell = peer_requirement_fixture(schema, requirement);
+        let harness = fixture_for_shells(std::slice::from_ref(&shell));
+        let dir = tempdir().expect("tempdir");
+        let registry = dir.path().join("registry");
+        let spec = shell.spec_string();
+        let error =
+            lib_install_bootstrap(&[&spec], &harness.uri(), Some("unit-test-token"), &registry)
+                .expect_err("malformed requirement must fail before peer selection");
+        assert!(
+            matches!(error, chelis_reef::BootstrapError::ManifestRead { .. }),
+            "{error}"
+        );
+        assert!(error.to_string().contains(requirement), "{error}");
+        assert!(harness.install_order().is_empty());
+        assert!(!registry.exists());
+    }
+}
+
+#[test]
+fn bootstrap_typed_peer_edges_preserve_cycle_rejection() {
+    let _g = file_lock();
+    let shell = peer_requirement_fixture(2, "=0.2.0");
+    let mut peer = SyntheticShell::new(
+        "chelis-lang",
+        "peer",
+        "v0.2.0",
+        "0.2.0",
+        vec![("peer-user", "=0.2.0")],
+    );
+    peer.schema = 2;
+    let harness = fixture_for_shells(&[shell.clone(), peer.clone()]);
+    let dir = tempdir().expect("tempdir");
+    let registry = dir.path().join("registry");
+    let spec = shell.spec_string();
+    let peer_spec = peer.spec_string();
+    let error = lib_install_bootstrap(
+        &[&spec, &peer_spec],
+        &harness.uri(),
+        Some("unit-test-token"),
+        &registry,
+    )
+    .expect_err("matching requirements still form a cycle");
+    assert!(
+        matches!(error, chelis_reef::BootstrapError::Cycle { .. }),
+        "{error}"
+    );
+    assert!(harness.install_order().is_empty());
+    assert!(!registry.exists());
 }
 
 // ============================================================

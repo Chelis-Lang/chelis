@@ -6415,7 +6415,7 @@ impl From<BootstrapError> for String {
 /// re-run via [`install_from_github`] later in the bootstrap loop —
 /// network fetch is repeated for the archive byte stream, but the
 /// validated install path stays the same as the single-shell case.
-fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ReefManifest, BootstrapError> {
+fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ParsedManifest, BootstrapError> {
     let token = try_github_token();
     let api_base = github_api_base_url();
     let archive_name = format!("{}-{}.tar.zst", spec.repo, spec.version);
@@ -6467,19 +6467,21 @@ fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ReefManifest, Bootstr
             message: "archive does not contain `reef.toml` at the root".to_string(),
         });
     }
-    read_manifest(&manifest_path)
-        .map(ParsedManifest::into_raw)
-        .map_err(|message| BootstrapError::ManifestRead {
-            spec: format!("{}/{}@{}", spec.org, spec.repo, spec.tag),
-            message,
-        })
+    read_manifest(&manifest_path).map_err(|message| BootstrapError::ManifestRead {
+        spec: format!("{}/{}@{}", spec.org, spec.repo, spec.tag),
+        message,
+    })
 }
 
 /// One node in the bootstrap dependency graph: `(name, version,
-/// deps)` where `deps` is the list of `(dep_name, dep_version)` edges
+/// deps)` where `deps` is the list of `(dep_name, requirement)` edges
 /// the node's manifest declared. A `Vec<BootstrapNode>` is the input
 /// to [`topo_sort_bootstrap`].
-type BootstrapNode = (String, String, Vec<(String, String)>);
+type BootstrapNode = (
+    String,
+    package_versioning::PackageVersion,
+    Vec<(String, package_versioning::DependencyRequirement)>,
+);
 
 /// Topologically sort `nodes` by their dependency edges so each entry
 /// is preceded by everything it depends on. Returns the sorted list
@@ -6497,19 +6499,38 @@ type BootstrapNode = (String, String, Vec<(String, String)>);
 /// cycle (the package's own `(name, version)` formatted twice with
 /// `->`).
 fn topo_sort_bootstrap(nodes: &[BootstrapNode]) -> Result<Vec<usize>, BootstrapError> {
-    // Map (name, version) -> index for edge resolution. Built up
-    // front so cycle detection can map back to (name, version) pairs
-    // inside the DFS.
-    let mut index_by_key: chelis_unord::UnordMap<(String, String), usize> =
-        chelis_unord::UnordMap::new();
-    for (i, (name, version, _)) in nodes.iter().enumerate() {
-        if let Some(prior) = index_by_key.insert((name.clone(), version.clone()), i) {
-            // Defensive: bootstrap-input dedup happens before topo
-            // sort, so this branch should be unreachable for
-            // legitimate callers. We preserve the prior index either
-            // way — duplicate-version detection is the caller's job.
-            let _ = prior;
+    // Input validation has rejected multiple versions of one package. Resolve
+    // every typed requirement to its explicit peer before traversing the graph.
+    // DFS then consumes only validated node indices, with no missing-edge fallback.
+    let index_by_name: chelis_unord::UnordMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _, _))| (name.as_str(), index))
+        .collect();
+    let mut edges = Vec::with_capacity(nodes.len());
+    for (name, _, dependencies) in nodes {
+        let mut resolved = Vec::with_capacity(dependencies.len());
+        for (dependency, requirement) in dependencies {
+            let index = index_by_name
+                .get(dependency.as_str())
+                .copied()
+                .ok_or_else(|| BootstrapError::MissingDependency {
+                    dependent: name.clone(),
+                    missing: dependency.clone(),
+                })?;
+            let selected_version = &nodes[index].1;
+            if !requirement.matches(selected_version) {
+                return Err(BootstrapError::Validation {
+                    message: format!(
+                        "shell `{name}` requires `{dependency}` `{}`, but the bootstrap input list \
+                         selects `{selected_version}`. Select a shell version that satisfies the requirement.",
+                        requirement.as_text()
+                    ),
+                });
+            }
+            resolved.push(index);
         }
+        edges.push(resolved);
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -6537,10 +6558,10 @@ fn topo_sort_bootstrap(nodes: &[BootstrapNode]) -> Result<Vec<usize>, BootstrapE
             continue;
         }
         path.push((start, 0));
-        path_keys.push((nodes[start].0.clone(), nodes[start].1.clone()));
+        path_keys.push((nodes[start].0.clone(), nodes[start].1.to_string()));
         colors[start] = Color::Gray;
         while let Some(&(node_idx, cursor)) = path.last() {
-            let deps = &nodes[node_idx].2;
+            let deps = &edges[node_idx];
             if cursor >= deps.len() {
                 colors[node_idx] = Color::Black;
                 order.push(node_idx);
@@ -6552,14 +6573,8 @@ fn topo_sort_bootstrap(nodes: &[BootstrapNode]) -> Result<Vec<usize>, BootstrapE
             // the next loop iteration after pop.
             let last = path.last_mut().expect("path nonempty");
             last.1 = cursor + 1;
-            let dep_key = (deps[cursor].0.clone(), deps[cursor].1.clone());
-            // Edges to nodes outside the bootstrap set are caught
-            // upstream as `MissingDependency`; here we assume every
-            // dep resolves into the input set.
-            let dep_idx = match index_by_key.get(&dep_key).copied() {
-                Some(i) => i,
-                None => continue, // unreachable in well-formed input; defensive
-            };
+            let dep_idx = deps[cursor];
+            let dep_key = (nodes[dep_idx].0.clone(), nodes[dep_idx].1.to_string());
             match colors[dep_idx] {
                 Color::Black => continue,
                 Color::Gray => {
@@ -6600,7 +6615,8 @@ fn topo_sort_bootstrap(nodes: &[BootstrapNode]) -> Result<Vec<usize>, BootstrapE
 ///    the manifest is needed to discover `[dependencies]` edges.
 /// 2. Build a directed graph keyed by `(name, version)`. Edges are
 ///    drawn from each entry's manifest dependencies, matching by
-///    name+version against the other entries in `specs`.
+///    each typed dependency requirement against the selected peer version
+///    in `specs`.
 /// 3. Topologically sort via DFS with a recursion-stack cycle check.
 ///    On cycle, return [`BootstrapError::Cycle`] naming the cycle
 ///    members. On a dependency that names a package not in the input
@@ -6684,27 +6700,32 @@ pub fn install_bootstrap(
                 ),
             });
         }
-        let mut deps: Vec<(String, String)> = Vec::new();
-        for (dep_name, dep_spec) in &manifest.dependencies {
+        let mut deps = Vec::new();
+        for (dep_name, dep_spec) in &manifest.typed.dependencies {
             // Path-only deps are local development edges that the
             // bootstrap install path cannot satisfy from a release;
             // skip them — `install_from_github` plus the lockfile
             // resolution path handles missing-from-registry errors at
             // build time. Bootstrap's job is the upstream-published
             // dep set.
-            if dep_spec.path.is_some() && dep_spec.version.is_none() {
+            if dep_spec.path().is_some() && dep_spec.requirement().is_none() {
                 continue;
             }
             // chelis-std declared by a shell's `reef.toml` is the
             // implicit-runtime dep, not an edge in the bootstrap graph.
             // The runtime is compiler-bundled; we do not include it in
-            // the topo sort or the install loop. Soft-verify the
-            // declared version against the compiler's bundled version
+            // the topo sort or the install loop. Match the manifest's
+            // typed requirement against the compiler's bundled version
             // so a stale shell declaration surfaces clearly.
-            if dep_name == CHELIS_STD_PACKAGE_NAME {
-                if let Some(declared) = dep_spec.version.as_deref() {
+            if dep_name.as_str() == CHELIS_STD_PACKAGE_NAME {
+                if let Some(requirement) = dep_spec.requirement() {
+                    let declared = requirement.as_text();
                     let bundled = runtime.version();
-                    if declared != bundled {
+                    let bundled_version = package_versioning::PackageVersion::from_str(bundled)
+                        .map_err(|error| BootstrapError::Validation {
+                            message: error.to_string(),
+                        })?;
+                    if !requirement.matches(&bundled_version) {
                         return Err(BootstrapError::Validation {
                             message: format!(
                                 "shell `{}/{}@{}` declares `chelis-std = {{ version = \"{}\" }}`, \
@@ -6719,26 +6740,24 @@ pub fn install_bootstrap(
                 }
                 continue;
             }
-            // Version-pinned deps need a peer in the bootstrap input
-            // set. Versionless deps (no `version =` and no `path =`)
-            // are ill-formed manifests; surface that early.
-            let dep_version = match dep_spec.version.as_ref() {
-                Some(v) => v.clone(),
+            // Retain the typed requirement until explicit peer selection.
+            let requirement = match dep_spec.requirement() {
+                Some(requirement) => requirement.clone(),
                 None => {
                     return Err(BootstrapError::Validation {
                         message: format!(
                             "shell `{}/{}@{}` declares dependency `{}` without a version pin: \
-                             reef bootstrap requires exact version pins on every dependency",
+                             reef bootstrap requires a version requirement on every published dependency",
                             spec.org, spec.repo, spec.tag, dep_name
                         ),
                     });
                 }
             };
-            deps.push((dep_name.clone(), dep_version));
+            deps.push((dep_name.to_string(), requirement));
         }
         nodes.push((
             manifest.package.name.clone(),
-            manifest.package.version.clone(),
+            manifest.typed.package.version.clone(),
             deps,
         ));
     }
@@ -6747,12 +6766,10 @@ pub fn install_bootstrap(
     // two versions in the input list is ambiguous; refuse rather than
     // silently picking one.
     {
-        let mut by_name: chelis_unord::UnordMap<&str, Vec<&str>> = chelis_unord::UnordMap::new();
+        let mut by_name: chelis_unord::UnordMap<&str, Vec<&package_versioning::PackageVersion>> =
+            chelis_unord::UnordMap::new();
         for (name, version, _) in &nodes {
-            by_name
-                .entry(name.as_str())
-                .or_default()
-                .push(version.as_str());
+            by_name.entry(name.as_str()).or_default().push(version);
         }
         for (name, versions) in by_name.to_sorted() {
             if versions.len() > 1 {
@@ -6769,38 +6786,13 @@ pub fn install_bootstrap(
         }
     }
 
-    // Build (name, version) -> index for edge validation.
-    let mut index_by_key: chelis_unord::UnordMap<(String, String), usize> =
-        chelis_unord::UnordMap::new();
-    for (i, (name, version, _)) in nodes.iter().enumerate() {
-        index_by_key.insert((name.clone(), version.clone()), i);
-    }
-
-    // Validate every dep edge resolves to a node in the input set.
-    for (name, _version, deps) in &nodes {
-        for (dep_name, dep_version) in deps {
-            if !index_by_key.contains_key(&(dep_name.clone(), dep_version.clone())) {
-                return Err(BootstrapError::MissingDependency {
-                    dependent: name.clone(),
-                    missing: dep_name.clone(),
-                });
-            }
-        }
-    }
-
     let order = topo_sort_bootstrap(&nodes)?;
 
     // Phase 3: install in topological order via Item 6's full path.
     let mut installed: Vec<InstalledArtifact> = Vec::with_capacity(order.len());
     for idx in order {
-        let (name, version, _deps) = &nodes[idx];
-        // Match the (name, version) back to the original spec to get
-        // the canonical `<org>/<repo>@<tag>` to call
-        // `install_from_github` with.
-        let spec = specs
-            .iter()
-            .find(|s| s.repo == *name && s.version == *version)
-            .expect("topo order references a node not in the input specs");
+        // Nodes retain the original input order; only the install order changes.
+        let spec = &specs[idx];
         let spec_str = format!("{}/{}@{}", spec.org, spec.repo, spec.tag);
         let artifact = install_from_github(&spec_str, registry_root)?;
         installed.push(artifact);

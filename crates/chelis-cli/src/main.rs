@@ -708,7 +708,10 @@ enum ReefCommand {
         ///
         /// `chelis-std` is the language runtime and ships with the
         /// compiler — it is not a bootstrap target. Including it in
-        /// the input list is rejected with a typed runtime-error.
+        /// the input list is rejected with a typed runtime-error. Shell runtime
+        /// requirements must match the bundled version. Dependency requirements
+        /// use the manifest's resolver semantics and must match the selected
+        /// shell peers in the explicit input list.
         #[arg(long, value_name = "ORG/REPO@TAG", num_args = 0..)]
         bootstrap: Option<Vec<String>>,
         /// `<name>` or `<name>=<version>` selectors. If omitted with

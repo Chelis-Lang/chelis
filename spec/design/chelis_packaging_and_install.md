@@ -68,7 +68,11 @@ The chelis-std runtime is packed from `packages/chelis-std` by
 embeds it. A lock records it by the hashes of the running binary's runtime, so
 the compiler repository commits neither the runtime pair nor a lock recording
 it ([`reef_distribution.md`](reef_distribution.md), Item 7, "Bundling and
-lockfile synthesis").
+lockfile synthesis"). Bootstrap preserves typed dependency requirements and
+checks them against the bundled runtime or the selected shell peer in its
+explicit input list, using the same matching semantics as normal dependency
+resolution. An incompatible or invalid requirement rejects the graph before
+installation.
 
 ## 3. The lockfile-ownership rule
 
