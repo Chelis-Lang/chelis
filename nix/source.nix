@@ -6,7 +6,7 @@
 let
   rootString = toString root;
   # Build-facing subset only: prose edits must not invalidate packages.
-  # This source feeds automatic graph generation and package behavior checks.
+  # This source feeds package metadata and package behavior checks.
   defaultRoots = [
     "Cargo.lock"
     "Cargo.toml"

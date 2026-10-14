@@ -2,7 +2,6 @@
   pkgs,
   lib,
   root,
-  crate2nix,
   cvc5,
 }:
 let
@@ -20,11 +19,21 @@ let
   };
   manifest = lib.importTOML (source + "/Cargo.toml");
   version = manifest.workspace.package.version;
-  crate2nixManifest = lib.importTOML (crate2nix + "/crate2nix/Cargo.toml");
-  crate2nixVersion =
-    assert crate2nixManifest.package.version == "0.15.0";
-    crate2nixManifest.package.version;
-  crate2nixTools = pkgs.callPackage (crate2nix + "/tools.nix") { };
+  # crate2nix 0.15.0 generates the committed root Cargo.nix with the compiler
+  # features below. The Cargo.nix freshness job in ci.yml runs the same
+  # command, and docs/contributor_setup.md gives it to contributors.
+  crate2nixVersion = "0.15.0";
+  compilerFeatures = [ "distribution" ];
+  crate2nixCommand = lib.concatMapStringsSep " " builtins.toJSON (
+    [
+      "generate"
+      "--no-default-features"
+    ]
+    ++ lib.concatMap (feature: [
+      "--features"
+      "chelis-cli/${feature}"
+    ]) (lib.sort lib.lessThan compilerFeatures)
+  );
   toolchain = pkgs.rust-bin.fromRustupToolchainFile (source + "/rust-toolchain.toml");
   buildRustCrateForPkgs =
     cratePkgs:
@@ -62,29 +71,12 @@ let
         };
       };
     };
-  generatedCargoNix =
-    assert crate2nixVersion == "0.15.0";
-    (crate2nixTools.generatedCargoNix {
-      name = "chelis";
-      src = source;
-      cargo = toolchain;
-      additionalCargoNixArgs = [
-        "--no-default-features"
-        "--features"
-        "chelis-cli/distribution"
-      ];
-    }).overrideAttrs
-      (_: {
-        CARGO_NET_OFFLINE = "true";
-      });
-  cargoGraph = import generatedCargoNix {
+  cargoGraph = import (root + "/Cargo.nix") {
     inherit buildRustCrateForPkgs pkgs;
     rootFeatures = [ ];
   };
   compilerCrate = cargoGraph.workspaceMembers."chelis-cli".build.override {
-    features = [
-      "distribution"
-    ];
+    features = compilerFeatures;
   };
   chelisupCrate = cargoGraph.workspaceMembers."chelisup".build.override {
     features = [ ];
@@ -255,9 +247,9 @@ in
     chelisupCrate
     compiler
     compilerCrate
+    crate2nixCommand
     crate2nixVersion
     crateSource
-    generatedCargoNix
     runtime
     source
     toolchain

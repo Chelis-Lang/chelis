@@ -222,6 +222,17 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "Cargo.nix",
+        "library-name",
+        lines=(
+            'libName = "chelis_runtime";type = [ "staticlib" "rlib" ];',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "is the crate2nix record of the runtime crate's Cargo library target, generated from its manifest; it declares the crate build, and the Nix packages ship the compiler's runtime export instead of this crate output"
+        ),
+    ),
+    Row(
         "bindings/python/chelis/__init__.py",
         "runtime-variable",
         lines=(

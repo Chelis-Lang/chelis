@@ -58,6 +58,7 @@ WORKFLOWS = {
             "SMT Feature Build (Linux)",
             "Docs",
             "No AI authorship markers",
+            "Cargo.nix freshness",
         ),
         identity_artifact="candidate-identity-ci",
     ),

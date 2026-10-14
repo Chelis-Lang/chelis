@@ -174,6 +174,18 @@ revision; never mix an archive or header from another derivation. A failed
 Nix-wrapper installation leaves its previous stable GC root and selected
 toolchain untouched.
 
+The flake imports the committed `Cargo.nix`, so Nix evaluation needs no import
+from derivation. A change to `Cargo.lock`, a workspace manifest, or a crate
+target (for example, a file in `src/bin/`) must also regenerate that file:
+
+```sh
+nix run --inputs-from . nixpkgs#crate2nix -- generate --no-default-features --features chelis-cli/distribution
+```
+
+The `Cargo.nix freshness` CI job runs the same crate2nix 0.15.0 command and
+fails on any byte difference. Resolve a `Cargo.nix` merge conflict with this
+command, not by hand.
+
 ## Optional Devenv shell
 
 The native path above works without Devenv. The optional shell supplies

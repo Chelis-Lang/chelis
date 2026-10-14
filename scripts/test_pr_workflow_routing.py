@@ -35,6 +35,7 @@ REQUIRED_IMPLEMENTATION_JOBS = {
     "smt-build": "SMT Feature Build (Linux)",
     "docs": "Docs",
     "no-ai-authorship": "No AI authorship markers",
+    "cargo-nix": "Cargo.nix freshness",
 }
 PREFLIGHT_GATED_JOBS = {
     "diagnostic-kind-oracle",

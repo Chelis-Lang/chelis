@@ -1,13 +1,7 @@
 {
   description = "Chelis compiler, runtime, and toolchain installer packages";
 
-  nixConfig.allow-import-from-derivation = true;
-
   inputs = {
-    crate2nix = {
-      url = "github:nix-community/crate2nix/0.15.0";
-      flake = false;
-    };
     nixpkgs.url = "github:NixOS/nixpkgs/f205b5574fd0cb7da5b702a2da51507b7f4fdd1b";
     rust-overlay = {
       url = "github:oxalica/rust-overlay/89abdfd661ea493cde2f73d7b1332cb34150aa43";
@@ -18,7 +12,6 @@
   outputs =
     {
       self,
-      crate2nix,
       nixpkgs,
       rust-overlay,
     }:
@@ -39,7 +32,6 @@
           };
           built = import ./nix/packages.nix {
             inherit
-              crate2nix
               cvc5
               lib
               pkgs
