@@ -517,8 +517,8 @@ fn fn_body(fn_node: &Expr) -> Option<&Expr> {
 }
 
 /// Flatten the program, pairing each top-level decl with its enclosing
-/// lexical module key. Mirrors `infer::top_level_decl_items_with_modules`
-/// but is local to this module (chelis-pred + chelis-deep only).
+/// module key. Lexical wrappers take precedence; flat reef declarations use
+/// the shared opacity module-identity resolver.
 fn flatten_with_modules(exprs: &[Expr]) -> Vec<(Option<String>, &Expr)> {
     fn push<'a>(expr: &'a Expr, prefix: Option<&str>, out: &mut Vec<(Option<String>, &'a Expr)>) {
         if tag(expr) == Some(DeepTag::Module) {
@@ -536,7 +536,16 @@ fn flatten_with_modules(exprs: &[Expr]) -> Vec<(Option<String>, &Expr)> {
             }
             return;
         }
-        out.push((prefix.map(str::to_string), expr));
+        // Reef flattens module wrappers. Use the same declaration identity
+        // as opacity checking so unrelated linked modules never share a
+        // constant set merely because both have no lexical wrapper.
+        let name = match tag(expr) {
+            Some(DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype) => {
+                children(expr).first().and_then(sym_str)
+            }
+            _ => None,
+        };
+        out.push((crate::opacity::module_key_for_item(prefix, name), expr));
     }
     let mut out = Vec::new();
     for expr in exprs {

@@ -1,0 +1,1 @@
+Preserve definitions referenced by retained type invariants during build pruning, so an in-module constant remains valid when the entry imports an unrelated module. Keep each flattened reef declaration in its defining module when validating invariant constants.

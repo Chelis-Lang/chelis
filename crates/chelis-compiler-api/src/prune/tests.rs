@@ -317,3 +317,76 @@ fn stamped_pruning_does_not_drop_a_def_in_the_entrys_closure() {
         "a def reachable from the entry must survive pruning on the stamped carrier"
     );
 }
+
+// spec/04-type-system.md §2.5.1: retained invariant predicates may name
+// in-module nullary constants. Pruning must preserve that checking context.
+const INVARIANT_MODULE: &str = "module Demo.Invariant\n\
+    def base() -> f32 = 0.0001\n\
+    def eps() -> f32 = base()\n\
+    @opaque\n\
+    @invariant(d) (d.x >= eps)\n\
+    type Pair = | Pair { x: f32 }\n\
+    def entry() -> f32 = 2.0\n\
+    def unrelated() -> f32 = 99.0\n";
+
+fn invariant_errors(exprs: &[DeepExpr]) -> Vec<chelis_types::errors::CheckError> {
+    let mut errors = Vec::new();
+    chelis_types::invariants::validate_type_invariants_in_program(exprs, &mut errors);
+    errors
+}
+
+#[test]
+fn retained_invariant_keeps_constant_and_transitive_body_dependencies() {
+    let original = expand(INVARIANT_MODULE);
+    assert!(invariant_errors(&original).is_empty());
+    let pruned = prune_to_entry(original, "entry");
+    assert_eq!(def_names(&pruned), vec!["base", "entry", "eps"]);
+    assert!(invariant_errors(&pruned).is_empty());
+}
+
+#[test]
+fn retained_invariant_closure_agrees_across_deep_ingress() {
+    let expanded = expand(INVARIANT_MODULE);
+    let stamped = stamp(&expanded);
+    let pruned = prune_to_entry(stamped, "entry");
+    assert_eq!(def_names(&pruned), vec!["base", "entry", "eps"]);
+    assert!(invariant_errors(&pruned).is_empty());
+}
+
+#[test]
+fn retained_invariant_is_a_root_even_without_entry_definitions() {
+    let module = expand(INVARIANT_MODULE).pop().unwrap();
+    let (_, _, children, _) = module.into_node_parts().unwrap();
+    let pruned = prune_to_reachable_seeds(children.into_iter().skip(1).collect(), []);
+    assert_eq!(def_names(&pruned), vec!["base", "eps"]);
+    assert!(invariant_errors(&pruned).is_empty());
+}
+
+#[test]
+fn pruning_does_not_admit_missing_or_parameterized_invariant_constants() {
+    for source in [
+        INVARIANT_MODULE.replace("def eps() -> f32 = base()", "def eps(x: f32) -> f32 = x"),
+        INVARIANT_MODULE.replace("d.x >= eps", "d.x >= missing"),
+    ] {
+        let original = expand(&source);
+        let before = invariant_errors(&original);
+        assert!(
+            !before.is_empty(),
+            "invalid invariant must reject before pruning"
+        );
+        let after = invariant_errors(&prune_to_entry(original, "entry"));
+        assert_eq!(before.len(), after.len());
+        assert!(after.iter().all(|error| {
+            matches!(
+                error.kind,
+                chelis_types::errors::CheckErrorKind::OpaqueTypeViolation
+            ) && error.message.contains("in-module zero-argument constant")
+        }));
+    }
+}
+
+#[test]
+fn runtime_resource_pruning_does_not_keep_invariant_only_definitions() {
+    let pruned = prune_checked_runtime_to_entry(expand(INVARIANT_MODULE), "entry");
+    assert_eq!(def_names(&pruned), vec!["entry"]);
+}

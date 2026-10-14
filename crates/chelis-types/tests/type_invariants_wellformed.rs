@@ -436,3 +436,32 @@ fn if_predicate_with_comparison_condition_is_admitted() {
     );
     assert_no_invariant_violation(&errors(&deep));
 }
+
+// spec/04 §2.5.1: reef flattening retains each declaration's module identity;
+// a foreign nullary constant never becomes an in-module invariant constant.
+fn flat_linked_invariant(constant_module: &str) -> Vec<chelis_deep::Expr> {
+    let deep = deep_of_surf(
+        "module A\ndef eps() -> f32 = 0.0001\n@opaque\n@invariant(d) d.x >= eps\ntype Pair = | Pair { x: f32 }",
+    );
+    let text = chelis_deep::printer::print_canonical(&deep)
+        .replace("eps", &format!("pkg__probe__{constant_module}__eps"))
+        .replace("Pair", "Pkg__probe__A__Pair");
+    let module = deep_of_dp(&text).pop().unwrap();
+    let (_, _, children, _) = module.into_node_parts().unwrap();
+    children.into_iter().skip(1).collect()
+}
+
+#[test]
+fn linked_invariant_accepts_nullary_constant_from_its_own_module() {
+    let _guard = chelis_types::install_linked_program_guard();
+    assert_check_clean(&errors(&flat_linked_invariant("A")));
+}
+
+#[test]
+fn linked_invariant_rejects_nullary_constant_from_a_different_module() {
+    let _guard = chelis_types::install_linked_program_guard();
+    assert_has_violation(
+        &errors(&flat_linked_invariant("B")),
+        "not the binder or an in-module zero-argument constant",
+    );
+}

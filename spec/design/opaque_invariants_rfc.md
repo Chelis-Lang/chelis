@@ -392,6 +392,16 @@ parser-level twins for best-effort Surf diagnostics:
   errors on mismatch (protects hand-written `.dp`).
 - The language rejects nothing on amenability grounds; it records.
 
+Build reachability treats every retained non-definition declaration as a root
+for its expression references. An invariant-bearing type therefore keeps the
+in-module constant definitions used by its predicate and their transitive
+definition dependencies through pruning and rechecking. Runtime resource
+admission continues to follow executed definitions only. Invariant validation
+uses the same declaration module-identity resolver as opacity checking: lexical
+wrappers take precedence, and flattened reef declarations recover their defining
+module from the linker identity. Constants from different linked modules never
+share an invariant validation context.
+
 ## 7. D-PRED: the `chelis-pred` crate
 
 New leaf crate (`crates/chelis-pred`, depends only on `chelis-deep`)

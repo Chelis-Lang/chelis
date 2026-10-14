@@ -22,7 +22,8 @@
 //! ## What pruning does and does not hide
 //!
 //! Pruning drops only GENUINELY-UNREACHABLE named decls. It seeds the
-//! reachable set from the entry name and follows every `var` reference whose
+//! reachable set from the entry name and retained non-def declarations, then
+//! follows every `var` reference whose
 //! name is a local `def`. A reference to a name that is not a local `def`
 //! (e.g. an unresolved import, or a built-in primitive) is never added to the
 //! reachable set, so it cannot keep an unrelated def alive. The corollary is
@@ -129,14 +130,14 @@ fn prune_top_level_entry(
 /// Prune a flat list of top-level Deep declarations to those reachable from
 /// the given seed names, by BFS over `var` references that resolve to a local
 /// `def`. Both the `def` body and its sibling `defsig` are dropped for an
-/// unreachable name; non-decl elements are kept.
+/// unreachable name; non-decl elements and their definition dependencies are
+/// kept. In particular, a retained type invariant keeps its in-module constants
+/// and their transitive body dependencies.
 ///
 /// This is the shared core both the WI-3 single-entry pruner and the build
 /// path use, so the reachability definition lives in one place. Unlike
-/// [`prune_top_level_to_reachable_defs`], an EMPTY seed set drops every named
-/// decl (reachable stays empty) — the build path relies on that to strip a
-/// linked program down to nothing when the entry program contributes no
-/// top-level defs.
+/// [`prune_top_level_to_reachable_defs`], an EMPTY entry seed set still prunes
+/// definitions: only definitions needed by retained non-def declarations remain.
 pub fn prune_to_reachable_seeds(
     exprs: Vec<DeepExpr>,
     seeds: impl IntoIterator<Item = String>,
@@ -157,6 +158,24 @@ fn prune_reachable(
 
     let mut reachable = UnordSet::<String>::new();
     let mut queue = VecDeque::from_iter(seeds);
+    if matches!(scope, ReferenceScope::Syntactic) {
+        // Non-def declarations survive the filter below. Their expression
+        // dependencies must survive too: otherwise a retained invariant loses
+        // the nullary constants that its well-formedness check requires.
+        // Follow these roots through the same closure as entry definitions,
+        // including constants whose bodies depend on other definitions.
+        // Runtime resource admission intentionally follows executed code only.
+        for expr in &exprs {
+            if deep_named_decl_name(expr).is_none() {
+                queue.extend(
+                    deep_referenced_vars(expr)
+                        .into_iter()
+                        .filter(|name| def_map.contains_key(*name))
+                        .map(str::to_string),
+                );
+            }
+        }
+    }
     while let Some(name) = queue.pop_front() {
         if !reachable.insert(name.clone()) {
             continue;
