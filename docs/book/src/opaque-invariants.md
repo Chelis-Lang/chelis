@@ -63,7 +63,9 @@ the type.
 
 A build retains the constant definitions referenced by each retained type
 invariant, including their definition dependencies. This checking context does
-not depend on whether the entry imports the type's defining module. Missing
+not depend on whether the entry imports the type's defining module. Predicate
+binders and helper parameters do not refer to same-named top-level definitions.
+Missing
 references, constants from other modules, and references to functions with
 parameters remain declaration errors.
 

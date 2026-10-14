@@ -390,3 +390,84 @@ fn runtime_resource_pruning_does_not_keep_invariant_only_definitions() {
     let pruned = prune_checked_runtime_to_entry(expand(INVARIANT_MODULE), "entry");
     assert_eq!(def_names(&pruned), vec!["entry"]);
 }
+
+const COLLIDING_INVARIANT_BINDER: &str = "module Probe.A\n\
+    import Other.Pkg (missing)\n\
+    def value(x: f32) -> f32 = missing(x)\n\
+    @opaque\n\
+    @invariant(value) value.x >= 0.0\n\
+    type Pair = | Pair { x: f32 }\n\
+    def main(x: f32) -> f32 = x * x\n";
+
+fn scoped_lower(
+    source: &str,
+) -> [Result<crate::pipeline::PipelineOutcome, crate::pipeline::PipelineRejection>; 2] {
+    let deep = chelis_deep::printer::print_canonical(&expand(source));
+    [
+        (crate::schema::SourceKind::Surf, source),
+        (crate::schema::SourceKind::Deep, deep.as_str()),
+    ]
+    .map(|(source_kind, source)| {
+        crate::pipeline::run_source(crate::pipeline::PipelineRequest {
+            source_kind,
+            source,
+            entry: Some("main"),
+            goal: crate::pipeline::PipelineGoal::Lower(
+                crate::pipeline::LoweringMode::AllowHostOnly,
+            ),
+        })
+    })
+}
+
+#[test]
+fn bound_invariant_variable_does_not_retain_an_unrelated_definition() {
+    assert_eq!(
+        def_names(&prune_to_entry(expand(COLLIDING_INVARIANT_BINDER), "main")),
+        vec!["main"]
+    );
+    for result in scoped_lower(COLLIDING_INVARIANT_BINDER) {
+        result.expect("a bound predicate variable is not a dependency");
+    }
+    let stamped = stamp(&expand(COLLIDING_INVARIANT_BINDER));
+    assert_eq!(def_names(&prune_to_entry(stamped, "main")), vec!["main"]);
+}
+
+#[test]
+fn scoped_lower_keeps_free_invariant_constants_but_not_the_bound_variable() {
+    let source = COLLIDING_INVARIANT_BINDER
+        .replace("@opaque", "def eps() -> f32 = 0.0001\n@opaque")
+        .replace("value.x >= 0.0", "value.x >= eps");
+    assert_eq!(
+        def_names(&prune_to_entry(expand(&source), "main")),
+        vec!["eps", "main"]
+    );
+    for result in scoped_lower(&source) {
+        result.expect("free invariant constants remain in the checking context");
+    }
+}
+
+#[test]
+fn scoped_lower_does_not_hide_a_real_entry_dependency_on_the_same_name() {
+    let source = COLLIDING_INVARIANT_BINDER.replace("x * x", "value(x)");
+    for result in scoped_lower(&source) {
+        let error = result.expect_err("the entry really depends on the invalid function");
+        assert!(error.to_string().contains("missing"), "{error}");
+    }
+}
+
+#[test]
+fn constant_dependency_closure_respects_helper_parameter_bindings() {
+    let source = COLLIDING_INVARIANT_BINDER
+        .replace(
+            "@opaque",
+            "def helper(value: f32) -> f32 = value\ndef eps() -> f32 = helper(0.0001)\n@opaque",
+        )
+        .replace("value.x >= 0.0", "value.x >= eps");
+    assert_eq!(
+        def_names(&prune_to_entry(expand(&source), "main")),
+        vec!["eps", "helper", "main"]
+    );
+    for result in scoped_lower(&source) {
+        result.expect("a helper parameter does not reference a same-named global");
+    }
+}

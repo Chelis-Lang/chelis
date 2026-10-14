@@ -22,9 +22,11 @@
 //! ## What pruning does and does not hide
 //!
 //! Pruning drops only GENUINELY-UNREACHABLE named decls. It seeds the
-//! reachable set from the entry name and retained non-def declarations, then
-//! follows every `var` reference whose
-//! name is a local `def`. A reference to a name that is not a local `def`
+//! reachable set from the entry name and free references in retained invariant
+//! predicates, then follows free runtime references that name a local `def`.
+//! The checker's binding analysis distinguishes a dependency from a same-spelled
+//! function parameter or invariant binder. A reference to a name that is not a
+//! local `def`
 //! (e.g. an unresolved import, or a built-in primitive) is never added to the
 //! reachable set, so it cannot keep an unrelated def alive. The corollary is
 //! the safety property: if the ENTRY's own reachable closure references an
@@ -56,19 +58,19 @@ const MODULE_DECL_OFFSET: usize = 1;
 /// path it would without pruning, rather than silently emptying the program).
 pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    prune_entry(exprs, entry, ReferenceScope::Syntactic)
+    prune_entry(exprs, entry, ReferenceScope::Checking)
 }
 
-/// Resource admission concerns executed definitions, not same-spelled locals
-/// or references in type metadata. Reuse the checker's capture/binding analysis
-/// for this scope, leaving the broader authoring/build pruner unchanged.
+/// Resource admission follows executed definitions only. Checking also keeps
+/// free references in retained invariant predicates; both scopes use the
+/// checker's lexical binding analysis for definition-body dependencies.
 pub(crate) fn prune_checked_runtime_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
     prune_entry(exprs, entry, ReferenceScope::LexicalRuntime)
 }
 
 #[derive(Clone, Copy)]
 enum ReferenceScope {
-    Syntactic,
+    Checking,
     LexicalRuntime,
 }
 
@@ -102,7 +104,7 @@ fn prune_entry(exprs: Vec<DeepExpr>, entry: &str, scope: ReferenceScope) -> Vec<
 }
 
 /// Prune a flat list of top-level Deep declarations to those reachable from
-/// `entry`, by BFS over `var` references that resolve to a local `def`. Both
+/// `entry`, by BFS over free `var` references that resolve to a local `def`. Both
 /// the `def` body and its sibling `defsig` are dropped for an unreachable
 /// name. Non-decl elements are kept.
 ///
@@ -112,7 +114,7 @@ fn prune_entry(exprs: Vec<DeepExpr>, entry: &str, scope: ReferenceScope) -> Vec<
 /// uses [`prune_to_reachable_seeds`] directly with its multi-name seed set.
 pub fn prune_top_level_to_reachable_defs(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    prune_top_level_entry(exprs, entry, ReferenceScope::Syntactic)
+    prune_top_level_entry(exprs, entry, ReferenceScope::Checking)
 }
 
 fn prune_top_level_entry(
@@ -128,22 +130,22 @@ fn prune_top_level_entry(
 }
 
 /// Prune a flat list of top-level Deep declarations to those reachable from
-/// the given seed names, by BFS over `var` references that resolve to a local
+/// the given seed names, by BFS over free `var` references that resolve to a local
 /// `def`. Both the `def` body and its sibling `defsig` are dropped for an
-/// unreachable name; non-decl elements and their definition dependencies are
-/// kept. In particular, a retained type invariant keeps its in-module constants
-/// and their transitive body dependencies.
+/// unreachable name; non-decl elements are kept. A retained type invariant
+/// keeps its free in-module constant references and their transitive definition
+/// dependencies, with lexical binding respected throughout the closure.
 ///
 /// This is the shared core both the WI-3 single-entry pruner and the build
 /// path use, so the reachability definition lives in one place. Unlike
 /// [`prune_top_level_to_reachable_defs`], an EMPTY entry seed set still prunes
-/// definitions: only definitions needed by retained non-def declarations remain.
+/// definitions: only definitions needed by retained invariants remain.
 pub fn prune_to_reachable_seeds(
     exprs: Vec<DeepExpr>,
     seeds: impl IntoIterator<Item = String>,
 ) -> Vec<DeepExpr> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
-    prune_reachable(exprs, seeds, ReferenceScope::Syntactic)
+    prune_reachable(exprs, seeds, ReferenceScope::Checking)
 }
 
 fn prune_reachable(
@@ -158,20 +160,20 @@ fn prune_reachable(
 
     let mut reachable = UnordSet::<String>::new();
     let mut queue = VecDeque::from_iter(seeds);
-    if matches!(scope, ReferenceScope::Syntactic) {
-        // Non-def declarations survive the filter below. Their expression
-        // dependencies must survive too: otherwise a retained invariant loses
-        // the nullary constants that its well-formedness check requires.
-        // Follow these roots through the same closure as entry definitions,
-        // including constants whose bodies depend on other definitions.
-        // Runtime resource admission intentionally follows executed code only.
+    if matches!(scope, ReferenceScope::Checking) {
+        // Invariant metadata needs its constant definitions for well-formedness
+        // checking, but its bound value is not a definition dependency. Restore
+        // the predicate's complete fn scope before asking the checker's lexical
+        // reference analysis; the generic metadata visitor exposes only its body.
+        // Runtime admission intentionally excludes these checking-only roots.
         for expr in &exprs {
-            if deep_named_decl_name(expr).is_none() {
+            if let DeepExpr::Node(node, _) = expr
+                && let Some(invariant) = node.meta().invariant()
+            {
                 queue.extend(
-                    deep_referenced_vars(expr)
+                    chelis_types::linearity::free_runtime_variables(&invariant.to_expression())
                         .into_iter()
-                        .filter(|name| def_map.contains_key(*name))
-                        .map(str::to_string),
+                        .filter(|name| def_map.contains_key(name)),
                 );
             }
         }
@@ -181,17 +183,9 @@ fn prune_reachable(
             continue;
         }
         if let Some(expr) = def_map.get(&name) {
-            let lexical_references;
-            let references = match scope {
-                ReferenceScope::Syntactic => deep_referenced_vars(expr),
-                ReferenceScope::LexicalRuntime => {
-                    lexical_references = chelis_types::linearity::free_runtime_variables(expr);
-                    lexical_references.iter().map(String::as_str).collect()
-                }
-            };
-            for reference in references {
-                if def_map.contains_key(reference) && !reachable.contains(reference) {
-                    queue.push_back(reference.to_string());
+            for reference in chelis_types::linearity::free_runtime_variables(expr) {
+                if def_map.contains_key(&reference) && !reachable.contains(&reference) {
+                    queue.push_back(reference);
                 }
             }
         }
