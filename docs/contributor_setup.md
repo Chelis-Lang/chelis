@@ -174,6 +174,20 @@ revision; never mix an archive or header from another derivation. A failed
 Nix-wrapper installation leaves its previous stable GC root and selected
 toolchain untouched.
 
+A published release pushes the runtime closures of the `chelis`,
+`chelis-runtime`, and `chelisup` outputs to the `chelis-lang` Cachix cache.
+`flake.nix` names that cache and its public signing key. When Nix trusts the
+cache, `nix build` and `nix run` of a released revision download those outputs
+and do not compile them.
+
+Nix applies these flake settings only for a trusted user. On a single-user
+install, or as a user in `trusted-users`, pass `--accept-flake-config`. On a
+multi-user install, the Nix daemon ignores the settings for other users, and
+Nix compiles the packages. For them, an administrator adds
+`https://chelis-lang.cachix.org` to `extra-substituters` and the key from
+`flake.nix` to `extra-trusted-public-keys` in the system Nix configuration (for
+example `/etc/nix/nix.conf`). Then the administrator restarts the Nix daemon.
+
 The flake imports the committed `Cargo.nix`, so Nix evaluation needs no import
 from derivation. A change to `Cargo.lock`, a workspace manifest, or a crate
 target (for example, a file in `src/bin/`) must also regenerate that file:
