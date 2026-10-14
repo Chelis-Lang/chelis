@@ -72,7 +72,15 @@ lockfile synthesis"). Bootstrap preserves typed dependency requirements and
 checks them against the bundled runtime or the selected shell peer in its
 explicit input list, using the same matching semantics as normal dependency
 resolution. An incompatible or invalid requirement rejects the graph before
-installation.
+installation. With no explicit selectors, bootstrap resolves the versionless
+canonical roots `nautilus`, `coral`, and `shoals` plus their dependency closure
+through the bounded typed remote resolver. Its in-memory seed fixes the running
+compiler and bundled runtime; canonical remote inputs choose versions and
+origins, while the registry supplies verified cache/publication state. Public
+fetches allow anonymous access. No project files are created. A missing
+compatible published cohort fails within the shared bounds and may become
+available later without rebuilding the compiler. Explicit selectors retain a
+closed input graph.
 
 ## 3. The lockfile-ownership rule
 

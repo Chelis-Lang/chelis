@@ -657,9 +657,11 @@ enum ReefCommand {
     ///   populate origins.
     /// * `--bootstrap [<ORG>/<REPO>@<TAG>...]` — install canonical shell
     ///   releases in dependency order. With no explicit entries, the
-    ///   toolchain's built-in default list is installed. `chelis-std`
-    ///   is compiler-bundled and rejected as an
-    ///   explicit bootstrap target.
+    ///   canonical nautilus, coral, and shoals roots and their complete
+    ///   compatible dependency closure are resolved from bounded GitHub
+    ///   release inputs for this compiler and its bundled runtime.
+    ///   Explicit entries instead form a closed graph. `chelis-std`
+    ///   is compiler-bundled and rejected as an explicit target.
     ///
     /// The four sources are mutually exclusive — exactly one of them
     /// must be supplied per invocation.
@@ -694,17 +696,20 @@ enum ReefCommand {
         /// `--from-monorepo`, `--from-github`, or `--bootstrap`.
         #[arg(long, value_name = "PATH", requires = "from_lockfile")]
         package_root: Option<PathBuf>,
-        /// Topologically-ordered install of multiple shells from
-        /// canonical-org GitHub Releases.
+        /// Install shells in dependency order from GitHub Releases.
         ///
-        /// Pass zero or more `<org>/<repo>@<tag>` entries. With no
-        /// entries, the toolchain's built-in list of canonical shells is
-        /// used. The
-        /// installer fetches each shell's manifest, builds a
-        /// dependency graph, topologically sorts, and installs each
-        /// shell via the same path as `--from-github`. Cycles and
-        /// references to packages outside the input set are surfaced
-        /// as typed errors.
+        /// With no entries, jointly resolve canonical nautilus, coral,
+        /// and shoals and their complete dependency closure for the exact
+        /// running compiler and bundled runtime. Discovery uses bounded
+        /// remote release inputs; the registry does not choose versions
+        /// or origins. A compatible published graph must exist within
+        /// those bounds. No project files are read or written.
+        ///
+        /// Explicit `<org>/<repo>@<tag>` entries form a closed graph:
+        /// dependency requirements must match the supplied peers;
+        /// missing peers and cycles are errors, with no discovery.
+        /// Public releases work anonymously. Private releases require
+        /// `GITHUB_TOKEN` or `gh auth login`.
         ///
         /// `chelis-std` is the language runtime and ships with the
         /// compiler — it is not a bootstrap target. Including it in
@@ -5562,26 +5567,16 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                                  selectors; pass each `<ORG>/<REPO>@<TAG>` after `--bootstrap`"
                             .into());
                     }
-                    // Empty list = use the built-in default; see the
-                    // `chelis_reef::DEFAULT_BOOTSTRAP_LIST` rustdoc.
-                    let raw_specs: Vec<String> = if bootstrap_args.is_empty() {
-                        chelis_reef::DEFAULT_BOOTSTRAP_LIST
-                            .iter()
-                            .map(|(repo, tag)| {
-                                format!("{}/{}@{}", chelis_reef::CANONICAL_REEF_ORG, repo, tag)
-                            })
-                            .collect()
-                    } else {
-                        bootstrap_args
-                    };
-                    let mut parsed: Vec<chelis_reef::GitHubReleaseSpec> =
-                        Vec::with_capacity(raw_specs.len());
-                    for s in &raw_specs {
-                        parsed.push(chelis_reef::GitHubReleaseSpec::parse(s)?);
-                    }
                     let registry_root = chelis_reef::registry_home()?;
-                    let installed =
-                        chelis_reef::install_bootstrap(&parsed, &registry_root, &EMBEDDED_RUNTIME)?;
+                    let installed = if bootstrap_args.is_empty() {
+                        chelis_reef::install_default_bootstrap(&registry_root, &EMBEDDED_RUNTIME)?
+                    } else {
+                        let parsed = bootstrap_args
+                            .iter()
+                            .map(|spec| chelis_reef::GitHubReleaseSpec::parse(spec))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        chelis_reef::install_bootstrap(&parsed, &registry_root, &EMBEDDED_RUNTIME)?
+                    };
                     for artifact in &installed {
                         println!(
                             "Installed {} {}",

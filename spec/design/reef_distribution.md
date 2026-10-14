@@ -72,7 +72,7 @@ One active path source overrides registry candidates for its package name. Reef 
 
 Discovery traversal rejects a cyclic path dependency graph with an ordered cycle report. A shared path package loads once for each canonical root.
 
-A valid lock is the preferred exact graph. Reef reuses it without release listing after complete identity and integrity checks.
+For project resolution, a valid lock is the preferred exact graph. Reef reuses it without release listing after complete identity and integrity checks.
 
 A requirement or source declaration change invalidates the preference. A locked hash failure or unavailable origin remains a hard error. Refresh and inspect check registry index entries against matching existing lock pins even if cached directories are missing, including packages outside a targeted refresh. They check fetched archives and shells against matching lock pins when index entries are absent, before selecting or reporting versions.
 
@@ -84,7 +84,7 @@ The production budget limits pages, requests, tags, manifests, request time, and
 
 Candidate archives stay in command-owned temporary storage. Reef scans one root `reef.toml` without complete archive extraction.
 
-A refresh stages and verifies each selected pair. Then it gets the project lock before the registry lock.
+A project refresh stages and verifies each selected pair. Then it gets the project lock before the registry lock.
 
 Reef publishes complete package directories, replaces `index.json`, and replaces the project lock last. A late failure can leave complete unused cache entries.
 
@@ -205,8 +205,9 @@ The pre-launch artifact backend is GitHub Releases on the canonical hosting
 org's repositories. Each shell repository maintains its own release tags
 (`v0.5.0` for Nautilus, `v0.5.0` for Coral, `v0.2.0` for Shoals,
 `v0.4.0` for Octant — each shell's own semver trajectory; the version is
-not synchronized across shells; the live pins are tracked in
-`DEFAULT_BOOTSTRAP_LIST` in `crates/chelis-reef/src/lib.rs`). Each release
+not synchronized across shells; default bootstrap resolves compatible versions
+from the canonical repositories named by `DEFAULT_BOOTSTRAP_ROOTS` in
+`crates/chelis-reef/src/lib.rs`). Each release
 attaches the prebuilt `<name>-<version>.chb` and
 `<name>-<version>.tar.zst` files (filenames omit the leading `v` even
 though the tag carries it).
@@ -324,14 +325,14 @@ Multiple `--from-github` flags are independent installs.
 chelis reef install --bootstrap <list>
 ```
 
-Where `<list>` is a sequence of `org/repo@tag` entries (or a config-file
-reference, or the built-in default list of canonical shells). Installs
-them in topological dependency order, using Item 6's per-shell install
-path under the hood.
+With explicit `org/repo@tag` entries, bootstrap installs only that closed
+input graph through Item 6's per-shell install path. Without entries, it
+resolves the canonical default roots and their complete dependency closure.
+Both forms report shells in deterministic dependency order.
 
 **Behavior.**
 
-- Parse the entries into a graph keyed by `(name, version)` with edges
+- For explicit selectors, parse entries into a graph keyed by `(name, version)` with edges
   derived from the shell's published `reef.toml` dependencies. The
   dependency edges are read from each shell's `<name>-<version>.tar.zst`
   archive after fetch but before placement. Each dependency requirement uses
@@ -341,11 +342,36 @@ path under the hood.
   additional peers.
 - Topologically sort. If a cycle is detected, fail with a clear error
   naming the cycle.
-- Install each shell in order via Item 6's `install_validated_artifact_pair`
-  + lockfile update.
-- The built-in default list covers the canonical shells: `nautilus`,
-  `coral`, `shoals`, `octant`. This list is hard-coded for the
-  pre-launch dev team; multi-publisher generalization is post-launch.
+- Publish explicit shells in order through Item 6's verified pair installer.
+  Default discovery publishes the selected verified remote material through
+  the shared registry publisher.
+- The versionless default roots are `nautilus`, `coral`, and `shoals`.
+  Default mode uses the existing bounded typed remote resolver over canonical
+  GitHub release observations, including transitive dependencies. Every
+  selected shell pins the running compiler exactly; runtime requirements must
+  match the compiler-bundled runtime. Default mode does not substitute a
+  compiler or runtime, including when dependency compiler drift is allowed
+  for project development.
+- Default discovery uses the existing provider, resolver ranking, search and
+  download limits, and artifact-pair verification. Registry state is verified
+  cache/publication state; it does not choose candidate versions or origins.
+  Selected entries record the observed canonical origins even when identical
+  bytes already exist in the cache under a different recorded origin.
+  Fixed observed remote inputs produce fixed selected identities, hashes and
+  dependency order. Public releases work anonymously; restricted releases
+  produce actionable authentication errors.
+- Default resolution starts from a typed in-memory seed. It creates no project
+  manifest, project lockfile, or other working-directory state. The complete
+  selected graph and pairs are validated before registry publication, which
+  reuses the existing registry lock and hash/conflict checks. A late failure
+  may leave complete unused cache entries; the operation does not promise a
+  joint filesystem transaction.
+- A compatible published graph need not exist immediately after a compiler
+  release. Absence within the observed bounded inputs produces a typed error
+  naming the compiler and default roots. The same compiler can resolve a
+  cohort published later without an embedded tag-table update. Historical
+  releases outside the shared discovery bounds are not promised.
+- Explicit selectors never enter default discovery or expand their input set.
 
 **chelis-std is the language runtime, not a shell.** The runtime is
 distributed bundled with the compiler — it version-marches with the
@@ -430,12 +456,18 @@ to the local-registry path. Three consequences:
 
 **Acceptance oracle.**
 
-- A clean dev environment with `GITHUB_TOKEN` set runs `chelis reef
-  install --bootstrap` (no arguments — uses the default list) and ends
-  with all four canonical shells (`nautilus`, `coral`, `shoals`,
-  `octant`) installed in the local registry, in the correct order so
-  each shell's dependencies were already present when it was
-  installed.
+- `chelis reef install --bootstrap` resolves the three default roots and
+  their complete compatible published closure against a fresh registry.
+  Verify the exact compiler, runtime authority, origins, hashes and dependency
+  order. Public localhost fixtures require neither a token nor `gh`.
+- With one compiler binary, an observed snapshot lacking a compatible cohort
+  fails without installation; a later snapshot containing that cohort succeeds.
+  Joint root constraints and release-enumeration permutations retain the
+  shared resolver's deterministic graph selection.
+- Cache versions and recorded fork origins do not change default selection.
+  Incompatible, cyclic, corrupt or out-of-budget inputs retain typed failures.
+- The real-network manual gate requires an available compatible published
+  cohort; it is not a pre-publication compiler release prerequisite.
 - Explicit list form `chelis reef install --bootstrap
   <org>/nautilus@v0.5.0 <org>/coral@v0.5.0` installs only the two
   named shells in topological order.
@@ -640,8 +672,8 @@ Per item:
 
 - Item 6: install single shell from canonical org's release; lockfile
   records hashes; subsequent fetches verify.
-- Item 7: install all canonical shells in dependency order from one
-  command.
+- Item 7: default mode installs the three canonical roots and their compatible
+  closure; explicit mode installs its closed selected graph in dependency order.
 - Item 8: a fresh `chelis reef build` succeeds end-to-end without
   manual install steps.
 - Item 9: a developer can re-create another developer's local
