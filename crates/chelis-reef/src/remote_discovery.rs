@@ -7,7 +7,7 @@ use crate::package_versioning::{
 use crate::{
     CANONICAL_REEF_ORG, EmbeddedRuntime, LockSource, LockedDependency, PackageId, ReefLock,
     ReefManifest, RegistryVersion, acquire_reef_home_lock, document_schema, parse_remote_origin,
-    read_lockfile, read_registry_index, registry_root, resolve_github_token, sha256_file,
+    read_lockfile, read_registry_index, registry_root, sha256_file, try_github_token,
     validate_manifest_schema_with, verify_artifact_pair, write_lockfile_unlocked,
 };
 use serde::{Deserialize, Serialize};
@@ -751,7 +751,7 @@ trait CandidateProvider {
 struct GitHubReleaseProvider {
     client: reqwest::blocking::Client,
     api_base: String,
-    token: String,
+    token: Option<String>,
 }
 
 struct AssetDownload<'a> {
@@ -778,10 +778,7 @@ impl GitHubReleaseProvider {
             client,
             api_base: std::env::var("CHELIS_REEF_GITHUB_BASE_API")
                 .unwrap_or_else(|_| "https://api.github.com".to_string()),
-            token: resolve_github_token().map_err(|error| DiscoveryError::RemoteUnavailable {
-                package: "<provider>".to_string(),
-                reason: error.to_string(),
-            })?,
+            token: try_github_token(),
         })
     }
 
@@ -799,11 +796,10 @@ impl GitHubReleaseProvider {
             package.as_str(),
             operation,
         )?;
-        let request = self
-            .client
-            .get(url)
-            .header("Accept", accept)
-            .header("Authorization", format!("token {}", self.token));
+        let mut request = self.client.get(url).header("Accept", accept);
+        if let Some(token) = &self.token {
+            request = request.header("Authorization", format!("token {token}"));
+        }
         let started = Instant::now();
         let response = match request.send() {
             Ok(response) => response,
@@ -823,7 +819,15 @@ impl GitHubReleaseProvider {
         if !response.status().is_success() {
             return Err(DiscoveryError::RemoteUnavailable {
                 package: package.to_string(),
-                reason: format!("{operation} at {url} returned HTTP {}", response.status()),
+                reason: format!(
+                    "{operation} at {url} returned HTTP {}{}",
+                    response.status(),
+                    if matches!(response.status().as_u16(), 401 | 403 | 404) {
+                        "; for a restricted repository, set GITHUB_TOKEN with contents: read access or sign in with gh auth login"
+                    } else {
+                        ""
+                    }
+                ),
             });
         }
         Ok((response, started))
@@ -1197,12 +1201,48 @@ pub struct OutdatedReport {
     pub packages: Vec<OutdatedPackage>,
 }
 
-struct DiscoverySession {
+struct ProjectSeed {
     root: PathBuf,
+    manifest: crate::ParsedManifest,
+    initial_lock: Option<ReefLock>,
+}
+
+/// Project preferences and canonical default discovery are distinct inputs.
+/// Bootstrap has no fabricated project path, manifest, or project lock.
+enum DiscoverySeed {
+    Project(Box<ProjectSeed>),
+    Bootstrap {
+        compiler: package_versioning::ExactCompilerVersion,
+    },
+}
+
+impl DiscoverySeed {
+    fn canonical_remote_only(&self) -> bool {
+        matches!(self, Self::Bootstrap { .. })
+    }
+
+    fn project(&self) -> Result<&ProjectSeed, DiscoveryError> {
+        match self {
+            Self::Project(project) => Ok(project),
+            Self::Bootstrap { .. } => Err(DiscoveryError::UnsupportedMode {
+                value: "default bootstrap has no project state".to_string(),
+            }),
+        }
+    }
+
+    fn compiler(&self) -> &package_versioning::ExactCompilerVersion {
+        match self {
+            Self::Project(project) => &project.manifest.typed.compiler,
+            Self::Bootstrap { compiler } => compiler,
+        }
+    }
+}
+
+struct DiscoverySession {
+    seed: DiscoverySeed,
     mode: DiscoveryMode,
     target: Option<PackageName>,
     network_enabled: bool,
-    root_manifest: crate::ParsedManifest,
     root_requests: Vec<RequestedPackage>,
     candidates: BTreeMap<PackageName, Vec<CandidateMaterial>>,
     path_stack: Vec<PackageName>,
@@ -1211,7 +1251,6 @@ struct DiscoverySession {
     queried_remote: BTreeSet<PackageName>,
     refresh_dependencies: BTreeSet<PackageName>,
     exclusions: BTreeMap<PackageName, Vec<String>>,
-    initial_lock: Option<ReefLock>,
     locked: BTreeMap<PackageName, LockedDependency>,
     budget: ResolutionBudget,
     explored_states: u64,
@@ -1268,49 +1307,20 @@ impl DiscoverySession {
         } else {
             None
         };
-        let locked = initial_lock
-            .as_ref()
-            .map(|lock| {
-                lock.dependencies
-                    .iter()
-                    .cloned()
-                    .filter_map(|dependency| {
-                        PackageName::from_str(&dependency.name)
-                            .ok()
-                            .map(|name| (name, dependency))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let temp = tempfile::tempdir().map_err(|error| DiscoveryError::Io {
-            operation: "create remote discovery temporary directory".to_string(),
-            message: error.to_string(),
-        })?;
-        let mut session = Self {
-            root,
+        let root_name = root_manifest.typed.package.name.clone();
+        let root_typed = root_manifest.typed.clone();
+        let root_path = root.clone();
+        let mut session = Self::from_seed(
+            DiscoverySeed::Project(Box::new(ProjectSeed {
+                root,
+                manifest: root_manifest,
+                initial_lock,
+            })),
             mode,
             target,
             network_enabled,
-            root_manifest,
-            root_requests: Vec::new(),
-            candidates: BTreeMap::new(),
-            path_stack: Vec::new(),
-            pending_local: BTreeSet::new(),
-            loaded_local: BTreeMap::new(),
-            queried_remote: BTreeSet::new(),
-            refresh_dependencies: BTreeSet::new(),
-            exclusions: BTreeMap::new(),
-            initial_lock,
-            locked,
-            budget: ResolutionBudget::production(),
-            explored_states: 0,
-            temp,
-            provider: None,
             runtime,
-        };
-        let root_name = session.root_manifest.typed.package.name.clone();
-        let root_path = session.root.clone();
-        let root_typed = session.root_manifest.typed.clone();
+        )?;
         session.root_requests =
             session.requests_for_manifest(&root_name, Some(&root_path), &root_typed)?;
         if let Some(target) = &session.target
@@ -1325,6 +1335,107 @@ impl DiscoverySession {
                 message: "target package is not present in the manifest or lock".to_string(),
             });
         }
+        Ok(session)
+    }
+
+    fn from_seed(
+        seed: DiscoverySeed,
+        mode: DiscoveryMode,
+        target: Option<PackageName>,
+        network_enabled: bool,
+        runtime: &'static EmbeddedRuntime,
+    ) -> Result<Self, DiscoveryError> {
+        let mut locked = BTreeMap::new();
+        if let DiscoverySeed::Project(project) = &seed
+            && let Some(lock) = &project.initial_lock
+        {
+            for dependency in &lock.dependencies {
+                let name = PackageName::from_str(&dependency.name).map_err(|error| {
+                    DiscoveryError::CandidateManifest {
+                        package: dependency.name.clone(),
+                        message: error.to_string(),
+                    }
+                })?;
+                locked.insert(name, dependency.clone());
+            }
+        }
+        let temp = tempfile::tempdir().map_err(|error| DiscoveryError::Io {
+            operation: "create remote discovery temporary directory".to_string(),
+            message: error.to_string(),
+        })?;
+        Ok(Self {
+            seed,
+            mode,
+            target,
+            network_enabled,
+            root_requests: Vec::new(),
+            candidates: BTreeMap::new(),
+            path_stack: Vec::new(),
+            pending_local: BTreeSet::new(),
+            loaded_local: BTreeMap::new(),
+            queried_remote: BTreeSet::new(),
+            refresh_dependencies: BTreeSet::new(),
+            exclusions: BTreeMap::new(),
+            locked,
+            budget: ResolutionBudget::production(),
+            explored_states: 0,
+            temp,
+            provider: None,
+            runtime,
+        })
+    }
+
+    fn for_bootstrap(runtime: &'static EmbeddedRuntime) -> Result<Self, DiscoveryError> {
+        let compiler =
+            package_versioning::ExactCompilerVersion::from_str(crate::CURRENT_COMPILER_VERSION)
+                .map_err(|error| DiscoveryError::CandidateManifest {
+                    package: "<compiler>".to_string(),
+                    message: error.to_string(),
+                })?;
+        let mut session = Self::from_seed(
+            DiscoverySeed::Bootstrap { compiler },
+            DiscoveryMode::Refresh,
+            None,
+            true,
+            runtime,
+        )?;
+        let requirement = PackageRequirement::from_str("*").map_err(|error| {
+            DiscoveryError::CandidateManifest {
+                package: "<default-roots>".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        for root in crate::DEFAULT_BOOTSTRAP_ROOTS {
+            let name =
+                PackageName::from_str(root).map_err(|error| DiscoveryError::CandidateManifest {
+                    package: root.to_string(),
+                    message: error.to_string(),
+                })?;
+            session.pending_local.insert(name.clone());
+            session.root_requests.push(RequestedPackage::new(
+                name.clone(),
+                name,
+                requirement.clone(),
+            ));
+        }
+        let name = PackageName::from_str(crate::CHELIS_STD_PACKAGE_NAME).map_err(|error| {
+            DiscoveryError::CandidateManifest {
+                package: crate::CHELIS_STD_PACKAGE_NAME.to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        let version = PackageVersion::from_str(runtime.version()).map_err(|error| {
+            DiscoveryError::CandidateManifest {
+                package: name.to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        session.pending_local.insert(name.clone());
+        session.root_requests.push(RequestedPackage::new(
+            name.clone(),
+            name,
+            PackageRequirement::exact(&version),
+        ));
         Ok(session)
     }
 
@@ -1398,7 +1509,7 @@ impl DiscoverySession {
                         exact.as_package_requirement(),
                     ));
                     let lock_path = dependency_root
-                        .strip_prefix(&self.root)
+                        .strip_prefix(&self.seed.project()?.root)
                         .map(|relative| relative.to_string_lossy().replace('\\', "/"))
                         .unwrap_or_else(|_| path.clone());
                     if self.candidates.get(name).into_iter().flatten().any(
@@ -1531,6 +1642,9 @@ impl DiscoverySession {
                 )?;
                 continue;
             }
+            if self.seed.canonical_remote_only() {
+                continue;
+            }
             let registry = registry_root().map_err(|message| DiscoveryError::Io {
                 operation: "resolve Reef registry root".to_string(),
                 message,
@@ -1655,6 +1769,12 @@ impl DiscoverySession {
     }
 
     fn source_locator(&self, package: &PackageName) -> Result<SourceLocator, DiscoveryError> {
+        if self.seed.canonical_remote_only() {
+            return Ok(SourceLocator::GitHub {
+                org: CANONICAL_REEF_ORG.to_string(),
+                repo: package.to_string(),
+            });
+        }
         let mut locators = BTreeSet::new();
         let mut add_origin = |origin: &str| -> Result<(), DiscoveryError> {
             let exact =
@@ -1895,6 +2015,18 @@ impl DiscoverySession {
                     }
                 }
                 let typed = material.typed.clone();
+                if self.seed.canonical_remote_only() && typed.compiler != *self.seed.compiler() {
+                    self.exclusions
+                        .entry(package.clone())
+                        .or_default()
+                        .push(format!(
+                            "{}: compiler pin `{}` does not match `{}`",
+                            release.tag,
+                            typed.compiler,
+                            self.seed.compiler()
+                        ));
+                    continue;
+                }
                 if let Some((dependency, path)) = typed.dependencies.iter().find_map(
                     |(dependency, declaration)| match declaration {
                         TypedDependency::Path { path, .. } => Some((dependency, path)),
@@ -2216,6 +2348,7 @@ fn lock_for_resolution(
     resolution: &package_versioning::LocalResolution,
     staged: &[StagedRemote],
 ) -> Result<ReefLock, DiscoveryError> {
+    let project = session.seed.project()?;
     let mut dependencies = Vec::new();
     for candidate in resolution.selected.values() {
         let material = session.material_for(candidate)?;
@@ -2284,7 +2417,7 @@ fn lock_for_resolution(
             name: crate::CHELIS_STD_PACKAGE_NAME.to_string(),
             version: session.runtime.version().to_string(),
             source: LockSource::bundled_for_current_compiler(),
-            compiler: session.root_manifest.typed.compiler.to_string(),
+            compiler: project.manifest.typed.compiler.to_string(),
             archive_sha256: session.runtime.archive_sha256().to_string(),
             shell_sha256: session.runtime.shell_sha256().to_string(),
         });
@@ -2299,8 +2432,8 @@ fn lock_for_resolution(
     dependencies.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(ReefLock {
         package: PackageId {
-            name: session.root_manifest.typed.package.name.to_string(),
-            version: session.root_manifest.typed.package.version.to_string(),
+            name: project.manifest.typed.package.name.to_string(),
+            version: project.manifest.typed.package.version.to_string(),
         },
         dependencies,
     })
@@ -2382,11 +2515,12 @@ fn publish_lock_last(
     let LockPublication::Project { project_lock_held } = publication else {
         return publish_registry_entries(staged);
     };
+    let project = session.seed.project()?;
     let _project_lock = if project_lock_held {
         None
     } else {
         Some(
-            document_schema::acquire_project_write_lock(&session.root).map_err(|error| {
+            document_schema::acquire_project_write_lock(&project.root).map_err(|error| {
                 DiscoveryError::Io {
                     operation: "acquire package-root project lock".to_string(),
                     message: error.to_string(),
@@ -2395,21 +2529,21 @@ fn publish_lock_last(
         )
     };
     let current_manifest =
-        crate::read_manifest(&session.root.join("reef.toml")).map_err(|message| {
+        crate::read_manifest(&project.root.join("reef.toml")).map_err(|message| {
             DiscoveryError::CandidateManifest {
-                package: session.root_manifest.typed.package.name.to_string(),
+                package: project.manifest.typed.package.name.to_string(),
                 message,
             }
         })?;
-    if current_manifest.raw != session.root_manifest.raw {
+    if current_manifest.raw != project.manifest.raw {
         return Err(DiscoveryError::Io {
             operation: "recheck project manifest under the project lock".to_string(),
             message: "reef.toml changed during remote discovery".to_string(),
         });
     }
-    let current_lock = if session.root.join("reef.lock").exists() {
+    let current_lock = if project.root.join("reef.lock").exists() {
         Some(
-            read_lockfile(&session.root.join("reef.lock"))
+            read_lockfile(&project.root.join("reef.lock"))
                 .map_err(|message| DiscoveryError::Io {
                     operation: "recheck project lock under the project lock".to_string(),
                     message,
@@ -2419,20 +2553,20 @@ fn publish_lock_last(
     } else {
         None
     };
-    if current_lock != session.initial_lock {
+    if current_lock != project.initial_lock {
         return Err(DiscoveryError::Io {
             operation: "recheck project lock under the project lock".to_string(),
             message: "reef.lock changed during remote discovery".to_string(),
         });
     }
-    document_schema::ensure_project_lock_ignore(&session.root).map_err(|message| {
+    document_schema::ensure_project_lock_ignore(&project.root).map_err(|message| {
         DiscoveryError::Io {
             operation: "update project ignore rules".to_string(),
             message,
         }
     })?;
     publish_registry_entries(staged)?;
-    write_lockfile_unlocked(&session.root.join("reef.lock"), lock).map_err(|message| {
+    write_lockfile_unlocked(&project.root.join("reef.lock"), lock).map_err(|message| {
         DiscoveryError::Io {
             operation: "replace project reef.lock last".to_string(),
             message,
@@ -2447,14 +2581,28 @@ fn publish_registry_entries(staged: &[StagedRemote]) -> Result<(), DiscoveryErro
         operation: "resolve Reef registry root".to_string(),
         message,
     })?;
+    publish_registry_entries_at(staged, &registry, RegistryOrigins::PreserveExisting)
+}
+
+#[derive(Clone, Copy)]
+enum RegistryOrigins {
+    PreserveExisting,
+    SelectedRemote,
+}
+
+fn publish_registry_entries_at(
+    staged: &[StagedRemote],
+    registry: &Path,
+    origins: RegistryOrigins,
+) -> Result<(), DiscoveryError> {
     let _registry_lock =
-        acquire_reef_home_lock(&registry, MAX_HTTP_REQUEST_TIME).map_err(|error| {
+        acquire_reef_home_lock(registry, MAX_HTTP_REQUEST_TIME).map_err(|error| {
             DiscoveryError::Io {
                 operation: "acquire Reef registry lock".to_string(),
                 message: error.to_string(),
             }
         })?;
-    let mut index = read_registry_index(&registry).map_err(|message| DiscoveryError::Io {
+    let mut index = read_registry_index(registry).map_err(|message| DiscoveryError::Io {
         operation: "recheck Reef registry index".to_string(),
         message,
     })?;
@@ -2536,7 +2684,7 @@ fn publish_registry_entries(staged: &[StagedRemote]) -> Result<(), DiscoveryErro
         }
         let versions = index.packages.entry(item.package.to_string()).or_default();
         if let Some(existing) = versions
-            .iter()
+            .iter_mut()
             .find(|entry| entry.version == item.version.to_string())
         {
             if existing.archive_sha256 != item.archive_sha256
@@ -2546,6 +2694,11 @@ fn publish_registry_entries(staged: &[StagedRemote]) -> Result<(), DiscoveryErro
                     package: item.package.to_string(),
                     message: "registry index conflicts with selected package bytes".to_string(),
                 });
+            }
+            if matches!(origins, RegistryOrigins::SelectedRemote) {
+                // Remote observations, not prior cache provenance, declare
+                // default bootstrap origins. Artifact hashes remain immutable.
+                existing.remote_origin = Some(item.origin.clone());
             }
         } else {
             versions.push(RegistryVersion {
@@ -2598,6 +2751,78 @@ fn selected_changes(
             })
         })
         .collect()
+}
+
+pub(super) fn install_default_bootstrap(
+    registry: &Path,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<Vec<crate::InstalledArtifact>, crate::BootstrapError> {
+    let mut session = DiscoverySession::for_bootstrap(runtime)?;
+    let resolution = session.resolve()?;
+    let packages = resolution
+        .selected
+        .values()
+        .filter(|candidate| candidate.id.name.as_str() != crate::CHELIS_STD_PACKAGE_NAME)
+        .collect::<Vec<_>>();
+    let nodes = packages
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.id.name.to_string(),
+                candidate.id.version.clone(),
+                candidate
+                    .dependencies
+                    .iter()
+                    .filter(|request| request.package.as_str() != crate::CHELIS_STD_PACKAGE_NAME)
+                    .map(|request| {
+                        (
+                            request.package.to_string(),
+                            package_versioning::DependencyRequirement::Compatible(
+                                request.requirement.clone(),
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<Vec<crate::BootstrapNode>>();
+    let order = crate::topo_sort_bootstrap(&nodes)?;
+    let mut staged = stage_selected_remote(&mut session, &resolution)?
+        .into_iter()
+        .map(|item| (item.package.clone(), item))
+        .collect::<BTreeMap<_, _>>();
+    let staged = order
+        .into_iter()
+        .map(|index| {
+            let name = &packages[index].id.name;
+            staged
+                .remove(name)
+                .ok_or_else(|| DiscoveryError::CandidateManifest {
+                    package: name.to_string(),
+                    message: "selected canonical remote artifact was not staged".to_string(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    publish_registry_entries_at(&staged, registry, RegistryOrigins::SelectedRemote)?;
+    Ok(staged
+        .into_iter()
+        .map(|item| {
+            let root = registry
+                .join("packages")
+                .join(item.package.as_str())
+                .join(item.version.to_string());
+            crate::InstalledArtifact {
+                package: PackageId {
+                    name: item.package.to_string(),
+                    version: item.version.to_string(),
+                },
+                shell_path: root.join(format!("{}-{}.chb", item.package, item.version)),
+                archive_path: root.join(format!("{}-{}.tar.zst", item.package, item.version)),
+                archive_sha256: item.archive_sha256,
+                shell_sha256: item.shell_sha256,
+            }
+        })
+        .collect())
 }
 
 pub fn update_project(
@@ -2913,7 +3138,7 @@ mod tests {
             let provider = GitHubReleaseProvider {
                 client: client.clone(),
                 api_base: server.uri(),
-                token: "test-token".to_string(),
+                token: Some("test-token".to_string()),
             };
             let locator = SourceLocator::from_str("github://chelis-lang/demo").unwrap();
             let package = PackageName::from_str("demo").unwrap();
@@ -3042,7 +3267,7 @@ mod tests {
             let reversed_provider = GitHubReleaseProvider {
                 client: client.clone(),
                 api_base: reversed_server.uri(),
-                token: "test-token".to_string(),
+                token: Some("test-token".to_string()),
             };
             let second_order = tokio::task::block_in_place(|| {
                 reversed_provider.list_releases(

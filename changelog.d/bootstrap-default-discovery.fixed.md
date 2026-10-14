@@ -1,0 +1,1 @@
+Default `reef install --bootstrap` jointly resolves canonical nautilus, coral, and shoals and their complete dependency closure from bounded GitHub release inputs compatible with the running compiler and bundled runtime. Public discovery supports anonymous requests; explicit selectors retain closed-graph validation.

@@ -5985,33 +5985,20 @@ impl std::fmt::Display for LockfileInstallError {
     }
 }
 
-/// Default list of canonical **shells** to bootstrap when
-/// `chelis reef install --bootstrap` is invoked without an explicit
-/// list. Each entry is `(repo, tag)` under [`CANONICAL_REEF_ORG`].
-///
-/// **Runtime is not in this list.** `chelis-std` is the language
-/// runtime, not a shell — it ships bundled with the compiler and is
-/// not installed via `reef install`. An explicit `chelis-std` entry
-/// in the bootstrap input list is rejected with a typed runtime
-/// error (see [`install_bootstrap`]).
-///
-/// Every entry must be a publicly readable shell repository, because one
-/// unreadable entry fails the whole install. This list is
-/// **hand-maintained**. Bump each entry's tag whenever a shell publishes a
-/// new release that should be the default-fetched version. The bootstrap installer reads
-/// each archive's `reef.toml` to discover dependencies; entries not
-/// present in this list whose `reef.toml` references them surface a
-/// [`BootstrapError::MissingDependency`] error rather than silently
-/// installing more than the operator asked for.
-///
-/// Multi-publisher generalization (the post-launch endgame) is Item 10
-/// in `spec/design/reef_distribution.md`; until then this list is the
-/// hard-coded source of truth.
-pub const DEFAULT_BOOTSTRAP_LIST: &[(&str, &str)] = &[
-    ("nautilus", "v0.6.1"),
-    ("coral", "v0.6.1"),
-    ("shoals", "v0.3.1"),
-];
+/// Versionless canonical roots for no-selector bootstrap. The existing bounded
+/// remote resolver selects a complete graph for the running compiler/runtime;
+/// explicit bootstrap selectors retain their closed input graph.
+pub const DEFAULT_BOOTSTRAP_ROOTS: &[&str] = &["nautilus", "coral", "shoals"];
+
+/// Resolve and install the canonical default roots and their dependency closure.
+/// Remote observations choose versions/origins; the registry is verified cache
+/// and publication state. No project files are read or written.
+pub fn install_default_bootstrap(
+    registry_root: &Path,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<Vec<InstalledArtifact>, BootstrapError> {
+    remote_discovery::install_default_bootstrap(registry_root, runtime)
+}
 
 /// Distinct error categories surfaced by the bootstrap install path.
 ///
@@ -6044,13 +6031,14 @@ pub enum BootstrapError {
         requested_version: String,
         bundled_version: String,
     },
-    /// The input list is empty AND
-    /// [`DEFAULT_BOOTSTRAP_LIST`] is empty (test scaffolds inject a
-    /// list; production never trips this).
+    /// The explicit bootstrap input list is empty. Default discovery
+    /// is a separate entry point.
     NothingToInstall,
     /// A network or HTTP-layer failure during fetch. Wraps the
     /// underlying [`GitHubFetchError`] verbatim.
     Fetch(GitHubFetchError),
+    /// Bounded default discovery, resolution or verified publication failed.
+    DefaultDiscovery(DiscoveryError),
     /// The fetched archive contained no readable `reef.toml`, or its
     /// contents did not parse as a manifest.
     ManifestRead { spec: String, message: String },
@@ -6092,9 +6080,14 @@ impl std::fmt::Display for BootstrapError {
             ),
             Self::NothingToInstall => write!(
                 f,
-                "bootstrap input list is empty and the built-in default list is empty too. Nothing to install"
+                "explicit bootstrap input list is empty. Nothing to install"
             ),
             Self::Fetch(e) => write!(f, "fetch failed during bootstrap: {e}"),
+            Self::DefaultDiscovery(error) => write!(
+                f,
+                "default bootstrap for compiler `{CURRENT_COMPILER_VERSION}` and roots [{}] failed within bounded canonical release inputs: {error}",
+                DEFAULT_BOOTSTRAP_ROOTS.join(", ")
+            ),
             Self::ManifestRead { spec, message } => write!(
                 f,
                 "could not read `reef.toml` from `{spec}` archive: {message}"
@@ -6394,6 +6387,12 @@ impl std::error::Error for BootstrapError {}
 impl From<GitHubFetchError> for BootstrapError {
     fn from(e: GitHubFetchError) -> Self {
         BootstrapError::Fetch(e)
+    }
+}
+
+impl From<DiscoveryError> for BootstrapError {
+    fn from(error: DiscoveryError) -> Self {
+        Self::DefaultDiscovery(error)
     }
 }
 
@@ -12290,11 +12289,10 @@ mod tests {
     /// cannot read it.
     #[test]
     fn default_bootstrap_list_names_only_public_shells() {
-        let repos: Vec<&str> = super::DEFAULT_BOOTSTRAP_LIST
-            .iter()
-            .map(|(repo, _)| *repo)
-            .collect();
-        assert_eq!(repos, ["nautilus", "coral", "shoals"]);
+        assert_eq!(
+            super::DEFAULT_BOOTSTRAP_ROOTS,
+            ["nautilus", "coral", "shoals"]
+        );
     }
 
     use super::*;

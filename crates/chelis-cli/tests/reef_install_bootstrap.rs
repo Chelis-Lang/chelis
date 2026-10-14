@@ -26,11 +26,10 @@
 //!
 //! This file also contains the manual-gate test
 //! `phaseA_item7_real_bootstrap_manual_gate`, which is `#[ignore]`d
-//! and only runnable with `--ignored --exact` plus a real
-//! `GITHUB_TOKEN` that has read access to the canonical org. The
-//! manual-gate test is what the orchestrator runs separately to
-//! validate the default bootstrap list against the live canonical
-//! shells.
+//! and runnable separately against an available compatible published graph.
+//! Public releases work anonymously; optional GitHub authentication avoids
+//! the anonymous API rate limit. Offline fixtures own default discovery's
+//! recurrence, joint constraints, determinism, provenance and rejection tests.
 //!
 //! Negative parity (separate `#[test]` functions, run as part of the
 //! default `cargo test --workspace` loop):
@@ -82,6 +81,7 @@ fn build_test_archive(
     version: &str,
     deps: &[(&str, &str)], // (name, version) pairs
     schema: u32,
+    compiler: &str,
 ) -> Vec<u8> {
     let mut deps_toml = String::new();
     for (dep_name, dep_version) in deps {
@@ -106,7 +106,7 @@ version = "{version}"
 compiler = "{compiler}"
 module_prefix = "Test"
 {resolver}{deps_toml}"#,
-        compiler = CURRENT_COMPILER_PIN,
+        compiler = compiler,
     );
     let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder() -> i32 = 0\n";
 
@@ -146,14 +146,19 @@ fn sha256_bytes(b: &[u8]) -> String {
 /// agrees with `archive_sha256`. The shell module list is empty —
 /// nothing in the install path inspects `shell.modules` beyond the
 /// agreement check, and an empty list keeps the fixture minimal.
-fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Vec<u8> {
+fn build_test_shell_bytes(
+    name: &str,
+    version: &str,
+    archive_sha256: &str,
+    compiler: &str,
+) -> Vec<u8> {
     let shell = chelis_shell::ShellPackage {
         format_version: chelis_shell::SHELL_FORMAT_VERSION,
         package: chelis_shell::PackageId {
             name: name.to_string(),
             version: version.to_string(),
         },
-        compiler: CURRENT_COMPILER_PIN.to_string(),
+        compiler: compiler.to_string(),
         modules: Vec::new(),
         dependencies: Vec::new(),
         archive_sha256: archive_sha256.to_string(),
@@ -172,6 +177,7 @@ struct SyntheticShell {
     version: &'static str,
     deps: Vec<(&'static str, String)>, // (name, requirement)
     schema: u32,
+    compiler: &'static str,
 }
 
 impl SyntheticShell {
@@ -192,6 +198,7 @@ impl SyntheticShell {
                 .map(|(name, version)| (name, version.to_string()))
                 .collect(),
             schema: 0,
+            compiler: CURRENT_COMPILER_PIN,
         }
     }
     fn spec_string(&self) -> String {
@@ -209,11 +216,16 @@ impl SyntheticShell {
             .iter()
             .map(|(name, requirement)| (*name, requirement.as_str()))
             .collect::<Vec<_>>();
-        build_test_archive(self.repo, self.version, &deps, self.schema)
+        build_test_archive(self.repo, self.version, &deps, self.schema, self.compiler)
     }
     fn shell_bytes(&self) -> Vec<u8> {
         let archive = self.archive_bytes();
-        build_test_shell_bytes(self.repo, self.version, &sha256_bytes(&archive))
+        build_test_shell_bytes(
+            self.repo,
+            self.version,
+            &sha256_bytes(&archive),
+            self.compiler,
+        )
     }
 }
 
@@ -232,6 +244,20 @@ fn shell_asset_id(shell_idx: usize) -> u64 {
 /// install order via accessors.
 fn fixture_for_shells(shells: &[SyntheticShell]) -> WiremockHarness {
     let harness = WiremockHarness::new();
+    mount_shells(&harness, shells, true);
+    harness
+}
+
+fn mount_shells(harness: &WiremockHarness, shells: &[SyntheticShell], authenticated: bool) {
+    let request = |path: String| {
+        let mock = Mock::given(method("GET")).and(wm_path(path));
+        if authenticated {
+            mock.and(header("authorization", "token unit-test-token"))
+        } else {
+            mock
+        }
+    };
+    let mut releases = std::collections::BTreeMap::<(&str, &str), Vec<serde_json::Value>>::new();
     let mut mocks: Vec<Mock> = Vec::new();
     for (idx, shell) in shells.iter().enumerate() {
         let archive_id = archive_asset_id(idx);
@@ -244,14 +270,19 @@ fn fixture_for_shells(shells: &[SyntheticShell]) -> WiremockHarness {
         let metadata_body = serde_json::json!({
             "id": 1000 + idx as u64,
             "tag_name": shell.tag,
+            "draft": false,
+            "prerelease": false,
             "assets": [
                 {"id": archive_id, "name": archive_name, "size": archive_bytes.len() as u64,
                  "content_type": "application/octet-stream"},
                 {"id": shell_id, "name": shell_name, "size": shell_bytes.len() as u64,
                  "content_type": "application/octet-stream"},
             ]
-        })
-        .to_string();
+        });
+        releases
+            .entry((shell.org, shell.repo))
+            .or_default()
+            .push(metadata_body.clone());
 
         let meta_path = format!(
             "/repos/{}/{}/releases/tags/{}",
@@ -274,19 +305,14 @@ fn fixture_for_shells(shells: &[SyntheticShell]) -> WiremockHarness {
         let recorder = harness.recorder.clone();
 
         mocks.push(
-            Mock::given(method("GET"))
-                .and(wm_path(meta_path))
-                .and(header("authorization", "token unit-test-token"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_string(metadata_body)
-                        .insert_header("content-type", "application/json"),
-                ),
+            request(meta_path).respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(metadata_body)
+                    .insert_header("content-type", "application/json"),
+            ),
         );
         mocks.push(
-            Mock::given(method("GET"))
-                .and(wm_path(archive_path))
-                .and(header("authorization", "token unit-test-token"))
+            request(archive_path)
                 .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes)),
         );
         // The shell-bytes endpoint records the install. We use a
@@ -294,19 +320,19 @@ fn fixture_for_shells(shells: &[SyntheticShell]) -> WiremockHarness {
         // appends the order tag before returning the bytes. wiremock
         // expects an impl Respond, so we use a tiny wrapper.
         let shell_bytes_inner = shell_bytes.clone();
+        mocks.push(request(shell_path).respond_with(RecordingResponse {
+            bytes: shell_bytes_inner,
+            tag: order_tag,
+            recorder,
+        }));
+    }
+    for ((org, repo), rows) in releases {
         mocks.push(
-            Mock::given(method("GET"))
-                .and(wm_path(shell_path))
-                .and(header("authorization", "token unit-test-token"))
-                .respond_with(RecordingResponse {
-                    bytes: shell_bytes_inner,
-                    tag: order_tag,
-                    recorder,
-                }),
+            request(format!("/repos/{org}/{repo}/releases"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(rows)),
         );
     }
     harness.mount_all(mocks);
-    harness
 }
 
 /// Custom wiremock responder that records the request tag in the
@@ -367,6 +393,17 @@ impl WiremockHarness {
                 m.mount(&self.server).await;
             }
         });
+    }
+
+    fn requests(&self) -> Vec<Request> {
+        self.rt
+            .block_on(self.server.received_requests())
+            .expect("request recording enabled")
+    }
+
+    fn reset(&self) {
+        self.rt.block_on(self.server.reset());
+        self.recorder.lock().expect("recorder").clear();
     }
 
     fn install_order(&self) -> Vec<String> {
@@ -701,6 +738,493 @@ fn bootstrap_typed_peer_edges_preserve_cycle_rejection() {
     assert!(!registry.exists());
 }
 
+// The default-mode contract is owned by reef_distribution.md Item 7.
+fn default_cohort() -> Vec<SyntheticShell> {
+    let mut shells = vec![
+        SyntheticShell::new("chelis-lang", "nautilus", "v0.2.0", "0.2.0", vec![]),
+        SyntheticShell::new(
+            "chelis-lang",
+            "coral",
+            "v0.2.0",
+            "0.2.0",
+            vec![("nautilus", "=0.2.0")],
+        ),
+        SyntheticShell::new(
+            "chelis-lang",
+            "shoals",
+            "v0.2.0",
+            "0.2.0",
+            vec![("coral", "=0.2.0"), ("bootstrap-bed", "^1")],
+        ),
+        SyntheticShell::new("chelis-lang", "bootstrap-bed", "v1.0.0", "1.0.0", vec![]),
+    ];
+    for shell in &mut shells {
+        shell.schema = 3;
+    }
+    shells[0].deps.push((
+        "chelis-std",
+        format!("={}", chelis_std_bundle::EMBEDDED_RUNTIME.version()),
+    ));
+    shells
+}
+
+fn default_command(
+    harness: &WiremockHarness,
+    registry: &Path,
+    cwd: &Path,
+    authenticated: bool,
+) -> Command {
+    let mut command = Command::cargo_bin("chelis").expect("chelis binary");
+    command
+        .current_dir(cwd)
+        .env("CHELIS_REEF_HOME", registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("CHELIS_REEF_ALLOW_DEP_COMPILER_DRIFT")
+        .env("PATH", "")
+        .args(["reef", "install", "--bootstrap"]);
+    if authenticated {
+        command.env("GITHUB_TOKEN", "unit-test-token");
+    }
+    command
+}
+
+fn assert_default_registry(registry: &Path) -> serde_json::Value {
+    let index: serde_json::Value =
+        serde_json::from_slice(&fs::read(registry.join("index.json")).expect("index"))
+            .expect("JSON");
+    let packages = index["packages"].as_object().expect("packages");
+    assert_eq!(
+        packages.len(),
+        4,
+        "only roots and selected closure belong in registry"
+    );
+    for (package, version) in [
+        ("nautilus", "0.2.0"),
+        ("coral", "0.2.0"),
+        ("shoals", "0.2.0"),
+        ("bootstrap-bed", "1.0.0"),
+    ] {
+        let entries = packages[package].as_array().expect("versions");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["version"], version);
+        assert_eq!(entries[0]["compiler"], CURRENT_COMPILER_PIN);
+        assert_eq!(
+            entries[0]["remote_origin"],
+            format!("github://chelis-lang/{package}@v{version}")
+        );
+        let shell = registry.join(format!(
+            "packages/{package}/{version}/{package}-{version}.chb"
+        ));
+        let archive = registry.join(format!(
+            "packages/{package}/{version}/{package}-{version}.tar.zst"
+        ));
+        let verified =
+            chelis_reef::verify_artifact_pair(&archive, &shell).expect("authentic selected pair");
+        assert_eq!(entries[0]["archive_sha256"], verified.archive_sha256);
+        assert_eq!(entries[0]["shell_sha256"], verified.shell_sha256);
+    }
+    assert!(!packages.contains_key("chelis-std"));
+    index
+}
+
+#[test]
+fn bootstrap_defaults_resolve_joint_graph_without_project_writes() {
+    let _g = file_lock();
+    oracle_default_compiler_graph();
+}
+
+fn oracle_default_compiler_graph() {
+    let mut shells = default_cohort();
+    let mut newer = SyntheticShell::new("chelis-lang", "nautilus", "v0.3.0", "0.3.0", vec![]);
+    newer.schema = 3;
+    let mut drift = SyntheticShell::new("chelis-lang", "nautilus", "v0.4.0", "0.4.0", vec![]);
+    drift.schema = 3;
+    drift.compiler = "=0.0.1";
+    shells.extend([newer, drift]);
+    let harness = fixture_for_shells(&shells);
+    let directory = tempdir().expect("tempdir");
+    let registry = directory.path().join("registry");
+    let output = default_command(&harness, &registry, directory.path(), true)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("UTF-8");
+    assert!(
+        stdout.find("Installed nautilus 0.2.0").expect("nautilus")
+            < stdout.find("Installed coral 0.2.0").expect("coral")
+    );
+    assert!(
+        stdout.find("Installed coral 0.2.0").expect("coral")
+            < stdout.find("Installed shoals 0.2.0").expect("shoals")
+    );
+    assert!(
+        stdout.find("Installed bootstrap-bed 1.0.0").expect("bed")
+            < stdout.find("Installed shoals 0.2.0").expect("shoals")
+    );
+    assert_default_registry(&registry);
+    for path in ["reef.toml", "reef.lock", ".reef-write.lock", ".gitignore"] {
+        assert!(
+            !directory.path().join(path).exists(),
+            "hidden project write: {path}"
+        );
+    }
+}
+
+#[test]
+fn bootstrap_defaults_same_binary_accepts_later_published_cohort() {
+    let _g = file_lock();
+    let harness = WiremockHarness::new();
+    let mut absent = default_cohort();
+    for shell in &mut absent {
+        shell.compiler = "=0.0.1";
+    }
+    mount_shells(&harness, &absent, true);
+    let directory = tempdir().expect("tempdir");
+    let registry = directory.path().join("registry");
+    default_command(&harness, &registry, directory.path(), true)
+        .env("CHELIS_REEF_ALLOW_DEP_COMPILER_DRIFT", "1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("default bootstrap"))
+        .stderr(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+    assert!(!registry.join("index.json").exists());
+    harness.reset();
+    mount_shells(&harness, &default_cohort(), true);
+    default_command(&harness, &registry, directory.path(), true)
+        .assert()
+        .success();
+    assert_default_registry(&registry);
+}
+
+#[test]
+fn bootstrap_defaults_permutation_and_repeat_preserve_registry_and_output() {
+    let _g = file_lock();
+    let directory = tempdir().expect("tempdir");
+    let mut results = Vec::new();
+    let mut shells = default_cohort();
+    let mut newer = SyntheticShell::new("chelis-lang", "nautilus", "v0.3.0", "0.3.0", vec![]);
+    newer.schema = 3;
+    shells.push(newer);
+    for index in 0..2 {
+        if index == 1 {
+            shells.reverse();
+        }
+        let harness = fixture_for_shells(&shells);
+        let registry = directory.path().join(format!("registry-{index}"));
+        let first = default_command(&harness, &registry, directory.path(), true)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let state = fs::read(registry.join("index.json")).expect("index");
+        let repeated = default_command(&harness, &registry, directory.path(), true)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert_eq!(
+            state,
+            fs::read(registry.join("index.json")).expect("repeat index")
+        );
+        assert_eq!(first, repeated);
+        let report = String::from_utf8(first)
+            .expect("UTF-8")
+            .lines()
+            .filter(|line| line.starts_with("Installed "))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        results.push((state, report));
+    }
+    assert_eq!(results[0], results[1]);
+}
+
+#[test]
+fn bootstrap_defaults_use_canonical_remote_candidates_not_cached_fork() {
+    let _g = file_lock();
+    let mut shells = default_cohort();
+    shells[1].deps.clear();
+    let mut fork = SyntheticShell::new("acme", "nautilus", "v0.9.0", "0.9.0", vec![]);
+    fork.schema = 3;
+    shells.push(fork);
+    let harness = fixture_for_shells(&shells);
+    let directory = tempdir().expect("tempdir");
+    let registry = directory.path().join("registry");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+        .env("GITHUB_TOKEN", "unit-test-token")
+        .args(["reef", "install", "--from-github", "acme/nautilus@v0.9.0"])
+        .assert()
+        .success();
+    let prior_requests = harness.requests().len();
+    default_command(&harness, &registry, directory.path(), true)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Installed nautilus 0.2.0"));
+    assert!(
+        harness
+            .requests()
+            .iter()
+            .skip(prior_requests)
+            .all(|request| request.url.path().starts_with("/repos/chelis-lang/"))
+    );
+    let index: serde_json::Value =
+        serde_json::from_slice(&fs::read(registry.join("index.json")).expect("index"))
+            .expect("JSON");
+    assert!(
+        index["packages"]["nautilus"]
+            .as_array()
+            .expect("versions")
+            .iter()
+            .any(|entry| entry["version"] == "0.9.0"
+                && entry["remote_origin"] == "github://acme/nautilus@v0.9.0")
+    );
+}
+
+#[test]
+fn bootstrap_defaults_public_without_token_or_gh() {
+    let _g = file_lock();
+    let harness = WiremockHarness::new();
+    mount_shells(&harness, &default_cohort(), false);
+    let directory = tempdir().expect("tempdir");
+    let registry = directory.path().join("registry");
+    default_command(&harness, &registry, directory.path(), false)
+        .assert()
+        .success();
+    assert_default_registry(&registry);
+    let requests = harness.requests();
+    assert!(!requests.is_empty());
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.headers.get("authorization").is_none())
+    );
+}
+
+#[test]
+fn bootstrap_defaults_private_errors_remain_actionable() {
+    let _g = file_lock();
+    for status in [401, 403] {
+        let harness = WiremockHarness::new();
+        harness.mount_all(vec![
+            Mock::given(method("GET")).respond_with(ResponseTemplate::new(status)),
+        ]);
+        let directory = tempdir().expect("tempdir");
+        let registry = directory.path().join("registry");
+        default_command(&harness, &registry, directory.path(), false)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("GITHUB_TOKEN"))
+            .stderr(predicate::str::contains(status.to_string()));
+        assert!(!registry.join("index.json").exists());
+    }
+}
+
+#[test]
+fn bootstrap_defaults_reject_invalid_runtime_missing_and_cyclic_graphs() {
+    let _g = file_lock();
+    for case in ["invalid", "runtime", "missing", "cycle"] {
+        let mut shells = default_cohort();
+        match case {
+            "invalid" => shells[0].deps = vec![("chelis-std", "not-a-version".to_string())],
+            "runtime" => shells[0].deps = vec![("chelis-std", "=99.0.0".to_string())],
+            "missing" => {
+                shells.pop();
+            }
+            "cycle" => shells[0].deps.push(("coral", "=0.2.0".to_string())),
+            _ => unreachable!(),
+        }
+        let harness = fixture_for_shells(&shells);
+        let directory = tempdir().expect("tempdir");
+        let registry = directory.path().join("registry");
+        let assertion = default_command(&harness, &registry, directory.path(), true)
+            .assert()
+            .failure();
+        if case == "cycle" {
+            assertion.stderr(predicate::str::contains("cycle"));
+        } else {
+            assertion.stderr(predicate::str::contains("default bootstrap"));
+        }
+        assert!(
+            !registry.join("index.json").exists(),
+            "planning failure mutated registry: {case}"
+        );
+        assert!(harness.requests().iter().all(|request| {
+            !request
+                .url
+                .path()
+                .starts_with("/repos/chelis-lang/chelis-std/")
+        }));
+    }
+}
+
+#[test]
+fn bootstrap_defaults_verify_selected_shells_before_registry_publication() {
+    let _g = file_lock();
+    let shells = default_cohort();
+    let harness = fixture_for_shells(&shells);
+    harness.mount_all(vec![
+        Mock::given(method("GET"))
+            .and(wm_path(format!(
+                "/repos/chelis-lang/nautilus/releases/assets/{}",
+                shell_asset_id(0)
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"corrupt selected CHB"))
+            .with_priority(1),
+    ]);
+    let directory = tempdir().expect("tempdir");
+    let registry = directory.path().join("registry");
+    default_command(&harness, &registry, directory.path(), true)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("default bootstrap"));
+    assert!(!registry.join("index.json").exists());
+    assert!(!registry.join("packages").exists());
+}
+
+#[test]
+fn bootstrap_defaults_rebind_identical_cached_bytes_to_observed_canonical_origin() {
+    let _g = file_lock();
+    let harness = WiremockHarness::new();
+    let mut fork = default_cohort();
+    fork[0].org = "acme";
+    mount_shells(&harness, &fork, true);
+    let directory = tempdir().expect("tempdir");
+    let registry = directory.path().join("registry");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+        .env("GITHUB_TOKEN", "unit-test-token")
+        .args(["reef", "install", "--from-github", "acme/nautilus@v0.2.0"])
+        .assert()
+        .success();
+    let before: serde_json::Value =
+        serde_json::from_slice(&fs::read(registry.join("index.json")).expect("prior index"))
+            .expect("prior index JSON");
+    assert_eq!(
+        before["packages"]["nautilus"][0]["remote_origin"],
+        "github://acme/nautilus@v0.2.0"
+    );
+    harness.reset();
+    mount_shells(&harness, &default_cohort(), true);
+    default_command(&harness, &registry, directory.path(), true)
+        .assert()
+        .success();
+    let after: serde_json::Value =
+        serde_json::from_slice(&fs::read(registry.join("index.json")).expect("canonical index"))
+            .expect("canonical index JSON");
+    assert_eq!(
+        after["packages"]["nautilus"][0]["archive_sha256"],
+        before["packages"]["nautilus"][0]["archive_sha256"]
+    );
+    assert_eq!(
+        after["packages"]["nautilus"][0]["shell_sha256"],
+        before["packages"]["nautilus"][0]["shell_sha256"]
+    );
+    assert_default_registry(&registry);
+    assert!(
+        harness
+            .requests()
+            .iter()
+            .all(|request| !request.url.path().contains("/acme/"))
+    );
+}
+
+#[test]
+fn bootstrap_defaults_existing_identity_conflicts_preserve_registry_metadata() {
+    let _g = file_lock();
+    let harness = WiremockHarness::new();
+    let mut prior = default_cohort();
+    prior[0].schema = 2;
+    mount_shells(&harness, &prior, true);
+    let directory = tempdir().expect("tempdir");
+    let registry = directory.path().join("registry");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+        .env("GITHUB_TOKEN", "unit-test-token")
+        .args([
+            "reef",
+            "install",
+            "--from-github",
+            "chelis-lang/nautilus@v0.2.0",
+        ])
+        .assert()
+        .success();
+    let before = fs::read(registry.join("index.json")).expect("prior index");
+    harness.reset();
+    mount_shells(&harness, &default_cohort(), true);
+    default_command(&harness, &registry, directory.path(), true)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("differs by bytes"));
+    assert_eq!(
+        before,
+        fs::read(registry.join("index.json")).expect("index after conflict")
+    );
+}
+
+#[test]
+fn bootstrap_defaults_keep_the_shared_release_tag_budget() {
+    use wiremock::matchers::query_param;
+    let _g = file_lock();
+    let harness = fixture_for_shells(&default_cohort());
+    for page in 1..=3 {
+        let count = if page == 3 { 57 } else { 100 };
+        let rows = (0..count).map(|offset| { let version = format!("1.0.{}", (page - 1) * 100 + offset); serde_json::json!({"tag_name":format!("v{version}"),"draft":false,"prerelease":false,"assets":[{"id":10,"name":format!("nautilus-{version}.tar.zst")},{"id":11,"name":format!("nautilus-{version}.chb")}]}) }).collect::<Vec<_>>();
+        harness.mount_all(vec![
+            Mock::given(method("GET"))
+                .and(wm_path("/repos/chelis-lang/nautilus/releases"))
+                .and(query_param("page", page.to_string()))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(rows)
+                        .insert_header("link", "<http://localhost/next>; rel=\"next\""),
+                )
+                .with_priority(1),
+        ]);
+    }
+    let directory = tempdir().expect("tempdir");
+    let registry = directory.path().join("registry");
+    default_command(&harness, &registry, directory.path(), true)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("accepted release tags"));
+    assert!(!registry.join("index.json").exists());
+}
+
+#[test]
+fn bootstrap_explicit_selectors_do_not_discover_a_missing_peer() {
+    let _g = file_lock();
+    let harness = fixture_for_shells(&default_cohort());
+    let directory = tempdir().expect("tempdir");
+    let registry = directory.path().join("registry");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+        .env("GITHUB_TOKEN", "unit-test-token")
+        .args(["reef", "install", "--bootstrap", "chelis-lang/coral@v0.2.0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not in the bootstrap input list"));
+    assert!(
+        harness
+            .requests()
+            .iter()
+            .all(|request| !request.url.path().ends_with("/releases"))
+    );
+    assert!(!registry.join("index.json").exists());
+}
+
 // ============================================================
 // Named acceptance oracle
 // ============================================================
@@ -924,13 +1448,13 @@ fn oracle_default_list_path() {
     let order = harness.install_order();
     assert_eq!(order, vec!["bar", "foo"]);
 
-    // Sub-case 2: DEFAULT_BOOTSTRAP_LIST itself parses without panic.
-    // We don't execute it against real network here.
-    for (repo, tag) in chelis_reef::DEFAULT_BOOTSTRAP_LIST {
-        let spec_str = format!("{}/{repo}@{tag}", chelis_reef::CANONICAL_REEF_ORG);
-        chelis_reef::GitHubReleaseSpec::parse(&spec_str)
-            .unwrap_or_else(|e| panic!("default-list entry `{spec_str}` must parse: {e}"));
+    // Default root identities are versionless; execute the actual no-selector
+    // CLI against a compatible multi-candidate graph rather than parsing tags.
+    for root in chelis_reef::DEFAULT_BOOTSTRAP_ROOTS {
+        root.parse::<chelis_reef::package_versioning::PackageName>()
+            .expect("canonical default root");
     }
+    oracle_default_compiler_graph();
 }
 
 /// Per-shell atomicity: shell 2 of 3 fails validation; shell 1 fully
@@ -969,9 +1493,14 @@ fn oracle_per_shell_atomicity_preserved() {
         // than the on-wire archive. Validation step catches this.
         let shell_bytes = if shell.repo == "atomic-b" {
             let bogus_sha = "0".repeat(64);
-            build_test_shell_bytes(shell.repo, shell.version, &bogus_sha)
+            build_test_shell_bytes(shell.repo, shell.version, &bogus_sha, shell.compiler)
         } else {
-            build_test_shell_bytes(shell.repo, shell.version, &sha256_bytes(&archive_bytes))
+            build_test_shell_bytes(
+                shell.repo,
+                shell.version,
+                &sha256_bytes(&archive_bytes),
+                shell.compiler,
+            )
         };
 
         let metadata_body = serde_json::json!({
@@ -1268,7 +1797,12 @@ fn phaseA_item7_manifest_read_failure_is_typed() {
         builder.finish().expect("finish");
     }
     let archive_bytes = zstd::stream::encode_all(Cursor::new(tar_bytes), 19).expect("zstd");
-    let shell_bytes = build_test_shell_bytes("bad", "0.2.0", &sha256_bytes(&archive_bytes));
+    let shell_bytes = build_test_shell_bytes(
+        "bad",
+        "0.2.0",
+        &sha256_bytes(&archive_bytes),
+        CURRENT_COMPILER_PIN,
+    );
 
     let harness = WiremockHarness::new();
     let metadata_body = serde_json::json!({
@@ -1353,9 +1887,8 @@ fn phaseA_item7_duplicate_package_versions_rejected() {
 fn phaseA_item7_empty_input_and_empty_default_errors_nothing_to_install() {
     let _g = file_lock();
     // Library-level: install_bootstrap with empty specs must surface
-    // BootstrapError::NothingToInstall. (The CLI handler substitutes
-    // the default list when the user passes `--bootstrap` with no
-    // args; the lib call here bypasses that substitution.)
+    // BootstrapError::NothingToInstall. The CLI uses the separate
+    // default-discovery entry point when no selectors are supplied.
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
     let err = chelis_reef::install_bootstrap(&[], &registry, &chelis_std_bundle::EMBEDDED_RUNTIME)
@@ -1588,56 +2121,87 @@ fn phaseA_item7_help_lists_bootstrap_flag() {
         .args(["reef", "install", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--bootstrap"));
+        .stdout(predicate::str::contains("--bootstrap"))
+        .stdout(predicate::str::contains("complete dependency closure"))
+        .stdout(predicate::str::contains("Explicit"))
+        .stdout(predicate::str::contains("closed graph"))
+        .stdout(predicate::str::contains("anonymously"));
 }
 
 // ============================================================
 // Manual gate (real network). `#[ignore]`d. Documented invocation:
-// `cargo test -p chelis-cli phaseA_item7_real_bootstrap_manual_gate -- --ignored --exact`.
-// Requires a working `GITHUB_TOKEN` with read access to the canonical
-// org and the canonical shells in DEFAULT_BOOTSTRAP_LIST must all be
-// published with their manifests intact and reachable.
-//
-// **Maintenance rule:** when DEFAULT_BOOTSTRAP_LIST is bumped to new
-// tags, this gate's expected version strings need no update — it
-// reads the list and asserts each entry was installed at the version
-// the list pinned. Maintainers verify each release exists with both
-// canonical assets attached before bumping the list
-// (`gh release view <tag> -R chelis-lang/<repo> --json assets`).
+// `cargo nextest run -p chelis-cli --test reef_install_bootstrap --run-ignored only
+// -E 'test(=phaseA_item7_real_bootstrap_manual_gate)'`.
+// A compatible published default-root dependency graph must exist.
+// Public releases work anonymously; optional GITHUB_TOKEN/gh auth avoids
+// the anonymous API rate limit.
+// This ecosystem availability gate does not require shell publication before
+// the compiler release. Offline fixtures own the recurrence regression.
 // ============================================================
 
 #[test]
 #[ignore = "real-network manual gate; run with `--ignored --exact`"]
 fn phaseA_item7_real_bootstrap_manual_gate() {
     let _g = file_lock();
-    let token = std::env::var("GITHUB_TOKEN").unwrap_or_default();
-    assert!(
-        !token.is_empty(),
-        "manual gate requires GITHUB_TOKEN set; \
-         run `export GITHUB_TOKEN=$(gh auth token)` first"
-    );
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    Command::cargo_bin("chelis")
+    let output = Command::cargo_bin("chelis")
         .expect("chelis binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &registry)
-        .env("GITHUB_TOKEN", token)
         .args(["reef", "install", "--bootstrap"])
         .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let index: serde_json::Value =
+        serde_json::from_slice(&fs::read(registry.join("index.json")).expect("registry index"))
+            .expect("index JSON");
+    let mut dependencies = String::new();
+    for root in chelis_reef::DEFAULT_BOOTSTRAP_ROOTS {
+        let version = index["packages"][root][0]["version"]
+            .as_str()
+            .expect("root version");
+        dependencies.push_str(&format!("{root} = \"={version}\"\n"));
+    }
+    for (name, versions) in index["packages"].as_object().expect("packages") {
+        let entries = versions.as_array().expect("versions");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        let version = entry["version"].as_str().expect("version");
+        assert_eq!(entry["compiler"], CURRENT_COMPILER_PIN);
+        let verified = chelis_reef::verify_artifact_pair(
+            &registry.join(format!(
+                "packages/{name}/{version}/{name}-{version}.tar.zst"
+            )),
+            &registry.join(format!("packages/{name}/{version}/{name}-{version}.chb")),
+        )
+        .expect("published artifact pair");
+        assert_eq!(entry["archive_sha256"], verified.archive_sha256);
+        assert_eq!(entry["shell_sha256"], verified.shell_sha256);
+        let origin = entry["remote_origin"].as_str().expect("canonical origin");
+        assert!(origin.starts_with(&format!(
+            "github://{}/{name}@",
+            chelis_reef::CANONICAL_REEF_ORG
+        )));
+        println!(
+            "{name}@{version}: compiler={} origin={origin} archive={} shell={}",
+            entry["compiler"], verified.archive_sha256, verified.shell_sha256
+        );
+    }
+    let project = dir.path().join("verify-closure");
+    fs::create_dir(&project).expect("verification project");
+    fs::write(project.join("reef.toml"), format!("schema = \"3\"\n[package]\nname = \"bootstrap-verification\"\nversion = \"0.0.0\"\ncompiler = \"{CURRENT_COMPILER_PIN}\"\nmodule_prefix = \"Verify\"\nresolver = \"2\"\n[dependencies]\n{dependencies}")).expect("verification manifest");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&project)
+        .env("CHELIS_REEF_HOME", &registry)
+        .args(["reef", "update", "--offline"])
+        .assert()
         .success();
-    // Each entry in the default list must end up in the registry at
-    // the pinned version.
-    for (repo, tag) in chelis_reef::DEFAULT_BOOTSTRAP_LIST {
-        let version = tag.strip_prefix('v').unwrap_or(tag);
-        let pkg_dir = registry.join(format!("packages/{repo}/{version}"));
-        assert!(
-            pkg_dir.join(format!("{repo}-{version}.chb")).exists(),
-            "{repo}@{tag} chb missing from registry"
-        );
-        assert!(
-            pkg_dir.join(format!("{repo}-{version}.tar.zst")).exists(),
-            "{repo}@{tag} archive missing from registry"
-        );
+    let stdout = String::from_utf8(output).expect("UTF-8");
+    print!("{stdout}");
+    for root in chelis_reef::DEFAULT_BOOTSTRAP_ROOTS {
+        assert!(stdout.contains(&format!("Installed {root} ")));
     }
 }
