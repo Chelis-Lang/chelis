@@ -179,7 +179,8 @@ A run of `nix-packages.yml` on `main` or on a release tag pushes to the
 `chelisup` outputs, the cvc5 tree, and the Rust crate builds. `flake.nix` names
 that cache and its public signing key. When Nix trusts the cache, a build of a
 pushed revision downloads those outputs. A build of a later revision downloads
-the unchanged cvc5 tree and crates, and it compiles only the affected crates.
+the unchanged cvc5 tree and crates. It compiles only the crates whose sources or
+dependencies changed.
 
 Nix applies these flake settings only for a trusted user. On a single-user
 install, or as a user in `trusted-users`, pass `--accept-flake-config`. On a

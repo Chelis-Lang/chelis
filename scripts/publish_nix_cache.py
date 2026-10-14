@@ -18,8 +18,8 @@ Cachix also pushes the runtime closure of each path. With the default
 cache.nixos.org serves. The script does not select the Rust toolchain, because
 a build downloads it from static.rust-lang.org in about the same time.
 
-A build of a later revision then downloads the unchanged cvc5 tree and crates,
-and it compiles only the crates that the change affects.
+A build of a later revision then downloads the unchanged cvc5 tree and crates.
+It compiles only the crates whose sources or dependencies changed.
 
 The Cachix CLI comes from the flake's pinned Nixpkgs, and it reads its token
 from `CACHIX_AUTH_TOKEN`. The workflow fills that variable from the
