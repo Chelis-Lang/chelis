@@ -4,7 +4,7 @@
   # Published releases push the package outputs to this Cachix cache.
   nixConfig.extra-substituters = [ "https://chelis-lang.cachix.org" ];
   nixConfig.extra-trusted-public-keys = [
-    "chelis-lang.cachix.org-1:REPLACE-WITH-THE-CACHE-PUBLIC-KEY"
+    "chelis-lang.cachix.org-1:F4W65FQ7sunLoF2q6rzkWNTIBd3P/tJ/NFcv12OS9v8="
   ];
 
   inputs = {

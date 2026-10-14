@@ -55,7 +55,7 @@ jobs:
       - name: Publish the package closure to Cachix
         if: github.event_name == 'release'
         env:
-          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_DEPLOY }}
         run: python scripts/publish_nix_cache.py
 
   nix-darwin-arm64:
@@ -94,5 +94,5 @@ jobs:
       - name: Publish the package closure to Cachix
         if: github.event_name == 'release'
         env:
-          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_DEPLOY }}
         run: python scripts/publish_nix_cache.py

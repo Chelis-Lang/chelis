@@ -9,7 +9,8 @@ path as ultimate. A path that a substituter supplied, for example zstd from
 cache.nixos.org, is not ultimate, so the cache receives Chelis builds only.
 
 The Cachix CLI comes from the flake's pinned Nixpkgs, and it reads its token
-from `CACHIX_AUTH_TOKEN`. `flake.nix` names the same cache in
+from `CACHIX_AUTH_TOKEN`. The workflow fills that variable from the
+`CACHIX_DEPLOY` repository secret. `flake.nix` names the same cache in
 `nixConfig.extra-substituters`, so `nix run` and `nix build` of a released
 revision download these outputs instead of compiling them.
 
