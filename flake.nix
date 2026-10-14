@@ -1,6 +1,12 @@
 {
   description = "Chelis compiler, runtime, and toolchain installer packages";
 
+  # Published releases push the package outputs to this Cachix cache.
+  nixConfig.extra-substituters = [ "https://chelis-lang.cachix.org" ];
+  nixConfig.extra-trusted-public-keys = [
+    "chelis-lang.cachix.org-1:REPLACE-WITH-THE-CACHE-PUBLIC-KEY"
+  ];
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/f205b5574fd0cb7da5b702a2da51507b7f4fdd1b";
     rust-overlay = {

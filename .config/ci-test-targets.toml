@@ -3463,6 +3463,24 @@ reason = "native Nix jobs explicitly run the complete module, including evaluati
 tracking_issue = "chelis#2287"
 
 [[path_rule]]
+prefix = "scripts/publish_nix_cache.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the publisher tests against a fake Nix runner; nix-packages.yml runs the publisher on a published release"
+tracking_issue = "chelis#3610"
+
+[[path_rule]]
+prefix = "scripts/test_publish_nix_cache.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit discovers and runs the publisher and flake cache contract tests"
+tracking_issue = "chelis#3610"
+
+[[path_rule]]
 prefix = "scripts/test_release_workflow_pyo3_isolation.py"
 disposition = "owner"
 workflow = "ci.yml"

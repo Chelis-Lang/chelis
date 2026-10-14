@@ -174,6 +174,13 @@ revision; never mix an archive or header from another derivation. A failed
 Nix-wrapper installation leaves its previous stable GC root and selected
 toolchain untouched.
 
+A published release pushes the locally built `chelis`, `chelis-runtime`, and
+`chelisup` outputs to the `chelis-lang` Cachix cache, and `flake.nix` names
+that cache and its public key. Nix asks before it uses the substituters of a
+flake. Pass `--accept-flake-config`, or, as a trusted Nix user, add the cache to
+your Nix configuration. Then `nix build` and `nix run` of a released revision
+download those outputs and do not compile them.
+
 The flake imports the committed `Cargo.nix`, so Nix evaluation needs no import
 from derivation. A change to `Cargo.lock`, a workspace manifest, or a crate
 target (for example, a file in `src/bin/`) must also regenerate that file:

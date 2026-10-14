@@ -52,6 +52,11 @@ jobs:
         run: python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs
+      - name: Publish the package closure to Cachix
+        if: github.event_name == 'release'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: python scripts/publish_nix_cache.py
 
   nix-darwin-arm64:
     name: Nix Packages (aarch64-darwin)
@@ -86,3 +91,8 @@ jobs:
         run: python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs
+      - name: Publish the package closure to Cachix
+        if: github.event_name == 'release'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: python scripts/publish_nix_cache.py
