@@ -51,12 +51,13 @@ Work in a fresh worktree on `origin/main`, with its own `uv venv --python 3.11`.
    ```
 
    The bump rewrites the workspace version, every hand-pinned `package.compiler`, the
-   pipeline-parity captures, the Hull corpus pin, the root and compile-fail fixture
-   `Cargo.lock` files, and regenerates the conformance assets. Read the preview before
-   `--write`. The date is the release day.
-3. Check the diff touches only `Cargo.toml`, `Cargo.lock` files, `reef.toml` and pinned
-   fixture JSON files, `tests/conformance/hull/manifest.json`, `CHANGELOG.md`, and
-   deleted `changelog.d/` fragments. Lock diffs change only local package `version`
+   pipeline-parity captures, the Hull corpus pin, and the root and fixture `Cargo.lock`
+   files. It regenerates `Cargo.nix` through Nix (run it in Devenv) and the conformance
+   assets. Read the preview before `--write`, and give the release day as the date.
+3. Check the diff touches only `Cargo.toml`, `Cargo.lock` files, `Cargo.nix`, `reef.toml`
+   and pinned fixture JSON files, `tests/conformance/hull/manifest.json`, `CHANGELOG.md`,
+   and deleted `changelog.d/` fragments. Lock and `Cargo.nix` diffs change only local
+   package `version`
    lines: no `checksum` or `source` line moves. Anything else means a script or the tree
    is wrong; stop and report it rather than editing around it.
 4. Run `.venv/bin/python -m unittest scripts.test_bump_compiler_pins scripts.test_changelog`

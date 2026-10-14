@@ -1932,3 +1932,32 @@ jobs:
         uses: ./.github/actions/vendor/ci/actions/publish-build-cache
         with:
           state-path: ${{ steps.build-cache.outputs.state-path }}
+
+  # The Nix flake imports the committed Cargo.nix graph. This job regenerates
+  # the graph from the candidate tree and fails on any byte difference. It
+  # runs for every event, because crate target discovery (src/main.rs,
+  # src/bin/, and build.rs) also changes the graph, not only the manifests.
+  # docs/contributor_setup.md gives the regeneration command. The job runs
+  # hosted for every event: it needs no warm cache, and only the hosted
+  # check-cargo-nix profile has CI evidence.
+  cargo-nix:
+    name: Cargo.nix freshness
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Set up portable Devenv
+        uses: ./.github/actions/vendor/ci/actions/setup-devenv
+
+      - name: Check the committed Cargo.nix graph
+        uses: ./.github/actions/vendor/ci/actions/check-cargo-nix
+        with:
+          crate2nix-version: "0.15.0"
+          feature-mode: none
+          features: chelis-cli/distribution

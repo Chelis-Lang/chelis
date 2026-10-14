@@ -1,0 +1,52 @@
+name: Check committed Cargo.nix freshness
+description: Regenerate Cargo.nix with an installed crate2nix version and compare exact bytes.
+inputs:
+  crate2nix-version:
+    description: Exact installed crate2nix version in X.Y.Z form.
+    required: true
+  feature-mode:
+    description: Feature selection mode. Use exactly all, default, or none.
+    required: false
+    default: "all"
+  features:
+    description: Optional newline-delimited Cargo feature names for default or none mode.
+    required: false
+    default: ""
+  timeout-seconds:
+    description: Generation timeout from 1 through 3600 seconds.
+    required: false
+    default: "600"
+  working-directory:
+    description: Contained directory with Cargo.toml, Cargo.lock, and Cargo.nix.
+    required: false
+    default: "."
+outputs:
+  cargo-nix-status:
+    description: Fixed matched status after exact byte equality.
+    value: ${{ steps.check.outputs.cargo-nix-status }}
+  crate2nix-version:
+    description: Verified installed crate2nix version.
+    value: ${{ steps.check.outputs.crate2nix-version }}
+  cargo-nix-sha256:
+    description: Lowercase SHA-256 digest of committed Cargo.nix.
+    value: ${{ steps.check.outputs.cargo-nix-sha256 }}
+runs:
+  using: composite
+  steps:
+    - name: Check committed Cargo.nix freshness
+      id: check
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+      working-directory: .
+      env:
+        CHELIS_DEVENV_PROFILE: check-cargo-nix
+        CHELIS_ACTION_REPOSITORY: ${{ github.action_repository || github.repository }}
+        CHELIS_ACTION_REVISION: ${{ github.action_ref || github.sha }}
+        CHECK_CARGO_NIX_ACTION_PATH: ${{ github.action_path }}
+        GITHUB_WORKSPACE: ${{ github.workspace }}
+        INPUT_CRATE2NIX_VERSION: ${{ inputs.crate2nix-version }}
+        INPUT_FEATURE_MODE: ${{ inputs.feature-mode }}
+        INPUT_FEATURES: ${{ inputs.features }}
+        INPUT_TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        RUNNER_TEMP: ${{ runner.temp }}
+      run: python3 "$CHECK_CARGO_NIX_ACTION_PATH/driver.py"

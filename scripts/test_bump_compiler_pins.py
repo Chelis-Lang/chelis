@@ -86,6 +86,22 @@ def _workspace_version() -> str:
     return m.group(1)
 
 
+def _graph_workspace_crates(graph: str) -> dict:
+    """Map `{package id: version}` for every workspace member in `Cargo.nix`."""
+    members = graph.split("\n  workspaceMembers = {\n", 1)[1].split("\n  };\n", 1)[0]
+    crates = {}
+    for package_id in re.findall(r'^    "([^"]+)" = rec \{$', members, re.MULTILINE):
+        entry = re.search(
+            rf'^      "{re.escape(package_id)}" = rec \{{\n'
+            r'        crateName = "[^"]+";\n'
+            r'        version = "([^"]+)";',
+            graph,
+            re.MULTILINE,
+        )
+        crates[package_id] = entry.group(1) if entry else None
+    return crates
+
+
 class BumpWorkspaceVersionTests(unittest.TestCase):
     """Regression: `bump_workspace_cargo_toml` used to drop the trailing
     newline because the regex `.*` does not match `\\n`. Bumping then
@@ -567,6 +583,9 @@ class ConformanceAssetRegenerationTests(unittest.TestCase):
             regenerate_workspace_lock=mock.Mock(
                 side_effect=lambda _dry: order.append("workspace lock")
             ),
+            regenerate_cargo_nix=mock.Mock(
+                side_effect=lambda _dry: order.append("Cargo.nix")
+            ),
             regenerate_compile_fail_fixture_locks=mock.Mock(
                 side_effect=lambda _dry: order.append("compile-fail locks")
             ),
@@ -585,7 +604,9 @@ class ConformanceAssetRegenerationTests(unittest.TestCase):
         self.assertEqual(
             argv, [[sys.executable, str(bump_mod.REGEN_CONFORMANCE_ASSETS_SCRIPT)]]
         )
-        self.assertEqual(order, ["workspace lock", "compile-fail locks", argv[0]])
+        self.assertEqual(
+            order, ["workspace lock", "Cargo.nix", "compile-fail locks", argv[0]]
+        )
 
     def test_the_retired_dist_rebuild_flag_is_rejected(self):
         with contextlib.redirect_stderr(io.StringIO()):
@@ -614,6 +635,91 @@ class ConformanceAssetRegenerationTests(unittest.TestCase):
 
     def test_the_script_it_runs_exists(self):
         self.assertTrue(bump_mod.REGEN_CONFORMANCE_ASSETS_SCRIPT.is_file())
+
+
+class CargoNixRegenerationTests(unittest.TestCase):
+    """Category 7: the Nix flake imports `Cargo.nix`, which records every
+    workspace crate at the workspace version, so a bump that leaves it behind
+    fails the release pull request's `Cargo.nix freshness` check.
+    """
+
+    def test_regeneration_reruns_the_command_the_header_records(self):
+        with mock.patch.object(
+            bump_mod.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ) as runner:
+            bump_mod.regenerate_cargo_nix(dry_run=False)
+        self.assertEqual(
+            [call.args[0] for call in runner.call_args_list],
+            [
+                [
+                    "nix",
+                    "run",
+                    "--inputs-from",
+                    ".",
+                    "nixpkgs#crate2nix",
+                    "--",
+                    "generate",
+                    "--no-default-features",
+                    "--features",
+                    "chelis-cli/distribution",
+                ]
+            ],
+        )
+        self.assertEqual(runner.call_args.kwargs["cwd"], bump_mod.REPO_ROOT)
+
+    def test_dry_run_reports_without_invoking_nix(self):
+        with mock.patch.object(bump_mod.subprocess, "run") as runner, mock.patch(
+            "builtins.print"
+        ) as printed:
+            bump_mod.regenerate_cargo_nix(dry_run=True)
+        runner.assert_not_called()
+        text = " ".join(str(c.args[0]) for c in printed.call_args_list)
+        self.assertIn("[dry-run] would regenerate Cargo.nix", text)
+
+    def test_nonzero_exit_is_fatal(self):
+        with mock.patch.object(
+            bump_mod.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 1),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                bump_mod.regenerate_cargo_nix(dry_run=False)
+        self.assertIn("Cargo.nix freshness", str(caught.exception))
+
+    def test_missing_nix_is_fatal(self):
+        with mock.patch.object(
+            bump_mod.subprocess, "run", side_effect=FileNotFoundError("nix")
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                bump_mod.regenerate_cargo_nix(dry_run=False)
+        self.assertIn("exited 127", str(caught.exception))
+
+    def test_a_graph_without_its_header_is_fatal_before_nix_runs(self):
+        with tempfile.TemporaryDirectory() as raw:
+            graph = Path(raw) / "Cargo.nix"
+            graph.write_text("{ pkgs }: { }\n", encoding="utf-8")
+            with mock.patch.object(bump_mod, "CARGO_NIX", graph), mock.patch.object(
+                bump_mod, "REPO_ROOT", Path(raw)
+            ), mock.patch.object(bump_mod.subprocess, "run") as runner:
+                with self.assertRaises(SystemExit) as caught:
+                    bump_mod.regenerate_cargo_nix(dry_run=False)
+        runner.assert_not_called()
+        self.assertIn("generation header", str(caught.exception))
+
+    def test_committed_graph_records_every_workspace_crate_at_the_workspace_version(self):
+        version = _workspace_version()
+        crates = _graph_workspace_crates(bump_mod.CARGO_NIX.read_text(encoding="utf-8"))
+        lock = _lock_path_packages((bump_mod.REPO_ROOT / "Cargo.lock").read_text())
+        self.assertEqual(sorted(crates), sorted(lock), "Cargo.nix and Cargo.lock list different workspace crates")
+        stale = sorted(f"{name} @ {found}" for name, found in crates.items() if found != version)
+        self.assertEqual(
+            stale,
+            [],
+            f"Cargo.nix has workspace crates behind {version}: {stale}. "
+            "Re-run `scripts/bump_compiler_pins.py <version>`.",
+        )
 
 
 if __name__ == "__main__":

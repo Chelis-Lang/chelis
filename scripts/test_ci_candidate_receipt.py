@@ -59,6 +59,7 @@ class ReceiptFixture:
                 "SMT Feature Build (Linux)",
                 "Docs",
                 "No AI authorship markers",
+                "Cargo.nix freshness",
             ],
             "conformance.yml": ["Hull Conformance Gate (Linux)"],
             "changelog.yml": ["Changelog"],

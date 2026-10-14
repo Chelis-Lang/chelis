@@ -637,6 +637,10 @@ NON_GATE_JOBS = {
     # toolchain and macOS-arm64. Same from-source cvc5 cost as smt-build,
     # so out of the per-PR gate scope by design.
     "smt-build-glibc231",
+    # Rule-id: GATE-SCOPE-CARGO-NIX -- the Cargo.nix freshness job runs the
+    # vendored check-cargo-nix action in its Devenv profile. That needs Nix
+    # and the network, so it is out of gate.py scope by design.
+    "cargo-nix",
 }
 
 
@@ -4218,7 +4222,7 @@ class DocsOnlySkipTests(unittest.TestCase):
     }
     # Jobs that run for every implementation event, including docs-only PRs.
     # Generic metadata edits never trigger ci.yml.
-    IMPLEMENTATION_ALWAYS_RUN_JOBS = {"no-ai-authorship", "docs"}
+    IMPLEMENTATION_ALWAYS_RUN_JOBS = {"no-ai-authorship", "docs", "cargo-nix"}
     # The classifier is always present on actual implementation events.
     ALWAYS_RUN_JOBS = {"changes"}
 
