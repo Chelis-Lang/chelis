@@ -5324,6 +5324,41 @@ impl<'a> TerminalIndex<'a> {
     }
 }
 
+/// Closed builtin producers reached through declaration aliases. Record the
+/// generated global label when its declaration is resolved, rather than
+/// reconstructing operation identity from an encoded spelling at a call site.
+/// A function body or computed callable is not a capture-free builtin producer.
+pub(crate) fn checked_builtin_callable_bindings(
+    declarations: &BTreeMap<String, Expr>,
+) -> BTreeMap<String, crate::host_type_state::CheckedBuiltinCallable> {
+    let mut bindings = BTreeMap::new();
+    for (name, body) in declarations {
+        let mut expr = body;
+        let mut visited = UnordSet::new();
+        let operation = loop {
+            let Some(reference) = callable_ref_name(expr) else {
+                break None;
+            };
+            if !visited.insert(reference.clone()) {
+                break None;
+            }
+            if let Some(body) = declarations.get(&reference) {
+                expr = body;
+            } else {
+                break crate::host_type_state::CheckedBuiltinCallable::from_symbol(&reference);
+            }
+        };
+        if let Some(operation) = operation {
+            bindings.insert(name.clone(), operation);
+            bindings.insert(
+                LoadStoreName::top_level(name).as_str().to_string(),
+                operation,
+            );
+        }
+    }
+    bindings
+}
+
 /// Resolve only the closed predicate callable identities through declaration
 /// aliases. A callable carrier is host data; applying its static identity to
 /// a tensor does not depend on materializing that carrier as a DAG value.
@@ -8469,6 +8504,7 @@ struct LowerCtx<'program> {
     local_callables: UnordMap<String, CallableExpr>,
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
+    checked_builtin_callables: BTreeMap<String, crate::host_type_state::CheckedBuiltinCallable>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
     /// The checked program's declared constructor field orders, which
     /// record construction stores its slots in (chelis#3230). Empty when
@@ -8650,6 +8686,8 @@ impl<'program> LowerCtx<'program> {
         program_signatures: impl Into<Arc<BTreeMap<String, Expr>>>,
         linearity: LinearityInfo,
     ) -> Self {
+        let program_defs = program_defs.into();
+        let checked_builtin_callables = checked_builtin_callable_bindings(&program_defs);
         Self {
             host_program: None,
             host_sources: Vec::new(),
@@ -8682,7 +8720,8 @@ impl<'program> LowerCtx<'program> {
             invocation_witnesses: Vec::new(),
             local_callables: UnordMap::new(),
             program_types: program_types.into(),
-            program_defs: program_defs.into(),
+            program_defs,
+            checked_builtin_callables,
             program_signatures: program_signatures.into(),
             constructor_layouts: Arc::default(),
             random_path_condition: None,
@@ -12492,6 +12531,7 @@ impl<'program> LowerCtx<'program> {
             && let Some(Expr::Atom(Atom::Name(func_name), _)) = func_kids.first()
             && !self.bindings.contains_key(func_name)
             && !self.program_defs.contains_key(func_name)
+            && !self.checked_builtin_callables.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
             && !self.fn_typed_params.contains(func_name)
         {
@@ -12918,6 +12958,9 @@ impl<'program> LowerCtx<'program> {
                         .is_none_or(|top| top.flatten_nodes() != local.flatten_nodes())
                 {
                     return None;
+                }
+                if let Some(operation) = self.checked_builtin_callables.get(&name) {
+                    return Some(CallableExpr::CheckedBuiltin(operation.symbol().to_string()));
                 }
                 if let Some(body) = self.program_defs.get(&name) {
                     let mut callable = self.resolve_callable_expr_inner(body, visited, true)?;

@@ -480,3 +480,130 @@ fn predicate_values_reject_mismatched_scalar_tensor_callback_surfaces() {
         }
     }
 }
+
+// [04-INF-9], [05-OP-20..22]: declaration-qualified captures preserve
+// checked operation identity, independently of the applying lexical scope.
+#[test]
+fn captured_global_predicate_alias_wrappers_preserve_checked_identity() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for (predicate, expected, nan_expected, other) in [
+            ("is_nan", false, true, "is_finite"),
+            ("is_finite", true, false, "is_nan"),
+            ("is_infinite", false, false, "is_finite"),
+        ] {
+            let source = format!(
+                r#"
+predicate = {predicate}
+chain = predicate
+def scalar(x: {dtype}) -> bool = predicate(x)
+def generic[p: Float](x: p) -> bool = chain(x)
+def classify_tensor(x: tensor[2,{dtype}]) -> tensor[2,bool] = predicate(x)
+def rank_zero(x: tensor[{dtype}]) -> tensor[bool] = chain(x)
+def apply_scalar(g: (&{dtype} -> bool), x: {dtype}) -> bool = g(x)
+def apply_tensor(g: (&tensor[2,{dtype}] -> tensor[2,bool]), x: tensor[2,{dtype}]) -> tensor[2,bool] = g(x)
+def borrowed_scalar(x: {dtype}) -> bool = apply_scalar(predicate,x)
+def borrowed_tensor(x: tensor[2,{dtype}]) -> tensor[2,bool] = apply_tensor(chain,x)
+def canonical(x: {dtype}) -> bool = {predicate}(x)
+def local(x: {dtype}) -> bool = {{
+  predicate = {predicate}
+  predicate(x)
+}}
+def shadow(predicate: (&{dtype} -> bool), x: {dtype}) -> bool = predicate(x)
+def caller_shadow(x: {dtype}) -> bool = {{
+  predicate = {other}
+  scalar(x)
+}}
+def producer_shadow({predicate}: (&{dtype} -> bool), x: {dtype}) -> bool = chain(x)
+def loss(x: tensor[2,{dtype}]) -> {dtype} = tensor_to_scalar(sum(where(classify_tensor(x),to_tensor([0.0{dtype},0.0{dtype}]),x),0))
+x = to_tensor([1.0{dtype},div(0.0{dtype},0.0{dtype})])
+scalar_result = scalar(1.0{dtype})
+generic_result = generic(1.0{dtype})
+tensor_result = classify_tensor(x)
+rank_zero_result = to_list(reshape(rank_zero(scalar_to_tensor(1.0{dtype})),[1i64]))
+borrowed_scalar_result = borrowed_scalar(1.0{dtype})
+borrowed_tensor_result = borrowed_tensor(x)
+canonical_result = canonical(1.0{dtype})
+local_result = local(1.0{dtype})
+shadow_result = shadow({other},1.0{dtype})
+caller_shadow_result = caller_shadow(1.0{dtype})
+producer_shadow_result = producer_shadow({other},1.0{dtype})
+derivative = grad(loss)(to_tensor([1.0{dtype},2.0{dtype}]))
+"#
+            );
+            for actual in [
+                evaluate(&source),
+                build_and_run(&source, &format!("captured_alias_{predicate}_{dtype}")),
+            ] {
+                for root in [
+                    "scalar_result",
+                    "generic_result",
+                    "borrowed_scalar_result",
+                    "canonical_result",
+                    "local_result",
+                    "caller_shadow_result",
+                    "producer_shadow_result",
+                ] {
+                    assert!(
+                        actual.contains(&format!("{root} = {expected}")),
+                        "{predicate} {dtype}: {actual}"
+                    );
+                }
+                for root in ["tensor_result", "borrowed_tensor_result"] {
+                    assert!(
+                        actual.contains(&format!(
+                            "{root} = tensor(shape=[2], data=[{expected}, {nan_expected}])"
+                        )),
+                        "{predicate} {dtype}: {actual}"
+                    );
+                }
+                assert!(
+                    actual.contains(&format!("rank_zero_result = [{expected}]")),
+                    "{actual}"
+                );
+                let derivative = if predicate == "is_finite" {
+                    "0.0"
+                } else {
+                    "1.0"
+                };
+                assert!(
+                    actual.contains(&format!(
+                        "derivative = tensor(shape=[2], data=[{derivative}, {derivative}])"
+                    )),
+                    "{actual}"
+                );
+                assert!(
+                    actual.contains(&format!("shadow_result = {}", !expected)),
+                    "{actual}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn captured_global_predicate_alias_wrappers_reject_invalid_contracts() {
+    for predicate in ["is_nan", "is_finite", "is_infinite"] {
+        for dtype in ["f16", "bf16", "f32", "f64"] {
+            for body in [
+                "def bad(x: i32) -> bool = predicate(x)\ny = bad(1i32)\n".to_string(),
+                format!(
+                    "def bad(x: {dtype}) -> tensor[bool] = predicate(x)\ny = bad(1.0{dtype})\n"
+                ),
+                format!(
+                    "def apply(g: (&tensor[2,{dtype}] -> tensor[3,bool]), x: tensor[2,{dtype}]) -> tensor[3,bool] = g(x)\ndef bad(x: tensor[2,{dtype}]) -> tensor[3,bool] = apply(predicate,x)\ny = bad(to_tensor([1.0{dtype},2.0{dtype}]))\n"
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("bad_capture.ch");
+                std::fs::write(&path, format!("predicate = {predicate}\n{body}")).unwrap();
+                Command::cargo_bin("chelis")
+                    .unwrap()
+                    .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                    .args(["check", "--file"])
+                    .arg(path)
+                    .assert()
+                    .failure();
+            }
+        }
+    }
+}

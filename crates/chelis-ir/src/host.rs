@@ -469,6 +469,7 @@ struct DefLaneFacts {
     call_graph: RefCell<Option<Arc<CallGraph>>>,
     /// Program-wide: every top-level definition body by name.
     program_defs: RefCell<Option<Arc<BTreeMap<String, Expr>>>>,
+    checked_builtin_callables: RefCell<Option<Arc<BTreeMap<String, CheckedBuiltinCallable>>>>,
     /// Program-wide: the checker's effect row per definition.
     def_effect_rows: RefCell<Option<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>>,
     /// Program-wide: the subexpression lowering context kernel lowering reads.
@@ -491,6 +492,7 @@ struct DefLaneFacts {
 struct SharedProgramFacts {
     call_graph: OnceLock<Arc<CallGraph>>,
     program_defs: OnceLock<Arc<BTreeMap<String, Expr>>>,
+    checked_builtin_callables: OnceLock<Arc<BTreeMap<String, CheckedBuiltinCallable>>>,
     def_effect_rows: OnceLock<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>,
     dropout_reaching_defs: OnceLock<Arc<UnordSet<String>>>,
     tensor_helper_def_summaries: OnceLock<Arc<BTreeMap<String, TensorHelperDefSummary>>>,
@@ -8533,12 +8535,20 @@ fn lower_host_expr_kind(
             // operation identity in host IR so a later alias or shadow
             // cannot change what it calls. The backend materializes the
             // corresponding capture-free function pointer from this node.
-            if let Some(op) = CheckedBuiltinCallable::from_symbol(&name)
-                && !scope.contains_key(&name)
-                && program.def_named(&name).is_none()
+            if !scope.contains_key(&name)
+                && let Some(op) = cached_checked_builtin_callables(program)
+                    .get(&name)
+                    .copied()
+                    .or_else(|| {
+                        program
+                            .def_named(&name)
+                            .is_none()
+                            .then(|| CheckedBuiltinCallable::from_symbol(&name))
+                            .flatten()
+                    })
             {
                 return Ok(HostExpr::new(HostExprKind::Builtin {
-                    name,
+                    name: op.symbol().to_string(),
                     args: Vec::new(),
                     ty: if ty.is_unresolved() {
                         HostTypeTerm::CheckedBuiltinCallable(op)
@@ -13602,6 +13612,35 @@ fn lower_program_host_app(
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = list.children_slice();
     let name = program_callee.name().to_string();
+    if let Some(operation) = cached_checked_builtin_callables(program)
+        .get(&name)
+        .copied()
+    {
+        let args = kids[1..]
+            .iter()
+            .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
+            .collect::<Result<Vec<_>, _>>()?;
+        let checked_ty = expr_host_type(app_expr, program, scope);
+        let ty = expected_ty
+            .filter(|_| checked_ty.is_unresolved())
+            .cloned()
+            .unwrap_or(checked_ty);
+        let ty = if ty.is_unresolved() {
+            infer_builtin_host_type(operation.symbol(), &args).ok_or_else(|| {
+                host_expr_lowering_error(
+                    app_expr,
+                    "checked builtin capture has no concrete result type",
+                )
+            })?
+        } else {
+            ty
+        };
+        return Ok(HostExpr::new(HostExprKind::Builtin {
+            name: operation.symbol().to_string(),
+            args,
+            ty,
+        }));
+    }
     let fn_sig = scope
         .get(&name)
         .and_then(host_fn_signature)
@@ -20140,6 +20179,22 @@ fn expr_contains_vmap_grad(expr: &Expr) -> bool {
         }
         Expr::Atom(_, _) | Expr::Map(_, _) => false,
     }
+}
+
+fn cached_checked_builtin_callables(
+    program: &HostLoweringSession<'_>,
+) -> Arc<BTreeMap<String, CheckedBuiltinCallable>> {
+    program_fact(
+        &program.facts.checked_builtin_callables,
+        program
+            .shared
+            .map(|shared| &shared.checked_builtin_callables),
+        || {
+            Arc::new(crate::lower::checked_builtin_callable_bindings(
+                &cached_program_defs(program),
+            ))
+        },
+    )
 }
 
 fn cached_program_defs(program: &HostLoweringSession<'_>) -> Arc<BTreeMap<String, Expr>> {

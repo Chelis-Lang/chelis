@@ -1070,7 +1070,10 @@ Stored-bit classification has exact typed-lane final forms under
 spellings and load/store template. Both read the operand's own IEEE storage width and write Bool
 storage without a floating conversion or a public numeric carrier. The
 closed checked-callable signature selector serves direct and aliased host
-applications as well as borrowed callbacks. Key-only helper emission retains
+applications as well as borrowed callbacks. A declaration-alias index retains
+closed operation identities under both source names and generated global labels;
+host and numeric lowering consult that identity relation after lexical bindings.
+Key-only helper emission retains
 its separately registered `append_key_callable_helpers` owner and key execution
 controls. The classifier registrations bind to the executed all-width raw-bit
 C matrix and the evaluator/native-C callable, shape, derivative and negative
