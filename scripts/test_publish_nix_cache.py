@@ -24,6 +24,10 @@ CHELIS = "/nix/store/aaaa-chelis-0.19.4"
 RUNTIME = "/nix/store/bbbb-chelis-runtime-0.19.4"
 CHELISUP = "/nix/store/cccc-chelisup-0.19.4"
 TOKEN = {publish_nix_cache.TOKEN_VARIABLE: "token"}
+RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+NIX_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
+PUBLISH_RUN = "run: python scripts/publish_nix_cache.py"
+TAG_GATE = "if: startsWith(github.ref, 'refs/tags/v')"
 
 
 class FakeNix:
@@ -58,6 +62,42 @@ def run_main(
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         code = publish_nix_cache.main(list(argv), run=nix, environ=environ)
     return code, stdout.getvalue(), stderr.getvalue()
+
+
+def job_block(workflow: str, job: str) -> str | None:
+    """The text of one top-level job, or None when the workflow lacks it."""
+    start = workflow.find(f"\n  {job}:\n")
+    if start < 0:
+        return None
+    following = re.search(r"\n  [A-Za-z0-9_-]+:\n", workflow[start + 1 :])
+    return workflow[start : start + 1 + following.start()] if following else workflow[start:]
+
+
+def assert_releases_reach_the_publisher(release: str, nix: str) -> None:
+    """GitHub starts no workflow for a release that GITHUB_TOKEN publishes.
+
+    release.yml therefore dispatches nix-packages.yml on the release tag, and
+    only a run on a release tag may push to the cache.
+    """
+    dispatch = job_block(release, "dispatch-nix-packages")
+    if dispatch is None:
+        raise AssertionError("release.yml must dispatch nix-packages.yml after it publishes a release")
+    rules = {
+        "    needs: [publish-release]\n": "must run after publish-release",
+        "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')\n": "must run only for a tag push",
+        "    permissions:\n      actions: write\n    steps:\n": "must hold only the actions: write permission",
+        "GH_TOKEN: ${{ github.token }}": "must dispatch with GITHUB_TOKEN",
+        'run: gh workflow run nix-packages.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"': "must dispatch nix-packages.yml on the release tag",
+    }
+    for text, rule in rules.items():
+        if text not in dispatch:
+            raise AssertionError(f"the dispatch job {rule}")
+    publish_steps = [step for step in nix.split("\n      - ") if PUBLISH_RUN in step]
+    if len(publish_steps) != 2:
+        raise AssertionError("each native Nix job must have one publish step")
+    for step in publish_steps:
+        if f"\n        {TAG_GATE}\n" not in step:
+            raise AssertionError("a publish step must run only on a release tag")
 
 
 class PublishNixCacheTests(unittest.TestCase):
@@ -105,6 +145,77 @@ class PublishNixCacheTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stdout.splitlines(), sorted([CHELIS, RUNTIME, CHELISUP]))
         self.assertEqual(nix.pushes(), [])
+
+
+class ReleaseTriggerContractTests(unittest.TestCase):
+    """A published release must start the run that pushes to the cache."""
+
+    def workflows(self) -> dict[str, str]:
+        return {
+            "release": RELEASE_WORKFLOW.read_text(encoding="utf-8"),
+            "nix": NIX_WORKFLOW.read_text(encoding="utf-8"),
+        }
+
+    def test_release_dispatches_the_publishing_nix_run(self) -> None:
+        assert_releases_reach_the_publisher(**self.workflows())
+
+    def test_each_trigger_rule_rejects_its_mutation(self) -> None:
+        darwin_publish = (
+            "        run: nix flake check --print-build-logs\n"
+            "      - name: Publish the package closure to Cachix\n"
+            f"        {TAG_GATE}\n"
+        )
+        mutations = [
+            (
+                "release",
+                "\n  dispatch-nix-packages:\n",
+                "\n  dispatch-nix-packages-retired:\n",
+                "must dispatch nix-packages.yml after it publishes",
+            ),
+            ("release", "    needs: [publish-release]\n", "    needs: [preflight]\n", "must run after publish-release"),
+            (
+                "release",
+                "    name: Dispatch the Nix package checks\n"
+                "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')\n",
+                "    name: Dispatch the Nix package checks\n    if: github.event_name == 'workflow_dispatch'\n",
+                "must run only for a tag push",
+            ),
+            (
+                "release",
+                "      actions: write\n    steps:\n",
+                "      actions: write\n      contents: write\n    steps:\n",
+                "only the actions: write permission",
+            ),
+            ("release", '--ref "$GITHUB_REF_NAME"', "--ref main", "on the release tag"),
+            (
+                "nix",
+                f"      # any other ref pushes nothing.\n      - name: Publish the package closure to Cachix\n        {TAG_GATE}\n",
+                "      # any other ref pushes nothing.\n      - name: Publish the package closure to Cachix\n"
+                "        if: github.event_name == 'release'\n",
+                "must run only on a release tag",
+            ),
+            (
+                "nix",
+                darwin_publish,
+                "        run: nix flake check --print-build-logs\n      - name: Publish the package closure to Cachix\n",
+                "must run only on a release tag",
+            ),
+            (
+                "nix",
+                darwin_publish
+                + "        env:\n          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_DEPLOY }}\n"
+                + f"        {PUBLISH_RUN}\n",
+                "        run: nix flake check --print-build-logs\n",
+                "each native Nix job must have one publish step",
+            ),
+        ]
+        for name, old, new, message in mutations:
+            with self.subTest(workflow=name, message=message):
+                workflows = self.workflows()
+                self.assertEqual(workflows[name].count(old), 1, old)
+                workflows[name] = workflows[name].replace(old, new)
+                with self.assertRaisesRegex(AssertionError, re.escape(message)):
+                    assert_releases_reach_the_publisher(**workflows)
 
 
 class FlakeCacheContractTests(unittest.TestCase):

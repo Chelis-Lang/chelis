@@ -52,8 +52,10 @@ jobs:
         run: python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs
+      # release.yml dispatches this workflow on each release tag. A run on
+      # any other ref pushes nothing.
       - name: Publish the package closure to Cachix
-        if: github.event_name == 'release'
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_DEPLOY }}
         run: python scripts/publish_nix_cache.py
@@ -92,7 +94,7 @@ jobs:
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs
       - name: Publish the package closure to Cachix
-        if: github.event_name == 'release'
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_DEPLOY }}
         run: python scripts/publish_nix_cache.py

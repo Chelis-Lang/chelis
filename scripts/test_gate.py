@@ -513,7 +513,7 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 
 _NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "3831a64fbd71648a385f1f2175c9f9aff8a884d517154ced2b191eda31e131b9"
+    "4fe2c70ff0bf36e9f4d17e3ba103db8ad7531f14196f58ab3a577f4ad498ab81"
 )
 
 

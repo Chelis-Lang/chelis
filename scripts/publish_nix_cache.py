@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Push the runtime closure of the Chelis Nix packages to Cachix.
 
-`nix-packages.yml` runs this script on a published release, after the complete
-native flake check set passed on that system. The script gives the output paths
+`nix-packages.yml` runs this script on a run on a release tag, after the
+complete native flake check set passed on that system. `release.yml` dispatches
+that run after it publishes the release. The script gives the output paths
 of `packages.<system>.chelis`, `chelis-runtime`, and `chelisup` to
 `cachix push`, and Cachix pushes their runtime closures. With the default
 "upstream caches" setting of the cache, Cachix skips each path that
