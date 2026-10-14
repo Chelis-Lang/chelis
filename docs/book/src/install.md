@@ -28,6 +28,10 @@ chelis --version
 ```
 
 The script installs only `chelisup`; `chelisup install` downloads the compiler.
+The compiler also bundles `chelis-std`. Reef checks a shell's declared runtime
+requirement against that bundled version; the runtime cannot be installed or
+replaced independently.
+
 Release tags start with `v`, while `chelisup install` takes a bare `X.Y.Z`
 version, which is why the last lines strip the `v`.
 

@@ -77,5 +77,12 @@ development, declare the libraries your program uses in `reef.toml`; Reef then
 fetches that dependency set and its transitive dependencies, pinned by
 `reef.lock`.
 
+`chelis-std` comes from the compiler and is excluded from the bootstrap
+input list. Dependency declarations follow the manifest schema: schema 1 uses
+a bare exact version, while schemas 2 and 3 use requirements such as `=0.4.0`.
+Each shell dependency must appear in the explicit bootstrap input list at a
+version satisfying its requirement. A runtime requirement must be satisfied by
+the compiler-bundled runtime.
+
 To inspect or change a library's implementation, clone that library's source
 repository. A source checkout is not needed to consume its Reef release.

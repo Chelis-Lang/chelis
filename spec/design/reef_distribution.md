@@ -334,7 +334,11 @@ path under the hood.
 - Parse the entries into a graph keyed by `(name, version)` with edges
   derived from the shell's published `reef.toml` dependencies. The
   dependency edges are read from each shell's `<name>-<version>.tar.zst`
-  archive after fetch but before placement.
+  archive after fetch but before placement. Each dependency requirement uses
+  the manifest's typed resolver semantics and must match the selected version
+  of its named peer in the explicit input set. A missing peer or incompatible
+  selected version fails before installation; bootstrap does not discover
+  additional peers.
 - Topologically sort. If a cycle is detected, fail with a clear error
   naming the cycle.
 - Install each shell in order via Item 6's `install_validated_artifact_pair`
@@ -353,8 +357,11 @@ it the same way Rust programs depend on `core`/`std`. Concretely:
   typed `BootstrapError::RuntimeNotABootstrapTarget` error naming
   both the requested and the bundled version.
 - A shell's `reef.toml` may declare `chelis-std = { version = "X" }`.
-  The bootstrap installer soft-verifies `X` against the compiler's
-  bundled runtime version: on match the dep is filtered from the
+  The bootstrap installer checks `X` against the compiler's bundled
+  runtime version using the manifest's typed dependency requirement:
+  schema 1 uses an exact package version; schemas 2 and 3 use resolver-2
+  requirements, including `=X.Y.Z`. Invalid requirements fail manifest
+  validation. On match the dep is filtered from the
   bootstrap graph (it is implicit, not an edge in the install loop);
   on mismatch the bootstrap aborts with a typed validation error
   naming both versions.
