@@ -174,11 +174,13 @@ revision; never mix an archive or header from another derivation. A failed
 Nix-wrapper installation leaves its previous stable GC root and selected
 toolchain untouched.
 
-A published release pushes the runtime closures of the `chelis`,
-`chelis-runtime`, and `chelisup` outputs to the `chelis-lang` Cachix cache.
-`flake.nix` names that cache and its public signing key. When Nix trusts the
-cache, `nix build` and `nix run` of a released revision download those outputs
-and do not compile them.
+A run of `nix-packages.yml` on `main` or on a release tag pushes to the
+`chelis-lang` Cachix cache. It pushes the `chelis`, `chelis-runtime`, and
+`chelisup` outputs, the cvc5 tree, and the Rust crate builds. `flake.nix` names
+that cache and its public signing key. When Nix trusts the cache, a build of a
+pushed revision downloads those outputs. A build of a later revision downloads
+the unchanged cvc5 tree and crates. It compiles only the crates whose sources or
+dependencies changed.
 
 Nix applies these flake settings only for a trusted user. On a single-user
 install, or as a user in `trusted-users`, pass `--accept-flake-config`. On a

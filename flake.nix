@@ -1,7 +1,7 @@
 {
   description = "Chelis compiler, runtime, and toolchain installer packages";
 
-  # Published releases push the package outputs to this Cachix cache.
+  # Runs on main and on release tags push the packages and their build inputs here.
   nixConfig.extra-substituters = [ "https://chelis-lang.cachix.org" ];
   nixConfig.extra-trusted-public-keys = [
     "chelis-lang.cachix.org-1:F4W65FQ7sunLoF2q6rzkWNTIBd3P/tJ/NFcv12OS9v8="

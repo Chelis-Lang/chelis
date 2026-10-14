@@ -23,36 +23,69 @@ SYSTEM = "aarch64-darwin"
 CHELIS = "/nix/store/aaaa-chelis-0.19.4"
 RUNTIME = "/nix/store/bbbb-chelis-runtime-0.19.4"
 CHELISUP = "/nix/store/cccc-chelisup-0.19.4"
+TREE = "/nix/store/dddd-cvc5-1.3.1-prebuilt-tree"
+DERIVATIONS = [
+    "/nix/store/eeee-chelis-0.19.4.drv",
+    "/nix/store/ffff-chelis-runtime-0.19.4.drv",
+    "/nix/store/gggg-chelisup-0.19.4.drv",
+]
+CRATE_LIB = "/nix/store/hhhh-rust_serde-1.0.228-lib"
+CRATE_OUT = "/nix/store/iiii-rust_serde-1.0.228"
+# The build closure also holds paths that the publisher leaves out. They are a
+# crate derivation, the Rust toolchain, a crate source, and the cvc5 package.
+CLOSURE = [
+    *DERIVATIONS,
+    "/nix/store/jjjj-rust_serde-1.0.228.drv",
+    CRATE_LIB,
+    CRATE_OUT,
+    "/nix/store/kkkk-rust-default-1.98.0",
+    "/nix/store/llll-serde-1.0.228.tar.gz",
+    "/nix/store/mmmm-cvc5-1.3.1",
+    TREE,
+]
+PUSHED = sorted([CHELIS, RUNTIME, CHELISUP, TREE, CRATE_LIB, CRATE_OUT])
 TOKEN = {publish_nix_cache.TOKEN_VARIABLE: "token"}
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 NIX_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 PUBLISH_RUN = "run: python scripts/publish_nix_cache.py"
-TAG_GATE = "if: startsWith(github.ref, 'refs/tags/v')"
+PUBLISH_GATE = "if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')"
 
 
 class FakeNix:
-    """Answers the three commands the publisher runs and records each call."""
+    """Answers the five commands the publisher runs and records each call."""
 
-    def __init__(self, fail: str | None = None) -> None:
+    def __init__(self, fail: str | None = None, closure: Sequence[str] = CLOSURE) -> None:
         self.fail = fail
+        self.closure = list(closure)
         self.calls: list[tuple[list[str], str | None]] = []
+
+    @staticmethod
+    def command_of(argv: Sequence[str]) -> str:
+        return argv[1] if argv[0] == "nix" else argv[0]
 
     def __call__(self, argv: Sequence[str], stdin: str | None) -> str:
         argv = list(argv)
         self.calls.append((argv, stdin))
-        command = argv[1]
+        command = self.command_of(argv)
         if command == self.fail:
             raise publish_nix_cache.PublishError(f"{command} failed")
         if command == "eval":
             return f"{SYSTEM}\n"
         if command == "build":
-            return f"{CHELIS}\n{RUNTIME}\n{CHELISUP}\n"
+            return f"{CHELIS}\n{RUNTIME}\n{CHELISUP}\n{TREE}\n"
+        if command == "path-info":
+            return "".join(f"{path}\n" for path in DERIVATIONS)
+        if command == "nix-store":
+            return "".join(f"{path}\n" for path in self.closure)
         if command == "run":
             return ""
         raise AssertionError(f"unexpected command {argv!r}")
 
+    def command(self, name: str) -> list[str]:
+        return next(argv for argv, _ in self.calls if self.command_of(argv) == name)
+
     def pushes(self) -> list[tuple[list[str], str | None]]:
-        return [call for call in self.calls if call[0][1] == "run"]
+        return [call for call in self.calls if self.command_of(call[0]) == "run"]
 
 
 def run_main(
@@ -76,8 +109,8 @@ def job_block(workflow: str, job: str) -> str | None:
 def assert_releases_reach_the_publisher(release: str, nix: str) -> None:
     """GitHub starts no workflow for a release that GITHUB_TOKEN publishes.
 
-    release.yml therefore dispatches nix-packages.yml on the release tag, and
-    only a run on a release tag may push to the cache.
+    release.yml therefore dispatches nix-packages.yml on the release tag. Only
+    a run on main or on a release tag may push to the cache.
     """
     dispatch = job_block(release, "dispatch-nix-packages")
     if dispatch is None:
@@ -96,27 +129,29 @@ def assert_releases_reach_the_publisher(release: str, nix: str) -> None:
     if len(publish_steps) != 2:
         raise AssertionError("each native Nix job must have one publish step")
     for step in publish_steps:
-        if f"\n        {TAG_GATE}\n" not in step:
-            raise AssertionError("a publish step must run only on a release tag")
+        if f"\n        {PUBLISH_GATE}\n" not in step:
+            raise AssertionError("a publish step must run only on main or a release tag")
 
 
 class PublishNixCacheTests(unittest.TestCase):
-    def test_pushes_the_three_package_outputs(self) -> None:
+    def test_pushes_the_packages_the_cvc5_tree_and_the_crate_builds(self) -> None:
         nix = FakeNix()
         code, stdout, _ = run_main(nix)
         self.assertEqual(code, 0)
-        self.assertIn("pushed the runtime closure of 3 aarch64-darwin output(s)", stdout)
-        build = next(argv for argv, _ in nix.calls if argv[1] == "build")
+        self.assertIn(f"pushed {len(PUSHED)} {SYSTEM} path(s)", stdout)
+        packages = [f".#packages.{SYSTEM}.{name}" for name in ("chelis", "chelis-runtime", "chelisup")]
+        self.assertEqual(nix.command("build")[-4:], [*packages, f".#legacyPackages.{SYSTEM}.cvc5-dir"])
+        self.assertEqual(nix.command("path-info")[2:], ["--derivation", *packages])
         self.assertEqual(
-            build[-3:],
-            [f".#packages.{SYSTEM}.chelis", f".#packages.{SYSTEM}.chelis-runtime", f".#packages.{SYSTEM}.chelisup"],
+            nix.command("nix-store"),
+            ["nix-store", "--query", "--requisites", "--include-outputs", *DERIVATIONS],
         )
         [(argv, stdin)] = nix.pushes()
         self.assertEqual(
             argv,
             ["nix", "run", "--inputs-from", ".", "nixpkgs#cachix", "--", "push", publish_nix_cache.CACHE_NAME],
         )
-        self.assertEqual(stdin, "".join(f"{path}\n" for path in sorted([CHELIS, RUNTIME, CHELISUP])))
+        self.assertEqual(stdin, "".join(f"{path}\n" for path in PUSHED))
 
     def test_missing_token_runs_no_command(self) -> None:
         nix = FakeNix()
@@ -132,18 +167,32 @@ class PublishNixCacheTests(unittest.TestCase):
         self.assertIn("build failed", stderr)
         self.assertEqual(nix.pushes(), [])
 
-    def test_failed_push_fails_the_release_job(self) -> None:
+    def test_failed_closure_query_stops_before_the_push(self) -> None:
+        nix = FakeNix(fail="nix-store")
+        code, _, stderr = run_main(nix)
+        self.assertEqual(code, 1)
+        self.assertIn("nix-store failed", stderr)
+        self.assertEqual(nix.pushes(), [])
+
+    def test_a_closure_without_crate_builds_stops_before_the_push(self) -> None:
+        nix = FakeNix(closure=[path for path in CLOSURE if path not in (CRATE_LIB, CRATE_OUT)])
+        code, _, stderr = run_main(nix)
+        self.assertEqual(code, 1)
+        self.assertIn("holds no crate build", stderr)
+        self.assertEqual(nix.pushes(), [])
+
+    def test_failed_push_fails_the_job(self) -> None:
         nix = FakeNix(fail="run")
         code, stdout, stderr = run_main(nix)
         self.assertEqual(code, 1)
         self.assertIn("run failed", stderr)
         self.assertNotIn("pushed", stdout)
 
-    def test_dry_run_lists_the_outputs_without_a_token(self) -> None:
+    def test_dry_run_lists_the_paths_without_a_token(self) -> None:
         nix = FakeNix()
         code, stdout, _ = run_main(nix, argv=["--dry-run"], environ={})
         self.assertEqual(code, 0)
-        self.assertEqual(stdout.splitlines(), sorted([CHELIS, RUNTIME, CHELISUP]))
+        self.assertEqual(stdout.splitlines(), PUSHED)
         self.assertEqual(nix.pushes(), [])
 
 
@@ -160,11 +209,8 @@ class ReleaseTriggerContractTests(unittest.TestCase):
         assert_releases_reach_the_publisher(**self.workflows())
 
     def test_each_trigger_rule_rejects_its_mutation(self) -> None:
-        darwin_publish = (
-            "        run: nix flake check --print-build-logs\n"
-            "      - name: Publish the package closure to Cachix\n"
-            f"        {TAG_GATE}\n"
-        )
+        publish_step = "      - name: Publish the packages and their build inputs to Cachix\n"
+        darwin_publish = f"        run: nix flake check --print-build-logs\n{publish_step}        {PUBLISH_GATE}\n"
         mutations = [
             (
                 "release",
@@ -189,16 +235,22 @@ class ReleaseTriggerContractTests(unittest.TestCase):
             ("release", '--ref "$GITHUB_REF_NAME"', "--ref main", "on the release tag"),
             (
                 "nix",
-                f"      # any other ref pushes nothing.\n      - name: Publish the package closure to Cachix\n        {TAG_GATE}\n",
-                "      # any other ref pushes nothing.\n      - name: Publish the package closure to Cachix\n"
-                "        if: github.event_name == 'release'\n",
-                "must run only on a release tag",
+                f"      # nothing.\n{publish_step}        {PUBLISH_GATE}\n",
+                f"      # nothing.\n{publish_step}        if: github.event_name == 'release'\n",
+                "must run only on main or a release tag",
+            ),
+            (
+                "nix",
+                f"      # nothing.\n{publish_step}        {PUBLISH_GATE}\n",
+                f"      # nothing.\n{publish_step}"
+                "        if: startsWith(github.ref, 'refs/heads/') || startsWith(github.ref, 'refs/tags/v')\n",
+                "must run only on main or a release tag",
             ),
             (
                 "nix",
                 darwin_publish,
-                "        run: nix flake check --print-build-logs\n      - name: Publish the package closure to Cachix\n",
-                "must run only on a release tag",
+                f"        run: nix flake check --print-build-logs\n{publish_step}",
+                "must run only on main or a release tag",
             ),
             (
                 "nix",
