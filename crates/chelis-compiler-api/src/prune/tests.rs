@@ -317,3 +317,157 @@ fn stamped_pruning_does_not_drop_a_def_in_the_entrys_closure() {
         "a def reachable from the entry must survive pruning on the stamped carrier"
     );
 }
+
+// spec/04-type-system.md §2.5.1: retained invariant predicates may name
+// in-module nullary constants. Pruning must preserve that checking context.
+const INVARIANT_MODULE: &str = "module Demo.Invariant\n\
+    def base() -> f32 = 0.0001\n\
+    def eps() -> f32 = base()\n\
+    @opaque\n\
+    @invariant(d) (d.x >= eps)\n\
+    type Pair = | Pair { x: f32 }\n\
+    def entry() -> f32 = 2.0\n\
+    def unrelated() -> f32 = 99.0\n";
+
+fn invariant_errors(exprs: &[DeepExpr]) -> Vec<chelis_types::errors::CheckError> {
+    let mut errors = Vec::new();
+    chelis_types::invariants::validate_type_invariants_in_program(exprs, &mut errors);
+    errors
+}
+
+#[test]
+fn retained_invariant_keeps_constant_and_transitive_body_dependencies() {
+    let original = expand(INVARIANT_MODULE);
+    assert!(invariant_errors(&original).is_empty());
+    let pruned = prune_to_entry(original, "entry");
+    assert_eq!(def_names(&pruned), vec!["base", "entry", "eps"]);
+    assert!(invariant_errors(&pruned).is_empty());
+}
+
+#[test]
+fn retained_invariant_closure_agrees_across_deep_ingress() {
+    let expanded = expand(INVARIANT_MODULE);
+    let stamped = stamp(&expanded);
+    let pruned = prune_to_entry(stamped, "entry");
+    assert_eq!(def_names(&pruned), vec!["base", "entry", "eps"]);
+    assert!(invariant_errors(&pruned).is_empty());
+}
+
+#[test]
+fn retained_invariant_is_a_root_even_without_entry_definitions() {
+    let module = expand(INVARIANT_MODULE).pop().unwrap();
+    let (_, _, children, _) = module.into_node_parts().unwrap();
+    let pruned = prune_to_reachable_seeds(children.into_iter().skip(1).collect(), []);
+    assert_eq!(def_names(&pruned), vec!["base", "eps"]);
+    assert!(invariant_errors(&pruned).is_empty());
+}
+
+#[test]
+fn pruning_does_not_admit_missing_or_parameterized_invariant_constants() {
+    for source in [
+        INVARIANT_MODULE.replace("def eps() -> f32 = base()", "def eps(x: f32) -> f32 = x"),
+        INVARIANT_MODULE.replace("d.x >= eps", "d.x >= missing"),
+    ] {
+        let original = expand(&source);
+        let before = invariant_errors(&original);
+        assert!(
+            !before.is_empty(),
+            "invalid invariant must reject before pruning"
+        );
+        let after = invariant_errors(&prune_to_entry(original, "entry"));
+        assert_eq!(before.len(), after.len());
+        assert!(after.iter().all(|error| {
+            matches!(
+                error.kind,
+                chelis_types::errors::CheckErrorKind::OpaqueTypeViolation
+            ) && error.message.contains("in-module zero-argument constant")
+        }));
+    }
+}
+
+#[test]
+fn runtime_resource_pruning_does_not_keep_invariant_only_definitions() {
+    let pruned = prune_checked_runtime_to_entry(expand(INVARIANT_MODULE), "entry");
+    assert_eq!(def_names(&pruned), vec!["entry"]);
+}
+
+const COLLIDING_INVARIANT_BINDER: &str = "module Probe.A\n\
+    import Other.Pkg (missing)\n\
+    def value(x: f32) -> f32 = missing(x)\n\
+    @opaque\n\
+    @invariant(value) value.x >= 0.0\n\
+    type Pair = | Pair { x: f32 }\n\
+    def main(x: f32) -> f32 = x * x\n";
+
+fn scoped_lower(
+    source: &str,
+) -> [Result<crate::pipeline::PipelineOutcome, crate::pipeline::PipelineRejection>; 2] {
+    let deep = chelis_deep::printer::print_canonical(&expand(source));
+    [
+        (crate::schema::SourceKind::Surf, source),
+        (crate::schema::SourceKind::Deep, deep.as_str()),
+    ]
+    .map(|(source_kind, source)| {
+        crate::pipeline::run_source(crate::pipeline::PipelineRequest {
+            source_kind,
+            source,
+            entry: Some("main"),
+            goal: crate::pipeline::PipelineGoal::Lower(
+                crate::pipeline::LoweringMode::AllowHostOnly,
+            ),
+        })
+    })
+}
+
+#[test]
+fn bound_invariant_variable_does_not_retain_an_unrelated_definition() {
+    assert_eq!(
+        def_names(&prune_to_entry(expand(COLLIDING_INVARIANT_BINDER), "main")),
+        vec!["main"]
+    );
+    for result in scoped_lower(COLLIDING_INVARIANT_BINDER) {
+        result.expect("a bound predicate variable is not a dependency");
+    }
+    let stamped = stamp(&expand(COLLIDING_INVARIANT_BINDER));
+    assert_eq!(def_names(&prune_to_entry(stamped, "main")), vec!["main"]);
+}
+
+#[test]
+fn scoped_lower_keeps_free_invariant_constants_but_not_the_bound_variable() {
+    let source = COLLIDING_INVARIANT_BINDER
+        .replace("@opaque", "def eps() -> f32 = 0.0001\n@opaque")
+        .replace("value.x >= 0.0", "value.x >= eps");
+    assert_eq!(
+        def_names(&prune_to_entry(expand(&source), "main")),
+        vec!["eps", "main"]
+    );
+    for result in scoped_lower(&source) {
+        result.expect("free invariant constants remain in the checking context");
+    }
+}
+
+#[test]
+fn scoped_lower_does_not_hide_a_real_entry_dependency_on_the_same_name() {
+    let source = COLLIDING_INVARIANT_BINDER.replace("x * x", "value(x)");
+    for result in scoped_lower(&source) {
+        let error = result.expect_err("the entry really depends on the invalid function");
+        assert!(error.to_string().contains("missing"), "{error}");
+    }
+}
+
+#[test]
+fn constant_dependency_closure_respects_helper_parameter_bindings() {
+    let source = COLLIDING_INVARIANT_BINDER
+        .replace(
+            "@opaque",
+            "def helper(value: f32) -> f32 = value\ndef eps() -> f32 = helper(0.0001)\n@opaque",
+        )
+        .replace("value.x >= 0.0", "value.x >= eps");
+    assert_eq!(
+        def_names(&prune_to_entry(expand(&source), "main")),
+        vec!["eps", "helper", "main"]
+    );
+    for result in scoped_lower(&source) {
+        result.expect("a helper parameter does not reference a same-named global");
+    }
+}

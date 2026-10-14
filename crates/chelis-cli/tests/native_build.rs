@@ -2862,3 +2862,88 @@ fn scatter_add_and_the_gather_adjoint_fold_duplicates_by_the_balanced_tree_in_ev
     }
     assert_lanes_agree("chelis#3048 scatter-add fold", compared);
 }
+
+// spec/04 §2.5.1: checking a retained opaque invariant must not depend on
+// whether the entry imports its defining module or an unrelated sibling.
+fn invariant_package(root: &Path, constant: &str, predicate: &str) {
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("reef.toml"), format!(
+        "[package]\nname = \"invariant-probe\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n",
+        env!("CARGO_PKG_VERSION"),
+    )).unwrap();
+    let imported_constant = if constant.is_empty() {
+        "import Probe.B (eps)\n"
+    } else {
+        ""
+    };
+    fs::write(root.join("src/a.ch"), format!(
+        "module Probe.A\nexport (value)\n{imported_constant}def base() -> f32 = 0.0001\n{constant}\n@opaque\n@invariant(d) ({predicate})\ntype Pair = | Pair {{ x: f32 }}\ndef value() -> i64 = 4i64\n",
+    )).unwrap();
+    fs::write(
+        root.join("src/b.ch"),
+        "module Probe.B\nexport (value, eps)\ndef value() -> i64 = 4i64\ndef eps() -> f32 = 0.0001\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn package_c_build_preserves_invariant_constants_for_either_import_set() {
+    let dir = tempdir().unwrap();
+    invariant_package(dir.path(), "def eps() -> f32 = base()", "d.x >= eps");
+    let file = dir.path().join("src/entry.ch");
+    for module in ["A", "B"] {
+        fs::write(
+            &file,
+            format!("module Probe.Entry\nimport Probe.{module} (value)\nout = value()\n",),
+        )
+        .unwrap();
+        let out = dir.path().join(format!("out_{module}"));
+        build(&file, &out)
+            .arg("--target")
+            .arg("c")
+            .assert()
+            .success();
+        let run = Process::new(out.join("entry")).output().unwrap();
+        assert!(run.status.success());
+        assert_eq!(run.stdout, b"out = 4\n");
+        let eval = Command::cargo_bin("chelis")
+            .unwrap()
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--file", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            eval.status.success(),
+            "{}",
+            String::from_utf8_lossy(&eval.stderr)
+        );
+        assert_eq!(run.stdout, eval.stdout);
+    }
+}
+
+#[test]
+fn package_c_build_rejects_invalid_invariant_constants_for_either_import_set() {
+    for (constant, predicate) in [
+        ("def eps(x: f32) -> f32 = x", "d.x >= eps"),
+        ("def eps() -> f32 = base()", "d.x >= missing"),
+        ("", "d.x >= eps"), // Imported constants are not in-module constants.
+    ] {
+        let dir = tempdir().unwrap();
+        invariant_package(dir.path(), constant, predicate);
+        let file = dir.path().join("src/entry.ch");
+        for module in ["A", "B"] {
+            fs::write(
+                &file,
+                format!("module Probe.Entry\nimport Probe.{module} (value)\nout = value()\n",),
+            )
+            .unwrap();
+            build(&file, &dir.path().join("out"))
+                .arg("--target")
+                .arg("c")
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("OpaqueTypeViolation"))
+                .stderr(predicate::str::contains("in-module zero-argument constant"));
+        }
+    }
+}
