@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -259,15 +260,21 @@ class ReleaseWorkflowWiringTest(unittest.TestCase):
         self.text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     def test_every_smt_build_step_goes_through_the_wrapper(self) -> None:
+        # Release jobs build the distribution feature set, which includes
+        # smt. Thus each of these builds compiles cvc5.
+        manifest = tomllib.loads(
+            (REPO_ROOT / "crates" / "chelis-cli" / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        self.assertIn("smt", manifest["features"]["distribution"])
         smt_builds = [
             line.strip()
             for line in self.text.splitlines()
-            if re.search(r"cargo (build|rustc)\b", line) and "--features smt" in line
+            if re.search(r"cargo (build|rustc)\b", line) and "--features distribution" in line
         ]
         self.assertEqual(
             len(smt_builds),
             5,
-            "release.yml should build chelis-cli --features smt in all five jobs",
+            "release.yml should build chelis-cli --features distribution in all five jobs",
         )
         for line in smt_builds:
             self.assertIn(

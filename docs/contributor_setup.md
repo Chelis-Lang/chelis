@@ -141,6 +141,20 @@ This builds a wheel from the checkout. The GitHub toolchain release does not
 include a Python wheel. For editable bindings during development, use the
 `uv pip install -e bindings/python` step under [Python 3.11](#python-311).
 
+## Distribution builds
+
+A distributed compiler builds `chelis-cli` with its `distribution` feature:
+
+```sh
+cargo build --release -p chelis-cli --features distribution
+```
+
+The GitHub release and the Nix `chelis` package build this feature, and a
+downstream package uses it too. It enables `smt`, `sealed-runtime`, and
+`clarabel-provider`. The `smt` feature links cvc5 through `cvc5-sys`, which
+builds the cvc5 version that it binds unless `CVC5_DIR` names a prebuilt cvc5
+tree. The [SMT build guide](smt_build_setup.md) has the prerequisites.
+
 ## Nix source packages
 
 From the checkout root, Nix provides source builds of `chelis`,

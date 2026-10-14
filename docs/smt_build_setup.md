@@ -218,10 +218,15 @@ validation still builds and checks its own Darwin shipping artifact in `release.
 
 `release.yml` builds all five release artifacts (linux-x86_64,
 linux-x86_64-glibc2.31, linux-x86_64-static, linux-x86_64-musl, darwin-arm64)
-with `cargo build --release -p chelis-cli --features smt,sealed-runtime`, so the
-shipped `chelis` binary discharges property obligations through cvc5 instead of
-degrading to the solver-free fuzz path, and carries a sealed runtime whose
-export the tarball ships (`spec/08-backends.md` §2.1). The static job adds
+with `cargo build --release -p chelis-cli --features distribution`. That
+`chelis-cli` feature is the feature set of every distributed compiler, and the
+Nix flake `chelis` package builds it too. It enables `smt`, so the shipped
+binary discharges property obligations through cvc5 and not through the
+solver-free fuzz path. It enables `sealed-runtime`, so the binary carries a
+sealed runtime whose export the tarball ships (`spec/08-backends.md` §2.1). It
+also enables `clarabel-provider`, the native Clarabel solver.
+
+The static job adds
 `--target x86_64-unknown-linux-gnu` with `RUSTFLAGS=-C target-feature=+crt-static`, which
 links glibc, libstdc++, and cvc5 into a static-pie executable. It refuses a
 `chelis` or `chelisup` that names a program interpreter or a shared library, and

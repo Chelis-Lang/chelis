@@ -43,7 +43,7 @@ Usage (single-line `run:` step, mirroring the `ci_apt_get.py` /
 `ci_free_disk.py` convention so the step stays Python, not shell, per repo
 policy):
 
-    python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
+    python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features distribution
 
 The command is passed through verbatim rather than hardcoded here. That is
 deliberate on two counts: this wrapper stays a generic

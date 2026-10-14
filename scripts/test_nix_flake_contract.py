@@ -72,7 +72,8 @@ def assert_automatic_crate2nix_contract(
         "additionalCargoNixArgs",
         '"--no-default-features"',
         '"--features"',
-        '"chelis-cli/smt"',
+        '"chelis-cli/distribution"',
+        '"distribution"',
         'CARGO_NET_OFFLINE = "true";',
         "import generatedCargoNix",
     )
@@ -611,6 +612,22 @@ class NixSourceContractTests(unittest.TestCase):
         packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
         source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
         mutated = packages.replace('      CARGO_NET_OFFLINE = "true";\n', "")
+        with self.assertRaisesRegex(AssertionError, "contract is incomplete"):
+            assert_automatic_crate2nix_contract(
+                flake,
+                mutated,
+                source,
+                cargo_nix_exists=False,
+            )
+
+    def test_compiler_without_distribution_fails_the_automatic_graph_contract(self) -> None:
+        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
+        mutated = packages.replace(
+            '      "distribution"\n', '      "smt"\n      "sealed-runtime"\n'
+        )
+        self.assertNotEqual(mutated, packages)
         with self.assertRaisesRegex(AssertionError, "contract is incomplete"):
             assert_automatic_crate2nix_contract(
                 flake,

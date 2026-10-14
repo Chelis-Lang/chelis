@@ -158,8 +158,17 @@ let
         cd "$TMPDIR/release-fixture"
         ${packages.chelis}/bin/chelis test tests
 
+        # chelis prove takes a write lock in the project directory, and the
+        # source in the store is read-only. Thus the Clarabel probes run in
+        # a writable copy with the layout that verify_release_smt.py reads.
+        verify="$TMPDIR/verify"
+        mkdir -p "$verify/.github/scripts" "$verify/packages" "$verify/examples"
+        cp ${root}/.github/scripts/verify_release_smt.py "$verify/.github/scripts/"
+        cp -R ${root}/packages/chelis-clarabel "$verify/packages/"
+        cp -R ${root}/examples/clarabel_qp "$verify/examples/"
+        chmod -R u+w "$verify"
         cd "$TMPDIR"
-        python3 ${root}/.github/scripts/verify_release_smt.py ${packages.chelis}/bin/chelis
+        python3 "$verify/.github/scripts/verify_release_smt.py" --clarabel ${packages.chelis}/bin/chelis
         touch "$out"
       '';
 

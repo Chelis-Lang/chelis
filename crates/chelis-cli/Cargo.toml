@@ -68,6 +68,10 @@ clarabel-provider = ["chelis-compiler-api/clarabel-provider", "chelis-runtime-bu
 # §2.1): they carry no checkout path and skip the development source-freshness
 # check. Staging receipts record the mode.
 sealed-runtime = ["chelis-runtime-bundle/sealed"]
+# Distribution builds enable exactly this set: the GitHub release, the Nix
+# flake package, and downstream packages such as nixpkgs. It links cvc5,
+# seals the carried runtime, and carries the Clarabel provider.
+distribution = ["smt", "sealed-runtime", "clarabel-provider"]
 # Test-only: instruments the runtime this `chelis` build carries and stages, so
 # its programs record the ownership ledger. The ledger test requires it.
 ownership-ledger = ["chelis-runtime/ownership-ledger"]
