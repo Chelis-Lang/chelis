@@ -6986,7 +6986,7 @@ fn copy_package_source(src: &Path, dst: &Path) -> Result<(), String> {
 /// dtype set publishes its members rather than a family name. A version-3
 /// consumer parsing `domain` as a string is correct for version 3 and breaks
 /// on a set, so it is likewise not compatible with version 3.
-pub const PACKAGE_SCHEMA_FORMAT_VERSION: u32 = 4;
+pub const PACKAGE_SCHEMA_FORMAT_VERSION: u32 = 5;
 
 /// Machine-readable package schema describing exported functions, types,
 /// constructors, and required authoring signatures.
@@ -10569,6 +10569,19 @@ fn render_collection_obligation(
             .to_string()
     };
     match constraint {
+        CollectionConstraint::FloatClassify {
+            kind,
+            operand,
+            result,
+        } => CollectionObligation::FloatClassify {
+            kind: match kind {
+                chelis_types::FloatClassify::Nan => chelis_shell::FloatClassifyKind::Nan,
+                chelis_types::FloatClassify::Finite => chelis_shell::FloatClassifyKind::Finite,
+                chelis_types::FloatClassify::Infinite => chelis_shell::FloatClassifyKind::Infinite,
+            },
+            operand: render(operand),
+            result: render(result),
+        },
         CollectionConstraint::KeyFromSeed { operand, result } => {
             CollectionObligation::KeyFromSeed {
                 operand: render(operand),

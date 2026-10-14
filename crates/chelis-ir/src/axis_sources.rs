@@ -285,6 +285,7 @@ pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
         | RiscOp::TruncDiv
         | RiscOp::Mod
         | RiscOp::Bitwise(_)
+        | RiscOp::FloatClassify(_)
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where
@@ -575,6 +576,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::TruncDiv
         | RiscOp::Mod
         | RiscOp::Bitwise(_)
+        | RiscOp::FloatClassify(_)
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where

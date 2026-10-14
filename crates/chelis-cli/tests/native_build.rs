@@ -1340,6 +1340,18 @@ fn nan_atom_coverage(
             Rows,
         ),
         Id::ScatterElements => (RiscOp::ScatterElements { axis: 0 }, Rows),
+        Id::IsNan => (
+            RiscOp::FloatClassify(chelis_types::FloatClassify::Nan),
+            NoFloatValue,
+        ),
+        Id::IsFinite => (
+            RiscOp::FloatClassify(chelis_types::FloatClassify::Finite),
+            NoFloatValue,
+        ),
+        Id::IsInfinite => (
+            RiscOp::FloatClassify(chelis_types::FloatClassify::Infinite),
+            NoFloatValue,
+        ),
         Id::Count => (RiscOp::Count { axes: vec![0] }, NoFloatValue),
         Id::TruncDiv => (RiscOp::TruncDiv, NoFloatValue),
         // [05-OP-64]: float `mod` is C `fmod` (chelis#626).

@@ -13,7 +13,8 @@ pub const SHELL_MAGIC: &[u8; 8] = b"CHELCHB\0";
 /// `ActiveSet` variant, so a shell published by this compiler can carry a
 /// domain a version-5 reader cannot decode.
 // #3130: Surf stages carry explicit syntax and Deep 0.20 has no Pipe.
-pub const SHELL_FORMAT_VERSION: u32 = 7;
+// Float classification adds a checked predicate relation to exported schemes.
+pub const SHELL_FORMAT_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPackage {
@@ -57,9 +58,22 @@ pub struct ShellSymbol {
     pub has_body: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FloatClassifyKind {
+    Nan,
+    Finite,
+    Infinite,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CollectionObligation {
+    FloatClassify {
+        kind: FloatClassifyKind,
+        operand: String,
+        result: String,
+    },
     Len {
         operand: String,
         result: String,
@@ -102,6 +116,11 @@ pub enum CollectionObligation {
 impl CollectionObligation {
     pub fn builtin(&self) -> &'static str {
         match self {
+            Self::FloatClassify { kind, .. } => match kind {
+                FloatClassifyKind::Nan => "is_nan",
+                FloatClassifyKind::Finite => "is_finite",
+                FloatClassifyKind::Infinite => "is_infinite",
+            },
             Self::Len { .. } => "len",
             Self::Index { .. } => "index",
             Self::Append { .. } => "append",
@@ -115,7 +134,10 @@ impl CollectionObligation {
 
     pub fn types(&self) -> Vec<&str> {
         match self {
-            Self::Len { operand, result } => vec![operand, result],
+            Self::FloatClassify {
+                operand, result, ..
+            }
+            | Self::Len { operand, result } => vec![operand, result],
             Self::Index {
                 list,
                 index,
@@ -668,7 +690,7 @@ mod tests {
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
             SHELL_FORMAT_VERSION
         );
-        assert_eq!(SHELL_FORMAT_VERSION, 7);
+        assert_eq!(SHELL_FORMAT_VERSION, 8);
     }
 
     #[test]
@@ -692,7 +714,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("unknown CHB version must be rejected");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 99 is unsupported; expected 7; regenerate the shell package"
+            "invalid shell envelope: shell format version 99 is unsupported; expected 8; regenerate the shell package"
         );
     }
 
@@ -704,7 +726,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("CHB v4 must not decode without relations");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 4 is unsupported; expected 7; regenerate the shell package"
+            "invalid shell envelope: shell format version 4 is unsupported; expected 8; regenerate the shell package"
         );
     }
 
@@ -720,7 +742,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("CHB v5 predates the dtype-set domain");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 5 is unsupported; expected 7; regenerate the shell package"
+            "invalid shell envelope: shell format version 5 is unsupported; expected 8; regenerate the shell package"
         );
     }
 
@@ -732,7 +754,7 @@ mod tests {
             decode_shell(&bytes).expect_err("v6 must be refused before reading its payload");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 6 is unsupported; expected 7; Deep 0.20 removes pipe nodes; regenerate the shell package"
+            "invalid shell envelope: shell format version 6 is unsupported; expected 8; Deep 0.20 removes pipe nodes; regenerate the shell package"
         );
     }
 
@@ -749,6 +771,34 @@ mod tests {
         let encoded = encode_shell(&obligated).expect("checked contract encodes");
         assert_eq!(decode_shell(&encoded).unwrap(), obligated);
         assert_ne!(encoded, encode_shell(&fixture_shell()).unwrap());
+    }
+
+    #[test]
+    fn float_classification_contracts_round_trip_and_reject_previous_version() {
+        for kind in [
+            FloatClassifyKind::Nan,
+            FloatClassifyKind::Finite,
+            FloatClassifyKind::Infinite,
+        ] {
+            let mut shell = fixture_shell();
+            let symbol = &mut shell.modules[0].exports[0];
+            symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t1))".into());
+            symbol.collection_obligations = vec![CollectionObligation::FloatClassify {
+                kind,
+                operand: "(t-var {} t0)".into(),
+                result: "(t-var {} t1)".into(),
+            }];
+            let bytes = encode_shell(&shell).unwrap();
+            assert_eq!(decode_shell(&bytes).unwrap(), shell);
+        }
+        let mut old = b"CHELCHB\0".to_vec();
+        old.extend_from_slice(&7u32.to_le_bytes());
+        assert!(
+            decode_shell(&old)
+                .unwrap_err()
+                .to_string()
+                .contains("expected 8")
+        );
     }
 
     #[test]

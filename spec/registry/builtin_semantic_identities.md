@@ -131,6 +131,9 @@ Each row names its governing atom.
 | `Numeric:erfc:TableA` | [05-OP-46] |
 | `Numeric:exp:TableA` | [05-OP-46] |
 | `Numeric:expand:TableA` | [05-OP-49] |
+| `Numeric:is_nan:TableA` | [05-OP-20] |
+| `Numeric:is_finite:TableA` | [05-OP-21] |
+| `Numeric:is_infinite:TableA` | [05-OP-22] |
 | `Numeric:floor:TableA` | [05-OP-46] |
 | `Numeric:floor_div:TableA` | [05-OP-64] |
 | `Numeric:fold_in:TableA` | [05-OP-72] |

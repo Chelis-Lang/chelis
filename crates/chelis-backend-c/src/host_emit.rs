@@ -86,6 +86,9 @@ enum CExpressionBuiltin {
     Floor,
     Ceil,
     Round,
+    IsNan,
+    IsFinite,
+    IsInfinite,
     Recip,
     Abs,
     Min,
@@ -97,7 +100,7 @@ enum CExpressionBuiltin {
 impl CExpressionBuiltin {
     /// Every builtin name the host scalar lane decodes, and so every
     /// expression it can emit.
-    const NAMES: [(&'static str, Self); 69] = [
+    const NAMES: [(&'static str, Self); 72] = [
         ("add", Self::Add),
         ("sub", Self::Sub),
         ("mul", Self::Mul),
@@ -161,6 +164,9 @@ impl CExpressionBuiltin {
         ("floor", Self::Floor),
         ("ceil", Self::Ceil),
         ("round", Self::Round),
+        ("is_nan", Self::IsNan),
+        ("is_finite", Self::IsFinite),
+        ("is_infinite", Self::IsInfinite),
         ("recip", Self::Recip),
         ("abs", Self::Abs),
         ("min", Self::Min),
@@ -220,6 +226,9 @@ impl CExpressionBuiltin {
             | Self::Floor
             | Self::Ceil
             | Self::Round
+            | Self::IsNan
+            | Self::IsFinite
+            | Self::IsInfinite
             | Self::Recip
             | Self::Abs
             | Self::Min
@@ -476,7 +485,7 @@ pub(crate) fn emit_host_abi_program(
     // elements through `chelis_key_at`.
     append_uniform_sample_helper(&mut body);
     body.push(String::new());
-    let key_callable_helpers_index = body.len();
+    let checked_callable_helpers_index = body.len();
     append_tensor_print_helper(&mut body);
     body.push(String::new());
     append_option_print_helper(&mut body);
@@ -762,14 +771,15 @@ pub(crate) fn emit_host_abi_program(
     // its closed carrier or function symbol, before any such declaration.
     if body.iter().any(|line| {
         line.trim().split_once(" = ").is_some_and(|(_, value)| {
-            value == "(chelis_key_callable){ NULL };" || value.starts_with("__chelis_key_callable_")
+            value == "(chelis_checked_callable){ NULL };"
+                || value.starts_with("__chelis_checked_callable_")
         })
     }) {
         let mut key_helpers = Vec::new();
-        append_key_callable_helpers(&mut key_helpers);
+        append_checked_callable_helpers(&mut key_helpers);
         key_helpers.push(String::new());
         body.splice(
-            key_callable_helpers_index..key_callable_helpers_index,
+            checked_callable_helpers_index..checked_callable_helpers_index,
             key_helpers,
         );
     }
@@ -1156,12 +1166,12 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
 /// builtin identity and the checked function type selects one exact surface.
 /// The tensor entries accept runtime rank and extents because rank-polymorphic
 /// aliases may be specialized at more than one call site.
-fn append_key_callable_helpers(out: &mut Vec<String>) {
+fn append_checked_callable_helpers(out: &mut Vec<String>) {
     out.push(
         r#"
 // The operation identity is in the checked host type. This private value is
 // only an ABI witness; independent calls select concrete callback surfaces.
-typedef struct { const void *zero; } chelis_key_callable;
+typedef struct { const void *zero; } chelis_checked_callable;
 
 static inline chelis_tuple *__chelis_key_pair(chelis_key left, chelis_key right) {
     chelis_value halves[2] = {
@@ -1176,7 +1186,7 @@ static inline chelis_tuple *__chelis_key_pair(chelis_key left, chelis_key right)
 
 // Shape scratch stays in a checked i64 tensor; rank never sizes a C stack
 // array. Key storage is allocated by its own dtype, never a scalar exemplar.
-static inline chelis_tensor *__chelis_key_callable_alloc_shape(
+static inline chelis_tensor *__chelis_checked_callable_alloc_shape(
     const chelis_tensor *input, bool append_count, int64_t count) {
     int64_t rank = chelis_tensor_rank(input);
     if (append_count && rank >= INT32_MAX)
@@ -1195,24 +1205,24 @@ static inline chelis_tensor *__chelis_key_callable_alloc_shape(
     return out;
 }
 
-static inline chelis_key __chelis_key_callable_seed_scalar(int64_t seed) {
+static inline chelis_key __chelis_checked_callable_seed_scalar(int64_t seed) {
     return chelis_key_from_seed_bits(seed);
 }
-static inline chelis_tuple *__chelis_key_callable_split_scalar(chelis_key key) {
+static inline chelis_tuple *__chelis_checked_callable_split_scalar(chelis_key key) {
     return __chelis_key_pair(
         chelis_key_derive_value(key, 0ULL),
         chelis_key_derive_value(key, 1ULL));
 }
-static inline chelis_tensor *__chelis_key_callable_children_scalar(chelis_key key, int64_t count) {
+static inline chelis_tensor *__chelis_checked_callable_children_scalar(chelis_key key, int64_t count) {
     return chelis_split_keys_tensor(key, count);
 }
-static inline chelis_key __chelis_key_callable_fold_scalar(chelis_key key, int64_t index) {
+static inline chelis_key __chelis_checked_callable_fold_scalar(chelis_key key, int64_t index) {
     return chelis_key_fold_in(key, index);
 }
-static inline chelis_tensor *__chelis_key_callable_seed_tensor(chelis_tensor *seeds) {
+static inline chelis_tensor *__chelis_checked_callable_seed_tensor(chelis_tensor *seeds) {
     chelis_read_view input = chelis_tensor_read_view(seeds);
     if (input.dtype != CHELIS_DTYPE_I64) abort();
-    chelis_tensor *out = __chelis_key_callable_alloc_shape(seeds, false, 0);
+    chelis_tensor *out = __chelis_checked_callable_alloc_shape(seeds, false, 0);
     chelis_tensor_write *guard = chelis_tensor_begin_write(out);
     chelis_write_view view = chelis_tensor_write_view(guard);
     for (int64_t i = 0; i < input.count; ++i)
@@ -1221,11 +1231,11 @@ static inline chelis_tensor *__chelis_key_callable_seed_tensor(chelis_tensor *se
     chelis_tensor_release(seeds);
     return out;
 }
-static inline chelis_tuple *__chelis_key_callable_split_tensor(chelis_tensor *keys) {
+static inline chelis_tuple *__chelis_checked_callable_split_tensor(chelis_tensor *keys) {
     chelis_read_view input = chelis_tensor_read_view(keys);
     if (input.dtype != CHELIS_DTYPE_KEY) abort();
-    chelis_tensor *left = __chelis_key_callable_alloc_shape(keys, false, 0);
-    chelis_tensor *right = __chelis_key_callable_alloc_shape(keys, false, 0);
+    chelis_tensor *left = __chelis_checked_callable_alloc_shape(keys, false, 0);
+    chelis_tensor *right = __chelis_checked_callable_alloc_shape(keys, false, 0);
     chelis_tensor_write *left_guard = chelis_tensor_begin_write(left);
     chelis_tensor_write *right_guard = chelis_tensor_begin_write(right);
     chelis_write_view left_view = chelis_tensor_write_view(left_guard);
@@ -1244,11 +1254,11 @@ static inline chelis_tuple *__chelis_key_callable_split_tensor(chelis_tensor *ke
     chelis_tensor_release(keys);
     return pair;
 }
-static inline chelis_tensor *__chelis_key_callable_children_tensor(chelis_tensor *keys, int64_t count) {
+static inline chelis_tensor *__chelis_checked_callable_children_tensor(chelis_tensor *keys, int64_t count) {
     if (count < 0) chelis_numeric_trap("numeric trap: domain in split_keys at i64");
     chelis_read_view input = chelis_tensor_read_view(keys);
     if (input.dtype != CHELIS_DTYPE_KEY) abort();
-    chelis_tensor *out = __chelis_key_callable_alloc_shape(keys, true, count);
+    chelis_tensor *out = __chelis_checked_callable_alloc_shape(keys, true, count);
     chelis_tensor_write *guard = chelis_tensor_begin_write(out);
     chelis_write_view view = chelis_tensor_write_view(guard);
     for (int64_t i = 0; i < input.count; ++i) {
@@ -1261,7 +1271,7 @@ static inline chelis_tensor *__chelis_key_callable_children_tensor(chelis_tensor
     chelis_tensor_release(keys);
     return out;
 }
-static inline chelis_tensor *__chelis_key_callable_fold_tensor(chelis_tensor *keys, chelis_tensor *indices) {
+static inline chelis_tensor *__chelis_checked_callable_fold_tensor(chelis_tensor *keys, chelis_tensor *indices) {
     chelis_read_view input = chelis_tensor_read_view(keys);
     chelis_read_view index = chelis_tensor_read_view(indices);
     int64_t rank = chelis_tensor_rank(keys);
@@ -1271,7 +1281,7 @@ static inline chelis_tensor *__chelis_key_callable_fold_tensor(chelis_tensor *ke
         if (chelis_tensor_shape(indices, axis) != chelis_tensor_shape(keys, axis))
             chelis_numeric_trap("numeric trap: domain in fold_in at i64");
     }
-    chelis_tensor *out = __chelis_key_callable_alloc_shape(keys, false, 0);
+    chelis_tensor *out = __chelis_checked_callable_alloc_shape(keys, false, 0);
     chelis_tensor_write *guard = chelis_tensor_begin_write(out);
     chelis_write_view view = chelis_tensor_write_view(guard);
     for (int64_t i = 0; i < input.count; ++i)
@@ -1286,6 +1296,63 @@ static inline chelis_tensor *__chelis_key_callable_fold_tensor(chelis_tensor *ke
 "#
         .to_string(),
     );
+    for (suffix, c_type, width, exponent, fraction, dtype) in [
+        ("f16", "uint16_t", 2, "0x7c00", "0x03ff", "F16"),
+        ("bf16", "uint16_t", 2, "0x7f80", "0x007f", "BF16"),
+        ("f32", "float", 4, "0x7f800000", "0x007fffff", "F32"),
+        (
+            "f64",
+            "double",
+            8,
+            "0x7ff0000000000000",
+            "0x000fffffffffffff",
+            "F64",
+        ),
+    ] {
+        for (name, expression) in [
+            (
+                "is_nan",
+                format!(
+                    "(bits & UINT64_C({exponent})) == UINT64_C({exponent}) && (bits & UINT64_C({fraction})) != 0"
+                ),
+            ),
+            (
+                "is_finite",
+                format!("(bits & UINT64_C({exponent})) != UINT64_C({exponent})"),
+            ),
+            (
+                "is_infinite",
+                format!(
+                    "(bits & UINT64_C({exponent})) == UINT64_C({exponent}) && (bits & UINT64_C({fraction})) == 0"
+                ),
+            ),
+        ] {
+            let bits = match suffix {
+                "f32" => "uint32_t bits; memcpy(&bits, &value, sizeof bits);",
+                "f64" => "uint64_t bits; memcpy(&bits, &value, sizeof bits);",
+                _ => "uint16_t bits = value;",
+            };
+            out.push(format!("static inline bool __chelis_checked_callable_{name}_{suffix}_scalar({c_type} value) {{ {bits} return {expression}; }}"));
+            out.push(format!(r#"static inline chelis_tensor *__chelis_checked_callable_{name}_{suffix}_tensor(chelis_tensor *input) {{
+                chelis_read_view view = chelis_tensor_read_view(input);
+                if (view.dtype != CHELIS_DTYPE_{dtype}) abort();
+                int64_t rank = chelis_tensor_rank(input);
+                int64_t *shape = rank == 0 ? NULL : malloc((size_t)rank * sizeof(int64_t));
+                if (rank != 0 && shape == NULL) abort();
+                for (int64_t axis = 0; axis < rank; ++axis) shape[axis] = chelis_tensor_shape(input, axis);
+                chelis_tensor *output = chelis_alloc((int32_t)rank, shape, CHELIS_DTYPE_BOOL);
+                free(shape);
+                chelis_tensor_write *guard = chelis_tensor_begin_write(output);
+                uint8_t *result = chelis_tensor_write_view(guard).data;
+                for (int64_t i = 0; i < view.count; ++i) {{
+                    uint{bitwidth}_t bits; memcpy(&bits, (const uint8_t*)view.data + i * {width}, {width});
+                    result[i] = {expression};
+                }}
+                chelis_tensor_end_write(guard);
+                return output;
+            }}"#, bitwidth=width*8));
+        }
+    }
 }
 
 /// Translation-unit-local support for Std.Io.Json's canonical object
@@ -2168,26 +2235,152 @@ fn append_tensor_abi_helpers(out: &mut Vec<String>) {
 }
 
 /// The only C callback signatures a resolved key operation can carry.
-fn key_callable_symbol(name: &str, ty: &HostType) -> Option<&'static str> {
+fn checked_callable_symbol(name: &str, ty: &HostType) -> Option<&'static str> {
     let HostType::Callback(params, result) = ty else {
         return None;
     };
+    let predicate = match (name, params.as_slice(), result.as_ref()) {
+        ("is_nan", [HostType::Float16], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_nan_f16_scalar")
+        }
+        ("is_nan", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::F16
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_nan_f16_tensor")
+        }
+        ("is_nan", [HostType::BFloat16], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_nan_bf16_scalar")
+        }
+        ("is_nan", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::Bf16
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_nan_bf16_tensor")
+        }
+        ("is_nan", [HostType::Float32], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_nan_f32_scalar")
+        }
+        ("is_nan", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::F32
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_nan_f32_tensor")
+        }
+        ("is_nan", [HostType::Float64], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_nan_f64_scalar")
+        }
+        ("is_nan", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::F64
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_nan_f64_tensor")
+        }
+        ("is_finite", [HostType::Float16], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_finite_f16_scalar")
+        }
+        ("is_finite", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::F16
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_finite_f16_tensor")
+        }
+        ("is_finite", [HostType::BFloat16], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_finite_bf16_scalar")
+        }
+        ("is_finite", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::Bf16
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_finite_bf16_tensor")
+        }
+        ("is_finite", [HostType::Float32], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_finite_f32_scalar")
+        }
+        ("is_finite", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::F32
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_finite_f32_tensor")
+        }
+        ("is_finite", [HostType::Float64], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_finite_f64_scalar")
+        }
+        ("is_finite", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::F64
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_finite_f64_tensor")
+        }
+        ("is_infinite", [HostType::Float16], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_infinite_f16_scalar")
+        }
+        ("is_infinite", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::F16
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_infinite_f16_tensor")
+        }
+        ("is_infinite", [HostType::BFloat16], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_infinite_bf16_scalar")
+        }
+        ("is_infinite", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::Bf16
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_infinite_bf16_tensor")
+        }
+        ("is_infinite", [HostType::Float32], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_infinite_f32_scalar")
+        }
+        ("is_infinite", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::F32
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_infinite_f32_tensor")
+        }
+        ("is_infinite", [HostType::Float64], HostType::Bool) => {
+            Some("__chelis_checked_callable_is_infinite_f64_scalar")
+        }
+        ("is_infinite", [HostType::Tensor(input)], HostType::Tensor(output))
+            if input.precision == Prim::F64
+                && output.precision == Prim::Bool
+                && input.dims == output.dims =>
+        {
+            Some("__chelis_checked_callable_is_infinite_f64_tensor")
+        }
+        _ => None,
+    };
+    if predicate.is_some() {
+        return predicate;
+    }
     let scalar = match (name, params.as_slice(), result.as_ref()) {
         ("key_from_seed", [HostType::Int64], HostType::Key) => {
-            Some("__chelis_key_callable_seed_scalar")
+            Some("__chelis_checked_callable_seed_scalar")
         }
         ("split_key", [HostType::Key], HostType::Tuple(halves))
             if matches!(halves.as_slice(), [HostType::Key, HostType::Key]) =>
         {
-            Some("__chelis_key_callable_split_scalar")
+            Some("__chelis_checked_callable_split_scalar")
         }
         ("split_keys", [HostType::Key, HostType::Int64], HostType::Tensor(out))
             if out.precision == Prim::Key =>
         {
-            Some("__chelis_key_callable_children_scalar")
+            Some("__chelis_checked_callable_children_scalar")
         }
         ("fold_in", [HostType::Key, HostType::Int64], HostType::Key) => {
-            Some("__chelis_key_callable_fold_scalar")
+            Some("__chelis_checked_callable_fold_scalar")
         }
         _ => None,
     };
@@ -2198,7 +2391,7 @@ fn key_callable_symbol(name: &str, ty: &HostType) -> Option<&'static str> {
         ("key_from_seed", [HostType::Tensor(seeds)], HostType::Tensor(out))
             if seeds.precision == Prim::Int64 && out.precision == Prim::Key =>
         {
-            Some("__chelis_key_callable_seed_tensor")
+            Some("__chelis_checked_callable_seed_tensor")
         }
         ("split_key", [HostType::Tensor(keys)], HostType::Tuple(halves))
             if keys.precision == Prim::Key
@@ -2208,19 +2401,19 @@ fn key_callable_symbol(name: &str, ty: &HostType) -> Option<&'static str> {
                         if left.precision == Prim::Key && right.precision == Prim::Key
                 ) =>
         {
-            Some("__chelis_key_callable_split_tensor")
+            Some("__chelis_checked_callable_split_tensor")
         }
         ("split_keys", [HostType::Tensor(keys), HostType::Int64], HostType::Tensor(out))
             if keys.precision == Prim::Key && out.precision == Prim::Key =>
         {
-            Some("__chelis_key_callable_children_tensor")
+            Some("__chelis_checked_callable_children_tensor")
         }
         ("fold_in", [HostType::Tensor(keys), HostType::Tensor(indices)], HostType::Tensor(out))
             if keys.precision == Prim::Key
                 && indices.precision == Prim::Int64
                 && out.precision == Prim::Key =>
         {
-            Some("__chelis_key_callable_fold_tensor")
+            Some("__chelis_checked_callable_fold_tensor")
         }
         _ => None,
     }
@@ -5962,7 +6155,7 @@ fn verified_call_authority(
         if let VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
             kind:
                 kind @ (VerifiedApplyKind::DirectCall { .. }
-                | VerifiedApplyKind::KeyBuiltinCall(_)
+                | VerifiedApplyKind::CheckedBuiltinCall(_)
                 | VerifiedApplyKind::NativeProviderCall),
             ..
         }) = action
@@ -7295,7 +7488,7 @@ impl<'a> HostEmitter<'a> {
                     )
                 }),
             (
-                VerifiedApplyKind::KeyBuiltinCall(_) | VerifiedApplyKind::IndirectCall,
+                VerifiedApplyKind::CheckedBuiltinCall(_) | VerifiedApplyKind::IndirectCall,
                 HostCalleeView::Local(binding),
             ) => Ok(VerifiedCallee::Value(self.local_c_name(binding))),
             (VerifiedApplyKind::NativeProviderCall, HostCalleeView::NativeProvider(symbol)) => {
@@ -8429,25 +8622,27 @@ impl<'a> HostEmitter<'a> {
         result_claims: Option<&str>,
     ) -> Result<(), Unsupported> {
         if args.is_empty()
-            && let HostType::KeyBuiltinCallable(op) = ty
+            && let HostType::CheckedBuiltinCallable(op) = ty
         {
             if op.symbol() != name {
                 return Err(invalid_abi_shape(
-                    format!("closed key callable identity {op:?} disagrees with `{name}`"),
-                    "C host key callable selection",
+                    format!("closed checked builtin identity {op:?} disagrees with `{name}`"),
+                    "C host checked callable selection",
                 ));
             }
             self.lines.push(format!(
-                "{}{target} = (chelis_key_callable){{ NULL }};",
+                "{}{target} = (chelis_checked_callable){{ NULL }};",
                 self.indent
             ));
             return Ok(());
         }
         if args.is_empty() && matches!(ty, HostType::Callback(_, _)) {
-            let symbol = key_callable_symbol(name, ty).ok_or_else(|| {
+            let symbol = checked_callable_symbol(name, ty).ok_or_else(|| {
                 invalid_abi_shape(
-                    format!("checked key callable `{name}` has incompatible C signature {ty:?}"),
-                    "C host key callable selection",
+                    format!(
+                        "checked builtin callable `{name}` has incompatible C signature {ty:?}"
+                    ),
+                    "C host checked callable selection",
                 )
             })?;
             self.lines
@@ -10464,6 +10659,52 @@ impl<'a> HostEmitter<'a> {
                     ),
                     [numeric_arg(0)],
                 ),
+                CExpressionBuiltin::IsNan
+                | CExpressionBuiltin::IsFinite
+                | CExpressionBuiltin::IsInfinite => {
+                    let (bits, exponent, fraction) = match &arg_vars[0].1 {
+                        HostType::Float16 => (arg(0), 0x7c00i64, 0x03ffi64),
+                        HostType::BFloat16 => (arg(0), 0x7f80, 0x007f),
+                        HostType::Float32 => (
+                            EmittedExpr::call("chelis_host_f32_bits", [arg(0)]),
+                            0x7f800000,
+                            0x007fffff,
+                        ),
+                        HostType::Float64 => (
+                            EmittedExpr::call("chelis_host_f64_bits", [arg(0)]),
+                            0x7ff0000000000000,
+                            0x000fffffffffffff,
+                        ),
+                        _ => unreachable!("checked classification input"),
+                    };
+                    let special = binary(
+                        BinaryOperator::Equal,
+                        binary(
+                            BinaryOperator::BitAnd,
+                            bits.clone(),
+                            EmittedExpr::integer(exponent),
+                        ),
+                        EmittedExpr::integer(exponent),
+                    );
+                    let payload =
+                        binary(BinaryOperator::BitAnd, bits, EmittedExpr::integer(fraction));
+                    match expression_builtin {
+                        CExpressionBuiltin::IsFinite => {
+                            binary(BinaryOperator::Equal, special, EmittedExpr::integer(0))
+                        }
+                        CExpressionBuiltin::IsNan => binary(
+                            BinaryOperator::LogicalAnd,
+                            special,
+                            binary(BinaryOperator::NotEqual, payload, EmittedExpr::integer(0)),
+                        ),
+                        CExpressionBuiltin::IsInfinite => binary(
+                            BinaryOperator::LogicalAnd,
+                            special,
+                            binary(BinaryOperator::Equal, payload, EmittedExpr::integer(0)),
+                        ),
+                        _ => unreachable!(),
+                    }
+                }
                 CExpressionBuiltin::Floor
                 | CExpressionBuiltin::Ceil
                 | CExpressionBuiltin::Round
@@ -13412,7 +13653,7 @@ impl<'a> HostEmitter<'a> {
             }
             // The callable's operation identity is retained by its checked
             // host type. An aggregate stores only a zero-payload witness.
-            HostType::KeyBuiltinCallable(_) => {
+            HostType::CheckedBuiltinCallable(_) => {
                 "chelis_value_take_tuple(chelis_tuple_from_values(NULL, 0))".to_string()
             }
             HostType::Callback(_, _) => {
@@ -13436,13 +13677,13 @@ impl<'a> HostEmitter<'a> {
         ty: &HostType,
         value_expr: &str,
     ) -> Result<(), Unsupported> {
-        if matches!(ty, HostType::KeyBuiltinCallable(_)) {
+        if matches!(ty, HostType::CheckedBuiltinCallable(_)) {
             self.lines.push(format!(
                 "{}chelis_tuple_release(chelis_tuple_take_value({value_expr}));",
                 self.indent
             ));
             self.lines.push(format!(
-                "{}{target} = (chelis_key_callable){{ NULL }};",
+                "{}{target} = (chelis_checked_callable){{ NULL }};",
                 self.indent
             ));
             return Ok(());
@@ -13492,7 +13733,7 @@ impl<'a> HostEmitter<'a> {
                     "unboxing a resolved host value",
                 ));
             }
-            HostType::KeyBuiltinCallable(_) => unreachable!("handled before scalar unboxing"),
+            HostType::CheckedBuiltinCallable(_) => unreachable!("handled before scalar unboxing"),
         };
         self.lines
             .push(format!("{}{target} = {expr};", self.indent));
@@ -14360,7 +14601,7 @@ fn host_type_may_carry_result_origin(ty: &HostType) -> bool {
         | HostType::Bool
         | HostType::String
         | HostType::Key
-        | HostType::KeyBuiltinCallable(_)
+        | HostType::CheckedBuiltinCallable(_)
         | HostType::Callback(_, _)
         | HostType::Dict(_, _)
         | HostType::MappedFile
@@ -14572,7 +14813,7 @@ fn checked_cast_abi_axis(ty: &HostType) -> Result<(Prim, CheckedCastSurface), Un
         HostType::Tensor(tensor) => Ok((tensor.precision, CheckedCastSurface::Tensor)),
         HostType::String
         | HostType::Key
-        | HostType::KeyBuiltinCallable(_)
+        | HostType::CheckedBuiltinCallable(_)
         | HostType::Callback(_, _)
         | HostType::Adt(_, _)
         | HostType::List(_)

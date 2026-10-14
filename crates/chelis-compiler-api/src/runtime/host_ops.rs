@@ -456,6 +456,32 @@ pub(super) fn numeric_binop(
     }
 }
 
+pub(super) fn eval_float_classification(
+    kind: chelis_types::FloatClassify,
+    args: &[RuntimeValue],
+) -> Result<RuntimeValue, String> {
+    match args {
+        [RuntimeValue::Scalar(value)] => chelis_types::classify_float(kind, value.value())
+            .map(|value| {
+                RuntimeValue::Bool(
+                    value
+                        .as_bool_exact()
+                        .expect("classification result is bool"),
+                )
+            })
+            .map_err(|e| e.to_string()),
+        [RuntimeValue::Tensor(value)] => {
+            chelis_types::classify_float_tensor(kind, value.value.storage())
+                .map(|storage| tensor_result(value, storage))
+                .map_err(|e| e.to_string())
+        }
+        _ => Err(format!(
+            "{} expects one float scalar or tensor",
+            kind.name()
+        )),
+    }
+}
+
 pub(super) fn numeric_unop(
     args: &[RuntimeValue],
     int_op: Option<IntUnOp>,

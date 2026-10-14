@@ -23,9 +23,9 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 28 is explicitly
+WireDag JSON is an exact-version contract. Schema version 29 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 27, and every future version are decode errors before any IR
+versions 1 through 28, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
@@ -216,7 +216,9 @@ AD and batching; backend preparation applies the normative forward decomposition
 Version 26 carries the named lossy casts as one tagged `NamedCast` operation
 whose `mode` names the rung (`trunc`, `saturate`, or `wrap`). Version 27 adds
 `Erf` and `Erfc` and their fused steps under [05-OP-46]. Version 28 adds `Pow`
-and its fused step under [05-OP-79].
+and its fused step under [05-OP-79]. Version 29 adds `FloatClassify`, whose
+closed `classification` discriminator is `nan`, `finite`, or `infinite`,
+retaining [05-OP-20..22] without embedded numeric payloads.
 
 Execution-value envelopes carry the independently required exact
 `schema_version: 4`. Missing, older, and future execution versions are rejected

@@ -1387,6 +1387,86 @@ enum Buf {
     Key(Vec<RandomKey>),
 }
 
+/// Stored-width IEEE classification ([05-OP-20..22]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FloatClassify {
+    Nan,
+    Finite,
+    Infinite,
+}
+
+impl FloatClassify {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Nan => "is_nan",
+            Self::Finite => "is_finite",
+            Self::Infinite => "is_infinite",
+        }
+    }
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "is_nan" => Some(Self::Nan),
+            "is_finite" => Some(Self::Finite),
+            "is_infinite" => Some(Self::Infinite),
+            _ => None,
+        }
+    }
+    pub const fn atom(self) -> &'static str {
+        match self {
+            Self::Nan => "[05-OP-20]",
+            Self::Finite => "[05-OP-21]",
+            Self::Infinite => "[05-OP-22]",
+        }
+    }
+}
+
+/// Read the operand's own representation; no floating-point computation or cast.
+pub fn classify_float(
+    op: FloatClassify,
+    value: ScalarValue,
+) -> Result<ScalarValue, NumericKernelError> {
+    let (bits, exponent, fraction) = match value.bits {
+        Bits::F16(v) => (u64::from(v.to_bits()), 0x7c00, 0x03ff),
+        Bits::Bf16(v) => (u64::from(v.to_bits()), 0x7f80, 0x007f),
+        Bits::F32(v) => (u64::from(v.to_bits()), 0x7f800000, 0x007fffff),
+        Bits::F64(v) => (v.to_bits(), 0x7ff0000000000000, 0x000fffffffffffff),
+        _ => {
+            return Err(NumericKernelError::WrongFamily {
+                op: op.name(),
+                expected: NumericFamily::Float,
+                actual: value.prim(),
+            });
+        }
+    };
+    let special = bits & exponent == exponent;
+    let answer = match op {
+        FloatClassify::Nan => special && bits & fraction != 0,
+        FloatClassify::Finite => !special,
+        FloatClassify::Infinite => special && bits & fraction == 0,
+    };
+    Ok(ScalarValue {
+        bits: Bits::Bool(answer),
+    })
+}
+
+pub fn classify_float_tensor(
+    op: FloatClassify,
+    value: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    if !value.prim().is_float() {
+        return Err(NumericKernelError::WrongFamily {
+            op: op.name(),
+            expected: NumericFamily::Float,
+            actual: value.prim(),
+        });
+    }
+    let values = (0..value.len())
+        .map(|i| classify_float(op, value.scalar_at(i)))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(tensor_from_scalars(Prim::Bool, &values))
+}
+
 /// Read-only borrowed view of a [`TensorStorage`] buffer at its own
 /// width (section C3: reads are free-form; only construction is gated).
 #[derive(Debug, Clone, Copy)]

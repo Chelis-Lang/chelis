@@ -989,6 +989,12 @@ impl fmt::Display for EffectSet {
 /// exactly as it rewrites the scheme body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CollectionConstraint {
+    /// [05-OP-20..22]: float scalar/tensor to bool on the same surface.
+    FloatClassify {
+        kind: crate::FloatClassify,
+        operand: Type,
+        result: Type,
+    },
     /// `len(operand) -> i64`: the operand is a `List` or a `Dict`.
     Len { operand: Type, result: Type },
     /// `index(list, index) -> result`: `list` is a `List[e]`, `index` is
@@ -1037,7 +1043,8 @@ impl CollectionConstraint {
     /// declares cannot make its builtin a value.
     pub fn transports_static_operand_rule(&self) -> bool {
         match self {
-            Self::SplitKeys { .. }
+            Self::FloatClassify { .. }
+            | Self::SplitKeys { .. }
             | Self::Len { .. }
             | Self::Index { .. }
             | Self::Append { .. }
@@ -1051,6 +1058,7 @@ impl CollectionConstraint {
     /// The builtin this constraint belongs to, for diagnostics.
     pub fn builtin(&self) -> &'static str {
         match self {
+            Self::FloatClassify { kind, .. } => kind.name(),
             Self::KeyFromSeed { .. } => "key_from_seed",
             Self::SplitKey { .. } => "split_key",
             Self::SplitKeys { .. } => "split_keys",
@@ -1067,7 +1075,9 @@ impl CollectionConstraint {
     /// not what it waits on.
     pub fn operands(&self) -> Vec<&Type> {
         match self {
-            Self::KeyFromSeed { operand, .. } | Self::SplitKey { operand, .. } => vec![operand],
+            Self::FloatClassify { operand, .. }
+            | Self::KeyFromSeed { operand, .. }
+            | Self::SplitKey { operand, .. } => vec![operand],
             Self::SplitKeys { operand, count, .. } => vec![operand, count],
             Self::FoldIn { operand, index, .. } => vec![operand, index],
             Self::Len { operand, .. } => vec![operand],
@@ -1081,7 +1091,11 @@ impl CollectionConstraint {
     /// decide which variables a pending constraint keeps monomorphic.
     pub fn carried_types(&self) -> Vec<&Type> {
         match self {
-            Self::KeyFromSeed { operand, result } | Self::SplitKey { operand, result } => {
+            Self::FloatClassify {
+                operand, result, ..
+            }
+            | Self::KeyFromSeed { operand, result }
+            | Self::SplitKey { operand, result } => {
                 vec![operand, result]
             }
             Self::SplitKeys {
@@ -1112,7 +1126,8 @@ impl CollectionConstraint {
     /// The result the suspended call already handed its consumer.
     pub fn result(&self) -> &Type {
         match self {
-            Self::KeyFromSeed { result, .. }
+            Self::FloatClassify { result, .. }
+            | Self::KeyFromSeed { result, .. }
             | Self::SplitKey { result, .. }
             | Self::SplitKeys { result, .. }
             | Self::FoldIn { result, .. }
@@ -1127,6 +1142,15 @@ impl CollectionConstraint {
     /// quantifier renaming; discharge passes the current substitution.
     pub fn map_types(&self, f: impl Fn(&Type) -> Type) -> Self {
         match self {
+            Self::FloatClassify {
+                kind,
+                operand,
+                result,
+            } => Self::FloatClassify {
+                kind: *kind,
+                operand: f(operand),
+                result: f(result),
+            },
             Self::KeyFromSeed { operand, result } => Self::KeyFromSeed {
                 operand: f(operand),
                 result: f(result),

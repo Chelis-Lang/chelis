@@ -540,7 +540,7 @@ pub enum VerifiedApplyKind {
     IndirectCall,
     NativeProviderCall,
     /// The indirect callee owner was produced by this closed key operation.
-    KeyBuiltinCall(crate::host_type_state::KeyBuiltinCallable),
+    CheckedBuiltinCall(crate::host_type_state::CheckedBuiltinCallable),
     DirectCall {
         callee: VerifiedUnitId,
         tail: bool,
@@ -946,8 +946,8 @@ fn verified_host_action<'a>(
                             ir::ApplyKind::NativeProviderCall => {
                                 VerifiedApplyKind::NativeProviderCall
                             }
-                            ir::ApplyKind::KeyBuiltinCall(op) => {
-                                VerifiedApplyKind::KeyBuiltinCall(*op)
+                            ir::ApplyKind::CheckedBuiltinCall(op) => {
+                                VerifiedApplyKind::CheckedBuiltinCall(*op)
                             }
                             ir::ApplyKind::DirectCall { callee } => VerifiedApplyKind::DirectCall {
                                 callee: VerifiedUnitId { key: callee.0 },

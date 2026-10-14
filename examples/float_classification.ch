@@ -1,0 +1,8 @@
+def finite_positive[p: Float](x: p) -> bool = and(is_finite(x), gt(x, cast(0i64, p)))
+def classify(x: tensor[4, f32]) -> tensor[4, bool] = is_finite(x)
+values: tensor[4, f32] = to_tensor([0.0f32, -0.0f32, 1.0f32, -1.0f32])
+finite = classify(values)
+positive = finite_positive(1.0f64)
+negative = finite_positive(-1.0f64)
+nan = is_nan(1.0f32)
+infinite = is_infinite(1.0f16)

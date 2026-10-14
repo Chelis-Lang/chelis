@@ -4895,6 +4895,9 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "floor"
                         | "ceil"
                         | "round"
+                        | "is_nan"
+                        | "is_finite"
+                        | "is_infinite"
                         | "relu"
                         | "sigmoid"
                         | "tanh"
@@ -4945,6 +4948,11 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
 /// the emit-main path or the host tuple-ABI still gets a chance to
 /// materialize the runtime literal.
 fn def_body_requires_host_runtime(body: &Expr) -> bool {
+    if callable_ref_name(body).is_some_and(|name| {
+        crate::host_type_state::CheckedBuiltinCallable::from_symbol(&name).is_some()
+    }) {
+        return true;
+    }
     let exempt = fn_body_qualifies_for_to_tensor_exemption(body);
     expr_requires_host_runtime_with_ctx(body, exempt)
 }
@@ -7414,7 +7422,7 @@ enum CallableExpr {
     /// Resolved key operation carried through a checked value binding. The
     /// original operation identity is captured when the value is formed;
     /// an alias's spelling never selects the lowered primitive.
-    KeyBuiltin(String),
+    CheckedBuiltin(String),
     Vmap {
         fn_expr: ResolvedFunction,
         axis: usize,
@@ -9437,7 +9445,7 @@ impl<'program> LowerCtx<'program> {
         };
         match callable {
             CallableExpr::Plain(fn_expr) => CallableExpr::Plain(function(fn_expr)),
-            CallableExpr::KeyBuiltin(name) => CallableExpr::KeyBuiltin(name.clone()),
+            CallableExpr::CheckedBuiltin(name) => CallableExpr::CheckedBuiltin(name.clone()),
             CallableExpr::Vmap { fn_expr, axis } => CallableExpr::Vmap {
                 fn_expr: function(fn_expr),
                 axis: *axis,
@@ -10662,7 +10670,7 @@ impl<'program> LowerCtx<'program> {
     /// producer, so a host consumer can read the projected value.
     fn stage_key_builtin_tuple_item(&mut self, expr: &Expr, name: &str) -> Option<LoweredValue> {
         use crate::host::staged::{HostSource, HostValueId, StageValue};
-        use crate::host_type_state::{HostTypeTerm, KeyBuiltinCallable};
+        use crate::host_type_state::{CheckedBuiltinCallable, HostTypeTerm};
         let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
             return None;
         };
@@ -10672,8 +10680,8 @@ impl<'program> LowerCtx<'program> {
         {
             return None;
         }
-        let op = KeyBuiltinCallable::from_symbol(name)?;
-        let ty = HostTypeTerm::KeyBuiltinCallable(op);
+        let op = CheckedBuiltinCallable::from_symbol(name)?;
+        let ty = HostTypeTerm::CheckedBuiltinCallable(op);
         let id = HostValueId(self.next_host_value);
         self.next_host_value += 1;
         if self.host_program.is_some() {
@@ -10700,7 +10708,7 @@ impl<'program> LowerCtx<'program> {
         let referenced = kids.first().and_then(symbol_name)?;
         if let Some(value) = self.bindings.get(referenced)
             && let LoweredValue::Host {
-                ty: crate::host_type_state::HostTypeTerm::KeyBuiltinCallable(op),
+                ty: crate::host_type_state::HostTypeTerm::CheckedBuiltinCallable(op),
                 ..
             } = value
             && op.symbol() == name
@@ -11617,7 +11625,7 @@ impl<'program> LowerCtx<'program> {
                         // expressions can then capture aliases through the
                         // same typed host carrier as other lexical values.
                         let value = self.stage_host_value(&bind_kids[i + 1], false).or_else(|| {
-                            if let CallableExpr::KeyBuiltin(operation) = &callable {
+                            if let CallableExpr::CheckedBuiltin(operation) = &callable {
                                 self.key_builtin_alias_value(&bind_kids[i + 1], operation)
                             } else {
                                 None
@@ -12691,7 +12699,7 @@ impl<'program> LowerCtx<'program> {
                 checked_result_names,
                 inlining_name,
             )),
-            CallableExpr::KeyBuiltin(name) => Some(if name == "split_key" {
+            CallableExpr::CheckedBuiltin(name) => Some(if name == "split_key" {
                 if args.len() != 1 {
                     raise_lowering_error(
                         "checked split_key callable has wrong arity",
@@ -12850,11 +12858,11 @@ impl<'program> LowerCtx<'program> {
                 }
                 if !declaration
                     && let Some(LoweredValue::Host {
-                        ty: crate::host_type_state::HostTypeTerm::KeyBuiltinCallable(op),
+                        ty: crate::host_type_state::HostTypeTerm::CheckedBuiltinCallable(op),
                         ..
                     }) = self.bindings.get(&name)
                 {
-                    return Some(CallableExpr::KeyBuiltin(op.symbol().to_string()));
+                    return Some(CallableExpr::CheckedBuiltin(op.symbol().to_string()));
                 }
                 // The innermost binding of the name wins (chelis#1949): a
                 // function-typed parameter is a callable, and a local value
@@ -12890,9 +12898,15 @@ impl<'program> LowerCtx<'program> {
                 }
                 if matches!(
                     name.as_str(),
-                    "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+                    "key_from_seed"
+                        | "split_key"
+                        | "split_keys"
+                        | "fold_in"
+                        | "is_nan"
+                        | "is_finite"
+                        | "is_infinite"
                 ) {
-                    return Some(CallableExpr::KeyBuiltin(name));
+                    return Some(CallableExpr::CheckedBuiltin(name));
                 }
                 None
             }
@@ -12951,7 +12965,7 @@ impl<'program> LowerCtx<'program> {
                         }
                         // `vmap(parameter)` is G2 territory.
                         CallableExpr::Parameter { .. } => None,
-                        CallableExpr::KeyBuiltin(_) => None,
+                        CallableExpr::CheckedBuiltin(_) => None,
                     })
             }
             DeepTag::Grad => self
@@ -15945,6 +15959,28 @@ impl<'program> LowerCtx<'program> {
                 } else {
                     self.attach_reuse_hint(node, app_span, &[x])
                 }
+            }
+            name if args.len() == 1 && chelis_types::FloatClassify::from_name(name).is_some() => {
+                let kind =
+                    chelis_types::FloatClassify::from_name(name).expect("classification identity");
+                let x = self.lower_expr_node(&args[0], "float classification input");
+                let result_ty = TensorType {
+                    dims: self
+                        .dag
+                        .get(x)
+                        .expect("classification input node")
+                        .output_type
+                        .dims
+                        .clone(),
+                    precision: Prim::Bool,
+                };
+                self.dag.add_node(
+                    self.owner(),
+                    RiscOp::FloatClassify(kind),
+                    vec![x],
+                    result_ty,
+                    self.current_span_id.clone(),
+                )
             }
             "floor" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "floor input");
@@ -23902,7 +23938,8 @@ impl<'program> LowerCtx<'program> {
         LoweredValue::Tuple(
             kids.iter()
                 .map(|expr| {
-                    if let Some(CallableExpr::KeyBuiltin(name)) = self.resolve_callable_expr(expr)
+                    if let Some(CallableExpr::CheckedBuiltin(name)) =
+                        self.resolve_callable_expr(expr)
                         && let Some(staged) = self.key_builtin_alias_value(expr, &name)
                     {
                         staged

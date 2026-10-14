@@ -169,6 +169,7 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
         | RiscOp::ListMapCapture { .. }
         | RiscOp::TruncDiv
         | RiscOp::Bitwise(..)
+        | RiscOp::FloatClassify(_)
         | RiscOp::Compare(..)
         | RiscOp::Logical(..)
         | RiscOp::Where

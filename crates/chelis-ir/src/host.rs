@@ -29,8 +29,8 @@ use chelis_vocab::EffectKind;
 use crate::LoadStoreName;
 use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_type_state::{
-    ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
-    HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, KeyBuiltinCallable, decode_host_type,
+    CheckedBuiltinCallable, ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot,
+    HostShapeTerm, HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, decode_host_type,
 };
 use crate::lower::top_level_lowering_map;
 
@@ -8533,7 +8533,7 @@ fn lower_host_expr_kind(
             // operation identity in host IR so a later alias or shadow
             // cannot change what it calls. The backend materializes the
             // corresponding capture-free function pointer from this node.
-            if let Some(op) = KeyBuiltinCallable::from_symbol(&name)
+            if let Some(op) = CheckedBuiltinCallable::from_symbol(&name)
                 && !scope.contains_key(&name)
                 && program.def_named(&name).is_none()
             {
@@ -8541,7 +8541,7 @@ fn lower_host_expr_kind(
                     name,
                     args: Vec::new(),
                     ty: if ty.is_unresolved() {
-                        HostTypeTerm::KeyBuiltinCallable(op)
+                        HostTypeTerm::CheckedBuiltinCallable(op)
                     } else {
                         ty
                     },
@@ -13549,7 +13549,7 @@ fn lower_lexical_host_call(
         .iter()
         .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
         .collect::<Result<Vec<_>, _>>()?;
-    if let HostTypeTerm::KeyBuiltinCallable(op) = binding {
+    if let HostTypeTerm::CheckedBuiltinCallable(op) = binding {
         // This identity came from the resolved value's producer, including
         // aliases and tuple projections. The application metadata selects
         // its concrete result; the alias's spelling selects nothing.
@@ -15745,7 +15745,7 @@ fn host_type_syntax(ty: &HostTypeTerm, span: chelis_deep::Span) -> Option<Expr> 
         }
         // This closed operation has no single Deep function type until a
         // checked application selects its scalar or tensor alternative.
-        HostTypeTerm::KeyBuiltinCallable(_) => None,
+        HostTypeTerm::CheckedBuiltinCallable(_) => None,
         HostTypeTerm::Adt(name, args) => Some(host_adt_syntax(
             name,
             args.iter()
@@ -16722,8 +16722,8 @@ fn write_canonical_host_type_key(ty: &HostTypeTerm, out: &mut String) {
             out.push_str(")->");
             write_canonical_host_type_key(ret, out);
         }
-        HostTypeTerm::KeyBuiltinCallable(op) => {
-            out.push_str("key-builtin:");
+        HostTypeTerm::CheckedBuiltinCallable(op) => {
+            out.push_str("checked-builtin:");
             out.push_str(op.symbol());
         }
         HostTypeTerm::Adt(name, args) => {
@@ -19390,6 +19390,7 @@ fn actualize_tensor_helper_types(
                 | crate::dag::RiscOp::Abs
                 | crate::dag::RiscOp::Floor
                 | crate::dag::RiscOp::Ceil
+                | crate::dag::RiscOp::FloatClassify(_)
                 | crate::dag::RiscOp::Round
                 | crate::dag::RiscOp::Recip
                 | crate::dag::RiscOp::UniformLike
@@ -22996,6 +22997,13 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(tensor_ty.clone())),
             _ => Some(fresh_host_inference()),
         },
+        "is_nan" | "is_finite" | "is_infinite" => Some(match tensor_arg {
+            Some(input) => HostTypeTerm::Tensor(TensorType {
+                dims: input.dims,
+                precision: Prim::Bool,
+            }),
+            None => HostTypeTerm::Bool,
+        }),
         "and" | "or" | "not" | "string_contains" | "string_starts_with" | "string_ends_with" => {
             Some(HostTypeTerm::Bool)
         }

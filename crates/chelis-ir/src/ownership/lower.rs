@@ -182,7 +182,7 @@ impl FormalTypePattern {
             }
             ConcreteHostType::Option(inner) => Self::Option(Box::new(Self::nominal(inner))),
             ConcreteHostType::Scalar(_)
-            | ConcreteHostType::KeyBuiltinCallable(_)
+            | ConcreteHostType::CheckedBuiltinCallable(_)
             | ConcreteHostType::MappedFile
             | ConcreteHostType::Unit => Self::Exact,
         }
@@ -561,7 +561,7 @@ struct UnitLowerer<'a, 'sites> {
     owners: BTreeMap<OwnerId, OwnerInfo>,
     owner_depth: BTreeMap<OwnerId, usize>,
     callback_modes: BTreeMap<OwnerId, Vec<ParamMode>>,
-    key_callbacks: BTreeMap<OwnerId, crate::host_type_state::KeyBuiltinCallable>,
+    key_callbacks: BTreeMap<OwnerId, crate::host_type_state::CheckedBuiltinCallable>,
     next_owner: u32,
     next_operation: u32,
     next_edge: u32,
@@ -1368,12 +1368,25 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 // unrelated function value cannot acquire callback status
                 // merely by sharing its concrete function type.
                 if args.is_empty()
-                    && let Some(op) = crate::host_type_state::KeyBuiltinCallable::from_symbol(name)
+                    && let Some(op) =
+                        crate::host_type_state::CheckedBuiltinCallable::from_symbol(name)
                     && let ConcreteHostType::Function(params, _) = ty
                     && let Value::Fresh(owner) = &value
                 {
-                    self.callback_modes
-                        .insert(*owner, vec![ParamMode::Owned; params.len()]);
+                    self.callback_modes.insert(
+                        *owner,
+                        vec![
+                            if matches!(
+                                op,
+                                crate::host_type_state::CheckedBuiltinCallable::FloatClassify(_)
+                            ) {
+                                ParamMode::Borrowed
+                            } else {
+                                ParamMode::Owned
+                            };
+                            params.len()
+                        ],
+                    );
                     self.key_callbacks.insert(*owner, op);
                 }
                 Ok(value)
@@ -1775,7 +1788,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                         self.key_callbacks
                             .get(&owner)
                             .copied()
-                            .map_or(ApplyKind::IndirectCall, ApplyKind::KeyBuiltinCall),
+                            .map_or(ApplyKind::IndirectCall, ApplyKind::CheckedBuiltinCall),
                         specs,
                     )
                 }

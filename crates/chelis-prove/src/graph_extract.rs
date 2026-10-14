@@ -243,6 +243,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::TruncDiv
             | WireRiscOp::Mod
             | WireRiscOp::Bitwise { .. }
+            | WireRiscOp::FloatClassify { .. }
             | WireRiscOp::Compare { .. }
             | WireRiscOp::Logical { .. }
             | WireRiscOp::Where {}
@@ -639,7 +640,9 @@ const _: () = {
     // grouped with `Atan`; they embed no numeric payload.
     // Version 28 adds the Tier 1 `Pow`, a binary float primitive grouped with
     // `Div`; it embeds no numeric payload.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 28);
+    // Version 29 adds stored-bit FloatClassify predicates with no embedded
+    // numeric payload; they have no real-valued envelope transformer.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 29);
 };
 
 #[cfg(test)]

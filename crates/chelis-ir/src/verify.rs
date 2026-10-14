@@ -1254,6 +1254,7 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         | RiscOp::TruncDiv
         | RiscOp::Mod
         | RiscOp::Bitwise(_)
+        | RiscOp::FloatClassify(_)
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where
@@ -2093,6 +2094,30 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         // Check arity.
         let arity = node.inputs.len();
         match &node.op {
+            RiscOp::FloatClassify(kind) => {
+                if arity != 1
+                    || node.output_type.precision != Prim::Bool
+                    || node
+                        .inputs
+                        .first()
+                        .and_then(|id| dag.get(*id))
+                        .is_none_or(|input| {
+                            !input.output_type.precision.is_float()
+                                || input.output_type.dims.len() != node.output_type.dims.len()
+                                || extents_contradict(
+                                    &input.output_type.dims,
+                                    &node.output_type.dims,
+                                )
+                        })
+                {
+                    errors.push(format!(
+                        "{} at node {} requires one float input and same-shape bool output",
+                        kind.name(),
+                        node.id.0
+                    ));
+                }
+            }
+
             RiscOp::RuntimeRecurrence(recurrence) => {
                 let load_at = |id| {
                     matches!(

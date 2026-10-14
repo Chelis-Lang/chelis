@@ -810,6 +810,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::TruncDiv
         | RiscOp::Mod
             | RiscOp::Bitwise(_)
+        | RiscOp::FloatClassify(_)
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where

@@ -13,9 +13,9 @@ use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, Unsu
 #[test]
 fn public_callable_fence_recurses_through_every_host_container() {
     use chelis_ir::host::{HostAdtConstructorLayout, HostAdtField, HostAdtLayout};
-    use chelis_ir::host_type_state::KeyBuiltinCallable;
+    use chelis_ir::host_type_state::CheckedBuiltinCallable;
 
-    let callable = ConcreteHostType::KeyBuiltinCallable(KeyBuiltinCallable::Split);
+    let callable = ConcreteHostType::CheckedBuiltinCallable(CheckedBuiltinCallable::Split);
     let nested = ConcreteHostType::Tuple(vec![ConcreteHostType::Option(Box::new(
         ConcreteHostType::List(Box::new(callable.clone())),
     ))]);
@@ -45,11 +45,11 @@ fn public_callable_fence_recurses_through_every_host_container() {
         nominal,
     ] {
         assert!(
-            crate::host_abi::public_type_contains_key_callable(&ty, &layouts),
+            crate::host_abi::public_type_contains_checked_callable(&ty, &layouts),
             "public type leaked {ty:?}"
         );
     }
-    assert!(!crate::host_abi::public_type_contains_key_callable(
+    assert!(!crate::host_abi::public_type_contains_checked_callable(
         &ConcreteHostType::Tuple(vec![ConcreteHostType::Scalar(Prim::Key)]),
         &layouts,
     ));

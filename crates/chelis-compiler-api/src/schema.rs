@@ -2413,7 +2413,8 @@ pub struct WireRecordPatternField {
 ///   primitives; a version-26 reader does not know the operations.
 /// - `28`: `Pow` and its fused step are the [05-OP-79] Tier 1 primitive; a
 ///   version-27 reader does not know the operation.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 28;
+/// - `29`: `FloatClassify` retains the stored-width predicates [05-OP-20..22].
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 29;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2756,6 +2757,31 @@ impl WireDag {
                     {
                         return Err(WireDagContractError::new(format!(
                             "WireDag Where node {} requires a same-shape Bool condition and exactly matching branch/output types",
+                            node.id
+                        )));
+                    }
+                }
+                WireRiscOp::FloatClassify { .. } => {
+                    if node.inputs.len() != 1
+                        || node.output_type.precision != "bool"
+                        || node
+                            .inputs
+                            .first()
+                            .and_then(|id| self.nodes[..index].iter().find(|input| input.id == *id))
+                            .is_none_or(|input| {
+                                !Prim::parse_interchange_name(&input.output_type.precision)
+                                    .is_some_and(|p| p.is_float())
+                                    || input.output_type.dims.len() != node.output_type.dims.len()
+                                    || input
+                                        .output_type
+                                        .dims
+                                        .iter()
+                                        .zip(&node.output_type.dims)
+                                        .any(|(a, b)| !wire_dim_info_equal(a, b))
+                            })
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag FloatClassify node {} requires one float input and same-shape bool output",
                             node.id
                         )));
                     }
@@ -3860,6 +3886,7 @@ fn wire_axis_origin_uncached(
         | WireRiscOp::Abs
         | WireRiscOp::Floor
         | WireRiscOp::Ceil
+        | WireRiscOp::FloatClassify { .. }
         | WireRiscOp::Round
         | WireRiscOp::Store { .. }
         | WireRiscOp::Copy
@@ -4429,6 +4456,9 @@ pub enum WireRiscOp {
     FloorDiv,
     TruncDiv,
     Mod,
+    FloatClassify {
+        classification: chelis_types::FloatClassify,
+    },
     Bitwise {
         bitwise: chelis_types::BitwiseKind,
     },

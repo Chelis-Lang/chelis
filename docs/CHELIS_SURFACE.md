@@ -109,9 +109,15 @@ separately named modular operation applies (`spec/04` [04-NUM-3/7]).
 | `floor` | float path: `grad` rejects (`PiecewiseConstant`); integer form is identity |
 | `ceil` | float path: `grad` rejects (`PiecewiseConstant`); integer form is identity |
 | `round` | ties to even; float path: `grad` rejects (`PiecewiseConstant`); integer form is identity |
+| `is_nan`, `is_finite`, `is_infinite` | stored-width classification to bool; same scalar/tensor surface and dimensions; zero cotangent ([05-OP-20..22]) |
 
 `recip`, transcendental functions, and `sqrt` admit floats. `neg`, `abs`,
 `floor`, `ceil`, and `round` also admit signed integers under the rules above.
+Classification admits `f16`, `bf16`, `f32`, and `f64` in eval and C, including
+signed zeros, subnormals, infinities, and NaNs. It reads stored bits without
+conversion. HIP and Metal’s admitted float widths report `UnsupportedFeature`
+under [#965](https://github.com/Chelis-Lang/chelis/issues/965); Metal rejects
+`f64` under [04-TGT-1].
 
 ### 1.3 Reduction — `spec/05` §2.3
 
@@ -440,7 +446,7 @@ and `load` are `RiscOp` memory nodes produced during lowering. Both are document
 
 ```
 Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan erf erfc sqrt pow
-              abs floor ceil round sum count max_reduce min_reduce prod_reduce argmax_reduce
+              abs floor ceil round is_nan is_finite is_infinite sum count max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
               reduce_window_mean reshape permute expand insert pad shrink stride
               uniform_like dropout gather scatter_replace scatter_elements

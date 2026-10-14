@@ -326,6 +326,38 @@ pub(crate) fn decide_collection_constraint(
         return Ok(None);
     }
     match &applied {
+        CollectionConstraint::FloatClassify { kind, operand, .. } => {
+            let operand = match operand {
+                Type::Ref(inner) => inner.as_ref(),
+                other => other,
+            };
+            let expected = match operand {
+                Type::Tensor(dims, _) => {
+                    Type::Tensor(dims.clone(), TensorPrec::Concrete(Prim::Bool))
+                }
+                Type::Prim(p) if p.is_float() => Type::Prim(Prim::Bool),
+                Type::Var(v)
+                    if subst
+                        .tvar_restriction(*v)
+                        .is_some_and(|bound| !bound.is_value_constraint()) =>
+                {
+                    Type::Prim(Prim::Bool)
+                }
+                Type::Var(_) | Type::Error(_) => return Ok(None),
+                other => {
+                    return Err(format!(
+                        "{} expects a float scalar or tensor, got {other} ({})",
+                        kind.name(),
+                        kind.atom()
+                    ));
+                }
+            };
+            Ok(Some(CollectionDecision::RequiredEquality {
+                actual: result.clone(),
+                expected,
+            }))
+        }
+
         CollectionConstraint::KeyFromSeed {
             operand: Type::Var(_),
             ..

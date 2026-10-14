@@ -85,7 +85,7 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
 
     // chelis#2443 moved this to 4: the `domain` field widened from a string
     // enum to a string-or-object union for §5.9's explicit dtype set.
-    assert_eq!(schema_json["format_version"], 4);
+    assert_eq!(schema_json["format_version"], 5);
     assert_eq!(
         exported(&schema_json, "restricted_close", "functions")["type_variable_restrictions"],
         expected_active_float()
@@ -129,13 +129,13 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
         "current package schema must round-trip without identity drift"
     );
     // chelis#2443: 3 joins the rejected set now that `domain` may be an object.
-    for version in [2, 3, 99] {
+    for version in [2, 3, 4, 99] {
         let mut incompatible = schema_json.clone();
         incompatible["format_version"] = version.into();
         let error = serde_json::from_value::<PackageSchema>(incompatible)
             .expect_err("non-current package schema versions must be rejected");
         assert!(
-            error.to_string().contains("unsupported") && error.to_string().contains("expected 4"),
+            error.to_string().contains("unsupported") && error.to_string().contains("expected 5"),
             "unexpected version {version} diagnostic: {error}"
         );
     }
@@ -354,4 +354,53 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
             }
         }])
     );
+}
+
+#[test]
+fn classification_relations_survive_public_schema_and_binary_shell() {
+    let (_directory, root) = package_fixture();
+    write(
+        &root.join("src/main.ch"),
+        "module Restriction.Main\nexport (nan_predicate, finite_predicate, infinite_predicate)\nnan_predicate = is_nan\nfinite_predicate = is_finite\ninfinite_predicate = is_infinite\n",
+    );
+    let schema = package_schema(&root, &chelis_std_bundle::EMBEDDED_RUNTIME).unwrap();
+    let schema = serde_json::to_value(schema).unwrap();
+    let mut malformed = schema.clone();
+    malformed["modules"][0]["functions"][0]["collection_obligations"][0]["float_classify"]["kind"] =
+        "unknown".into();
+    assert!(serde_json::from_value::<PackageSchema>(malformed).is_err());
+
+    let artifacts = build_package_with_options(
+        &root,
+        &BuildOptions { auto_fetch: false },
+        &chelis_std_bundle::EMBEDDED_RUNTIME,
+    )
+    .unwrap();
+    let shell = serde_json::to_value(read_shell(&artifacts.shell_path).unwrap()).unwrap();
+    for (name, kind) in [
+        ("nan_predicate", "nan"),
+        ("finite_predicate", "finite"),
+        ("infinite_predicate", "infinite"),
+    ] {
+        let from_schema = exported(&schema, name, "functions");
+        let from_shell = exported(&shell, name, "exports");
+        assert_eq!(
+            from_schema["collection_obligations"][0]["float_classify"]["kind"],
+            kind
+        );
+        assert_eq!(
+            from_schema["collection_obligations"],
+            from_shell["collection_obligations"]
+        );
+        assert_eq!(
+            from_schema["type_variable_restrictions"],
+            from_shell["type_variable_restrictions"]
+        );
+        assert!(
+            !from_schema["type_variable_restrictions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

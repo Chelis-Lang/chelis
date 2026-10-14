@@ -532,7 +532,10 @@ fn key_builtin_aliases_preserve_runtime_domain_rejections() {
 fn key_callable_helpers_are_emitted_only_for_alias_consumers() {
     for (source, expected) in [
         ("def main() -> string = \"plain\"\n", false),
-        ("def main() -> string = \"chelis_key_callable\"\n", false),
+        (
+            "def main() -> string = \"chelis_checked_callable\"\n",
+            false,
+        ),
         (
             "def main() = {\n  seed: i64 -> key = key_from_seed\n  seed(7i64)\n}\n",
             true,
@@ -552,7 +555,7 @@ fn key_callable_helpers_are_emitted_only_for_alias_consumers() {
             .expect("C source");
         assert_eq!(
             c.contents
-                .contains("static inline chelis_key __chelis_key_callable_seed_scalar"),
+                .contains("static inline chelis_key __chelis_checked_callable_seed_scalar"),
             expected,
             "{source}"
         );

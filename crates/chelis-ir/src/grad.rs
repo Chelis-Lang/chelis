@@ -540,6 +540,7 @@ fn integer_computation(node: &DagNode) -> Option<IntegerComputation> {
         | RiscOp::Argmin { .. }
         | RiscOp::Cast { .. }
         | RiscOp::NamedCast { .. }
+        | RiscOp::FloatClassify(_)
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Iota
@@ -672,7 +673,7 @@ enum OperandSlot {
 fn operand_slot(op: &RiscOp, slot: usize) -> OperandSlot {
     use OperandSlot::{Control, Data};
     match op {
-        RiscOp::Compare(_) => Control,
+        RiscOp::FloatClassify(_) | RiscOp::Compare(_) => Control,
         RiscOp::RuntimeRecurrence(_) => Data,
         RiscOp::RuntimeRecurrenceAdjoint { .. } if slot <= 1 => Control,
         RiscOp::RuntimeRecurrenceAdjoint { .. } => Data,
@@ -1042,6 +1043,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::TruncDiv => "trunc_div",
         RiscOp::Mod => "mod",
         RiscOp::Bitwise(kind) => kind.name(),
+        RiscOp::FloatClassify(kind) => kind.name(),
         RiscOp::Compare(kind) => kind.surf_name(),
         RiscOp::Logical(kind) => kind.surf_name(),
         RiscOp::Where => "where",
@@ -2467,7 +2469,7 @@ fn compute_adjoints(
             let zero = fill_like(dag, node.owner, x, 0.0);
             Some(vec![(x, zero)])
         }
-        RiscOp::Bitwise(_) => Some(vec![]),
+        RiscOp::FloatClassify(_) | RiscOp::Bitwise(_) => Some(vec![]),
         RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
             // chelis#178: floor / truncating integer division are
             // non-differentiable (piecewise constant) — grad_dag_checked
