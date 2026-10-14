@@ -1937,10 +1937,12 @@ jobs:
   # the graph from the candidate tree and fails on any byte difference. It
   # runs for every event, because crate target discovery (src/main.rs,
   # src/bin/, and build.rs) also changes the graph, not only the manifests.
-  # docs/contributor_setup.md gives the regeneration command.
+  # docs/contributor_setup.md gives the regeneration command. The job runs
+  # hosted for every event: it needs no warm cache, and only the hosted
+  # check-cargo-nix profile has CI evidence.
   cargo-nix:
     name: Cargo.nix freshness
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     needs: [changes]
     if: ${{ !cancelled() }}
     timeout-minutes: 30

@@ -106,6 +106,19 @@ def freshness_inputs(workflow: str) -> dict[str, str]:
     return inputs
 
 
+def assert_documented_crate2nix_matches_profile(
+    documented: dict[str, str], *, profile: str, pins: str
+) -> None:
+    pinned_hash = re.search(r'crate2nix = \{[^}]*hash = "([^"]+)";', pins)
+    if pinned_hash is None:
+        raise AssertionError("the vendored pins must record the crate2nix source hash")
+    expected = {"version": freshness_profile_version(profile), "hash": pinned_hash.group(1)}
+    if documented != expected:
+        raise AssertionError(
+            f"the documented crate2nix {documented!r} must match the freshness profile {expected!r}"
+        )
+
+
 def assert_committed_crate2nix_contract(
     *,
     flake: str,
@@ -287,10 +300,6 @@ class NixFlakeContractTests(unittest.TestCase):
 
     @REQUIRES_NIX
     def test_pinned_nixpkgs_crate2nix_matches_the_freshness_profile(self) -> None:
-        profile = (VENDORED_CI / "devenv-toolchain.toml").read_text(encoding="utf-8")
-        pins = (VENDORED_CI / "devenv" / "shared" / "pins.nix").read_text(encoding="utf-8")
-        pinned_hash = re.search(r'crate2nix = \{[^}]*hash = "([^"]+)";', pins)
-        self.assertIsNotNone(pinned_hash)
         # Contributors regenerate with this crate2nix (docs/contributor_setup.md),
         # and the ci.yml freshness job uses the vendored profile.
         documented = nix_json(
@@ -302,12 +311,10 @@ class NixFlakeContractTests(unittest.TestCase):
             "--apply",
             "package: { version = package.version; hash = package.src.outputHash; }",
         )
-        self.assertEqual(
+        assert_documented_crate2nix_matches_profile(
             documented,
-            {
-                "version": freshness_profile_version(profile),
-                "hash": pinned_hash.group(1),
-            },
+            profile=(VENDORED_CI / "devenv-toolchain.toml").read_text(encoding="utf-8"),
+            pins=(VENDORED_CI / "devenv" / "shared" / "pins.nix").read_text(encoding="utf-8"),
         )
 
     @REQUIRES_NIX
@@ -771,6 +778,30 @@ class NixSourceContractTests(unittest.TestCase):
                 inputs[name] = mutate(inputs[name])
                 with self.assertRaisesRegex(AssertionError, message):
                     assert_committed_crate2nix_contract(**inputs)
+
+    def test_documented_crate2nix_rule_rejects_a_changed_profile(self) -> None:
+        profile = (VENDORED_CI / "devenv-toolchain.toml").read_text(encoding="utf-8")
+        pins = (VENDORED_CI / "devenv" / "shared" / "pins.nix").read_text(encoding="utf-8")
+        # The pinned Nixpkgs crate2nix, which the Nix test above evaluates.
+        documented = {
+            "version": "0.15.0",
+            "hash": "sha256-SUuruvw1/moNzCZosHaa60QMTL+L9huWdsCBN6XZIic=",
+        }
+        assert_documented_crate2nix_matches_profile(documented, profile=profile, pins=pins)
+        mutations = {
+            "profile": (
+                'constructor = "crate2nix-source"\nversion = "0.15.0"',
+                'constructor = "crate2nix-source"\nversion = "0.16.0"',
+            ),
+            "pins": (documented["hash"], "sha256-" + "A" * 43 + "="),
+        }
+        for name, (old, new) in mutations.items():
+            with self.subTest(record=name):
+                records = {"profile": profile, "pins": pins}
+                self.assertEqual(records[name].count(old), 1, old)
+                records[name] = records[name].replace(old, new)
+                with self.assertRaisesRegex(AssertionError, "must match the freshness profile"):
+                    assert_documented_crate2nix_matches_profile(documented, **records)
 
     def test_cvc5_sys_override_uses_the_fixed_native_inputs(self) -> None:
         packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")

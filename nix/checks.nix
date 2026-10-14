@@ -125,12 +125,12 @@ let
     in
     assert missingWorkspaceMembers == [ ];
     pkgs.runCommand "crate2nix-graph-contract" { } ''
-      if ! grep -F -x -q ${escape versionLine} ${root}/Cargo.nix; then
-        echo ${escape "Cargo.nix does not record crate2nix ${built.crate2nixVersion}"} >&2
+      if [ "$(sed -n 2p ${root}/Cargo.nix)" != ${escape versionLine} ]; then
+        echo ${escape "line 2 of Cargo.nix does not record crate2nix ${built.crate2nixVersion}"} >&2
         exit 1
       fi
-      if ! grep -F -x -q ${escape commandLine} ${root}/Cargo.nix; then
-        echo ${escape "Cargo.nix does not record the command: ${built.crate2nixCommand}"} >&2
+      if [ "$(sed -n 3p ${root}/Cargo.nix)" != ${escape commandLine} ]; then
+        echo ${escape "line 3 of Cargo.nix does not record the command: ${built.crate2nixCommand}"} >&2
         exit 1
       fi
       touch "$out"
