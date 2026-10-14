@@ -300,21 +300,22 @@ pub(crate) fn emit_verified_dag(
     func_name: &str,
 ) -> Result<EmitResult, Unsupported> {
     let dag = plan.dag();
-    if let Some(node) = dag
-        .nodes()
-        .iter()
-        .find(|node| matches!(node.op, RiscOp::FloatClassify(_)))
-    {
+    if let Some((node, kind)) = dag.nodes().iter().find_map(|node| match node.op {
+        RiscOp::FloatClassify(kind) => Some((node, kind)),
+        _ => None,
+    }) {
         return Err(Unsupported::new(
-            UnsupportedKind::Op("float classification".into()),
+            UnsupportedKind::Op(kind.name().into()),
             format!(
-                "stored-width float classification at metal DAG node {}",
+                "stored-width {} ({}) at metal DAG node {}",
+                kind.name(),
+                kind.atom(),
                 node.id.0
             ),
             Stage::Codegen("metal"),
             chelis_types::unimplemented_rejection!(
                 965,
-                "stored-width float classification has no metal kernel; use the C target"
+                "stored-width classification has no metal kernel; use the C target"
             ),
         ));
     }

@@ -22,6 +22,25 @@ fn evaluate(source: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn evaluate_json(source: &str) -> serde_json::Value {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("classification.ch");
+    std::fs::write(&path, source).unwrap();
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "--file"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
 #[test]
 fn scalar_and_tensor_classification_agree_in_eval_and_native_c() {
     for (dtype, subnormal) in [
@@ -267,6 +286,196 @@ tensor_infinite = apply_tensor(is_infinite,x)
                     actual.contains(expected),
                     "{dtype}: missing {expected}: {actual}"
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn predicate_tensor_values_keep_their_surface_through_every_callable_route() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for (predicate, first, second) in [
+            ("is_nan", false, true),
+            ("is_finite", true, false),
+            ("is_infinite", false, false),
+        ] {
+            let source = format!(
+                r#"
+f = {predicate}
+alias = f
+def local(x: tensor[2,{dtype}]) -> tensor[2,bool] = {{
+  g = {predicate}
+  g(x)
+}}
+def apply(g: (&tensor[2,{dtype}] -> tensor[2,bool]), x: tensor[2,{dtype}]) -> tensor[2,bool] = g(x)
+x = to_tensor([1.0{dtype},div(0.0{dtype},0.0{dtype})])
+direct = {predicate}(x)
+inline_alias = f(to_tensor([1.0{dtype},div(0.0{dtype},0.0{dtype})]))
+bound_alias = f(x)
+chained_alias = alias(x)
+local_alias = local(x)
+borrowed_direct = apply({predicate},x)
+borrowed_alias = apply(f,x)
+scalar_alias = f(1.0{dtype})
+def loss(x: tensor[2,{dtype}]) -> {dtype} = tensor_to_scalar(sum(where(f(x),to_tensor([0.0{dtype},0.0{dtype}]),x),0))
+derivative = grad(loss)(to_tensor([1.0{dtype},2.0{dtype}]))
+"#
+            );
+            for actual in [
+                evaluate(&source),
+                build_and_run(&source, &format!("tensor_routes_{predicate}_{dtype}")),
+            ] {
+                for root in [
+                    "direct",
+                    "inline_alias",
+                    "bound_alias",
+                    "chained_alias",
+                    "local_alias",
+                    "borrowed_direct",
+                    "borrowed_alias",
+                ] {
+                    let expected = format!("{root} = tensor(shape=[2], data=[{first}, {second}])");
+                    assert!(
+                        actual.contains(&expected),
+                        "{predicate} {dtype}: missing {expected}: {actual}"
+                    );
+                }
+                assert!(
+                    actual.contains(&format!("scalar_alias = {first}")),
+                    "{actual}"
+                );
+                let derivative = if predicate == "is_finite" {
+                    "0.0"
+                } else {
+                    "1.0"
+                };
+                assert!(
+                    actual.contains(&format!(
+                        "derivative = tensor(shape=[2], data=[{derivative}, {derivative}])"
+                    )),
+                    "{predicate} {dtype}: {actual}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn predicate_rank_zero_values_and_mixed_alias_instantiations_keep_tensor_roots() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for (predicate, expected) in [
+            ("is_nan", false),
+            ("is_finite", true),
+            ("is_infinite", false),
+        ] {
+            let source = format!(
+                r#"
+f = {predicate}
+alias = f
+def local(x: tensor[{dtype}]) -> tensor[bool] = {{
+  g = {predicate}
+  g(x)
+}}
+def apply(g: (&tensor[{dtype}] -> tensor[bool]), x: tensor[{dtype}]) -> tensor[bool] = g(x)
+x = scalar_to_tensor(1.0{dtype})
+direct = {predicate}(x)
+inline_alias = f(scalar_to_tensor(1.0{dtype}))
+bound_alias = f(x)
+chained_alias = alias(x)
+local_alias = local(x)
+borrowed_direct = apply({predicate},x)
+borrowed_alias = apply(f,x)
+scalar_alias = f(1.0{dtype})
+vector_alias = f(to_tensor([1.0{dtype},2.0{dtype}]))
+rank_zero_list = to_list(reshape(chained_alias,[1i64]))
+"#
+            );
+            let json = evaluate_json(&source);
+            for root in [
+                "direct",
+                "inline_alias",
+                "bound_alias",
+                "chained_alias",
+                "local_alias",
+                "borrowed_direct",
+                "borrowed_alias",
+            ] {
+                let value = &json["roots"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|value| value["name"] == root)
+                    .unwrap()["value"];
+                assert_eq!(value["type"], "tensor", "{predicate} {dtype} {root}");
+                assert_eq!(value["value"]["shape"], serde_json::json!([]));
+                assert_eq!(
+                    value["value"]["data"],
+                    serde_json::json!({"dtype":"bool", "values":[expected]})
+                );
+            }
+            for actual in [
+                evaluate(&source),
+                build_and_run(&source, &format!("rank_zero_routes_{predicate}_{dtype}")),
+            ] {
+                for root in [
+                    "direct",
+                    "inline_alias",
+                    "bound_alias",
+                    "chained_alias",
+                    "local_alias",
+                    "borrowed_direct",
+                    "borrowed_alias",
+                ] {
+                    let output = format!("{root} = {expected}");
+                    assert!(
+                        actual.contains(&output),
+                        "{predicate} {dtype}: missing {output}: {actual}"
+                    );
+                }
+                assert!(
+                    actual.contains(&format!("scalar_alias = {expected}")),
+                    "{actual}"
+                );
+                assert!(
+                    actual.contains(&format!(
+                        "vector_alias = tensor(shape=[2], data=[{expected}, {expected}])"
+                    )),
+                    "{actual}"
+                );
+                assert!(
+                    actual.contains(&format!("rank_zero_list = [{expected}]")),
+                    "{actual}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn predicate_values_reject_mismatched_scalar_tensor_callback_surfaces() {
+    for predicate in ["is_nan", "is_finite", "is_infinite"] {
+        for dtype in ["f16", "bf16", "f32", "f64"] {
+            for source in [
+                format!(
+                    "f = {predicate}\ndef bad(g: (&tensor[{dtype}] -> bool), x: tensor[{dtype}]) -> bool = g(x)\ny = bad(f,scalar_to_tensor(1.0{dtype}))\n"
+                ),
+                format!(
+                    "f = {predicate}\ndef bad(g: (&{dtype} -> tensor[bool]), x: {dtype}) -> tensor[bool] = g(x)\ny = bad(f,1.0{dtype})\n"
+                ),
+                format!(
+                    "f = {predicate}\ndef bad(g: (&tensor[2,{dtype}] -> tensor[3,bool]), x: tensor[2,{dtype}]) -> tensor[3,bool] = g(x)\ny = bad(f,to_tensor([1.0{dtype},2.0{dtype}]))\n"
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("rejected_callable.ch");
+                std::fs::write(&path, source).unwrap();
+                Command::cargo_bin("chelis")
+                    .unwrap()
+                    .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                    .args(["check", "--file"])
+                    .arg(path)
+                    .assert()
+                    .failure();
             }
         }
     }

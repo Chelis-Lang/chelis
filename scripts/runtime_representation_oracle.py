@@ -195,6 +195,14 @@ TYPED_NONNUMERIC_BACKEND_FINAL_FORMS = (
         "REDUCED_FLOAT_COMPARISON_HELPERS",
     ),
 )
+# [05-OP-20..22]: closed stored-width IEEE classification and Bool output.
+# Exact private owners are bound to the raw-bit C and CLI execution matrices.
+FLOAT_CLASSIFICATION_BACKEND_FINAL_FORMS = (
+    ("crates/chelis-backend-c/src/emit.rs", "backend-element-spelling", "CEmitter::emit_float_classification"),
+    ("crates/chelis-backend-c/src/emit.rs", "load-store-template", "CEmitter::emit_float_classification"),
+    ("crates/chelis-backend-c/src/host_emit.rs", "backend-element-spelling", "append_float_classification_helpers"),
+    ("crates/chelis-backend-c/src/host_emit.rs", "load-store-template", "append_float_classification_helpers"),
+)
 EXACT_REDUCTION_BACKEND_FINAL_FORMS = (
     # chelis#1281: the lowered mean guard observes the exact divisor storage
     # selected by [05-OP-11], including explicit f16/bf16 decoding, before
@@ -524,6 +532,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         and (path, owner) in C_INDEX_PROJECTION_OWNERS
     ) or (
         (path, kind, owner) in TYPED_NONNUMERIC_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in FLOAT_CLASSIFICATION_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in EXACT_REDUCTION_BACKEND_FINAL_FORMS
     ) or (
@@ -1122,6 +1132,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *PHASE2_FINAL_FORMS,
         *((path, "backend-element-spelling", owner) for path, owner in C_INDEX_PROJECTION_OWNERS),
         *TYPED_NONNUMERIC_BACKEND_FINAL_FORMS,
+        *FLOAT_CLASSIFICATION_BACKEND_FINAL_FORMS,
         *EXACT_REDUCTION_BACKEND_FINAL_FORMS,
         *LIST_MAP_BACKEND_FINAL_FORMS,
         *RUNTIME_RECURRENCE_BACKEND_FINAL_FORMS,
@@ -2636,6 +2647,14 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "cargo", "nextest", "run", "-p", "chelis-backend-c",
                 "--test", "pow_kernel_routes",
             ),
+        ),
+        OracleLeg(
+            "stored-width float classification raw-bit C execution and malformed IR controls",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "float_classification"),
+        ),
+        OracleLeg(
+            "float classification callable surfaces, AD and device rejection execution",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_965_float_classification"),
         ),
         OracleLeg(
             "checked key callable scalar and tensor C execution",

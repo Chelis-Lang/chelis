@@ -6,3 +6,6 @@ positive = finite_positive(1.0f64)
 negative = finite_positive(-1.0f64)
 nan = is_nan(1.0f32)
 infinite = is_infinite(1.0f16)
+predicate = is_finite
+aliased = predicate(to_tensor([1.0f32, div(0.0f32, 0.0f32)]))
+rank_zero = predicate(scalar_to_tensor(1.0f16))

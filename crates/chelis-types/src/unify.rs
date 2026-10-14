@@ -982,6 +982,15 @@ pub(crate) fn collection_contract_visible_in_type(
 }
 
 pub(crate) fn collection_contract_callable_type(constraint: &CollectionConstraint) -> Type {
+    if let CollectionConstraint::FloatClassify {
+        operand, result, ..
+    } = constraint
+    {
+        return Type::Fn(
+            vec![Type::Ref(Box::new(operand.clone()))],
+            Box::new(result.clone()),
+        );
+    }
     Type::Fn(
         constraint.operands().into_iter().cloned().collect(),
         Box::new(constraint.result().clone()),
@@ -1692,10 +1701,19 @@ impl Subst {
         let mut tvars = UnordSet::default();
         let mut dvars = UnordSet::default();
         let mut rvars = UnordSet::default();
-        // Almost every `generalize` runs with an empty ledger -- a suspended
-        // operand decision is the exception, not the rule -- so leave without
-        // applying the substitution or walking a type in that case.
-        if ledger.is_empty() {
+        // Transported checked builtin values remain polymorphic. A
+        // consumed relation, however, is a pending body obligation just like
+        // an operand gate: generalization must not detach its template from
+        // the first application that supplies the operand/result evidence.
+        let consumed = self
+            .collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned")
+            .iter()
+            .filter(|instance| matches!(instance.state, CollectionContractState::Consumed { .. }))
+            .map(|instance| instance.constraint.clone())
+            .collect::<Vec<_>>();
+        if ledger.is_empty() && consumed.is_empty() {
             return (tvars, dvars, rvars);
         }
         for (operand, gate) in ledger.iter() {
@@ -1705,6 +1723,14 @@ impl Subst {
                 tvars.extend(crate::env::free_tvars(pending));
                 dvars.extend(crate::env::free_dvars(pending));
                 rvars.extend(crate::env::free_rvars(pending));
+            }
+        }
+        for constraint in consumed {
+            for carried in constraint.carried_types() {
+                let pending = self.apply(carried);
+                tvars.extend(crate::env::free_tvars(&pending));
+                dvars.extend(crate::env::free_dvars(&pending));
+                rvars.extend(crate::env::free_rvars(&pending));
             }
         }
         (tvars, dvars, rvars)
@@ -1873,6 +1899,44 @@ impl Subst {
         }
     }
 
+    /// A prior body call can be waiting on the operand this application
+    /// just bound. Revisit only consumed instances; transported callable
+    /// values still belong to their own applications/generalization.
+    fn replay_consumed_collection_contracts_before(&mut self, mark: CollectionContractId) {
+        loop {
+            let ids = self
+                .collection_contracts
+                .lock()
+                .expect("subst.collection_contracts poisoned")
+                .iter()
+                .filter(|instance| {
+                    instance.id < mark
+                        && matches!(instance.state, CollectionContractState::Consumed { .. })
+                })
+                .map(|instance| instance.id)
+                .collect::<Vec<_>>();
+            let mut settled = false;
+            for id in ids {
+                let Some(instance) = self.take_collection_contract_instance(id) else {
+                    continue;
+                };
+                let CollectionContractState::Consumed { evidence } = &instance.state else {
+                    unreachable!("selected consumed relation");
+                };
+                match discharge_collection_constraint(&instance.constraint, evidence.as_ref(), self)
+                {
+                    CollectionDischarge::Unresolved => {
+                        self.restore_collection_contract_instance(instance)
+                    }
+                    CollectionDischarge::Settled(_) => settled = true,
+                }
+            }
+            if !settled {
+                break;
+            }
+        }
+    }
+
     /// Finish one application's contract lifecycle after ordinary call
     /// unification has tied all argument and result variables together.
     ///
@@ -1888,6 +1952,7 @@ impl Subst {
         result: &Type,
         related_results: &[Type],
     ) -> Option<Type> {
+        self.replay_consumed_collection_contracts_before(mark);
         let ids = self.collection_contract_ids_since(mark);
         let applied_result = self.apply(result);
         let mut checked_result = None;
@@ -1949,6 +2014,7 @@ impl Subst {
                 }
             }
         }
+        self.replay_consumed_collection_contracts_before(mark);
         checked_result
     }
 

@@ -1167,6 +1167,11 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
 /// The tensor entries accept runtime rank and extents because rank-polymorphic
 /// aliases may be specialized at more than one call site.
 fn append_checked_callable_helpers(out: &mut Vec<String>) {
+    append_key_callable_helpers(out);
+    append_float_classification_helpers(out);
+}
+
+fn append_key_callable_helpers(out: &mut Vec<String>) {
     out.push(
         r#"
 // The operation identity is in the checked host type. This private value is
@@ -1296,6 +1301,9 @@ static inline chelis_tensor *__chelis_checked_callable_fold_tensor(chelis_tensor
 "#
         .to_string(),
     );
+}
+
+fn append_float_classification_helpers(out: &mut Vec<String>) {
     for (suffix, c_type, width, exponent, fraction, dtype) in [
         ("f16", "uint16_t", 2, "0x7c00", "0x03ff", "F16"),
         ("bf16", "uint16_t", 2, "0x7f80", "0x007f", "BF16"),
@@ -10662,49 +10670,22 @@ impl<'a> HostEmitter<'a> {
                 CExpressionBuiltin::IsNan
                 | CExpressionBuiltin::IsFinite
                 | CExpressionBuiltin::IsInfinite => {
-                    let (bits, exponent, fraction) = match &arg_vars[0].1 {
-                        HostType::Float16 => (arg(0), 0x7c00i64, 0x03ffi64),
-                        HostType::BFloat16 => (arg(0), 0x7f80, 0x007f),
-                        HostType::Float32 => (
-                            EmittedExpr::call("chelis_host_f32_bits", [arg(0)]),
-                            0x7f800000,
-                            0x007fffff,
-                        ),
-                        HostType::Float64 => (
-                            EmittedExpr::call("chelis_host_f64_bits", [arg(0)]),
-                            0x7ff0000000000000,
-                            0x000fffffffffffff,
-                        ),
-                        _ => unreachable!("checked classification input"),
-                    };
-                    let special = binary(
-                        BinaryOperator::Equal,
-                        binary(
-                            BinaryOperator::BitAnd,
-                            bits.clone(),
-                            EmittedExpr::integer(exponent),
-                        ),
-                        EmittedExpr::integer(exponent),
+                    // The checked application selects a surface as well as a
+                    // width. Direct, aliased and callback applications share
+                    // the exact same borrowed stored-bit kernels.
+                    let signature = HostType::Callback(
+                        arg_vars.iter().map(|(_, ty)| ty.clone()).collect(),
+                        Box::new(ty.clone()),
                     );
-                    let payload =
-                        binary(BinaryOperator::BitAnd, bits, EmittedExpr::integer(fraction));
-                    match expression_builtin {
-                        CExpressionBuiltin::IsFinite => {
-                            binary(BinaryOperator::Equal, special, EmittedExpr::integer(0))
-                        }
-                        CExpressionBuiltin::IsNan => binary(
-                            BinaryOperator::LogicalAnd,
-                            special,
-                            binary(BinaryOperator::NotEqual, payload, EmittedExpr::integer(0)),
-                        ),
-                        CExpressionBuiltin::IsInfinite => binary(
-                            BinaryOperator::LogicalAnd,
-                            special,
-                            binary(BinaryOperator::Equal, payload, EmittedExpr::integer(0)),
-                        ),
-                        _ => unreachable!(),
-                    }
+                    let symbol = checked_callable_symbol(name, &signature).ok_or_else(|| {
+                        invalid_abi_shape(
+                            format!("classification carries invalid signature `{signature:?}`"),
+                            "checked float classification",
+                        )
+                    })?;
+                    EmittedExpr::call(symbol, [arg(0)])
                 }
+
                 CExpressionBuiltin::Floor
                 | CExpressionBuiltin::Ceil
                 | CExpressionBuiltin::Round

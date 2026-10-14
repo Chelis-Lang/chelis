@@ -5324,6 +5324,27 @@ impl<'a> TerminalIndex<'a> {
     }
 }
 
+/// Resolve only the closed predicate callable identities through declaration
+/// aliases. A callable carrier is host data; applying its static identity to
+/// a tensor does not depend on materializing that carrier as a DAG value.
+fn float_predicate_callable<'a>(
+    mut expr: &'a Expr,
+    declarations: &'a BTreeMap<String, Expr>,
+) -> Option<chelis_types::FloatClassify> {
+    let mut visited = UnordSet::new();
+    loop {
+        let name = callable_ref_name(expr)?;
+        if !visited.insert(name.clone()) {
+            return None;
+        }
+        if let Some(body) = declarations.get(&name) {
+            expr = body;
+        } else {
+            return chelis_types::FloatClassify::from_name(&name);
+        }
+    }
+}
+
 fn def_is_lowered(
     name: &str,
     top_level_defs: &BTreeMap<String, Expr>,
@@ -5342,6 +5363,9 @@ fn def_is_lowered(
     }
 
     let lowered = top_level_defs.get(name).is_some_and(|body| {
+        if float_predicate_callable(body, top_level_defs).is_some() {
+            return false;
+        }
         // A declaration of function type can bind a computed function value,
         // not only a function literal. Its initializer needs the same callable
         // identity as a lexical binding; a projected closure is host-served.
@@ -5489,6 +5513,16 @@ fn expr_depends_on_nonlowerable_name(
         {
             return true;
         }
+        // A checked predicate alias keeps the application's selected
+        // scalar surface on the host, just like its direct builtin spelling.
+        if tag == DeepTag::App
+            && let Some(callee) = kids.first()
+            && callable_ref_name(callee).is_some_and(|name| !bound_names.names.contains(&name))
+            && float_predicate_callable(callee, top_level_defs).is_some()
+            && expr_type_metadata(expr).is_some_and(type_is_scalar_primitive)
+        {
+            return true;
+        }
         // A precision/rank-polymorphic def has no standalone DAG, but a
         // checked call can bind it. Inspect the body and actual arguments
         // instead of inheriting the declaration's standalone exclusion.
@@ -5536,6 +5570,9 @@ fn expr_depends_on_nonlowerable_name(
             && !bound_names.names.contains(name)
             && top_level_defs.contains_key(name)
         {
+            if float_predicate_callable(expr, top_level_defs).is_some() {
+                return false;
+            }
             return !def_is_lowered(name, top_level_defs, types, type_env, cache, visiting);
         }
         if tag == DeepTag::Fn {

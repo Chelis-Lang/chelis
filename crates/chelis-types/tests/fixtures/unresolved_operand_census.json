@@ -19,6 +19,22 @@
       "file": "app_collection.rs",
       "function": "decide_collection_constraint",
       "ordinal": 1,
+      "pattern": "Type::Var(v)",
+      "disposition": "not_a_route",
+      "reason": "decision helper has no diagnostic sink; a dtype-bounded scalar variable has a known scalar surface and publishes the required bool equality while its ActiveFloat family restriction remains on the checked callable contract"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "decide_collection_constraint",
+      "ordinal": 2,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route",
+      "reason": "decision helper has no diagnostic sink; an unresolved predicate operand returns Ok(None) for the consumed-contract caller to retain as pending; an error witness retains its upstream diagnostic"
+    },
+    {
+      "file": "app_collection.rs",
+      "function": "decide_collection_constraint",
+      "ordinal": 3,
       "pattern": "CollectionConstraint::KeyFromSeed { operand : Type::Var(_) , .. } | CollectionConstraint::SplitKey { operand : Type::Var(_) , .. } | CollectionConstraint::SplitKeys { operand : Type::Var(_) , .. } | CollectionConstraint::FoldIn { operand : Type::Var(_) , .. }",
       "disposition": "not_a_route",
       "reason": "decision helper has no diagnostic sink; unresolved key/seed operands return Ok(None), retained as pending by the consumed-contract caller"
@@ -26,7 +42,7 @@
     {
       "file": "app_collection.rs",
       "function": "decide_collection_constraint",
-      "ordinal": 2,
+      "ordinal": 4,
       "pattern": "Type::Var(_)",
       "disposition": "not_a_route",
       "reason": "decision helper has no diagnostic sink; an unresolved len operand returns Ok(None), leaving collection admission pending"
@@ -34,7 +50,7 @@
     {
       "file": "app_collection.rs",
       "function": "decide_collection_constraint",
-      "ordinal": 3,
+      "ordinal": 5,
       "pattern": "Type::Var(_)",
       "disposition": "not_a_route",
       "reason": "decision helper has no diagnostic sink; an unresolved index returns Ok(None) before list element publication"
@@ -42,7 +58,7 @@
     {
       "file": "app_collection.rs",
       "function": "decide_collection_constraint",
-      "ordinal": 4,
+      "ordinal": 6,
       "pattern": "Type::Var(_)",
       "disposition": "not_a_route",
       "reason": "decision helper has no diagnostic sink; an unresolved list returns Ok(None) after index admission, leaving element derivation pending"
@@ -50,7 +66,7 @@
     {
       "file": "app_collection.rs",
       "function": "decide_collection_constraint",
-      "ordinal": 5,
+      "ordinal": 7,
       "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
       "disposition": "not_a_route",
       "reason": "decision helper has no diagnostic sink; either unresolved concat operand returns Ok(None), leaving overload selection and compatibility pending"

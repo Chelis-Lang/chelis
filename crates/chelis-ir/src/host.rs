@@ -22265,9 +22265,34 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             }
         }
         HostExprKind::Builtin { name, args, .. } => {
-            let args = conform_builtin_arguments(&name, args, &ty);
+            let mut args = conform_builtin_arguments(&name, args, &ty);
+            let mut ty = ty;
+            if chelis_types::FloatClassify::from_name(&name).is_some()
+                && let HostTypeTerm::Tensor(output) = &mut ty
+                && output.precision == chelis_types::types::Prim::Bool
+                && let [input] = args.as_mut_slice()
+                && let HostTypeTerm::Tensor(mut input_ty) = host_expr_type(input)
+                && input_ty.dims.len() == output.dims.len()
+            {
+                // [05-OP-20..22] preserves each input axis. Propagate
+                // checked extents across that relation, without changing
+                // either dtype or overwriting a conflicting known extent.
+                // Host list ingress can retain wildcard axis metadata even
+                // when a checked consumer has fixed the corresponding axis.
+                let wildcard =
+                    |dim: &DimInfo| matches!(dim, DimInfo::Named(name, None) if name == "*");
+                for (input, output) in input_ty.dims.iter_mut().zip(&mut output.dims) {
+                    if wildcard(input) {
+                        *input = output.clone();
+                    } else if wildcard(output) {
+                        *output = input.clone();
+                    }
+                }
+                *input = force_host_expr_type(input.clone(), HostTypeTerm::Tensor(input_ty));
+            }
             HostExprKind::Builtin { name, args, ty }
         }
+
         HostExprKind::AdtConstruct { ctor, fields, .. } => HostExprKind::AdtConstruct {
             ctor,
             fields: conform_host_subexprs(fields),
@@ -24607,6 +24632,36 @@ mod tests {
     use super::*;
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
+
+    #[test]
+    fn predicate_shape_conformance_keeps_known_conflicts_for_rejection() {
+        for name in ["is_nan", "is_finite", "is_infinite"] {
+            for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+                let input_ty = HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision,
+                });
+                let output_ty = HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(3)],
+                    precision: Prim::Bool,
+                });
+                let expr = HostExpr::new(HostExprKind::Builtin {
+                    name: name.into(),
+                    args: vec![HostExpr::new(HostExprKind::Var(
+                        "x".into(),
+                        input_ty.clone(),
+                    ))],
+                    ty: output_ty.clone(),
+                });
+                let conformed = force_host_expr_type(expr, output_ty.clone());
+                let HostExprKind::Builtin { args, ty, .. } = conformed.kind else {
+                    panic!("classification must retain its builtin identity");
+                };
+                assert_eq!(host_expr_type(&args[0]), input_ty);
+                assert_eq!(ty, output_ty);
+            }
+        }
+    }
 
     #[test]
     fn inferred_type_holes_are_not_authored_binders() {

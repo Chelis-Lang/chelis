@@ -1063,6 +1063,22 @@ execution, HIP structural admission, and the ignored real-HIP exact-bit matrix.
 A renamed or additional owner remains unclassified until it independently
 supplies the same final-form authority and execution contract.
 
+Stored-bit classification has exact typed-lane final forms under
+[05-OP-20..22]: `CEmitter::emit_float_classification` owns its
+`backend-element-spelling` and `load-store-template` rows, and
+`append_float_classification_helpers` owns its private scalar/tensor element
+spellings and load/store template. Both read the operand's own IEEE storage width and write Bool
+storage without a floating conversion or a public numeric carrier. The
+closed checked-callable signature selector serves direct and aliased host
+applications as well as borrowed callbacks. Key-only helper emission retains
+its separately registered `append_key_callable_helpers` owner and key execution
+controls. The classifier registrations bind to the executed all-width raw-bit
+C matrix and the evaluator/native-C callable, shape, derivative and negative
+matrix. Rename, path and seam-kind controls reject unregistered owners. HIP
+and Metal report the canonical predicate identity through their typed
+unimplemented dispositions; their rejection gates emit no element access.
+These final forms do not extend the foundation or transition debt.
+
 The #1281 exact C reduction cutover adds two more closed
 `backend-element-spelling` owners as final forms:
 `CEmitter::emit_mean_nonempty_guard` and

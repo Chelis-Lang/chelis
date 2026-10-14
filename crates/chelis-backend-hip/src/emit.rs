@@ -490,21 +490,22 @@ impl HipEmitter {
         let dag = storage_plan.emission();
         Self::reject_integer_abs(dag)?;
 
-        if let Some(node) = dag
-            .nodes()
-            .iter()
-            .find(|node| matches!(node.op, RiscOp::FloatClassify(_)))
-        {
+        if let Some((node, kind)) = dag.nodes().iter().find_map(|node| match node.op {
+            RiscOp::FloatClassify(kind) => Some((node, kind)),
+            _ => None,
+        }) {
             return Err(Unsupported::new(
-                UnsupportedKind::Op("float classification".into()),
+                UnsupportedKind::Op(kind.name().into()),
                 format!(
-                    "stored-width float classification at hip DAG node {}",
+                    "stored-width {} ({}) at hip DAG node {}",
+                    kind.name(),
+                    kind.atom(),
                     node.id.0
                 ),
                 Stage::Codegen("hip"),
                 chelis_types::unimplemented_rejection!(
                     965,
-                    "stored-width float classification has no hip kernel; use the C target"
+                    "stored-width classification has no hip kernel; use the C target"
                 ),
             ));
         }

@@ -1908,6 +1908,26 @@ class ManifestTests(unittest.TestCase):
             commands,
         )
 
+    def test_float_classification_owners_are_exact_and_require_execution_controls(self) -> None:
+        expected = (
+            ("crates/chelis-backend-c/src/emit.rs", "backend-element-spelling", "CEmitter::emit_float_classification"),
+            ("crates/chelis-backend-c/src/emit.rs", "load-store-template", "CEmitter::emit_float_classification"),
+            ("crates/chelis-backend-c/src/host_emit.rs", "backend-element-spelling", "append_float_classification_helpers"),
+            ("crates/chelis-backend-c/src/host_emit.rs", "load-store-template", "append_float_classification_helpers"),
+        )
+        self.assertEqual(oracle.FLOAT_CLASSIFICATION_BACKEND_FINAL_FORMS, expected)
+        forms = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        for path, kind, owner in expected:
+            self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+            self.assertFalse(oracle.owner_module_final_form("width-arithmetic", path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, path.replace("chelis-backend-c", "chelis-backend-hip"), owner))
+            self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        commands = [" ".join(leg.argv) for leg in oracle.phase0_legs()]
+        self.assertTrue(any("chelis-backend-c" in command and "--test float_classification" in command for command in commands))
+        self.assertTrue(any("chelis-cli" in command and "--test issue_965_float_classification" in command for command in commands))
+        self.assertFalse(oracle.owner_module_final_form("load-store-template", expected[2][0], "append_checked_callable_helpers"))
+
     def test_exact_reduction_backend_owners_require_exact_execution_controls(self) -> None:
         expected = (
             (

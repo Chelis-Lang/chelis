@@ -2495,3 +2495,49 @@ fn every_family_route_checks_concrete_helper_instantiations() {
         }
     }
 }
+
+/// [05-OP-20..22] and [04-INF-9]: the transported predicate relation
+/// suspends while a lambda's operand is unknown, then derives the same bool
+/// surface and enforces the same float family as the direct checked call.
+#[test]
+fn float_predicate_value_relations_replay_unresolved_scalar_and_tensor_operands() {
+    for predicate in ["is_nan", "is_finite", "is_infinite"] {
+        let call = format!("{predicate}($)");
+        for dtype in ["f16", "bf16", "f32", "f64"] {
+            for (decl, result) in [
+                (format!("x: {dtype}"), "bool"),
+                (format!("x: tensor[2,{dtype}]"), "tensor[2,bool]"),
+                (format!("x: tensor[{dtype}]"), "tensor[bool]"),
+            ] {
+                for source in [
+                    resolved(&decl, &call, result),
+                    unresolved(&decl, &call, result),
+                ] {
+                    assert!(check(&source).is_ok(), "{source}");
+                }
+            }
+        }
+        let bounded = format!("def f[p: Float](x: p) -> bool = {predicate}(x)\n");
+        assert!(check(&bounded).is_ok(), "{bounded}");
+        let invalid_bound = format!("def f[p: Int](x: p) -> bool = {predicate}(x)\n");
+        assert!(check(&invalid_bound).is_err(), "{invalid_bound}");
+        for (decl, result) in [("x: i32", "bool"), ("x: tensor[2,i32]", "tensor[2,bool]")] {
+            let eager = check(&resolved(decl, &call, result)).unwrap_err();
+            let deferred = check(&unresolved(decl, &call, result)).unwrap_err();
+            assert_eq!(
+                eager[0].kind.diagnostic_name(),
+                deferred[0].kind.diagnostic_name(),
+                "{}\n{}",
+                summary(&eager),
+                summary(&deferred)
+            );
+        }
+        for source in [
+            unresolved("x: f32", &call, "tensor[bool]"),
+            unresolved("x: tensor[f32]", &call, "bool"),
+            unresolved("x: tensor[2,f32]", &call, "tensor[3,bool]"),
+        ] {
+            assert!(check(&source).is_err(), "{source}");
+        }
+    }
+}
