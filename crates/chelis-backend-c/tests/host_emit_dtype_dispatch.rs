@@ -33,7 +33,7 @@ fn vec_ty(n: usize, prim: Prim) -> TensorType {
 fn make_binary_program(op_name: &str, prim: Prim) -> HostProgram {
     let tt = vec_ty(4, prim);
     let body = HostExpr::new(HostExprKind::Builtin {
-        name: op_name.to_string(),
+        name: op_name.into(),
         args: vec![
             HostExpr::new(HostExprKind::Var(
                 "a".to_string(),
@@ -80,7 +80,7 @@ fn make_binary_program(op_name: &str, prim: Prim) -> HostProgram {
 fn make_unary_program(op_name: &str, prim: Prim) -> HostProgram {
     let tt = vec_ty(4, prim);
     let body = HostExpr::new(HostExprKind::Builtin {
-        name: op_name.to_string(),
+        name: op_name.into(),
         args: vec![HostExpr::new(HostExprKind::Var(
             "a".to_string(),
             HostType::Tensor(tt.clone()),
@@ -118,7 +118,7 @@ fn make_tensor_to_scalar_program(prim: Prim, scalar_ty: HostType) -> HostProgram
         precision: prim,
     };
     let body = HostExpr::new(HostExprKind::Builtin {
-        name: "tensor_to_scalar".to_string(),
+        name: "tensor_to_scalar".into(),
         args: vec![HostExpr::new(HostExprKind::Var(
             "input".to_string(),
             HostType::Tensor(tensor_ty.clone()),
@@ -156,7 +156,7 @@ fn make_scalar_to_tensor_program() -> HostProgram {
         precision: Prim::Int64,
     };
     let body = HostExpr::new(HostExprKind::Builtin {
-        name: "scalar_to_tensor".to_string(),
+        name: "scalar_to_tensor".into(),
         args: vec![HostExpr::new(HostExprKind::Var(
             "input".to_string(),
             HostType::Int64,
@@ -258,7 +258,7 @@ fn make_checked_tensor_cast_program(source: Prim, target: Prim) -> HostProgram {
     let source_ty = vec_ty(2, source);
     let target_ty = vec_ty(2, target);
     let body = HostExpr::new(HostExprKind::Builtin {
-        name: "cast".to_string(),
+        name: "cast".into(),
         args: vec![HostExpr::new(HostExprKind::Var(
             "input".to_string(),
             HostType::Tensor(source_ty.clone()),
@@ -768,7 +768,7 @@ fn to_tensor_list_ingress_uses_only_the_exact_registered_constructor() {
         list_ty,
     ));
     let to_tensor = HostExpr::new(HostExprKind::Builtin {
-        name: "to_tensor".to_string(),
+        name: "to_tensor".into(),
         args: vec![list],
         ty: HostType::Tensor(tensor_ty.clone()),
     });
@@ -866,7 +866,7 @@ fn make_mixed_logical_program(op_name: &str) -> HostProgram {
     function.params[1].ty = HostType::Bool;
     let tt = vec_ty(4, Prim::Bool);
     function.body = HostExpr::new(HostExprKind::Builtin {
-        name: op_name.to_string(),
+        name: op_name.into(),
         args: vec![
             HostExpr::new(HostExprKind::Var(
                 "a".to_string(),

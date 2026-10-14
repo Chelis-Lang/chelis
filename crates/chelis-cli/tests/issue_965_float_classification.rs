@@ -607,3 +607,181 @@ fn captured_global_predicate_alias_wrappers_reject_invalid_contracts() {
         }
     }
 }
+
+/// [04-INF-9], [05-OP-20..22], §4.7: runtime producer axes survive
+/// all admitted routes; naming the producer cannot change executability.
+#[test]
+fn predicate_route_producer_shape_matrix_executes_in_eval_and_native_c() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for predicate in ["is_nan", "is_finite", "is_infinite"] {
+            let mut source = format!(
+                r#"
+f = {predicate}
+g = f
+def captured[n,m,p: Float](z: tensor[n,m,p]) -> tensor[n,m,bool] = f(z)
+def local[n,m,p: Float](z: tensor[n,m,p]) -> tensor[n,m,bool] = {{
+  h = {predicate}
+  h(z)
+}}
+def borrowed[n,m,p: Float](h: (&tensor[n,m,p] -> tensor[n,m,bool]), z: tensor[n,m,p]) -> tensor[n,m,bool] = h(z)
+def captured_vector[n,p: Float](z: tensor[n,p]) -> tensor[n,bool] = f(z)
+def local_vector[n,p: Float](z: tensor[n,p]) -> tensor[n,bool] = {{
+  h = {predicate}
+  h(z)
+}}
+def borrowed_vector[n,p: Float](h: (&tensor[n,p] -> tensor[n,bool]), z: tensor[n,p]) -> tensor[n,bool] = h(z)
+x = to_tensor([[1.0{dtype},2.0{dtype},div(0.0{dtype},0.0{dtype})],[4.0{dtype},5.0{dtype},6.0{dtype}]])
+v = to_tensor([1.0{dtype},2.0{dtype},div(0.0{dtype},0.0{dtype})])
+"#
+            );
+            let producers = [
+                (
+                    "stride_matrix",
+                    "stride(x,1i64,2i64)".to_string(),
+                    vec![2, 2],
+                    vec![false, true, false, false],
+                    false,
+                ),
+                (
+                    "reshape_matrix",
+                    "reshape(x,[2i64,3i64])".to_string(),
+                    vec![2, 3],
+                    vec![false, false, true, false, false, false],
+                    false,
+                ),
+                (
+                    "shrink_matrix",
+                    "shrink(x,[[0i64,2i64],[1i64,3i64]])".to_string(),
+                    vec![2, 2],
+                    vec![false, true, false, false],
+                    false,
+                ),
+                (
+                    "pad_matrix",
+                    format!("pad(x,[[0i64,0i64],[1i64,0i64]],0.0{dtype})"),
+                    vec![2, 4],
+                    vec![false, false, false, true, false, false, false, false],
+                    false,
+                ),
+                (
+                    "permute_matrix",
+                    "permute(x,1i32,0i32)".to_string(),
+                    vec![3, 2],
+                    vec![false, false, false, false, true, false],
+                    false,
+                ),
+                (
+                    "empty_matrix",
+                    "shrink(x,[[0i64,0i64],[0i64,3i64]])".to_string(),
+                    vec![0, 3],
+                    vec![],
+                    false,
+                ),
+                (
+                    "stride_vector",
+                    "stride(v,2i64)".to_string(),
+                    vec![2],
+                    vec![false, true],
+                    true,
+                ),
+            ];
+            let mut expected = Vec::new();
+            for (stem, producer, shape, nan, vector) in producers {
+                let suffix = if vector { "_vector" } else { "" };
+                source.push_str(&format!("{stem}_producer = {producer}\n"));
+                let routes = [
+                    ("direct", format!("{predicate}({producer})")),
+                    ("alias", format!("f({producer})")),
+                    ("chain", format!("g({producer})")),
+                    ("bound", format!("f({stem}_producer)")),
+                    ("local", format!("local{suffix}({producer})")),
+                    ("captured", format!("captured{suffix}({producer})")),
+                    ("borrowed", format!("borrowed{suffix}(f,{producer})")),
+                ];
+                let values = nan
+                    .iter()
+                    .map(|nan| match predicate {
+                        "is_nan" => *nan,
+                        "is_finite" => !nan,
+                        "is_infinite" => false,
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>();
+                for (route, expression) in routes {
+                    let name = format!("{stem}_{route}");
+                    source.push_str(&format!("{name} = {expression}\n"));
+                    expected.push(format!("{name} = tensor(shape={shape:?}, data={values:?})"));
+                }
+            }
+            for actual in [
+                evaluate(&source),
+                build_and_run(&source, &format!("shape_routes_{predicate}_{dtype}")),
+            ] {
+                for expected in &expected {
+                    assert!(
+                        actual.contains(expected),
+                        "{predicate} {dtype}: missing {expected}: {actual}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// An authored result requirement remains separate from the producer-derived
+/// ABI type and still executes on the actual runtime result.
+#[test]
+fn predicate_runtime_axes_keep_authored_result_claims_in_eval_and_native_c() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for predicate in ["is_nan", "is_finite", "is_infinite"] {
+            for (count, succeeds) in [(1, true), (3, false)] {
+                let values = (1..=count)
+                    .map(|n| format!("{n}.0{dtype}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let source = format!(
+                    "f = {predicate}\ndef claimed[n](x: tensor[n,{dtype}]) -> tensor[1,bool] = f(stride(x,2i64))\nresult = claimed(to_tensor([{values}]))\n"
+                );
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("claims.ch");
+                let out = dir.path().join("out");
+                std::fs::write(&path, source).unwrap();
+                let evaluated = Command::cargo_bin("chelis")
+                    .unwrap()
+                    .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                    .args(["eval", "--file"])
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    evaluated.status.success(),
+                    succeeds,
+                    "{predicate} {dtype}: {}",
+                    String::from_utf8_lossy(&evaluated.stderr)
+                );
+                Command::cargo_bin("chelis")
+                    .unwrap()
+                    .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                    .arg("build")
+                    .arg(&path)
+                    .args(["--target", "c", "--output"])
+                    .arg(&out)
+                    .assert()
+                    .success();
+                let executed = std::process::Command::new(out.join("claims"))
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    executed.status.success(),
+                    succeeds,
+                    "{predicate} {dtype}: {}",
+                    String::from_utf8_lossy(&executed.stderr)
+                );
+                if !succeeds {
+                    assert!(String::from_utf8_lossy(&evaluated.stderr).contains("numeric trap"));
+                    assert!(String::from_utf8_lossy(&executed.stderr).contains("numeric trap"));
+                }
+            }
+        }
+    }
+}

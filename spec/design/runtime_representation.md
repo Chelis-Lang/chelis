@@ -1073,6 +1073,15 @@ closed checked-callable signature selector serves direct and aliased host
 applications as well as borrowed callbacks. A declaration-alias index retains
 closed operation identities under both source names and generated global labels;
 host and numeric lowering consult that identity relation after lexical bindings.
+Host IR carries the closed discriminator in `HostBuiltinIdentity`; its private
+representation prevents a checked operation from becoming an ordinary string
+builtin during rewriting. Before `ConcreteHostType` and ABI projection, mandatory
+checked-application normalization instantiates the same-surface, same-axis Bool
+relation from the actual lowered operand, including producer-created runtime
+axes. Related binding and enclosing value metadata follows that result; known
+surface, precision, rank and extent contradictions remain errors. Authored
+result and local extent claim plans retain their identity and declaration order
+independently of the inferred ABI type. C ABI equality remains exact.
 Key-only helper emission retains
 its separately registered `append_key_callable_helpers` owner and key execution
 controls. The classifier registrations bind to the executed all-width raw-bit
@@ -1974,6 +1983,16 @@ Hardware-only HIP and Metal execution remains registered separately and cannot
 be counted by these active-test receipts. These amendments do not change the
 Phase 0 foundation, mutation contract, or digest. A passing selection receipt
 still requires actual execution and artifact verification.
+
+The stored-bit classifier amendment retains the two inherited Phase 0 execution
+legs in the Phase 1 manifest: the raw-bit C matrix and malformed-IR controls,
+and the CLI callable, shape, derivative and typed device-rejection controls.
+Their frozen floors bind the exact listed test identities, including runtime
+producer routes and authored result-claim execution. Missing-leg, missing-floor
+and manifest-digest negatives enforce the additive enrollment. Every earlier
+command, identity floor, Python floor, native control and planner mutation is
+retained; only the Phase 1 selection digest changes. The Phase 0 foundation,
+mutation contract and digest remain unchanged.
 
 The host/C consumer audit follows the representation owners and submissions:
 

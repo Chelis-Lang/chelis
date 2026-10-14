@@ -57,6 +57,85 @@ impl CheckedBuiltinCallable {
     }
 }
 
+/// A builtin identity fixed at host-IR ingress. Closed checked operations
+/// retain their discriminator through rewriting and type resolution; ordinary
+/// builtin names keep their existing behavior. The private representation
+/// prevents constructing a string-only spelling of a checked operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBuiltinIdentity(HostBuiltinIdentityKind);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostBuiltinIdentityKind {
+    Ordinary(String),
+    Checked(CheckedBuiltinCallable),
+}
+
+impl HostBuiltinIdentity {
+    pub fn as_str(&self) -> &str {
+        match &self.0 {
+            HostBuiltinIdentityKind::Ordinary(name) => name,
+            HostBuiltinIdentityKind::Checked(operation) => operation.symbol(),
+        }
+    }
+
+    pub fn checked_operation(&self) -> Option<CheckedBuiltinCallable> {
+        match self.0 {
+            HostBuiltinIdentityKind::Checked(operation) => Some(operation),
+            HostBuiltinIdentityKind::Ordinary(_) => None,
+        }
+    }
+}
+
+impl From<CheckedBuiltinCallable> for HostBuiltinIdentity {
+    fn from(operation: CheckedBuiltinCallable) -> Self {
+        Self(HostBuiltinIdentityKind::Checked(operation))
+    }
+}
+
+impl From<String> for HostBuiltinIdentity {
+    fn from(name: String) -> Self {
+        match CheckedBuiltinCallable::from_symbol(&name) {
+            Some(operation) => operation.into(),
+            None => Self(HostBuiltinIdentityKind::Ordinary(name)),
+        }
+    }
+}
+
+impl From<&str> for HostBuiltinIdentity {
+    fn from(name: &str) -> Self {
+        name.to_owned().into()
+    }
+}
+
+impl std::ops::Deref for HostBuiltinIdentity {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for HostBuiltinIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<str> for HostBuiltinIdentity {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+impl PartialEq<&str> for HostBuiltinIdentity {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+impl PartialEq<String> for HostBuiltinIdentity {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
 /// A host type before polymorphism and inference have been resolved.
 ///
 /// Unlike the legacy `HostType`, this vocabulary has no anonymous `Unknown`.
@@ -147,6 +226,10 @@ pub enum ConcreteHostType {
 /// Why a logical type term could not be made concrete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostTypeResolutionError {
+    InvalidCheckedApplication {
+        operation: String,
+        detail: String,
+    },
     UnresolvedTypeVariable {
         name: String,
     },
@@ -170,6 +253,9 @@ pub enum HostTypeResolutionError {
 impl fmt::Display for HostTypeResolutionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidCheckedApplication { operation, detail } => {
+                write!(f, "invalid checked application {operation}: {detail}")
+            }
             Self::UnresolvedTypeVariable { name } => {
                 write!(f, "unresolved host type variable `{name}`")
             }

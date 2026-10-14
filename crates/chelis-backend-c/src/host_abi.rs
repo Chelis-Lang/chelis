@@ -1094,7 +1094,7 @@ fn project_callback_argument(
     if let ConcreteHostType::CheckedBuiltinCallable(op) = actual {
         return Ok(HostAbiExpr {
             kind: HostAbiExprKind::Builtin {
-                name: op.symbol().to_string(),
+                name: op.into(),
                 args: Vec::new(),
                 ty: HostAbiType::try_callback_signature(expected)?,
             },

@@ -226,15 +226,15 @@ impl CExpressionBuiltin {
             | Self::Floor
             | Self::Ceil
             | Self::Round
-            | Self::IsNan
-            | Self::IsFinite
-            | Self::IsInfinite
             | Self::Recip
             | Self::Abs
             | Self::Min
             | Self::Max => Some(NanFinalization::Canonical),
             Self::Relu | Self::MinElem | Self::MaxElem => Some(NanFinalization::BitPreserving),
-            Self::TruncDiv
+            Self::IsNan
+            | Self::IsFinite
+            | Self::IsInfinite
+            | Self::TruncDiv
             | Self::BitAnd
             | Self::BitOr
             | Self::BitXor

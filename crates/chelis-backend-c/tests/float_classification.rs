@@ -10,6 +10,22 @@ use std::{fs, process::Command};
 
 #[test]
 fn raw_storage_matrix_matches_scalar_tensor_evaluator_and_executed_c() {
+    // These operations return Bool, so [04-NUM-2] float-result finalization
+    // must never claim them. The executed raw-bit matrix below is their
+    // result oracle, including NaNs that must remain operands, not results.
+    let inventory = chelis_backend_c::host_builtin_nan_inventory();
+    for name in ["is_nan", "is_finite", "is_infinite"] {
+        let rows = inventory
+            .iter()
+            .filter(|(symbol, _)| *symbol == name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.len(),
+            1,
+            "missing/duplicate classification inventory: {name}"
+        );
+        assert_eq!(rows[0].1, None, "Bool result is not a float result: {name}");
+    }
     for (prim, width, sign, exponent, fraction, dtype) in [
         (Prim::F16, 2, 0x8000u64, 0x7c00u64, 0x03ffu64, "F16"),
         (Prim::Bf16, 2, 0x8000, 0x7f80, 0x007f, "BF16"),

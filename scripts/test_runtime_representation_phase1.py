@@ -278,6 +278,33 @@ class ReceiptTests(unittest.TestCase):
                 with self.subTest(tampered_floor=identity), self.assertRaisesRegex(oracle.OracleFailure, 'reviewed selection digest differs'):
                     oracle.frozen_manifest((json.dumps(changed, indent=2) + '\n').encode(), oracle.MANIFEST_SHA256)
 
+    def test_classifier_inherited_legs_preserve_exact_execution_and_rejection_floors(self):
+        packet = oracle.frozen_manifest(oracle.MANIFEST.read_bytes(), oracle.MANIFEST_SHA256)
+        rows = {row['name']: row for row in packet['legs']}
+        expected_targets = {
+            'stored-width float classification raw-bit C execution and malformed IR controls':
+                ('float_classification', 'invalid_ir_classification_shapes_and_dtypes_are_rejected'),
+            'float classification callable surfaces, AD and device rejection execution':
+                ('issue_965_float_classification', 'nonfloat_operands_wrong_shapes_and_wrong_arity_are_type_errors'),
+        }
+        inherited = dict(oracle.phase1_legs())
+        for name, (target, negative) in expected_targets.items():
+            row = rows[name]
+            self.assertEqual(row['args'], list(inherited[name]))
+            self.assertIn(target, row['args'])
+            self.assertTrue(any(identity.endswith('::' + negative) for identity in row['required']))
+            removed = copy.deepcopy(packet)
+            removed['legs'] = [leg for leg in removed['legs'] if leg['name'] != name]
+            with self.subTest(missing_leg=name), self.assertRaisesRegex(oracle.OracleFailure, 'leg inventory drifted'):
+                oracle.validate_manifest(removed)
+            for identity in row['required']:
+                with self.subTest(missing_identity=identity), self.assertRaisesRegex(oracle.OracleFailure, 'lost identities'):
+                    oracle.require_frozen_selection([item for item in row['required'] if item != identity], row['required'])
+                changed = copy.deepcopy(packet)
+                next(leg for leg in changed['legs'] if leg['name'] == name)['required'].remove(identity)
+                with self.subTest(changed_floor=identity), self.assertRaisesRegex(oracle.OracleFailure, 'reviewed selection digest differs'):
+                    oracle.frozen_manifest((json.dumps(changed, indent=2) + '\n').encode(), oracle.MANIFEST_SHA256)
+
     def test_failed_process_cannot_publish_a_passing_transcript(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

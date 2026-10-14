@@ -479,6 +479,47 @@
       ]
     },
     {
+      "name": "stored-width float classification raw-bit C execution and malformed IR controls",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "float_classification",
+        "-E",
+        "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
+      ],
+      "required": [
+        "chelis-backend-c::float_classification::invalid_ir_classification_shapes_and_dtypes_are_rejected",
+        "chelis-backend-c::float_classification::raw_storage_matrix_matches_scalar_tensor_evaluator_and_executed_c"
+      ]
+    },
+    {
+      "name": "float classification callable surfaces, AD and device rejection execution",
+      "args": [
+        "-p",
+        "chelis-cli",
+        "--test",
+        "issue_965_float_classification",
+        "-E",
+        "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
+      ],
+      "required": [
+        "chelis-cli::issue_965_float_classification::captured_global_predicate_alias_wrappers_preserve_checked_identity",
+        "chelis-cli::issue_965_float_classification::captured_global_predicate_alias_wrappers_reject_invalid_contracts",
+        "chelis-cli::issue_965_float_classification::device_targets_report_the_open_classification_issue",
+        "chelis-cli::issue_965_float_classification::nonfloat_operands_wrong_shapes_and_wrong_arity_are_type_errors",
+        "chelis-cli::issue_965_float_classification::predicate_rank_zero_values_and_mixed_alias_instantiations_keep_tensor_roots",
+        "chelis-cli::issue_965_float_classification::predicate_route_producer_shape_matrix_executes_in_eval_and_native_c",
+        "chelis-cli::issue_965_float_classification::predicate_runtime_axes_keep_authored_result_claims_in_eval_and_native_c",
+        "chelis-cli::issue_965_float_classification::predicate_tensor_values_keep_their_surface_through_every_callable_route",
+        "chelis-cli::issue_965_float_classification::predicate_values_reject_mismatched_scalar_tensor_callback_surfaces",
+        "chelis-cli::issue_965_float_classification::predicate_values_select_exact_scalar_and_tensor_callback_signatures",
+        "chelis-cli::issue_965_float_classification::predicates_compose_through_float_generics_aliases_shapes_and_ad",
+        "chelis-cli::issue_965_float_classification::raw_scalar_payload_classification_agrees_in_eval_and_native_c",
+        "chelis-cli::issue_965_float_classification::scalar_and_tensor_classification_agree_in_eval_and_native_c"
+      ]
+    },
+    {
       "name": "checked key callable scalar and tensor C execution",
       "args": [
         "-p",
@@ -2152,6 +2193,7 @@
     "scripts.test_runtime_representation_oracle.SourceUniverseTests.test_the_universe_is_every_file_under_the_frozen_roots",
     "scripts.test_runtime_representation_oracle.SourceUniverseTests.test_visible_names_are_scanned_whatever_their_spelling",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_added_test_binary_is_hashed_and_checked_after_execution",
+    "scripts.test_runtime_representation_phase1.ReceiptTests.test_classifier_inherited_legs_preserve_exact_execution_and_rejection_floors",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_duplicate_json_fields_are_not_a_valid_selection",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_execution_receipt_names_and_reports_an_added_test",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_execution_requires_one_passing_framework_case_per_selection",

@@ -108,59 +108,18 @@ fn current_wire_dag_count_round_trips_canonical_axes() {
 
 #[test]
 fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode() {
-    let cases = [
-        (
-            r#"{"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            None,
-        ),
-        (
-            r#"{"schema_version":5,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(5),
-        ),
-        (
-            r#"{"schema_version":18,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(18),
-        ),
-        (
-            r#"{"schema_version":19,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(19),
-        ),
-        (
-            r#"{"schema_version":20,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(20),
-        ),
-        (
-            r#"{"schema_version":21,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(21),
-        ),
-        (
-            r#"{"schema_version":22,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(22),
-        ),
-        (
-            r#"{"schema_version":23,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(23),
-        ),
-        (
-            r#"{"schema_version":24,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(24),
-        ),
-        (
-            r#"{"schema_version":26,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(26),
-        ),
-        (
-            r#"{"schema_version":27,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(27),
-        ),
-        (
-            r#"{"schema_version":29,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(29),
-        ),
-    ];
+    // Exercise every older schema and the immediate future schema against a
+    // malformed op, so the version gate must run before op decoding.
+    let malformed = r#"{"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#;
+    let mut cases = vec![(malformed.to_owned(), None)];
+    for version in (1..WIRE_DAG_SCHEMA_VERSION).chain([WIRE_DAG_SCHEMA_VERSION + 1]) {
+        let mut value: serde_json::Value = serde_json::from_str(malformed).unwrap();
+        value["schema_version"] = version.into();
+        cases.push((value.to_string(), Some(version)));
+    }
 
     for (json, found) in cases {
-        match (WireDag::from_validated_json(json), found) {
+        match (WireDag::from_validated_json(&json), found) {
             (
                 Err(WireDagDecodeError::Schema(WireDagSchemaError::MissingSchemaVersion {
                     supported,
@@ -180,7 +139,7 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
             (other, _) => panic!("schema mismatch must win before op decode, got {other:?}"),
         }
 
-        let direct = serde_json::from_str::<WireDag>(json)
+        let direct = serde_json::from_str::<WireDag>(&json)
             .expect_err("direct WireDag decode must enforce the same version gate");
         assert!(
             direct.to_string().contains("WireDag schema version"),
@@ -188,11 +147,21 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
         );
     }
 
-    let current_unknown = r#"{"schema_version":29,"declarations":["entry"],"nodes":[{"id":0,"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#;
-    assert!(matches!(
-        WireDag::from_validated_json(current_unknown),
-        Err(WireDagDecodeError::Parse(_))
-    ));
+    let mut current_unknown: serde_json::Value = serde_json::from_str(malformed).unwrap();
+    current_unknown["schema_version"] = WIRE_DAG_SCHEMA_VERSION.into();
+    current_unknown["declarations"] = serde_json::json!(["entry"]);
+    let node = &mut current_unknown["nodes"][0];
+    node["shape_deps"] = serde_json::json!([]);
+    node["span_id"] = serde_json::Value::Null;
+    node["merged_spans"] = serde_json::json!([]);
+    node["declaration"] = 0.into();
+    node["activation"] = serde_json::Value::Null;
+    let current_unknown = current_unknown.to_string();
+    let Err(WireDagDecodeError::Parse(error)) = WireDag::from_validated_json(&current_unknown)
+    else {
+        panic!("current schema must reach malformed-op decoding");
+    };
+    assert!(error.to_string().contains("not_an_op"), "{error}");
 }
 
 #[test]
