@@ -1045,6 +1045,7 @@ pub(super) struct LoopCompositionReceipt {
     checked_callee: Expr,
     inner: Option<Box<LoopEntryReceipt>>,
     entered: bool,
+    forwarding_position: Option<usize>,
 }
 
 impl LoopEntryReceipt {
@@ -1219,6 +1220,7 @@ fn collect_delta_entry_actuals(
 thread_local! {
     static ENTRY_CLAIM_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static ENTRY_CLAIM_TRAVERSAL_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static FORWARDING_ROUTE_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static COMPOSITION_SOURCE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -1242,6 +1244,7 @@ pub(super) fn reset_entry_claim_work() {
     ENTRY_CLAIM_WORK.with(|v| v.set(0));
     ENTRY_CLAIM_TRAVERSAL_WORK.with(|v| v.set(0));
     COMPOSITION_SOURCE_BYTES.with(|v| v.set(0));
+    FORWARDING_ROUTE_WORK.with(|v| v.set(0));
 }
 #[cfg(test)]
 pub(super) fn entry_claim_work() -> u64 {
@@ -1253,6 +1256,11 @@ pub(super) fn entry_claim_work() -> u64 {
 #[cfg(test)]
 pub(super) fn entry_claim_traversal_work() -> u64 {
     ENTRY_CLAIM_TRAVERSAL_WORK.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(super) fn forwarding_route_work() -> u64 {
+    FORWARDING_ROUTE_WORK.with(std::cell::Cell::get)
 }
 
 /// Rebuild tensor declarations, including List elements, at one invocation.
@@ -1964,9 +1972,11 @@ impl<'a> EvalContext<'a> {
                 let Some((last, init)) = kids.split_last() else {
                     return Err("a `block` node has no children".to_string());
                 };
+                let cursor = self.take_forwarding_cursor();
                 for child in init {
                     let _ = self.eval_expr(child)?;
                 }
+                self.resume_forwarding_tail(cursor, DeepTag::Block, 1);
                 self.eval_expr(last)
             }
             DeepTag::Record => self.eval_record_with_claims(node, None),
@@ -2520,6 +2530,13 @@ impl<'a> EvalContext<'a> {
         node: EvalNode<'_>,
         claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
+        let forwarding_target = self.take_forwarding_cursor().and_then(|(index, position)| {
+            self.loop_compositions[index]
+                .proof
+                .forwarding()
+                .is_target(position)
+                .then_some(index)
+        });
         let kids = node.children;
         let func = kids
             .first()
@@ -2849,7 +2866,7 @@ impl<'a> EvalContext<'a> {
         } else {
             self.eval_expr(func)?
         };
-        let composition_index = self.loop_compositions.len().checked_sub(1).filter(|index| {
+        let composition_index = forwarding_target.filter(|index| {
             let frame = &self.loop_compositions[*index];
             #[cfg(test)]
             charge_composition_source_comparison(frame.proof.callsite(), node.expr);
@@ -3144,9 +3161,11 @@ impl<'a> EvalContext<'a> {
                 match tag {
                     DeepTag::Block => {
                         if let Some((last, init)) = kids.split_last() {
+                            let cursor = self.take_forwarding_cursor();
                             for child in init {
                                 self.eval_expr(child)?;
                             }
+                            self.resume_forwarding_tail(cursor, DeepTag::Block, 1);
                             return self.eval_under_result_claim(last, claims);
                         }
                     }
@@ -3280,6 +3299,7 @@ impl<'a> EvalContext<'a> {
         node: EvalNode<'_>,
         claims: Option<&[DeclaredResultClaim]>,
     ) -> Result<RuntimeValue, String> {
+        let forwarding_cursor = self.take_forwarding_cursor();
         let kids = node.children;
         let bind_list_expr = kids
             .first()
@@ -3427,6 +3447,20 @@ impl<'a> EvalContext<'a> {
                     .insert_with_result_producer(name.to_string(), value, result_producer);
             }
 
+            let layers = if crosses_nested_let {
+                // Include empty lexical layers: binding ordinals alone cannot
+                // identify the original tail occurrence.
+                let mut layers = 0;
+                let mut current = node.expr;
+                while let Some((DeepTag::Let, children)) = tagged_expr_children(current) {
+                    layers += 1;
+                    current = children.get(1).ok_or("let missing body")?;
+                }
+                layers
+            } else {
+                1
+            };
+            self.resume_forwarding_tail(forwarding_cursor, DeepTag::Let, layers);
             match (claims, guarded) {
                 (Some(_), Some(_)) | (None, _) => self.eval_expr(planned_body),
                 (Some(claims), None) => self.eval_under_result_claim(planned_body, claims),
@@ -3725,6 +3759,32 @@ impl<'a> EvalContext<'a> {
         )
     }
 
+    fn take_forwarding_cursor(&mut self) -> Option<(usize, usize)> {
+        let index = self.loop_compositions.len().checked_sub(1)?;
+        self.loop_compositions[index]
+            .forwarding_position
+            .take()
+            .map(|position| {
+                #[cfg(test)]
+                FORWARDING_ROUTE_WORK.with(|work| work.set(work.get() + 1));
+                (index, position)
+            })
+    }
+
+    fn resume_forwarding_tail(
+        &mut self,
+        cursor: Option<(usize, usize)>,
+        tag: DeepTag,
+        layers: usize,
+    ) {
+        if let Some((index, position)) = cursor {
+            #[cfg(test)]
+            FORWARDING_ROUTE_WORK.with(|work| work.set(work.get() + layers as u64));
+            let frame = &mut self.loop_compositions[index];
+            frame.forwarding_position = frame.proof.forwarding().advance(position, tag, layers);
+        }
+    }
+
     fn loop_callback_receipt(&self, callback: &RuntimeValue) -> Option<LoopEntryReceipt> {
         let RuntimeValue::Closure {
             checked_function,
@@ -3751,14 +3811,12 @@ impl<'a> EvalContext<'a> {
             // Reading a checked declaration does not initialize its captures.
             // Actual callable resolution and its independent first entry stay
             // at the original application in the callback body.
-            let (DeepTag::Fn, children) = tagged_expr_children(checked_function)? else {
-                return None;
-            };
-            let body = children.get(1)?;
-            let (DeepTag::App, app) = tagged_expr_children(body)? else {
-                return None;
-            };
-            let name = var_name(app.first()?)?;
+            // Both source-plan derivations inspect checked metadata. Charge
+            // their complete source, separately from runtime value walks.
+            #[cfg(test)]
+            charge_composition_source_comparison(checked_function, checked_function);
+            let forwarding = chelis_ir::host::accumulator_forwarding_plan(checked_function)?;
+            let name = forwarding.callee_name();
             if env.contains_key(name) {
                 return None;
             }
@@ -3781,6 +3839,7 @@ impl<'a> EvalContext<'a> {
                 ))),
                 proof: composition,
                 entered: false,
+                forwarding_position: None,
             });
             return Some(outer);
         };
@@ -3834,6 +3893,7 @@ impl<'a> EvalContext<'a> {
             &[],
             None,
             Some(receipt),
+            has_composition,
         );
         if has_composition {
             let frame = self
@@ -3960,6 +4020,7 @@ impl<'a> EvalContext<'a> {
             &formal_claims,
             present,
             receipt,
+            false,
         )
     }
 
@@ -3973,6 +4034,7 @@ impl<'a> EvalContext<'a> {
         inherited_claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
         mut loop_entry: Option<&mut LoopEntryReceipt>,
+        activate_forwarding: bool,
     ) -> Result<RuntimeValue, String> {
         // A caller's first-site axes resolve in the caller's activation,
         // whose sites have all run by the time its callee produces the
@@ -4349,7 +4411,16 @@ impl<'a> EvalContext<'a> {
                             })
                             .cloned(),
                     );
-                    let value = self.eval_under_result_claim(&body, &claims)?;
+                    let forwarding_index =
+                        activate_forwarding.then(|| self.loop_compositions.len() - 1);
+                    if let Some(index) = forwarding_index {
+                        self.loop_compositions[index].forwarding_position = Some(0);
+                    }
+                    let result = self.eval_under_result_claim(&body, &claims);
+                    if let Some(index) = forwarding_index {
+                        self.loop_compositions[index].forwarding_position = None;
+                    }
+                    let value = result?;
                     // The declared result is a later site of every binder
                     // the body bound, including one whose first site ran
                     // after the returned value's producer, where the claim
