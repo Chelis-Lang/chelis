@@ -1065,6 +1065,19 @@ mod tests {
     const BOX: &str = "type Box[n] =\n  | Box { v: tensor[n, f32], w: i64 }\n";
 
     #[test]
+    fn admission_pattern_retains_wildcards_without_creating_extent_claims() {
+        let registry = registry(BOX);
+        let authored = ty("(t-adt {} Box (d-name {} *))");
+        assert!(ClaimPattern::derive(&authored, &registry).unwrap().is_empty());
+        let admission = ClaimPattern::derive_admission(&authored, &registry).unwrap();
+        let root = admission.nested_root().unwrap();
+        let leaf = tensor(&admission, field(&admission, root, "Box", 0));
+        assert!(leaf.axes.is_empty());
+        assert_eq!(leaf.rank, Some(1));
+        assert!(admission.child(root, ClaimStep::Field { ctor: "Box", field: 1 }).is_none());
+    }
+
+    #[test]
     fn nominal_dimension_argument_becomes_the_field_claim() {
         let registry = registry(BOX);
         for (arg, claim) in [
