@@ -58,20 +58,24 @@ different shape or infer a precision from the first element. A static route
 remains valid only when its proof of representability survives graph rewrites;
 if a rewrite changes that proof, routing is recomputed before emission.
 
-A tensor helper captures scalar and tensor values. A free lexical value with a
-host-only representation remains in the host lane until its projection is a
-typed scalar or tensor input. The admission check uses the ownership checker's
-free-variable analysis, including function, block and pattern binders. Filtering
-a host value out of the helper's numeric scope cannot make its name refer to a
-same-spelled top-level initializer. Callable operands retain transform
-specialization rather than becoming numeric inputs. The same admission boundary
-uses an exhaustive carrier classification: incomplete numeric types and checked
-callables retain their inference and specialization routes rather than being
-classified as host-only payloads. It
-serves ordinary helpers, traced helpers and gradient helpers with runtime
-controls. This preserves the value of a computed aggregate when a later helper
-reads its fields; [`grad_consumption.ch`](../../examples/grad_consumption.ch)
-exercises distinct cotangents and their primal in the same program.
+A tensor helper captures scalar and tensor values. Lexical ADTs, containers,
+strings and mapped files retain typed opaque bindings during numeric lowering.
+These bindings represent caller values that have already been evaluated; they
+carry no numeric graph node. Specialization can forward or ignore them, including
+an unused argument excluded from a gradient's `wrt` selection. Reading their
+payload, exporting them as numeric results, or reconstructing their cotangents
+requires the host lane. The caller retains eager argument effects and traps even
+when specialization ignores the value.
+
+Keeping these bindings in numeric name resolution prevents a missing lexical
+value from resolving to a same-spelled top-level initializer. The boundary uses
+an exhaustive carrier classification: incomplete numeric types and checked
+callables retain their inference and specialization routes rather than becoming
+opaque payloads. Ordinary, traced and runtime-controlled tensor helpers use the
+same binding representation. This preserves the value of a computed aggregate
+when a later helper reads its fields;
+[`grad_consumption.ch`](../../examples/grad_consumption.ch) exercises distinct
+cotangents and their primal in the same program.
 
 The implementation should replace `UncarriableWalk::concat_input_fact`'s
 syntax-based `Unknown` arm for computed tensor expressions with this checked

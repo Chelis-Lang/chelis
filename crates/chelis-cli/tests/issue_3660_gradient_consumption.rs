@@ -156,3 +156,84 @@ out = inspect(Model { value: to_tensor([3.0f32, 4.0f32, 5.0f32]) })
         );
     }
 }
+
+#[test]
+fn unused_host_actual_keeps_its_eager_effect_once() {
+    let source = r#"def square(xs: List[f32], scale: f32) -> f32 = mul(scale, scale)
+out = {
+  values: List[f32] = {
+    _ = print("argument")
+    [17.0f32, 19.0f32]
+  }
+  grad(square, wrt=scale)(values, 2.0f32)
+}
+"#;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("unused_effect.ch");
+    write_file(&path, source);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        eval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let eval = String::from_utf8(eval.stdout).unwrap();
+    assert_eq!(eval, "argument\nout = 4.0\n");
+    if gcc_available() {
+        assert_eq!(build_and_run(source, "unused_effect"), eval);
+    }
+}
+
+#[test]
+fn unused_host_actual_still_traps_before_the_numeric_result() {
+    let source = r#"def square(xs: List[f32], scale: f32) -> f32 = mul(scale, scale)
+out = {
+  values: List[f32] = {
+    _ = mul(scalar_to_tensor(2i32), scalar_to_tensor(2000000000i32))
+    [17.0f32, 19.0f32]
+  }
+  grad(square, wrt=scale)(values, 2.0f32)
+}
+"#;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("unused_trap.ch");
+    let out = dir.path().join("native");
+    write_file(&path, source);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!eval.status.success());
+    assert!(String::from_utf8_lossy(&eval.stderr).contains("numeric trap: overflow in mul at i32"));
+    if gcc_available() {
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                out.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let native = std::process::Command::new(out.join("unused_trap"))
+            .output()
+            .unwrap();
+        assert!(!native.status.success());
+        assert!(
+            String::from_utf8_lossy(&native.stderr)
+                .contains("numeric trap: overflow in mul at i32")
+        );
+        assert!(!String::from_utf8_lossy(&native.stdout).contains("out ="));
+    }
+}

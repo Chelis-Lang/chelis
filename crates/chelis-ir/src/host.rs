@@ -5832,7 +5832,7 @@ fn lower_def_body_kernel(
     };
     #[cfg(feature = "lowering-trace")]
     let lowered = if tensor_helpers.collect_trace {
-        let context = cached_subexpr_lowering_context(program);
+        let context = tensor_helper_context(program, &signature.scope);
         let scoped = kernel_scope_types(program, &signature.scope, Some(&signature.params));
         let traced = if transfer_literal_result_claims {
             crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
@@ -5970,7 +5970,7 @@ fn lower_kernel_dag(
     expected: &TensorType,
     transfer_literal_result_claims: bool,
 ) -> Result<crate::Dag, crate::lower::LowerDiagnostic> {
-    let context = cached_subexpr_lowering_context(program);
+    let context = tensor_helper_context(program, scope);
     let scope_types = kernel_scope_types(program, scope, declaring_params);
     let dag = if transfer_literal_result_claims {
         crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
@@ -6878,33 +6878,33 @@ fn tensor_helper_input_is_host_payload(ty: &HostTypeTerm) -> bool {
     }
 }
 
+fn bind_tensor_helper_payloads(
+    context: crate::lower::SubexprLoweringContext,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> crate::lower::SubexprLoweringContext {
+    context.with_host_payloads(scope.to_sorted().into_iter().filter_map(|(name, ty)| {
+        let lexical = LoadStoreName::top_level_source_for_label(name)
+            .ok()
+            .flatten()
+            .is_none();
+        (lexical && tensor_helper_input_is_host_payload(ty)).then(|| (name.clone(), ty.clone()))
+    }))
+}
+
+fn tensor_helper_context(
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> crate::lower::SubexprLoweringContext {
+    bind_tensor_helper_payloads(cached_subexpr_lowering_context(program), scope)
+}
+
 // Observation changes the returned product, never helper admission or failure
 // policy. Keep this guard outside both concrete lowering implementations.
 fn lower_tensor_helper_with<T>(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
     lower: impl FnOnce() -> Result<T, crate::lower::LowerDiagnostic>,
 ) -> Option<T> {
-    // A helper captures only scalar/tensor inputs. Dropping a lexical host
-    // value from that scope makes its spelling free in the DAG lowerer,
-    // which can then resolve a same-spelled top-level initializer instead.
-    // Keep the value on the host until its projection becomes a typed tensor
-    // input; callable operands still belong to transform specialization.
-    if chelis_types::linearity::free_runtime_variables(expr)
-        .into_iter()
-        .any(|name| {
-            LoadStoreName::top_level_source_for_label(&name)
-                .ok()
-                .flatten()
-                .is_none()
-                && scope
-                    .get(&name)
-                    .is_some_and(tensor_helper_input_is_host_payload)
-        })
-    {
-        return None;
-    }
     // Do not lower a returned/dynamically-computed callable through the DAG:
     // that path beta-reduces the inner application and loses the outer call.
     // The caller falls back to host lowering, which preserves the unsupported
@@ -6955,11 +6955,12 @@ fn lower_tensor_helper_dag(
     context: &crate::lower::SubexprLoweringContext,
     root_operation: Option<CheckedBuiltinCallable>,
 ) -> Option<crate::Dag> {
-    lower_tensor_helper_with(expr, program, scope, || {
+    let context = bind_tensor_helper_payloads(context.clone(), scope);
+    lower_tensor_helper_with(expr, program, || {
         let dag = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
             expr,
             collect_tensor_scope(program, scope, Some(expr)).into_sorted(),
-            context,
+            &context,
             None,
             false,
             root_operation,
@@ -6991,12 +6992,15 @@ fn lower_tensor_helper_product(
         record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
         return None;
     }
-    let context = lowering_context
-        .cloned()
-        .unwrap_or_else(|| cached_subexpr_lowering_context(program));
+    let context = bind_tensor_helper_payloads(
+        lowering_context
+            .cloned()
+            .unwrap_or_else(|| cached_subexpr_lowering_context(program)),
+        scope,
+    );
     #[cfg(feature = "lowering-trace")]
     if collect_trace {
-        return lower_tensor_helper_with(expr, program, scope, || {
+        return lower_tensor_helper_with(expr, program, || {
             let scoped = collect_tensor_scope(program, scope, Some(expr)).into_sorted();
             let (dag, trace) =
                 crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
@@ -7031,8 +7035,8 @@ fn lower_tensor_helper_dag_with_controls(
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
 ) -> Option<crate::lower::LoweredSubexprWithControls> {
-    let context = cached_subexpr_lowering_context(program);
-    lower_tensor_helper_with(expr, program, scope, || {
+    let context = tensor_helper_context(program, scope);
+    lower_tensor_helper_with(expr, program, || {
         let mut lowered = crate::lower::try_lower_subexpr_program_with_context_and_controls(
             expr,
             collect_tensor_scope(program, scope, Some(expr)),
@@ -27156,47 +27160,65 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
         let checked = surf_check(
             "type Model = | Model { value: tensor[2, f32] }\n\
              m = Model { value: to_tensor([1.0f32, 2.0f32]) }\n\
-             def inspect(m: &Model) -> f32 = tensor_to_scalar(sum(m.value, 0i32))\n",
+             def inspect(m: &Model) -> f32 = tensor_to_scalar(sum(m.value, 0i32))\n\
+             def forwarded(m: &Model) -> f32 = inspect(m)\n\
+             def scaled(m: &Model, scale: f32) -> f32 = mul(inspect(m), scale)\n\
+             def differentiated(m: &Model, scale: f32) -> f32 = grad(scaled, wrt=scale)(m, scale)\n\
+             def matched(m: &Model, scale: f32) -> f32 = match m with {\n\
+               | Model { value: v } => mul(tensor_to_scalar(sum(v, 0i32)), scale)\n\
+             }\n\
+             def differentiated_match(m: &Model, scale: f32) -> f32 = grad(matched, wrt=scale)(m, scale)\n",
         );
         let session = HostLoweringSession::new(&checked);
-        let (_, body) = session.def_named("inspect").unwrap();
-        let signature = host_def_signature("inspect", body, None, &session).unwrap();
         let context = cached_subexpr_lowering_context(&session);
         // A lexical host parameter cannot become the same-spelled global
         // just because the helper's numeric input list omits its ADT type.
-        assert!(
-            lower_tensor_helper_dag(
-                &signature.body_expr,
-                &session,
-                &signature.scope,
-                &TensorType::scalar_f32(),
-                &context,
-                None,
-            )
-            .is_none()
-        );
-        assert!(
-            lower_tensor_helper_dag_with_controls(
-                &signature.body_expr,
-                &session,
-                &signature.scope,
-                &TensorType::scalar_f32(),
-            )
-            .is_none()
-        );
-        #[cfg(feature = "lowering-trace")]
-        assert!(
-            lower_tensor_helper_product(
-                &signature.body_expr,
-                &session,
-                &signature.scope,
-                &TensorType::scalar_f32(),
-                true,
-                Some(&context),
-                None,
-            )
-            .is_none()
-        );
+        // Forwarding and exclusion from `wrt` do not make a payload read safe.
+        for name in [
+            "inspect",
+            "forwarded",
+            "differentiated",
+            "differentiated_match",
+        ] {
+            let (_, body) = session.def_named(name).unwrap();
+            let signature = host_def_signature(name, body, None, &session).unwrap();
+            assert!(
+                lower_tensor_helper_dag(
+                    &signature.body_expr,
+                    &session,
+                    &signature.scope,
+                    &TensorType::scalar_f32(),
+                    &context,
+                    None,
+                )
+                .is_none(),
+                "{name} must preserve the payload boundary"
+            );
+            assert!(
+                lower_tensor_helper_dag_with_controls(
+                    &signature.body_expr,
+                    &session,
+                    &signature.scope,
+                    &TensorType::scalar_f32(),
+                )
+                .is_none(),
+                "{name} with controls"
+            );
+            #[cfg(feature = "lowering-trace")]
+            assert!(
+                lower_tensor_helper_product(
+                    &signature.body_expr,
+                    &session,
+                    &signature.scope,
+                    &TensorType::scalar_f32(),
+                    true,
+                    Some(&context),
+                    None,
+                )
+                .is_none(),
+                "{name} traced"
+            );
+        }
     }
 
     #[test]
@@ -27212,7 +27234,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
             let (_, body) = session.def_named(name).unwrap();
             let mut signature = host_def_signature(name, body, None, &session).unwrap();
             // The inner tensor binder shadows this unrelated outer host
-            // value; a free-variable boundary must not inspect it as a use.
+            // value; its opaque binding must yield to the numeric binder.
             signature
                 .scope
                 .insert("m".into(), HostTypeTerm::Adt("Model".into(), Vec::new()));
@@ -27293,6 +27315,51 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
             )
             .is_some()
         );
+    }
+
+    #[test]
+    fn tensor_helpers_specialize_ignored_host_payloads_without_reading_them() {
+        let checked = surf_check(
+            "type Model = | Model { value: tensor[2, f32] }\n\
+             m = Model { value: to_tensor([1.0f32, 2.0f32]) }\n\
+             def ignored(m: &Model, x: tensor[2, f32]) -> tensor[2, f32] = mul(x, x)\n\
+             def forwarded(m: &Model, x: tensor[2, f32]) -> tensor[2, f32] = ignored(m, x)\n\
+             def square(xs: List[f32], scale: f32) -> f32 = mul(scale, scale)\n\
+             def differentiated(xs: List[f32], scale: f32) -> f32 = grad(square, wrt=scale)(xs, scale)\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        let context = cached_subexpr_lowering_context(&session);
+        for name in ["forwarded", "differentiated"] {
+            let (_, body) = session.def_named(name).unwrap();
+            let signature = host_def_signature(name, body, None, &session).unwrap();
+            let expected = tensor_type_from_host_input(&signature.ret_ty).unwrap();
+            assert!(
+                lower_tensor_helper_dag(
+                    &signature.body_expr,
+                    &session,
+                    &signature.scope,
+                    &expected,
+                    &context,
+                    None
+                )
+                .is_some(),
+                "{name}"
+            );
+            #[cfg(feature = "lowering-trace")]
+            assert!(
+                lower_tensor_helper_product(
+                    &signature.body_expr,
+                    &session,
+                    &signature.scope,
+                    &expected,
+                    true,
+                    Some(&context),
+                    None
+                )
+                .is_some(),
+                "{name} traced"
+            );
+        }
     }
 
     /// A typed local callable carries `surf_binding_type` on its bind value.
