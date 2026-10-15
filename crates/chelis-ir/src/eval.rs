@@ -1664,13 +1664,14 @@ fn batched_matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<Te
 }
 
 /// Read one gather/scatter index tensor element: exact for the integer
-/// family, the pre-refactor f64 truncation for float storage (index
-/// tensors are i64-typed after ingress, so the float arm is legacy
+/// family, the pre-refactor f64 truncation for float storage (checked index
+/// tensors have a signed-integer dtype, so the float arm is legacy
 /// tolerance for f64-storage fixtures driving untyped index inputs).
 fn index_at(indices: &TensorValue, linear: usize) -> isize {
-    match indices.storage().to_raw() {
-        RawTensor::Int(v) => v[linear] as isize,
-        RawTensor::Float(v) => v[linear] as isize,
+    let value = indices.storage().scalar_at(linear);
+    match value.as_i64_exact() {
+        Some(index) => index as isize,
+        None => value.as_f64_lossy() as isize,
     }
 }
 
