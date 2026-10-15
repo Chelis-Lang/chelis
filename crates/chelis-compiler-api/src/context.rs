@@ -1763,14 +1763,14 @@ mod tests {
 
     #[test]
     fn context_version_rejection_names_pipe_removal_only_for_its_predecessor() {
-        for version in [39_u32, 40, 99] {
+        for version in [39_u32, 40, 41, 42, 99] {
             let mut bytes = CACHE_MAGIC.to_vec();
             bytes.extend_from_slice(&version.to_le_bytes());
             let error = match CompiledContext::decode(&bytes) {
                 Err(error) => error,
                 Ok(_) => panic!("incompatible version {version} must reject before payload decode"),
             };
-            let cause = if version == 40 {
+            let cause = if version == 40 && CACHE_FORMAT_VERSION == 41 {
                 "Deep 0.20 removes pipe nodes; "
             } else {
                 ""
@@ -1778,7 +1778,7 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "decode CompiledContext: cache file format version {version} not supported by this binary (expects 41); {cause}regenerate the cache"
+                    "decode CompiledContext: cache file format version {version} not supported by this binary (expects 43); {cause}regenerate the cache"
                 )
             );
         }
@@ -1793,7 +1793,7 @@ mod tests {
     #[test]
     fn cache_format_version_tracks_result_origins_and_ordered_list_operations() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 41);
+        assert_eq!(CACHE_FORMAT_VERSION, 43);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

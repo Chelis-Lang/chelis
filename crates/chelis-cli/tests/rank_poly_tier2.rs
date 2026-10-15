@@ -790,6 +790,8 @@ fn checked_helper_composition_3668_formats_checks_evaluates_and_executes_c() {
              def middle[s, q: {bound}](x: &tensor[..s, q]) -> tensor[..s, q] = negate(x)\n\
              def outer[t, v: {bound}](x: &tensor[..t, v]) -> tensor[..t, v] = middle(x)\n\
              out0 = outer(scalar_to_tensor(1.0{precision}))\n\
+             observed_rank = rank(out0)\n\
+             observed_value = tensor_to_scalar(out0)\n\
              out1 = outer(to_tensor([1.0, 2.0, 3.0], {precision}))\n\
              out2 = outer(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], {precision}))\n\
              out3 = outer(to_tensor([[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]], {precision}))\n"
@@ -798,10 +800,23 @@ fn checked_helper_composition_3668_formats_checks_evaluates_and_executes_c() {
         assert_eq!(formatted, fmt_stdout(&formatted), "canonical idempotence");
         assert_clean(&check_json(&formatted), "checked helper composition");
         let dir = tempdir().expect("tempdir");
-        let eval = parse_printed_tensors(&eval_stdout(dir.path(), &formatted, "helper_eval"));
-        let native = parse_printed_tensors(&build_compile_run(&formatted, "helper_native"));
+        let eval_text = eval_stdout(dir.path(), &formatted, "helper_eval");
+        let native_text = build_compile_run(&formatted, "helper_native");
+        for (label, text) in [("Eval", &eval_text), ("native C", &native_text)] {
+            let scalar = |name: &str| -> f64 {
+                let prefix = format!("{name} = ");
+                text.lines()
+                    .find_map(|line| line.strip_prefix(&prefix))
+                    .unwrap_or_else(|| panic!("{label}: missing {name}: {text}"))
+                    .parse()
+                    .expect("exact finite scalar observation")
+            };
+            assert_eq!(scalar("observed_rank"), 0.0, "{label}: rank-zero result");
+            assert_eq!(scalar("observed_value"), -1.0, "{label}: rank-zero value");
+        }
+        let eval = parse_printed_tensors(&eval_text);
+        let native = parse_printed_tensors(&native_text);
         let expected: &[(&str, &[usize], &[f64])] = &[
-            ("out0", &[], &[-1.0]),
             ("out1", &[3], &[-1.0, -2.0, -3.0]),
             ("out2", &[2, 3], &[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]),
             ("out3", &[2, 1, 3], &[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]),

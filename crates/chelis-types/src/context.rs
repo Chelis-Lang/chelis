@@ -373,7 +373,7 @@ mod tests {
         wire.as_object_mut().unwrap().remove("result_origin");
         assert!(serde_json::from_value::<Scheme>(wire).is_err());
         let mut wire = serde_json::to_value(TypeEnv::empty()).unwrap();
-        for version in [6, 7, 8, 9, 10] {
+        for version in [6, 7, 8, 9, 10, 11, 12] {
             wire["format_version"] = serde_json::json!(version);
             assert!(serde_json::from_value::<TypeEnv>(wire.clone()).is_err());
         }
