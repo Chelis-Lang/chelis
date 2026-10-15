@@ -237,3 +237,93 @@ out = {
         assert!(!String::from_utf8_lossy(&native.stdout).contains("out ="));
     }
 }
+
+fn assert_nested_opaque_values(source: &str, expected: &[&str], name: &str) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.ch"));
+    write_file(&path, source);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        eval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let eval = String::from_utf8(eval.stdout).unwrap();
+    for output in
+        std::iter::once(eval.clone()).chain(gcc_available().then(|| build_and_run(source, name)))
+    {
+        for line in expected {
+            assert!(
+                output.lines().any(|actual| actual == *line),
+                "missing {line}: {output}"
+            );
+        }
+        assert_eq!(output, eval);
+    }
+}
+
+// spec/06 §§2.1–2.2: transporting an excluded argument does not demand its
+// cotangent leaves. Its lexical payload still belongs to this activation.
+#[test]
+fn nested_opaque_arguments_can_be_ignored_during_grad_specialization() {
+    assert_nested_opaque_values(
+        r#"def square(pair: (string, string), x: f32) -> f32 = mul(x, x)
+def bridge(s: string, x: f32) -> f32 = grad(square, wrt=x)((s, s), x)
+s = "global"
+first = bridge("local", 3.0f32)
+second = bridge("other", 7.0f32)
+"#,
+        &["first = 6.0", "second = 14.0"],
+        "nested_opaque_ignored",
+    );
+}
+
+#[test]
+fn nested_opaque_arguments_rebase_their_numeric_leaves() {
+    assert_nested_opaque_values(
+        r#"type Wrapped =
+  | Wrapped { label: string, maybe: Option[f32], coefficient: f32, offset: f32 }
+def tuple_loss(pair: (string, (Option[f32], f32)), x: f32) -> f32 = mul(mul(x, x), (pair.1).1)
+def tuple_bridge(s: string, o: Option[f32], c: f32, x: f32) -> f32 = grad(tuple_loss, wrt=x)((s, (o, c)), x)
+def record_loss(p: &Wrapped, x: f32) -> f32 = mul(mul(x, x), sub(p.coefficient, p.offset))
+def record_bridge(s: string, o: Option[f32], c: f32, d: f32, x: f32) -> f32 = grad(record_loss, wrt=x)(Wrapped { label: s, maybe: o, coefficient: c, offset: d }, x)
+s = "global"
+o: Option[f32] = Some(99.0f32)
+tuple_first = tuple_bridge("local", Some(1.0f32), 5.0f32, 3.0f32)
+tuple_second = tuple_bridge("other", None, 11.0f32, 7.0f32)
+record_first = record_bridge("local", None, 12.0f32, 5.0f32, 3.0f32)
+record_second = record_bridge("other", Some(2.0f32), 14.0f32, 11.0f32, 4.0f32)
+"#,
+        &[
+            "tuple_first = 30.0",
+            "tuple_second = 154.0",
+            "record_first = 42.0",
+            "record_second = 24.0",
+        ],
+        "nested_opaque_numeric",
+    );
+}
+
+#[test]
+fn nested_opaque_discrete_leaves_reconstruct_as_unit_in_selected_cotangents() {
+    assert_nested_opaque_values(
+        r#"def loss(p: (string, f32), x: f32) -> f32 = mul(p.1, x)
+def bridge(s: string, c: f32, x: f32) = grad(loss, wrt=p)((s, c), x)
+s = "global"
+first = bridge("local", 5.0f32, 3.0f32)
+second = bridge("other", 11.0f32, 7.0f32)
+"#,
+        &[
+            "first.0 = ()",
+            "first.1 = 3.0",
+            "second.0 = ()",
+            "second.1 = 7.0",
+        ],
+        "nested_opaque_unit",
+    );
+}

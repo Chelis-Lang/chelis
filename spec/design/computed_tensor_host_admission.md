@@ -62,9 +62,14 @@ A tensor helper captures scalar and tensor values. Lexical ADTs, containers,
 strings and mapped files retain typed opaque bindings during numeric lowering.
 These bindings represent caller values that have already been evaluated; they
 carry no numeric graph node. Specialization can forward or ignore them, including
-an unused argument excluded from a gradient's `wrt` selection. Reading their
-payload, exporting them as numeric results, or reconstructing their cotangents
-requires the host lane. The caller retains eager argument effects and traps even
+an unused argument excluded from a gradient's `wrt` selection. Argument transport
+retains the recursive tuple/ADT tree and rebases only its real numeric leaves;
+it does not demand cotangent leaves. Target selection decides cotangent
+requirements separately, including opaque leaves nested inside that tree. Reading
+their payload or exporting them as numeric results requires the host lane.
+Known discrete fixed shapes reconstruct unit cotangents from their checked type;
+floating payloads and containers requiring runtime lengths or tags retain host
+reconstruction. The caller retains eager argument effects and traps even
 when specialization ignores the value.
 
 Keeping these bindings in numeric name resolution prevents a missing lexical

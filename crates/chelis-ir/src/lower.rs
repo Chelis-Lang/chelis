@@ -6547,75 +6547,125 @@ fn rebuild_runtime_list_view(
     }
 }
 
-/// Flatten every scalar/tensor leaf of a recursive List/tuple/ADT value.
-/// Empty structures contribute no leaves while retaining their position in
-/// the separate reconstruction template.
-fn recursive_list_leaf_nodes(value: &LoweredValue) -> Vec<NodeId> {
-    fn walk(value: &LoweredValue, out: &mut Vec<NodeId>) {
-        match value {
-            LoweredValue::HostConstant(_) => {}
-            LoweredValue::HostPayload { .. } | LoweredValue::Host { .. } => {
-                raise_lowering_error("a host value has no tensor cotangent leaves", None, None)
+/// Visit a recursive value's leaves in transport/ABI order. Keeping the
+/// traversal separate from its consumer prevents argument transport from
+/// prematurely demanding that every leaf has a numeric cotangent.
+fn visit_recursive_value_leaves(value: &LoweredValue, visit: &mut impl FnMut(&LoweredValue)) {
+    match value {
+        LoweredValue::HostConstant(_)
+        | LoweredValue::HostPayload { .. }
+        | LoweredValue::Host { .. }
+        | LoweredValue::Node(_) => visit(value),
+        LoweredValue::Adt { .. } if runtime_column_list_parts(value).is_some() => {
+            let (len, element) = runtime_column_list_parts(value).expect("guarded above");
+            visit(&LoweredValue::Node(len));
+            visit_recursive_value_leaves(&element, visit);
+        }
+        LoweredValue::Adt { .. } if adt_cons_chain_values(value).is_some() => {
+            for item in adt_cons_chain_values(value).expect("guarded above") {
+                visit_recursive_value_leaves(&item, visit);
             }
-            LoweredValue::Node(node) => out.push(*node),
-            LoweredValue::Adt { .. } if runtime_column_list_parts(value).is_some() => {
-                let (len, element) = runtime_column_list_parts(value).expect("guarded above");
-                out.push(len);
-                walk(&element, out);
-            }
-            LoweredValue::Adt { .. } if adt_cons_chain_values(value).is_some() => {
-                for item in adt_cons_chain_values(value).expect("guarded above") {
-                    walk(&item, out);
-                }
-            }
-            LoweredValue::Tuple(items) => {
-                for item in items {
-                    walk(item, out);
-                }
-            }
-            LoweredValue::Adt { fields, .. } => {
-                for field in fields {
-                    walk(field, out);
-                }
+        }
+        LoweredValue::Tuple(items) | LoweredValue::Adt { fields: items, .. } => {
+            for item in items {
+                visit_recursive_value_leaves(item, visit);
             }
         }
     }
+}
 
+/// A strict numeric-leaf demand, used by column recurrence lowering. It is
+/// not an argument-transport plan: opaque leaves cannot become columns.
+fn recursive_list_leaf_nodes(value: &LoweredValue) -> Vec<NodeId> {
     let mut leaves = Vec::new();
-    walk(value, &mut leaves);
+    visit_recursive_value_leaves(value, &mut |leaf| match leaf {
+        LoweredValue::Node(node) => leaves.push(*node),
+        LoweredValue::HostConstant(_) => {}
+        LoweredValue::HostPayload { .. } | LoweredValue::Host { .. } => {
+            raise_lowering_error("a host value has no tensor cotangent leaves", None, None)
+        }
+        LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => unreachable!("visited leaf"),
+    });
     leaves
 }
 
+/// Transport preserves the argument tree, including opaque leaves. Only its
+/// real numeric leaves enter the subgraph ABI and require rebasing. Opaque
+/// cotangent requirements are decided later, when targets are selected.
+struct ArgumentTransport {
+    template: LoweredValue,
+    leaf_nodes: Vec<NodeId>,
+    opaque_types: Vec<crate::host_type_state::HostTypeTerm>,
+}
+
+impl ArgumentTransport {
+    fn new(value: &LoweredValue) -> Self {
+        let mut result = Self {
+            template: value.clone(),
+            leaf_nodes: Vec::new(),
+            opaque_types: Vec::new(),
+        };
+        visit_recursive_value_leaves(value, &mut |leaf| match leaf {
+            LoweredValue::Node(node) => result.leaf_nodes.push(*node),
+            LoweredValue::HostPayload { ty, .. } => result.opaque_types.push(ty.clone()),
+            LoweredValue::HostConstant(_) => {}
+            LoweredValue::Host { .. } => {
+                raise_lowering_error("a staged host value needs its host producer", None, None)
+            }
+            LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => unreachable!("visited leaf"),
+        });
+        result
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecursiveRebuild {
+    Transport,
+    Cotangent,
+}
+
 /// Rebuild a recursive List/tuple/ADT value from its primal structure and a
-/// flat sequence of replacement leaves. This is used symmetrically for staged
-/// parameter Loads and for the returned recursive cotangent.
+/// flat sequence of replacement leaves. Transport preserves opaque leaves;
+/// cotangent reconstruction replaces type-proven discrete leaves with unit
+/// and demands host reconstruction for unknown floating or container payloads.
 fn rebuild_recursive_list_like(
     template: &LoweredValue,
     leaves: &mut impl Iterator<Item = LoweredValue>,
-    cotangent: bool,
+    mode: RecursiveRebuild,
 ) -> LoweredValue {
     match template {
         LoweredValue::HostConstant(_) => {
-            if cotangent {
+            if mode == RecursiveRebuild::Cotangent {
                 LoweredValue::Tuple(Vec::new())
             } else {
                 template.clone()
             }
         }
-        LoweredValue::HostPayload { .. } | LoweredValue::Host { .. } => raise_lowering_error(
-            "a host value cannot be rebuilt from tensor cotangent leaves",
+        LoweredValue::HostPayload { .. } if mode == RecursiveRebuild::Transport => template.clone(),
+        LoweredValue::HostPayload { ty, .. } => {
+            host_payload_discrete_cotangent(ty).unwrap_or_else(|| {
+                raise_lowering_error(
+                    "a host value cannot be rebuilt from tensor cotangent leaves",
+                    None,
+                    None,
+                )
+            })
+        }
+        LoweredValue::Host { .. } => raise_lowering_error(
+            "a staged host value cannot be rebuilt from tensor cotangent leaves",
             None,
             None,
         ),
         LoweredValue::Node(_) => leaves.next().expect("recursive List leaf count mismatch"),
         LoweredValue::Adt { fields, .. }
-            if cotangent && runtime_packed_tensor_parts(template).is_some() =>
+            if mode == RecursiveRebuild::Cotangent
+                && runtime_packed_tensor_parts(template).is_some() =>
         {
             // Metadata has unit cotangent and never becomes a result root.
             // Consume its slots to keep later structured leaves aligned.
-            let mut rebuilt = fields
-                .iter()
-                .map(|field| rebuild_recursive_list_like(field, leaves, true));
+            let mut rebuilt = fields.iter().map(|field| {
+                rebuild_recursive_list_like(field, leaves, RecursiveRebuild::Cotangent)
+            });
             let payload = rebuilt.next().expect("packed tensor payload");
             for _ in rebuilt {}
             payload
@@ -6624,28 +6674,28 @@ fn rebuild_recursive_list_like(
             let (len, element) = runtime_column_list_parts(template).expect("guarded above");
             let replacement_len = leaves.next().expect("runtime List length leaf missing");
             rebuild_runtime_column_list(
-                if cotangent {
+                if mode == RecursiveRebuild::Cotangent {
                     len
                 } else {
                     replacement_len
                         .as_single_node()
                         .expect("runtime List length load is scalar")
                 },
-                rebuild_recursive_list_like(&element, leaves, cotangent),
+                rebuild_recursive_list_like(&element, leaves, mode),
             )
         }
         LoweredValue::Adt { .. } if adt_cons_chain_values(template).is_some() => {
             let items = adt_cons_chain_values(template)
                 .expect("guarded above")
                 .into_iter()
-                .map(|item| rebuild_recursive_list_like(&item, leaves, cotangent))
+                .map(|item| rebuild_recursive_list_like(&item, leaves, mode))
                 .collect();
             rebuild_cons_chain(items)
         }
         LoweredValue::Tuple(items) => LoweredValue::Tuple(
             items
                 .iter()
-                .map(|item| rebuild_recursive_list_like(item, leaves, cotangent))
+                .map(|item| rebuild_recursive_list_like(item, leaves, mode))
                 .collect(),
         ),
         LoweredValue::Adt {
@@ -6659,7 +6709,7 @@ fn rebuild_recursive_list_like(
             layout: layout.clone(),
             fields: fields
                 .iter()
-                .map(|field| rebuild_recursive_list_like(field, leaves, cotangent))
+                .map(|field| rebuild_recursive_list_like(field, leaves, mode))
                 .collect(),
         },
     }
@@ -7708,6 +7758,43 @@ fn host_payload_may_have_cotangent(ty: &crate::host_type_state::HostTypeTerm) ->
         | HostTypeTerm::MappedFile
         | HostTypeTerm::Unit
         | HostTypeTerm::Never => false,
+    }
+}
+
+/// Reconstruct a cotangent only when the checked type proves an entirely
+/// discrete fixed shape. Runtime container lengths/tags and floating or
+/// unresolved leaves require the host value; no primal payload is copied.
+fn host_payload_discrete_cotangent(
+    ty: &crate::host_type_state::HostTypeTerm,
+) -> Option<LoweredValue> {
+    use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
+    match ty {
+        HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)) => {
+            (!precision.is_float()).then(|| LoweredValue::Tuple(Vec::new()))
+        }
+        HostTypeTerm::Tensor(tensor) => {
+            (!tensor.precision.is_float()).then(|| LoweredValue::Tuple(Vec::new()))
+        }
+        HostTypeTerm::Tuple(items) => items
+            .iter()
+            .map(host_payload_discrete_cotangent)
+            .collect::<Option<Vec<_>>>()
+            .map(LoweredValue::Tuple),
+        HostTypeTerm::Fn(..)
+        | HostTypeTerm::CheckedBuiltinCallable(_)
+        | HostTypeTerm::CheckedCallableChoice(_)
+        | HostTypeTerm::Dimension(_)
+        | HostTypeTerm::MappedFile
+        | HostTypeTerm::Unit
+        | HostTypeTerm::Never => Some(LoweredValue::Tuple(Vec::new())),
+        HostTypeTerm::Scalar(HostPrecisionTerm::Variable(_))
+        | HostTypeTerm::PolymorphicTensor(_)
+        | HostTypeTerm::List(_)
+        | HostTypeTerm::Option(_)
+        | HostTypeTerm::Dict(..)
+        | HostTypeTerm::Adt(..)
+        | HostTypeTerm::TypeVariable(_)
+        | HostTypeTerm::InferenceVariable(_) => None,
     }
 }
 
@@ -13358,13 +13445,9 @@ impl<'program> LowerCtx<'program> {
         // scalar/tensor lane. Tuples and ADTs are recursively flattened to
         // typed leaf nodes while retaining a template for exact repacking.
         enum GradArgPlan {
-            HostPayload(LoweredValue),
             HostConstant(LoweredValue),
             Tensor(NodeId),
-            Structured {
-                template: LoweredValue,
-                leaf_nodes: Vec<NodeId>,
-            },
+            Structured(ArgumentTransport),
             Callable(CallableExpr),
         }
         // A multi-argument grad call may mix structured and scalar/tensor
@@ -13374,9 +13457,6 @@ impl<'program> LowerCtx<'program> {
             .iter()
             .map(|arg| match arg {
                 GradActual::Callable(callable) => GradArgPlan::Callable(callable.clone()),
-                GradActual::Value(value @ LoweredValue::HostPayload { .. }) => {
-                    GradArgPlan::HostPayload(value.clone())
-                }
                 GradActual::Value(arg @ LoweredValue::HostConstant(_)) => {
                     GradArgPlan::HostConstant(arg.clone())
                 }
@@ -13386,13 +13466,11 @@ impl<'program> LowerCtx<'program> {
                     None,
                 ),
                 GradActual::Value(LoweredValue::Node(id)) => GradArgPlan::Tensor(*id),
-                GradActual::Value(arg @ (LoweredValue::Tuple(_) | LoweredValue::Adt { .. })) => {
-                    let leaf_nodes = recursive_list_leaf_nodes(arg);
-                    GradArgPlan::Structured {
-                        template: arg.clone(),
-                        leaf_nodes,
-                    }
-                }
+                GradActual::Value(
+                    arg @ (LoweredValue::HostPayload { .. }
+                    | LoweredValue::Tuple(_)
+                    | LoweredValue::Adt { .. }),
+                ) => GradArgPlan::Structured(ArgumentTransport::new(arg)),
             })
             .collect();
         let node_type = |ctx: &Self, id: NodeId| {
@@ -13538,10 +13616,9 @@ impl<'program> LowerCtx<'program> {
             .zip(&plans)
             .filter_map(|(name, plan)| match plan {
                 GradArgPlan::Callable(callable) => Some((name.clone(), callable.clone())),
-                GradArgPlan::HostPayload(_)
-                | GradArgPlan::HostConstant(_)
+                GradArgPlan::HostConstant(_)
                 | GradArgPlan::Tensor(_)
-                | GradArgPlan::Structured { .. } => None,
+                | GradArgPlan::Structured(_) => None,
             })
             .collect::<Vec<_>>();
         let captured_bindings = self.seed_subctx_with_declaring_scope(
@@ -13602,22 +13679,6 @@ impl<'program> LowerCtx<'program> {
             .enumerate()
         {
             match plans.get(index) {
-                Some(GradArgPlan::HostPayload(value @ LoweredValue::HostPayload { ty, .. })) => {
-                    if wrt_indices.map_or_else(
-                        || host_payload_may_have_cotangent(ty),
-                        |indices| indices.contains(&index),
-                    ) {
-                        raise_lowering_error(
-                            "a lexical host payload gradient needs host reconstruction",
-                            Some(app_span),
-                            self.current_span_id.clone(),
-                        );
-                    }
-                    subctx.bindings.insert(name.clone(), value.clone());
-                }
-                Some(GradArgPlan::HostPayload(_)) => {
-                    unreachable!("host payload plan preserves its value")
-                }
                 Some(GradArgPlan::HostConstant(value)) => {
                     if wrt_indices.is_some_and(|indices| indices.contains(&index)) {
                         raise_lowering_error(
@@ -13638,17 +13699,35 @@ impl<'program> LowerCtx<'program> {
                         );
                     }
                 }
-                Some(GradArgPlan::Structured {
+                Some(GradArgPlan::Structured(ArgumentTransport {
                     template,
                     leaf_nodes,
-                }) => {
+                    opaque_types,
+                })) => {
                     let differentiable_leaves = leaf_nodes
                         .iter()
                         .map(|node| node_type(self, *node).precision.is_float())
                         .collect::<Vec<_>>();
                     let differentiable = differentiable_leaves.iter().any(|leaf| *leaf);
-                    let selected = differentiable
-                        && wrt_indices.is_none_or(|indices| indices.contains(&index));
+                    let demands_cotangent = wrt_indices.map_or_else(
+                        || {
+                            differentiable
+                                || opaque_types.iter().any(host_payload_may_have_cotangent)
+                        },
+                        |indices| indices.contains(&index),
+                    );
+                    if demands_cotangent
+                        && opaque_types
+                            .iter()
+                            .any(|ty| host_payload_discrete_cotangent(ty).is_none())
+                    {
+                        raise_lowering_error(
+                            "a lexical host payload gradient needs host reconstruction",
+                            Some(app_span),
+                            self.current_span_id.clone(),
+                        );
+                    }
+                    let selected = differentiable && demands_cotangent;
                     let mut leaf_values = Vec::with_capacity(leaf_nodes.len());
                     for (leaf_index, element_node) in leaf_nodes.iter().enumerate() {
                         let element_ty = node_type(self, *element_node);
@@ -13692,7 +13771,11 @@ impl<'program> LowerCtx<'program> {
                     let mut leaf_values = leaf_values.into_iter();
                     subctx.bindings.insert(
                         name.clone(),
-                        rebuild_recursive_list_like(template, &mut leaf_values, false),
+                        rebuild_recursive_list_like(
+                            template,
+                            &mut leaf_values,
+                            RecursiveRebuild::Transport,
+                        ),
                     );
                 }
                 Some(GradArgPlan::Tensor(actual)) => {
@@ -13880,8 +13963,7 @@ impl<'program> LowerCtx<'program> {
                 GradArgPlan::Tensor(actual) => Some((name.clone(), *actual)),
                 // Structured params are served by their per-leaf entries; a
                 // constant or a callable has no Load to serve.
-                GradArgPlan::Structured { .. }
-                | GradArgPlan::HostPayload(_)
+                GradArgPlan::Structured(_)
                 | GradArgPlan::HostConstant(_)
                 | GradArgPlan::Callable(_) => None,
             })
@@ -14076,7 +14158,11 @@ impl<'program> LowerCtx<'program> {
                         }
                     }
                     let mut leaves = leaves.into_iter();
-                    packed.push(rebuild_recursive_list_like(template, &mut leaves, true));
+                    packed.push(rebuild_recursive_list_like(
+                        template,
+                        &mut leaves,
+                        RecursiveRebuild::Cotangent,
+                    ));
                 }
             }
         }
@@ -14125,8 +14211,7 @@ impl<'program> LowerCtx<'program> {
                     .iter()
                     .filter_map(|plan| match plan {
                         GradArgPlan::Tensor(actual) => Some(*actual),
-                        GradArgPlan::Structured { .. }
-                        | GradArgPlan::HostPayload(_)
+                        GradArgPlan::Structured(_)
                         | GradArgPlan::HostConstant(_)
                         | GradArgPlan::Callable(_) => None,
                     })
@@ -19935,7 +20020,8 @@ impl<'program> LowerCtx<'program> {
             })
             .collect::<Vec<_>>();
         let mut replacements = item_loads.into_iter();
-        let mut item_value = rebuild_recursive_list_like(element, &mut replacements, false);
+        let mut item_value =
+            rebuild_recursive_list_like(element, &mut replacements, RecursiveRebuild::Transport);
         if let Some(index) = index_load {
             // Visit logical indices, then decode independent row shapes in
             // the invocation. Full payload captures receive ordinary slice

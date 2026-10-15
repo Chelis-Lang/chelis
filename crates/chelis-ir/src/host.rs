@@ -27167,7 +27167,11 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
              def matched(m: &Model, scale: f32) -> f32 = match m with {\n\
                | Model { value: v } => mul(tensor_to_scalar(sum(v, 0i32)), scale)\n\
              }\n\
-             def differentiated_match(m: &Model, scale: f32) -> f32 = grad(matched, wrt=scale)(m, scale)\n",
+             def differentiated_match(m: &Model, scale: f32) -> f32 = grad(matched, wrt=scale)(m, scale)\n\
+             def nested_read(p: (string, Model), x: f32) -> f32 = mul(inspect(p.1), x)\n\
+             def nested_read_bridge(s: string, m: Model, x: f32) -> f32 = grad(nested_read, wrt=x)((s, m), x)\n\
+             def selected(p: (Option[f32], f32), x: f32) -> f32 = mul(p.1, x)\n\
+             def selected_bridge(o: Option[f32], c: f32, x: f32) -> f32 = (grad(selected, wrt=p)((o, c), x)).1\n",
         );
         let session = HostLoweringSession::new(&checked);
         let context = cached_subexpr_lowering_context(&session);
@@ -27179,6 +27183,8 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
             "forwarded",
             "differentiated",
             "differentiated_match",
+            "nested_read_bridge",
+            "selected_bridge",
         ] {
             let (_, body) = session.def_named(name).unwrap();
             let signature = host_def_signature(name, body, None, &session).unwrap();
@@ -27325,11 +27331,20 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
              def ignored(m: &Model, x: tensor[2, f32]) -> tensor[2, f32] = mul(x, x)\n\
              def forwarded(m: &Model, x: tensor[2, f32]) -> tensor[2, f32] = ignored(m, x)\n\
              def square(xs: List[f32], scale: f32) -> f32 = mul(scale, scale)\n\
-             def differentiated(xs: List[f32], scale: f32) -> f32 = grad(square, wrt=scale)(xs, scale)\n",
+             def differentiated(xs: List[f32], scale: f32) -> f32 = grad(square, wrt=scale)(xs, scale)\n\
+             def mixed(p: (string, (Option[f32], f32)), x: f32) -> f32 = mul(mul(x, x), (p.1).1)\n\
+             def mixed_bridge(s: string, o: Option[f32], c: f32, x: f32) -> f32 = grad(mixed, wrt=x)((s, (o, c)), x)\n\
+             def selected_discrete(p: (string, f32), x: f32) -> f32 = mul(p.1, x)\n\
+             def selected_discrete_bridge(s: string, c: f32, x: f32) -> f32 = (grad(selected_discrete, wrt=p)((s, c), x)).1\n",
         );
         let session = HostLoweringSession::new(&checked);
         let context = cached_subexpr_lowering_context(&session);
-        for name in ["forwarded", "differentiated"] {
+        for name in [
+            "forwarded",
+            "differentiated",
+            "mixed_bridge",
+            "selected_discrete_bridge",
+        ] {
             let (_, body) = session.def_named(name).unwrap();
             let signature = host_def_signature(name, body, None, &session).unwrap();
             let expected = tensor_type_from_host_input(&signature.ret_ty).unwrap();
