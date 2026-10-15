@@ -966,6 +966,13 @@ fn growing_receipts_do_not_discharge_independent_caller_or_result_claims() {
                     );
                     let named = source.replace("def consume", "def step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] ! { IO } = { _ = print(\"body\")\n append(acc, produce(size)) }\ndef consume")
                         .replace("fn (acc: List[tensor[3, f32]], i: i64) -> {\n _ = print(\"body\")\n append(acc, produce(size))\n}", "fn (acc: List[tensor[3, f32]], i: i64) -> { old = acc\n item = i\n step(old, item) }");
+                    let size_binding =
+                        format!("size = string_len(read_file(\"{}\"))\n", path.display());
+                    let named = named.replace(&size_binding, "").replacen(
+                        "def step",
+                        &format!("{size_binding}def step"),
+                        1,
+                    );
                     for source in [source, named] {
                         let (success, output) = result_claims::run(&source, native);
                         assert_eq!(success, size == 3, "{source}\n{output}");
