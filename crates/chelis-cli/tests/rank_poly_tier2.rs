@@ -1026,7 +1026,7 @@ fn recursive_checked_helpers_3668_execute_both_finite_branches_at_two_dtypes() {
 #[test]
 fn recursive_and_acyclic_row_evidence_3668_do_not_discharge_effect_checks() {
     let recursive = "def left[r, p: Float](x: &tensor[..r, p], stop: bool) -> tensor[..r, p] ! {IO} = if stop then neg(x) else right(x, true)\n\
-        def right[s, q: Float](x: &tensor[..s, q], stop: bool) -> tensor[..s, q] ! {IO} = { print(\"recursive body\")\n if stop then neg(x) else left(x, true) }\n";
+        def right[s, q: Float](x: &tensor[..s, q], stop: bool) -> tensor[..s, q] ! {IO} = { shown = print(\"recursive body\")\n if stop then neg(x) else left(x, true) }\n";
     let positive = format!(
         "{recursive}def outer[t, v: Float](x: &tensor[..t, v]) -> tensor[..t, v] ! {{IO}} = left(x, false)\n"
     );
@@ -1038,7 +1038,7 @@ fn recursive_and_acyclic_row_evidence_3668_do_not_discharge_effect_checks() {
         "{recursive}def outer[t, v: Float](x: &tensor[..t, v]) -> tensor[..t, v] ! {{}} = left(x, false)\n"
     );
     assert_rejected_with(&check_json(&negative), "IO", "SCC effects still enforced");
-    let negative = "def noisy[r](x: &tensor[..r, f32]) -> tensor[..r, f32] ! {IO} = { print(\"called\")\n neg(x) }\n\
+    let negative = "def noisy[r](x: &tensor[..r, f32]) -> tensor[..r, f32] ! {IO} = { shown = print(\"called\")\n neg(x) }\n\
         def outer[s](x: &tensor[..s, f32]) -> tensor[..s, f32] ! {} = noisy(x)\n";
     assert_rejected_with(
         &check_json(negative),
