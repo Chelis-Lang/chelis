@@ -28,11 +28,11 @@ use crate::dag::{
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
     FloatExtremaOp, FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, NumericTrap, RawTensor,
-    ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors,
-    count_tensor_groups, finalize_tensor, float_extrema_adjoint, float_relu, float_relu_adjoint,
-    float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
-    integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
-    scatter_add_tensor_groups, tensor_from_scalars,
+    ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups_iter,
+    compare_tensors, count_tensor_groups, finalize_tensor, float_extrema_adjoint, float_relu,
+    float_relu_adjoint, float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
+    integer_is_exactly_representable, reduce_tensor_groups, reduce_tensor_groups_iter,
+    reduce_window_grad_tensor_groups, scatter_add_tensor_groups, tensor_from_scalars,
 };
 use chelis_types::dtype_semantics::{
     PreparedDropout, fold_in_storage, key_from_seed_storage, split_key_storage, split_keys_storage,
@@ -1715,11 +1715,12 @@ fn gather(
     let index_suffix_rank = index_rank - batch_rank;
     let out_shape = sparse_domain_shape(&values.shape, &indices.shape, axis, batch_rank);
     let out_len = admit_result("gather", &out_shape, values.prim())?;
-    let mut picks = Vec::with_capacity(out_len);
-    for out_linear in 0..out_len {
-        let out_index = linear_to_index(out_linear, &out_shape);
-        let idx_index = sparse_index_coordinate(&out_index, axis, batch_rank, index_rank);
-        let gathered = index_at(indices, index_to_linear(&idx_index, &indices.shape));
+    // Each stored index is visited in row-major order by a nonempty gather,
+    // possibly repeatedly for outer/inner value coordinates. Validate once
+    // before copying, retaining the first invalid index and the empty-domain
+    // behavior of the output-coordinate loop.
+    for index_linear in 0..if out_len == 0 { 0 } else { indices.len() } {
+        let gathered = index_at(indices, index_linear);
         // [05-SPARSE-1]: an index outside the axis is a `Domain` trap in the
         // primitive, rendered as every lane renders it; no lane panics on it
         // ([04-NUM-10]).
@@ -1731,17 +1732,23 @@ fn gather(
                 i64::try_from(values.shape[axis]).unwrap_or(i64::MAX),
             ));
         }
-        let mut value_index = Vec::with_capacity(values.shape.len());
-        value_index.extend_from_slice(&out_index[..axis]);
-        value_index.push(gathered as usize);
-        value_index.extend_from_slice(&out_index[axis + index_suffix_rank..]);
-        picks.push(index_to_linear(&value_index, &values.shape));
     }
+    let source_steps = movement_steps(&values.shape, out_len);
+    let index_steps = movement_steps(&indices.shape, out_len);
+    let mut value_map = vec![0; out_shape.len()];
+    let mut index_map = vec![0; out_shape.len()];
+    value_map[..axis].copy_from_slice(&source_steps[..axis]);
+    value_map[axis + index_suffix_rank..].copy_from_slice(&source_steps[axis + 1..]);
+    index_map[..batch_rank].copy_from_slice(&index_steps[..batch_rank]);
+    index_map[axis..axis + index_suffix_rank].copy_from_slice(&index_steps[batch_rank..]);
+    let picks = (0..out_len).map(|out_linear| {
+        let index_linear = movement_offset(out_linear, &out_shape, &index_map);
+        movement_offset(out_linear, &out_shape, &value_map)
+            + index_at(indices, index_linear) as usize * source_steps[axis]
+    });
+    let storage = values.storage().reuse_gather_iter(picks);
     // reuse_* contract: gather is element-preserving (section C3).
-    Ok(TensorValue::from_storage(
-        out_shape.clone(),
-        values.storage().reuse_gather(&picks),
-    ))
+    Ok(TensorValue::from_storage(out_shape.clone(), storage))
 }
 
 fn scatter_add(
@@ -2106,7 +2113,7 @@ fn for_each_window_pos(window_shape: &[usize], n: usize, mut f: impl FnMut(&[usi
     }
 }
 
-/// Build the exact, ordered source-index group for every output element of
+/// Generate the exact, ordered source indices for every output element of
 /// an axis reduction. Shape planning remains local; arithmetic does not. The
 /// result is admitted as `op`'s at `prim` first: removing an axis of an empty
 /// operand can leave extents whose product is not representable.
@@ -2115,30 +2122,29 @@ fn axis_reduction_groups(
     prim: Prim,
     input_shape: &[usize],
     axis: usize,
-) -> Result<(Vec<usize>, Vec<Vec<usize>>), String> {
+) -> Result<
+    (
+        Vec<usize>,
+        impl ExactSizeIterator<Item = impl ExactSizeIterator<Item = usize>>,
+    ),
+    String,
+> {
     assert!(axis < input_shape.len());
     let mut out_shape = input_shape.to_vec();
     let axis_len = out_shape.remove(axis);
     let out_len = admit_result(op, &out_shape, prim)?;
-    let mut groups = Vec::with_capacity(out_len);
-    for out_flat in 0..out_len {
-        let out_index = linear_to_index(out_flat, &out_shape);
-        let mut group = Vec::with_capacity(axis_len);
-        for axis_index in 0..axis_len {
-            let mut input_index = Vec::with_capacity(input_shape.len());
-            let mut output_axis = 0;
-            for input_axis in 0..input_shape.len() {
-                if input_axis == axis {
-                    input_index.push(axis_index);
-                } else {
-                    input_index.push(out_index[output_axis]);
-                    output_axis += 1;
-                }
-            }
-            group.push(index_to_linear(&input_index, input_shape));
-        }
-        groups.push(group);
-    }
+    // An empty result reads no coordinates; empty shapes can contain stride
+    // products that are not representable. The admitted nonempty result's
+    // suffix product is representable even when the removed axis is empty.
+    let inner = if out_len == 0 {
+        1
+    } else {
+        numel(&input_shape[axis + 1..])
+    };
+    let groups = (0..out_len).map(move |out_flat| {
+        let base = out_flat / inner * axis_len * inner + out_flat % inner;
+        (0..axis_len).map(move |axis_index| base + axis_index * inner)
+    });
     Ok((out_shape, groups))
 }
 
@@ -2153,7 +2159,7 @@ fn reduce(
 ) -> Result<TensorValue, String> {
     let (out_shape, groups) = axis_reduction_groups(name, result, &input.shape, axis)?;
     let storage =
-        reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
+        reduce_tensor_groups_iter(op, input.storage(), groups).map_err(|err| err.to_string())?;
     Ok(TensorValue::from_storage(out_shape, storage))
 }
 
@@ -2170,8 +2176,8 @@ fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<Te
         ArgReduceOp::Argmin => "argmin_reduce",
     };
     let (out_shape, groups) = axis_reduction_groups(name, Prim::Int64, &input.shape, axis)?;
-    let storage =
-        arg_reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
+    let storage = arg_reduce_tensor_groups_iter(op, input.storage(), groups)
+        .map_err(|err| err.to_string())?;
     Ok(TensorValue::from_storage(out_shape, storage))
 }
 
@@ -2265,20 +2271,12 @@ fn permute(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, String> {
     assert_eq!(axes.len(), input.shape.len());
     let out_shape: Vec<usize> = axes.iter().map(|&axis| input.shape[axis]).collect();
     let out_len = admit_result("permute", &out_shape, input.prim())?;
-    let mut picks = Vec::with_capacity(out_len);
-    for flat_idx in 0..out_len {
-        let out_index = linear_to_index(flat_idx, &out_shape);
-        let mut in_index = vec![0; input.shape.len()];
-        for (out_axis, &in_axis) in axes.iter().enumerate() {
-            in_index[in_axis] = out_index[out_axis];
-        }
-        picks.push(index_to_linear(&in_index, &input.shape));
-    }
+    let source_steps = movement_steps(&input.shape, out_len);
+    let steps: Vec<_> = axes.iter().map(|&axis| source_steps[axis]).collect();
+    let picks = (0..out_len).map(|flat| movement_offset(flat, &out_shape, &steps));
+    let storage = input.storage().reuse_gather_iter(picks);
     // reuse_* contract: permute is element-preserving (section C3).
-    Ok(TensorValue::from_storage(
-        out_shape,
-        input.storage().reuse_gather(&picks),
-    ))
+    Ok(TensorValue::from_storage(out_shape, storage))
 }
 
 /// `op` is the expansion's primitive, `expand` or `insert`, whose result is
@@ -2291,25 +2289,16 @@ fn expand(
 ) -> Result<TensorValue, String> {
     assert!(axis <= input.shape.len());
     let out_len = admit_result(op, &out_shape, input.prim())?;
-    let mut picks = Vec::with_capacity(out_len);
-    for flat_idx in 0..out_len {
-        let out_index = linear_to_index(flat_idx, &out_shape);
-        let in_index = if out_shape.len() == input.shape.len() {
-            let mut idx = out_index;
-            idx[axis] = 0;
-            idx
-        } else {
-            let mut idx = out_index;
-            idx.remove(axis);
-            idx
-        };
-        picks.push(index_to_linear(&in_index, &input.shape));
+    let mut steps = movement_steps(&input.shape, out_len);
+    if out_shape.len() == input.shape.len() {
+        steps[axis] = 0;
+    } else {
+        steps.insert(axis, 0);
     }
+    let picks = (0..out_len).map(|flat| movement_offset(flat, &out_shape, &steps));
+    let storage = input.storage().reuse_gather_iter(picks);
     // reuse_* contract: expand is element-preserving (section C3).
-    Ok(TensorValue::from_storage(
-        out_shape,
-        input.storage().reuse_gather(&picks),
-    ))
+    Ok(TensorValue::from_storage(out_shape, storage))
 }
 
 fn one_hot(indices: &TensorValue, vocab: usize, prim: Prim) -> Result<TensorValue, String> {
@@ -2669,21 +2658,16 @@ fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> Result<TensorValue,
         out_shape.push(end - start);
     }
     let out_len = numel(&out_shape);
-    let mut picks = Vec::with_capacity(out_len);
-    for flat_idx in 0..out_len {
-        let out_index = linear_to_index(flat_idx, &out_shape);
-        let in_index: Vec<usize> = out_index
-            .iter()
-            .zip(bounds.iter())
-            .map(|(idx, (start, _))| idx + start)
-            .collect();
-        picks.push(index_to_linear(&in_index, &input.shape));
-    }
+    let steps = movement_steps(&input.shape, out_len);
+    let base: usize = steps
+        .iter()
+        .zip(bounds)
+        .map(|(step, (start, _))| step * start)
+        .sum();
+    let picks = (0..out_len).map(|flat| base + movement_offset(flat, &out_shape, &steps));
+    let storage = input.storage().reuse_gather_iter(picks);
     // reuse_* contract: shrink is element-preserving (section C3).
-    Ok(TensorValue::from_storage(
-        out_shape,
-        input.storage().reuse_gather(&picks),
-    ))
+    Ok(TensorValue::from_storage(out_shape, storage))
 }
 
 fn stride(input: &TensorValue, strides: &[std::num::NonZeroUsize]) -> TensorValue {
@@ -2695,18 +2679,42 @@ fn stride(input: &TensorValue, strides: &[std::num::NonZeroUsize]) -> TensorValu
         .map(|(dim, step)| (*dim).div_ceil(step.get()))
         .collect();
     let out_len = numel(&out_shape);
-    let mut picks = Vec::with_capacity(out_len);
-    for flat_idx in 0..out_len {
-        let out_index = linear_to_index(flat_idx, &out_shape);
-        let in_index: Vec<usize> = out_index
-            .iter()
-            .zip(strides.iter())
-            .map(|(idx, step)| idx * step.get())
-            .collect();
-        picks.push(index_to_linear(&in_index, &input.shape));
-    }
+    let steps: Vec<_> = movement_steps(&input.shape, out_len)
+        .into_iter()
+        .zip(strides)
+        .zip(&out_shape)
+        .map(|((step, stride), &extent)| if extent <= 1 { 0 } else { step * stride.get() })
+        .collect();
+    let picks = (0..out_len).map(|flat| movement_offset(flat, &out_shape, &steps));
+    let storage = input.storage().reuse_gather_iter(picks);
     // reuse_* contract: stride is element-preserving (section C3).
-    TensorValue::from_storage(out_shape, input.storage().reuse_gather(&picks))
+    TensorValue::from_storage(out_shape, storage)
+}
+
+/// Row-major input strides for a movement with an admitted result. Empty
+/// results never read coordinates, including shapes whose unused stride
+/// products exceed the host's index domain.
+fn movement_steps(shape: &[usize], out_len: usize) -> Vec<usize> {
+    let mut steps = vec![0; shape.len()];
+    if out_len != 0 {
+        let mut step = 1;
+        for axis in (0..shape.len()).rev() {
+            steps[axis] = step;
+            step *= shape[axis];
+        }
+    }
+    steps
+}
+
+/// Evaluate an affine source coordinate without retaining an output-sized
+/// pick vector or allocating a coordinate tuple for each element.
+fn movement_offset(mut flat: usize, shape: &[usize], steps: &[usize]) -> usize {
+    let mut offset = 0;
+    for axis in (0..shape.len()).rev() {
+        offset += flat % shape[axis] * steps[axis];
+        flat /= shape[axis];
+    }
+    offset
 }
 
 fn linear_to_index(mut linear: usize, shape: &[usize]) -> Vec<usize> {
@@ -6993,6 +7001,40 @@ mod tests {
         assert_eq!(
             values[&root].storage().to_i64_exact_vec(),
             Some(vec![(1_i64 << 53) + 2])
+        );
+    }
+
+    #[test]
+    fn gather_coordinates_preserve_batch_layout_and_empty_domain_validation() {
+        let data = finalize_wide_int(
+            "test",
+            Prim::Int64,
+            vec![2, 3, 4, 2],
+            (0..48).map(|i| (1_i64 << 53) + i).collect(),
+        )
+        .unwrap();
+        let indices = finalize_wide_int("test", Prim::Int16, vec![2, 2], vec![3, 1, 0, 2]).unwrap();
+        let gathered = gather(&data, &indices, 2, 1).unwrap();
+        assert_eq!(gathered.shape, vec![2, 3, 2, 2]);
+        for flat in 0..24 {
+            let batch = flat / 12;
+            let outer = flat / 4 % 3;
+            let pick = flat / 2 % 2;
+            let tail = flat % 2;
+            let axis = [3, 1, 0, 2][batch * 2 + pick];
+            let source = (batch * 3 + outer) * 8 + axis * 2 + tail;
+            assert_eq!(
+                gathered.storage().scalar_at(flat).as_i64_exact(),
+                Some((1_i64 << 53) + source as i64)
+            );
+        }
+        let invalid = finalize_wide_int("test", Prim::Int64, vec![2], vec![-1, 5]).unwrap();
+        let empty = finalize_wide_int("test", Prim::Int64, vec![0, 4], vec![]).unwrap();
+        assert_eq!(gather(&empty, &invalid, 1, 0).unwrap().shape, vec![0, 2]);
+        let nonempty = finalize_wide_int("test", Prim::Int64, vec![1, 4], vec![0; 4]).unwrap();
+        assert_eq!(
+            gather(&nonempty, &invalid, 1, 0).unwrap_err(),
+            chelis_abi::failure::sparse_index_out_of_bounds("gather", -1, 1, 4)
         );
     }
 

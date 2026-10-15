@@ -128,6 +128,12 @@ and evaluation finishes within 90 seconds on an idle runner. Owner: chelis#828,
 sparse index reads (chelis#3591). The case reports peak live heap increase;
 convolution memory optimization has separate acceptance obligations.
 
+The suite's full-size movement/reduction witnesses are also manual:
+`cargo nextest run -p chelis-ir --test eval_performance --run-ignored only -E 'test(/large_window_movement_coordinates|large_axis_reduction_coordinates/)' --no-capture`.
+Expected success: exact element/reduction values and the documented heap budgets
+at 19,668,992 elements. Default PR CI runs the smaller allocation controls.
+Owner: chelis#828, movement/reduction scratch (chelis#3589 and chelis#3590).
+
 | Gate | Command | Expected success | Owner |
 |---|---|---|---|
 | Keyed randomness corpus | `.venv/bin/python scripts/keyed_randomness_oracle.py` | `KEYED RANDOMNESS ORACLE: PASS` and a fresh exact-SHA receipt with all 91 selected identities passing, none failed/skipped/unrun, and the retired-dispatch tripwire passing. Requires a clean committed task worktree, its uv Python 3.11, Cargo/nextest and a native C toolchain. Manual: not dispatched by default CI. [Corpus and limits](keyed_randomness_oracle.md); `par` is a typed refusal, and shell release is separate. | chelis#2413 |
