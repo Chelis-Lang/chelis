@@ -5986,6 +5986,7 @@ fn retained_accumulator_entries<'a>(
         &'a HostExpr,
         &'a HostExpr,
         std::collections::BTreeMap<String, String>,
+        String,
     );
     fn collect<'a>(
         value: &'a HostExpr,
@@ -5995,12 +5996,26 @@ fn retained_accumulator_entries<'a>(
         match &value.kind {
             HostExprKind::Let { bindings, body, .. }
             | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+                let retained = matches!(value.kind, HostExprKind::RetainedInvocation { .. });
+                let mut ingress = Vec::new();
                 for (index, binding) in bindings.iter().enumerate() {
-                    if matches!(binding.value.kind, HostExprKind::SignatureEntry { .. }) {
+                    if let HostExprKind::SignatureEntry { contract, .. } = &binding.value.kind {
                         if index + 1 != bindings.len() {
                             return None;
                         }
-                        out.push((&binding.value, body, aliases.clone()));
+                        // A retained call stages every payload in formal
+                        // order. Scalar actuals are deliberately absent from
+                        // its observation list; the authored formal spelling
+                        // alone cannot identify their staged value.
+                        let item = if retained {
+                            if ingress.len() != contract.formals().len() {
+                                return None;
+                            }
+                            ingress.get(1).copied()?
+                        } else {
+                            contract.formals().get(1)?.name()
+                        };
+                        out.push((&binding.value, body, aliases.clone(), item.to_owned()));
                     } else {
                         let source = variable(&binding.value)
                             .and_then(|name| aliases.get(name))
@@ -6008,6 +6023,9 @@ fn retained_accumulator_entries<'a>(
                         aliases.remove(&binding.name);
                         if let Some(source) = source {
                             aliases.insert(binding.name.clone(), source);
+                        }
+                        if matches!(binding.value.kind, HostExprKind::FormalIngress { .. }) {
+                            ingress.push(binding.name.as_str());
                         }
                     }
                 }
@@ -6018,10 +6036,13 @@ fn retained_accumulator_entries<'a>(
             _ => Some(()),
         }
     }
-    let [acc, _] = params else {
+    let [acc, item] = params else {
         return None;
     };
-    let mut aliases = std::collections::BTreeMap::from([(acc.name.clone(), acc.name.clone())]);
+    let mut aliases = std::collections::BTreeMap::from([
+        (acc.name.clone(), acc.name.clone()),
+        (item.name.clone(), item.name.clone()),
+    ]);
     let mut candidates = Vec::new();
     collect(body, &mut aliases, &mut candidates)?;
     if candidates.len() != proofs.len() {
@@ -6030,7 +6051,7 @@ fn retained_accumulator_entries<'a>(
     candidates
         .into_iter()
         .zip(proofs)
-        .map(|((value, tail, aliases), proof)| {
+        .map(|((value, tail, aliases, item_alias), proof)| {
             let HostExprKind::SignatureEntry {
                 contract,
                 args,
@@ -6053,6 +6074,7 @@ fn retained_accumulator_entries<'a>(
                 && entry.position == 0
                 && entry.name == proof.parameter()
                 && !contract.formals()[1].pattern().has_tensor()
+                && aliases.get(&item_alias) == Some(&item.name)
                 && aliases.get(name).is_some_and(|source| source == &acc.name)
                 && same_obligation
                 && proof.validates_body_as(tail, name))
@@ -17033,5 +17055,101 @@ mod storage_narrowing_tests {
                 .sum()
         });
         assert_eq!(total, 0, "{total} misrounded conversions over 2^32 inputs");
+    }
+}
+
+#[cfg(test)]
+mod forwarding_entry_identity_tests {
+    use super::*;
+
+    fn checked_callback() -> HostCallback {
+        let source = "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, produce(3i64))\nout = len(fold(fn (acc: List[tensor[*, f32]], i: i64) -> { old0 = acc\n item0 = i\n old1 = old0\n item1 = item0\n step(old1, item1) }, [produce(3i64)], range(0i64, 2i64)))\n";
+        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let checked = chelis_types::check_typed_program(&deep).unwrap();
+        let checked = chelis_effects::check_program(&checked).unwrap();
+        let checked = chelis_types::check_linearity(&checked).unwrap();
+        let realizability = chelis_effects::realizability::infer_realizability(
+            &checked,
+            crate::TENSOR_CAPABLE_PRIMS,
+        );
+        let manifest =
+            chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
+        let lowered =
+            chelis_ir::host::try_lower_compiled_program_with_manifest(&checked, &manifest).unwrap();
+        let host = crate::prepare_host_program_for_codegen(lowered.host.unwrap()).unwrap();
+        let manifested = chelis_types::manifest::ManifestedProgram::new(
+            checked,
+            manifest,
+            chelis_types::types::Target::C,
+        );
+        let verified = chelis_ir::ownership::verify_ownership(
+            chelis_ir::ownership::lower_host_ownership(&manifested, host).unwrap(),
+        )
+        .unwrap();
+        let projected = crate::host_abi::project_program(verified.emission()).unwrap();
+        fn find(expr: &HostExpr) -> Option<&HostCallback> {
+            match &expr.kind {
+                HostExprKind::Fold { callback, .. } => Some(callback),
+                HostExprKind::Builtin { args, .. } => args.iter().find_map(find),
+                HostExprKind::Let { bindings, body, .. } => bindings
+                    .iter()
+                    .find_map(|binding| find(&binding.value))
+                    .or_else(|| find(body)),
+                HostExprKind::ResultClaimScope { body, .. }
+                | HostExprKind::ExtentSites { value: body, .. } => find(body),
+                _ => None,
+            }
+        }
+        projected
+            .program()
+            .globals
+            .iter()
+            .find_map(|binding| find(&binding.value))
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn retained_forwarding_entries_validate_original_item_staging() {
+        let callback = checked_callback();
+        let composition = callback.accumulator_composition.as_ref().unwrap();
+        let mut proofs = Vec::new();
+        if let Some(outer) = composition.outer().filter(|proof| proof.has_extent_claim()) {
+            proofs.push(std::sync::Arc::new(outer.clone()));
+        }
+        proofs.push(std::sync::Arc::new(composition.inner().clone()));
+        let HostCallbackKind::Inline { params, body } = &callback.kind else {
+            panic!("inline callback");
+        };
+        assert!(retained_accumulator_entries(params, body, &proofs).is_some());
+        fn mutate(expr: &mut HostExpr, target: &str) -> bool {
+            match &mut expr.kind {
+                HostExprKind::Let { bindings, body, .. }
+                | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+                    for binding in bindings {
+                        if binding.name == target {
+                            binding.value = HostExpr::new(HostExprKind::Var(
+                                "unrelated_item".into(),
+                                HostAbiType::Int64,
+                            ));
+                            return true;
+                        }
+                    }
+                    mutate(body, target)
+                }
+                HostExprKind::ResultClaimScope { body, .. }
+                | HostExprKind::ExtentSites { value: body, .. } => mutate(body, target),
+                _ => false,
+            }
+        }
+        for target in ["item0", "item1"] {
+            let mut changed = body.clone();
+            assert!(mutate(&mut changed, target));
+            assert!(
+                retained_accumulator_entries(params, &changed, &proofs).is_none(),
+                "changed original item: {target}"
+            );
+        }
     }
 }

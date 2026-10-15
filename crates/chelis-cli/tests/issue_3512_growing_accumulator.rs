@@ -249,7 +249,7 @@ static chelis_value __probe_index(const chelis_list *x, int64_t slot) {
         .filter_map(|line| line.strip_prefix("__memory__="))
         .next_back()
         .expect("origin allocation bytes");
-    eprintln!("native invocation origin bytes retained until teardown: {memory}");
+    eprintln!("native invocation cumulative allocated origin bytes: {memory}");
     let (entry, origin) = counts.split_once(',').unwrap();
     (entry.parse().unwrap(), origin.parse().unwrap())
 }
@@ -728,6 +728,11 @@ fn recursive_named_calls_cannot_borrow_the_loop_callsite_receipt() {
                     path.display()
                 );
                 let (success, output) = result_claims::run(&source, native);
+                for unproved in [false, true] {
+                    let wrapped =
+                        result_claims::run(&forwarding_wrapper(&source, unproved), native);
+                    assert_eq!((success, &output), (wrapped.0, &wrapped.1));
+                }
                 assert_eq!(success, steps < 2, "{source}\n{output}");
                 assert_eq!(
                     output.lines().filter(|line| *line == "before").count(),
@@ -877,51 +882,52 @@ fn named_entry_receipts_restore_the_callee_witness_for_local_claims() {
                     let dir = tempfile::tempdir().unwrap();
                     let path = dir.path().join("size");
                     std::fs::write(&path, "xxxxx").unwrap();
-                    let source = format!(
+                    let bare_source = format!(
                         "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef independent[m](seed: List[tensor[m, f32]], size: i64) -> i64 = {{\n v: tensor[m, f32] = produce(size)\n len(seed)\n}}\ndef step[m](acc: List[tensor[m, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{\n _ = print(\"before\")\n _ = independent([produce(5i64)], 5i64)\n size = string_len(read_file(\"{}\"))\n v: tensor[m, f32] = produce(if i == 0i64 then 3i64 else size)\n _ = print(\"after\")\n old = acc\n older = old\n append(older, v)\n}}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = {{\n _ = {combine}(fn (acc: List[tensor[{outer}, f32]], i: i64) -> step(acc, i), seed, range(0i64, {steps}i64))\n 42i64\n}}\nout = run([produce(3i64)])\n",
                         path.display()
                     );
-                    let counterfactual =
-                        source.replace("-> step(acc, i)", "-> { old = acc\n step(old, i) }");
-                    let (old_success, old_output) = result_claims::run(&counterfactual, native);
-                    let (success, output) = result_claims::run(&source, native);
-                    assert_eq!(
-                        (success, &output),
-                        (old_success, &old_output),
-                        "proved/unproved differ native={native}: {source}"
-                    );
-                    assert_eq!(success, steps < 2, "{source}\n{output}");
-                    assert_eq!(
-                        output.lines().filter(|line| *line == "before").count(),
-                        steps,
-                        "{output}"
-                    );
-                    assert_eq!(
-                        output.lines().filter(|line| *line == "after").count(),
-                        steps.min(1),
-                        "{output}"
-                    );
-                    if steps == 2 {
-                        assert!(
-                            output.contains("numeric trap: domain in insert at i64"),
-                            "{output}"
+                    for source in [bare_source.clone(), forwarding_wrapper(&bare_source, false)] {
+                        let counterfactual = forwarding_wrapper(&bare_source, true);
+                        let (old_success, old_output) = result_claims::run(&counterfactual, native);
+                        let (success, output) = result_claims::run(&source, native);
+                        assert_eq!(
+                            (success, &output),
+                            (old_success, &old_output),
+                            "proved/unproved differ native={native}: {source}"
                         );
-                    }
-                    if steps == 1 {
-                        let independent_bad =
-                            source.replace("[produce(5i64)], 5i64)", "[produce(5i64)], 6i64)");
-                        let (success, output) = result_claims::run(&independent_bad, native);
-                        assert!(!success, "{output}");
-                        assert!(
-                            output.contains("extent `m`: claimed = 5, insert axis 0 = 6"),
+                        assert_eq!(success, steps < 2, "{source}\n{output}");
+                        assert_eq!(
+                            output.lines().filter(|line| *line == "before").count(),
+                            steps,
                             "{output}"
                         );
                         assert_eq!(
-                            output.lines().filter(|line| *line == "before").count(),
-                            1,
+                            output.lines().filter(|line| *line == "after").count(),
+                            steps.min(1),
                             "{output}"
                         );
-                        assert!(!output.lines().any(|line| line == "after"), "{output}");
+                        if steps == 2 {
+                            assert!(
+                                output.contains("numeric trap: domain in insert at i64"),
+                                "{output}"
+                            );
+                        }
+                        if steps == 1 {
+                            let independent_bad =
+                                source.replace("[produce(5i64)], 5i64)", "[produce(5i64)], 6i64)");
+                            let (success, output) = result_claims::run(&independent_bad, native);
+                            assert!(!success, "{output}");
+                            assert!(
+                                output.contains("extent `m`: claimed = 5, insert axis 0 = 6"),
+                                "{output}"
+                            );
+                            assert_eq!(
+                                output.lines().filter(|line| *line == "before").count(),
+                                1,
+                                "{output}"
+                            );
+                            assert!(!output.lines().any(|line| line == "after"), "{output}");
+                        }
                     }
                 }
             }
@@ -958,27 +964,38 @@ fn growing_receipts_do_not_discharge_independent_caller_or_result_claims() {
                         "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef consume(xs: {claimed}) -> i64 ! {{ IO }} = {{\n _ = print(\"consume\")\n len(xs)\n}}\ndef grow(seed: List[tensor[3, f32]], size: i64) -> {output_type} ! {{ IO }} = {combine}(fn (acc: List[tensor[3, f32]], i: i64) -> {{\n _ = print(\"body\")\n append(acc, produce(size))\n}}, seed, range(0i64, 1i64))\nsize = string_len(read_file(\"{}\"))\n{end}\n",
                         path.display()
                     );
-                    let (success, output) = result_claims::run(&source, native);
-                    assert_eq!(success, size == 3, "{source}\n{output}");
-                    assert_eq!(
-                        output.lines().filter(|line| *line == "body").count(),
+                    let named = source.replace("def consume", "def step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] ! { IO } = { _ = print(\"body\")\n append(acc, produce(size)) }\ndef consume")
+                        .replace("fn (acc: List[tensor[3, f32]], i: i64) -> {\n _ = print(\"body\")\n append(acc, produce(size))\n}", "fn (acc: List[tensor[3, f32]], i: i64) -> { old = acc\n item = i\n step(old, item) }");
+                    let size_binding =
+                        format!("size = string_len(read_file(\"{}\"))\n", path.display());
+                    let named = named.replace(&size_binding, "").replacen(
+                        "def step",
+                        &format!("{size_binding}def step"),
                         1,
-                        "{output}"
                     );
-                    if size == 5 {
-                        eprintln!("independent {owner} {combine} native={native}: {output}");
-                        assert!(
-                            output.contains(&format!(
-                                "numeric trap: domain in {} at i64",
-                                if owner == "caller" { "load" } else { combine }
-                            )),
-                            "{output}"
-                        );
+                    for source in [source, named] {
+                        let (success, output) = result_claims::run(&source, native);
+                        assert_eq!(success, size == 3, "{source}\n{output}");
                         assert_eq!(
-                            output.lines().filter(|line| *line == "consume").count(),
-                            0,
+                            output.lines().filter(|line| *line == "body").count(),
+                            1,
                             "{output}"
                         );
+                        if size == 5 {
+                            eprintln!("independent {owner} {combine} native={native}: {output}");
+                            assert!(
+                                output.contains(&format!(
+                                    "numeric trap: domain in {} at i64",
+                                    if owner == "caller" { "load" } else { combine }
+                                )),
+                                "{output}"
+                            );
+                            assert_eq!(
+                                output.lines().filter(|line| *line == "consume").count(),
+                                0,
+                                "{output}"
+                            );
+                        }
                     }
                 }
             }
@@ -1292,6 +1309,455 @@ fn single_local_aliases_have_bounded_work_and_equal_value_controls_do_not() {
                     }
                 }
             }
+        }
+    }
+}
+
+fn forwarding_wrapper_source(
+    seed_size: usize,
+    steps: usize,
+    hops: usize,
+    unproved: bool,
+) -> String {
+    let first = if unproved {
+        "if i == 0i64 then acc else acc"
+    } else {
+        "acc"
+    };
+    let mut bindings = format!("old0 = {first}\n item0 = i\n");
+    for hop in 1..hops {
+        bindings.push_str(&format!(
+            "old{hop} = old{}\n item{hop} = item{}\n",
+            hop - 1,
+            hop - 1
+        ));
+    }
+    format!(
+        "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, produce(3i64))\ndef run(seed: List[tensor[3, f32]]) -> i64 = len(fold(fn (acc: List[tensor[*, f32]], i: i64) -> {{ {bindings} step(old{}, item{}) }}, seed, range(0i64, {steps}i64)))\nout = run(map(fn (i: i64) -> produce(3i64), range(0i64, {seed_size}i64)))\n",
+        hops - 1,
+        hops - 1
+    )
+}
+
+#[test]
+fn lexical_forwarding_wrappers_have_bounded_native_entry_work() {
+    let mut excessive = Vec::new();
+    for hops in [1, 2] {
+        for seed in [100, 400] {
+            for steps in [100, 400] {
+                for unproved in [false, true] {
+                    let source = forwarding_wrapper_source(seed, steps, hops, unproved);
+                    let (work, origins) = counted_native(&source);
+                    eprintln!(
+                        "forwarding wrapper C N={seed} K={steps} L={hops} unproved={unproved}: work={work} origins={origins}"
+                    );
+                    if unproved {
+                        assert!(work >= (seed * steps) as u64, "{work}");
+                    } else if work > 96 * (seed + steps) as u64 + 100 {
+                        excessive.push(format!("N={seed} K={steps} L={hops}: {work}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(excessive.is_empty(), "{}", excessive.join("\n"));
+}
+
+#[test]
+fn lexical_forwarding_preserves_weak_strong_entry_and_final_invalid_effects() {
+    for native in [false, true] {
+        for outer in ["*", "3"] {
+            for steps in [0, 1, 2] {
+                let dir = tempfile::tempdir().unwrap();
+                let size_path = dir.path().join("size");
+                std::fs::write(&size_path, "xxxxx").unwrap();
+                let source = format!(
+                    "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\nsize = string_len(read_file(\"{}\"))\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{ _ = print(\"body\")\n append(acc, produce(size)) }}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = {{ _ = fold(fn (acc: List[tensor[{outer}, f32]], i: i64) -> {{ old = acc\n item = i\n _ = print(\"wrapper\")\n step(old, item) }}, seed, range(0i64, {steps}i64))\n 42i64 }}\nout = run([produce(3i64)])\n",
+                    size_path.display()
+                );
+                let (success, output) = result_claims::run(&source, native);
+                assert_eq!(success, steps < 2, "{source}\n{output}");
+                let wrappers = if steps < 2 {
+                    steps
+                } else if outer == "*" {
+                    2
+                } else {
+                    1
+                };
+                assert_eq!(
+                    output.lines().filter(|line| *line == "wrapper").count(),
+                    wrappers,
+                    "{output}"
+                );
+                assert_eq!(
+                    output.lines().filter(|line| *line == "body").count(),
+                    usize::from(steps > 0),
+                    "{output}"
+                );
+                if !success {
+                    assert!(
+                        output.contains("numeric trap: domain in load at i64"),
+                        "{output}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_nominal_fold_scan_retains_independent_named_entries() {
+    for collection in ["Chain", "Box"] {
+        for claim in ["3", "n"] {
+            for combine in ["fold", "scan"] {
+                for hops in [1, 2] {
+                    for steps in [100, 400] {
+                        let source = immutable_nominal_alias_source(
+                            collection, claim, "composed", combine, steps,
+                        );
+                        let mut aliases = "old0 = acc\n item0 = i\n".to_owned();
+                        for hop in 1..hops {
+                            aliases.push_str(&format!(
+                                "old{hop} = old{}\n item{hop} = item{}\n",
+                                hop - 1,
+                                hop - 1
+                            ));
+                        }
+                        let source = source.replace(
+                            "step(acc, i)",
+                            &format!("{{ {aliases} step(old{}, item{}) }}", hops - 1, hops - 1),
+                        );
+                        let (work, origins) = counted_native(&source);
+                        eprintln!(
+                            "forwarding nominal C {collection}/{claim}/{combine} K={steps} L={hops}: work={work} origins={origins}"
+                        );
+                        assert!(work <= 96 * steps as u64 + 200, "{source}\n{work}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_prior_same_callee_call_keeps_independent_entry_effects() {
+    for native in [false, true] {
+        for strong in [false, true] {
+            for unproved in [false, true] {
+                let outer = if strong { "3" } else { "*" };
+                let alias = if unproved {
+                    "if i == 0i64 then acc else acc"
+                } else {
+                    "acc"
+                };
+                let source = format!(
+                    "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{ _ = print(\"callee\")\n append(acc, produce(3i64)) }}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = len(fold(fn (acc: List[tensor[{outer}, f32]], i: i64) -> {{ old = {alias}\n item = i\n _ = print(\"prefix\")\n _ = step(old, item)\n _ = print(\"between\")\n step(old, item) }}, seed, range(0i64, 2i64)))\nout = run([produce(3i64)])\n"
+                );
+                let (success, output) = result_claims::run(&source, native);
+                assert!(success, "{source}\n{output}");
+                let effects = output
+                    .lines()
+                    .filter(|line| matches!(*line, "prefix" | "callee" | "between"))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    effects,
+                    [
+                        "prefix", "callee", "between", "callee", "prefix", "callee", "between",
+                        "callee"
+                    ],
+                    "{output}"
+                );
+                assert!(output.contains("out = 3"), "{output}");
+            }
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_empty_and_bad_seed_retain_first_independent_entry() {
+    for native in [false, true] {
+        for outer in ["*", "3"] {
+            for steps in [0, 1, 2] {
+                for unproved in [false, true] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("size");
+                    std::fs::write(&path, "xxxxx").unwrap();
+                    let alias = if unproved {
+                        "if i == 0i64 then acc else acc"
+                    } else {
+                        "acc"
+                    };
+                    let source = format!(
+                        "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{ _ = print(\"body\")\n append(acc, produce(3i64)) }}\ndef run(seed: List[tensor[*, f32]]) -> i64 ! {{ IO }} = {{ _ = fold(fn (acc: List[tensor[{outer}, f32]], i: i64) -> {{ old = {alias}\n item = i\n _ = print(\"wrapper\")\n step(old, item) }}, seed, range(0i64, {steps}i64))\n 42i64 }}\nout = run([produce(string_len(read_file(\"{}\")))])\n",
+                        path.display()
+                    );
+                    let (success, output) = result_claims::run(&source, native);
+                    assert_eq!(success, steps == 0, "{source}\n{output}");
+                    assert_eq!(
+                        output.lines().filter(|line| *line == "body").count(),
+                        0,
+                        "{output}"
+                    );
+                    assert_eq!(
+                        output.lines().filter(|line| *line == "wrapper").count(),
+                        usize::from(steps > 0 && outer == "*"),
+                        "{output}"
+                    );
+                    if !success {
+                        assert!(
+                            output.contains("numeric trap: domain in load at i64"),
+                            "{output}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_unproved_item_and_shadowed_callee_keep_full_semantics() {
+    for native in [false, true] {
+        for mode in ["item", "callee", "acc", "item_shadow"] {
+            let prefix = match mode {
+                "item" => "old = acc\n item = if i == 0i64 then i else i",
+                "callee" => {
+                    "old = acc\n item = i\n step = fn (xs: List[tensor[*, f32]], n: i64) -> xs"
+                }
+                "acc" => "old = acc\n acc = [produce(3i64)]\n item = i",
+                "item_shadow" => "old = acc\n i = 0i64\n item = i",
+                _ => unreachable!(),
+            };
+            let source = forwarding_wrapper_source(3, 2, 1, false)
+                .replace("old0 = acc\n item0 = i\n", &format!("{prefix}\n"))
+                .replace("step(old0, item0)", "step(old, item)");
+            let (success, output) = result_claims::run(&source, native);
+            assert!(success, "{source}\n{output}");
+            let expected = if mode == "callee" { 3 } else { 5 };
+            assert!(output.contains(&format!("out = {expected}")), "{output}");
+        }
+    }
+}
+
+fn forwarding_wrapper(source: &str, unproved: bool) -> String {
+    let root = if unproved {
+        "if i == 0i64 then acc else acc"
+    } else {
+        "acc"
+    };
+    source.replace(
+        "-> step(acc, i)",
+        &format!(
+            "-> {{ old = {root}\n older = old\n item = i\n item2 = item\n step(older, item2) }}"
+        ),
+    )
+}
+
+#[test]
+fn lexical_forwarding_example_preserves_the_independent_callee_claim() {
+    let source = include_str!("../../../examples/forwarded_accumulator_entry.ch");
+    let negative = source
+        .replacen("acc: List[tensor[3, f32]]", "acc: List[tensor[5, f32]]", 1)
+        .replacen(
+            "[1.0f32, 2.0f32, 3.0f32]",
+            "[1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32]",
+            1,
+        );
+    for native in [false, true] {
+        let (success, output) = result_claims::run(source, native);
+        assert!(success && output.contains("out = 5"), "{output}");
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("contradictory.ch");
+    std::fs::write(&path, negative).unwrap();
+    let rejected = assert_cmd::Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(diagnostic.contains("DimensionMismatch"), "{diagnostic}");
+}
+
+#[test]
+fn lexical_forwarding_stationary_named_entries_keep_seed_work_bounded() {
+    for seed in [100, 400] {
+        for steps in [100, 400] {
+            for hops in [1, 2] {
+                for unproved in [false, true] {
+                    let source = forwarding_wrapper_source(seed, steps, hops, unproved)
+                        .replace("append(acc, produce(3i64))", "acc");
+                    let (work, origins) = counted_native(&source);
+                    eprintln!(
+                        "stationary forwarding C N={seed} K={steps} L={hops} unproved={unproved}: work={work} origins={origins}"
+                    );
+                    if unproved {
+                        assert!(work >= (seed * steps) as u64, "{work}");
+                    } else {
+                        assert!(work <= 96 * (seed + steps) as u64 + 100, "{work}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_nominal_initial_size_and_steps_have_separate_entry_bounds() {
+    for collection in ["Chain", "Box"] {
+        for seed in [100, 400] {
+            for steps in [100, 400] {
+                let source =
+                    immutable_nominal_alias_source(collection, "3", "composed", "fold", steps);
+                let (base, construction) = if collection == "Chain" {
+                    ("End { v }", "Link { v, next: acc }")
+                } else {
+                    ("Base { v }", "Wrap { inner: acc }")
+                };
+                let builder = format!(
+                    "def make_seed[T](v: T, count: i64) -> {collection}[T] = fold(fn (acc: {collection}[T], i: i64) -> {construction}, {base}, range(0i64, count))\n"
+                );
+                let source = source.replace("out = run(", &format!("{builder}out = run("));
+                let original = if collection == "Chain" {
+                    "End { v: produce(3i64) }"
+                } else {
+                    "Base { v: produce(3i64) }"
+                };
+                let source = source.replace(
+                    &format!("out = run({original})"),
+                    &format!("out = run(make_seed(produce(3i64), {seed}i64))"),
+                );
+                for unproved in [false, true] {
+                    let source = forwarding_wrapper(&source, unproved);
+                    let (work, origins) = counted_native(&source);
+                    eprintln!(
+                        "nominal initial-size forwarding {collection} N={seed} K={steps} unproved={unproved}: work={work} origins={origins}"
+                    );
+                    if unproved {
+                        assert!(work >= (seed * steps) as u64, "{work}");
+                    } else {
+                        assert!(work <= 96 * (seed + steps) as u64 + 200, "{work}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_does_not_discharge_an_earlier_identical_call_entry() {
+    for seed in [100, 400] {
+        for steps in [100, 400] {
+            let source = forwarding_wrapper_source(seed, steps, 2, false).replace(
+                "step(old1, item1) }",
+                "_ = step(old1, item1)\n step(old1, item1) }",
+            );
+            let (work, origins) = counted_native(&source);
+            eprintln!(
+                "independent earlier forwarding call N={seed} K={steps}: work={work} origins={origins}"
+            );
+            assert!(
+                work >= (seed * steps) as u64,
+                "independent entry was skipped: {work}"
+            );
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_keeps_independent_wrapper_local_claims_in_order() {
+    for native in [false, true] {
+        for combine in ["fold", "scan"] {
+            for steps in [0, 1, 2] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("size");
+                std::fs::write(&path, "xxxxx").unwrap();
+                let source = format!(
+                    "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\nsize = string_len(read_file(\"{}\"))\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{ _ = print(\"body\")\n append(acc, produce(size)) }}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = {{ _ = {combine}(fn (acc: List[tensor[*, f32]], i: i64) -> {{ _ = print(\"prefix\")\n old: List[tensor[3, f32]] = acc\n _ = print(\"local\")\n item = i\n step(old, item) }}, seed, range(0i64, {steps}i64))\n 42i64 }}\nout = run([produce(3i64)])\n",
+                    path.display()
+                );
+                let unproved = source.replace(
+                    "old: List[tensor[3, f32]] = acc",
+                    "old: List[tensor[3, f32]] = if i == 0i64 then acc else acc",
+                );
+                let actual = result_claims::run(&source, native);
+                let baseline = result_claims::run(&unproved, native);
+                assert_eq!(actual, baseline, "{source}");
+                let (success, output) = actual;
+                assert_eq!(success, steps < 2, "{output}");
+                assert_eq!(
+                    output.lines().filter(|line| *line == "prefix").count(),
+                    steps,
+                    "{output}"
+                );
+                assert_eq!(
+                    output.lines().filter(|line| *line == "local").count(),
+                    steps.min(1),
+                    "{output}"
+                );
+                assert_eq!(
+                    output.lines().filter(|line| *line == "body").count(),
+                    steps.min(1),
+                    "{output}"
+                );
+                if !success {
+                    // Preserve the independently reproduced complete-check
+                    // producer in each lane; the unproved path above is exact.
+                    let producer = if native { "append" } else { "load" };
+                    assert!(
+                        output.contains(&format!("numeric trap: domain in {producer} at i64")),
+                        "{output}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_saved_roles_survive_later_formal_name_shadows() {
+    for steps in [100, 400] {
+        for unproved in [false, true] {
+            let source = forwarding_wrapper_source(400, steps, 2, unproved).replace(
+                "item0 = i\n",
+                "item0 = i\n i = 0i64\n acc = [produce(3i64)]\n",
+            );
+            let (work, origins) = counted_native(&source);
+            eprintln!(
+                "saved forwarding roles after shadows N=400 K={steps} unproved={unproved}: work={work} origins={origins}"
+            );
+            if unproved {
+                assert!(work >= 400 * steps as u64, "{work}");
+            } else {
+                assert!(work <= 96 * (400 + steps) as u64 + 100, "{work}");
+            }
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_bound_call_results_retain_complete_entry_checks() {
+    for seed in [100, 400] {
+        for steps in [100, 400] {
+            let source = forwarding_wrapper_source(seed, steps, 2, false).replace(
+                "step(old1, item1) }",
+                "result = step(old1, item1)\n result }",
+            );
+            let (work, origins) = counted_native(&source);
+            eprintln!(
+                "bound-call-result forwarding residue N={seed} K={steps}: work={work} origins={origins}"
+            );
+            assert!(
+                work >= (seed * steps) as u64,
+                "a non-tail call cannot borrow the tail receipt: {work}"
+            );
         }
     }
 }

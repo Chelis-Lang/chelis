@@ -623,6 +623,13 @@ fn parity_checked_runtime_extents() {
     drive_parity(&examples_root().join("checked_runtime_extents.ch"), true);
 }
 
+#[test]
+fn parity_forwarded_accumulator_entry() {
+    let path = examples_root().join("forwarded_accumulator_entry.ch");
+    drive_parity(&path, true);
+    assert_eq!(run_eval(&path), b"out = 5\n");
+}
+
 /// chelis#469: `expand`/`insert` sizes taken from scalar parameters and
 /// arithmetic over them, with no tensor carrying the extent.
 #[test]

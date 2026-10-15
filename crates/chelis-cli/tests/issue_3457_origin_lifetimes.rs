@@ -330,6 +330,31 @@ fn returned_prefix_suffix_view_keeps_backing_origins_after_callee_exit() {
 }
 
 #[test]
+fn lexical_forwarding_result_views_keep_retained_callee_backing_owners() {
+    for steps in [1, 400] {
+        let source = format!(
+            "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, produce(3i64))\ndef selected(seed: List[tensor[3, f32]]) -> List[tensor[*, f32]] = {{\n xs = fold(fn (acc: List[tensor[*, f32]], i: i64) -> {{ old = acc\n older = old\n item = i\n _ = len(take(old, 1i64))\n step(older, item) }}, seed, range(0i64, {steps}i64))\n ys = skip(xs, 1i64)\n take(ys, 1i64)\n}}\nout = shape(index(selected([produce(3i64)]), 0i64), 0i32)\n"
+        );
+        live_metadata_with_sanitizers(&format!("forwarding-returned-view-{steps}"), &source, true);
+        let negative = source.replace(
+            "out = shape(index(selected([produce(3i64)]), 0i64), 0i32)",
+            "def reject(seed: List[tensor[3, f32]]) -> tensor[5, f32] = index(selected(seed), 0i64)\nout = reject([produce(3i64)])",
+        );
+        for native in [false, true] {
+            let (success, output) = result_claims::run(&negative, native);
+            let unproved = negative.replace("old = acc", "old = if i == 0i64 then acc else acc");
+            let baseline = result_claims::run(&unproved, native);
+            assert_eq!((success, &output), (baseline.0, &baseline.1));
+            assert!(!success, "{output}");
+            assert!(
+                output.contains("numeric trap: domain in fold at i64"),
+                "{output}"
+            );
+        }
+    }
+}
+
+#[test]
 fn tensor_tuple_and_nested_nominal_construction_stays_bounded() {
     for (kind, ty, seed, body, result) in [
         (

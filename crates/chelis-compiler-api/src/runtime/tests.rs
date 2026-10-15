@@ -5570,3 +5570,125 @@ fn single_local_aliases_have_bounded_work_and_equal_value_controls_do_not() {
         }
     }
 }
+
+fn forwarding_wrapper_source(
+    seed_size: usize,
+    steps: usize,
+    hops: usize,
+    unproved: bool,
+) -> String {
+    let first = if unproved {
+        "if i == 0i64 then acc else acc"
+    } else {
+        "acc"
+    };
+    let mut bindings = format!("old0 = {first}\n item0 = i\n");
+    for hop in 1..hops {
+        bindings.push_str(&format!(
+            "old{hop} = old{}\n item{hop} = item{}\n",
+            hop - 1,
+            hop - 1
+        ));
+    }
+    format!(
+        "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, produce(3i64))\ndef run(seed: List[tensor[3, f32]]) -> i64 = len(fold(fn (acc: List[tensor[*, f32]], i: i64) -> {{ {bindings} step(old{}, item{}) }}, seed, range(0i64, {steps}i64)))\nout = run(map(fn (i: i64) -> produce(3i64), range(0i64, {seed_size}i64)))\n",
+        hops - 1,
+        hops - 1
+    )
+}
+
+#[test]
+fn lexical_forwarding_wrappers_have_bounded_complete_eval_entry_work() {
+    let mut excessive = Vec::new();
+    for hops in [1, 2, 16] {
+        for seed in [100, 400] {
+            for steps in [100, 400] {
+                for unproved in [false, true] {
+                    let source = forwarding_wrapper_source(seed, steps, hops, unproved);
+                    let checked = checked_surf(&source);
+                    let empty = UnordMap::new();
+                    super::eval::reset_entry_claim_work();
+                    let outcome = evaluate_host_program_with_library_and_types(
+                        &checked,
+                        None,
+                        None,
+                        HostEvaluationInputs {
+                            roots: &empty,
+                            bindings: None,
+                        },
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        render_value(&outcome.host_bindings["out"]),
+                        (seed + steps).to_string()
+                    );
+                    let observations = super::eval::entry_claim_work();
+                    let traversal = super::eval::entry_claim_traversal_work();
+                    let route = super::eval::forwarding_route_work();
+                    let source_bytes = super::eval::composition_source_bytes();
+                    let work = observations + traversal;
+                    eprintln!(
+                        "forwarding wrapper Eval N={seed} K={steps} L={hops} unproved={unproved}: observations={observations} traversal={traversal} route={route} source_bytes={source_bytes}"
+                    );
+                    assert!(
+                        source_bytes <= 1024 * source.len() as u64 * steps as u64,
+                        "source_bytes={source_bytes}"
+                    );
+                    assert!(
+                        route <= (4 * hops + 8) as u64 * steps as u64,
+                        "route={route}"
+                    );
+                    if unproved {
+                        assert!(work >= (seed * steps) as u64, "{work}");
+                    } else if work > 128 * (seed + steps) as u64 + 100 {
+                        excessive.push(format!("N={seed} K={steps} L={hops}: {work}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(excessive.is_empty(), "{}", excessive.join("\n"));
+}
+
+#[test]
+fn lexical_forwarding_stationary_named_entry_work_is_bounded() {
+    for seed in [100, 400] {
+        for steps in [100, 400] {
+            for unproved in [false, true] {
+                let source = forwarding_wrapper_source(seed, steps, 2, unproved)
+                    .replace("append(acc, produce(3i64))", "acc");
+                let checked = checked_surf(&source);
+                let empty = UnordMap::new();
+                super::eval::reset_entry_claim_work();
+                let outcome = evaluate_host_program_with_library_and_types(
+                    &checked,
+                    None,
+                    None,
+                    HostEvaluationInputs {
+                        roots: &empty,
+                        bindings: None,
+                    },
+                    None,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(
+                    render_value(&outcome.host_bindings["out"]),
+                    seed.to_string()
+                );
+                let work =
+                    super::eval::entry_claim_work() + super::eval::entry_claim_traversal_work();
+                eprintln!(
+                    "stationary forwarding Eval N={seed} K={steps} unproved={unproved}: work={work}"
+                );
+                if unproved {
+                    assert!(work >= (seed * steps) as u64, "{work}");
+                } else {
+                    assert!(work <= 128 * (seed + steps) as u64 + 100, "{work}");
+                }
+            }
+        }
+    }
+}
