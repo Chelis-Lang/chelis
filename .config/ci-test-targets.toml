@@ -4973,6 +4973,11 @@ reason = "script-unit executes the cache-publication selection, artifact sealing
 tracking_issue = "chelis#1730"
 
 [[path_rule]]
+prefix = "examples/forwarded_accumulator_entry.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
 prefix = "examples/pure_helper_result_claims.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
