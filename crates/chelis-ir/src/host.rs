@@ -8873,8 +8873,16 @@ fn lower_host_expr_kind(
                 }
             }
             if let Some(target) = forwarding.as_mut() {
-                let layers = nested_layers.as_ref().map_or(1, Vec::len);
-                if let Some(position) = target.plan.advance(target.position, DeepTag::Let, layers) {
+                // The unflattened branch advances this exact Let occurrence;
+                // flattened input advances its explicit original source layers.
+                let position = if let Some(layers) = nested_layers.as_ref() {
+                    target
+                        .plan
+                        .advance(target.position, DeepTag::Let, layers.len())
+                } else {
+                    target.plan.advance(target.position, DeepTag::Let, 1)
+                };
+                if let Some(position) = position {
                     target.position = position;
                     tensor_helpers.forwarding = forwarding;
                 }
