@@ -12812,7 +12812,20 @@ fn inlined_matmul_products_match_evaluator_bits_under_sanitizers() {
         ]
         .into_iter()
         .collect();
-        let expected = eval_tensor(&dag, &inputs).unwrap()[&sum].to_f64_lossy_vec();
+        let dense = eval_tensor(&dag, &inputs).unwrap();
+        let rooted =
+            chelis_ir::eval::eval_tensor_roots_with(&dag, &[sum], |name| inputs.get(name).cloned())
+                .unwrap();
+        assert_eq!(rooted[&sum].shape, dense[&sum].shape);
+        let bits = |value: &TensorValue| {
+            value
+                .to_f64_lossy_vec()
+                .into_iter()
+                .map(f64::to_bits)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&rooted[&sum]), bits(&dense[&sum]));
+        let expected = rooted[&sum].to_f64_lossy_vec();
         let (native, bits, format) = match prim {
             Prim::F32 => ("float", "uint32_t", "%08x"),
             _ => ("double", "uint64_t", "%016llx"),
@@ -12997,6 +13010,12 @@ fn inlined_matmul_expansion_traps_precede_allocation_and_match_the_evaluator() {
         .into_iter()
         .collect();
         let evaluated = eval_tensor(&dag, &inputs);
+        let rooted =
+            chelis_ir::eval::eval_tensor_roots_with(&dag, &[sum], |name| inputs.get(name).cloned());
+        assert_eq!(
+            rooted.as_ref().map(|values| &values[&sum]),
+            evaluated.as_ref().map(|values| &values[&sum])
+        );
         let source = match &evaluated {
             Ok(_) => generated.clone(),
             Err(_) => generated.replacen(

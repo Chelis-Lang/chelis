@@ -71,12 +71,46 @@ stride 1, and padding 3. Every result must match the bits of a direct
 cross-correlation with the canonical adjacent-pair reduction tree, and DAG
 execution must finish within 90 seconds. Run this manual budget on an idle
 machine; it does not establish a throughput guarantee. Default PR CI does not
-run this ignored case. Its reported heap peak includes residual materialized
-convolution coordinates and contraction operands.
+run this ignored case. Peak live heap increase must remain below 32 MiB,
+including source storage, graph scheduling, and output buffers.
 
-The suite covers sparse index reads and the named movement/reduction scratch
-cases of chelis#828. It does not certify
-the tracker's other rows: host iteration, routed-DAG reuse, the School batched
-corpus, dead-after-last-use chains, contraction memory,
-or streamed convolution coordinates. The whole-model goal in
-chelis#3584 requires separate evidence.
+Root-scoped evaluation represents private expansion/product nodes as immutable
+views and feeds finalized tagged multiplication results into typed
+canonical adjacent-pair sum kernels. Dense source storage dispatches once per
+contraction rather than validating tags at every leaf. The shared IR contraction planner controls eligibility;
+all-values evaluation and explicitly selected intermediate roots retain dense
+values. Views own their source values across last-use reclamation. Cartesian
+index views retain Add overflow and Gather domain checks at their original node
+positions. Window views permit one data reader plus auxiliary expansion extent
+readers. Vector extrema prove the complete index interval, and an interval
+that cannot prove bounds falls back to row-major first-invalid-index checking.
+
+Default cases compare stored bits against dense all-values evaluation for all
+four float dtypes and admitted accumulator widths, static and runtime extent
+lowering, cancellation, nonfinite
+values, signed zeros, selected intermediate roots, convolution gradients, and
+Cartesian overflow/invalid/empty controls. A nonempty Add still overflows before
+an empty Gather output, and key-valued gathers preserve opaque key storage.
+A many-contraction case reports
+planner scaling; the planner uses one graph scan for source Drop positions.
+
+Run the model-sized pointwise pair separately:
+
+```sh
+cargo nextest run --release -p chelis-ir --test eval_performance --run-ignored only \
+  -E 'test(=eval_performance_pointwise_pair_witness)' --no-capture
+```
+
+This evaluates `[3136,128]` by `[128,512]`, GELU, then `[512,128]` in f32.
+Every result must match explicit canonical-tree references with an independent
+dense scalar GELU graph. Peak live heap increase must remain below 96 MiB and
+evaluation must finish within 90 seconds on an idle runner. Default PR CI does
+not run this ignored case.
+
+The suite covers sparse index reads, named movement/reduction scratch,
+private exact contractions, and Cartesian convolution coordinates of chelis#828.
+It does not certify host iteration, routed-DAG reuse, the School batched corpus,
+or dead-after-last-use chains. Products with additional readers, shape/claim
+dependencies, activation ownership, unequal expansion types, or early source
+Drop are not eligible for the shared contraction descriptor. The whole-model
+goal in chelis#3584 requires separate evidence.

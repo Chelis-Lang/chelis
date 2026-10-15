@@ -19,6 +19,7 @@ use chelis_abi::metadata::{AllocationBytes, MetadataError, ShapeMetadata};
 use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::sync::{Arc, OnceLock};
 
 use crate::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
@@ -43,9 +44,177 @@ use chelis_types::{PreparedUniformLike, RandomKey, uniform_like_bound_adjoint};
 
 #[derive(Debug, Clone)]
 pub struct TensorValue {
-    storage: TensorStorage,
+    storage: EvalStorage,
     pub shape: Vec<usize>,
     raw_f64_ingress: bool,
+}
+
+#[derive(Debug, Clone)]
+enum EvalStorage {
+    Dense(TensorStorage),
+    View(Arc<TensorView>),
+}
+
+impl From<TensorStorage> for EvalStorage {
+    fn from(storage: TensorStorage) -> Self {
+        Self::Dense(storage)
+    }
+}
+
+#[derive(Debug)]
+struct TensorView {
+    precision: Prim,
+    len: usize,
+    kind: TensorViewKind,
+    materialized: OnceLock<TensorStorage>,
+}
+
+#[derive(Debug)]
+enum TensorViewKind {
+    Expand {
+        source: TensorValue,
+        inner: usize,
+        block: usize,
+        source_block: usize,
+    },
+    Product {
+        lhs: TensorValue,
+        rhs: TensorValue,
+    },
+    CartesianAdd {
+        lhs: TensorValue,
+        rhs: TensorValue,
+        bounds: Option<(i64, i64)>,
+    },
+    Gather {
+        source: TensorValue,
+        indices: TensorValue,
+    },
+}
+
+impl TensorView {
+    fn scalar_at(&self, index: usize) -> chelis_types::ScalarValue {
+        assert!(index < self.len);
+        match &self.kind {
+            TensorViewKind::Expand {
+                source,
+                inner,
+                block,
+                source_block,
+            } => source.scalar_at(index / block * source_block + index % inner),
+            TensorViewKind::CartesianAdd { lhs, rhs, .. } => {
+                chelis_types::dtype_semantics::int_binop(
+                    IntBinOp::Add,
+                    lhs.scalar_at(index),
+                    rhs.scalar_at(index),
+                )
+                .expect("Cartesian extrema established total integer addition")
+            }
+            TensorViewKind::Gather { source, indices } => source.scalar_at(
+                indices
+                    .scalar_at(index)
+                    .as_i64_exact()
+                    .expect("integer Cartesian indices") as usize,
+            ),
+            TensorViewKind::Product { lhs, rhs } => chelis_types::dtype_semantics::float_binop(
+                FloatBinOp::Mul,
+                lhs.scalar_at(index),
+                rhs.scalar_at(index),
+            )
+            .expect("a validated same-dtype float product is total"),
+        }
+    }
+}
+
+// Extrema of the two unexpanded vectors prove every Cartesian addition is
+// representable without visiting the matrix. The checked operation still runs
+// at Add, before a later Gather can report a domain failure.
+fn cartesian_add(lhs: &TensorValue, rhs: &TensorValue) -> Result<TensorValue, String> {
+    let extrema =
+        |value: &TensorValue| -> Option<(chelis_types::ScalarValue, chelis_types::ScalarValue)> {
+            let EvalStorage::View(view) = &value.storage else {
+                return None;
+            };
+            let TensorViewKind::Expand { source, .. } = &view.kind else {
+                return None;
+            };
+            let mut vals = (0..source.len()).map(|i| source.scalar_at(i));
+            let first = vals.next()?;
+            Some(vals.fold((first, first), |(lo, hi), v| {
+                (
+                    if v.as_i64_exact() < lo.as_i64_exact() {
+                        v
+                    } else {
+                        lo
+                    },
+                    if v.as_i64_exact() > hi.as_i64_exact() {
+                        v
+                    } else {
+                        hi
+                    },
+                )
+            }))
+        };
+    let bounds = if lhs.is_empty() {
+        None
+    } else {
+        let (Some((a, b)), Some((c, d))) = (extrema(lhs), extrema(rhs)) else {
+            return Err("Cartesian operand is not an expansion".into());
+        };
+        let lo = chelis_types::dtype_semantics::int_binop(IntBinOp::Add, a, c)
+            .map_err(|e| e.to_string())?;
+        let hi = chelis_types::dtype_semantics::int_binop(IntBinOp::Add, b, d)
+            .map_err(|e| e.to_string())?;
+        Some((
+            lo.as_i64_exact().expect("integer sum"),
+            hi.as_i64_exact().expect("integer sum"),
+        ))
+    };
+    Ok(TensorValue::from_view(
+        lhs.shape.clone(),
+        lhs.prim(),
+        TensorViewKind::CartesianAdd {
+            lhs: lhs.clone(),
+            rhs: rhs.clone(),
+            bounds,
+        },
+    ))
+}
+
+fn cartesian_gather(source: &TensorValue, indices: &TensorValue) -> Result<TensorValue, String> {
+    admit_result("gather", &indices.shape, source.prim())?;
+    let bounds = match &indices.storage {
+        EvalStorage::View(v) => match &v.kind {
+            TensorViewKind::CartesianAdd { bounds, .. } => *bounds,
+            _ => None,
+        },
+        _ => None,
+    };
+    let proved = bounds.is_some_and(|(lo, hi)| lo >= 0 && (hi as u64) < source.len() as u64);
+    if !proved {
+        for index in 0..indices.len() {
+            let value = indices
+                .scalar_at(index)
+                .as_i64_exact()
+                .expect("integer Cartesian indices");
+            if value < 0 || value as usize >= source.len() {
+                return Err(chelis_abi::failure::sparse_index_out_of_bounds(
+                    "gather",
+                    value,
+                    0,
+                    i64::try_from(source.len()).unwrap_or(i64::MAX),
+                ));
+            }
+        }
+    }
+    Ok(TensorValue::from_view(
+        indices.shape.clone(),
+        source.prim(),
+        TensorViewKind::Gather {
+            source: source.clone(),
+            indices: indices.clone(),
+        },
+    ))
 }
 
 impl TensorValue {
@@ -54,7 +223,8 @@ impl TensorValue {
     pub fn scalar(value: f64) -> Self {
         Self {
             storage: finalize_tensor("scalar", Prim::F64, RawTensor::Float(vec![value]))
-                .expect("f64 finalize is total"),
+                .expect("f64 finalize is total")
+                .into(),
             shape: vec![],
             raw_f64_ingress: true,
         }
@@ -68,7 +238,8 @@ impl TensorValue {
         assert_eq!(numel(&shape), data.len());
         Self {
             storage: finalize_tensor("from_vec", Prim::F64, RawTensor::Float(data))
-                .expect("f64 finalize is total"),
+                .expect("f64 finalize is total")
+                .into(),
             shape,
             raw_f64_ingress: true,
         }
@@ -78,7 +249,7 @@ impl TensorValue {
     pub fn from_storage(shape: Vec<usize>, storage: TensorStorage) -> Self {
         assert_eq!(numel(&shape), storage.len());
         Self {
-            storage,
+            storage: storage.into(),
             shape,
             raw_f64_ingress: false,
         }
@@ -86,40 +257,75 @@ impl TensorValue {
 
     /// The element dtype, from the storage variant itself.
     pub fn prim(&self) -> Prim {
-        self.storage.prim()
+        match &self.storage {
+            EvalStorage::Dense(storage) => storage.prim(),
+            EvalStorage::View(view) => view.precision,
+        }
     }
 
     pub fn storage(&self) -> &TensorStorage {
-        &self.storage
+        match &self.storage {
+            EvalStorage::Dense(storage) => storage,
+            EvalStorage::View(view) => view.materialized.get_or_init(|| {
+                let values = (0..view.len)
+                    .map(|index| view.scalar_at(index))
+                    .collect::<Vec<_>>();
+                tensor_from_scalars(view.precision, &values)
+            }),
+        }
     }
 
     /// Element count (the shape's numel).
     pub fn len(&self) -> usize {
-        self.storage.len()
+        match &self.storage {
+            EvalStorage::Dense(storage) => storage.len(),
+            EvalStorage::View(view) => view.len,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.storage.is_empty()
+        self.len() == 0
     }
 
     /// Widen every element to f64; exact except for i64 magnitudes
     /// above 2^53 (the named-lossy read of section C3).
     pub fn to_f64_lossy_vec(&self) -> Vec<f64> {
-        self.storage.to_f64_lossy_vec()
+        self.storage().to_f64_lossy_vec()
     }
 
     /// One element widened to f64 (same loss profile).
     pub fn element_f64_lossy(&self, index: usize) -> f64 {
-        self.storage.element_f64_lossy(index)
+        self.scalar_at(index).as_f64_lossy()
     }
 
     /// First element widened to f64, or 0.0 for an empty buffer (the
     /// scalar-read convention `eval_scalar` always had).
     pub fn first_f64_lossy_or_zero(&self) -> f64 {
-        if self.storage.is_empty() {
+        if self.is_empty() {
             0.0
         } else {
-            self.storage.element_f64_lossy(0)
+            self.element_f64_lossy(0)
+        }
+    }
+
+    fn scalar_at(&self, index: usize) -> chelis_types::ScalarValue {
+        match &self.storage {
+            EvalStorage::Dense(storage) => storage.scalar_at(index),
+            EvalStorage::View(view) => view.scalar_at(index),
+        }
+    }
+
+    fn from_view(shape: Vec<usize>, precision: Prim, kind: TensorViewKind) -> Self {
+        let len = numel(&shape);
+        Self {
+            storage: EvalStorage::View(Arc::new(TensorView {
+                precision,
+                len,
+                kind,
+                materialized: OnceLock::new(),
+            })),
+            shape,
+            raw_f64_ingress: false,
         }
     }
 
@@ -166,7 +372,7 @@ impl PartialEq for TensorValue {
         }
         let self_prim = self.prim();
         let other_prim = other.prim();
-        match (self.storage.to_raw(), other.storage.to_raw()) {
+        match (self.storage().to_raw(), other.storage().to_raw()) {
             (RawTensor::Int(a), RawTensor::Int(b)) => a == b,
             (RawTensor::Float(a), RawTensor::Float(b)) => a == b,
             (RawTensor::Int(ints), RawTensor::Float(floats)) => {
@@ -1306,7 +1512,7 @@ fn broadcast_rank0_operands<'a>(
 /// qualifies: every output element is `value[0]`, never re-finalized.
 fn splat_rank0(value: &TensorValue, shape: &[usize]) -> TensorValue {
     TensorValue {
-        storage: value.storage.reuse_gather(&vec![0; numel(shape)]),
+        storage: value.storage().reuse_gather(&vec![0; numel(shape)]).into(),
         shape: shape.to_vec(),
         raw_f64_ingress: value.raw_f64_ingress,
     }
@@ -1668,7 +1874,7 @@ fn batched_matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<Te
 /// tensors have a signed-integer dtype, so the float arm is legacy
 /// tolerance for f64-storage fixtures driving untyped index inputs).
 fn index_at(indices: &TensorValue, linear: usize) -> isize {
-    let value = indices.storage().scalar_at(linear);
+    let value = indices.scalar_at(linear);
     match value.as_i64_exact() {
         Some(index) => index as isize,
         None => value.as_f64_lossy() as isize,
@@ -2158,8 +2364,73 @@ fn reduce(
     result: Prim,
 ) -> Result<TensorValue, String> {
     let (out_shape, groups) = axis_reduction_groups(name, result, &input.shape, axis)?;
-    let storage =
-        reduce_tensor_groups_iter(op, input.storage(), groups).map_err(|err| err.to_string())?;
+    let dense_product = match &input.storage {
+        EvalStorage::View(product) => match &product.kind {
+            TensorViewKind::Product { lhs, rhs } => match (&lhs.storage, &rhs.storage) {
+                (EvalStorage::View(lhs), EvalStorage::View(rhs)) => match (&lhs.kind, &rhs.kind) {
+                    (
+                        TensorViewKind::Expand {
+                            source: a,
+                            inner: ai,
+                            block: ab,
+                            source_block: asb,
+                        },
+                        TensorViewKind::Expand {
+                            source: b,
+                            inner: bi,
+                            block: bb,
+                            source_block: bsb,
+                        },
+                    ) if matches!(a.storage, EvalStorage::Dense(_))
+                        && matches!(b.storage, EvalStorage::Dense(_)) =>
+                    {
+                        Some((a, b, *ai, *ab, *asb, *bi, *bb, *bsb))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    };
+    let storage = if let (
+        Some((a, b, ai, ab, asb, bi, bb, bsb)),
+        TensorReduceOp::Sum {
+            accumulator,
+            result,
+        },
+    ) = (dense_product, op)
+    {
+        chelis_types::dtype_semantics::sum_tensor_product_groups(
+            a.storage(),
+            b.storage(),
+            accumulator,
+            result,
+            groups.map(|group| {
+                group.map(move |index| {
+                    (index / ab * asb + index % ai, index / bb * bsb + index % bi)
+                })
+            }),
+        )
+    } else if let (
+        EvalStorage::View(_),
+        TensorReduceOp::Sum {
+            accumulator,
+            result,
+        },
+    ) = (&input.storage, op)
+    {
+        chelis_types::dtype_semantics::sum_tensor_scalar_groups(
+            input.prim(),
+            accumulator,
+            result,
+            groups.map(|group| group.map(|index| input.scalar_at(index))),
+        )
+    } else {
+        reduce_tensor_groups_iter(op, input.storage(), groups)
+    }
+    .map_err(|err| err.to_string())?;
     Ok(TensorValue::from_storage(out_shape, storage))
 }
 
@@ -3399,9 +3670,9 @@ struct EvaluatedValues {
     #[cfg_attr(not(test), allow(dead_code))]
     peak_live_values: usize,
     /// The most tensor ELEMENTS `values` ever held at once, by the same
-    /// sampling rule. [`TensorStorage`] owns its buffer outright rather than
-    /// sharing a handle, so removing an entry releases that entry's elements
-    /// and this count is a faithful proxy for the evaluator's own footprint.
+    /// sampling rule. This is a logical element count: root-scoped virtual
+    /// views can share source-sized storage, so allocation oracles measure
+    /// their physical footprint separately.
     #[cfg_attr(not(test), allow(dead_code))]
     peak_live_elements: usize,
 }
@@ -3911,6 +4182,37 @@ where
     let free_schedule = scope
         .retained_roots()
         .map(|roots| value_free_schedule(&bound_dag, &order, live, &local_guard_sites, roots));
+
+    // The all-values API retains materialized intermediates. A selected
+    // intermediate also remains dense even when it is not one of Dag::roots.
+    let mut virtual_nodes = vec![false; dag.len()];
+    if let Some(roots) = scope.retained_roots() {
+        for product in crate::fuse::reduction_inlined_products(dag) {
+            if product.skipped().iter().any(|node| roots.contains(node)) {
+                continue;
+            }
+            for node in product.skipped() {
+                virtual_nodes[node.0] = true;
+            }
+        }
+        for indices in crate::fuse::cartesian_gather_indices(dag) {
+            let skipped = [indices.index_sum, indices.views[0], indices.views[1]];
+            if skipped.iter().any(|node| roots.contains(node)) {
+                continue;
+            }
+            for node in skipped {
+                virtual_nodes[node.0] = true;
+            }
+            if indices.private_gather
+                && !roots.contains(&indices.gather)
+                && dag
+                    .get(indices.gather)
+                    .is_some_and(|node| node.inputs.len() == 2)
+            {
+                virtual_nodes[indices.gather.0] = true;
+            }
+        }
+    }
 
     // One seed query for the walk: the literal result claims a witness
     // checks are a whole-graph derivation, read from the unbound graph as
@@ -4478,11 +4780,18 @@ where
             RiscOp::Store { .. } | RiscOp::Copy | RiscOp::Drop | RiscOp::Realize => {
                 values[&node.inputs[0]].clone()
             }
-            RiscOp::Add => binary_elementwise(
-                ElementwiseBinOp::Add,
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-            )?,
+            RiscOp::Add => {
+                let (lhs, rhs) = (&values[&node.inputs[0]], &values[&node.inputs[1]]);
+                if virtual_nodes[node.id.0]
+                    && lhs.prim().is_integer()
+                    && lhs.prim() == rhs.prim()
+                    && lhs.shape == rhs.shape
+                {
+                    cartesian_add(lhs, rhs)?
+                } else {
+                    binary_elementwise(ElementwiseBinOp::Add, lhs, rhs)?
+                }
+            }
             RiscOp::Sub => binary_elementwise(
                 ElementwiseBinOp::Sub,
                 &values[&node.inputs[0]],
@@ -4496,7 +4805,19 @@ where
                 {
                     return Err(agreement_failure(dag, node, lhs, rhs));
                 }
-                binary_elementwise(ElementwiseBinOp::Mul, lhs, rhs)?
+                if virtual_nodes[node.id.0] && lhs.prim().is_float() && lhs.prim() == rhs.prim() {
+                    require_matching_comparison_shapes("mul", lhs, rhs)?;
+                    TensorValue::from_view(
+                        lhs.shape.clone(),
+                        lhs.prim(),
+                        TensorViewKind::Product {
+                            lhs: lhs.clone(),
+                            rhs: rhs.clone(),
+                        },
+                    )
+                } else {
+                    binary_elementwise(ElementwiseBinOp::Mul, lhs, rhs)?
+                }
             }
             RiscOp::Div => {
                 if is_runtime_mean_div(dag, node)
@@ -5059,7 +5380,39 @@ where
                         input.shape.len() + 1
                     ));
                 };
-                expand(kind.primitive_name(), input, *axis, out_shape)?
+                if virtual_nodes[node.id.0] {
+                    let len = admit_result(kind.primitive_name(), &out_shape, input.prim())?;
+                    let suffix = if kind == crate::axis_sources::ExpansionKind::Expand {
+                        *axis + 1
+                    } else {
+                        *axis
+                    };
+                    let inner = if len == 0 {
+                        1
+                    } else {
+                        numel(&input.shape[suffix..])
+                    };
+                    let block = if len == 0 { 1 } else { size_value * inner };
+                    let source_block = if len == 0 {
+                        1
+                    } else if kind == crate::axis_sources::ExpansionKind::Expand {
+                        input.shape[*axis] * inner
+                    } else {
+                        inner
+                    };
+                    TensorValue::from_view(
+                        out_shape,
+                        input.prim(),
+                        TensorViewKind::Expand {
+                            source: input.clone(),
+                            inner,
+                            block,
+                            source_block,
+                        },
+                    )
+                } else {
+                    expand(kind.primitive_name(), input, *axis, out_shape)?
+                }
             }
             RiscOp::OneHot { vocab } => one_hot(&values[&node.inputs[0]], *vocab, out_prim)?,
             RiscOp::Pad { padding, fill } => {
@@ -5271,12 +5624,20 @@ where
                     batched_matmul(lhs, rhs, out_prim)?
                 }
             }
-            RiscOp::Gather { axis, batch_rank } => gather(
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-                *axis,
-                *batch_rank,
-            )?,
+            RiscOp::Gather { axis, batch_rank } => {
+                let (source, indices) = (&values[&node.inputs[0]], &values[&node.inputs[1]]);
+                if virtual_nodes[node.id.0]
+                    && *axis == 0
+                    && *batch_rank == 0
+                    && source.shape.len() == 1
+                    && source.prim() != Prim::Key
+                    && matches!(&indices.storage,EvalStorage::View(view) if matches!(view.kind,TensorViewKind::CartesianAdd{..}))
+                {
+                    cartesian_gather(source, indices)?
+                } else {
+                    gather(source, indices, *axis, *batch_rank)?
+                }
+            }
             RiscOp::ScatterAdd { axis, batch_rank } => scatter_add(
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
@@ -5355,6 +5716,18 @@ where
                 local_guard_verdict(*axis, claim, observed, &mut runtime_dims, &values)?;
             }
         }
+        // A transparent Copy can carry a private view to a selected root.
+        // Complete its storage before returning, so the root API does not
+        // defer output-sized work to the caller's first storage observation.
+        let value = if scope
+            .retained_roots()
+            .is_some_and(|roots| roots.contains(&node.id))
+            && matches!(value.storage, EvalStorage::View(_))
+        {
+            TensorValue::from_storage(value.shape.clone(), value.storage().clone())
+        } else {
+            value
+        };
         let produced_elements = value.len();
         if let Some(replaced) = values.insert(node.id, value) {
             live_elements -= replaced.len();

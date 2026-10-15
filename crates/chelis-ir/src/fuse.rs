@@ -526,6 +526,14 @@ pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
     let private = |node: &DagNode| {
         consumer_count[node.id.0] == 1 && !dependency[node.id.0] && node.owner.activation.is_none()
     };
+    let mut first_drop = vec![usize::MAX; dag.len()];
+    for node in dag.nodes() {
+        if matches!(node.op, RiscOp::Drop) {
+            for input in &node.inputs {
+                first_drop[input.0] = first_drop[input.0].min(node.id.0);
+            }
+        }
+    }
     let mut found = Vec::new();
     for sum in dag.nodes() {
         if !matches!(sum.op, RiscOp::Sum { .. })
@@ -559,10 +567,11 @@ pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
         if !admitted(lhs) || !admitted(rhs) {
             continue;
         }
-        let operands = lhs.inputs.iter().chain(&rhs.inputs).collect::<Vec<_>>();
-        let released_early = dag.nodes()[..sum.id.0].iter().any(|node| {
-            matches!(node.op, RiscOp::Drop) && node.inputs.iter().any(|id| operands.contains(&id))
-        });
+        let released_early = lhs
+            .inputs
+            .iter()
+            .chain(&rhs.inputs)
+            .any(|id| first_drop[id.0] < sum.id.0);
         if released_early {
             continue;
         }
@@ -570,6 +579,102 @@ pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
             sum: sum.id,
             product: product.id,
             views: [lhs.id, rhs.id],
+        });
+    }
+    found
+}
+
+/// A private Cartesian index matrix consumed by a flat gather. The descriptor
+/// records existing nodes; lanes retain their checks at those node positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CartesianGatherIndices {
+    pub gather: NodeId,
+    pub index_sum: NodeId,
+    pub views: [NodeId; 2],
+    /// One data reader; auxiliary Expand InputAxis readers observe extents.
+    pub private_gather: bool,
+}
+
+pub fn cartesian_gather_indices(dag: &Dag) -> Vec<CartesianGatherIndices> {
+    let counts = build_consumer_counts(dag);
+    // Auxiliary InputAxis reads observe only extents. A window's one data
+    // reader can coexist with those reads without requiring dense windows.
+    let mut data_counts = counts.clone();
+    for node in dag.nodes() {
+        if let RiscOp::Expand {
+            size: crate::dag::RtDim::InputAxis { tensor, .. },
+            ..
+        } = &node.op
+            && *tensor != 0
+            && let Some(input) = node.inputs.get(*tensor)
+        {
+            data_counts[input.0] -= 1;
+        }
+    }
+    let mut dependency = vec![false; dag.len()];
+    for node in dag.nodes() {
+        for id in node.shape_deps.iter().chain(&node.result_claim_deps) {
+            dependency[id.0] = true;
+        }
+    }
+    let private = |node: &DagNode| {
+        counts[node.id.0] == 1 && !dependency[node.id.0] && node.owner.activation.is_none()
+    };
+    let mut found = Vec::new();
+    for gather in dag.nodes() {
+        if !matches!(
+            gather.op,
+            RiscOp::Gather {
+                axis: 0,
+                batch_rank: 0
+            }
+        ) || gather.inputs.len() != 2
+            || gather.owner.activation.is_some()
+        {
+            continue;
+        }
+        let (Some(source), Some(sum)) = (dag.get(gather.inputs[0]), dag.get(gather.inputs[1]))
+        else {
+            continue;
+        };
+        if source.output_type.dims.len() != 1
+            || !matches!(sum.op, RiscOp::Add)
+            || sum.inputs.len() != 2
+            || !sum.output_type.precision.is_integer()
+            || !private(sum)
+        {
+            continue;
+        }
+        let (Some(row), Some(col)) = (dag.get(sum.inputs[0]), dag.get(sum.inputs[1])) else {
+            continue;
+        };
+        if !matches!(row.op, RiscOp::Expand { axis: 1, .. })
+            || !matches!(col.op, RiscOp::Expand { axis: 0, .. })
+            || row.inputs.is_empty()
+            || col.inputs.is_empty()
+            || !private(row)
+            || !private(col)
+            || row.output_type != sum.output_type
+            || col.output_type != sum.output_type
+            || sum.output_type.dims.len() != 2
+        {
+            continue;
+        }
+        if ![row, col].iter().all(|view| {
+            dag.get(view.inputs[0]).is_some_and(|base| {
+                base.output_type.dims.len() == 1
+                    && base.output_type.precision == sum.output_type.precision
+            })
+        }) {
+            continue;
+        }
+        found.push(CartesianGatherIndices {
+            gather: gather.id,
+            index_sum: sum.id,
+            views: [row.id, col.id],
+            private_gather: data_counts[gather.id.0] == 1
+                && !dependency[gather.id.0]
+                && gather.owner.activation.is_none(),
         });
     }
     found

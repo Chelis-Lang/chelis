@@ -2832,14 +2832,26 @@ fn reduce_sum_group(
     group: impl Iterator<Item = usize>,
     accumulator: Prim,
 ) -> Result<ScalarValue, NumericKernelError> {
+    reduce_sum_values(
+        op,
+        group.map(|index| scalar_at_reduction_width(op, input, index, accumulator)),
+        accumulator,
+    )
+}
+
+fn reduce_sum_values(
+    op: TensorReduceOp,
+    values: impl Iterator<Item = Result<ScalarValue, NumericKernelError>>,
+    accumulator: Prim,
+) -> Result<ScalarValue, NumericKernelError> {
     // Each occupied level holds the completed left-to-right subtree of
     // 2^level leaves. Carrying combines adjacent equal-sized subtrees.
     // Finalize from the smallest occupied level upward: the odd right tail
     // is carried unchanged until the next left subtree joins it. This is
     // the breadth-first adjacent-pair tree, including non-power-of-two sizes.
     let mut levels = [None; usize::BITS as usize];
-    for index in group {
-        let mut carry = scalar_at_reduction_width(op, input, index, accumulator)?;
+    for value in values {
+        let mut carry = value?;
         let mut level = 0;
         while let Some(left) = levels[level].take() {
             carry = reduction_add(op, left, carry)?;
@@ -3128,6 +3140,193 @@ where
     // extremum selected a stored element whose bits [05-OP-12] keeps. Storing
     // them is insertion, so no f64 image or second finalization can change a
     // selected NaN's payload, sign or signaling bit.
+    Ok(tensor_from_scalars(result, &values))
+}
+
+// The same adjacent-pair tree as reduce_sum_values, after a single typed
+// storage dispatch. Only float accumulators use this infallible native core.
+fn native_sum<T>(values: impl Iterator<Item = T>) -> T
+where
+    T: Copy + Default + std::ops::Add<Output = T>,
+{
+    let mut levels = [None; usize::BITS as usize];
+    for mut carry in values {
+        let mut level = 0;
+        while let Some(left) = levels[level].take() {
+            carry = left + carry;
+            level += 1;
+        }
+        levels[level] = Some(carry);
+    }
+    let mut right = None;
+    for left in levels.into_iter().flatten() {
+        right = Some(match right {
+            Some(tail) => left + tail,
+            None => left,
+        });
+    }
+    right.unwrap_or_default()
+}
+
+/// Exact stored-operand products followed by ordered sums ([05-OP-33],
+/// [05-OP-30]). Dtype dispatch occurs once; products finalize at their own
+/// dtype before widening into the accumulator. Coordinates remain indices,
+/// and numeric inputs/results retain tagged storage at this boundary.
+pub fn sum_tensor_product_groups<G, I>(
+    lhs: &TensorStorage,
+    rhs: &TensorStorage,
+    accumulator: Prim,
+    result: Prim,
+    groups: G,
+) -> Result<TensorStorage, NumericKernelError>
+where
+    G: IntoIterator<Item = I>,
+    I: IntoIterator<Item = (usize, usize)>,
+{
+    let op = TensorReduceOp::Sum {
+        accumulator,
+        result,
+    };
+    if lhs.prim() != rhs.prim() {
+        return Err(NumericKernelError::DtypeMismatch {
+            op: "mul",
+            lhs: lhs.prim(),
+            rhs: rhs.prim(),
+        });
+    }
+    reduction_signature(op, lhs.prim())?;
+    macro_rules! run {
+        ($left:expr,$right:expr,$product:expr,$variant:ident) => {{
+            let values = groups
+                .into_iter()
+                .map(|group| {
+                    let value = native_sum(
+                        group
+                            .into_iter()
+                            .map(|(a, b)| ($product)($left[a], $right[b])),
+                    );
+                    reduction_result_scalar(
+                        op,
+                        canonical_nan_scalar(ScalarValue {
+                            bits: Bits::$variant(value),
+                        }),
+                        result,
+                    )
+                })
+                .collect::<Result<Vec<_>, NumericKernelError>>()?;
+            Ok(tensor_from_scalars(result, &values))
+        }};
+    }
+    match (&lhs.buf, &rhs.buf, accumulator) {
+        (Buf::F32(a), Buf::F32(b), Prim::F32) => run!(
+            a,
+            b,
+            |x: f32, y: f32| apply_float_binop_f32(FloatBinOp::Mul, x, y),
+            F32
+        ),
+        (Buf::F32(a), Buf::F32(b), Prim::F64) => run!(
+            a,
+            b,
+            |x: f32, y: f32| f64::from(apply_float_binop_f32(FloatBinOp::Mul, x, y)),
+            F64
+        ),
+        (Buf::F64(a), Buf::F64(b), Prim::F64) => run!(
+            a,
+            b,
+            |x: f64, y: f64| apply_float_binop_f64(FloatBinOp::Mul, x, y),
+            F64
+        ),
+        (Buf::F16(a), Buf::F16(b), Prim::F32) => run!(
+            a,
+            b,
+            |x: half::f16, y: half::f16| half::f16::from_f32(apply_float_binop_f32(
+                FloatBinOp::Mul,
+                x.to_f32(),
+                y.to_f32()
+            ))
+            .to_f32(),
+            F32
+        ),
+        (Buf::F16(a), Buf::F16(b), Prim::F64) => run!(
+            a,
+            b,
+            |x: half::f16, y: half::f16| f64::from(
+                half::f16::from_f32(apply_float_binop_f32(
+                    FloatBinOp::Mul,
+                    x.to_f32(),
+                    y.to_f32()
+                ))
+                .to_f32()
+            ),
+            F64
+        ),
+        (Buf::Bf16(a), Buf::Bf16(b), Prim::F32) => run!(
+            a,
+            b,
+            |x: half::bf16, y: half::bf16| half::bf16::from_f32(apply_float_binop_f32(
+                FloatBinOp::Mul,
+                x.to_f32(),
+                y.to_f32()
+            ))
+            .to_f32(),
+            F32
+        ),
+        (Buf::Bf16(a), Buf::Bf16(b), Prim::F64) => run!(
+            a,
+            b,
+            |x: half::bf16, y: half::bf16| f64::from(
+                half::bf16::from_f32(apply_float_binop_f32(
+                    FloatBinOp::Mul,
+                    x.to_f32(),
+                    y.to_f32()
+                ))
+                .to_f32()
+            ),
+            F64
+        ),
+        _ => Err(NumericKernelError::WrongFamily {
+            op: "mul",
+            expected: NumericFamily::Float,
+            actual: lhs.prim(),
+        }),
+    }
+}
+
+/// Sum ordered groups of already tagged leaves. A streamed producer retains
+/// its own per-operation finalization before a leaf enters the same checked
+/// accumulator tree as stored tensor input ([05-OP-30]).
+pub fn sum_tensor_scalar_groups<G, I>(
+    input: Prim,
+    accumulator: Prim,
+    result: Prim,
+    groups: G,
+) -> Result<TensorStorage, NumericKernelError>
+where
+    G: IntoIterator<Item = I>,
+    I: IntoIterator<Item = ScalarValue>,
+{
+    let op = TensorReduceOp::Sum {
+        accumulator,
+        result,
+    };
+    reduction_signature(op, input)?;
+    let values = groups
+        .into_iter()
+        .map(|group| {
+            let leaves = group.into_iter().map(|value| {
+                if value.prim() != input {
+                    return Err(NumericKernelError::DtypeMismatch {
+                        op: "sum",
+                        lhs: input,
+                        rhs: value.prim(),
+                    });
+                }
+                within_family("sum", value, accumulator)
+            });
+            let value = reduce_sum_values(op, leaves, accumulator)?;
+            reduction_result_scalar(op, canonical_nan_scalar(value), result)
+        })
+        .collect::<Result<Vec<_>, NumericKernelError>>()?;
     Ok(tensor_from_scalars(result, &values))
 }
 
@@ -6254,6 +6453,133 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn stored_product_sum_matches_materialized_nodes_at_every_tree_length() {
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            for accumulator in [Prim::F32, Prim::F64] {
+                if prim == Prim::F64 && accumulator == Prim::F32 {
+                    continue;
+                }
+                for len in 0..66 {
+                    let a = finalize_tensor(
+                        "oracle",
+                        prim,
+                        RawTensor::Float(
+                            (0..len)
+                                .map(|i| {
+                                    [
+                                        2048.0,
+                                        -2048.0,
+                                        0.00006103515625,
+                                        -0.0,
+                                        1.0,
+                                        0.1,
+                                        0.3,
+                                        1.0009765625,
+                                    ][i % 8]
+                                })
+                                .collect(),
+                        ),
+                    )
+                    .unwrap();
+                    let b = finalize_tensor(
+                        "oracle",
+                        prim,
+                        RawTensor::Float(
+                            (0..len)
+                                .map(|i| [1.0, -1.0, 0.5, 0.3, 1.00390625][i % 5])
+                                .collect(),
+                        ),
+                    )
+                    .unwrap();
+                    let product = float_tensor_binop(FloatBinOp::Mul, &a, &b).unwrap();
+                    let op = TensorReduceOp::Sum {
+                        accumulator,
+                        result: prim,
+                    };
+                    let expected =
+                        reduce_tensor_groups(op, &product, &[(0..len).collect()]).unwrap();
+                    let actual = sum_tensor_product_groups(
+                        &a,
+                        &b,
+                        accumulator,
+                        prim,
+                        [(0..len).map(|i| (i, i))],
+                    )
+                    .unwrap();
+                    assert_eq!(actual, expected, "{prim:?}/{accumulator:?} length={len}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stored_product_sum_rejects_dtype_and_accumulator_mismatch() {
+        let a = finalize_tensor("oracle", Prim::F32, RawTensor::Float(vec![1.0])).unwrap();
+        let b = finalize_tensor("oracle", Prim::F64, RawTensor::Float(vec![1.0])).unwrap();
+        assert!(matches!(
+            sum_tensor_product_groups(&a, &b, Prim::F64, Prim::F64, [[(0, 0)]]),
+            Err(NumericKernelError::DtypeMismatch { op: "mul", .. })
+        ));
+        assert!(matches!(
+            sum_tensor_product_groups(&a, &a, Prim::F16, Prim::F16, [[(0, 0)]]),
+            Err(NumericKernelError::InvalidReductionSignature { .. })
+        ));
+        let empty =
+            sum_tensor_product_groups(&a, &a, Prim::F32, Prim::F32, [std::iter::empty()]).unwrap();
+        assert_eq!(
+            empty.scalar_at(0),
+            scalar_from_f64("oracle", Prim::F32, 0.0).unwrap()
+        );
+    }
+
+    #[test]
+    fn scalar_stream_sum_uses_the_same_tree_and_rejects_wrong_leaf_tags() {
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            let input = finalize_tensor(
+                "oracle",
+                prim,
+                RawTensor::Float(vec![2048.0, 1.0, -2048.0, 1.0, 1.0]),
+            )
+            .unwrap();
+            let accumulator = if prim == Prim::F64 {
+                Prim::F64
+            } else {
+                Prim::F32
+            };
+            let expected = reduce_tensor_groups(
+                TensorReduceOp::Sum {
+                    accumulator,
+                    result: prim,
+                },
+                &input,
+                &[vec![0, 1, 2, 3, 4]],
+            )
+            .unwrap();
+            let actual = sum_tensor_scalar_groups(
+                prim,
+                accumulator,
+                prim,
+                std::iter::once((0..5).map(|i| input.scalar_at(i))),
+            )
+            .unwrap();
+            assert_eq!(actual, expected);
+        }
+        let wrong = scalar_from_f64("oracle", Prim::F64, 1.0).unwrap();
+        assert_eq!(
+            sum_tensor_scalar_groups(Prim::F32, Prim::F32, Prim::F32, [[wrong]]),
+            Err(NumericKernelError::DtypeMismatch {
+                op: "sum",
+                lhs: Prim::F32,
+                rhs: Prim::F64
+            })
+        );
+        assert!(
+            sum_tensor_scalar_groups(Prim::F32, Prim::F16, Prim::F16, [std::iter::empty()])
+                .is_err()
+        );
     }
 
     #[test]

@@ -54,6 +54,741 @@ fn shaped_ty(shape: &[usize], precision: Prim) -> TensorType {
     }
 }
 
+#[test]
+fn eval_performance_streamed_contraction_bits_and_scratch() {
+    use chelis_ir::dag::Owner;
+    use chelis_ir::eval::eval_tensor_roots_with;
+    use chelis_ir::tier2::lower_matmul_with_accumulator;
+    for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        for accumulator in [Prim::F32, Prim::F64] {
+            for runtime in [false, true] {
+                if prim == Prim::F64 && accumulator == Prim::F32 {
+                    continue;
+                }
+                let (m, k, n) = (33, 17, 31);
+                let mut dag = Dag::new();
+                let owner = Owner::from(dag.declare("contraction oracle"));
+                let a_ty = if runtime {
+                    TensorType {
+                        dims: vec![DimInfo::Named("*".into(), None); 2],
+                        precision: prim,
+                    }
+                } else {
+                    shaped_ty(&[m, k], prim)
+                };
+                let b_ty = if runtime {
+                    TensorType {
+                        dims: vec![DimInfo::Named("*".into(), None); 2],
+                        precision: prim,
+                    }
+                } else {
+                    shaped_ty(&[k, n], prim)
+                };
+                let a = dag.add_node(
+                    owner,
+                    RiscOp::Load { name: "a".into() },
+                    vec![],
+                    a_ty.clone(),
+                    None,
+                );
+                let b = dag.add_node(
+                    owner,
+                    RiscOp::Load { name: "b".into() },
+                    vec![],
+                    b_ty.clone(),
+                    None,
+                );
+                let root = lower_matmul_with_accumulator(
+                    owner,
+                    &mut dag,
+                    a,
+                    b,
+                    &a_ty,
+                    &b_ty,
+                    accumulator,
+                    None,
+                );
+                dag.add_root(root);
+                if runtime {
+                    assert!(dag.nodes().iter().any(|node| matches!(
+                        node.op,
+                        RiscOp::Expand {
+                            size: chelis_ir::dag::RtDim::InputAxis { .. },
+                            ..
+                        }
+                    ) && node.inputs.len() > 1));
+                }
+                let inputs = UnordMap::from([
+                    (
+                        "a".into(),
+                        TensorValue::from_storage(
+                            vec![m, k],
+                            finalize_tensor(
+                                "oracle",
+                                prim,
+                                RawTensor::Float(
+                                    (0..m * k)
+                                        .map(|i| {
+                                            [2048.0, 0.00006103515625, -2048.0, 1.0, -0.0, 0.0, 2.0]
+                                                [i % 7]
+                                        })
+                                        .collect(),
+                                ),
+                            )
+                            .unwrap(),
+                        ),
+                    ),
+                    (
+                        "b".into(),
+                        TensorValue::from_storage(
+                            vec![k, n],
+                            finalize_tensor(
+                                "oracle",
+                                prim,
+                                RawTensor::Float(
+                                    (0..k * n)
+                                        .map(|i| [-1.0, 0.5, 1.0, -0.0, 2.0][i % 5])
+                                        .collect(),
+                                ),
+                            )
+                            .unwrap(),
+                        ),
+                    ),
+                ]);
+                let before = LIVE.load(Ordering::Relaxed);
+                PEAK.store(before, Ordering::Relaxed);
+                let start = Instant::now();
+                let rooted =
+                    eval_tensor_roots_with(&dag, &[root], |name| inputs.get(name).cloned())
+                        .unwrap();
+                let elapsed = start.elapsed();
+                let peak = PEAK.load(Ordering::Relaxed).saturating_sub(before);
+                assert!(
+                    peak < 96 * 1024,
+                    "materialized contraction {prim:?}/{accumulator:?} peak={peak}"
+                );
+                let dense = eval_tensor(&dag, &inputs).unwrap();
+                assert_eq!(
+                    bincode::serialize(rooted[&root].storage()).unwrap(),
+                    bincode::serialize(dense[&root].storage()).unwrap()
+                );
+                let product = dag
+                    .nodes()
+                    .iter()
+                    .find(|node| matches!(node.op, RiscOp::Mul))
+                    .unwrap()
+                    .id;
+                let selected = eval_tensor_roots_with(&dag, &[root, product], |name| {
+                    inputs.get(name).cloned()
+                })
+                .unwrap();
+                assert_eq!(selected.len(), 2);
+                assert_eq!(
+                    bincode::serialize(selected[&product].storage()).unwrap(),
+                    bincode::serialize(dense[&product].storage()).unwrap()
+                );
+                eprintln!(
+                    "eval-performance contraction dtype={prim:?} accumulator={accumulator:?} wall={elapsed:?} peak_heap_delta={peak} PASS"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_performance_streamed_convolution_bits_and_scratch() {
+    use chelis_ir::dag::Owner;
+    use chelis_ir::eval::eval_tensor_roots_with;
+    use chelis_ir::tier2::{lower_conv, lower_conv_runtime};
+    for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        for runtime in [false, true] {
+            let mut dag = Dag::new();
+            let owner = Owner::from(dag.declare("streamed convolution"));
+            let input_ty = shaped_ty(&[1, 3, 16, 16], prim);
+            let kernel_ty = shaped_ty(&[2, 3, 3, 3], prim);
+            let output_ty = shaped_ty(&[1, 2, 16, 16], prim);
+            let x = dag.add_node(
+                owner,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                input_ty.clone(),
+                None,
+            );
+            let k = dag.add_node(
+                owner,
+                RiscOp::Load { name: "k".into() },
+                vec![],
+                kernel_ty.clone(),
+                None,
+            );
+            let root = if runtime {
+                let one = dag.add_node(
+                    owner,
+                    RiscOp::synth_const(Prim::Int64, 1.0),
+                    vec![],
+                    TensorType {
+                        dims: vec![],
+                        precision: Prim::Int64,
+                    },
+                    None,
+                );
+                lower_conv_runtime(
+                    owner,
+                    &mut dag,
+                    x,
+                    k,
+                    &input_ty,
+                    &kernel_ty,
+                    &output_ty,
+                    &[one, one],
+                    &[(one, one), (one, one)],
+                    None,
+                )
+            } else {
+                lower_conv(
+                    owner,
+                    &mut dag,
+                    x,
+                    k,
+                    &input_ty,
+                    &kernel_ty,
+                    &output_ty,
+                    &[1, 1],
+                    &[(1, 1), (1, 1)],
+                    None,
+                )
+            };
+            assert_eq!(
+                chelis_ir::fuse::cartesian_gather_indices(&dag).len(),
+                1,
+                "Cartesian descriptor runtime={runtime}"
+            );
+            dag.add_root(root);
+            let inputs: UnordMap<String, TensorValue> = UnordMap::from([
+                (
+                    "x".into(),
+                    TensorValue::from_storage(
+                        vec![1, 3, 16, 16],
+                        finalize_tensor(
+                            "oracle",
+                            prim,
+                            RawTensor::Float(
+                                (0..768)
+                                    .map(|i| [2048.0, -2048.0, 0.5, -0.0, 0.00006103515625][i % 5])
+                                    .collect(),
+                            ),
+                        )
+                        .unwrap(),
+                    ),
+                ),
+                (
+                    "k".into(),
+                    TensorValue::from_storage(
+                        vec![2, 3, 3, 3],
+                        finalize_tensor(
+                            "oracle",
+                            prim,
+                            RawTensor::Float((0..54).map(|i| [1.0, -1.0, 0.5][i % 3]).collect()),
+                        )
+                        .unwrap(),
+                    ),
+                ),
+            ]);
+            let before = LIVE.load(Ordering::Relaxed);
+            PEAK.store(before, Ordering::Relaxed);
+            let rooted =
+                eval_tensor_roots_with(&dag, &[root], |name| inputs.get(name).cloned()).unwrap();
+            let peak = PEAK.load(Ordering::Relaxed).saturating_sub(before);
+            assert!(peak < 128 * 1024, "materialized convolution peak={peak}");
+            let dense = eval_tensor(&dag, &inputs).unwrap();
+            assert_eq!(
+                bincode::serialize(rooted[&root].storage()).unwrap(),
+                bincode::serialize(dense[&root].storage()).unwrap()
+            );
+            let indices = dag
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.op, RiscOp::Gather { .. }))
+                .unwrap()
+                .inputs[1];
+            let selected =
+                eval_tensor_roots_with(&dag, &[root, indices], |name| inputs.get(name).cloned())
+                    .unwrap();
+            assert_eq!(
+                bincode::serialize(selected[&indices].storage()).unwrap(),
+                bincode::serialize(dense[&indices].storage()).unwrap()
+            );
+            eprintln!("eval-performance convolution peak_heap_delta={peak} PASS");
+        }
+    }
+}
+
+#[test]
+#[ignore = "model-sized contraction witness; docs/manual_gates.md eval-performance"]
+fn eval_performance_pointwise_pair_witness() {
+    use chelis_ir::dag::Owner;
+    use chelis_ir::eval::eval_tensor_roots_with;
+    use chelis_ir::tier2::{lower_gelu, lower_matmul};
+    let mut dag = Dag::new();
+    let owner = Owner::from(dag.declare("pointwise pair"));
+    let a_ty = shaped_ty(&[3136, 128], Prim::F32);
+    let b_ty = shaped_ty(&[128, 512], Prim::F32);
+    let c_ty = shaped_ty(&[512, 128], Prim::F32);
+    let a = dag.add_node(
+        owner,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        a_ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        owner,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        b_ty.clone(),
+        None,
+    );
+    let c = dag.add_node(
+        owner,
+        RiscOp::Load { name: "c".into() },
+        vec![],
+        c_ty.clone(),
+        None,
+    );
+    let first = lower_matmul(owner, &mut dag, a, b, &a_ty, &b_ty, None);
+    let mid_ty = shaped_ty(&[3136, 512], Prim::F32);
+    let activation = lower_gelu(owner, &mut dag, first, &mid_ty, None);
+    let root = lower_matmul(owner, &mut dag, activation, c, &mid_ty, &c_ty, None);
+    dag.add_root(root);
+    let value = |shape: Vec<usize>, v: f64| {
+        let len = shape.iter().product();
+        TensorValue::from_storage(
+            shape,
+            finalize_tensor("oracle", Prim::F32, RawTensor::Float(vec![v; len])).unwrap(),
+        )
+    };
+    let inputs: UnordMap<String, TensorValue> = UnordMap::from([
+        ("a".into(), value(vec![3136, 128], 0.1)),
+        ("b".into(), value(vec![128, 512], 0.01)),
+        ("c".into(), value(vec![512, 128], 0.01)),
+    ]);
+    // An independent dense scalar GELU graph supplies only the activation;
+    // both contractions use explicit adjacent-pair native-f32 references.
+    let first_value = (0..7).fold(0.1_f32 * 0.01_f32, |x, _| x + x);
+    let mut scalar = Dag::new();
+    let decl = scalar.declare("scalar activation");
+    let x = scalar.add_node(
+        decl,
+        RiscOp::synth_const(Prim::F32, f64::from(first_value)),
+        vec![],
+        TensorType::scalar_f32(),
+        None,
+    );
+    let y = lower_gelu(decl.into(), &mut scalar, x, &TensorType::scalar_f32(), None);
+    scalar.add_root(y);
+    let activation = eval_tensor(&scalar, &UnordMap::default()).unwrap()[&y]
+        .storage()
+        .scalar_at(0)
+        .as_f64_lossy() as f32;
+    let expected = (0..9).fold(activation * 0.01_f32, |x, _| x + x);
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let start = Instant::now();
+    let actual = eval_tensor_roots_with(&dag, &[root], |name| inputs.get(name).cloned()).unwrap();
+    let elapsed = start.elapsed();
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(before);
+    assert!(peak < 96 * 1024 * 1024, "pointwise pair peak={peak}");
+    assert!(
+        elapsed.as_secs_f64() < 90.0,
+        "pointwise pair wall={elapsed:?}"
+    );
+    for i in 0..3136 * 128 {
+        assert_eq!(
+            (actual[&root].storage().scalar_at(i).as_f64_lossy() as f32).to_bits(),
+            expected.to_bits()
+        );
+    }
+    eprintln!(
+        "eval-performance pointwise [3136,128]x[128,512] gelu x[512,128] wall={elapsed:?} peak_heap_delta={peak} PASS"
+    );
+}
+
+#[test]
+fn eval_performance_cartesian_indices_errors_and_empty_domain() {
+    use chelis_ir::dag::RtDim;
+    use chelis_ir::eval::eval_tensor_roots_with;
+    for source_prim in [Prim::F32, Prim::Key] {
+        for tail_empty in [false, true] {
+            for (rows, cols, extent) in [
+                (vec![0, 3], vec![0, 1], 5),
+                (vec![-1, 0], vec![0, 1], 5),
+                (vec![3, 0], vec![2, -1], 5),
+                (vec![i64::MAX], vec![1], 5),
+                (vec![i64::MIN], vec![-1], 5),
+                (vec![i64::MAX], vec![], 0),
+            ] {
+                let base_shape = if tail_empty {
+                    vec![extent, 0]
+                } else {
+                    vec![extent]
+                };
+                let base_len = base_shape.iter().product();
+                let mut out_shape = vec![rows.len(), cols.len()];
+                if tail_empty {
+                    out_shape.push(0);
+                }
+                let mut dag = Dag::new();
+                let owner = dag.declare("cartesian trap");
+                let base = dag.add_node(
+                    owner,
+                    RiscOp::Load {
+                        name: "base".into(),
+                    },
+                    vec![],
+                    shaped_ty(&base_shape, source_prim),
+                    None,
+                );
+                let r = dag.add_node(
+                    owner,
+                    RiscOp::Load { name: "r".into() },
+                    vec![],
+                    ty(rows.len(), Prim::Int64),
+                    None,
+                );
+                let c = dag.add_node(
+                    owner,
+                    RiscOp::Load { name: "c".into() },
+                    vec![],
+                    ty(cols.len(), Prim::Int64),
+                    None,
+                );
+                let matrix = shaped_ty(&[rows.len(), cols.len()], Prim::Int64);
+                let a = dag.add_node(
+                    owner,
+                    RiscOp::Expand {
+                        axis: 1,
+                        size: RtDim::Lit(cols.len()),
+                    },
+                    vec![r],
+                    matrix.clone(),
+                    None,
+                );
+                let b = dag.add_node(
+                    owner,
+                    RiscOp::Expand {
+                        axis: 0,
+                        size: RtDim::Lit(rows.len()),
+                    },
+                    vec![c],
+                    matrix.clone(),
+                    None,
+                );
+                let indices = dag.add_node(owner, RiscOp::Add, vec![a, b], matrix, None);
+                let root = dag.add_node(
+                    owner,
+                    RiscOp::Gather {
+                        axis: 0,
+                        batch_rank: 0,
+                    },
+                    vec![base, indices],
+                    shaped_ty(&out_shape, source_prim),
+                    None,
+                );
+                // A second view makes Gather private, while the selected Copy owns
+                // the output. Errors must still belong to the original Add/Gather.
+                let copy = dag.add_node(
+                    owner,
+                    RiscOp::Copy,
+                    vec![root],
+                    shaped_ty(&out_shape, source_prim),
+                    None,
+                );
+                dag.add_root(copy);
+                let inputs: UnordMap<String, TensorValue> = UnordMap::from([
+                    (
+                        "base".into(),
+                        if source_prim == Prim::Key {
+                            let key = chelis_types::RandomKey::from_seed(
+                                chelis_types::scalar_from_i64("oracle", Prim::Int64, 42).unwrap(),
+                            )
+                            .unwrap();
+                            TensorValue::from_storage(
+                                base_shape.clone(),
+                                chelis_types::TensorStorage::from_keys(vec![key; base_len]),
+                            )
+                        } else {
+                            TensorValue::from_vec(base_shape.clone(), vec![1.0; base_len])
+                        },
+                    ),
+                    (
+                        "r".into(),
+                        TensorValue::finalize_from_wide_int(
+                            "oracle",
+                            Prim::Int64,
+                            vec![rows.len()],
+                            rows.clone(),
+                        )
+                        .unwrap(),
+                    ),
+                    (
+                        "c".into(),
+                        TensorValue::finalize_from_wide_int(
+                            "oracle",
+                            Prim::Int64,
+                            vec![cols.len()],
+                            cols.clone(),
+                        )
+                        .unwrap(),
+                    ),
+                ]);
+                let dense = eval_tensor(&dag, &inputs);
+                let streamed =
+                    eval_tensor_roots_with(&dag, &[copy], |name| inputs.get(name).cloned());
+                match (dense, streamed) {
+                    (Ok(dense), Ok(streamed)) => {
+                        assert_eq!(dense[&copy].storage(), streamed[&copy].storage())
+                    }
+                    (Err(a), Err(b)) => assert_eq!(a, b),
+                    other => panic!("different trap outcomes: {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_performance_streamed_convolution_gradients() {
+    use chelis_ir::dag::Owner;
+    use chelis_ir::eval::eval_tensor_roots_with;
+    use chelis_ir::grad::grad_dag_checked;
+    use chelis_ir::tier2::lower_conv;
+    let mut dag = Dag::new();
+    let owner = Owner::from(dag.declare("convolution gradient"));
+    let xt = shaped_ty(&[1, 1, 4, 4], Prim::F32);
+    let kt = shaped_ty(&[1, 1, 3, 3], Prim::F32);
+    let x = dag.add_node(
+        owner,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        xt.clone(),
+        None,
+    );
+    let k = dag.add_node(
+        owner,
+        RiscOp::Load { name: "k".into() },
+        vec![],
+        kt.clone(),
+        None,
+    );
+    let mut loss = lower_conv(
+        owner,
+        &mut dag,
+        x,
+        k,
+        &xt,
+        &kt,
+        &xt,
+        &[1, 1],
+        &[(1, 1), (1, 1)],
+        None,
+    );
+    for rank in (0..4).rev() {
+        loss = dag.add_node(
+            owner,
+            RiscOp::sum_with_accumulator(rank, Prim::F32, Prim::F32).unwrap(),
+            vec![loss],
+            shaped_ty(&[1, 1, 4, 4][..rank], Prim::F32),
+            None,
+        );
+    }
+    dag.add_root(loss);
+    let value = |shape: Vec<usize>, data: Vec<f64>| {
+        TensorValue::from_storage(
+            shape,
+            finalize_tensor("oracle", Prim::F32, RawTensor::Float(data)).unwrap(),
+        )
+    };
+    let inputs: UnordMap<String, TensorValue> = UnordMap::from([
+        ("x".into(), value(vec![1, 1, 4, 4], vec![0.25; 16])),
+        ("k".into(), value(vec![1, 1, 3, 3], vec![0.5; 9])),
+    ]);
+    let differentiated = grad_dag_checked(&dag, loss, &[x, k]).unwrap();
+    let roots = [differentiated.grad_nodes[&x], differentiated.grad_nodes[&k]];
+    let dense = eval_tensor(&differentiated.dag, &inputs).unwrap();
+    let streamed = eval_tensor_roots_with(&differentiated.dag, &roots, |name| {
+        inputs.get(name).cloned()
+    })
+    .unwrap();
+    for root in roots {
+        assert_eq!(
+            bincode::serialize(dense[&root].storage()).unwrap(),
+            bincode::serialize(streamed[&root].storage()).unwrap()
+        );
+    }
+    let delta = 0.03125;
+    let scalar_loss = |offset: f64| {
+        let mut perturbed = inputs.clone();
+        let mut data = vec![0.25; 16];
+        data[5] += offset;
+        perturbed.insert("x".into(), value(vec![1, 1, 4, 4], data));
+        eval_tensor_roots_with(&dag, &[loss], |name| perturbed.get(name).cloned()).unwrap()[&loss]
+            .storage()
+            .scalar_at(0)
+            .as_f64_lossy()
+    };
+    let finite_difference = (scalar_loss(delta) - scalar_loss(-delta)) / (2.0 * delta);
+    assert!(
+        (streamed[&roots[0]].storage().scalar_at(5).as_f64_lossy() - finite_difference).abs()
+            < 1e-5
+    );
+}
+
+#[test]
+fn eval_performance_streamed_contraction_nonfinite_bits() {
+    use chelis_ir::dag::Owner;
+    use chelis_ir::eval::eval_tensor_roots_with;
+    use chelis_ir::tier2::lower_matmul;
+    for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        for values in [
+            vec![-0.0, -0.0, -0.0],
+            vec![f64::NAN, 1.0, 2.0],
+            vec![f64::INFINITY, -f64::INFINITY, 1.0],
+            vec![0.0, -0.0, 0.0],
+        ] {
+            let mut dag = Dag::new();
+            let owner = Owner::from(dag.declare("nonfinite contraction"));
+            let at = shaped_ty(&[1, 3], prim);
+            let bt = shaped_ty(&[3, 1], prim);
+            let a = dag.add_node(
+                owner,
+                RiscOp::Load { name: "a".into() },
+                vec![],
+                at.clone(),
+                None,
+            );
+            let b = dag.add_node(
+                owner,
+                RiscOp::Load { name: "b".into() },
+                vec![],
+                bt.clone(),
+                None,
+            );
+            let root = lower_matmul(owner, &mut dag, a, b, &at, &bt, None);
+            dag.add_root(root);
+            let inputs: UnordMap<String, TensorValue> = UnordMap::from([
+                (
+                    "a".into(),
+                    TensorValue::from_storage(
+                        vec![1, 3],
+                        finalize_tensor("oracle", prim, RawTensor::Float(values)).unwrap(),
+                    ),
+                ),
+                (
+                    "b".into(),
+                    TensorValue::from_storage(
+                        vec![3, 1],
+                        finalize_tensor("oracle", prim, RawTensor::Float(vec![1.0; 3])).unwrap(),
+                    ),
+                ),
+            ]);
+            let dense = eval_tensor(&dag, &inputs).unwrap();
+            let streamed =
+                eval_tensor_roots_with(&dag, &[root], |name| inputs.get(name).cloned()).unwrap();
+            assert_eq!(
+                bincode::serialize(dense[&root].storage()).unwrap(),
+                bincode::serialize(streamed[&root].storage()).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn eval_performance_many_contraction_plans() {
+    use chelis_ir::dag::Owner;
+    use chelis_ir::tier2::lower_matmul;
+    for count in [16, 256, 4096] {
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("many contractions"));
+        let ty = shaped_ty(&[1, 1], Prim::F32);
+        let a = dag.add_node(
+            owner,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            owner,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        for _ in 0..count {
+            let root = lower_matmul(owner, &mut dag, a, b, &ty, &ty, None);
+            dag.add_root(root);
+        }
+        let start = Instant::now();
+        let plans = chelis_ir::fuse::reduction_inlined_products(&dag);
+        assert_eq!(plans.len(), count);
+        eprintln!(
+            "eval-performance planner contractions={count} nodes={} wall={:?} PASS",
+            dag.len(),
+            start.elapsed()
+        );
+    }
+}
+
+#[test]
+fn eval_performance_contraction_dense_control() {
+    use chelis_ir::dag::Owner;
+    use chelis_ir::eval::eval_tensor_roots_with;
+    use chelis_ir::tier2::lower_matmul;
+    let mut dag = Dag::new();
+    let owner = Owner::from(dag.declare("dense timing control"));
+    let at = shaped_ty(&[196, 128], Prim::F32);
+    let bt = shaped_ty(&[128, 128], Prim::F32);
+    let a = dag.add_node(
+        owner,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        at.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        owner,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        bt.clone(),
+        None,
+    );
+    let root = lower_matmul(owner, &mut dag, a, b, &at, &bt, None);
+    dag.add_root(root);
+    let inputs: UnordMap<String, TensorValue> = UnordMap::from([
+        (
+            "a".into(),
+            TensorValue::from_vec(vec![196, 128], vec![0.1; 196 * 128]),
+        ),
+        (
+            "b".into(),
+            TensorValue::from_vec(vec![128, 128], vec![0.01; 128 * 128]),
+        ),
+    ]);
+    let start = Instant::now();
+    let streamed = eval_tensor_roots_with(&dag, &[root], |name| inputs.get(name).cloned()).unwrap();
+    let stream_time = start.elapsed();
+    let start = Instant::now();
+    let dense = eval_tensor(&dag, &inputs).unwrap();
+    let dense_time = start.elapsed();
+    assert_eq!(
+        bincode::serialize(streamed[&root].storage()).unwrap(),
+        bincode::serialize(dense[&root].storage()).unwrap()
+    );
+    eprintln!(
+        "eval-performance same-head contraction control streamed={stream_time:?} dense={dense_time:?} PASS"
+    );
+}
+
 fn coordinate_case(
     shape: &[usize],
     out_shape: &[usize],
@@ -782,6 +1517,7 @@ fn eval_performance_convolution_index_witness() {
     let result = eval_tensor_roots_with(&dag, &[root], |name| inputs.get(name).cloned()).unwrap();
     let elapsed = start.elapsed();
     let peak = PEAK.load(Ordering::Relaxed).saturating_sub(start_live);
+    assert!(peak < 32 * 1024 * 1024, "convolution peak={peak}");
     // Direct [05-OP-51] cross-correlation, with [05-OP-30]'s adjacent-pair
     // tree over channel/kernel-height/kernel-width, including padded zeros.
     for y in 0..56 {
