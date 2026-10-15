@@ -140,47 +140,104 @@ fn payload(n: usize, changing: bool, witnesses: bool, alternating: bool) -> Stri
     }
     json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":nodes,"roots":roots}).to_string()
 }
-#[test]
-fn contextual_public_ingress_allocation_and_context_scaling() {
-    for (changing, witnesses, alternating) in [
-        (false, false, false),
-        (true, false, false),
-        (true, true, false),
-        (false, false, true),
-    ] {
-        for n in [32, 64, 128] {
-            let json = payload(n, changing, witnesses, alternating);
-            let before = LIVE.load(Relaxed);
-            PEAK.store(before, Relaxed);
-            BYTES.store(0, Relaxed);
-            CALLS.store(0, Relaxed);
-            ENABLED.store(true, Relaxed);
-            let start = Instant::now();
-            let decoded = WireDag::from_validated_json(&json);
-            let wall = start.elapsed();
-            ENABLED.store(false, Relaxed);
-            let allocated = BYTES.load(Relaxed);
-            let calls = CALLS.load(Relaxed);
-            let peak = PEAK.load(Relaxed).saturating_sub(before);
-            let decoded = decoded.expect("full public contextual graph validates");
-            eprintln!(
-                "contextual ingress changing={changing} witnesses={witnesses} alternating={alternating} n={n} nodes={} bytes={} allocated={allocated} allocation_calls={calls} peak_heap_delta={peak} wall={wall:?}",
-                decoded.nodes.len(),
-                json.len()
-            );
+fn measure_contextual_case(changing: bool, witnesses: bool, alternating: bool) {
+    for n in [32, 64, 128] {
+        let json = payload(n, changing, witnesses, alternating);
+        let before = LIVE.load(Relaxed);
+        PEAK.store(before, Relaxed);
+        BYTES.store(0, Relaxed);
+        CALLS.store(0, Relaxed);
+        ENABLED.store(true, Relaxed);
+        let start = Instant::now();
+        let decoded = WireDag::from_validated_json(&json);
+        let wall = start.elapsed();
+        ENABLED.store(false, Relaxed);
+        let allocated = BYTES.load(Relaxed);
+        let calls = CALLS.load(Relaxed);
+        let peak = PEAK.load(Relaxed).saturating_sub(before);
+        let decoded = decoded.expect("full public contextual graph validates");
+        eprintln!(
+            "contextual ingress changing={changing} witnesses={witnesses} alternating={alternating} n={n} nodes={} bytes={} allocated={allocated} allocation_calls={calls} peak_heap_delta={peak} wall={wall:?}",
+            decoded.nodes.len(),
+            json.len()
+        );
+        assert!(
+            peak <= decoded.nodes.len() * 2048 + 64 * 1024,
+            "context authority must not retain every prefix memo: {peak}"
+        );
+        if !witnesses {
             assert!(
-                peak <= decoded.nodes.len() * 2048 + 64 * 1024,
-                "context authority must not retain every prefix memo: {peak}"
+                allocated <= decoded.nodes.len() * 4096 + 64 * 1024,
+                "repeated contextual ingress allocates expanded prefix paths: {allocated}"
             );
-            if !changing && !witnesses {
-                assert!(
-                    allocated <= decoded.nodes.len() * 4096 + 64 * 1024,
-                    "repeated contextual ingress allocates expanded prefix paths: {allocated}"
-                );
-            }
-            let mut bad: Value = serde_json::from_str(&json).unwrap();
-            bad["nodes"].as_array_mut().unwrap().last_mut().unwrap()["inputs"][1] = json!(u64::MAX);
-            assert!(WireDag::from_validated_json(&bad.to_string()).is_err());
         }
+        let mut bad: Value = serde_json::from_str(&json).unwrap();
+        bad["nodes"].as_array_mut().unwrap().last_mut().unwrap()["inputs"][1] = json!(u64::MAX);
+        assert!(WireDag::from_validated_json(&bad.to_string()).is_err());
     }
+}
+
+#[test]
+fn contextual_repeated_authority_allocation() {
+    measure_contextual_case(false, false, false);
+}
+#[test]
+fn contextual_alternating_authority_allocation() {
+    measure_contextual_case(false, false, true);
+}
+#[test]
+fn contextual_distinct_authority_allocation() {
+    measure_contextual_case(true, false, false);
+}
+#[test]
+fn contextual_distinct_witness_authority_allocation() {
+    measure_contextual_case(true, true, false);
+}
+
+#[test]
+fn public_ingress_preserves_exact_first_diagnostics() {
+    let mut dag: Value = serde_json::from_str(&payload(4, false, false, false)).unwrap();
+    let compare = dag["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|node| node["op"]["kind"] == "compare")
+        .unwrap();
+    dag["nodes"][compare]["output_type"]["dims"] = json!([]);
+    let id = dag["nodes"].as_array().unwrap().len();
+    dag["nodes"].as_array_mut().unwrap().push(node(
+        id,
+        json!({"kind":"load","name":""}),
+        vec![],
+        vec![],
+        "f32",
+    ));
+    let shape = WireDag::from_validated_json(&dag.to_string())
+        .unwrap_err()
+        .to_string();
+    eprintln!("diagnostic shape-first: {shape}");
+    assert_eq!(
+        shape,
+        format!(
+            "WireDag contract error: WireDag Compare node {compare} requires two same-shape, same-precision active numeric or bool operands and a same-shape Bool output; ordered comparisons require active numeric operands"
+        )
+    );
+    dag["nodes"][0]["op"]["name"] = json!("");
+    let binding = WireDag::from_validated_json(&dag.to_string())
+        .unwrap_err()
+        .to_string();
+    eprintln!("diagnostic binding-first: {binding}");
+    assert_eq!(
+        binding,
+        "WireDag contract error: WireDag Load node 0 has invalid graph input name: Load/Store name must not be empty"
+    );
+    dag["nodes"][compare]["inputs"][0] = json!(u64::MAX);
+    let domain = WireDag::from_validated_json(&dag.to_string())
+        .unwrap_err()
+        .to_string();
+    eprintln!("diagnostic domain-first: {domain}");
+    assert_eq!(
+        domain,
+        "WireDag contract error: input references must resolve to earlier nodes in the owning DAG"
+    );
 }
