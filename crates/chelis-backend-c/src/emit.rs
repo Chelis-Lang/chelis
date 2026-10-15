@@ -6863,6 +6863,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         plan: &str,
         rank: usize,
     ) -> Vec<(usize, String)> {
+        let index_type = Self::index_c_type();
         let mut lines = Vec::new();
         for (part, tag) in [("index", "INDEX"), ("base", "BASE")] {
             for axis in 0..rank {
@@ -6874,11 +6875,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     fields.push(("modulus", "MODULUS"));
                 }
                 for (name, field) in fields {
-                    lines.push(format!("const int64_t {prefix}_{part}{axis}_{name} = chelis_sparse_term({plan}, CHELIS_SPARSE_{tag}, CHELIS_PROJECTION_{field}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}));"));
+                    lines.push(format!("const {index_type} {prefix}_{part}{axis}_{name} = chelis_sparse_term({plan}, CHELIS_SPARSE_{tag}, CHELIS_PROJECTION_{field}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}));"));
                 }
             }
         }
-        lines.push(format!("const int64_t {prefix}_selected_scale = chelis_sparse_term({plan}, CHELIS_SPARSE_SELECTED, CHELIS_PROJECTION_SCALE, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));"));
+        lines.push(format!("const {index_type} {prefix}_selected_scale = chelis_sparse_term({plan}, CHELIS_SPARSE_SELECTED, CHELIS_PROJECTION_SCALE, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));"));
         lines.into_iter().map(|line| (0, line)).collect()
     }
 

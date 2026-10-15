@@ -366,3 +366,47 @@ fn sparse_projections_bind_slots_and_selected_offsets() {
         }
     }
 }
+
+#[test]
+fn sparse_compact_geometry_skips_unobserved_empty_products() {
+    use chelis_abi::metadata::{ElementCount, SparseMetadata};
+    let shape = |dims: &[i64], dtype| ShapeMetadata::contiguous(dims, dtype).unwrap();
+    let huge_empty = shape(&[i64::MAX, i64::MAX, 0], RuntimeDType::I8);
+    let empty_indices = shape(&[0], RuntimeDType::I64);
+    // This outer product would overflow if compact geometry were built for
+    // an iteration domain that has no reachable query.
+    assert!(ElementCount::from_extents(&huge_empty.shape()[..2]).is_err());
+    let empty = SparseMetadata::new(&huge_empty, &empty_indices, 2, false).unwrap();
+    assert_eq!(empty.domain().elements().get(), 0);
+    assert!(empty.index_slot(0).is_err());
+    assert!(empty.data_index(0, 0).is_err());
+
+    let large = i64::try_from(isize::MAX).unwrap();
+    let no_selection = shape(&[0, large], RuntimeDType::I8);
+    let scalar_index = shape(&[], RuntimeDType::I64);
+    let unselectable = SparseMetadata::new(&no_selection, &scalar_index, 0, false).unwrap();
+    assert_eq!(unselectable.domain().elements().get(), large);
+    for linear in [0, large - 1] {
+        assert_eq!(unselectable.index_slot(linear).unwrap(), 0);
+        for selected in [-1, 0, i64::MAX] {
+            assert!(matches!(
+                unselectable.data_index(linear, selected),
+                Err(MetadataError::Domain(_))
+            ));
+        }
+    }
+    let empty_elementwise = SparseMetadata::new(
+        &no_selection,
+        &shape(&[0, large], RuntimeDType::I64),
+        0,
+        true,
+    )
+    .unwrap();
+    assert!(empty_elementwise.index_slot(0).is_err());
+    assert!(empty_elementwise.data_index(0, 0).is_err());
+    // Canonical source strides themselves still have to be representable.
+    assert!(matches!(
+        ShapeMetadata::contiguous(&[0, i64::MAX, i64::MAX], RuntimeDType::I8),
+        Err(MetadataError::Overflow(_))
+    ));
+}
