@@ -8,7 +8,8 @@ fn f32_value(value: f64) -> ScalarValue {
 }
 
 fn i64_value(value: i64) -> ScalarValue {
-    scalar_from_f64("prove-test", Prim::Int64, value as f64).expect("valid i64 test value")
+    chelis_types::dtype_semantics::scalar_from_i64("prove-test", Prim::Int64, value)
+        .expect("valid i64 test value")
 }
 
 /// Desugar a Surf module string to Deep for collection tests.

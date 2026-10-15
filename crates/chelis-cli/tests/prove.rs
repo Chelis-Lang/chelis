@@ -4355,3 +4355,139 @@ def cancel(x: f64) -> f64 = ((x + 1.0f64) - x)
         }
     }
 }
+
+// chelis#3634: the Deep property lane makes the same over-the-reals decision as
+// the Surf lane, and its Tier C tail is a shared function both the fall-through
+// and the refutation search call. Pin both directions on a `.dp` input so a
+// future change to either caller cannot silently drop the check.
+#[test]
+fn issue_3634_the_deep_lane_is_corroborated_and_refuted_like_the_surf_lane() {
+    for (predicate, expected_status, expected_check, exit) in [
+        ("x == x", "passed", "corroborated", 0),
+        ("x > 0.0", "failed", "refuted", 1),
+    ] {
+        let dir = write_prop(&format!(
+            "@property deep_check forall(x: f32):\n  {predicate}\n"
+        ));
+        let deep = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["deep", dir.path().join("prop.ch").to_str().unwrap()])
+            .output()
+            .expect("desugar");
+        assert!(deep.status.success(), "{deep:?}");
+        let path = dir.path().join("prop.dp");
+        std::fs::write(&path, deep.stdout).expect("write deep");
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_PROVE_TEST_FORCE_SMT_RESULT", "proved")
+            .args(["prove", path.to_str().unwrap(), "--tier", "auto", "--json"])
+            .output()
+            .expect("run prove");
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{predicate}: stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let props = property_records(&output.stdout);
+        assert_eq!(props.len(), 1, "{predicate}: {props:?}");
+        let prop = &props[0];
+        assert_eq!(prop["status"], expected_status, "{predicate}: {prop}");
+        assert_eq!(
+            prop["machine_arithmetic"]["status"], expected_check,
+            "{predicate}: {prop}"
+        );
+        if expected_check == "corroborated" {
+            assert_eq!(prop["proof_tier"], "smt", "{predicate}: {prop}");
+            assert_eq!(prop["samples"], 0, "{predicate}: {prop}");
+            assert_eq!(
+                prop["composite_verdict"], "proven_modulo_real_arithmetic",
+                "{predicate}: {prop}"
+            );
+        } else {
+            assert_eq!(prop["proof_tier"], "fuzz", "{predicate}: {prop}");
+            assert_eq!(prop["composite_verdict"], "failed", "{predicate}: {prop}");
+            assert!(prop.get("counterexample").is_some(), "{predicate}: {prop}");
+        }
+    }
+}
+
+// chelis#3634 (P2-1): a refutation under `auto` becomes the published record, so
+// it must carry the same contract assumptions `--tier fuzz-only` publishes. It
+// used to publish an empty `assumptions` array, losing the contract's discharge
+// evidence on exactly the records a reader inspects most closely.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_3634_a_refutation_publishes_the_same_assumptions_as_fuzz_only() {
+    let source = r#"
+def cancel(x: f64) -> f64 = ((x + 1.0f64) - x)
+@property cancel_is_one forall(x: f64) where x > 0.0f64, x < 1e100f64:
+  (cancel(x) > 0.5f64)
+  with contract = "std.exp.zero"
+"#;
+    let dir = write_prop(source);
+    let path = dir.path().join("prop.ch");
+    let mut published: Vec<(String, Vec<String>)> = Vec::new();
+    for tier in ["auto", "fuzz-only"] {
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["prove", path.to_str().unwrap(), "--tier", tier, "--json"])
+            .output()
+            .expect("run prove");
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{tier} must refute: stdout={}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let props = property_records(&output.stdout);
+        assert_eq!(props.len(), 1, "{tier}: {props:?}");
+        let mut names: Vec<String> = props[0]["assumptions"]
+            .as_array()
+            .expect("assumptions array")
+            .iter()
+            .map(|record| record["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        names.sort();
+        assert!(
+            names.iter().any(|name| name == "std.exp.zero"),
+            "{tier} must publish the contract's discharge: {}",
+            props[0]
+        );
+        published.push((tier.to_string(), names));
+    }
+    assert_eq!(
+        published[0].1, published[1].1,
+        "auto and fuzz-only must publish the same assumption set on the same refutation"
+    );
+}
+
+// chelis#3634 (P2-2): the refutation reports the fuzz tier after Tier B DECIDED,
+// so `failure_summary` must not claim the tier fell back. A record whose own
+// `machine_arithmetic` field says a proof was displaced cannot also say the
+// solver failed to reach one.
+#[test]
+fn issue_3634_a_refutation_is_not_reported_as_a_tier_degradation() {
+    let (code, stdout) = prove_with_forced_smt(
+        r#"
+@property always_positive forall(x: f64):
+  (x > 0.0f64)
+"#,
+        &["--json"],
+        "proved",
+    );
+    assert_eq!(code, Some(1), "stdout={stdout:?}");
+    let props = property_records(&stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let prop = &props[0];
+    assert_eq!(prop["machine_arithmetic"]["status"], "refuted", "{prop}");
+    assert!(
+        prop["failure_summary"].get("degradation").is_none(),
+        "an escalation is not a degradation: {prop}"
+    );
+    // The honest fields are still there: the summary names the tier that
+    // produced the counterexample and the tier that was requested.
+    assert_eq!(prop["failure_summary"]["actual_tier"], "fuzz", "{prop}");
+    assert_eq!(prop["failure_summary"]["requested_tier"], "auto", "{prop}");
+}

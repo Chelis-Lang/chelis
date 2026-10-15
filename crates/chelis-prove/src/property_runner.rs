@@ -940,7 +940,7 @@ fn prove_surf_property(
             options,
             seed,
         ) {
-            outcome.append_assumptions(contract_assumptions);
+            outcome.append_assumptions(contract_assumptions.clone());
             // chelis#3634: a Tier B green is a decision over the REALS, so it
             // rules out no machine-arithmetic counterexample. `auto` runs Tier C
             // against it as a refutation search; a concrete counterexample wins,
@@ -950,8 +950,14 @@ fn prove_surf_property(
                 outcome.display_status() == "passed",
                 &outcome.disclosed_qualifiers(),
             ) {
-                let probe =
+                let mut probe =
                     prove_surf_property_fuzz(decls, property, options, seed, semantic_program);
+                // The probe can become the published record, so it carries the
+                // same contract assumptions the Tier C fall-through below
+                // attaches. Without this a refutation under `auto` would
+                // publish an empty `assumptions` array where `fuzz-only`
+                // publishes the contract's discharge.
+                probe.append_assumptions(contract_assumptions);
                 return crate::machine_arith::resolve_property(outcome, probe);
             }
             return outcome;

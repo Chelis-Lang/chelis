@@ -459,9 +459,17 @@ fn build_failure_summary_json(
 ) -> serde_json::Value {
     let requested_tier = options.tier;
     let actual_tier = outcome.proof_tier.as_str();
+    // chelis#3634: a machine-arithmetic refutation reports the fuzz tier after
+    // Tier B DECIDED, so the tier did not fall back. Reporting `degraded` there
+    // would state a false cause on a record whose own `machine_arithmetic`
+    // field says a proof was displaced.
+    let refuted_in_machine_arithmetic = outcome.machine_arithmetic.as_ref().is_some_and(|check| {
+        check.status == chelis_prove::machine_arith::MachineArithmeticStatus::Refuted
+    });
     let degradation = if requested_tier != actual_tier
         && !(requested_tier == "beacon-only" && actual_tier == "beacon")
         && actual_tier != "none"
+        && !refuted_in_machine_arithmetic
     {
         Some(json!({
             "degraded": true,

@@ -806,14 +806,27 @@ idealization and does not exempt its base.
 `machine_arithmetic` is **absent** when no check was attempted: under
 `--tier smt-only`, `--tier induction-only` and `--tier beacon-only` (an
 explicitly selected tier is never widened), and for a green whose base is not
-over the reals. `auto`'s induction lane stays terminal for the reason it
-already is — a recursive model overflows the concrete evaluator — so an
-induction green carries no machine-arithmetic check either.
+over the reals. `auto`'s induction lane is terminal by its own contract
+(chelis#978: an accepted induction plan does not trail into a finite fuzz
+sample), so an induction green carries no check even though it discloses
+`real_arithmetic`. Extending the check to that lane is residual work, not a
+property of this rule.
 
-The check bounds what `auto` can claim; it does not change what Tier C can
-find. Whether a given machine counterexample is reachable is a property of the
-sampler (chelis#3636), and the guarantee this rule establishes is exactly that
-`auto` is never weaker than `fuzz-only` on the same input.
+The guarantee this rule establishes is exactly one direction of parity: a
+counterexample Tier C would find can no longer be suppressed by an
+over-the-reals proof, so `auto` never reports a pass where `fuzz-only` reports
+a refutation. It is not a claim that `auto` and `fuzz-only` agree on every
+input or exit code — a Tier C run that errors or establishes nothing leaves
+`auto` reporting its proof while `fuzz-only` reports that failure, which is the
+intended asymmetry. The check also does not change what Tier C can find:
+whether a given machine counterexample is reachable is a property of the
+sampler (chelis#3636).
+
+`auto` therefore spends the sample budget after every over-the-reals proof, so
+proving an all-green module costs roughly the sum of the deductive and sampling
+tiers rather than the deductive tier alone. `--tier smt-only` is the way to pay
+only for the proof, at the cost of reporting the machine-arithmetic question as
+unchecked.
 
 Plain text renders the disclosure in place of a sample ratio an over-the-reals
 proof does not have:

@@ -69,27 +69,27 @@ false in binary64: `(x + 1.0f64) - x > 0.5f64` holds over the reals and fails
 at `x = 1e17f64`, where `x + 1.0f64` rounds back to `x`.
 
 `--tier auto` therefore does not stop at a solver proof. It samples the
-property — or the derived producer obligation — afterwards, looking only for a
+property, or the derived producer obligation, afterwards, looking only for a
 counterexample, and reports the result in the additive `machine_arithmetic`
 field:
 
-- `"status":"refuted"` — sampling found a concrete machine counterexample. The
+- `"status":"refuted"`: sampling found a concrete machine counterexample. The
   record is `"status":"failed"` with `"composite_verdict":"failed"` and carries
   the counterexample. A machine value is a definite refutation, so it replaces
   the proof.
-- `"status":"corroborated"` — every sampled input satisfied the property. The
+- `"status":"corroborated"`: every sampled input satisfied the property. The
   proof stands exactly as the solver produced it: the verdict is still
   `proven_modulo_real_arithmetic` and `real_arithmetic` is still in
   `qualifiers`, because sampling is not exhaustive.
-- `"status":"unchecked"` — sampling established nothing (an input the generator
+- `"status":"unchecked"`: sampling established nothing (an input the generator
   cannot produce, or preconditions it could not satisfy), with a `reason`. The
   proof is unchanged; a sampler limit is not evidence about the property.
 
-The field is absent when no such check ran: under `--tier smt-only`,
-`--tier induction-only`, and `--tier beacon-only`, an explicitly requested tier
-is never widened into a second one. An induction proof carries no check either,
-and neither does a result conditional on an asserted axiom such as
-`clarabel.qp.ideal_optimality`, which idealizes the float solver on purpose —
+The field is absent when no such check ran. An explicitly requested tier is
+never widened into a second one, so `--tier smt-only` and `--tier
+induction-only` run no check. An induction proof carries none either, and
+neither does a result conditional on an asserted axiom such as
+`clarabel.qp.ideal_optimality`, which idealizes the float solver on purpose:
 sampling there would contradict the assumption you declared, not the proof.
 
 In plain text an `auto` run prints the disclosure rather than a sample ratio a
@@ -101,7 +101,16 @@ property: sq_nonneg -- proven_modulo_real_arithmetic (proved over the reals; mac
 
 What this check can find is bounded by what the sampler generates; it does not
 promise that every machine counterexample is reachable. What it does establish
-is that `auto` is never weaker than `--tier fuzz-only` on the same file.
+is one direction: a counterexample sampling would find can no longer be hidden
+by a proof, so `auto` does not report a pass where `--tier fuzz-only` reports a
+failure. The two tiers still differ in the other direction. When sampling
+errors or establishes nothing, `auto` reports the proof it has and
+`--tier fuzz-only` reports that failure.
+
+Checking the proof costs the sample budget, so proving a module whose
+properties all pass takes roughly as long as the solver and the sampler
+together. Use `--tier smt-only` to pay for the solver alone; that run reports
+the machine-arithmetic question as unchecked rather than answering it.
 
 The edge inputs do not depend on the seed, so a property refuted at one is
 refuted under every seed. They are proposed first, so a budget smaller than

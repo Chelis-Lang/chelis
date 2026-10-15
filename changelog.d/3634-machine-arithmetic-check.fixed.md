@@ -10,7 +10,11 @@ that cannot sample leaves the proof untouched with its reason. The additive
 plain text prints the disclosure in place of the `0/0 passed` ratio a proof does not
 have. An explicitly selected tier runs no such check, and neither does a green
 conditional on an asserted axiom, whose assumption the concrete evaluator does not
-honor. `auto` is therefore never weaker than `--tier fuzz-only` on the same input
+honor. A counterexample sampling would find can therefore no longer be hidden by a
+proof, so `auto` reports no pass where `--tier fuzz-only` reports a failure. Checking
+the proof spends the sample budget, so `auto` on a module whose properties all pass
+now costs about as much as the solver and the sampler together; `--tier smt-only` pays
+for the solver alone and reports the machine-arithmetic question as unchecked
 ([#3634](https://github.com/Chelis-Lang/chelis/issues/3634)).
 
 Tier C validation lowers an `@invariant` predicate from its defining program, so an

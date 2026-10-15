@@ -536,10 +536,13 @@ pub(crate) fn finite_exact_constant(value: ScalarValue) -> Option<f64> {
 /// dotted path prefix of the binder value, the binder's fields (so `sum`
 /// over a tensor field expands to the right number of scalar terms), the
 /// resolved in-module constant environment, and the defining program (so a
-/// module constant lowers with its DECLARED numeric type, U2). `exprs` is
-/// empty when no module is available (the concrete-eval-only test callers),
-/// in which case a constant defaults to `Real` -- harmless because concrete
-/// evaluation is sort-agnostic.
+/// module constant lowers with its DECLARED numeric type, U2). An empty
+/// `exprs` defaults every constant to `Real`, which is NOT harmless on the
+/// concrete-eval path: `concrete_eval::align_literal_widths` declines an
+/// `(F64, Int32|Int64)` pair, so a `Real` bound against an integer field
+/// compares false for every value. That is chelis#3651, and it is why
+/// `lower_predicate_flattened` takes the defining program as a required
+/// argument. Pass `&[]` only where the predicate references no constant.
 struct LowerCtx<'a> {
     binder: &'a str,
     prefix: &'a str,
