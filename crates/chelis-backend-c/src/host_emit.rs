@@ -8597,6 +8597,7 @@ impl<'a> HostEmitter<'a> {
                 bindings,
                 body,
                 ty: expr_ty,
+                ..
             } => {
                 require_same_abi_type(ty, expr_ty, "retained invocation")?;
                 self.lines.push(format!("{}{{", self.indent));

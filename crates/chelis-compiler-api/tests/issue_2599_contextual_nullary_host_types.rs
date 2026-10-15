@@ -307,3 +307,15 @@ fn a_nullary_value_no_context_fixes_is_still_rejected() {
         failures.join("\n\n")
     );
 }
+
+// Dimension-only arguments fix no stored payload type or precision. The
+// registry permits their parametric layout without inventing an extent.
+#[test]
+fn dimension_only_empty_nominal_list_has_parametric_layout_and_balanced_owners() {
+    let case = AMBIGUOUS
+        .iter()
+        .find(|case| case.name == "empty_accumulator_dimension_generic_adt_unfixed")
+        .expect("original dimension-only witness");
+    assert_eq!(evaluated(case.source), "a = 0\n");
+    check_positive(case).unwrap();
+}
