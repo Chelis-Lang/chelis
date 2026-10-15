@@ -183,6 +183,7 @@ impl FormalTypePattern {
             ConcreteHostType::Option(inner) => Self::Option(Box::new(Self::nominal(inner))),
             ConcreteHostType::Scalar(_)
             | ConcreteHostType::CheckedBuiltinCallable(_)
+            | ConcreteHostType::CheckedCallableChoice(_)
             | ConcreteHostType::MappedFile
             | ConcreteHostType::Unit => Self::Exact,
         }

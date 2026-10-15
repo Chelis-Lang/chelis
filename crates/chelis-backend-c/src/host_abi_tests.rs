@@ -1123,3 +1123,26 @@ fn callback_parameter_shadowing_a_def_is_the_exported_callee() {
     let def = format!("{}__chelis_owned_body", authored_function_symbol("inc"));
     assert!(!calls_c_identifier(&body, &def), "{body}");
 }
+
+#[test]
+fn checked_callable_choice_is_a_logical_value_without_a_c_abi() {
+    use chelis_ir::host_type_state::CheckedBuiltinCallable;
+    let operations =
+        ["is_nan", "is_finite"].map(|name| CheckedBuiltinCallable::from_symbol(name).unwrap());
+    let choice = ConcreteHostType::CheckedCallableChoice(operations.to_vec());
+    let error = HostAbiType::try_from_concrete(&choice).unwrap_err();
+    let identity = error.identity();
+    assert!(matches!(identity.what, UnsupportedKind::HostAbi(_)));
+    assert_eq!(identity.stage, Stage::Codegen("c"));
+    assert_eq!(identity.disposition, RejectionAuthorityKind::Unimplemented);
+    assert_eq!(
+        identity.tracking_issue.map(|issue| issue.number()),
+        Some(879)
+    );
+    for operation in operations {
+        assert!(
+            HostAbiType::try_from_concrete(&ConcreteHostType::CheckedBuiltinCallable(operation))
+                .is_ok()
+        );
+    }
+}

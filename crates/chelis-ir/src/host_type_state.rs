@@ -146,6 +146,9 @@ pub enum HostTypeTerm {
     Scalar(HostPrecisionTerm),
     Fn(Vec<HostTypeTerm>, Box<HostTypeTerm>),
     CheckedBuiltinCallable(CheckedBuiltinCallable),
+    /// A runtime choice of checked operations, not one statically fixed
+    /// operation. Each alternative retains its complete checked contract.
+    CheckedCallableChoice(Vec<CheckedBuiltinCallable>),
     Adt(String, Vec<HostTypeTerm>),
     List(Box<HostTypeTerm>),
     Dict(Box<HostTypeTerm>, Box<HostTypeTerm>),
@@ -213,6 +216,9 @@ pub enum ConcreteHostType {
     Scalar(Prim),
     Function(Vec<ConcreteHostType>, Box<ConcreteHostType>),
     CheckedBuiltinCallable(CheckedBuiltinCallable),
+    /// A runtime choice of checked operations, not one statically fixed
+    /// operation. Each alternative retains its complete checked contract.
+    CheckedCallableChoice(Vec<CheckedBuiltinCallable>),
     Adt(String, Vec<ConcreteHostType>),
     List(Box<ConcreteHostType>),
     Dict(Box<ConcreteHostType>, Box<ConcreteHostType>),
@@ -308,6 +314,27 @@ impl fmt::Display for HostTypeDecodeError {
 impl std::error::Error for HostTypeDecodeError {}
 
 impl HostTypeTerm {
+    /// Join only closed checked callable contracts. Branch order and nesting
+    /// cannot select an identity: canonical alternatives are sorted and unique.
+    pub(crate) fn checked_callable_join(types: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut operations = Vec::new();
+        for ty in types {
+            match ty {
+                Self::CheckedBuiltinCallable(op) => operations.push(op),
+                Self::CheckedCallableChoice(ops) => operations.extend(ops),
+                Self::Never => {}
+                _ => return None,
+            }
+        }
+        operations.sort_by_key(|op| op.symbol());
+        operations.dedup();
+        match operations.as_slice() {
+            [] => None,
+            [op] => Some(Self::CheckedBuiltinCallable(*op)),
+            _ => Some(Self::CheckedCallableChoice(operations)),
+        }
+    }
+
     // Compatibility spellings for the scalar variants while the host lowerer
     // migrates from its former coarse enum.  They are exact logical
     // precisions, not defaults: i32 and i64 no longer collapse at the
@@ -338,6 +365,7 @@ impl HostTypeTerm {
             Self::Dict(key, value) => key.is_unresolved() || value.is_unresolved(),
             Self::Scalar(HostPrecisionTerm::Concrete(_))
             | Self::CheckedBuiltinCallable(_)
+            | Self::CheckedCallableChoice(_)
             | Self::Tensor(_)
             | Self::MappedFile
             | Self::Unit => false,
@@ -362,6 +390,7 @@ impl HostTypeTerm {
                 Box::new(ret.into_concrete()?),
             )),
             Self::CheckedBuiltinCallable(op) => Ok(ConcreteHostType::CheckedBuiltinCallable(op)),
+            Self::CheckedCallableChoice(ops) => Ok(ConcreteHostType::CheckedCallableChoice(ops)),
             Self::Adt(name, args) => Ok(ConcreteHostType::Adt(
                 name,
                 args.into_iter()

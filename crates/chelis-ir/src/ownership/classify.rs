@@ -86,7 +86,9 @@ pub(crate) fn classify(
         // The target ABI still rejects first-class function values under
         // chelis#879.  Ownership nevertheless models their logical identity
         // so the sealed payload can reach that target-capability boundary.
-        T::Function(_, _) => ValueClass::NonHeap(NonHeapKind::FirstClassFunction),
+        T::Function(_, _) | T::CheckedCallableChoice(_) => {
+            ValueClass::NonHeap(NonHeapKind::FirstClassFunction)
+        }
         // The closed key operation has no captured payload; its resolved
         // identity is in the host type and a call specializes it explicitly.
         T::CheckedBuiltinCallable(_) => ValueClass::NonHeap(NonHeapKind::Unit),

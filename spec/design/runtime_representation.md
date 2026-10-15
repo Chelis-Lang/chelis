@@ -1081,6 +1081,12 @@ scope contains operands rather than callable pseudo-inputs. The helper resolves
 its result from the actual producer axes, including runtime movement axes,
 without rewriting a source callee name or consulting a same-spelled shadow.
 Ordinary function signatures cannot establish closed operation identity.
+A runtime join of distinct checked operations retains a canonical set of their
+checked contracts in logical host IR. Conformance preserves each branch's
+operation identity; it cannot relabel an alternative with the first branch's
+descriptor. The private C ABI projection rejects this function value under
+chelis#879. Repeated alternatives collapse to the same closed operation.
+
 Genuine host operands and borrowed callbacks retain `HostBuiltinIdentity` and
 instantiate the same-surface, same-axis Bool relation at their application.
 Enclosing values use the existing direct-call lowering path; concrete type and

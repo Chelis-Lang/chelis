@@ -8632,12 +8632,7 @@ impl<'a> HostEmitter<'a> {
         if args.is_empty()
             && let HostType::CheckedBuiltinCallable(op) = ty
         {
-            if op.symbol() != name {
-                return Err(invalid_abi_shape(
-                    format!("closed checked builtin identity {op:?} disagrees with `{name}`"),
-                    "C host checked callable selection",
-                ));
-            }
+            validate_checked_builtin_identity(*op, name)?;
             self.lines.push(format!(
                 "{}{target} = (chelis_checked_callable){{ NULL }};",
                 self.indent
@@ -14666,6 +14661,21 @@ fn admit_host_elementwise(
     ))
 }
 
+/// A statically closed descriptor is still an invariant, independently of
+/// the target's rejection of a valid runtime callable choice.
+fn validate_checked_builtin_identity(
+    operation: chelis_ir::host_type_state::CheckedBuiltinCallable,
+    name: &str,
+) -> Result<(), Unsupported> {
+    if operation.symbol() != name {
+        return Err(invalid_abi_shape(
+            format!("closed checked builtin identity {operation:?} disagrees with `{name}`"),
+            "C host checked callable selection",
+        ));
+    }
+    Ok(())
+}
+
 fn invalid_abi_shape(detail: String, context: &'static str) -> Unsupported {
     Unsupported::new(
         UnsupportedKind::Construct(detail),
@@ -15462,6 +15472,23 @@ fn sparse_symbol_expr(
 #[cfg(test)]
 mod expression_dispatch_tests {
     use super::*;
+
+    #[test]
+    fn closed_callable_identity_mismatch_remains_an_internal_error() {
+        use chelis_ir::host_type_state::CheckedBuiltinCallable;
+        use chelis_types::unsupported::RejectionAuthorityKind;
+        let nan = CheckedBuiltinCallable::from_symbol("is_nan").unwrap();
+        assert!(validate_checked_builtin_identity(nan, "is_nan").is_ok());
+        let error = validate_checked_builtin_identity(nan, "is_finite").unwrap_err();
+        let identity = error.identity();
+        assert_eq!(identity.stage, Stage::Codegen("c"));
+        assert_eq!(identity.disposition, RejectionAuthorityKind::Deliberate);
+        assert_eq!(identity.atom.map(|atom| atom.as_str()), Some("[04-TOT-2]"));
+        assert_eq!(identity.tracking_issue, None);
+        assert!(error.to_string().contains("chelis#730"));
+        assert_eq!(identity.context, "C host checked callable selection");
+        assert!(error.to_string().contains("disagrees"));
+    }
 
     /// chelis#2734: host lowering keeps an operation on the host loop exactly
     /// when the shared table admits its dtype, so each loop's arms must be

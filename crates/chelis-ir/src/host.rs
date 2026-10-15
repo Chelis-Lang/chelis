@@ -8642,7 +8642,12 @@ fn lower_host_expr_kind(
                 expected_ty,
             )?;
             let explicit_ty = expr_host_type(expr, program, scope);
-            let ty = if explicit_ty.is_unresolved() {
+            let ty = if let Some(joined) = HostTypeTerm::checked_callable_join([
+                host_expr_type(&then_expr),
+                host_expr_type(&else_expr),
+            ]) {
+                joined
+            } else if explicit_ty.is_unresolved() {
                 let then_ty = host_expr_type(&then_expr);
                 if then_ty.is_unresolved() {
                     host_expr_type(&else_expr)
@@ -10159,7 +10164,11 @@ fn lower_match_host_expr(
         )?);
     }
     let explicit = expr_host_type(match_expr, program, scope);
-    let result_ty = if explicit.is_unresolved() {
+    let result_ty = if let Some(joined) =
+        HostTypeTerm::checked_callable_join(arms.iter().map(|arm| host_expr_type(&arm.body)))
+    {
+        joined
+    } else if explicit.is_unresolved() {
         arms.iter()
             .map(|arm| host_expr_type(&arm.body))
             .find(|ty| !ty.is_unresolved())
@@ -13660,6 +13669,18 @@ fn lower_lexical_host_call(
         .collect::<Result<Vec<_>, _>>()?;
     let (param_tys, ret_ty) = host_fn_signature(binding)
         .or_else(|| kids.first().and_then(expr_fn_type))
+        .or_else(|| {
+            // The checked application has instantiated the logical choice,
+            // while its alternatives remain unspecialized operations. Keep
+            // the actual typed payload for the unsupported callable marker;
+            // this is not a guessed signature or a static operation choice.
+            matches!(binding, HostTypeTerm::CheckedCallableChoice(_)).then(|| {
+                (
+                    args.iter().map(host_expr_type).collect(),
+                    explicit_ty.clone(),
+                )
+            })
+        })
         .ok_or_else(|| {
             host_expr_lowering_error(
                 app_expr,
@@ -13674,7 +13695,14 @@ fn lower_lexical_host_call(
         explicit_ty
     };
     Ok(HostExpr::new(HostExprKind::Call {
-        callee: lexical.callee(),
+        // A computed checked callable is logically valid, but has no static
+        // operation identity. Preserve the existing target-boundary marker;
+        // neither ownership nor codegen may reinterpret it as a direct call.
+        callee: if matches!(binding, HostTypeTerm::CheckedCallableChoice(_)) {
+            HostCallee::unresolved_callable()
+        } else {
+            lexical.callee()
+        },
         args,
         arg_tys: param_tys,
         ty,
@@ -15841,7 +15869,7 @@ fn host_type_syntax(ty: &HostTypeTerm, span: chelis_deep::Span) -> Option<Expr> 
         }
         // This closed operation has no single Deep function type until a
         // checked application selects its scalar or tensor alternative.
-        HostTypeTerm::CheckedBuiltinCallable(_) => None,
+        HostTypeTerm::CheckedBuiltinCallable(_) | HostTypeTerm::CheckedCallableChoice(_) => None,
         HostTypeTerm::Adt(name, args) => Some(host_adt_syntax(
             name,
             args.iter()
@@ -16821,6 +16849,14 @@ fn write_canonical_host_type_key(ty: &HostTypeTerm, out: &mut String) {
         HostTypeTerm::CheckedBuiltinCallable(op) => {
             out.push_str("checked-builtin:");
             out.push_str(op.symbol());
+        }
+        HostTypeTerm::CheckedCallableChoice(ops) => {
+            out.push_str("checked-choice[");
+            for op in ops {
+                out.push_str(op.symbol());
+                out.push(',');
+            }
+            out.push(']');
         }
         HostTypeTerm::Adt(name, args) => {
             out.push_str("adt:");
@@ -22324,6 +22360,18 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
 /// parameter types beneath `len(...)` or a fold seed beneath a callback, still
 /// reaches a bare `None` or `[]` whose type only that context fixes.
 fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
+    // A join's alternatives are distinct checked contracts. Context may
+    // specialize data, but must never retag one operation as another.
+    if matches!(ty, HostTypeTerm::CheckedCallableChoice(_)) {
+        let own = host_expr_type(&expr);
+        if matches!(
+            own,
+            HostTypeTerm::CheckedBuiltinCallable(_) | HostTypeTerm::CheckedCallableChoice(_)
+        ) && own != ty
+        {
+            return force_host_expr_type(expr, own);
+        }
+    }
     let HostExpr {
         kind,
         span_id,
@@ -24849,6 +24897,60 @@ fn solve_host_type_vars(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_callable_join_preserves_branch_identity_through_conformance() {
+        let nan = CheckedBuiltinCallable::from_symbol("is_nan").unwrap();
+        let finite = CheckedBuiltinCallable::from_symbol("is_finite").unwrap();
+        let ty = |op| HostTypeTerm::CheckedBuiltinCallable(op);
+        let joined = HostTypeTerm::checked_callable_join([ty(nan), ty(finite)]).unwrap();
+        assert_eq!(
+            joined,
+            HostTypeTerm::checked_callable_join([ty(finite), ty(nan)]).unwrap()
+        );
+        assert_eq!(
+            joined,
+            HostTypeTerm::checked_callable_join([joined.clone(), ty(nan)]).unwrap()
+        );
+        assert_eq!(
+            HostTypeTerm::checked_callable_join([ty(nan), ty(nan)]),
+            Some(ty(nan))
+        );
+        assert!(HostTypeTerm::checked_callable_join([ty(nan), HostTypeTerm::Bool]).is_none());
+        let branch = |op: CheckedBuiltinCallable| {
+            HostExpr::new(HostExprKind::Builtin {
+                name: op.into(),
+                args: Vec::new(),
+                ty: ty(op),
+            })
+        };
+        let expr = force_host_expr_type(
+            HostExpr::new(HostExprKind::If {
+                cond: Box::new(HostExpr::new(HostExprKind::Bool(false))),
+                then_expr: Box::new(branch(nan)),
+                else_expr: Box::new(branch(finite)),
+                ty: joined.clone(),
+            }),
+            joined.clone(),
+        );
+        let HostExprKind::If {
+            then_expr,
+            else_expr,
+            ty: actual,
+            ..
+        } = expr.kind
+        else {
+            panic!("if")
+        };
+        assert_eq!(actual, joined);
+        assert_eq!(host_expr_type(&then_expr), ty(nan));
+        assert_eq!(host_expr_type(&else_expr), ty(finite));
+        assert!(matches!(
+            joined.into_concrete(),
+            Ok(ConcreteHostType::CheckedCallableChoice(_))
+        ));
+    }
+
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
 

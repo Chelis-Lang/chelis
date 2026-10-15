@@ -185,7 +185,7 @@ impl HostAbiType {
                 ));
             }
             ConcreteHostType::Scalar(Prim::Key) => Self::Key,
-            ConcreteHostType::Function(_, _) => {
+            ConcreteHostType::Function(_, _) | ConcreteHostType::CheckedCallableChoice(_) => {
                 return Err(unsupported_function_value(ty, "C host ABI value selection"));
             }
             ConcreteHostType::CheckedBuiltinCallable(op) => Self::CheckedBuiltinCallable(*op),
@@ -621,7 +621,8 @@ pub(crate) fn public_type_contains_checked_callable(
         visited: &mut UnordSet<String>,
     ) -> bool {
         match ty {
-            ConcreteHostType::CheckedBuiltinCallable(_) => true,
+            ConcreteHostType::CheckedBuiltinCallable(_)
+            | ConcreteHostType::CheckedCallableChoice(_) => true,
             ConcreteHostType::Function(params, ret) => {
                 params.iter().any(|param| contains(param, layouts, visited))
                     || contains(ret, layouts, visited)

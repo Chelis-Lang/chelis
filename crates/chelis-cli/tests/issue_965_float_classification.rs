@@ -908,39 +908,108 @@ fn predicate_runtime_axes_keep_authored_result_claims_in_eval_and_native_c() {
 #[test]
 fn runtime_selected_predicates_reach_the_target_callable_fence() {
     for tensor in [false, true] {
+        for (choice, reverse) in [
+            ("if flag then is_nan else is_finite", false),
+            ("if flag then is_finite else is_nan", true),
+            (
+                "if flag then (if flag then is_nan else is_finite) else is_finite",
+                false,
+            ),
+            (
+                "match flag with { | true => is_nan | false => is_finite }",
+                false,
+            ),
+        ] {
+            for flag in [false, true] {
+                let (input, output, value) = if tensor {
+                    (
+                        "tensor[2,f32]",
+                        "tensor[2,bool]",
+                        "to_tensor([1.0f32,2.0f32])",
+                    )
+                } else {
+                    ("f32", "bool", "1.0f32")
+                };
+                let source = format!(
+                    "def selected(flag: bool, x: {input}) -> {output} = {{\n  f = {choice}\n  f(x)\n}}\nresult = selected({flag},{value})\n"
+                );
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("selected.ch");
+                std::fs::write(&path, &source).unwrap();
+                Command::cargo_bin("chelis")
+                    .unwrap()
+                    .args(["fmt", "--inplace"])
+                    .arg(&path)
+                    .assert()
+                    .success();
+                let source = std::fs::read_to_string(&path).unwrap();
+                let checked = Command::cargo_bin("chelis")
+                    .unwrap()
+                    .arg("check")
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                assert!(
+                    checked.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&checked.stderr)
+                );
+                let checked: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+                assert_eq!(checked["score"], 1.0);
+                assert_eq!(checked["errors"], serde_json::json!([]));
+                if !tensor {
+                    assert!(evaluate(&source).contains(&format!("result = {}", flag == reverse)));
+                }
+                let built = Command::cargo_bin("chelis")
+                    .unwrap()
+                    .args(["build", "--target", "c", "--emit-c"])
+                    .arg(&path)
+                    .arg("-o")
+                    .arg(dir.path().join("selected.c"))
+                    .output()
+                    .unwrap();
+                assert!(!built.status.success());
+                let error = String::from_utf8_lossy(&built.stderr);
+                assert!(error.contains("chelis#879"), "{error}");
+                assert!(!error.contains("chelis#730"), "{error}");
+                assert!(
+                    !error.contains("identity") || !error.contains("disagrees"),
+                    "{error}"
+                );
+                assert!(!dir.path().join("selected.c").exists());
+            }
+        }
+    }
+}
+
+/// Collapsing repeated identities is static resolution, including borrowed
+/// callback arguments; a logical join must not discard this admitted path.
+#[test]
+fn repeated_predicate_choices_keep_the_closed_callable_route() {
+    for tensor in [false, true] {
         for flag in [false, true] {
-            let (input, output, value) = if tensor {
-                ("tensor[2,f32]", "tensor[2,bool]", "to_tensor([1.0f32,2.0f32])")
+            let (input, output, value, expected) = if tensor {
+                (
+                    "tensor[2,f32]",
+                    "tensor[2,bool]",
+                    "to_tensor([1.0f32,2.0f32])",
+                    "tensor(shape=[2], data=[true, true])",
+                )
             } else {
-                ("f32", "bool", "1.0f32")
+                ("f32", "bool", "1.0f32", "true")
             };
             let source = format!(
-                "def selected(flag: bool, x: {input}) -> {output} = {{\n  f = if flag then is_nan else is_finite\n  f(x)\n}}\nresult = selected({flag},{value})\n"
+                "alias = is_finite\ndef borrowed(f: (&{input} -> {output}), x: {input}) -> {output} = f(x)\ndef selected(flag: bool, x: {input}) -> {output} = {{\n  f = if flag then alias else is_finite\n  f(x)\n}}\nresult = selected({flag},{value})\nborrowed_result = borrowed(alias,{value})\n"
             );
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("selected.ch");
-            std::fs::write(&path, &source).unwrap();
-            Command::cargo_bin("chelis").unwrap()
-                .args(["fmt", "--inplace"]).arg(&path).assert().success();
-            let source = std::fs::read_to_string(&path).unwrap();
-            let checked = Command::cargo_bin("chelis").unwrap()
-                .arg("check").arg(&path).output().unwrap();
-            assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
-            let checked: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
-            assert_eq!(checked["score"], 1.0);
-            assert_eq!(checked["errors"], serde_json::json!([]));
+            let native = build_and_run(&source, &format!("repeated_{tensor}_{flag}"));
+            assert!(native.contains(&format!("result = {expected}")), "{native}");
+            assert!(
+                native.contains(&format!("borrowed_result = {expected}")),
+                "{native}"
+            );
             if !tensor {
-                assert!(evaluate(&source).contains(&format!("result = {}", !flag)));
+                assert_eq!(native, evaluate(&source));
             }
-            let built = Command::cargo_bin("chelis").unwrap()
-                .args(["build", "--target", "c", "--emit-c"]).arg(&path)
-                .arg("-o").arg(dir.path().join("selected.c")).output().unwrap();
-            assert!(!built.status.success());
-            let error = String::from_utf8_lossy(&built.stderr);
-            assert!(error.contains("chelis#879"), "{error}");
-            assert!(!error.contains("chelis#730"), "{error}");
-            assert!(!error.contains("identity") || !error.contains("disagrees"), "{error}");
-            assert!(!dir.path().join("selected.c").exists());
         }
     }
 }
