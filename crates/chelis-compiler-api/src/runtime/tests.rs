@@ -5137,7 +5137,7 @@ fn growing_accumulator_claim_work_is_bounded_by_new_components() {
 }
 
 #[test]
-fn named_definition_accumulator_claim_retains_full_entry_work() {
+fn named_definition_accumulator_claim_has_independent_compositional_receipts() {
     for combine in ["fold", "scan"] {
         for steps in [100, 400] {
             let source = format!(
@@ -5160,7 +5160,10 @@ fn named_definition_accumulator_claim_retains_full_entry_work() {
             );
             let work = super::eval::entry_claim_work();
             eprintln!("Eval named definition {combine} K={steps}: {work}");
-            assert!(work >= steps as u64 * steps as u64, "{work}");
+            // §4.7: the outer wildcard admission does not discharge the
+            // helper's stronger formal. Both boundaries need their own
+            // first successful entry and construction postcondition.
+            assert!(work <= 40 * steps as u64 + 100, "{work}");
         }
     }
 }

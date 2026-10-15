@@ -517,7 +517,7 @@ fn aliases_and_selected_callables_retain_complete_entry_validation() {
 }
 
 #[test]
-fn named_definition_accumulator_claim_is_a_measured_full_walk_residue() {
+fn named_definition_accumulator_claim_has_independent_compositional_receipts() {
     for combine in ["fold", "scan"] {
         for steps in [100, 400] {
             let source = format!(
@@ -526,9 +526,44 @@ fn named_definition_accumulator_claim_is_a_measured_full_walk_residue() {
             let (work, origins) = counted_native(&source);
             eprintln!("C named definition {combine} K={steps}: reads {work}; origins {origins}");
             assert!(
-                work >= steps as u64 * steps as u64,
-                "named-call entries retain complete checks: {work}"
+                work <= 40 * steps as u64 + 100,
+                "independently checked named-call entries have bounded work: {work}"
             );
+        }
+    }
+}
+
+#[test]
+fn named_accumulator_entries_preserve_empty_and_final_invalid_effects() {
+    // §4.7: first entry precedes the body; a bad newly appended component
+    // fails at the next entry, with no invented final-result obligation.
+    for native in [false, true] {
+        for combine in ["fold", "scan"] {
+            for direct in [false, true] {
+                for steps in [0, 1, 2] {
+                    for bad_seed in [false, true] {
+                        let callback = if direct {
+                            "step"
+                        } else {
+                            "fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i)"
+                        };
+                        let source = format!(
+                            "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{\n _ = print(\"body\")\n append(acc, produce(5i64))\n}}\ndef run(seed: List[tensor[*, f32]]) -> i64 ! {{ IO }} = {{\n _ = {combine}({callback}, seed, range(0i64, {steps}i64))\n 42i64\n}}\nout = run([produce({}i64)])\n",
+                            if bad_seed { 5 } else { 3 }
+                        );
+                        let (success, output) = result_claims::run(&source, native);
+                        let failed = steps > 0 && (bad_seed || steps > 1);
+                        assert_eq!(success, !failed, "{source}\n{output}");
+                        let bodies = if steps == 0 || bad_seed { 0 } else { 1 };
+                        assert_eq!(output.lines().filter(|line| *line == "body").count(), bodies, "{source}\n{output}");
+                        if failed {
+                            assert!(output.contains("numeric trap: domain in load at i64"), "{output}");
+                        } else {
+                            assert!(output.contains("out = 42"), "{output}");
+                        }
+                    }
+                }
+            }
         }
     }
 }
