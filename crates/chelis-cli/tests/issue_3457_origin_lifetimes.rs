@@ -102,6 +102,10 @@ struct LiveMetadata {
 }
 
 fn live_metadata(name: &str, source: &str) -> LiveMetadata {
+    live_metadata_with_sanitizers(name, source, false)
+}
+
+fn live_metadata_with_sanitizers(name: &str, source: &str, sanitized: bool) -> LiveMetadata {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/issue3457");
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).unwrap();
@@ -135,8 +139,37 @@ fn live_metadata(name: &str, source: &str) -> LiveMetadata {
         "int main(void) { atexit(__probe_report);",
     );
     std::fs::write(&path, c).unwrap();
-    assert!(common::link_generated(&destination, "lifetime.c", "lifetime").success());
+    if sanitized {
+        let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+            chelis_backend_c::toolchain::CodegenRequirements {
+                wants_openmp: true,
+                needs_blas: false,
+            },
+        );
+        let linked = std::process::Command::new(toolchain.compiler)
+            .current_dir(&destination)
+            .args([
+                "-O1",
+                "-g",
+                "-fsanitize=address,undefined",
+                "-fno-omit-frame-pointer",
+            ])
+            .args(toolchain.compile_flags)
+            .arg("lifetime.c")
+            .arg("libchelis_runtime.a")
+            .args(toolchain.link_flags)
+            .args(["-o", "lifetime"])
+            .status()
+            .unwrap();
+        assert!(linked.success());
+    } else {
+        assert!(common::link_generated(&destination, "lifetime.c", "lifetime").success());
+    }
     let output = std::process::Command::new(destination.join("lifetime"))
+        .env(
+            "ASAN_OPTIONS",
+            "detect_stack_use_after_return=1:detect_leaks=0",
+        )
         .output()
         .unwrap();
     std::fs::write(dir.join("stdout.txt"), &output.stdout).unwrap();
@@ -260,6 +293,105 @@ fn escaped_growing_chain_keeps_necessary_live_origins() {
         measured[1].peak_origin > measured[0].peak_origin,
         "{measured:?}"
     );
+}
+
+#[test]
+fn returned_prefix_suffix_view_keeps_backing_origins_after_callee_exit() {
+    let source = "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef selected(size: i64) -> List[tensor[*, f32]] = {\n xs = [produce(5i64), produce(size), produce(7i64)]\n ys = skip(xs, 1i64)\n take(ys, 1i64)\n}\nout = shape(index(selected(3i64), 0i64), 0i32)\n";
+    live_metadata_with_sanitizers("returned-prefix-suffix", source, true);
+    // The retained selected component still attributes its independent
+    // mismatching claim to insert after both view-producing scopes retire.
+    let negative = source.replace(
+        "out = shape(index(selected(3i64), 0i64), 0i32)",
+        "def reject(size: i64) -> tensor[5, f32] = index(selected(size), 0i64)\nout = reject(3i64)",
+    );
+    for native in [false, true] {
+        let (success, output) = result_claims::run(&negative, native);
+        assert!(!success, "{output}");
+        assert!(
+            output.contains("numeric trap: domain in insert at i64"),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn tensor_tuple_and_nested_nominal_construction_stays_bounded() {
+    for (kind, ty, seed, body, result) in [
+        (
+            "tensor",
+            "tensor[3, f32]",
+            "produce(3i64)",
+            "produce(3i64)",
+            "shape(b, 0i32)",
+        ),
+        (
+            "tuple",
+            "(tensor[3, f32], tensor[3, f32])",
+            "(produce(3i64), produce(3i64))",
+            "(acc.1, acc.0)",
+            "shape(b.0, 0i32)",
+        ),
+        (
+            "nested",
+            "Box[Box[tensor[3, f32]]]",
+            "Box { v: Box { v: produce(3i64) } }",
+            "Box { v: value(acc) }",
+            "shape(value(value(b)), 0i32)",
+        ),
+    ] {
+        let measured = [0, 100, 400, 1600].map(|steps| {
+            let source = format!("type Box[T] =\n | Box {{ v: T }}\ndef value[T](b: Box[T]) -> T = match b with {{ | Box {{ v }} => v }}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef run() -> i64 = {{\n b = fold(fn (acc: {ty}, i: i64) -> {body}, {seed}, range(0i64, {steps}i64))\n {result}\n}}\nout = run()\n");
+            live_metadata_with_sanitizers(&format!("{kind}-k{steps}"), &source, steps == 1600)
+        });
+        for later in &measured[2..] {
+            assert!(
+                later.peak_origin <= measured[1].peak_origin + 1024,
+                "{kind}: {measured:?}"
+            );
+            assert!(
+                later.peak_claim <= measured[1].peak_claim + 1024,
+                "{kind}: {measured:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn retired_loop_metadata_preserves_empty_next_entry_and_final_invalid_schedule() {
+    for native in [false, true] {
+        for combine in ["fold", "scan"] {
+            for (seed, steps, succeeds, effects) in [
+                (3, 0, true, 0),
+                (3, 1, true, 1),
+                (3, 2, false, 1),
+                (5, 0, true, 0),
+                (5, 1, false, 0),
+            ] {
+                let source = format!(
+                    "type Box[T] =\n | Box {{ v: T }}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef run(seed: Box[tensor[*, f32]], steps: i64) -> i64 ! {{ IO }} = {{\n _ = {combine}(fn (acc: Box[tensor[3, f32]], i: i64) -> {{\n _ = print(\"step\")\n Box {{ v: produce(5i64) }}\n }}, seed, range(0i64, steps))\n 42i64\n}}\nout = run(Box {{ v: produce({seed}i64) }}, {steps}i64)\n"
+                );
+                let (success, output) = result_claims::run(&source, native);
+                assert_eq!(
+                    success, succeeds,
+                    "native={native} {combine} seed={seed} steps={steps}: {output}"
+                );
+                assert_eq!(
+                    output.lines().filter(|line| *line == "step").count(),
+                    effects,
+                    "{output}"
+                );
+                if succeeds {
+                    assert!(output.contains("out = 42"), "{output}");
+                } else {
+                    assert!(
+                        output.contains("numeric trap: domain in load at i64"),
+                        "{output}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
