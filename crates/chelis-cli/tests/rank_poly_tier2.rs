@@ -874,7 +874,7 @@ fn helper_package_3668() -> (tempfile::TempDir, std::path::PathBuf) {
     let root = dir.path().join("rank-helper-composition");
     fs::create_dir_all(root.join("src")).expect("source directory");
     fs::write(root.join("reef.toml"), format!(
-        "[package]\nname = \"rank-helper-composition\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"RankCompose\"\n",
+        "schema = \"3\"\n[package]\nname = \"rank-helper-composition\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"RankCompose\"\nresolver = \"2\"\n",
         chelis_compiler_api::COMPILER_VERSION
     )).expect("manifest");
     fs::write(root.join("src/helper.ch"),
