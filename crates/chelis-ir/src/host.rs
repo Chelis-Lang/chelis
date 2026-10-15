@@ -32417,79 +32417,135 @@ pub fn bound_accumulator_forwarding_plan(
             parent: Option<usize>,
             roles: &mut AccumulatorIdentities<BoundForwardingRole>,
         ) -> Option<BoundForwardingRole> {
-            #[cfg(test)]
-            charge_accumulator_identity_work(1);
-            if let Expr::MetaExpr(meta, _) = expr {
-                let next = self.edge(parent, BoundForwardingEdge::Metadata);
-                return self.value(&meta.expr, next, roles);
+            struct LetState<'a> {
+                pairs: &'a [[Expr; 2]],
+                ordinal: usize,
+                body: &'a Expr,
+                parent: Option<usize>,
+                undo: Vec<(String, Option<Option<BoundForwardingRole>>)>,
             }
-            let node = as_node(expr)?;
-            let children = node.children_slice();
-            match node.tag() {
-                DeepTag::Var => roles.role(accumulator_identity_variable(expr)?),
-                DeepTag::App => {
-                    let [function, first, second] = children else {
-                        return None;
-                    };
-                    if function.tag() != Some(DeepTag::Var) {
-                        return None;
+            enum Task<'a> {
+                Value(&'a Expr, Option<usize>),
+                Next(LetState<'a>),
+                Bind(LetState<'a>),
+                Restore(Vec<(String, Option<Option<BoundForwardingRole>>)>),
+            }
+            let mut tasks = vec![Task::Value(expr, parent)];
+            let mut result = None;
+            while let Some(task) = tasks.pop() {
+                #[cfg(test)]
+                charge_accumulator_identity_work(1);
+                match task {
+                    Task::Next(state) => {
+                        if let Some([_, initializer]) = state.pairs.get(state.ordinal) {
+                            let next = self.edge(
+                                state.parent,
+                                BoundForwardingEdge::LetInitializer(state.ordinal),
+                            );
+                            tasks.push(Task::Bind(state));
+                            tasks.push(Task::Value(initializer, next));
+                        } else {
+                            let next = self.edge(state.parent, BoundForwardingEdge::LetBody);
+                            tasks.push(Task::Restore(state.undo));
+                            tasks.push(Task::Value(state.body, next));
+                        }
                     }
-                    let callee = accumulator_identity_variable(function)?;
-                    if roles.is_bound(callee)
-                        || roles.role(accumulator_identity_variable(first)?)
-                            != Some(BoundForwardingRole::Original(
-                                AccumulatorRootRole::Accumulator,
-                            ))
-                        || roles.role(accumulator_identity_variable(second)?)
-                            != Some(BoundForwardingRole::Original(AccumulatorRootRole::Item))
-                    {
-                        return None;
-                    }
-                    let occurrence = self.candidates.len();
-                    self.candidates.push(Candidate {
-                        route: parent,
-                        callee_name: callee.to_owned(),
-                        callsite: expr.clone(),
-                    });
-                    Some(BoundForwardingRole::InvocationResult(occurrence))
-                }
-                DeepTag::Let => {
-                    let bindings = children.first().and_then(as_node)?;
-                    let (pairs, remainder) = bindings.children_slice().as_chunks::<2>();
-                    if bindings.tag() != DeepTag::Bind || !remainder.is_empty() {
-                        return None;
-                    }
-                    let body = children.get(1)?;
-                    let mut undo = Vec::new();
-                    // Initializers are evaluated in the preceding lexical scope.
-                    for (ordinal, [binder, initializer]) in pairs.iter().enumerate() {
-                        let next = self.edge(parent, BoundForwardingEdge::LetInitializer(ordinal));
-                        let role = self.value(initializer, next, roles);
+                    Task::Bind(mut state) => {
+                        let [binder, _] = &state.pairs[state.ordinal];
                         let mut names = UnordSet::new();
                         collect_binder_names(binder, &mut names);
                         for name in names.into_sorted() {
                             let previous = roles.bind(&name, None);
-                            undo.push((name, previous));
+                            state.undo.push((name, previous));
                         }
-                        if let (Some(role), Some(name)) = (role, symbol_name(binder)) {
+                        if let (Some(role), Some(name)) = (result, symbol_name(binder)) {
                             let previous = roles.bind(name, Some(role));
-                            undo.push((name.to_owned(), previous));
+                            state.undo.push((name.to_owned(), previous));
+                        }
+                        state.ordinal += 1;
+                        tasks.push(Task::Next(state));
+                    }
+                    Task::Restore(undo) => {
+                        for (name, previous) in undo.into_iter().rev() {
+                            roles.restore(&name, previous);
                         }
                     }
-                    let next = self.edge(parent, BoundForwardingEdge::LetBody);
-                    let result = self.value(body, next, roles);
-                    for (name, previous) in undo.into_iter().rev() {
-                        roles.restore(&name, previous);
+                    Task::Value(expr, parent) => {
+                        result = None;
+                        if let Expr::MetaExpr(meta, _) = expr {
+                            let next = self.edge(parent, BoundForwardingEdge::Metadata);
+                            tasks.push(Task::Value(&meta.expr, next));
+                            continue;
+                        }
+                        let Some(node) = as_node(expr) else {
+                            continue;
+                        };
+                        let children = node.children_slice();
+                        match node.tag() {
+                            DeepTag::Var => {
+                                result = accumulator_identity_variable(expr)
+                                    .and_then(|name| roles.role(name));
+                            }
+                            DeepTag::App => {
+                                let [function, first, second] = children else {
+                                    continue;
+                                };
+                                if function.tag() != Some(DeepTag::Var) {
+                                    continue;
+                                }
+                                let Some(callee) = accumulator_identity_variable(function) else {
+                                    continue;
+                                };
+                                let first = accumulator_identity_variable(first)
+                                    .and_then(|name| roles.role(name));
+                                let second = accumulator_identity_variable(second)
+                                    .and_then(|name| roles.role(name));
+                                if roles.is_bound(callee)
+                                    || first
+                                        != Some(BoundForwardingRole::Original(
+                                            AccumulatorRootRole::Accumulator,
+                                        ))
+                                    || second
+                                        != Some(BoundForwardingRole::Original(
+                                            AccumulatorRootRole::Item,
+                                        ))
+                                {
+                                    continue;
+                                }
+                                let occurrence = self.candidates.len();
+                                self.candidates.push(Candidate {
+                                    route: parent,
+                                    callee_name: callee.to_owned(),
+                                    callsite: expr.clone(),
+                                });
+                                result = Some(BoundForwardingRole::InvocationResult(occurrence));
+                            }
+                            DeepTag::Let => {
+                                let bindings = children.first().and_then(as_node)?;
+                                let (pairs, remainder) = bindings.children_slice().as_chunks::<2>();
+                                if bindings.tag() != DeepTag::Bind || !remainder.is_empty() {
+                                    return None;
+                                }
+                                tasks.push(Task::Next(LetState {
+                                    pairs,
+                                    ordinal: 0,
+                                    body: children.get(1)?,
+                                    parent,
+                                    undo: Vec::new(),
+                                }));
+                            }
+                            DeepTag::Block => {
+                                if let Some(tail) = children.last() {
+                                    let next = self.edge(parent, BoundForwardingEdge::BlockTail);
+                                    tasks.push(Task::Value(tail, next));
+                                }
+                            }
+                            _ => {}
+                        }
                     }
-                    result
                 }
-                DeepTag::Block => {
-                    let tail = children.last()?;
-                    let next = self.edge(parent, BoundForwardingEdge::BlockTail);
-                    self.value(tail, next, roles)
-                }
-                _ => None,
             }
+            result
         }
     }
     let mut callback_node = callback;
