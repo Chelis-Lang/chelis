@@ -75,6 +75,9 @@ grouped resolver `4e5d11d33`. Five samples alternate parent/candidate execution
 order for each fixture class. CPU is median user-plus-system time for each direct
 test process, including lengths 32/64/128, fixture construction, rejection checks
 and startup. It is not isolated resolver CPU or a universal speedup.
+The machine also runs independent workloads, so CPU and elapsed timings are
+shared-host observations. Deterministic work counters and allocator bytes
+provide the structural evidence.
 
 | Fixture | Parent/grouped CPU (ms) | Parent/grouped allocated bytes at 128 | Parent/grouped peak bytes at 128 |
 | --- | --- | --- | --- |
