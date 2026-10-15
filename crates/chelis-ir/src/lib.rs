@@ -32,6 +32,7 @@ pub mod axis_sources;
 pub mod capacity_key;
 pub mod claim_pattern;
 pub mod compositions;
+pub mod contraction_views;
 pub mod dag;
 pub mod eval;
 pub mod fuse;

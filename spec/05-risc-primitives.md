@@ -2694,6 +2694,20 @@ exact ADT identity by [05-OP-34].
 > operation selectors and null plans use `movement`. These metadata operations have no
 > cotangent or arithmetic accumulator and do not alter payload arithmetic.
 >
+> `chelis_metadata_plan_tensor` snapshots a tensor's checked contiguous logical
+> metadata without retaining its payload. `chelis_metadata_permute_plan` and
+> `chelis_metadata_expand_plan` construct the same movement plans from a live
+> contiguous logical metadata plan, with the same tagged bounds, closed selectors,
+> admission, projections and failures as their tensor counterparts.
+> `chelis_movement_result_metadata` snapshots a movement plan's checked result
+> as independently owned contiguous logical metadata.
+> `chelis_metadata_plan_reshape` admits a tagged target shape and requires its
+> element count to equal the source count, reporting the canonical reshape
+> disagreement on failure. These constructors reject strided metadata plans:
+> their source indices denote logical row-major elements, whose mapping to a
+> payload is a separate view recipe. Every resulting metadata or movement plan
+> owns its metadata independently of its source and allocates no tensor payload.
+>
 > `chelis_tensor_window_plan` snapshots the complete input and valid-padding
 > result metadata from [05-RWIN-1]'s positive trailing window and stride lists,
 > transported as equal-length arrays of exact tagged i64 values. The tagged

@@ -95,6 +95,11 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | checked movement chelis_movement_check_product | `void chelis_movement_check_product(const chelis_movement_plan *lhs, const chelis_movement_plan *rhs, chelis_product_shape_context context)` |
 | checked movement chelis_movement_check_target | `void chelis_movement_check_target(const chelis_movement_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
 | checked movement chelis_movement_plan_release | `void chelis_movement_plan_release(chelis_movement_plan *plan)` |
+| logical metadata snapshot | `chelis_metadata_plan *chelis_metadata_plan_tensor(const chelis_tensor *input)` |
+| logical metadata reshape | `chelis_metadata_plan *chelis_metadata_plan_reshape(const chelis_metadata_plan *input, chelis_scalar rank, const chelis_scalar *shape)` |
+| logical metadata permutation | `chelis_movement_plan *chelis_metadata_permute_plan(const chelis_metadata_plan *input, chelis_scalar rank, const chelis_scalar *axes)` |
+| logical metadata expansion | `chelis_movement_plan *chelis_metadata_expand_plan(const chelis_metadata_plan *input, chelis_scalar axis, chelis_scalar size, chelis_movement_op operation)` |
+| logical movement result metadata | `chelis_metadata_plan *chelis_movement_result_metadata(const chelis_movement_plan *plan)` |
 | checked window tensor_window_plan | `chelis_window_plan *chelis_tensor_window_plan(const chelis_tensor *input, chelis_scalar count, const chelis_scalar *window, const chelis_scalar *steps, chelis_window_op operation)` |
 | checked window window_extent | `int64_t chelis_window_extent(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar axis)` |
 | checked window window_count | `int64_t chelis_window_count(const chelis_window_plan *plan)` |

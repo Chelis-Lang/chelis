@@ -1063,6 +1063,41 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_tensor ( const chelis_tensor * input ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_tensor` snapshots a tensor"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_reshape ( const chelis_metadata_plan * input , chelis_scalar rank , const chelis_scalar * shape ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_reshape` admits a tagged target shape"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_movement_plan * chelis_metadata_permute_plan ( const chelis_metadata_plan * input , chelis_scalar rank , const chelis_scalar * axes ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_permute_plan` and"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_movement_plan * chelis_metadata_expand_plan ( const chelis_metadata_plan * input , chelis_scalar axis , chelis_scalar size , chelis_movement_op operation ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_expand_plan` construct the same movement plans"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_movement_result_metadata ( const chelis_movement_plan * plan ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_movement_result_metadata` snapshots a movement plan"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_view ( chelis_scalar rank , const chelis_scalar * shape , const chelis_scalar * strides , chelis_scalar exemplar , chelis_scalar byte_capacity ) ;",
         &[],
         "[05-OP-33]",

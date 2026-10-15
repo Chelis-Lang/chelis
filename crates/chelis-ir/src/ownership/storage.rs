@@ -576,7 +576,16 @@ fn build_storage_plan(
     dag: VerifiedDagView<'_>,
     lane: StorageLaneKind,
 ) -> Result<BuiltStoragePlan, OwnershipError> {
+    let views = (lane == StorageLaneKind::C).then(|| dag.contraction_views());
     let mut skipped = dag.reduction_inlined_fused_elems();
+    if let Some(views) = &views {
+        skipped.extend(
+            dag.nodes()
+                .iter()
+                .filter(|node| views.is_deferred(node.id))
+                .map(|node| node.id),
+        );
+    }
     match lane {
         // The C emitter computes an inlined product inside its sum.
         StorageLaneKind::C => skipped.extend(
@@ -590,7 +599,14 @@ fn build_storage_plan(
     let owner_of = compute_owner_map(&placements);
     let destructively_dropped = destructively_dropped_owners(&placements, &owner_of);
     let mut requirements = owner_requirements(dag, &placements, &owner_of)?;
-    extend_lifetimes(dag, lane, &placements, &owner_of, &mut requirements);
+    extend_lifetimes(
+        dag,
+        lane,
+        &placements,
+        &owner_of,
+        &mut requirements,
+        views.as_ref(),
+    );
     let AssignedSlots { slots, reusable } = assign_slots(
         dag,
         &mut placements,
@@ -873,6 +889,7 @@ fn extend_lifetimes(
     placements: &[StoragePlacement],
     owner_of: &[Option<NodeId>],
     requirements: &mut BTreeMap<NodeId, OwnerRequirement>,
+    views: Option<&crate::contraction_views::ContractionViews>,
 ) {
     let epilogue = dag.len();
     for node in dag.nodes() {
@@ -886,7 +903,7 @@ fn extend_lifetimes(
             },
             // A node computing a skipped input inline reads, at its own
             // position, everything that input would have read.
-            _ => read_through_skipped(dag, placements, &node.inputs),
+            _ => read_through_skipped(dag, placements, &node.inputs, views),
         };
         // Ownership borrows shape dependencies as well as value inputs. A
         // result-claim witness stores the canonical scalar the producer reads;
@@ -938,6 +955,19 @@ fn extend_lifetimes(
             requirement.last_use_index = epilogue;
         }
     }
+    // The recipe planner propagates deferred reads in one reverse pass.
+    // These are payload borrows even when the original node only carried
+    // metadata at the later consumer; a source slot cannot be repurposed.
+    if let Some(views) = views {
+        for node in dag.nodes() {
+            if let Some(last) = views.base_last_read(node.id)
+                && let Some(owner) = owner_of[node.id.0]
+                && let Some(requirement) = requirements.get_mut(&owner)
+            {
+                requirement.last_use_index = requirement.last_use_index.max(last);
+            }
+        }
+    }
 }
 
 /// `inputs`, with each skipped node replaced by its own reads, transitively.
@@ -945,10 +975,15 @@ fn read_through_skipped(
     dag: VerifiedDagView<'_>,
     placements: &[StoragePlacement],
     inputs: &[NodeId],
+    views: Option<&crate::contraction_views::ContractionViews>,
 ) -> Vec<NodeId> {
     let mut reads = Vec::new();
     let mut pending = inputs.iter().rev().copied().collect::<Vec<_>>();
     while let Some(input) = pending.pop() {
+        if views.is_some_and(|views| views.is_deferred(input)) {
+            // Accounted for by the reverse-topological base-retirement pass.
+            continue;
+        }
         if !matches!(placements[input.0], StoragePlacement::Skipped) {
             reads.push(input);
             continue;

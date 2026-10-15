@@ -77,6 +77,14 @@ pub struct CEmitter {
     /// ([`chelis_ir::fuse::InlinedProduct`]). Their `Mul` emits nothing and
     /// their expansions emit only their checked plans.
     inlined_products: BTreeMap<usize, chelis_ir::fuse::InlinedProduct>,
+    /// Additional recipes preserve the specialized forward-product path.
+    deferred_views: chelis_ir::contraction_views::ContractionViews,
+    deferred_ranks: BTreeMap<usize, usize>,
+    deferred_metadata: BTreeSet<NodeId>,
+    deferred_cursor: usize,
+    emitted_metadata: BTreeSet<NodeId>,
+    pin_retirements: BTreeMap<usize, Vec<NodeId>>,
+    metadata_retirements: BTreeMap<usize, Vec<NodeId>>,
     /// Backing-slot plan for materialized C tensors.
     memory_plan: MemoryPlan,
     fused_reuse: BTreeMap<NodeId, ReusableOwnedStorage>,
@@ -982,6 +990,29 @@ impl CEmitter {
         }
 
         let seeds = dag.trap_seeds();
+        let deferred_views = dag.contraction_views();
+        let mut deferred_metadata = BTreeSet::new();
+        let mut deferred_ranks = BTreeMap::new();
+        for node in dag.nodes() {
+            if deferred_views.is_deferred(node.id) {
+                deferred_metadata.insert(node.id);
+                deferred_metadata.extend(node.inputs.iter().copied());
+                deferred_ranks.insert(node.id.0, node.output_type.dims.len());
+            }
+        }
+        let mut pin_retirements = BTreeMap::<usize, Vec<NodeId>>::new();
+        let mut metadata_retirements = BTreeMap::<usize, Vec<NodeId>>::new();
+        for node in dag.nodes() {
+            if let Some(last) = deferred_views.base_last_read(node.id) {
+                pin_retirements.entry(last).or_default().push(node.id);
+            }
+            if deferred_metadata.contains(&node.id) {
+                metadata_retirements
+                    .entry(deferred_views.last_read(node.id))
+                    .or_default()
+                    .push(node.id);
+            }
+        }
         let mut e = CEmitter {
             lines: Vec::new(),
             indent: 0,
@@ -1004,6 +1035,13 @@ impl CEmitter {
                 .into_iter()
                 .map(|inlined| (inlined.sum.0, inlined))
                 .collect(),
+            deferred_views,
+            deferred_ranks,
+            deferred_metadata,
+            deferred_cursor: 0,
+            emitted_metadata: BTreeSet::new(),
+            pin_retirements,
+            metadata_retirements,
             memory_plan,
             fused_reuse,
             reused_sources: chelis_unord::UnordSet::new(),
@@ -1296,7 +1334,9 @@ impl CEmitter {
                 }
             }
             e.emit_runtime_dim_sites(node.id.0, &realized);
+            e.emit_deferred_ownership_after_node(node);
         }
+        e.emit_deferred_retirements(dag.len());
 
         // Every generated allocation is canonical contiguous storage.  Keep
         // its exclusive lease across the straight-line kernel and end all
@@ -3613,6 +3653,136 @@ impl CEmitter {
         self.emit_slot_allocation_if_needed(id, ty);
     }
 
+    /// One logical element, preserving each recipe's own product rounding.
+    /// Shared numeric recipes are dense boundaries in the shared plan, so
+    /// recursively spelling this expression cannot expand a numeric diamond.
+    fn deferred_read(&mut self, node: NodeId, index: &str, dag: VerifiedDagView<'_>) -> String {
+        let id = node.0;
+        let producer = dag.get(node).expect("verified recipe source");
+        if !self.deferred_views.is_deferred(node) {
+            let et = Self::elem_type(&producer.output_type);
+            return if self.deferred_views.base_last_read(node).is_some() {
+                format!("t{id}_deferred_data[{index}]")
+            } else {
+                format!("((const {et}*)t{id}_data)[{index}]")
+            };
+        }
+        match &producer.op {
+            RiscOp::Reshape { .. } => self.deferred_read(producer.inputs[0], index, dag),
+            RiscOp::Expand { .. } | RiscOp::Permute { .. } => {
+                let mut offset = format!("t{id}_base");
+                for axis in 0..producer.output_type.dims.len() {
+                    offset.push_str(&format!(
+                        " + ((({index}) / t{id}_divisor{axis}) % t{id}_extent{axis}) * t{id}_scale{axis}"
+                    ));
+                }
+                let cursor = format!("__view_index_{}", self.deferred_cursor);
+                self.deferred_cursor += 1;
+                let index_type = Self::prim_elem_type(Prim::Int64);
+                self.line(&format!("const {index_type} {cursor} = {offset};"));
+                self.deferred_read(producer.inputs[0], &cursor, dag)
+            }
+            RiscOp::Mul => {
+                let lhs = self.deferred_read(producer.inputs[0], index, dag);
+                let rhs = self.deferred_read(producer.inputs[1], index, dag);
+                if Self::is_reduced_float(&producer.output_type) {
+                    let load = Self::reduced_to_f32_fn(producer.output_type.precision);
+                    let store = Self::f32_to_reduced_fn(producer.output_type.precision);
+                    format!("{store}({load}({lhs}) * {load}({rhs}))")
+                } else {
+                    finalize_elem(
+                        crate::fp_env::risc_nan_finalization(&RiscOp::Mul),
+                        format!("({lhs}) * ({rhs})"),
+                        &producer.output_type,
+                    )
+                }
+            }
+            _ => unreachable!("shared planner admits only movement and product recipes"),
+        }
+    }
+
+    fn emit_deferred_movement_metadata(&mut self, id: usize, rank: usize) {
+        self.line(&format!(
+            "chelis_metadata_plan *t{id}_metadata = chelis_movement_result_metadata(t{id}_movement);"
+        ));
+        self.emitted_metadata.insert(NodeId(id));
+        self.emit_movement_terms(id, rank);
+        let index_type = Self::prim_elem_type(Prim::Int64);
+        for axis in 0..rank {
+            self.line(&format!(
+                "const {index_type} t{id}_divisor{axis} = chelis_movement_term(t{id}_movement, CHELIS_PROJECTION_DIVISOR, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}));"
+            ));
+        }
+        self.line(&format!("chelis_movement_plan_release(t{id}_movement);"));
+    }
+
+    fn emit_deferred_movement_copy(
+        &mut self,
+        id: usize,
+        source: NodeId,
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+    ) {
+        let index_type = Self::prim_elem_type(Prim::Int64);
+        let et = Self::elem_type(ty);
+        self.emit_movement_terms(id, ty.dims.len());
+        for axis in 0..ty.dims.len() {
+            self.line(&format!(
+                "const {index_type} t{id}_divisor{axis} = chelis_movement_term(t{id}_movement, CHELIS_PROJECTION_DIVISOR, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}));"
+            ));
+        }
+        self.line(&format!("for ({index_type} i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        let mut projection = format!("t{id}_base");
+        for axis in 0..ty.dims.len() {
+            projection.push_str(&format!(
+                " + ((i / t{id}_divisor{axis}) % t{id}_extent{axis}) * t{id}_scale{axis}"
+            ));
+        }
+        self.line(&format!("const {index_type} src = {projection};"));
+        let read = self.deferred_read(source, "src", dag);
+        self.line(&format!("(({et}*)t{id}_data)[i] = {read};"));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("chelis_movement_plan_release(t{id}_movement);"));
+    }
+
+    fn emit_deferred_ownership_after_node(&mut self, node: &DagNode) {
+        let id = node.id.0;
+        if self.deferred_metadata.contains(&node.id)
+            && !self.emitted_metadata.contains(&node.id)
+        {
+            assert!(!self.deferred_views.is_deferred(node.id));
+            self.line(&format!(
+                "chelis_metadata_plan *t{id}_metadata = chelis_metadata_plan_tensor(t{id});"
+            ));
+            self.emitted_metadata.insert(node.id);
+        }
+        if self.deferred_views.base_last_read(node.id).is_some() {
+            self.finish_tensor_write_for_checked_read(id);
+            let et = Self::elem_type(&node.output_type);
+            self.line(&format!("chelis_tensor *t{id}_deferred_owner = t{id};"));
+            self.line(&format!("chelis_tensor_retain(t{id}_deferred_owner);"));
+            self.line(&format!(
+                "const {et} *t{id}_deferred_data = (const {et}*)chelis_tensor_read_view(t{id}_deferred_owner).data;"
+            ));
+        }
+        self.emit_deferred_retirements(id);
+    }
+
+    fn emit_deferred_retirements(&mut self, position: usize) {
+        if let Some(nodes) = self.metadata_retirements.remove(&position) {
+            for node in nodes {
+                self.line(&format!("chelis_metadata_plan_release(t{}_metadata);", node.0));
+            }
+        }
+        if let Some(nodes) = self.pin_retirements.remove(&position) {
+            for node in nodes {
+                self.line(&format!("chelis_tensor_release(t{}_deferred_owner);", node.0));
+            }
+        }
+    }
+
     fn emit_fused_in_place_wrapper(&mut self, id: usize, ty: &TensorType, spec: CFusedReuse) {
         let source = spec.token.source().0;
         assert_eq!(spec.token.consumer(), NodeId(id));
@@ -3814,7 +3984,7 @@ impl CEmitter {
         // Capture its logical extent while the source metadata still names it.
         let extent = format!("t{id}_shape_extent");
         self.line(&format!(
-            "const int64_t {extent} = chelis_tensor_shape(t{a}, {axis});"
+            "const int64_t {extent} = {};", self.tensor_extent(NodeId(a), axis)
         ));
         self.emit_slot_wrapper(id, ty);
         match ty.precision {
@@ -6248,7 +6418,7 @@ impl CEmitter {
         let word = Self::prim_elem_type(Prim::Key);
         let index = Self::prim_elem_type(Prim::Int64);
         let last = node.output_type.dims.len() - 1;
-        let extent = Self::bound_c_expr(count, &node.inputs, key.0, last);
+        let extent = self.bound_c_expr(count, &node.inputs, key.0, last);
         let trap = NumericTrap::Domain {
             op: "split_keys",
             prim: Prim::Int64,
@@ -9154,7 +9324,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         new_shape: &[RtDim],
         inputs: &[NodeId],
         ty: &TensorType,
-        _dag: VerifiedDagView<'_>,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         // chelis#616: a node-valued (runtime) target extent is read from its
@@ -9165,7 +9335,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .iter()
             .enumerate()
             .filter(|(_, dim)| matches!(dim, RtDim::Node(_) | RtDim::InputAxis { .. }))
-            .map(|(axis, dim)| (axis, Self::bound_c_expr(dim, inputs, a, axis)))
+            .map(|(axis, dim)| (axis, self.bound_c_expr(dim, inputs, a, axis)))
             .collect();
         // Read from its target's scalars and its operand's metadata: a
         // claim-sized `reshape` declares them before its branch.
@@ -9182,6 +9352,33 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                  chelis_numeric_trap(\"numeric trap: domain in reshape at i64\"); }}"
             ));
             self.emit_static_dim_guard(id, *axis, extent, ty.dims.get(*axis));
+        }
+        if self.deferred_views.is_deferred(NodeId(id))
+            || self.deferred_views.is_deferred(NodeId(a))
+        {
+            self.line(&format!(
+                "chelis_metadata_plan *t{id}_metadata = chelis_metadata_plan_reshape(t{a}_metadata, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {});",
+                Self::ndim(ty), Self::tagged_shape_literal(ty)
+            ));
+            if self.deferred_views.is_deferred(NodeId(id)) {
+                self.emitted_metadata.insert(NodeId(id));
+                return;
+            }
+            self.emit_slot_wrapper(id, ty);
+            let index_type = Self::prim_elem_type(Prim::Int64);
+            let et = Self::elem_type(ty);
+            self.line(&format!("for ({index_type} i = 0; i < t{id}_size; i++) {{"));
+            self.indent += 1;
+            let read = self.deferred_read(NodeId(a), "i", dag);
+            self.line(&format!("(({et}*)t{id}_data)[i] = {read};"));
+            self.indent -= 1;
+            self.line("}");
+            if self.deferred_metadata.contains(&NodeId(id)) {
+                self.emitted_metadata.insert(NodeId(id));
+            } else {
+                self.line(&format!("chelis_metadata_plan_release(t{id}_metadata);"));
+            }
+            return;
         }
         // The runtime's checked metadata owner validates this exact target
         // before either allocation or capacity-proven repurpose can occur.
@@ -9203,7 +9400,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         axes: &[usize],
         inputs: &[NodeId],
         ty: &TensorType,
-        _dag: VerifiedDagView<'_>,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let elem_type = Self::elem_type(ty);
@@ -9211,10 +9408,24 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             &format!("t{id}_axes"),
             &axes.iter().map(usize::to_string).collect::<Vec<_>>(),
         );
-        self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_tensor_permute_plan(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), t{id}_axes);", axes.len()));
+        let logical = self.deferred_views.is_deferred(NodeId(id))
+            || self.deferred_views.is_deferred(NodeId(a));
+        if logical {
+            self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_metadata_permute_plan(t{a}_metadata, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), t{id}_axes);", axes.len()));
+        } else {
+            self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_tensor_permute_plan(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), t{id}_axes);", axes.len()));
+        }
         self.line(&format!("chelis_movement_check_target(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {});", Self::ndim(ty), Self::tagged_shape_literal(ty)));
+        if self.deferred_views.is_deferred(NodeId(id)) {
+            self.emit_deferred_movement_metadata(id, ty.dims.len());
+            return;
+        }
         self.emit_slot_wrapper(id, ty);
         let rank = ty.dims.len();
+        if logical {
+            self.emit_deferred_movement_copy(id, NodeId(a), ty, dag);
+            return;
+        }
         self.emit_movement_loop(
             id,
             rank,
@@ -9235,7 +9446,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
-        let extent = Self::bound_c_expr(size, inputs, a, axis);
+        let extent = self.bound_c_expr(size, inputs, a, axis);
         let kind = dag.expansion_kind(NodeId(id));
         let op = kind.primitive_name();
         self.emit_negative_bound_guard(
@@ -9269,9 +9480,19 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             chelis_ir::axis_sources::ExpansionKind::Insert => "CHELIS_MOVEMENT_INSERT",
         };
         let elem_type = Self::elem_type(ty);
-        self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_tensor_expand_plan(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, ({extent})), {operation});"));
+        let logical = self.deferred_views.is_deferred(NodeId(id))
+            || self.deferred_views.is_deferred(NodeId(a));
+        if logical {
+            self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_metadata_expand_plan(t{a}_metadata, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, ({extent})), {operation});"));
+        } else {
+            self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_tensor_expand_plan(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, ({extent})), {operation});"));
+        }
         self.line(&format!("chelis_movement_check_target(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {});", Self::ndim(ty), Self::tagged_shape_literal(ty)));
         let rank = ty.dims.len();
+        if self.deferred_views.is_deferred(NodeId(id)) {
+            self.emit_deferred_movement_metadata(id, rank);
+            return;
+        }
         if self
             .inlined_products
             .values()
@@ -9283,6 +9504,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             return;
         }
         self.emit_slot_wrapper(id, ty);
+        if logical {
+            self.emit_deferred_movement_copy(id, NodeId(a), ty, dag);
+            return;
+        }
         self.emit_movement_loop(
             id,
             rank,
@@ -9298,10 +9523,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// checked runtime extent; `Node(i)` reads the rank-0 integer bound
     /// scalar `t{inputs[i]}->data[0]` with its declared element type, cast to
     /// `int` for use as a C index.
-    fn bound_c_expr(bound: &RtDim, inputs: &[NodeId], a: usize, axis: usize) -> String {
+    fn bound_c_expr(&self, bound: &RtDim, inputs: &[NodeId], a: usize, axis: usize) -> String {
         match bound {
             RtDim::Lit(n) => n.to_string(),
-            RtDim::ToEnd => format!("chelis_tensor_shape(t{a}, {axis})"),
+            RtDim::ToEnd => self.tensor_extent(NodeId(a), axis),
             RtDim::Node(i) => {
                 let n = inputs[*i].0;
                 format!("((int64_t*)t{n}_data)[0]")
@@ -9311,7 +9536,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 axis: RtAxis::Lit(source_axis),
             } => {
                 let source = inputs[*tensor].0;
-                format!("chelis_tensor_shape(t{source}, {source_axis})")
+                if let Some(rank) = self.deferred_ranks.get(&source) {
+                    let normalized = if *source_axis < 0 { (*rank as i32 + source_axis) as usize } else { *source_axis as usize };
+                    self.tensor_extent(NodeId(source), normalized)
+                } else {
+                    format!("chelis_tensor_shape(t{source}, {source_axis})")
+                }
             }
             // A symbolic dim (reshape targets only; verify rejects it in
             // movement bounds) is a declared C variable, exactly as
@@ -9637,7 +9867,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 {
                     return (axis, self.tensor_extent(*source, source_axis as usize));
                 }
-                (axis, Self::bound_c_expr(&carrier, inputs, operand, axis))
+                (axis, self.bound_c_expr(&carrier, inputs, operand, axis))
             })
             .collect()
     }
@@ -9787,6 +10017,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// metadata, or for an unstored node the extent its expansion's checked
     /// plan holds ([`Self::inlined_view`]), which that plan declared earlier.
     fn tensor_extent(&self, node: NodeId, axis: usize) -> String {
+        if self.deferred_views.is_deferred(node) {
+            return format!("chelis_metadata_plan_shape(t{}_metadata)[{axis}]", node.0);
+        }
         match self.inlined_view(node) {
             Some(view) => format!("t{view}_extent{axis}"),
             None => format!("chelis_tensor_shape(t{}, {axis})", node.0),
@@ -9972,12 +10205,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// size.
     fn canonical_extent_operand(
         canonical: &chelis_ir::axis_sources::CanonicalExtent,
-        axis: usize,
+        _axis: usize,
     ) -> String {
         match canonical {
             chelis_ir::axis_sources::CanonicalExtent::Binder(name) => extent_read(name),
             chelis_ir::axis_sources::CanonicalExtent::Witness(witness) => {
-                Self::bound_c_expr(&RtDim::Node(0), &[*witness], witness.0, axis)
+                format!("(({}*)t{}_data)[0]", Self::prim_elem_type(Prim::Int64), witness.0)
             }
             chelis_ir::axis_sources::CanonicalExtent::Resolved(extent) => extent.to_string(),
         }
@@ -10020,12 +10253,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let before = padding
             .iter()
             .enumerate()
-            .map(|(axis, (n, _))| Self::bound_c_expr(n, inputs, a, axis))
+            .map(|(axis, (n, _))| self.bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         let after = padding
             .iter()
             .enumerate()
-            .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis))
+            .map(|(axis, (_, n))| self.bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         for (axis, (low, high)) in padding.iter().enumerate() {
             let prefix = chelis_abi::failure::negative_movement_bound_prefix("pad", axis);
@@ -10111,12 +10344,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let start = bounds
             .iter()
             .enumerate()
-            .map(|(axis, (n, _))| Self::bound_c_expr(n, inputs, a, axis))
+            .map(|(axis, (n, _))| self.bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         let end = bounds
             .iter()
             .enumerate()
-            .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis))
+            .map(|(axis, (_, n))| self.bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         for (axis, (low, high)) in bounds.iter().enumerate() {
             let prefix = chelis_abi::failure::negative_movement_bound_prefix("shrink", axis);
@@ -10154,7 +10387,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let steps = strides
             .iter()
             .enumerate()
-            .map(|(axis, n)| Self::bound_c_expr(n, inputs, a, axis))
+            .map(|(axis, n)| self.bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         self.emit_affine_bounds(&format!("t{id}_steps"), &steps);
         self.emit_affine_plan(id, a, ty, "stride", &format!("t{id}_steps, NULL"));
