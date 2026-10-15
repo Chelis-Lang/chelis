@@ -101,7 +101,7 @@ pub(crate) fn classify(
         T::Tensor(_) => ValueClass::Heap(HeapKind::Tensor),
         T::Option(child) => container(std::iter::once(child.as_ref()), HeapKind::Option)?,
         T::MappedFile => ValueClass::Heap(HeapKind::MappedFile),
-        T::Unit => ValueClass::NonHeap(NonHeapKind::Unit),
+        T::Unit | T::Dimension(_) => ValueClass::NonHeap(NonHeapKind::Unit),
     })
 }
 

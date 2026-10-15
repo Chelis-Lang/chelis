@@ -41,7 +41,10 @@ list element, or ADT field merely because its cotangent is unit, and it never
 uses a backend carrier limitation to reject a language-defined cotangent.
 
 A disconnected differentiable scalar or tensor receives exact positive zeros with its
-actual argument's dtype and ordered shape, including empty axes and rank zero. See
+actual argument's dtype and ordered shape, including empty axes and rank zero.
+Nested generic ADT fields instantiate their declaration dimensions independently
+from each field's nominal arguments; two uses of one declaration do not equate
+their dimensions unless their enclosing type requires that equality. See
 [`grad_disconnected.ch`](../examples/grad_disconnected.ch).
 
 [`grad_bitwise.ch`](../examples/grad_bitwise.ch) demonstrates exact discrete

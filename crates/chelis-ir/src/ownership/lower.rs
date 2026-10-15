@@ -19,7 +19,7 @@ use crate::host::{
     ConcreteHostFunction, ConcreteHostMatchArm, ConcreteHostProgram, HostBinding, HostCallee,
     HostCalleeView, HostDisplayRoot, HostExpr, HostExprKind, HostFunctionOrigin, HostTensorHelper,
 };
-use crate::host_type_state::ConcreteHostType;
+use crate::host_type_state::{ConcreteHostType, HostShapeSlot};
 
 use super::classify::{ClassifyError, NonHeapKind, Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
@@ -60,6 +60,7 @@ enum FormalTypePattern {
     Dict(Box<Self>, Box<Self>),
     Tuple(Vec<Self>),
     Tensor(Vec<FormalDimension>),
+    Dimension(FormalDimension),
     Option(Box<Self>),
 }
 
@@ -81,6 +82,14 @@ impl FormalTypePattern {
                 .unwrap_or_else(|| Self::nominal(formal));
         }
         match (formal, tag) {
+            (
+                ConcreteHostType::Dimension(HostShapeSlot::Dim(_)),
+                DeepTag::DVar | DeepTag::DName | DeepTag::DLit,
+            ) => Self::Dimension(
+                dimension_variable_key(checked)
+                    .map(FormalDimension::Quantified)
+                    .unwrap_or(FormalDimension::Nominal),
+            ),
             (ConcreteHostType::Function(params, ret), DeepTag::TFn) => {
                 let Some((checked_ret, checked_params)) = children.split_last() else {
                     return Self::nominal(formal);
@@ -181,11 +190,15 @@ impl FormalTypePattern {
                 Self::Tensor(vec![FormalDimension::Nominal; tensor.dims.len()])
             }
             ConcreteHostType::Option(inner) => Self::Option(Box::new(Self::nominal(inner))),
+            ConcreteHostType::Dimension(HostShapeSlot::Dim(_)) => {
+                Self::Dimension(FormalDimension::Nominal)
+            }
             ConcreteHostType::Scalar(_)
             | ConcreteHostType::CheckedBuiltinCallable(_)
             | ConcreteHostType::CheckedCallableChoice(_)
             | ConcreteHostType::MappedFile
-            | ConcreteHostType::Unit => Self::Exact,
+            | ConcreteHostType::Unit
+            | ConcreteHostType::Dimension(HostShapeSlot::RankVariable(_)) => Self::Exact,
         }
     }
 }
@@ -228,6 +241,11 @@ impl CallTypeInstantiation {
     ) -> bool {
         match (pattern, formal, actual) {
             (FormalTypePattern::Exact, _, _) => formal == actual,
+            (
+                FormalTypePattern::Dimension(pattern),
+                ConcreteHostType::Dimension(HostShapeSlot::Dim(formal)),
+                ConcreteHostType::Dimension(HostShapeSlot::Dim(actual)),
+            ) => self.admits_dimension(pattern, formal, actual),
             (
                 FormalTypePattern::Function(pattern_params, pattern_ret),
                 ConcreteHostType::Function(formal_params, formal_ret),

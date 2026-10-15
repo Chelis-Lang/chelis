@@ -14106,7 +14106,7 @@ impl<'a> HostEmitter<'a> {
             HostType::CheckedBuiltinCallable(_) => {
                 "chelis_value_take_tuple(chelis_tuple_from_values(NULL, 0))".to_string()
             }
-            HostType::Callback(_, _) => {
+            HostType::Callback(_, _) | HostType::Dimension(_) => {
                 return Err(unsupported_value_boxing(ty, "boxing a resolved host value"));
             }
         })
@@ -14177,7 +14177,7 @@ impl<'a> HostEmitter<'a> {
             HostType::MappedFile => format!("chelis_mapped_file_take_value({value_expr})"),
             // The empty tuple carrier above has no scalar payload to read.
             HostType::Unit => "0".to_string(),
-            HostType::Callback(_, _) => {
+            HostType::Callback(_, _) | HostType::Dimension(_) => {
                 return Err(unsupported_value_boxing(
                     ty,
                     "unboxing a resolved host value",
@@ -15055,7 +15055,8 @@ fn host_type_may_carry_result_origin(ty: &HostType) -> bool {
         | HostType::Callback(_, _)
         | HostType::Dict(_, _)
         | HostType::MappedFile
-        | HostType::Unit => false,
+        | HostType::Unit
+        | HostType::Dimension(_) => false,
     }
 }
 
@@ -15286,7 +15287,8 @@ fn checked_cast_abi_axis(ty: &HostType) -> Result<(Prim, CheckedCastSurface), Un
         | HostType::Tuple(_)
         | HostType::Option(_)
         | HostType::MappedFile
-        | HostType::Unit => Err(checked_cast_plan_error(format!(
+        | HostType::Unit
+        | HostType::Dimension(_) => Err(checked_cast_plan_error(format!(
             "checked numeric cast resolved to non-numeric ABI type {ty:?}"
         ))),
     }

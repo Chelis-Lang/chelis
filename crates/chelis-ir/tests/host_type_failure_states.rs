@@ -352,3 +352,41 @@ fn c_emitter_has_no_infallible_or_default_host_type_conversion() {
         "unboxing an unsupported host type must return Unsupported, not zero"
     );
 }
+
+#[test]
+fn nominal_dimension_arguments_retain_exact_kind_and_identity() {
+    for (syntax, slot) in [
+        (
+            "(d-lit {} 3)",
+            HostShapeSlot::Dim(chelis_ir::DimInfo::Lit(3)),
+        ),
+        (
+            "(d-name {} channels)",
+            HostShapeSlot::Dim(chelis_ir::DimInfo::Named("channels".into(), None)),
+        ),
+        (
+            "(d-var {} d7)",
+            HostShapeSlot::Dim(chelis_ir::DimInfo::Named("d7".into(), None)),
+        ),
+        (
+            "(d-name {} *)",
+            HostShapeSlot::Dim(chelis_ir::DimInfo::Named("*".into(), None)),
+        ),
+    ] {
+        let decoded = decode_host_type(&parse_one(&format!("(t-adt {{}} Leaf {syntax})"))).unwrap();
+        assert_eq!(
+            decoded,
+            HostTypeTerm::Adt("Leaf".into(), vec![HostTypeTerm::Dimension(slot.clone())])
+        );
+        assert_eq!(
+            decoded.into_concrete().unwrap(),
+            ConcreteHostType::Adt("Leaf".into(), vec![ConcreteHostType::Dimension(slot)])
+        );
+    }
+    assert_ne!(
+        decode_host_type(&parse_one("(t-adt {} Leaf (d-lit {} 3))")).unwrap(),
+        decode_host_type(&parse_one("(t-adt {} Leaf (t-prim {} i64))")).unwrap()
+    );
+    assert!(parse_str("(t-adt {} Leaf (d-rank {} rank))").is_err());
+    assert!(decode_host_type(&parse_one("(t-adt {} Leaf (d-lit {} -1))")).is_err());
+}

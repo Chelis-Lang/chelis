@@ -29,7 +29,7 @@ use chelis_types::types::Prim;
 use chelis_types::unsupported::{RejectionAuthority, Stage, Unsupported, UnsupportedKind};
 use chelis_unord::UnordSet;
 
-/// A host value whose complete logical type has an implemented C ABI.
+/// A host value's C ABI or a nominal argument retained for layout identity.
 ///
 /// Kept crate-private so callers cannot manufacture a purportedly-resolved
 /// ABI value.  Construction is exclusively through [`Self::try_from_concrete`].
@@ -64,6 +64,8 @@ pub(crate) enum HostAbiType {
     /// one concrete callback signature.
     CheckedBuiltinCallable(CheckedBuiltinCallable),
     Adt(String, Vec<HostAbiType>),
+    /// A nominal dimension constrains fields and has no C value representation.
+    Dimension(chelis_ir::HostShapeSlot),
     List(Box<HostAbiType>),
     Dict(Box<HostAbiType>, Box<HostAbiType>),
     Tuple(Vec<HostAbiType>),
@@ -240,6 +242,7 @@ impl HostAbiType {
             }
             ConcreteHostType::MappedFile => Self::MappedFile,
             ConcreteHostType::Unit => Self::Unit,
+            ConcreteHostType::Dimension(dim) => Self::Dimension(dim.clone()),
         })
     }
 
@@ -260,7 +263,7 @@ impl HostAbiType {
             Self::Bool => Some("bool"),
             Self::String => Some("chelis_string"),
             Self::Key => Some("chelis_key"),
-            Self::Callback(_, _) => None,
+            Self::Callback(_, _) | Self::Dimension(_) => None,
             Self::CheckedBuiltinCallable(_) => Some("chelis_checked_callable"),
             Self::Adt(_, _) => Some("chelis_adt*"),
             Self::List(_) => Some("chelis_list*"),
@@ -293,6 +296,7 @@ impl HostAbiType {
             // A `chelis_key` is its 64 bits by value and owns no heap handle.
             | Self::Key
             | Self::Unit
+            | Self::Dimension(_)
             | Self::Callback(_, _) => None,
             Self::CheckedBuiltinCallable(_) => None,
             Self::String => Some("(chelis_string){ NULL }"),
@@ -674,7 +678,8 @@ pub(crate) fn public_type_contains_checked_callable(
             ConcreteHostType::Scalar(_)
             | ConcreteHostType::Tensor(_)
             | ConcreteHostType::MappedFile
-            | ConcreteHostType::Unit => false,
+            | ConcreteHostType::Unit
+            | ConcreteHostType::Dimension(_) => false,
         }
     }
     contains(ty, layouts, &mut UnordSet::new())
