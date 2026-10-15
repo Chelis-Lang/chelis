@@ -120,6 +120,14 @@ respective hardware and record those results separately.
 
 ## Compiler feature acceptance gates
 
+The incremental [eval-performance suite](eval_performance.md) runs its sparse
+index allocation oracle in default PR CI. Its full convolution caller is manual:
+`cargo nextest run -p chelis-ir --test eval_performance --run-ignored only -E 'test(=eval_performance_convolution_index_witness)' --no-capture`.
+Expected success: every output bit matches the direct canonical-tree reference
+and evaluation finishes within 90 seconds on an idle runner. Owner: chelis#828,
+sparse index reads (chelis#3591). The case reports peak live heap increase;
+convolution memory optimization has separate acceptance obligations.
+
 | Gate | Command | Expected success | Owner |
 |---|---|---|---|
 | Keyed randomness corpus | `.venv/bin/python scripts/keyed_randomness_oracle.py` | `KEYED RANDOMNESS ORACLE: PASS` and a fresh exact-SHA receipt with all 91 selected identities passing, none failed/skipped/unrun, and the retired-dispatch tripwire passing. Requires a clean committed task worktree, its uv Python 3.11, Cargo/nextest and a native C toolchain. Manual: not dispatched by default CI. [Corpus and limits](keyed_randomness_oracle.md); `par` is a typed refusal, and shell release is separate. | chelis#2413 |
