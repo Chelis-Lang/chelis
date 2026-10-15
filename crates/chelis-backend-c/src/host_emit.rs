@@ -15197,7 +15197,7 @@ fn require_same_abi_type(
     actual: &HostType,
     context: &'static str,
 ) -> Result<(), Unsupported> {
-    if expected == actual {
+    if expected.same_value_layout(actual) {
         Ok(())
     } else {
         Err(invalid_abi_shape(

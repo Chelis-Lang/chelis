@@ -92,6 +92,39 @@ impl chelis_ir::host::AccumulatorTypeIdentity for HostAbiType {
     }
 }
 
+impl HostAbiType {
+    /// Check the assignment ABI without equating nominal dimension claims.
+    /// Dimension arguments remain exact metadata in this type, but have no
+    /// C value slot. Entry/result guards, not layout comparison, enforce them.
+    /// All value-bearing type arguments retain their existing exact checks.
+    pub(crate) fn same_value_layout(&self, other: &Self) -> bool {
+        let same_items = |left: &[Self], right: &[Self]| {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| left.same_value_layout(right))
+        };
+        match (self, other) {
+            (Self::Dimension(_), Self::Dimension(_)) => true,
+            (Self::Adt(left, left_args), Self::Adt(right, right_args)) => {
+                left == right && same_items(left_args, right_args)
+            }
+            (Self::Tuple(left), Self::Tuple(right)) => same_items(left, right),
+            (Self::List(left), Self::List(right)) | (Self::Option(left), Self::Option(right)) => {
+                left.same_value_layout(right)
+            }
+            (Self::Dict(left_key, left_value), Self::Dict(right_key, right_value)) => {
+                left_key.same_value_layout(right_key) && left_value.same_value_layout(right_value)
+            }
+            (Self::Callback(left_args, left_ret), Self::Callback(right_args, right_ret)) => {
+                same_items(left_args, right_args) && left_ret.same_value_layout(right_ret)
+            }
+            _ => self == other,
+        }
+    }
+}
+
 pub(crate) type HostAbiProgram = HostProgram<HostAbiType>;
 pub(crate) type HostAbiBinding = HostBinding<HostAbiType>;
 pub(crate) type HostAbiFunction = HostFunction<HostAbiType>;

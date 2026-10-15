@@ -1,1 +1,1 @@
-Preserve each nested generic ADT field's nominal dimensions during C lowering, including disconnected gradients over fields with different shapes.
+Preserve each nested generic ADT field's nominal dimensions during C lowering, including disconnected gradients over fields with different shapes. Keep folding and recursive ADT results compatible with their C value layouts while enforcing each activation's own extent claims.

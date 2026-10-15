@@ -15645,15 +15645,14 @@ fn solve_checked_dimensions(
 ) {
     match (checked, actual) {
         (
-            HostTypeTerm::Dimension(crate::host_type_state::HostShapeSlot::Dim(DimInfo::Named(
-                name,
-                None,
-            ))),
+            HostTypeTerm::Dimension(crate::host_type_state::HostShapeSlot::Dim(
+                checked_dim @ DimInfo::Named(name, None),
+            )),
             HostTypeTerm::Dimension(crate::host_type_state::HostShapeSlot::Dim(actual)),
         ) => {
             let unknown =
                 matches!(actual, DimInfo::Named(axis, None) if axis.is_empty() || axis == "*");
-            if binders.contains(name) && !unknown {
+            if binders.contains(name) && !unknown && actual != checked_dim {
                 out.entry(name.clone()).or_insert_with(|| actual.clone());
             }
         }
@@ -21258,8 +21257,8 @@ fn resolve_host_type_alias<'a>(registry: &'a AdtRegistry, name: &str) -> Option<
     matches.next().is_none().then_some(first)
 }
 
-/// Expand checker-validated aliases before a host type drives layout,
-/// constructor, field, or match decisions.
+/// Normalize checker-owned nominal argument kinds and expand aliases before
+/// a host type drives layout, constructor, field, or match decisions.
 ///
 /// The checker keeps an authored alias name in expression metadata even
 /// though aliases are semantically transparent. Host lowering previously
@@ -21271,18 +21270,67 @@ fn resolve_host_type_alias<'a>(registry: &'a AdtRegistry, name: &str) -> Option<
 /// identity through field instantiation and layout matching; they have no
 /// runtime value slot.
 fn expand_host_type_aliases(program: &HostLoweringSession<'_>, ty: HostTypeTerm) -> HostTypeTerm {
+    normalize_host_type(program.adt_registry(), ty)
+}
+
+/// One registry-owned kind/alias boundary for value lowering and proof terms.
+fn normalize_host_type(registry: &AdtRegistry, ty: HostTypeTerm) -> HostTypeTerm {
+    fn parameter_kinds<'a>(
+        registry: &'a AdtRegistry,
+        name: &str,
+    ) -> Option<&'a [NominalParamKind]> {
+        if let Some(definition) = registry.lookup(name) {
+            return Some(&definition.param_kinds);
+        }
+        if let Some(alias) = registry.resolve_alias(name) {
+            return Some(&alias.param_kinds);
+        }
+        let mut matches = registry
+            .defs
+            .iter()
+            .map(|(name, definition)| (name, definition.param_kinds.as_slice()))
+            .chain(
+                registry
+                    .aliases
+                    .iter()
+                    .map(|(name, alias)| (name, alias.param_kinds.as_slice())),
+            )
+            .filter_map(|(candidate, kinds)| {
+                terminal_name_matches(candidate, name).then_some(kinds)
+            });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
     fn expand(
-        program: &HostLoweringSession<'_>,
+        registry: &AdtRegistry,
         ty: HostTypeTerm,
         visiting: &mut UnordSet<String>,
     ) -> HostTypeTerm {
         match ty {
             HostTypeTerm::Adt(name, args) => {
-                let args = args
+                let mut args = args
                     .into_iter()
-                    .map(|argument| expand(program, argument, visiting))
+                    .map(|argument| expand(registry, argument, visiting))
                     .collect::<Vec<_>>();
-                let Some(alias) = resolve_host_type_alias(program.adt_registry(), &name) else {
+                // Authored Deep signatures can spell every nominal binder as
+                // t-var. Its checker-owned header kind decides whether that
+                // argument is a type or a dimension before any substitution.
+                if let Some(kinds) = parameter_kinds(registry, &name) {
+                    for (argument, kind) in args.iter_mut().zip(kinds) {
+                        if *kind == NominalParamKind::Dimension
+                            && let HostTypeTerm::TypeVariable(binder) = argument
+                        {
+                            *argument = HostTypeTerm::Dimension(
+                                crate::host_type_state::HostShapeSlot::Dim(DimInfo::Named(
+                                    binder.clone(),
+                                    None,
+                                )),
+                            );
+                        }
+                    }
+                }
+                let Some(alias) = resolve_host_type_alias(registry, &name) else {
                     return HostTypeTerm::Adt(name, args);
                 };
                 if alias.params.len() != args.len() || !visiting.insert(name.clone()) {
@@ -21304,7 +21352,7 @@ fn expand_host_type_aliases(program: &HostLoweringSession<'_>, ty: HostTypeTerm)
                     .collect::<UnordMap<_, _>>();
                 let body = rename_host_type_variables(
                     decode_host_type_or_raise(
-                        &type_to_deep_expr(&program.adt_registry().expand_aliases(&alias.body)),
+                        &type_to_deep_expr(&registry.expand_aliases(&alias.body)),
                         &UnordMap::new(),
                     ),
                     &checker_parameter_names,
@@ -21339,7 +21387,7 @@ fn expand_host_type_aliases(program: &HostLoweringSession<'_>, ty: HostTypeTerm)
                     }
                 }
                 let expanded = expand(
-                    program,
+                    registry,
                     substitute_host_dimension_terms(
                         substitute_host_type_term(body, &type_substitutions),
                         &dimension_substitutions,
@@ -21352,31 +21400,31 @@ fn expand_host_type_aliases(program: &HostLoweringSession<'_>, ty: HostTypeTerm)
             HostTypeTerm::Fn(params, ret) => HostTypeTerm::Fn(
                 params
                     .into_iter()
-                    .map(|param| expand(program, param, visiting))
+                    .map(|param| expand(registry, param, visiting))
                     .collect(),
-                Box::new(expand(program, *ret, visiting)),
+                Box::new(expand(registry, *ret, visiting)),
             ),
             HostTypeTerm::List(inner) => {
-                HostTypeTerm::List(Box::new(expand(program, *inner, visiting)))
+                HostTypeTerm::List(Box::new(expand(registry, *inner, visiting)))
             }
             HostTypeTerm::Dict(key, value) => HostTypeTerm::Dict(
-                Box::new(expand(program, *key, visiting)),
-                Box::new(expand(program, *value, visiting)),
+                Box::new(expand(registry, *key, visiting)),
+                Box::new(expand(registry, *value, visiting)),
             ),
             HostTypeTerm::Tuple(items) => HostTypeTerm::Tuple(
                 items
                     .into_iter()
-                    .map(|item| expand(program, item, visiting))
+                    .map(|item| expand(registry, item, visiting))
                     .collect(),
             ),
             HostTypeTerm::Option(inner) => {
-                HostTypeTerm::Option(Box::new(expand(program, *inner, visiting)))
+                HostTypeTerm::Option(Box::new(expand(registry, *inner, visiting)))
             }
             other => other,
         }
     }
 
-    expand(program, ty, &mut UnordSet::new())
+    expand(registry, ty, &mut UnordSet::new())
 }
 
 /// Replace every bound `TypeVariable` in a host type (chelis#1201).
@@ -25194,16 +25242,12 @@ fn solve_host_type_vars(
     out: &mut UnordMap<String, HostTypeTerm>,
 ) {
     match (declared, actual) {
-        (
-            HostTypeTerm::Dimension(crate::host_type_state::HostShapeSlot::Dim(DimInfo::Named(
-                name,
-                _,
-            ))),
-            HostTypeTerm::Dimension(_),
-        ) if name != "*" => {
-            out.entry(name.clone()).or_insert_with(|| actual.clone());
-        }
-        (HostTypeTerm::TypeVariable(name), resolved) if !resolved.is_unresolved() => {
+        // Extents belong to activation_dimensions, never this type/precision
+        // substitution. In particular, a recursive call's result dimension
+        // cannot replace the callee's own parameter witness with its caller's.
+        (HostTypeTerm::TypeVariable(name), resolved)
+            if !resolved.is_unresolved() && !matches!(resolved, HostTypeTerm::Dimension(_)) =>
+        {
             out.entry(name.clone()).or_insert_with(|| resolved.clone());
         }
         // chelis#2152: a tensor's precision variable is the same checked
@@ -25255,6 +25299,82 @@ fn solve_host_type_vars(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// spec/04 §4.7: an invocation's result is an obligation, not evidence
+    /// that specializes a recursive callee's own runtime extent witness.
+    #[test]
+    fn retained_type_substitution_does_not_bind_activation_dimensions() {
+        let dimension =
+            |dim| HostTypeTerm::Dimension(crate::host_type_state::HostShapeSlot::Dim(dim));
+        let formal = HostTypeTerm::Adt(
+            "Box".into(),
+            vec![dimension(DimInfo::Named("m".into(), None))],
+        );
+        let actual = HostTypeTerm::Adt("Box".into(), vec![dimension(DimInfo::Lit(3))]);
+        let mut types = UnordMap::new();
+        solve_host_type_vars(&formal, &actual, &mut types);
+        assert!(
+            types.is_empty(),
+            "nominal dimensions are not type variables"
+        );
+        solve_host_type_vars(
+            &HostTypeTerm::TypeVariable("m".into()),
+            &dimension(DimInfo::Lit(3)),
+            &mut types,
+        );
+        assert!(types.is_empty(), "type variables cannot capture dimensions");
+        assert_eq!(substitute_host_type_term(formal.clone(), &types), formal);
+
+        let mut binders = UnordSet::new();
+        binders.insert("m".into());
+        let mut dimensions = UnordMap::new();
+        solve_checked_dimensions(&formal, &formal, &binders, &mut dimensions);
+        assert!(
+            dimensions.is_empty(),
+            "a binder observing itself is not extent evidence"
+        );
+        solve_checked_dimensions(&formal, &actual, &binders, &mut dimensions);
+        assert_eq!(dimensions.get("m"), Some(&DimInfo::Lit(3)));
+
+        solve_host_type_vars(
+            &HostTypeTerm::TypeVariable("t".into()),
+            &HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::F32)),
+            &mut types,
+        );
+        assert_eq!(
+            types.get("t"),
+            Some(&HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+                Prim::F32
+            )))
+        );
+        assert!(!types.contains_key("m"));
+    }
+
+    #[test]
+    fn authored_nominal_arguments_keep_the_registry_parameter_kind() {
+        let checked = surf_check(
+            "type Box[n] = | Box { v: tensor[n, f32] }\n\
+             type Value[t] = | Value { v: t }\n\
+             def boxed[m](u: tensor[m, f32]) -> Box[m] = Box { v: u }\n\
+             def value[t](u: t) -> Value[t] = Value { v: u }\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        let (_, boxed) = lookup_declared_fn_type(&session, "boxed").unwrap();
+        assert_eq!(
+            boxed,
+            HostTypeTerm::Adt(
+                "Box".into(),
+                vec![HostTypeTerm::Dimension(
+                    crate::host_type_state::HostShapeSlot::Dim(DimInfo::Named("m".into(), None),)
+                )],
+            ),
+        );
+        let (_, value) = lookup_declared_fn_type(&session, "value").unwrap();
+        assert_eq!(
+            value,
+            HostTypeTerm::Adt("Value".into(), vec![HostTypeTerm::TypeVariable("t".into())]),
+        );
+    }
 
     #[test]
     fn checked_callable_join_preserves_branch_identity_through_conformance() {
@@ -31974,7 +32094,7 @@ fn accumulator_construction_proof_impl(
     (reused && (admission || !matches!(recipe, AccumulatorDeltaRecipe::Inherited))).then_some(
         AccumulatorDeltaProof {
             parameter,
-            formal_type: decode_host_type(authored).ok()?,
+            formal_type: normalize_host_type(registry, decode_host_type(authored).ok()?),
             pattern: Arc::new(pattern),
             recipe,
         },
@@ -32067,6 +32187,44 @@ mod accumulator_delta_tests {
 #[cfg(test)]
 mod accumulator_delta_nominal_tests {
     use super::*;
+
+    #[test]
+    fn named_nominal_proof_uses_the_exact_normalized_formal_kind() {
+        fn find_fn(expr: &Expr) -> Option<&Expr> {
+            if let Expr::MetaExpr(meta, _) = expr {
+                return find_fn(&meta.expr);
+            }
+            let node = as_node(expr)?;
+            if node.tag() == DeepTag::Fn {
+                return Some(expr);
+            }
+            node.children_slice().iter().find_map(find_fn)
+        }
+        let source = "type Chain[n] =\n | End { v: tensor[n, f32] }\n | Link { v: tensor[n, f32], next: Chain[n] }\ndef step[n](acc: Chain[n], i: i64) -> Chain[n] = Link { v: insert(scalar_to_tensor(0.0f32), 0i32, add(i, 3i64)), next: acc }\n";
+        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
+        let proof = accumulator_construction_proof(
+            checked.exprs().iter().find_map(find_fn).unwrap(),
+            checked.adt_registry(),
+        )
+        .expect("named nominal construction has inherited evidence");
+        let nominal = |arg| HostTypeTerm::Adt("Chain".into(), vec![arg]);
+        let dim = |dim| HostTypeTerm::Dimension(crate::host_type_state::HostShapeSlot::Dim(dim));
+        assert!(proof.validates_formal_type(&nominal(dim(DimInfo::Named("n".into(), None)))));
+        for other in [
+            HostTypeTerm::TypeVariable("n".into()),
+            dim(DimInfo::Named("caller".into(), None)),
+            dim(DimInfo::Lit(3)),
+            HostTypeTerm::Unit,
+        ] {
+            assert!(
+                !proof.validates_formal_type(&nominal(other)),
+                "physical layout or equal extent is not the proof's logical obligation"
+            );
+        }
+    }
+
     #[test]
     fn recursive_delta_reuses_only_the_identical_root_obligation() {
         fn find_fn(expr: &Expr) -> Option<&Expr> {

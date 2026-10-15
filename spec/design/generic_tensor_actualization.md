@@ -58,6 +58,14 @@ failure before C emission. The ownership
 verifier remains a consumer of this contract and continues to reject mismatched
 precisions; it is not relaxed to make either reproducer pass.
 
+Nominal dimension arguments remain exact logical terms through field
+instantiation. They belong to the activation's dimension evidence, separately
+from type and precision substitution: an inferred caller result cannot replace
+a retained callee's own named extent witness. The private C projection compares
+nominal arguments by value layout when assigning values, because a dimension
+has no C value slot. Logical equality and accumulator reuse certificates still
+compare the exact dimension terms; entry and result claims enforce their extents.
+
 The call-site instantiation already used for authored parameter/result claims
 in `chelis-ir/src/lower.rs` is the starting point. The implementation should
 make its checked rank/precision mapping available to the whole lowered body
