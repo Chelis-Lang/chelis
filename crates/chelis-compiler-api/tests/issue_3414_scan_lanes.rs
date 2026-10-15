@@ -304,6 +304,122 @@ fn transform_result_claim_projects_list_gradient_layout() {
     }
 }
 
+fn dynamic_list_scan_gradient(claim: usize, index: usize) -> String {
+    format!(
+        "def list_index[item](values: List[item], idx: i64) -> item = index(values, idx)\n\
+        type Box[n] = | Box {{ v: tensor[n, f32] }}\n\
+        type Model[n] = | Model {{ blocks: List[Box[n]] }}\n\
+        def loss[n](x: Model[n], i: tensor[i64]) -> tensor[f32] = sum(cumsum(list_index(x.blocks, tensor_to_scalar(i)).v, 0i32), 0i32)\n\
+        def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\n\
+        def mk(size: i64, i: i64) -> Model[{claim}] = grad(loss, wrt=x)(Model {{ blocks: [Box {{ v: produce(size) }}] }}, scalar_to_tensor(i))\n\
+        out = mk(string_len(\"xxxxx\"), string_len(\"{}\"))\n",
+        "x".repeat(index)
+    )
+}
+
+#[test]
+fn runtime_list_failure_precedes_later_transform_result_claim() {
+    for (claim, index) in [(5, 0), (5, 6), (3, 0), (3, 6)] {
+        let source = dynamic_list_scan_gradient(claim, index);
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: source.clone(),
+            bindings: BTreeMap::new(),
+        });
+        let generated = ownership_support::emit(&source, "ordered_list_transform_claim");
+        if claim == 5 && index == 0 {
+            assert!(result.is_ok(), "{result:?}");
+            let (ledger, _) = ownership_support::run_program(&generated);
+            ownership_support::balanced(&ledger);
+        } else {
+            let stderr = ownership_support::run_failure_stderr(&generated, "");
+            let error = format!("{:?}", result.unwrap_err());
+            let expected = if index == 6 {
+                "index 6 out of bounds for list of len 1"
+            } else {
+                "claimed = 3"
+            };
+            assert!(
+                stderr.contains(expected),
+                "native C: {stderr}\nEval: {error}"
+            );
+            assert!(
+                error.contains(expected),
+                "Eval: {error}\nnative C: {stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn inactive_runtime_list_controls_do_not_preempt_transform_result_claims() {
+    for claim in [3, 5] {
+        for index in [0, 6] {
+            let source = dynamic_list_scan_gradient(claim, index).replace(
+                "= sum(cumsum(list_index(x.blocks, tensor_to_scalar(i)).v, 0i32), 0i32)",
+                "= if eq(tensor_to_scalar(i), 0i64) then sum(cumsum(list_index(x.blocks, 0i64).v, 0i32), 0i32) else sum(cumsum(list_index(x.blocks, add(tensor_to_scalar(i), 6i64)).v, 0i32), 0i32)",
+            );
+            let result = eval(EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source.clone(),
+                bindings: BTreeMap::new(),
+            });
+            let generated = ownership_support::emit(&source, "inactive_list_transform_claim");
+            if claim == 5 && index == 0 {
+                assert!(result.is_ok(), "{result:?}");
+                let (ledger, _) = ownership_support::run_program(&generated);
+                ownership_support::balanced(&ledger);
+            } else {
+                let expected = if index == 6 {
+                    "index 12 out of bounds for list of len 1"
+                } else {
+                    "claimed = 3"
+                };
+                let error = format!("{:?}", result.unwrap_err());
+                assert!(error.contains(expected), "{error}");
+                let stderr = ownership_support::run_failure_stderr(&generated, "");
+                assert!(stderr.contains(expected), "{stderr}");
+            }
+        }
+    }
+}
+
+#[test]
+fn runtime_list_controls_keep_forward_trap_order_in_eval_and_earlier_native_prefix() {
+    for claim in [3, 5] {
+        for earlier in [true, false] {
+            let gather = "_ = gather(list_index(x.blocks, 0i64).v, to_tensor([99i64]), 0i32)";
+            let select = "selected = list_index(x.blocks, tensor_to_scalar(i))";
+            let body = if earlier {
+                format!("{gather}\n {select}")
+            } else {
+                format!("{select}\n {gather}")
+            };
+            let source = dynamic_list_scan_gradient(claim, 6).replace(
+                "= sum(cumsum(list_index(x.blocks, tensor_to_scalar(i)).v, 0i32), 0i32)",
+                &format!("= {{\n {body}\n sum(cumsum(selected.v, 0i32), 0i32)\n}}"),
+            );
+            let expected = if earlier {
+                "numeric trap: domain in gather at i64"
+            } else {
+                "index 6 out of bounds for list of len 1"
+            };
+            let error = eval(EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source.clone(),
+                bindings: BTreeMap::new(),
+            })
+            .unwrap_err();
+            assert!(format!("{error:?}").contains(expected), "{error:?}");
+            if earlier {
+                let generated = ownership_support::emit(&source, "ordered_forward_list_controls");
+                let stderr = ownership_support::run_failure_stderr(&generated, "");
+                assert!(stderr.contains(expected), "{stderr}");
+            }
+        }
+    }
+}
+
 #[test]
 fn original_file_sized_scan_gradient_preserves_outer_claim() {
     let dir = tempfile::tempdir().unwrap();

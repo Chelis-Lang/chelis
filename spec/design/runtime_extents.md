@@ -49,6 +49,24 @@ producer-lineage plan distinct from whole-result alias selection. The
 transform projection does not establish producer placement for a tensor
 binding wrapped in an aggregate only after intervening effects.
 
+Runtime List controls in a transformed tensor region execute in that region's
+single producer traversal. Each logical selector records a private ordinary
+`Copy` anchor after its arguments are prepared and before its private numeric
+implementation. Its typed check retains the original count/index, length and
+activation sources. AD retains those references and the anchor through
+separate Copy roots; after pruning and splicing, the retained roots' exact
+inputs recover the original sources. DCE and consuming-fanout normalization
+remap every control reference explicitly.
+
+The evaluator checks each active control once after its anchor and before any
+later node's producer guards or arithmetic. An inactive control reads only its
+activation. Canonical List failures remain distinct from tensor-evaluator
+failures, preserving their diagnostic rendering. Control roots are not value
+roots. This adds work and retained metadata proportional to the number of
+runtime checks, plus their stable ordering, and does not expand a scan by its
+element count or execute its body twice. The representation uses existing
+typed values and Copy operations; it changes no primitive or Wire vocabulary.
+
 ## Current state and remaining work
 
 The reference implementation state for the merged inventory is `4f3812e2f`.

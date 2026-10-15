@@ -908,12 +908,11 @@ impl<'a> EvalContext<'a> {
             matches!(kind, TransformKind::Grad),
             inherited_claims,
         )?;
-        let result = chelis_ir::eval::eval_tensor_roots_exact_with_result_claims(
-            dag,
-            &roots,
-            &result_claims,
-            load,
-        );
+        let result = match lowered.evaluate_with_result_claims(&result_claims, load) {
+            Ok(values) => Ok(values),
+            Err(chelis_ir::lower::LoweredSubexprEvalError::Tensor(error)) => Err(error),
+            Err(chelis_ir::lower::LoweredSubexprEvalError::List(error)) => return Err(error),
+        };
         let result = self.mark_numeric_trap_from_trusted_result(result);
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every
@@ -927,7 +926,6 @@ impl<'a> EvalContext<'a> {
             };
             format!("host runtime `{kind_label}` evaluation failed: {err}")
         })?;
-        lowered.check_list_controls(&values)?;
         if let Some(packed) = empty_packed {
             return Ok(packed);
         }

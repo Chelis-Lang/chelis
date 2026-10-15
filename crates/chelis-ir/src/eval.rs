@@ -4263,6 +4263,86 @@ fn eval_tensor_internal_with_result_claims<F>(
     scope: EvaluationScope<'_>,
     strict_loads: bool,
     result_claims: &[InheritedResultClaim],
+    load_input: F,
+) -> Result<EvaluatedValues, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    eval_tensor_internal_with_result_claims_and_controls(
+        dag,
+        scope,
+        strict_loads,
+        result_claims,
+        &[],
+        &mut false,
+        load_input,
+    )
+}
+
+fn check_runtime_list_control(
+    check: &crate::lower::RuntimeListCheck,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<(), String> {
+    use crate::lower::RuntimeListCheck;
+    let scalar = |id: NodeId| -> Result<chelis_types::ScalarValue, String> {
+        let value = values
+            .get(&id)
+            .ok_or("runtime List control source was not evaluated")?;
+        if !value.shape.is_empty() {
+            return Err("runtime List control source is not scalar".to_string());
+        }
+        Ok(value.scalar_at(0))
+    };
+    let integer = |id| {
+        scalar(id)?
+            .as_i64_exact()
+            .ok_or_else(|| "runtime List control source is not i64".to_string())
+    };
+    let activation = match check {
+        RuntimeListCheck::NonNegative { activation, .. }
+        | RuntimeListCheck::IndexBounds { activation, .. } => *activation,
+    };
+    if let Some(active) = activation {
+        let active = scalar(active)?
+            .as_bool_exact()
+            .ok_or("runtime List activation is not bool")?;
+        if !active {
+            return Ok(());
+        }
+    }
+    match check {
+        RuntimeListCheck::NonNegative {
+            operation,
+            argument,
+            value,
+            ..
+        } => {
+            let value = integer(*value)?;
+            if value < 0 {
+                return Err(chelis_abi::failure::list_argument_negative(
+                    operation, argument, value,
+                ));
+            }
+        }
+        RuntimeListCheck::IndexBounds { index, len, .. } => {
+            let index = integer(*index)?;
+            let len = integer(*len)?;
+            if index >= len {
+                let len = usize::try_from(len).map_err(|_| "runtime List length is negative")?;
+                return Err(chelis_abi::failure::list_index_out_of_bounds(index, len));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn eval_tensor_internal_with_result_claims_and_controls<F>(
+    dag: &Dag,
+    scope: EvaluationScope<'_>,
+    strict_loads: bool,
+    result_claims: &[InheritedResultClaim],
+    list_checks: &[crate::lower::RuntimeListCheck],
+    list_failure: &mut bool,
     mut load_input: F,
 ) -> Result<EvaluatedValues, String>
 where
@@ -4583,7 +4663,19 @@ where
     // checks are a whole-graph derivation, read from the unbound graph as
     // the C lane reads them.
     let seeds = dag.trap_seeds();
+    let mut ordered_checks = list_checks.iter().collect::<Vec<_>>();
+    ordered_checks.sort_by_key(|check| check.anchor());
+    let mut next_check = 0;
     for (index, id) in order.into_iter().enumerate() {
+        // The source-boundary Copy has executed. Run its checks before this
+        // next node's guards/arithmetic, even when this node is masked out.
+        while next_check < ordered_checks.len() && ordered_checks[next_check].anchor() < id {
+            if let Err(error) = check_runtime_list_control(ordered_checks[next_check], &values) {
+                *list_failure = true;
+                return Err(error);
+            }
+            next_check += 1;
+        }
         let node = bound_dag
             .get(id)
             .ok_or("evaluation schedule references a missing node")?;
@@ -6147,6 +6239,10 @@ where
         }
     }
 
+    if next_check != ordered_checks.len() {
+        return Err("runtime List control boundary was not reached".to_string());
+    }
+
     Ok(EvaluatedValues {
         values,
         peak_live_values,
@@ -6946,6 +7042,33 @@ where
         load_input,
     )
     .map(|evaluated| evaluated.values)
+}
+
+pub(crate) fn eval_tensor_roots_exact_with_ordered_list_checks<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    claims: &[InheritedResultClaim],
+    checks: &[crate::lower::RuntimeListCheck],
+    load: F,
+) -> (Result<UnordMap<NodeId, TensorValue>, String>, bool)
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    let mut list_failure = false;
+    let result = reject_drop_roots(dag, roots).and_then(|()| {
+        let live = live_mask_for_roots(dag, roots);
+        eval_tensor_internal_with_result_claims_and_controls(
+            dag,
+            EvaluationScope::Roots { live: &live, roots },
+            true,
+            claims,
+            checks,
+            &mut list_failure,
+            load,
+        )
+        .map(|evaluated| evaluated.values)
+    });
+    (result, list_failure)
 }
 
 fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
