@@ -7369,6 +7369,59 @@ mod tests {
         assert_eq!(error, original_public_witness_result(&bad).unwrap_err());
     }
 
+    // Explicit residual, not a linear-work oracle: repeated epochs can expose
+    // a growing active conditional-to-strict adjacency. Charge every incidence.
+    #[test]
+    fn public_conditional_strict_incidence_residual_is_counted() {
+        for n in [16, 32, 64] {
+            let mut dag = contextual_prefix_comparisons(0, 1);
+            let mut constant = dag.nodes[1].clone();
+            let compare = dag.nodes[2].clone();
+            dag.nodes = shared_axis_diamond(0);
+            for id in 1..n {
+                let mut load = dag.nodes[0].clone();
+                load.id = id;
+                dag.nodes.push(load);
+            }
+            constant.id = dag.nodes.len() as u64;
+            constant.shape_deps = vec![0];
+            let observed = constant.id;
+            dag.nodes.push(constant);
+            let anchors = (0..n)
+                .map(|source| append_test_witness(&mut dag.nodes, source, &[]))
+                .collect::<Vec<_>>();
+            for source in 1..n {
+                append_test_witness(&mut dag.nodes, observed, &[anchors[source as usize]]);
+                let mut question = compare.clone();
+                question.id = dag.nodes.len() as u64;
+                question.inputs = vec![0, source];
+                question.shape_deps = vec![0];
+                dag.nodes.push(question);
+            }
+            dag.roots = vec![dag.nodes.last().unwrap().id];
+            let json = public_witness_json(&dag);
+            WIRE_INGRESS_WORK.with(|work| work.set(Some(WireIngressWork::default())));
+            WireDag::from_validated_json(&json).unwrap();
+            let work = WIRE_INGRESS_WORK.with(|work| work.replace(None).unwrap());
+            eprintln!(
+                "conditional strict residual n={n} nodes={}: {work:?}",
+                dag.nodes.len()
+            );
+            assert_eq!(work.witness_fallbacks, 0, "{work:?}");
+            assert_eq!(
+                work.conditional_incidence_steps,
+                (n * (n - 1) / 2) as usize,
+                "{work:?}"
+            );
+            assert!(original_public_witness_result(&json).is_ok());
+            dag.nodes[observed as usize].shape_deps.clear();
+            let bad = public_witness_json(&dag);
+            let error = WireDag::from_validated_json(&bad).unwrap_err().to_string();
+            assert!(error.contains("requires two same-shape"), "{error}");
+            assert_eq!(error, original_public_witness_result(&bad).unwrap_err());
+        }
+    }
+
     #[test]
     fn conditional_dense_active_sparse_edges_choose_incidence() {
         for n in [16, 32, 64] {
