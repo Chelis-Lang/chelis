@@ -156,6 +156,13 @@ const POSITIVE: &[Case] = &[
         name: "empty_accumulator_tuple_of_dimension_generic_adt",
         source: "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\ndef repl[n](xs: List[(string, Col[n])], acc: List[(string, Col[n])]) -> List[(string, Col[n])] =\n  if eq(len(xs), 0i64) then acc\n  else {\n    hp = index(xs, 0i64)\n    next = append(acc, hp)\n    repl(skip(xs, 1i64), next)\n  }\na = len(repl([(\"a\", FCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], []))\n",
     },
+    // [04-ADT-1,3,4]: the registry classifies n as a dimension, not a
+    // stored type/precision. Empty lists therefore need no invented extent
+    // to have their parametric C value layout (chelis#3666).
+    Case {
+        name: "empty_accumulator_dimension_generic_adt_parametric",
+        source: "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\ndef repl[n](xs: List[Col[n]], acc: List[Col[n]]) -> List[Col[n]] =\n  if eq(len(xs), 0i64) then acc\n  else {\n    hp = index(xs, 0i64)\n    repl(skip(xs, 1i64), append(acc, hp))\n  }\na = len(repl([], []))\n",
+    },
 ];
 
 /// Each shape above with a `None` whose type nothing determines.
@@ -179,13 +186,6 @@ const AMBIGUOUS: &[Case] = &[
     Case {
         name: "fold_callback_len_of_none",
         source: "def case(flag: bool) -> i64 =\n  fold(fn (acc: i64, x: i64) -> add(acc, len([None])), 0i64, [1i64, 2i64])\na = case(true)\n",
-    },
-    // chelis#3153 negative parity: both arguments are empty, so nothing fixes
-    // the dimension of `Col[n]`. The checker accepts it and the evaluator runs
-    // it, but no host type exists, so the fix must NOT invent one.
-    Case {
-        name: "empty_accumulator_dimension_generic_adt_unfixed",
-        source: "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\ndef repl[n](xs: List[Col[n]], acc: List[Col[n]]) -> List[Col[n]] =\n  if eq(len(xs), 0i64) then acc\n  else {\n    hp = index(xs, 0i64)\n    repl(skip(xs, 1i64), append(acc, hp))\n  }\na = len(repl([], []))\n",
     },
 ];
 
@@ -312,9 +312,9 @@ fn a_nullary_value_no_context_fixes_is_still_rejected() {
 // registry permits their parametric layout without inventing an extent.
 #[test]
 fn dimension_only_empty_nominal_list_has_parametric_layout_and_balanced_owners() {
-    let case = AMBIGUOUS
+    let case = POSITIVE
         .iter()
-        .find(|case| case.name == "empty_accumulator_dimension_generic_adt_unfixed")
+        .find(|case| case.name == "empty_accumulator_dimension_generic_adt_parametric")
         .expect("original dimension-only witness");
     assert_eq!(evaluated(case.source), "a = 0\n");
     check_positive(case).unwrap();
