@@ -2367,7 +2367,9 @@ Analysis records bounded scoped-map/undo operations and parent links, with
 ordered-map comparisons adding their logarithmic factor. It does not clone an
 environment or a root-to-call route per candidate. Plan records, selected route
 materialization, checked source/callee comparisons, lowered validation, runtime
-routing, entry work and emitted bytes have separate cost measurements.
+routing, entry work and emitted bytes are accounted for separately. Structural
+visit counters do not measure ordered-map comparisons, allocator bytes or
+checked expression comparisons; those costs retain their own units.
 
 ## Part II: remaining delivery sequence
 

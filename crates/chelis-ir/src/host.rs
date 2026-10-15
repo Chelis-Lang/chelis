@@ -32306,8 +32306,8 @@ fn accumulator_identity_variable(mut expr: &Expr) -> Option<&str> {
     node.children_slice().first().and_then(symbol_name)
 }
 
-/// One checked lexical tail path. Initializers and block prefixes are not
-/// members of this path, even when they contain an identical application.
+/// One checked lexical occurrence path. A tail or exact returned-result
+/// initializer may be selected; identical unselected calls cannot use it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccumulatorForwardingPlan {
     callee_name: String,
@@ -33639,6 +33639,10 @@ mod accumulator_forwarding_wrapper_tests {
             let (candidates, routes) = plan.analysis_records();
             assert_eq!(plan.occurrence(), 0);
             assert_eq!(candidates, length + 1);
+            eprintln!(
+                "returned source L={length}: visits={work} candidates={candidates} route_records={routes} selected_route={}",
+                plan.route().len()
+            );
             assert!(routes <= 16 * length + 64, "L={length}: routes={routes}");
             assert!(work <= 128 * length + 2048, "L={length}: work={work}");
             // Whole callback/callee byte comparisons and ordered-map
@@ -33723,6 +33727,69 @@ mod accumulator_forwarding_wrapper_tests {
                 .is_none()
         );
         assert!(returned_accumulator_invocation(&make("saved", None), &other).is_none());
+    }
+
+    #[test]
+    fn lowered_returned_alias_work_counts_success_and_failed_lineage() {
+        let plan = accumulator_forwarding_plan(
+            returned_plan("{ result = step(acc, i)\n result }")
+                .unwrap()
+                .owner(),
+        )
+        .unwrap();
+        let ty = HostTypeTerm::Unit;
+        for length in [40, 80, 160] {
+            let mut bindings = vec![HostBinding {
+                name: "result".into(),
+                display_name: None,
+                display_roots: Vec::new(),
+                ty: ty.clone(),
+                value: HostExpr::new(HostExprKind::RetainedInvocation {
+                    bindings: Vec::new(),
+                    body: Box::new(HostExpr::new(HostExprKind::Unit)),
+                    ty: ty.clone(),
+                    forwarding: Some(Arc::new(plan.clone())),
+                }),
+            }];
+            for index in 0..length {
+                bindings.push(HostBinding {
+                    name: format!("alias{index}"),
+                    display_name: None,
+                    display_roots: Vec::new(),
+                    ty: ty.clone(),
+                    value: HostExpr::new(HostExprKind::Var(
+                        if index == 0 {
+                            "result".into()
+                        } else {
+                            format!("alias{}", index - 1)
+                        },
+                        ty.clone(),
+                    )),
+                });
+            }
+            for valid in [true, false] {
+                let body = HostExpr::new(HostExprKind::Let {
+                    bindings: bindings.clone(),
+                    body: Box::new(HostExpr::new(HostExprKind::Var(
+                        if valid {
+                            format!("alias{}", length - 1)
+                        } else {
+                            "unproved_equal_value".into()
+                        },
+                        ty.clone(),
+                    ))),
+                    ty: ty.clone(),
+                });
+                ACCUMULATOR_IDENTITY_WORK.with(|work| work.set(0));
+                assert_eq!(
+                    returned_accumulator_invocation(&body, &plan).is_some(),
+                    valid
+                );
+                let work = ACCUMULATOR_IDENTITY_WORK.with(std::cell::Cell::get);
+                eprintln!("returned lowered L={length} valid={valid}: visits={work}");
+                assert!(work <= 16 * length + 100, "L={length}: visits={work}");
+            }
+        }
     }
 
     #[test]
