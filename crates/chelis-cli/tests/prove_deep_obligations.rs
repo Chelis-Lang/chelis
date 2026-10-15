@@ -13,6 +13,9 @@
 //! `#[cfg(feature = "smt")]`. Without the feature the obligation path is not
 //! compiled, mirroring `prove_invariant_obligations.rs`.
 //!
+//! This required SMT target also owns canonical numeric literal values and
+//! typed integer input domains on both Surf and Deep (the proof_numeric_values module).
+//!
 //! Run: `cargo nextest run -p chelis-cli --features smt
 //!   --test prove_deep_obligations`
 //! with `LD_LIBRARY_PATH` set to the uv python lib (see AGENTS.md).
@@ -284,4 +287,409 @@ fn type_broken_deep_module_with_no_invariant_errors_not_silent_pass() {
             .any(|r| r["kind"] == "error" && r["stage"] == "check"),
         "the type-check failure must be surfaced as a check-error record: {records:?}"
     );
+}
+
+// Numeric literal/domain parity shares this required, feature-enabled SMT owner.
+mod proof_numeric_values {
+    //! Shared Surf/Deep acceptance run by the required prove_deep_obligations SMT target.
+    use assert_cmd::Command;
+    use serde_json::Value;
+
+    fn prove(source: &str, deep: bool) -> (i32, Vec<Value>) {
+        prove_with_tier(source, deep, "smt-only")
+    }
+
+    fn prove_with_tier(source: &str, deep: bool, tier: &str) -> (i32, Vec<Value>) {
+        prove_with_options(source, deep, tier, &[])
+    }
+
+    fn prove_with_options(
+        source: &str,
+        deep: bool,
+        tier: &str,
+        extra: &[&str],
+    ) -> (i32, Vec<Value>) {
+        let directory = tempfile::tempdir().unwrap();
+        let surf = directory.path().join("numeric.ch");
+        std::fs::write(&surf, source).unwrap();
+        let formatted = Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["fmt", "--inplace"])
+            .arg(&surf)
+            .output()
+            .unwrap();
+        assert!(formatted.status.success(), "{formatted:?}");
+        let input = if deep {
+            let output = Command::cargo_bin("chelis")
+                .unwrap()
+                .arg("deep")
+                .arg(&surf)
+                .env_remove("CHELIS_STYLE_GATE_DISABLE")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let path = directory.path().join("numeric.dp");
+            std::fs::write(&path, output.stdout).unwrap();
+            path
+        } else {
+            surf
+        };
+        let output = Command::cargo_bin("chelis")
+            .unwrap()
+            .arg("prove")
+            .arg(input)
+            .args(["--json", "--tier", tier, "--seed", "37"])
+            .args(extra)
+            .env_remove("CHELIS_STYLE_GATE_DISABLE")
+            .output()
+            .unwrap();
+        let records: Vec<Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            !records.is_empty(),
+            "{source}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output.status.code().unwrap(), records)
+    }
+    fn property<'a>(records: &'a [Value], name: &str) -> &'a Value {
+        records
+            .iter()
+            .find(|r| r["kind"] == "property" && r["name"] == name)
+            .unwrap_or_else(|| panic!("missing {name}: {records:?}"))
+    }
+
+    #[test]
+    fn nested_grad_sibling_preserves_numeric_smt_verdicts_and_own_boundary() {
+        let source = "def declared(dummy: i32) -> f64 = 1.3\n@property nested_grad forall(x: f32):\n  grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=xx)(x) >= 0.0\n@property numeric_true forall(x: i32):\n  declared(x) == 1.3f64\n@property numeric_false forall(x: i32):\n  declared(x) != 1.3f64\n";
+        for deep in [false, true] {
+            for (extra, expected_names) in [
+                (vec![], vec!["nested_grad", "numeric_true", "numeric_false"]),
+                (
+                    vec!["--only", "numeric_*"],
+                    vec!["numeric_true", "numeric_false"],
+                ),
+                (vec!["--only", "nested_grad"], vec!["nested_grad"]),
+            ] {
+                let (code, records) = prove_with_options(source, deep, "smt-only", &extra);
+                assert_eq!(
+                    code,
+                    if expected_names.contains(&"numeric_false") {
+                        1
+                    } else {
+                        2
+                    },
+                    "{records:#?}"
+                );
+                let names = records
+                    .iter()
+                    .filter(|r| r["kind"] == "property")
+                    .map(|r| r["name"].as_str().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(names, expected_names, "{records:#?}");
+                for name in expected_names {
+                    let record = property(&records, name);
+                    assert_eq!(record["proof_tier"], "smt", "{record}");
+                    assert_eq!(record["samples"], 0, "{record}");
+                    assert_eq!(
+                        record["status"],
+                        match name {
+                            "numeric_true" => "passed",
+                            "numeric_false" => "failed",
+                            _ => "unsupported",
+                        },
+                        "{record}"
+                    );
+                    if name == "nested_grad" {
+                        assert_eq!(
+                            record["reason"],
+                            "scalar grad SMT lowering does not support nested gradients",
+                            "{record}"
+                        );
+                    }
+                }
+                let summary = records.iter().find(|r| r["kind"] == "summary").unwrap();
+                assert_eq!(summary["errors"], 0, "{summary}");
+            }
+        }
+    }
+    fn mutate_one_definition(source: &str, original: &str, replacement: &str) -> String {
+        assert_eq!(source.matches(original).count(), 1);
+        let mutant = source.replacen(original, replacement, 1);
+        assert_eq!(mutant.matches(replacement).count(), 1);
+        assert_eq!(
+            source.split_once("@property").unwrap().1,
+            mutant.split_once("@property").unwrap().1
+        );
+        assert_eq!(mutant.replace(replacement, original), source);
+        assert_eq!(
+            source
+                .lines()
+                .zip(mutant.lines())
+                .filter(|(left, right)| left != right)
+                .count(),
+            1
+        );
+        mutant
+    }
+
+    fn exact_integer(value: &Value) -> i64 {
+        if let Some(value) = value.as_i64() {
+            return value;
+        }
+        let text = value.as_str().unwrap();
+        if let Some(magnitude) = text.strip_prefix("(- ").and_then(|s| s.strip_suffix(')')) {
+            i64::try_from(-magnitude.trim().parse::<i128>().unwrap()).unwrap()
+        } else {
+            text.parse().unwrap()
+        }
+    }
+
+    #[test]
+    fn typed_integer_domains_cast_minima_and_implementation_mutants_match_on_surf_and_deep() {
+        for (dtype, minimum, maximum) in [
+            ("i8", i8::MIN as i64, i8::MAX as i64),
+            ("i16", i16::MIN as i64, i16::MAX as i64),
+            ("i32", i32::MIN as i64, i32::MAX as i64),
+            ("i64", i64::MIN, i64::MAX),
+        ] {
+            let source = format!(
+                "def value(x: {dtype}) -> {dtype} = x\ndef minimum(dummy: {dtype}) -> {dtype} = cast({minimum}, {dtype})\n@property lower forall(x: {dtype}):\n  value(x) >= minimum(x)\n@property upper forall(x: {dtype}):\n  value(x) <= cast({maximum}, {dtype})\n@property at_minimum forall(x: {dtype}) where x == cast({minimum}, {dtype}):\n  value(x) == x\n@property strict_minimum forall(x: {dtype}):\n  value(x) > cast({minimum}, {dtype})\n"
+            );
+            for deep in [false, true] {
+                let (code, records) = prove(&source, deep);
+                assert_eq!(code, 1, "{records:?}"); // only the strict bound is false
+                for name in ["lower", "upper", "at_minimum"] {
+                    let record = property(&records, name);
+                    assert_eq!(record["status"], "passed", "{record}");
+                    assert_eq!(record["proof_tier"], "smt", "{record}");
+                    assert_eq!(record["qualifiers"], serde_json::json!(["real_arithmetic"]));
+                }
+                assert_eq!(
+                    property(&records, "lower")["assumptions"],
+                    serde_json::json!([])
+                );
+                let guarded = property(&records, "at_minimum");
+                assert_eq!(guarded["assumptions"].as_array().unwrap().len(), 1);
+                assert_eq!(
+                    guarded["assumptions"][0]["name"],
+                    "preconditions:at_minimum"
+                );
+                assert_eq!(
+                    guarded["assumptions"][0]["non_vacuity"]["evidence"]["assumption_count"],
+                    1
+                );
+                assert_eq!(
+                    guarded["assumptions"][0]["non_vacuity"]["evidence"]["intrinsic_domain_count"],
+                    2
+                );
+                let strict = property(&records, "strict_minimum");
+                assert_eq!(strict["status"], "failed", "{strict}");
+                assert_eq!(exact_integer(&strict["counterexample"]["x"]), minimum);
+                let original_definition = format!("def value(x: {dtype}) -> {dtype} = x\n");
+                let mutant_definition =
+                    format!("def value(x: {dtype}) -> {dtype} = x + cast(1, {dtype})\n");
+                let mutant =
+                    mutate_one_definition(&source, &original_definition, &mutant_definition);
+                let (_, records) = prove(&mutant, deep);
+                let failure = property(&records, "at_minimum");
+                assert_eq!(failure["status"], "failed", "{failure}");
+                assert_eq!(failure["proof_tier"], "smt");
+                assert_eq!(exact_integer(&failure["counterexample"]["x"]), minimum);
+            }
+        }
+    }
+
+    #[test]
+    fn nonminimum_casts_float_rounding_sentinel_and_nested_substitution_keep_values() {
+        let source = "def inner(dummy: i32) -> i32 = cast(-3, i32)\ndef outer(x: i32) -> i32 = inner(x)\n@property nearby forall(x: i32) where x == cast(-3, i32):\n  outer(x) == x\n@property rounding forall(x: f32):\n  cast(16777217, f32) == 16777216f32\n@property rounding_false forall(x: f32):\n  cast(16777217, f32) != 16777216f32\n@property decimal forall(x: f64):\n  cast(1.1, f64) == 1.1f64\n@property sentinel forall(x: i64):\n  -9223372036854775808i64 < 0i64\n@property sentinel_false forall(x: i64):\n  -9223372036854775808i64 > 0i64\n";
+        for deep in [false, true] {
+            let (code, records) = prove(source, deep);
+            assert_eq!(code, 1, "{records:?}");
+            for name in ["nearby", "rounding", "decimal", "sentinel"] {
+                assert_eq!(property(&records, name)["status"], "passed", "{records:?}");
+                assert_eq!(property(&records, name)["proof_tier"], "smt");
+            }
+            for name in ["rounding_false", "sentinel_false"] {
+                assert_eq!(property(&records, name)["status"], "failed", "{records:?}");
+            }
+            let mutant = mutate_one_definition(
+                source,
+                "def inner(dummy: i32) -> i32 = cast(-3, i32)\n",
+                "def inner(dummy: i32) -> i32 = cast(-2, i32)\n",
+            );
+            let (_, records) = prove(&mutant, deep);
+            assert_eq!(
+                property(&records, "nearby")["status"],
+                "failed",
+                "{records:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_domains_reject_vacuous_guards_without_hiding_unbounded_intermediate_arithmetic() {
+        let source = "@property impossible forall(x: i64) where x < cast(-9223372036854775808, i64):\n  true\n@property arithmetic forall(x: i8):\n  x + 1i8 > x\n@property computed_argument forall(x: i8):\n  identity(x + 1i8) > x\ndef identity(x: i8) -> i8 = x\n";
+        for deep in [false, true] {
+            let (code, records) = prove(source, deep);
+            assert_ne!(code, 0);
+            let invalid = property(&records, "impossible");
+            assert_eq!(invalid["status"], "unsupported", "{invalid}");
+            assert!(
+                invalid["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("non_vacuity_invalid")
+            );
+            for name in ["arithmetic", "computed_argument"] {
+                let record = property(&records, name);
+                assert_eq!(record["status"], "passed", "{record}");
+                assert_eq!(record["composite_verdict"], "proven_modulo_real_arithmetic");
+            }
+        }
+    }
+
+    #[test]
+    fn declaration_context_literals_keep_smt_surf_deep_and_runtime_verdicts() {
+        let source = "sig standalone: i32 -> f64\ndef declared(dummy: i32) -> f64 = 1.1\ndef standalone(dummy: i32) = 1.1\ndef wide(dummy: i32) -> i64 = 3000000000\ndef integer_float(dummy: i32) -> f64 = 16777217\ndef local(dummy: i32) -> f64 = { \n  value: f64 = 1.1\n  value\n}\ndef minimum(dummy: i32) -> i8 = -128\ndef minimum64(dummy: i32) -> i64 = -9223372036854775808\ndef nested(x: i32) -> f64 = declared(x)\n@property declared_true forall(x: i32):\n  declared(x) == 1.1f64\n@property declared_false forall(x: i32):\n  declared(x) != 1.1f64\n@property standalone_true forall(x: i32):\n  standalone(x) == 1.1f64\n@property local_true forall(x: i32):\n  local(x) == 1.1f64\n@property local_false forall(x: i32):\n  local(x) != 1.1f64\n@property wide_true forall(x: i32):\n  wide(x) == 3000000000i64\n@property wide_false forall(x: i32):\n  wide(x) != 3000000000i64\n@property integer_float_true forall(x: i32):\n  integer_float(x) == 16777217f64\n@property minimum_true forall(x: i32):\n  minimum(x) == cast(-128, i8)\n@property minimum64_true forall(x: i32):\n  minimum64(x) == cast(-9223372036854775808, i64)\n@property nested_true forall(x: i32):\n  nested(x) == 1.1f64\n";
+        for deep in [false, true] {
+            for tier in ["smt-only", "fuzz-only"] {
+                let (code, records) = prove_with_tier(source, deep, tier);
+                assert_eq!(code, 1, "{records:?}");
+                for name in [
+                    "declared_true",
+                    "standalone_true",
+                    "wide_true",
+                    "integer_float_true",
+                    "minimum_true",
+                    "minimum64_true",
+                    "nested_true",
+                ] {
+                    let record = property(&records, name);
+                    assert_eq!(record["status"], "passed", "{record}");
+                    assert_eq!(
+                        record["proof_tier"],
+                        if tier == "smt-only" { "smt" } else { "fuzz" },
+                        "{record}"
+                    );
+                    assert_eq!(record["assumptions"], serde_json::json!([]));
+                }
+                // Canonical Deep retains the typed local's ascription Block, which
+                // its SMT arithmetic fragment does not lower. Surf lowers the
+                // same source, and both surfaces execute it in the runtime tier.
+                for name in ["local_true", "local_false"] {
+                    let record = property(&records, name);
+                    if deep && tier == "smt-only" {
+                        assert_eq!(record["status"], "unsupported", "{record}");
+                        assert_eq!(
+                            record["reason"], "property does not lower to Tier B (smt-only)",
+                            "{record}"
+                        );
+                        assert_eq!(record["samples"], 0, "{record}");
+                    } else {
+                        assert_eq!(
+                            record["status"],
+                            if name == "local_true" {
+                                "passed"
+                            } else {
+                                "failed"
+                            },
+                            "{record}"
+                        );
+                        assert_eq!(
+                            record["proof_tier"],
+                            if tier == "smt-only" { "smt" } else { "fuzz" },
+                            "{record}"
+                        );
+                        assert_eq!(record["assumptions"], serde_json::json!([]));
+                    }
+                }
+                for name in ["declared_false", "wide_false"] {
+                    let record = property(&records, name);
+                    assert_eq!(record["status"], "failed", "{record}");
+                    assert_eq!(
+                        record["proof_tier"],
+                        if tier == "smt-only" { "smt" } else { "fuzz" },
+                        "{record}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn surf_gradient_literals_keep_smt_and_runtime_verdicts_and_implementation_mutants() {
+        let source = "def coefficient(x: f32) -> f32 = x * 1.1f32\ndef negative_coefficient(x: f32) -> f32 = x * -1.1f32\ndef helper(x: f32) -> f32 = coefficient(x)\ndef tiny(x: f32) -> f32 = x * 1e-45f32\ndef underflow(x: f32) -> f32 = x * 1e-46f32\ndef wide_coefficient(x: f64) -> f64 = x * 1.1f64\n@property gradient_true forall(x: f32):\n  grad(coefficient, wrt=x)(x) == 1.1f32\n@property gradient_false forall(x: f32):\n  grad(coefficient, wrt=x)(x) != 1.1f32\n@property negative_true forall(x: f32):\n  grad(negative_coefficient, wrt=x)(x) == -1.1f32\n@property negative_false forall(x: f32):\n  grad(negative_coefficient, wrt=x)(x) != -1.1f32\n@property nested_true forall(x: f32):\n  grad(helper, wrt=x)(x) == 1.1f32\n@property inline_true forall(x: f32):\n  grad(fn (v: f32) -> v * 1.1f32, wrt=v)(x) == 1.1f32\n@property tiny_true forall(x: f32):\n  grad(tiny, wrt=x)(x) == 1e-45f32\n@property tiny_false forall(x: f32):\n  grad(tiny, wrt=x)(x) != 1e-45f32\n@property underflow_true forall(x: f32):\n  grad(underflow, wrt=x)(x) == 0.0f32\n@property underflow_false forall(x: f32):\n  grad(underflow, wrt=x)(x) != 0.0f32\n@property wide_true forall(x: f64):\n  grad(wide_coefficient, wrt=x)(x) == 1.1f64\n@property wide_false forall(x: f64):\n  grad(wide_coefficient, wrt=x)(x) != 1.1f64\n";
+        for tier in ["smt-only", "fuzz-only"] {
+            let (code, records) = prove_with_tier(source, false, tier);
+            assert_eq!(code, 1, "{records:?}");
+            for name in [
+                "gradient_true",
+                "gradient_false",
+                "negative_true",
+                "negative_false",
+                "nested_true",
+                "inline_true",
+                "tiny_true",
+                "tiny_false",
+                "underflow_true",
+                "underflow_false",
+                "wide_true",
+                "wide_false",
+            ] {
+                let record = property(&records, name);
+                assert_eq!(
+                    record["status"],
+                    if name.ends_with("_false") {
+                        "failed"
+                    } else {
+                        "passed"
+                    },
+                    "{record}"
+                );
+                assert_eq!(
+                    record["proof_tier"],
+                    if tier == "smt-only" { "smt" } else { "fuzz" },
+                    "{record}"
+                );
+                if tier == "smt-only" {
+                    assert_eq!(record["samples"], 0, "{record}");
+                }
+            }
+            let mutant = mutate_one_definition(
+                source,
+                "def coefficient(x: f32) -> f32 = x * 1.1f32\n",
+                "def coefficient(x: f32) -> f32 = x * 1.2f32\n",
+            );
+            let (code, records) = prove_with_tier(&mutant, false, tier);
+            assert_eq!(code, 1, "{records:?}");
+            for name in ["gradient_true", "nested_true"] {
+                assert_eq!(property(&records, name)["status"], "failed", "{records:?}");
+            }
+            assert_eq!(property(&records, "gradient_false")["status"], "passed");
+        }
+    }
+
+    #[test]
+    fn canonical_guard_plan_preserves_authored_fuzz_evaluation_at_an_exact_f64_interval() {
+        let source = "def declared(dummy: i32) -> f64 = 1.1\n@property exact_interval forall(x: f64) where x >= declared(0), x <= 1.1f64:\n  x == 1.1f64\n";
+        for deep in [false, true] {
+            let (code, records) = prove_with_tier(source, deep, "fuzz-only");
+            assert_eq!(code, 0, "{records:?}");
+            let record = property(&records, "exact_interval");
+            assert_eq!(record["status"], "passed", "{record}");
+            assert_eq!(record["proof_tier"], "fuzz", "{record}");
+            assert_eq!(record["sampling_method"], "constraint_directed");
+            assert_eq!(record["accepted_samples"], 100);
+            assert_eq!(record["rejected_samples"], 0);
+            assert!(record["goal"].as_str().unwrap().contains(if deep {
+                "declared"
+            } else {
+                "declared(0)"
+            }));
+        }
+    }
 }

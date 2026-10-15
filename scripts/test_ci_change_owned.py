@@ -2468,6 +2468,32 @@ class PlanningTests(unittest.TestCase):
             source_reader=sources.__getitem__,
         )
 
+    def test_deep_numeric_smt_target_routes_to_existing_required_feature_owner(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        repository = owned.read_config(root / ".config/ci-test-targets.toml")
+        identity = owned.Identity("chelis-cli", "prove_deep_obligations")
+        owner = repository.target_exclusions[identity]
+        command = "cargo test -p chelis-cli --features smt --test prove_deep_obligations"
+        self.assertEqual((owner.workflow, owner.job, owner.cadence, owner.tracking_issue),
+                         ("ci.yml", "smt-build", "pull_request and push", "chelis#1125"))
+        self.assertIn(command, owner.reason)
+        self.assertIn(command, (root / ".github/workflows/ci.yml").read_text())
+        path = "crates/chelis-cli/tests/prove_deep_obligations.rs"
+        standing = "crates/p/tests/smoke.rs"
+        sources = {path: (root / path).read_text(), standing: "#[test]\nfn standing() {}\n"}
+        workspace = metadata(package("p", [("smoke", standing, [])]),
+                             package("chelis-cli", [(identity.target, path, [])]))
+        config = replace(repository, standing_targets=(owned.Identity("p", "smoke"),),
+                         manual_only_targets={}, manual_gate_targets={},
+                         target_exclusions={identity: owner}, test_exclusions={},
+                         required_package_rules=(), path_rules=())
+        plan = self.plan([owned.ChangeRecord("M", path)], base=workspace, candidate=workspace,
+                         config=config, tracked=set(sources), sources=sources)
+        self.assertNotIn(identity.canonical, plan["change_owned"])
+        self.assertNotIn(identity.canonical, plan["package_expansion"])
+        self.assertEqual(plan["path_dispositions"][0]["kind"], "integration_target_excluded")
+        self.assertEqual(plan["path_dispositions"][0]["owner"]["job"], "smt-build")
+
     def test_removed_shared_path_retires_without_retaining_dead_routing(self) -> None:
         path = "retired-tools/tool.py"
         sources = fixture_sources()

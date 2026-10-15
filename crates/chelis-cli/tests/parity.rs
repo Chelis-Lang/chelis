@@ -971,7 +971,7 @@ fn parity_literal_ascriptions() {
     let path = examples_root().join("literal_ascriptions.ch");
     assert_eq!(
         run_eval(&path),
-        b"same = 1.5\nwidened = 1.100000023841858\nadopted = 1.1\nlocal = 1.5\n",
+        b"same = 1.5\nwidened = 1.100000023841858\nadopted = 1.1\nlocal = 1.5\ngradient_matches = true\ngradient_differs = false\nsubnormal_gradient_matches = true\nunderflow_gradient_matches = true\n",
     );
     drive_parity(&examples_root().join("literal_ascriptions.ch"), true);
 }

@@ -227,6 +227,21 @@ fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 /// Deep has erased a canonical source distinction such as module-path casing
 /// or a grouped `dim` declaration.
 pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
+    resugar_program_with_literal_types(exprs, false)
+}
+
+/// Reconstruct a semantic Surf view for analysis, retaining every literal's
+/// canonical dtype even where source presentation could omit its suffix.
+/// Consumers may then inspect a leaf without reconstructing its declaration
+/// context. This is an AST API; it does not define another source spelling.
+pub fn resugar_program_for_analysis(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
+    resugar_program_with_literal_types(exprs, true)
+}
+
+fn resugar_program_with_literal_types(
+    exprs: &[DeepExpr],
+    retain_literal_types: bool,
+) -> Result<Vec<Decl>, ResugarError> {
     chelis_deep::metadata::validate_metadata(exprs)?;
     validate_grad_selector_consistency(exprs)?;
     for expr in exprs {
@@ -235,7 +250,9 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
     let _declared = DeclaredTensorsScope::install(DeclaredTensors::collect(exprs));
     let _explicit = ExplicitLiteralSpansScope::install();
     let mut declarations = resugar_declaration_sequence(exprs)?;
-    strip_redundant_suffixes(&mut declarations);
+    if !retain_literal_types {
+        strip_redundant_suffixes(&mut declarations);
+    }
     validate_surface_declarations(&declarations)?;
     Ok(declarations)
 }
@@ -814,6 +831,12 @@ fn deep_callable_origin_in_scope(
         return DeepCallableOrigin::Unknown;
     };
     match node.tag {
+        DeepTag::Grad if matches!(node.children.len(), 1 | 2) => {
+            // Like the Surf selector resolver, retain the target's formal
+            // parameter identity through grad. Each transform's operative
+            // selector is still checked by walk_grad_selector_consistency.
+            deep_callable_origin_in_scope(&node.children[0], callables, locals)
+        }
         DeepTag::If if node.children.len() == 3 => {
             let consequence = deep_callable_origin_in_scope(&node.children[1], callables, locals);
             let alternative = deep_callable_origin_in_scope(&node.children[2], callables, locals);

@@ -436,3 +436,140 @@ fn swapped_cmplt_still_resugars_faithfully_as_less_than() {
 
     assert_eq!(format_expression(&surf_ast), "(b < a)");
 }
+
+#[test]
+fn semantic_resugaring_keeps_declaration_bound_literal_dtypes_before_source_elision() {
+    use chelis_deep::LiteralSuffix;
+    use chelis_surf::ast::{Decl, Expr, Literal};
+    use chelis_surf::resugar::{resugar_program, resugar_program_for_analysis};
+    let declarations = parse_surf("sig standalone: i32 -> f64\ndef unrelated(x: i32) -> i32 = x\ndef standalone(dummy: i32) = 1.1\ndef declared(dummy: i32) -> f64 = 1.1\ndef wide(dummy: i32) -> i64 = 3000000000\ndef integer_float(dummy: i32) -> f64 = 16777217\ndef local(dummy: i32) -> f64 = { \n  value: f64 = 1.1\n  value\n}\n").unwrap();
+    let canonical = desugar_program(&declarations).unwrap();
+    let semantic = resugar_program_for_analysis(&canonical).unwrap();
+    let source = resugar_program(&canonical).unwrap();
+    let body = |declarations: &[Decl], name: &str| -> Expr {
+        declarations
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::FunDef {
+                    name: found, body, ..
+                } if found == name => Some(body.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    for name in ["standalone", "declared"] {
+        assert!(
+            matches!(body(&semantic, name), Expr::Lit(Literal::TypedFloat(value, LiteralSuffix::F64), _) if value == 1.1)
+        );
+    }
+    assert!(
+        matches!(body(&source, "declared"), Expr::Lit(Literal::Float(value), _) if value == 1.1)
+    );
+    assert!(matches!(
+        body(&semantic, "wide"),
+        Expr::Lit(Literal::TypedInt(3000000000, LiteralSuffix::I64), _)
+    ));
+    assert!(
+        matches!(body(&semantic, "integer_float"), Expr::Lit(Literal::TypedFloat(value, LiteralSuffix::F64), _) if value == 16777217.0)
+    );
+    let Expr::Block(ref bindings, _, _) = body(&semantic, "local") else {
+        panic!("local declaration retained");
+    };
+    assert!(
+        matches!(bindings[0].value, Expr::Lit(Literal::TypedFloat(value, LiteralSuffix::F64), _) if value == 1.1)
+    );
+    // Presentation remains the existing canonical source contract.
+    let printed = chelis_surf::format::format_program(&source);
+    assert_eq!(
+        printed,
+        chelis_surf::format::format_source(&printed).unwrap()
+    );
+}
+
+#[test]
+fn semantic_resugaring_preserves_converting_named_and_binder_casts() {
+    use chelis_deep::NamedCastMode;
+    use chelis_surf::ast::{CastMode, Decl, Expr};
+    use chelis_surf::resugar::resugar_program_for_analysis;
+    let source = "def convert(dummy: i32) -> f64 = cast(1.1f32, f64)\ndef named(dummy: i32) -> i32 = cast_trunc(1.5, i32)\ndef binder[p: Float](dummy: p) -> p = cast(1.1, p)\n";
+    let canonical = desugar_program(&parse_surf(source).unwrap()).unwrap();
+    let semantic = resugar_program_for_analysis(&canonical).unwrap();
+    for (name, mode) in [
+        ("convert", CastMode::Checked),
+        ("named", CastMode::Named(NamedCastMode::Trunc)),
+        ("binder", CastMode::Checked),
+    ] {
+        let body = semantic
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::FunDef {
+                    name: found, body, ..
+                } if found == name => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            matches!(body, Expr::Cast(_, _, found, _) if *found == mode),
+            "{name}: {body:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_grad_resugaring_preserves_callable_selector_identity() {
+    use chelis_surf::resugar::{
+        normalize_deep_for_surface_roundtrip, resugar_program, resugar_program_for_analysis,
+    };
+
+    // Named selectors retain their formal parameter identity (spec/03 §2.7),
+    // including on a surrounding grad. Reconstruction does not implement AD.
+    for target in ["fn (x: f32, w: f32) -> x * w", "pair"] {
+        let source = format!(
+            "def pair(x: f32, w: f32) -> f32 = x * w\nselected = grad(grad({target}, wrt=w), wrt=x)\n"
+        );
+        let canonical = desugar_program(&parse_surf(&source).unwrap()).unwrap();
+        for reconstructed in [
+            resugar_program(&canonical),
+            resugar_program_for_analysis(&canonical),
+        ] {
+            let reconstructed = reconstructed.expect("valid nested selectors reconstruct");
+            let roundtrip = desugar_program(&reconstructed).unwrap();
+            assert_eq!(
+                print_canonical(&normalize_deep_for_surface_roundtrip(&roundtrip).unwrap()),
+                print_canonical(&normalize_deep_for_surface_roundtrip(&canonical).unwrap())
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_grad_resugaring_rejects_contradictory_outer_and_inner_selectors() {
+    use chelis_surf::resugar::{ResugarError, resugar_program, resugar_program_for_analysis};
+
+    for (outer, inner) in [(1, 1), (0, 0), (2, 1), (0, 2)] {
+        let source = format!(
+            "(def {{}} selected (grad {{wrt: (var {{}} x)}} \
+               (grad {{wrt: (var {{}} w)}} \
+                 (fn {{}} (params {{}} x w) (app {{}} (var {{}} mul) (var {{}} x) (var {{}} w))) \
+                 (lit {{type: (t-prim {{}} i32)}} {inner})) \
+               (lit {{type: (t-prim {{}} i32)}} {outer})))"
+        );
+        let canonical = parse_deep(&source).unwrap();
+        for result in [
+            resugar_program(&canonical),
+            resugar_program_for_analysis(&canonical),
+        ] {
+            if outer == 2 || inner == 2 {
+                assert!(
+                    matches!(result, Err(ResugarError::InvalidGradSelectorIndex { .. })),
+                    "{result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(ResugarError::ContradictoryGradSelector { .. })),
+                    "{result:?}"
+                );
+            }
+        }
+    }
+}
