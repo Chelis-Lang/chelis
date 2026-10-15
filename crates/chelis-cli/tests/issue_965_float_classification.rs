@@ -902,3 +902,45 @@ fn predicate_runtime_axes_keep_authored_result_claims_in_eval_and_native_c() {
         }
     }
 }
+
+/// [04-INF-9]: different checked function identities form a valid logical
+/// callable choice. Its absent C value ABI is target-specific (chelis#879).
+#[test]
+fn runtime_selected_predicates_reach_the_target_callable_fence() {
+    for tensor in [false, true] {
+        for flag in [false, true] {
+            let (input, output, value) = if tensor {
+                ("tensor[2,f32]", "tensor[2,bool]", "to_tensor([1.0f32,2.0f32])")
+            } else {
+                ("f32", "bool", "1.0f32")
+            };
+            let source = format!(
+                "def selected(flag: bool, x: {input}) -> {output} = {{\n  f = if flag then is_nan else is_finite\n  f(x)\n}}\nresult = selected({flag},{value})\n"
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("selected.ch");
+            std::fs::write(&path, &source).unwrap();
+            Command::cargo_bin("chelis").unwrap()
+                .args(["fmt", "--inplace"]).arg(&path).assert().success();
+            let source = std::fs::read_to_string(&path).unwrap();
+            let checked = Command::cargo_bin("chelis").unwrap()
+                .arg("check").arg(&path).output().unwrap();
+            assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
+            let checked: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+            assert_eq!(checked["score"], 1.0);
+            assert_eq!(checked["errors"], serde_json::json!([]));
+            if !tensor {
+                assert!(evaluate(&source).contains(&format!("result = {}", !flag)));
+            }
+            let built = Command::cargo_bin("chelis").unwrap()
+                .args(["build", "--target", "c", "--emit-c"]).arg(&path)
+                .arg("-o").arg(dir.path().join("selected.c")).output().unwrap();
+            assert!(!built.status.success());
+            let error = String::from_utf8_lossy(&built.stderr);
+            assert!(error.contains("chelis#879"), "{error}");
+            assert!(!error.contains("chelis#730"), "{error}");
+            assert!(!error.contains("identity") || !error.contains("disagrees"), "{error}");
+            assert!(!dir.path().join("selected.c").exists());
+        }
+    }
+}
