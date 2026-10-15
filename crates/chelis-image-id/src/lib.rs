@@ -26,6 +26,11 @@
 //!    [`identify`] reads that instead and falls back to the digest only when
 //!    the image carries none.
 //!
+//! 3. **On Linux, the loader names the main program by `argv[0]`.** A wrapper
+//!    passes its own path as `argv[0]`, and a shell passes the bare command
+//!    name. So for the main program, [`running_image_path`] reads
+//!    [`std::env::current_exe`] (`/proc/self/exe`) instead (chelis#3649).
+//!
 //! The crate is deliberately separate from `chelis-compiler-api`, which sets
 //! `#![forbid(unsafe_code)]`. `dladdr` is FFI and cannot be called from there,
 //! and `forbid` cannot be relaxed locally by design. Keeping the one unsafe
@@ -192,15 +197,17 @@ pub fn fingerprint_string(image: Option<&RunningImage>) -> String {
 
 /// The path of the object image containing this crate's code.
 ///
-/// Asks the dynamic loader (`dladdr`) which object a symbol defined *here* was
-/// loaded from. For an ordinary statically linked binary that is the executable
-/// itself; for a `cdylib` loaded into another process it is the shared object,
-/// which is the whole point (see the module docs).
+/// Asks the dynamic loader (`dladdr`) which object a symbol defined *here*
+/// came from. For a `cdylib` loaded into another process, that object is the
+/// shared object, which is the whole point (see the module docs). For the
+/// main program, it is the executable.
 ///
-/// Falls back to [`std::env::current_exe`] when `dladdr` is unavailable or
+/// On Linux, the loader names the main program by `argv[0]`. So for the main
+/// program, this reads [`std::env::current_exe`] instead (see `loader_path`).
+/// It also uses [`std::env::current_exe`] when `dladdr` is unavailable or
 /// yields nothing usable.
 pub fn running_image_path() -> Option<PathBuf> {
-    dladdr_self().or_else(|| std::env::current_exe().ok())
+    loader_path().or_else(|| std::env::current_exe().ok())
 }
 
 /// Every candidate path for the running image, best first.
@@ -210,7 +217,7 @@ pub fn running_image_path() -> Option<PathBuf> {
 /// through to the executable rather than degrading the fingerprint.
 fn running_image_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(p) = dladdr_self() {
+    if let Some(p) = loader_path() {
         out.push(p);
     }
     if let Ok(exe) = std::env::current_exe()
@@ -219,6 +226,22 @@ fn running_image_candidates() -> Vec<PathBuf> {
         out.push(exe);
     }
     out
+}
+
+/// The loader's path for the object that holds this crate's code.
+///
+/// On Linux, this is `None` when that object is the main program, because the
+/// loader then reports `argv[0]` (chelis#3649). `argv[0]` does not always name
+/// the running image. A wrapper passes its own path, and a shell passes the
+/// bare command name, which [`identify`] opens in the working directory.
+/// [`std::env::current_exe`] reads `/proc/self/exe`, which always names the
+/// running executable.
+fn loader_path() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if in_main_program() {
+        return None;
+    }
+    dladdr_self()
 }
 
 #[cfg(unix)]
@@ -262,6 +285,35 @@ fn dladdr_self() -> Option<PathBuf> {
     // No `dladdr` equivalent is wired up yet. `current_exe` is correct for a
     // statically linked binary, which is every non-unix chelis build today.
     None
+}
+
+/// Whether the object that holds this crate's code is the main program.
+///
+/// The entry point (`AT_ENTRY`) is always in the main program. This crate's
+/// code is in the same object when `dladdr` reports the same base address for
+/// both.
+#[cfg(target_os = "linux")]
+fn in_main_program() -> bool {
+    // SAFETY: `getauxval` only reads the auxiliary vector. It returns 0 for an
+    // entry that the vector does not hold.
+    let entry = unsafe { libc::getauxval(libc::AT_ENTRY) } as *const libc::c_void;
+    let probe = in_main_program as *const () as *const libc::c_void;
+    !entry.is_null() && object_base(probe).is_some_and(|base| object_base(entry) == Some(base))
+}
+
+/// The base address of the loaded object that contains `address`, when the
+/// loader can place it.
+#[cfg(target_os = "linux")]
+fn object_base(address: *const libc::c_void) -> Option<*mut libc::c_void> {
+    let mut info = std::mem::MaybeUninit::<libc::Dl_info>::uninit();
+    // SAFETY: `dladdr` only compares `address` with the loaded objects. It does
+    // not read from it. `info` is a valid, aligned, and writable `Dl_info`, and
+    // this function reads it only after `dladdr` reports success.
+    if unsafe { libc::dladdr(address, info.as_mut_ptr()) } == 0 {
+        return None;
+    }
+    // SAFETY: `dladdr` returned success, so `info` is initialized.
+    Some(unsafe { info.assume_init() }.dli_fbase)
 }
 
 /// Identify one object image at `path`: its byte length and its build id.
@@ -493,6 +545,76 @@ mod tests {
             via_loader.exists(),
             "dladdr reported {via_loader:?}, which does not exist"
         );
+    }
+
+    /// The variable that makes a test binary act as the child of
+    /// `the_running_image_does_not_depend_on_argv0`. Its value is the
+    /// fingerprint that the parent identified.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const ARGV0_CHILD: &str = "CHELIS_IMAGE_ID_ARGV0_CHILD";
+
+    /// The identity of the running image must not depend on `argv[0]`
+    /// (chelis#3649). A wrapper passes its own path as `argv[0]`, and a shell
+    /// passes the bare command name. On Linux, the loader names the main
+    /// program by `argv[0]`. The test runs this binary again with a decoy
+    /// `argv[0]`, and the child must identify the same image as the parent.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn the_running_image_does_not_depend_on_argv0() {
+        use std::ffi::{OsStr, OsString};
+        use std::os::unix::process::CommandExt;
+        const TEST: &str = "tests::the_running_image_does_not_depend_on_argv0";
+
+        let identity = |image: &RunningImage| OsString::from(fingerprint_string(Some(image)));
+        if let Some(expected) = std::env::var_os(ARGV0_CHILD) {
+            let image = running_image().expect("the child must identify its image");
+            assert_eq!(
+                identity(&image),
+                expected,
+                "argv[0] {:?} made the child identify {:?}",
+                std::env::args_os().next(),
+                image.path
+            );
+            return;
+        }
+
+        let expected = identity(&running_image().expect("the test binary must be identifiable"));
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let decoy = dir.path().join("decoy");
+        std::fs::write(&decoy, b"not the test binary").expect("write the decoy");
+        // The decoy must identify differently. Otherwise the check can pass by accident.
+        let (len, id) = identify(&decoy).expect("identify the decoy");
+        let decoy_image = RunningImage {
+            path: decoy.clone(),
+            len,
+            id,
+        };
+        assert_ne!(identity(&decoy_image), expected);
+
+        let cases: [(&str, &OsStr, Option<&Path>); 2] = [
+            ("argv[0] names another file", decoy.as_os_str(), None),
+            (
+                "argv[0] is a bare name, and the working directory holds a file with that name",
+                OsStr::new("decoy"),
+                Some(dir.path()),
+            ),
+        ];
+        for (case, argv0, directory) in cases {
+            let mut child =
+                std::process::Command::new(std::env::current_exe().expect("current_exe"));
+            child
+                .arg0(argv0)
+                .args(["--exact", TEST])
+                .env(ARGV0_CHILD, &expected);
+            if let Some(directory) = directory {
+                child.current_dir(directory);
+            }
+            let status = child.status().expect("run the child");
+            assert!(
+                status.success(),
+                "{case}: the child identified another image"
+            );
+        }
     }
 
     /// The id must be a function of CONTENT, not of path or timestamp. This is
