@@ -263,15 +263,23 @@ fn matmul_stores_no_rank_three_intermediate() {
     }
 }
 
-/// Negative control: a product something else also reads is stored, and its
-/// sum reads the stored product.
+/// Negative control: an exposed product is owned dense storage; its private
+/// expansions stay checked recipes and its sum reads the stored product.
 #[test]
 fn an_observed_matmul_product_is_still_stored() {
     let dag = matmul_dag(Prim::F32, [4, 6, 3], true);
     let c = codegen_with_options(&dag, "issue_3370_observed", CodegenOptions::default())
         .unwrap()
         .c_source;
-    assert_eq!(c.matches("chelis_alloc(3,").count(), 3, "{c}");
+    assert_eq!(c.matches("chelis_alloc(3,").count(), 1, "{c}");
+    assert_eq!(c.matches("chelis_metadata_expand_plan(").count(), 2, "{c}");
+    let product = dag
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::Mul))
+        .unwrap()
+        .id;
+    assert!(c.contains(&format!("outputs[1] = t{};", product.0)), "{c}");
     assert!(!c.contains("chelis_shape_reduction_plan("), "{c}");
 }
 

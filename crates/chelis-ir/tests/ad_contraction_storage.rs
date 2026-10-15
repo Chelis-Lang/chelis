@@ -541,3 +541,90 @@ fn mapped_ad_contractions_preserve_each_batch_tree_and_empty_batches() {
         }
     }
 }
+
+#[test]
+fn binary_einsum_adjoints_preserve_output_then_reduction_trees() {
+    for (equation, ashape, bshape) in [
+        ("ij,jk->", vec![3, 5], vec![5, 7]),
+        ("ij,kl->", vec![3, 5], vec![2, 7]),
+        ("ij,jk->ki", vec![3, 5], vec![5, 7]),
+        ("ii,ij->j", vec![3, 3], vec![3, 7]),
+        ("bij,bjk->bik", vec![2, 3, 5], vec![2, 5, 7]),
+    ] {
+        for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            let mut dag = Dag::new();
+            let owner = dag.declare("test");
+            let at = ty(&ashape, precision);
+            let bt = ty(&bshape, precision);
+            let a = dag.add_node(
+                owner,
+                RiscOp::Load { name: "a".into() },
+                vec![],
+                at.clone(),
+                None,
+            );
+            let b = dag.add_node(
+                owner,
+                RiscOp::Load { name: "b".into() },
+                vec![],
+                bt.clone(),
+                None,
+            );
+            let acc = precision.default_reduce_sum_accumulator().unwrap();
+            let mut loss = tier2_ordered::lower_einsum(
+                owner.into(),
+                &mut dag,
+                equation,
+                [(a, &at), (b, &bt)],
+                Some(acc),
+                None,
+            )
+            .ok()
+            .expect("supported binary einsum");
+            while !dag.get(loss).unwrap().output_type.dims.is_empty() {
+                let mut output = dag.get(loss).unwrap().output_type.clone();
+                let axis = output.dims.len() - 1;
+                output.dims.pop();
+                output.precision = acc;
+                loss = dag.add_node(
+                    owner,
+                    RiscOp::Sum {
+                        axis,
+                        accumulator: acc,
+                    },
+                    vec![loss],
+                    output,
+                    None,
+                );
+            }
+            let gradient = grad_dag_checked(&dag, loss, &[a, b]).unwrap();
+            let roots = vec![
+                gradient.output_node,
+                gradient.grad_nodes[&a],
+                gradient.grad_nodes[&b],
+            ];
+            let mut dag = gradient.dag;
+            dag.set_roots(roots.clone());
+            let values: UnordMap<String, TensorValue> = [("a", &ashape), ("b", &bshape)]
+                .into_iter()
+                .map(|(name, shape)| {
+                    (
+                        name.into(),
+                        TensorValue::from_vec(
+                            shape.clone(),
+                            (0..shape.iter().product())
+                                .map(|i| ((i * 17 % 29) as f64 - 14.0) / 16.0)
+                                .collect(),
+                        ),
+                    )
+                })
+                .collect();
+            let dense = eval_tensor(&dag, &values).unwrap();
+            let rooted =
+                eval_tensor_roots_with(&dag, &roots, |name| values.get(name).cloned()).unwrap();
+            for root in roots {
+                same_bits(&rooted[&root], &dense[&root]);
+            }
+        }
+    }
+}

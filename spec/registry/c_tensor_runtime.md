@@ -95,6 +95,7 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | checked movement chelis_movement_check_product | `void chelis_movement_check_product(const chelis_movement_plan *lhs, const chelis_movement_plan *rhs, chelis_product_shape_context context)` |
 | checked movement chelis_movement_check_target | `void chelis_movement_check_target(const chelis_movement_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
 | checked movement chelis_movement_plan_release | `void chelis_movement_plan_release(chelis_movement_plan *plan)` |
+| logical product metadata | `chelis_metadata_plan *chelis_metadata_product_plan(const chelis_metadata_plan *lhs, const chelis_metadata_plan *rhs, chelis_product_shape_context context)` |
 | logical metadata snapshot | `chelis_metadata_plan *chelis_metadata_plan_tensor(const chelis_tensor *input)` |
 | logical metadata reshape | `chelis_metadata_plan *chelis_metadata_plan_reshape(const chelis_metadata_plan *input, chelis_scalar rank, const chelis_scalar *shape)` |
 | logical metadata permutation | `chelis_movement_plan *chelis_metadata_permute_plan(const chelis_metadata_plan *input, chelis_scalar rank, const chelis_scalar *axes)` |

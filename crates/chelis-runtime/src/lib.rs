@@ -3324,6 +3324,15 @@ pub unsafe extern "C" fn chelis_movement_check_product(
     rhs: *const chelis_movement_plan,
     context: chelis_product_shape_context,
 ) {
+    validate_product_shape_context(context);
+    check_product_shapes(
+        movement_plan(lhs).metadata.result().shape(),
+        movement_plan(rhs).metadata.result().shape(),
+        context,
+    );
+}
+
+fn validate_product_shape_context(context: chelis_product_shape_context) {
     if !matches!(context, CHELIS_PRODUCT_MUL | CHELIS_PRODUCT_MATMUL) {
         affine_result::<()>(
             Err(MetadataError::Domain(
@@ -3332,8 +3341,9 @@ pub unsafe extern "C" fn chelis_movement_check_product(
             "movement",
         );
     }
-    let lhs = movement_plan(lhs).metadata.result().shape();
-    let rhs = movement_plan(rhs).metadata.result().shape();
+}
+
+fn check_product_shapes(lhs: &[i64], rhs: &[i64], context: chelis_product_shape_context) {
     if lhs != rhs {
         let message = match context {
             CHELIS_PRODUCT_MATMUL => chelis_abi::failure::matmul_product_disagreement(lhs, rhs),
@@ -3381,6 +3391,20 @@ fn logical_metadata_plan(metadata: ShapeMetadata) -> *mut chelis_metadata_plan {
     Box::into_raw(Box::new(chelis_metadata_plan {
         layout: MetadataPlanLayout::Contiguous(metadata),
     }))
+}
+
+/// [05-OP-33] original-position product agreement without replicated payloads.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_product_plan(
+    lhs: *const chelis_metadata_plan,
+    rhs: *const chelis_metadata_plan,
+    context: chelis_product_shape_context,
+) -> *mut chelis_metadata_plan {
+    validate_product_shape_context(context);
+    let lhs = logical_metadata(lhs, "mul");
+    let rhs = logical_metadata(rhs, "mul");
+    check_product_shapes(lhs.shape(), rhs.shape(), context);
+    logical_metadata_plan(lhs.clone())
 }
 
 #[no_mangle]

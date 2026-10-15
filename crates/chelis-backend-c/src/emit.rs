@@ -242,6 +242,14 @@ fn finalize_elem(
     }
 }
 
+/// Checked descriptor, static shape, or an immutable logical shape snapshot.
+#[derive(Clone, Copy)]
+enum ReductionInput {
+    Tensor(usize),
+    StaticShape,
+    LogicalShape(NodeId),
+}
+
 /// How a sum tree stores a lone leaf that no addition touched.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CarriedLeaf {
@@ -1000,6 +1008,22 @@ impl CEmitter {
                 deferred_ranks.insert(node.id.0, node.output_type.dims.len());
             }
         }
+        for node in dag.nodes() {
+            if matches!(node.op, RiscOp::Mul)
+                && node
+                    .inputs
+                    .iter()
+                    .any(|input| deferred_views.is_deferred(*input))
+            {
+                deferred_metadata.insert(node.id);
+                deferred_metadata.extend(node.inputs.iter().copied());
+            }
+        }
+        for node in dag.nodes() {
+            if deferred_metadata.contains(&node.id) {
+                deferred_ranks.insert(node.id.0, node.output_type.dims.len());
+            }
+        }
         let mut pin_retirements = BTreeMap::<usize, Vec<NodeId>>::new();
         let mut metadata_retirements = BTreeMap::<usize, Vec<NodeId>>::new();
         for node in dag.nodes() {
@@ -1297,6 +1321,15 @@ impl CEmitter {
                     "chelis_movement_check_product(t{lhs}_movement, t{rhs}_movement, {context});"
                 ));
                 e.emit_same_shape_result_guards(node);
+            } else if matches!(node.op, RiscOp::Mul)
+                && (e.deferred_views.is_deferred(node.id)
+                    || node
+                        .inputs
+                        .iter()
+                        .any(|input| e.deferred_views.is_deferred(*input)))
+            {
+                e.emit_span_comments(node);
+                e.emit_deferred_product_node(node, dag);
             } else if let RiscOp::Load { name } = &node.op {
                 let input_idx = *input_slots
                     .get(name.as_str())
@@ -3686,23 +3719,58 @@ impl CEmitter {
                 self.line(&format!("const {index_type} {cursor} = {offset};"));
                 self.deferred_read(producer.inputs[0], &cursor, dag)
             }
-            RiscOp::Mul => {
-                let lhs = self.deferred_read(producer.inputs[0], index, dag);
-                let rhs = self.deferred_read(producer.inputs[1], index, dag);
-                if Self::is_reduced_float(&producer.output_type) {
-                    let load = Self::reduced_to_f32_fn(producer.output_type.precision);
-                    let store = Self::f32_to_reduced_fn(producer.output_type.precision);
-                    format!("{store}({load}({lhs}) * {load}({rhs}))")
-                } else {
-                    finalize_elem(
-                        crate::fp_env::risc_nan_finalization(&RiscOp::Mul),
-                        format!("({lhs}) * ({rhs})"),
-                        &producer.output_type,
-                    )
-                }
-            }
+            RiscOp::Mul => self.deferred_product_expression(producer, index, dag),
             _ => unreachable!("shared planner admits only movement and product recipes"),
         }
+    }
+
+    fn deferred_product_expression(
+        &mut self,
+        node: &DagNode,
+        index: &str,
+        dag: VerifiedDagView<'_>,
+    ) -> String {
+        let lhs = self.deferred_read(node.inputs[0], index, dag);
+        let rhs = self.deferred_read(node.inputs[1], index, dag);
+        if Self::is_reduced_float(&node.output_type) {
+            let load = Self::reduced_to_f32_fn(node.output_type.precision);
+            let store = Self::f32_to_reduced_fn(node.output_type.precision);
+            format!("{store}({load}({lhs}) * {load}({rhs}))")
+        } else {
+            finalize_elem(
+                crate::fp_env::risc_nan_finalization(&RiscOp::Mul),
+                format!("({lhs}) * ({rhs})"),
+                &node.output_type,
+            )
+        }
+    }
+
+    fn emit_deferred_product_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        let id = node.id.0;
+        self.nan_finalization = crate::fp_env::risc_nan_finalization(&node.op);
+        let [lhs, rhs] = [node.inputs[0].0, node.inputs[1].0];
+        let context = if chelis_ir::tier2::is_matmul_product(node, |id| dag.get(id)) {
+            "CHELIS_PRODUCT_MATMUL"
+        } else {
+            "CHELIS_PRODUCT_MUL"
+        };
+        self.line(&format!("chelis_metadata_plan *t{id}_metadata = chelis_metadata_product_plan(t{lhs}_metadata, t{rhs}_metadata, {context});"));
+        self.emitted_metadata.insert(node.id);
+        // The original Mul owns operand agreement before result claims and
+        // allocation, even though its payload may be consumed at a later Sum.
+        self.emit_same_shape_result_guards(node);
+        if self.deferred_views.is_deferred(node.id) {
+            return;
+        }
+        self.emit_slot_wrapper(id, &node.output_type);
+        let index = Self::prim_elem_type(Prim::Int64);
+        let et = Self::elem_type(&node.output_type);
+        self.line(&format!("for ({index} i = 0; i < t{id}_size; ++i) {{"));
+        self.indent += 1;
+        let expression = self.deferred_product_expression(node, "i", dag);
+        self.line(&format!("(({et}*)t{id}_data)[i] = {expression};"));
+        self.indent -= 1;
+        self.line("}");
     }
 
     fn emit_deferred_movement_metadata(&mut self, id: usize, rank: usize) {
@@ -3774,7 +3842,7 @@ impl CEmitter {
 
     fn emit_deferred_retirements(&mut self, position: usize) {
         if let Some(nodes) = self.metadata_retirements.remove(&position) {
-            for node in nodes {
+            for node in nodes.into_iter().rev() {
                 self.line(&format!(
                     "chelis_metadata_plan_release(t{}_metadata);",
                     node.0
@@ -3782,7 +3850,7 @@ impl CEmitter {
             }
         }
         if let Some(nodes) = self.pin_retirements.remove(&position) {
-            for node in nodes {
+            for node in nodes.into_iter().rev() {
                 self.line(&format!(
                     "chelis_tensor_release(t{}_deferred_owner);",
                     node.0
@@ -7370,29 +7438,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     fn emit_reduction_plan(
         &mut self,
         id: usize,
-        input: Option<usize>,
+        input: ReductionInput,
         input_ty: &TensorType,
         axes: &[usize],
         output_ty: &TensorType,
         operation: &str,
         scratch: bool,
-    ) {
-        self.emit_reduction_plan_shape(
-            id, input, input_ty, axes, output_ty, operation, scratch, None,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn emit_reduction_plan_shape(
-        &mut self,
-        id: usize,
-        input: Option<usize>,
-        input_ty: &TensorType,
-        axes: &[usize],
-        output_ty: &TensorType,
-        operation: &str,
-        scratch: bool,
-        logical_shape: Option<String>,
     ) {
         let axes_name = format!("t{id}_reduction_axes");
         self.emit_affine_bounds(
@@ -7402,11 +7453,31 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let count = axes.len();
         let dtype = Self::dtype_macro(output_ty);
         let exemplar = format!("chelis_scalar_from_bits({dtype}, UINT64_C(0))");
-        if let Some(input) = input {
+        if let ReductionInput::Tensor(input) = input {
             self.line(&format!("chelis_reduction_plan *t{id}_reduction = chelis_tensor_reduction_plan(t{input}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {count}), {axes_name}, {exemplar}, {operation});"));
         } else {
             let rank = input_ty.dims.len();
-            let shape = logical_shape.unwrap_or_else(|| Self::tagged_shape_literal(input_ty));
+            let shape = match input {
+                ReductionInput::StaticShape => Self::tagged_shape_literal(input_ty),
+                ReductionInput::LogicalShape(source) => {
+                    let extents = (0..rank)
+                        .map(|axis| {
+                            format!(
+                                "chelis_scalar_from_bits(CHELIS_DTYPE_I64, {})",
+                                self.tensor_extent(source, axis)
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    if extents.is_empty() {
+                        "NULL".into()
+                    } else {
+                        format!("(chelis_scalar[]){{ {} }}", extents.join(", "))
+                    }
+                }
+                ReductionInput::Tensor(_) => {
+                    unreachable!("tensor plans use the checked descriptor constructor")
+                }
+            };
             self.line(&format!("chelis_reduction_plan *t{id}_reduction = chelis_shape_reduction_plan(chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {count}), {axes_name}, {exemplar}, {operation});"));
         }
         let extents = (0..output_ty.dims.len()).map(|axis|
@@ -7459,7 +7530,15 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "verified count axes are strictly descending"
         );
 
-        self.emit_reduction_plan(id, Some(a), input_ty, axes, ty, "CHELIS_REDUCE_COUNT", true);
+        self.emit_reduction_plan(
+            id,
+            ReductionInput::Tensor(a),
+            input_ty,
+            axes,
+            ty,
+            "CHELIS_REDUCE_COUNT",
+            true,
+        );
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("if (t{a}_dtype != CHELIS_DTYPE_BOOL) {{"));
         self.indent += 1;
@@ -7951,28 +8030,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .output_type;
         let ty = &node.output_type;
         assert!(matches!(ty.precision, Prim::F32 | Prim::F64));
-        let extents = (0..input_ty.dims.len())
-            .map(|axis| {
-                format!(
-                    "chelis_scalar_from_bits(CHELIS_DTYPE_I64, {})",
-                    self.tensor_extent(input, axis)
-                )
-            })
-            .collect::<Vec<_>>();
-        let logical_shape = if extents.is_empty() {
-            "NULL".into()
-        } else {
-            format!("(chelis_scalar[]){{ {} }}", extents.join(", "))
-        };
-        self.emit_reduction_plan_shape(
+        self.emit_reduction_plan(
             id,
-            None,
+            ReductionInput::LogicalShape(input),
             input_ty,
             &[axis],
             ty,
             "CHELIS_REDUCE_SUM",
             false,
-            Some(logical_shape),
         );
         self.emit_slot_wrapper(id, ty);
         let index = Self::prim_elem_type(Prim::Int64);
@@ -8055,7 +8120,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let operand_et = Self::elem_type(input_ty);
         self.emit_reduction_plan(
             id,
-            Some(a),
+            ReductionInput::Tensor(a),
             input_ty,
             &[axis],
             ty,
@@ -8130,7 +8195,15 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         });
         let acc_et = Self::elem_type(ty);
         let operand_et = Self::elem_type(product_ty);
-        self.emit_reduction_plan(id, None, product_ty, &[axis], ty, "CHELIS_REDUCE_SUM", true);
+        self.emit_reduction_plan(
+            id,
+            ReductionInput::StaticShape,
+            product_ty,
+            &[axis],
+            ty,
+            "CHELIS_REDUCE_SUM",
+            true,
+        );
         self.emit_slot_wrapper(id, ty);
         if blocked {
             self.line(&format!(
@@ -8320,7 +8393,15 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 stored
             }
         };
-        self.emit_reduction_plan(id, Some(a), input_ty, &[axis], ty, runtime_operation, false);
+        self.emit_reduction_plan(
+            id,
+            ReductionInput::Tensor(a),
+            input_ty,
+            &[axis],
+            ty,
+            runtime_operation,
+            false,
+        );
         let empty = self.gated_check(&format!("t{id}_leaf_count == 0"));
         self.line(&format!("if ({empty}) {{"));
         self.indent += 1;
@@ -8430,7 +8511,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         }
         self.emit_reduction_plan(
             id,
-            Some(a),
+            ReductionInput::Tensor(a),
             &input_node.output_type,
             &[axis],
             ty,
@@ -9089,7 +9170,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         };
         self.emit_reduction_plan(
             id,
-            Some(a),
+            ReductionInput::Tensor(a),
             input_ty,
             &[axis],
             ty,
@@ -9223,7 +9304,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.emit_elementwise_index_steps(id, ext_inputs, fused_input_type);
         self.emit_reduction_plan(
             id,
-            None,
+            ReductionInput::StaticShape,
             fused_input_type,
             &[axis],
             out_ty,
@@ -10144,7 +10225,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// metadata, or for an unstored node the extent its expansion's checked
     /// plan holds ([`Self::inlined_view`]), which that plan declared earlier.
     fn tensor_extent(&self, node: NodeId, axis: usize) -> String {
-        if self.deferred_views.is_deferred(node) {
+        if self.emitted_metadata.contains(&node) {
             return format!("chelis_metadata_plan_shape(t{}_metadata)[{axis}]", node.0);
         }
         match self.inlined_view(node) {

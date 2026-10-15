@@ -169,6 +169,7 @@ void probe_release(const chelis_tensor *p){for(size_t i=0;i<256;i++)if(owners[i]
         fs::write(&path, source).unwrap();
         sources.push(path);
         driver.push_str(&format!("void {name}(chelis_tensor **,int,chelis_tensor **,int);\nstatic void run_{index}(void){{\n"));
+        let mut ingress_payloads: Vec<(Prim, Vec<usize>, Vec<u8>)> = Vec::new();
         for (slot, label) in code.input_labels.iter().enumerate() {
             let input = &inputs[label];
             let prim = dag
@@ -181,16 +182,24 @@ void probe_release(const chelis_tensor *p){for(size_t i=0;i<256;i++)if(owners[i]
             let stored =
                 finalize_tensor("probe", prim, RawTensor::Float(input.to_f64_lossy_vec())).unwrap();
             let data = bytes(&stored);
-            driver.push_str(&format!("_Alignas(8) static const unsigned char input_{slot}[]={{ {} }};\nint64_t shape_{slot}[]={{ {} }};\nchelis_tensor *in_{slot}=chelis_tensor_entry_borrow({},shape_{slot},{},input_{slot},{});\n",literal(&data),input.shape.iter().map(usize::to_string).collect::<Vec<_>>().join(","),input.shape.len(),prim.runtime_dtype().unwrap().c_macro(),data.len()));
+            let alias = ingress_payloads
+                .iter()
+                .position(|(tag, shape, bytes)| {
+                    *tag == prim && *shape == input.shape && *bytes == data
+                })
+                .unwrap_or(slot);
+            ingress_payloads.push((prim, input.shape.clone(), data.clone()));
+            driver.push_str(&format!("_Alignas(8) static const unsigned char input_{slot}[]={{ {} }};\nint64_t shape_{slot}[]={{ {} }};\nchelis_tensor *in_{slot}=chelis_tensor_entry_borrow({},shape_{slot},{},input_{alias},{});\n",literal(&data),input.shape.iter().map(usize::to_string).collect::<Vec<_>>().join(","),input.shape.len(),prim.runtime_dtype().unwrap().c_macro(),data.len()));
         }
         driver.push_str(&format!("chelis_tensor *inputs[]={{ {} }};chelis_tensor *outputs[{}]={{0}};calls=live=peak=largest=0;memset(owners,0,sizeof owners);\n{name}(inputs,{},outputs,{});\n",(0..code.input_labels.len()).map(|slot|format!("in_{slot}")).collect::<Vec<_>>().join(","),roots.len(),code.input_labels.len(),roots.len()));
         for (slot, root) in roots.iter().enumerate() {
             let data = bytes(dense[root].storage());
             driver.push_str(&format!("static const unsigned char expected_{slot}[]={{ {} }};\nif(chelis_tensor_byte_count(outputs[{slot}])!={} || ({} && memcmp(chelis_tensor_read_view(outputs[{slot}]).data,expected_{slot},{})!=0)){{fprintf(stderr,\"case {index} output {slot} bits differ\\n\");abort();}}\n",literal(&data),data.len(),data.len(),data.len()));
         }
-        driver.push_str(&format!("if(largest>{bound}){{fprintf(stderr,\"case {index} label-product allocation %zu > {bound}\\n\",largest);abort();}}\nprintf(\"case={index} allocations=%zu peak=%zu largest=%zu\\n\",calls,peak,largest);\nfor(size_t i=0;i<{};i++)probe_release(outputs[i]);if(live)abort();for(size_t i=0;i<{};i++)chelis_tensor_release(inputs[i]);\n}}\n",roots.len(),code.input_labels.len()));
+        driver.push_str(&format!("uint64_t hash=UINT64_C(1469598103934665603);for(size_t slot=0;slot<{};slot++){{const unsigned char *data=chelis_tensor_read_view(outputs[slot]).data;for(size_t byte=0;byte<chelis_tensor_byte_count(outputs[slot]);byte++)hash=(hash^data[byte])*UINT64_C(1099511628211);}}\n", roots.len()));
+        driver.push_str(&format!("if(largest>{bound} || peak>16*{bound}){{fprintf(stderr,\"case {index} label-product allocation %zu > {bound}\\n\",largest);abort();}}\nprintf(\"case={index} allocations=%zu peak=%zu largest=%zu hash=%016llx\\n\",calls,peak,largest,(unsigned long long)hash);\nfor(size_t i=0;i<{};i++)probe_release(outputs[i]);if(live)abort();for(size_t i=0;i<{};i++)chelis_tensor_release(inputs[i]);\n}}\n",roots.len(),code.input_labels.len()));
     }
-    driver.push_str("int main(void){\n");
+    driver.push_str("int main(void){setbuf(stdout,NULL);\n");
     for index in 0..cases.len() {
         driver.push_str(&format!("run_{index}();\n"));
     }
@@ -224,12 +233,15 @@ void probe_release(const chelis_tensor *p){for(size_t i=0;i<256;i++)if(owners[i]
         .env("ASAN_OPTIONS", "detect_leaks=0")
         .output()
         .unwrap();
-    assert!(
-        run.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&run.stdout),
-        String::from_utf8_lossy(&run.stderr)
-    );
+    if !run.status.success() {
+        let preserved = probe.keep();
+        panic!(
+            "generated probe {}: {}\n{}",
+            preserved.display(),
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
     eprintln!("{}", String::from_utf8_lossy(&run.stdout));
 }
 #[test]
@@ -260,6 +272,20 @@ fn ad_contractions_execute_exact_bits_without_label_product_allocations() {
     for einsum in [false, true] {
         let (dag, roots) = graph([3, 5, 7], einsum, Prim::F32, Prim::F32, true);
         cases.push((dag, roots, inputs([3, 5, 7]), 8 * 35));
+    }
+    for size in [32, 64] {
+        for einsum in [false, true] {
+            let (dag, roots) = graph([size; 3], einsum, Prim::F32, Prim::F32, true);
+            cases.push((dag, roots, inputs([size; 3]), 8 * size * size));
+        }
+    }
+    for size in [32, 64] {
+        for einsum in [false, true] {
+            let (mut dag, mut roots) = graph([size; 3], einsum, Prim::F32, Prim::F32, false);
+            roots.remove(0);
+            dag.set_roots(roots.clone());
+            cases.push((dag, roots, inputs([size; 3]), 8 * size * size));
+        }
     }
     execute(cases);
 }
@@ -304,6 +330,10 @@ fn canonical_forward_products_keep_the_specialized_c_path() {
         dag.add_root(y);
         let source = support::codegen(&dag, "forward").unwrap().c_source;
         assert!(source.contains("__lhs_"), "{source}");
+        assert!(
+            source.contains("__sum_columns_"),
+            "the existing eight-column kernel must stay selected: {source}"
+        );
         for generic in [
             "chelis_metadata_plan_tensor(",
             "__carry_level_",
@@ -324,7 +354,9 @@ fn deferred_movement_sum_uses_the_canonical_bounded_carry_tree() {
     let mut cases = Vec::new();
     for (precision, acc) in [
         (Prim::F16, Prim::F32),
+        (Prim::F16, Prim::F64),
         (Prim::Bf16, Prim::F32),
+        (Prim::Bf16, Prim::F64),
         (Prim::F32, Prim::F32),
         (Prim::F32, Prim::F64),
         (Prim::F64, Prim::F64),
@@ -448,4 +480,399 @@ fn deferred_movement_pins_owned_sources_across_drop_and_multiple_readers() {
             (exposed, vec![first, second, moved], values, 13 * 8),
         ]);
     }
+}
+
+fn execute_failure(dag: &Dag, inputs: &UnordMap<String, TensorValue>) {
+    let expected = eval_tensor(dag, inputs).unwrap_err();
+    let probe = common::probe_dir("ad_contraction_failure");
+    let dir = probe.path();
+    let staged = chelis_runtime_bundle::stage(dir).unwrap();
+    let code = support::codegen(dag, "negative").unwrap();
+    let kernel = dir.join("kernel.c");
+    fs::write(&kernel, code.c_source).unwrap();
+    let mut driver = String::from(
+        "#include \"chelis_runtime.h\"\nvoid negative(chelis_tensor **,int,chelis_tensor **,int);\nint main(void){\n",
+    );
+    for (slot, name) in code.input_labels.iter().enumerate() {
+        let value = &inputs[name];
+        let data = bytes(
+            &finalize_tensor(
+                "probe",
+                Prim::F32,
+                RawTensor::Float(value.to_f64_lossy_vec()),
+            )
+            .unwrap(),
+        );
+        driver.push_str(&format!("_Alignas(8) static const unsigned char data{slot}[]={{ {} }};int64_t shape{slot}[]={{ {} }};chelis_tensor *in{slot}=chelis_tensor_entry_borrow({},shape{slot},CHELIS_DTYPE_F32,data{slot},{});\n", literal(&data), value.shape.iter().map(usize::to_string).collect::<Vec<_>>().join(","),value.shape.len(),data.len()));
+    }
+    driver.push_str(&format!("chelis_tensor *inputs[]={{ {} }};chelis_tensor *outputs[{}]={{0}};negative(inputs,{},outputs,{});return 0;}}\n", (0..code.input_labels.len()).map(|i|format!("in{i}")).collect::<Vec<_>>().join(","),code.output_labels.len(),code.input_labels.len(),code.output_labels.len()));
+    let main = dir.join("main.c");
+    fs::write(&main, driver).unwrap();
+    let binary = dir.join("negative");
+    let compiled = Command::new("clang")
+        .args([
+            "-O2",
+            "-ffp-contract=off",
+            "-fno-fast-math",
+            "-fsanitize=address,undefined",
+            "-fno-sanitize-recover=all",
+            "-I",
+        ])
+        .arg(dir)
+        .arg(kernel)
+        .arg(main)
+        .arg(staged.archive)
+        .args(["-lm", "-o"])
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let run = Command::new(binary)
+        .env("ASAN_OPTIONS", "detect_leaks=0")
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&run.stderr);
+    assert!(!run.status.success(), "expected {expected}");
+    assert!(
+        error.contains(&expected),
+        "expected {expected}; got {error}"
+    );
+    assert!(
+        !error.contains("AddressSanitizer") && !error.contains("runtime error:"),
+        "{error}"
+    );
+}
+
+#[test]
+fn wildcard_ad_products_keep_original_position_agreement_and_results() {
+    let mut cases = Vec::new();
+    for einsum in [false, true] {
+        let (mut dag, roots) = graph([3, 5, 7], einsum, Prim::F32, Prim::F32, false);
+        let ids: Vec<_> = dag
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.op,
+                    RiscOp::Load { .. }
+                        | RiscOp::Expand { .. }
+                        | RiscOp::Permute { .. }
+                        | RiscOp::Mul
+                )
+            })
+            .map(|node| node.id)
+            .collect();
+        for id in ids {
+            let rank = dag.get(id).unwrap().output_type.dims.len();
+            dag.node_mut(id).unwrap().output_type.dims =
+                vec![DimInfo::Named("*".into(), None); rank];
+        }
+        let code = support::codegen(&dag, "wildcard_ad").unwrap().c_source;
+        assert!(code.contains("chelis_metadata_product_plan("));
+        assert!(
+            code.find("chelis_metadata_product_plan(").unwrap()
+                < code.find("__carry_level_").unwrap()
+        );
+        let mut mismatch = inputs([3, 5, 7]);
+        mismatch.insert(
+            "b".into(),
+            TensorValue::from_vec(vec![6, 7], vec![0.25; 42]),
+        );
+        execute_failure(&dag, &mismatch);
+        cases.push((dag, roots, inputs([3, 5, 7]), 8 * 35));
+    }
+    execute(cases);
+}
+
+#[test]
+fn binary_einsum_c_adjoints_preserve_output_then_reduction_trees() {
+    let mut cases = Vec::new();
+    for (equation, ashape, bshape) in [
+        ("ij,jk->", vec![3, 5], vec![5, 7]),
+        ("ij,kl->", vec![3, 5], vec![2, 7]),
+        ("ij,jk->ki", vec![3, 5], vec![5, 7]),
+        ("ii,ij->j", vec![3, 3], vec![3, 7]),
+        ("bij,bjk->bik", vec![2, 3, 5], vec![2, 5, 7]),
+    ] {
+        for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            let mut dag = Dag::new();
+            let owner = dag.declare("test");
+            let at = ty(&ashape, precision);
+            let bt = ty(&bshape, precision);
+            let a = dag.add_node(
+                owner,
+                RiscOp::Load { name: "a".into() },
+                vec![],
+                at.clone(),
+                None,
+            );
+            let b = dag.add_node(
+                owner,
+                RiscOp::Load { name: "b".into() },
+                vec![],
+                bt.clone(),
+                None,
+            );
+            let acc = precision.default_reduce_sum_accumulator().unwrap();
+            let mut loss = tier2_ordered::lower_einsum(
+                owner.into(),
+                &mut dag,
+                equation,
+                [(a, &at), (b, &bt)],
+                Some(acc),
+                None,
+            )
+            .ok()
+            .expect("supported binary einsum");
+            while !dag.get(loss).unwrap().output_type.dims.is_empty() {
+                let mut output = dag.get(loss).unwrap().output_type.clone();
+                let axis = output.dims.len() - 1;
+                output.dims.pop();
+                output.precision = acc;
+                loss = dag.add_node(
+                    owner,
+                    RiscOp::Sum {
+                        axis,
+                        accumulator: acc,
+                    },
+                    vec![loss],
+                    output,
+                    None,
+                );
+            }
+            let gradient = grad_dag_checked(&dag, loss, &[a, b]).unwrap();
+            let roots = vec![
+                gradient.output_node,
+                gradient.grad_nodes[&a],
+                gradient.grad_nodes[&b],
+            ];
+            let mut dag = gradient.dag;
+            dag.set_roots(roots.clone());
+            let values: UnordMap<String, TensorValue> = [("a", &ashape), ("b", &bshape)]
+                .into_iter()
+                .map(|(name, shape)| {
+                    (
+                        name.into(),
+                        TensorValue::from_vec(
+                            shape.clone(),
+                            (0..shape.iter().product())
+                                .map(|i| ((i * 17 % 29) as f64 - 14.0) / 16.0)
+                                .collect(),
+                        ),
+                    )
+                })
+                .collect();
+            let bound = 8 * ashape
+                .iter()
+                .product::<usize>()
+                .max(bshape.iter().product());
+            cases.push((dag, roots, values, bound));
+        }
+    }
+    execute(cases);
+}
+
+#[test]
+fn mapped_c_adjoints_keep_batch_trees_and_bounded_storage() {
+    let mut cases = Vec::new();
+    for einsum in [false, true] {
+        for batch in [0usize, 2] {
+            for grad_after_map in [false, true] {
+                let (dag, _) = graph([3, 5, 7], einsum, Prim::F32, Prim::F32, false);
+                let mut mapped =
+                    chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(batch)).unwrap();
+                if grad_after_map {
+                    let owner = mapped.declare("batch_loss");
+                    let loss = mapped.add_node(
+                        owner,
+                        RiscOp::Sum {
+                            axis: 0,
+                            accumulator: Prim::F32,
+                        },
+                        vec![mapped.roots()[0]],
+                        ty(&[], Prim::F32),
+                        None,
+                    );
+                    let loads = ["a", "b"].map(|label| {
+                        mapped
+                            .nodes()
+                            .iter()
+                            .find(|node| matches!(&node.op,RiscOp::Load{name} if name==label))
+                            .unwrap()
+                            .id
+                    });
+                    let result = grad_dag_checked(&mapped, loss, &loads).unwrap();
+                    let roots = vec![
+                        result.output_node,
+                        result.grad_nodes[&loads[0]],
+                        result.grad_nodes[&loads[1]],
+                    ];
+                    mapped = result.dag;
+                    mapped.set_roots(roots);
+                }
+                let base = inputs([3, 5, 7]);
+                let values = ["a", "b"]
+                    .map(|name| {
+                        let value = &base[name];
+                        let mut shape = vec![batch];
+                        shape.extend(&value.shape);
+                        let data = value.to_f64_lossy_vec();
+                        (
+                            name.into(),
+                            TensorValue::from_vec(
+                                shape,
+                                (0..batch)
+                                    .flat_map(|i| data.iter().map(move |x| x + i as f64 / 16.0))
+                                    .collect(),
+                            ),
+                        )
+                    })
+                    .into_iter()
+                    .collect();
+                let roots = mapped.roots().to_vec();
+                cases.push((mapped, roots, values, 8 * batch.max(1) * 35));
+            }
+        }
+    }
+    execute(cases);
+}
+
+#[test]
+fn shared_numeric_diamonds_cache_before_movement_readers() {
+    let mut dag = Dag::new();
+    let owner = dag.declare("test");
+    let vector = ty(&[17], Prim::F32);
+    let mut value = dag.add_node(
+        owner,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vector.clone(),
+        None,
+    );
+    let mut products = Vec::new();
+    for _ in 0..12 {
+        value = dag.add_node(owner, RiscOp::Mul, vec![value, value], vector.clone(), None);
+        products.push(value);
+        value = dag.add_node(
+            owner,
+            RiscOp::Permute { axes: vec![0] },
+            vec![value],
+            vector.clone(),
+            None,
+        );
+        value = dag.add_node(
+            owner,
+            RiscOp::Reshape {
+                new_shape: vec![chelis_ir::dag::RtDim::Lit(17)],
+            },
+            vec![value],
+            vector.clone(),
+            None,
+        );
+    }
+    let sum = dag.add_node(
+        owner,
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![value],
+        ty(&[], Prim::F32),
+        None,
+    );
+    dag.add_root(sum);
+    let plan = chelis_ir::contraction_views::contraction_views(&dag, &[sum]);
+    assert!(products[..11].iter().all(|node| !plan.is_deferred(*node)));
+    assert!(plan.is_deferred(products[11]));
+    let code = support::codegen(&dag, "diamond").unwrap().c_source;
+    assert!(
+        code.len() < 100_000,
+        "numeric expressions must remain a cached DAG, source bytes={}",
+        code.len()
+    );
+    execute(vec![(
+        dag,
+        vec![sum],
+        [("a".into(), TensorValue::from_vec(vec![17], vec![0.999; 17]))]
+            .into_iter()
+            .collect(),
+        17 * 8,
+    )]);
+}
+
+#[test]
+fn exposed_ad_products_are_owned_dense_outputs() {
+    for einsum in [false, true] {
+        let (mut dag, mut roots) = graph([3, 5, 7], einsum, Prim::F32, Prim::F32, false);
+        let product = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Mul) && node.output_type.dims.len() == 3)
+            .unwrap()
+            .id;
+        roots.push(product);
+        dag.set_roots(roots.clone());
+        assert!(
+            !chelis_ir::contraction_views::contraction_views(&dag, &roots).is_deferred(product)
+        );
+        execute(vec![(dag, roots, inputs([3, 5, 7]), 8 * 105)]);
+    }
+}
+
+#[test]
+fn ad_contraction_inputs_preserve_aliases_and_nonfinite_bits() {
+    let mut cases = Vec::new();
+    for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        for einsum in [false, true] {
+            let (dag, roots) = graph(
+                [3, 3, 3],
+                einsum,
+                precision,
+                precision.default_reduce_sum_accumulator().unwrap(),
+                false,
+            );
+            let data = vec![
+                0.0,
+                -0.0,
+                0.5,
+                -0.25,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::from_bits(0xfff8000000000042),
+                0.125,
+                -0.5,
+            ];
+            let value = TensorValue::from_vec(vec![3, 3], data);
+            cases.push((
+                dag,
+                roots,
+                [("a".into(), value.clone()), ("b".into(), value)]
+                    .into_iter()
+                    .collect(),
+                8 * 9,
+            ));
+            let (dag, roots) = graph(
+                [3, 3, 3],
+                einsum,
+                precision,
+                precision.default_reduce_sum_accumulator().unwrap(),
+                true,
+            );
+            let value =
+                TensorValue::from_vec(vec![3, 3], (0..9).map(|i| (i as f64 - 4.0) / 8.0).collect());
+            cases.push((
+                dag,
+                roots,
+                [("a".into(), value.clone()), ("b".into(), value)]
+                    .into_iter()
+                    .collect(),
+                8 * 9,
+            ));
+        }
+    }
+    execute(cases);
 }

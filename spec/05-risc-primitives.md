@@ -2694,6 +2694,11 @@ exact ADT identity by [05-OP-34].
 > operation selectors and null plans use `movement`. These metadata operations have no
 > cotangent or arithmetic accumulator and do not alter payload arithmetic.
 >
+> `chelis_metadata_product_plan` applies the same closed product shape context
+> and complete-shape agreement as `chelis_movement_check_product` to two
+> contiguous logical metadata plans, returning an independently owned copy of
+> the left logical metadata. Invalid contexts, null or strided carriers reject
+> before any payload read or allocation of a product tensor.
 > `chelis_metadata_plan_tensor` snapshots a tensor's checked contiguous logical
 > metadata without retaining its payload. `chelis_metadata_permute_plan` and
 > `chelis_metadata_expand_plan` construct the same movement plans from a live

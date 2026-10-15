@@ -23,6 +23,12 @@ fn logical_movement_plans_compose_without_replicated_payloads() {
             let tensor = chelis_alloc(2, [2, 3].as_ptr(), dtype);
             let metadata = chelis_metadata_plan_tensor(tensor);
             chelis_tensor_release(tensor);
+            for context in [CHELIS_PRODUCT_MUL, CHELIS_PRODUCT_MATMUL] {
+                let product = chelis_metadata_product_plan(metadata, metadata, context);
+                assert_eq!(chelis_metadata_plan_count(product), 6);
+                assert_eq!(chelis_metadata_plan_dtype(product), dtype);
+                chelis_metadata_plan_release(product);
+            }
             let expanded =
                 chelis_metadata_expand_plan(metadata, int(2), int(5), CHELIS_MOVEMENT_INSERT);
             let expansion_metadata = chelis_movement_result_metadata(expanded);
@@ -69,6 +75,38 @@ fn malformed_logical_movement_child() {
             chelis_scalar_from_bits(CHELIS_DTYPE_F32, 0),
         );
         match case.as_str() {
+            "product-strided" => {
+                let strided = chelis_metadata_plan_view(
+                    int(1),
+                    [int(2)].as_ptr(),
+                    [int(8)].as_ptr(),
+                    chelis_scalar_from_bits(CHELIS_DTYPE_F32, 0),
+                    int(16),
+                );
+                chelis_metadata_product_plan(strided, input, CHELIS_PRODUCT_MUL);
+            }
+            "product-context" => {
+                chelis_metadata_product_plan(input, input, 99);
+            }
+            "product-null" => {
+                chelis_metadata_product_plan(std::ptr::null(), input, CHELIS_PRODUCT_MUL);
+            }
+            "product-mul" | "product-matmul" => {
+                let other = chelis_metadata_plan_new(
+                    int(2),
+                    [int(2), int(4)].as_ptr(),
+                    chelis_scalar_from_bits(CHELIS_DTYPE_F32, 0),
+                );
+                chelis_metadata_product_plan(
+                    input,
+                    other,
+                    if case == "product-matmul" {
+                        CHELIS_PRODUCT_MATMUL
+                    } else {
+                        CHELIS_PRODUCT_MUL
+                    },
+                );
+            }
             "null" => {
                 chelis_metadata_expand_plan(
                     std::ptr::null(),
@@ -119,6 +157,11 @@ fn malformed_logical_movement_child() {
 #[test]
 fn malformed_logical_movements_keep_checked_owner_failures() {
     for case in [
+        "product-strided",
+        "product-context",
+        "product-null",
+        "product-mul",
+        "product-matmul",
         "null",
         "rank",
         "axes-null",
@@ -139,6 +182,24 @@ fn malformed_logical_movements_keep_checked_owner_failures() {
             error.contains("Domain") || error.contains("numeric trap: domain"),
             "{case}: {error}"
         );
+        if case == "product-matmul" {
+            assert!(
+                error.contains(&chelis_abi::failure::matmul_product_disagreement(
+                    &[2, 3],
+                    &[2, 4]
+                )),
+                "{error}"
+            );
+        } else if case == "product-mul" {
+            assert!(
+                error.contains(&chelis_abi::failure::operand_shape_disagreement(
+                    "mul",
+                    &[2, 3],
+                    &[2, 4]
+                )),
+                "{error}"
+            );
+        }
         assert!(
             !error.contains("malformed logical movement returned"),
             "{error}"
