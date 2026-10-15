@@ -1909,8 +1909,8 @@ impl<'plan> Emitter<'plan> {
         if active_count > u32::MAX as usize {
             return Err("Metal scan activation exceeds uint32 indexing".into());
         }
-        let row_length = match input.n.checked_div(active_count) {
-            Some(length) => length,
+        let row_length = match std::num::NonZeroUsize::new(active_count) {
+            Some(rows) => input.n / rows.get(),
             // A zero-row activation has no element row; the kernel uses its
             // explicit empty-row branch instead of indexing activation.
             None => 0,
