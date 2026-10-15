@@ -28,13 +28,16 @@ fn check_body(
     expr: &deep::Expr,
     graph: &TopLevelReferenceGraph,
     available: &BTreeSet<usize>,
+    component: &BTreeSet<usize>,
     context: &RankBodyContext,
     errors: &mut Vec<CheckError>,
 ) {
     stack_guard!("check_rank_body_discipline", expr);
     let Some((tag, _, kids)) = stamped_parts(expr) else {
-        if let deep::Expr::MetaExpr(meta) = expr {
-            check_body(def_name, &meta.expr, graph, available, context, errors);
+        if let deep::Expr::MetaExpr(meta, _) = expr {
+            check_body(
+                def_name, &meta.expr, graph, available, component, context, errors,
+            );
         }
         return;
     };
@@ -44,7 +47,8 @@ fn check_body(
             format!("may not use `{}` in its body: no body evidence transports its function across the opaque rank", tag.as_str()),
         )),
         DeepTag::App => match graph.applications.get(&expr_key(expr)) {
-            Some(ResolvedApplication::Definition(vertex)) if available.contains(vertex) => {}
+            Some(ResolvedApplication::Definition(vertex))
+                if available.contains(vertex) || component.contains(vertex) => {}
             Some(ResolvedApplication::Definition(vertex)) => errors.push(rank_body_error(
                 def_name,
                 format!("may not call `{}`: checked name-preserving body evidence is unavailable", graph.definition(*vertex).name),
@@ -74,7 +78,9 @@ fn check_body(
         _ => {}
     }
     for child in kids {
-        check_body(def_name, child, graph, available, context, errors);
+        check_body(
+            def_name, child, graph, available, component, context, errors,
+        );
     }
 }
 
@@ -105,7 +111,7 @@ pub(super) fn validate_rank_bodies(
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
             break;
         }
-        let mut candidate = accepted.clone();
+        let mut candidate = BTreeSet::new();
         for index in &component.members {
             if let Some(vertex) = graph.definition_vertex_by_item[*index]
                 && graph.definition(vertex).kind == TopLevelDefinitionKind::Function
@@ -136,6 +142,7 @@ pub(super) fn validate_rank_bodies(
                 &definition.name,
                 body,
                 graph,
+                &accepted,
                 &candidate,
                 &context,
                 &mut failures,
