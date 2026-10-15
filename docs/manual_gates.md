@@ -124,9 +124,15 @@ The incremental [eval-performance suite](eval_performance.md) runs its sparse
 index allocation oracle in default PR CI. Its full convolution caller is manual:
 `cargo nextest run -p chelis-ir --test eval_performance --run-ignored only -E 'test(=eval_performance_convolution_index_witness)' --no-capture`.
 Expected success: every output bit matches the direct canonical-tree reference
-and evaluation finishes within 90 seconds on an idle runner. Owner: chelis#828,
-sparse index reads (chelis#3591). The case reports peak live heap increase;
-convolution memory optimization has separate acceptance obligations.
+and evaluation finishes within 90 seconds with peak live heap increase below
+32 MiB on an idle runner. Owner: chelis#828, streamed convolution (chelis#3592).
+
+The full pointwise contraction pair is manual:
+`cargo nextest run --release -p chelis-ir --test eval_performance --run-ignored only -E 'test(=eval_performance_pointwise_pair_witness)' --no-capture`.
+Expected success: every output bit agrees with the canonical-tree/scalar-GELU
+reference, evaluation finishes within 90 seconds, and peak live heap increase
+stays below 96 MiB on an idle runner. Default PR CI runs smaller bit and heap
+controls. Owner: chelis#828, private exact contractions (chelis#3588).
 
 The suite's full-size movement/reduction witnesses are also manual:
 `cargo nextest run -p chelis-ir --test eval_performance --run-ignored only -E 'test(/large_window_movement_coordinates|large_axis_reduction_coordinates/)' --no-capture`.
