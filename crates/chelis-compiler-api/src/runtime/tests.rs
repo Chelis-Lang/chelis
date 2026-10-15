@@ -5068,3 +5068,42 @@ out = run()
         }
     }
 }
+
+#[test]
+fn growing_accumulator_claim_work_is_bounded_by_new_components() {
+    for collection in ["chain", "list"] {
+        for claim in ["3", "n"] {
+            for scan in [false, true] {
+                for steps in [100, 400] {
+                    let combine = if scan { "scan" } else { "fold" };
+                    let source = if collection == "chain" {
+                        format!("type Chain[n] =\n | End {{ v: tensor[n, f32] }}\n | Link {{ v: tensor[n, f32], next: Chain[n] }}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef run[n](steps: i64) -> i64 = {{\n _ = {combine}(fn (acc: Chain[{claim}], i: i64) -> Link {{ v: produce(3i64), next: acc }}, End {{ v: produce(3i64) }}, range(0i64, steps))\n steps\n}}\nout = run({steps}i64)\n")
+                    } else {
+                        let generic = if claim == "n" { "[n]" } else { "" };
+                        format!("def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef run{generic}(seed: List[tensor[{claim}, f32]], steps: i64) -> i64 = len({combine}(fn (acc: List[tensor[{claim}, f32]], i: i64) -> append(acc, produce(3i64)), seed, range(0i64, steps)))\nout = run([produce(3i64)], {steps}i64)\n")
+                    };
+                    for unproved in [false, true] {
+                    let source = if unproved {
+                        source.replace("next: acc", "next: if eq(i, 0i64) then acc else acc")
+                            .replace("append(acc,", "append(if eq(i, 0i64) then acc else acc,")
+                    } else { source.clone() };
+                    let checked = checked_surf(&source);
+                    let empty = UnordMap::new();
+                    let inputs = HostEvaluationInputs { roots: &empty, bindings: None };
+                    super::eval::reset_entry_claim_work();
+                    let outcome = evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None).expect("growing loop evaluates");
+                    let work = super::eval::entry_claim_work();
+                    let expected = if collection == "chain" || scan { steps } else { steps + 1 };
+                    assert_eq!(render_value(&outcome.host_bindings["out"]), expected.to_string());
+                    eprintln!("growing {collection} {combine} claim={claim} K={steps} unproved={unproved}: {work}");
+                    if unproved {
+                        assert!(work >= steps as u64 * steps as u64, "counterfactual must retain complete accumulator entry walks: {work}");
+                    } else {
+                        assert!(work <= 40 * steps as u64 + 40, "claim work must be bounded by initial and fresh components: {work}\n{source}");
+                    }
+                    }
+                }
+            }
+        }
+    }
+}

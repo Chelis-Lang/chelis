@@ -1864,7 +1864,13 @@ A `fold` or `scan` may discharge a repeated accumulator entry claim from a
 previous successful check only with independent evidence that the accumulator
 satisfies the identical obligation against the same witnesses. A checked
 callback whose result is the unchanged immutable accumulator supplies that
-evidence. Reuse does not discharge another formal's claim, a caller's claim,
+evidence. Evidence for an inherited immutable component discharges only that
+component's identical obligation. Comparisons between its established witnesses
+and the current entry's first witnesses remain, in their original order; a new
+first witness does not inherit an older witness's value. Fresh components retain
+their next-entry checks. This reuse introduces no callback-result obligation and
+preserves a final iteration whose result has no subsequent callback entry.
+Reuse does not discharge another formal's claim, a caller's claim,
 or a result claim, and does not suppress callback effects. The first callback
 invocation retains its entry checks; an empty input invokes no callback and
 introduces no callback-entry check.

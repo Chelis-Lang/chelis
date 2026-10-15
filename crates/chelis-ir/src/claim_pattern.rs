@@ -390,6 +390,20 @@ impl Builder<'_> {
         name: &str,
         args: &[Expr],
     ) -> Result<Option<ClaimNodeId>, ClaimPatternError> {
+        // Surf uses a type-variable spelling for a name in a nominal
+        // dimension slot. Normalize that slot before memoization, exactly as
+        // substitution does, so the recursive occurrence is the same node.
+        // A type-parameter slot keeps its original type argument.
+        let normalized = self.registry.lookup(name).map(|definition| {
+            definition.param_args.iter().zip(args).map(|(parameter, argument)| {
+                if matches!(parameter, NominalArg::Dimension(_)) {
+                    dimension_argument(argument)
+                } else {
+                    argument.clone()
+                }
+            }).collect::<Vec<_>>()
+        });
+        let args = normalized.as_deref().filter(|normalized| normalized.len() == args.len()).unwrap_or(args);
         let key = format!(
             "{name}[{}]",
             args.iter().map(canonical).collect::<Vec<_>>().join(",")
@@ -1097,6 +1111,12 @@ mod tests {
             "type Pair[n] =\n  | Leaf { v: tensor[n, f32] }\n  | Node { l: Pair[n], r: Pair[n] }\n\
              type T[n] =\n  | Tip { v: tensor[n, f32] }\n  | Fix { t: T[3] }\n",
         );
+        for argument in ["(d-var {} k)", "(t-var {} k)"] {
+            let pattern = ClaimPattern::derive(&ty(&format!("(t-adt {{}} Pair {argument})")), &registry).unwrap();
+            let root = pattern.root().unwrap();
+            assert_eq!(field(&pattern, root, "Node", 0), root, "dimension-slot spelling must retain exact recursive obligation identity");
+            assert_eq!(pattern.nodes().len(), 2);
+        }
         let pattern = ClaimPattern::derive(&ty("(t-adt {} Pair (d-lit {} 3))"), &registry).unwrap();
         let root = pattern.root().unwrap();
         assert_eq!(field(&pattern, root, "Node", 0), root);

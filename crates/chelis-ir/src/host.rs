@@ -1913,6 +1913,7 @@ pub struct HostCallback<T = HostTypeTerm> {
     /// Checked source proves an unchanged immutable accumulator with no
     /// second-formal entry obligation (runtime_extents.md C6.6).
     pub stationary_accumulator: Option<StationaryAccumulatorProof>,
+    pub accumulator_delta: Option<AccumulatorDeltaProof>,
     pub kind: HostCallbackKind<T>,
     pub ret_ty: T,
 }
@@ -2510,6 +2511,7 @@ fn resolve_host_callback(
     };
     Ok(ConcreteHostCallback {
         stationary_accumulator: callback.stationary_accumulator,
+        accumulator_delta: callback.accumulator_delta,
         kind,
         ret_ty: callback.ret_ty.into_concrete()?,
     })
@@ -12490,6 +12492,7 @@ fn materialize_runtime_grad_list_element(
     let mapped = HostExpr::new(HostExprKind::Map {
         callback: HostCallback {
             stationary_accumulator: None,
+            accumulator_delta: None,
             kind: HostCallbackKind::Inline {
                 params: vec![HostParam {
                     name: item_name.into(),
@@ -12682,6 +12685,7 @@ fn pack_grad_roots(plan: &GradPackPlan, roots: &mut impl Iterator<Item = HostExp
             HostExpr::new(HostExprKind::Map {
                 callback: HostCallback {
                     stationary_accumulator: None,
+                    accumulator_delta: None,
                     kind: HostCallbackKind::Inline {
                         params: vec![HostParam {
                             name: "__chelis_grad_list_row".into(),
@@ -18870,6 +18874,7 @@ fn checked_tensor_scan_callback(
         kind,
         ret_ty,
         stationary_accumulator: _,
+        accumulator_delta: _,
     } = callback;
     let (params, body) = match kind {
         HostCallbackKind::Inline { params, body } => (params, *body),
@@ -18912,6 +18917,7 @@ fn checked_tensor_scan_callback(
     });
     HostCallback {
         stationary_accumulator: None,
+        accumulator_delta: None,
         kind: HostCallbackKind::Inline {
             params,
             body: Box::new(body),
@@ -19192,6 +19198,7 @@ fn lower_host_callback(
             };
             Ok(Some(HostCallback {
                 stationary_accumulator: stationary_accumulator_proof(expr, program.adt_registry()),
+                accumulator_delta: accumulator_delta_proof(expr, program.adt_registry()),
                 kind: HostCallbackKind::Inline {
                     params,
                     body: Box::new(body),
@@ -19264,6 +19271,7 @@ fn named_host_callback(
 ) -> HostCallback {
     HostCallback {
         stationary_accumulator: None,
+        accumulator_delta: None,
         kind: HostCallbackKind::Named {
             params: positional_host_params(param_tys, &callee),
             callee,
@@ -22804,6 +22812,7 @@ fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> Hos
         kind,
         ret_ty,
         stationary_accumulator,
+        accumulator_delta,
     } = callback;
     let ret_ty = if ret_ty.is_unresolved() && !expected.is_unresolved() {
         expected.clone()
@@ -22821,6 +22830,7 @@ fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> Hos
         kind,
         ret_ty,
         stationary_accumulator,
+        accumulator_delta,
     }
 }
 
@@ -30393,6 +30403,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     fn a_fold_conforms_its_seed_and_callback_body() {
         let callback = HostCallback {
             stationary_accumulator: None,
+            accumulator_delta: None,
             kind: HostCallbackKind::Inline {
                 params: vec![
                     HostParam {
@@ -30750,6 +30761,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             HostExpr::new(HostExprKind::Map {
                 callback: HostCallback {
                     stationary_accumulator: None,
+                    accumulator_delta: None,
                     kind: HostCallbackKind::Named {
                         callee: HostCallee::test_local(function),
                         params: vec![HostParam {
@@ -31419,7 +31431,7 @@ mod accumulator_delta_nominal_tests {
             if node.tag() == DeepTag::Fn { return Some(expr); }
             node.children_slice().iter().find_map(find_fn)
         }
-        let source = "type Chain[n] = End { v: tensor[n, f32] } | Link { v: tensor[n, f32], next: Chain[n] }\nout = fold(fn (acc: Chain[3], i: i64) -> Link { v: to_tensor([1.0f32, 2.0f32, 3.0f32]), next: acc }, End { v: to_tensor([1.0f32, 2.0f32, 3.0f32]) }, range(0i64, 2i64))\n";
+        let source = "type Chain[n] =\n | End { v: tensor[n, f32] }\n | Link { v: tensor[n, f32], next: Chain[n] }\nout = fold(fn (acc: Chain[3], i: i64) -> Link { v: to_tensor([1.0f32, 2.0f32, 3.0f32]), next: acc }, End { v: to_tensor([1.0f32, 2.0f32, 3.0f32]) }, range(0i64, 2i64))\n";
         let declarations = chelis_surf::parser::parse_str(source).unwrap();
         let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
         let checked = chelis_types::check_ir_program(&deep).unwrap();

@@ -102,3 +102,97 @@ fn growing_list_entry_preserves_order_and_final_iteration() {
         }
     }
 }
+
+
+fn counted_native(source: &str) -> (u64, u64) {
+    use assert_cmd::Command;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("growing.ch");
+    std::fs::write(&path, source).unwrap();
+    let destination = dir.path().join("c");
+    let built = Command::cargo_bin("chelis").unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", "--emit-c", "--allow-style-violations"])
+        .arg(&path).args(["--target", "c", "-o"]).arg(&destination).output().unwrap();
+    assert!(built.status.success(), "{source}\n{built:?}");
+    let c_path = destination.join("growing.c");
+    let mut c = std::fs::read_to_string(&c_path).unwrap();
+    let include = c.rfind("#include ").expect("generated includes");
+    let header_end = include + c[include..].find('\n').unwrap() + 1;
+    // Count executed extent reads and rank admission, not elapsed time or
+    // emitted check text. Runtime allocation internals are outside this shim.
+    c.insert_str(header_end, r#"
+static uint64_t __probe_entry = 0;
+static uint64_t __probe_origin = 0;
+static int64_t __probe_shape(const chelis_tensor *x, int32_t axis) {
+    ++__probe_entry;
+    return chelis_tensor_shape(x, axis);
+}
+static int32_t __probe_rank(const chelis_tensor *x) {
+    ++__probe_entry;
+    return chelis_tensor_rank(x);
+}
+static chelis_value __probe_field(const chelis_adt *x, int64_t slot) {
+    ++__probe_entry;
+    return chelis_adt_get_field(x, slot);
+}
+static chelis_value __probe_index(const chelis_list *x, int64_t slot) {
+    ++__probe_entry;
+    return chelis_list_index(x, slot);
+}
+#define chelis_tensor_shape __probe_shape
+#define chelis_tensor_rank __probe_rank
+#define chelis_adt_get_field __probe_field
+#define chelis_list_index __probe_index
+"#);
+    c = c.replace("static __chelis_host_result_origin *__chelis_host_result_origin_alloc(__chelis_host_result_origin_arena *arena, int64_t child_count) {",
+        "static __chelis_host_result_origin *__chelis_host_result_origin_alloc(__chelis_host_result_origin_arena *arena, int64_t child_count) { ++__probe_origin;");
+    c = c.replace("static void __chelis_host_result_origin_arena_destroy(__chelis_host_result_origin_arena *arena) {",
+        "static void __chelis_host_result_origin_arena_destroy(__chelis_host_result_origin_arena *arena) { fprintf(stderr, \"__work__=%llu,%llu\\n\", (unsigned long long)__probe_entry, (unsigned long long)__probe_origin);");
+    c = c.replace("__chelis_entry_named_state *state = &states[i];", "__chelis_entry_named_state *state = &states[i]; ++__probe_entry;");
+    c = c.replace("    __chelis_entry_claim_step *step = (__chelis_entry_claim_step *)malloc(sizeof *step);", "    ++__probe_entry; __chelis_entry_claim_step *step = (__chelis_entry_claim_step *)malloc(sizeof *step);");
+    let mut counted = String::new();
+    for line in c.lines() {
+        if line.contains(".ordinal] = __chelis_entry_named_states[i];") {
+            let count: u64 = line.split("i < ").nth(1).unwrap().split(';').next().unwrap().parse().unwrap();
+            counted.push_str(&format!("__probe_entry += {};\n", 2 * count));
+        }
+        counted.push_str(line);
+        counted.push('\n');
+    }
+    std::fs::write(&c_path, counted).unwrap();
+    assert!(common::link_generated(&destination, "growing.c", "growing").success());
+    let output = std::process::Command::new(destination.join("growing")).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let output = String::from_utf8_lossy(&output.stderr);
+    let counts = output.lines().filter_map(|line| line.strip_prefix("__work__=")).last().expect("executed counters");
+    let (entry, origin) = counts.split_once(',').unwrap();
+    (entry.parse().unwrap(), origin.parse().unwrap())
+}
+
+#[test]
+fn compiled_growing_claim_reads_are_linear_with_a_quadratic_counterfactual() {
+    for collection in ["chain", "list"] {
+        for claim in ["3", "n"] {
+            for scan in [false, true] {
+                for steps in [100, 400] {
+                    let combine = if scan { "scan" } else { "fold" };
+                    let source = if collection == "chain" {
+                        format!("type Chain[n] =\n | End {{ v: tensor[n, f32] }}\n | Link {{ v: tensor[n, f32], next: Chain[n] }}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef run[n](steps: i64) -> i64 = {{\n _ = {combine}(fn (acc: Chain[{claim}], i: i64) -> Link {{ v: produce(3i64), next: acc }}, End {{ v: produce(3i64) }}, range(0i64, steps))\n steps\n}}\nout = run({steps}i64)\n")
+                    } else {
+                        let generic = if claim == "n" { "[n]" } else { "" };
+                        format!("def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef run{generic}(seed: List[tensor[{claim}, f32]], steps: i64) -> i64 = len({combine}(fn (acc: List[tensor[{claim}, f32]], i: i64) -> append(acc, produce(3i64)), seed, range(0i64, steps)))\nout = run([produce(3i64)], {steps}i64)\n")
+                    };
+                    let (work, origins) = counted_native(&source);
+                    let counterfactual = source.replace("next: acc", "next: if eq(i, 0i64) then acc else acc")
+                        .replace("append(acc,", "append(if eq(i, 0i64) then acc else acc,");
+                    let (unproved, old_origins) = counted_native(&counterfactual);
+                    eprintln!("C {collection} {combine} claim={claim} K={steps}: reads {work}, unproved {unproved}; origins {origins}/{old_origins}");
+                    assert!(work <= 40 * steps as u64 + 40, "{source}\n{work}");
+                    assert!(unproved >= steps as u64 * steps as u64, "counterfactual must retain full entry work: {unproved}");
+                    assert!(origins <= 10 * steps as u64 + 20, "origin construction work is measured separately: {origins}");
+                }
+            }
+        }
+    }
+}

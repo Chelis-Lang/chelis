@@ -762,6 +762,8 @@ typedef struct __chelis_entry_named_state {
     int64_t value;
     int axis;
     char path[512];
+    size_t ordinal;
+    size_t next_ordinal;
 } __chelis_entry_named_state;
 
 static inline void __chelis_entry_named_observe(__chelis_entry_named_state *states, size_t count,
@@ -772,6 +774,7 @@ static inline void __chelis_entry_named_observe(__chelis_entry_named_state *stat
         if (strcmp(state->key, key) != 0) continue;
         if (!state->seen) {
             state->seen = 1;
+            state->ordinal = states[0].next_ordinal++;
             state->value = value;
             state->axis = axis;
             snprintf(state->path, sizeof state->path, "%s", path);
@@ -856,7 +859,7 @@ static void __chelis_entry_named_observe_at(__chelis_entry_named_state *states, 
         __chelis_entry_named_state *state = &states[i];
         if (strcmp(state->key, key) != 0) continue;
         if (!state->seen || state->value != value) {
-            __chelis_entry_named_observe(state, 1, key, __chelis_entry_path_text(path), axis, value);
+            __chelis_entry_named_observe(states, count, key, __chelis_entry_path_text(path), axis, value);
         }
         return;
     }
@@ -1137,12 +1140,57 @@ static void __chelis_entry_claim_walk(const __chelis_host_result_claim *frame, i
 /// The entry check of the claims a formal nests below a tuple or nominal
 /// type (runtime_extents.md C6.5): one walk of the carried value along its
 /// claim pattern, in the formal's signature position.
+pub(super) fn delta_list_metadata(param: &HostParam, value: &str, proof: &chelis_ir::host::AccumulatorDeltaProof, old: &str) -> String {
+    let HostAbiType::List(inner) = &param.ty else { unreachable!("eligible direct tensor List"); };
+    let HostAbiType::Tensor(tensor) = inner.as_ref() else { unreachable!("eligible direct tensor List"); };
+    let chelis_ir::host::AccumulatorDeltaRecipe::ListInterval { before, .. } = proof.recipe() else { unreachable!("List interval"); };
+    let mut lines = vec![format!("for (int64_t delta_metadata_index = 0; delta_metadata_index < chelis_list_len({value}); ++delta_metadata_index) {{")];
+    // Jump the inherited interval in constant work, rather than testing every
+    // inherited element against a range predicate.
+    lines.push(format!("if (delta_metadata_index == {before}) delta_metadata_index += {old};"));
+    lines.push(format!("if (delta_metadata_index >= chelis_list_len({value})) break;"));
+    lines.push(format!("chelis_value delta_metadata_value = chelis_list_index({value}, delta_metadata_index);"));
+    lines.push(format!("const __chelis_entry_path delta_metadata_root = {{ NULL, {}, 0 }};", c_utf8_byte_literal(&param.name)));
+    lines.push("const __chelis_entry_path delta_metadata_path = { &delta_metadata_root, NULL, delta_metadata_index };".into());
+    lines.extend(tensor_metadata_checks("chelis_tensor_borrow_value(delta_metadata_value)", &TensorLabel::path("&delta_metadata_path"), tensor));
+    lines.push("chelis_value_release(delta_metadata_value); }".into());
+    lines.join(" ")
+}
+
+pub(super) struct DeltaWalkContext<'a> {
+    pub proof: &'a chelis_ir::host::AccumulatorDeltaProof,
+    pub checked: &'a str,
+    pub prior_states: Option<(&'a str, usize)>,
+    pub old_list_len: Option<&'a str>,
+}
+
+pub(super) fn delta_entry_step(
+    param: &HostParam,
+    value: &str,
+    index: usize,
+    named_binders: &[String],
+    delta: DeltaWalkContext<'_>,
+) -> Result<String, Unsupported> {
+    nested_entry_step_impl(delta.proof.pattern(), param, value, index, named_binders, Some(delta))
+}
+
 pub(super) fn nested_entry_step(
     pattern: &chelis_ir::claim_pattern::ClaimPattern,
     param: &HostParam,
     value: &str,
     index: usize,
     named_binders: &[String],
+) -> Result<String, Unsupported> {
+    nested_entry_step_impl(pattern, param, value, index, named_binders, None)
+}
+
+fn nested_entry_step_impl(
+    pattern: &chelis_ir::claim_pattern::ClaimPattern,
+    param: &HostParam,
+    value: &str,
+    index: usize,
+    named_binders: &[String],
+    delta: Option<DeltaWalkContext<'_>>,
 ) -> Result<String, Unsupported> {
     let tag = borrowed_claim_value_tag(&param.ty).ok_or_else(|| {
         invalid_abi_shape(
@@ -1185,10 +1233,100 @@ pub(super) fn nested_entry_step(
             named_binders.len(),
         )
     };
-    lines.push(format!(
-        "__chelis_entry_claim_walk(&__chelis_entry_claim_{index}, {root}, __chelis_claim_borrowed_value({tag}, {value}), &__chelis_entry_claim_path_{index}, {keys}, {states}, {count});"
-    ));
+    let frame = format!("__chelis_entry_claim_{index}");
+    let path = format!("__chelis_entry_claim_path_{index}");
+    let borrowed = format!("__chelis_claim_borrowed_value({tag}, {value})");
+    let walk = format!("__chelis_entry_claim_walk(&{frame}, {root}, {borrowed}, &{path}, {keys}, {states}, {count});");
+    if let Some(delta) = delta {
+        lines.push(format!("if (!{}) {{ {walk} }} else {{", delta.checked));
+        emit_delta_recipe(&mut lines, &delta, pattern.root().expect("claim root"), delta.proof.recipe(), &borrowed, &path, &frame, &keys, &states, count, &mut 0)?;
+        lines.push("}".into());
+        if let Some(old) = delta.old_list_len {
+            lines.push(format!("{old} = chelis_list_len({value});"));
+        }
+    } else {
+        lines.push(walk);
+    }
     Ok(format!("{{ {} }}", lines.join(" ")))
+}
+
+
+#[allow(clippy::too_many_arguments)]
+fn emit_delta_recipe(
+    lines: &mut Vec<String>,
+    delta: &DeltaWalkContext<'_>,
+    node: chelis_ir::claim_pattern::ClaimNodeId,
+    recipe: &chelis_ir::host::AccumulatorDeltaRecipe,
+    value: &str,
+    path: &str,
+    frame: &str,
+    keys: &str,
+    states: &str,
+    count: usize,
+    serial: &mut usize,
+) -> Result<(), Unsupported> {
+    use chelis_ir::claim_pattern::ClaimNode;
+    use chelis_ir::host::AccumulatorDeltaRecipe as Recipe;
+    let id = *serial;
+    *serial += 1;
+    let replay = |lines: &mut Vec<String>, path: &str, suffix: bool| {
+        if let Some((prior, length)) = delta.prior_states {
+            lines.push(format!("for (size_t witness_{id} = 0; witness_{id} < {length}; ++witness_{id}) {{"));
+            let prior = format!("{prior}[witness_{id}]");
+            lines.push(format!("if (!{prior}.seen) continue;"));
+            let replay_path = if suffix {
+                let prefix = delta.proof.parameter().len();
+                lines.push(format!("const __chelis_entry_path inherited_path_{id} = {{ &{path}, {prior}.path + {prefix}, 0 }};"));
+                format!("inherited_path_{id}")
+            } else { path.to_owned() };
+            lines.push(format!("__chelis_entry_named_observe_at({states}, {count}, {prior}.key, &{replay_path}, {prior}.axis, {prior}.value);"));
+            lines.push("}".into());
+        }
+    };
+    match recipe {
+        Recipe::Fresh => lines.push(format!("__chelis_entry_claim_walk(&{frame}, {}, {value}, &{path}, {keys}, {states}, {count});", node.index())),
+        Recipe::Inherited => replay(lines, path, true),
+        Recipe::Constructor { constructor, fields: recipes } => {
+            let ClaimNode::Nominal { constructors, .. } = delta.proof.pattern().node(node) else { unreachable!("derived constructor pattern"); };
+            let layout = constructors.iter().find(|layout| layout.name == *constructor).expect("derived constructor");
+            for (slot, (field, recipe)) in layout.fields.iter().zip(recipes).enumerate() {
+                let Some(child) = field.node else { continue; };
+                let segment = field.name.clone().unwrap_or_else(|| slot.to_string());
+                let segment = if constructors.len() > 1 { format!(".{}.{segment}", layout.stored_name) } else { format!(".{segment}") };
+                let child_value = format!("delta_value_{id}_{slot}");
+                let child_path = format!("delta_path_{id}_{slot}");
+                lines.push("{".into());
+                lines.push(format!("chelis_value {child_value} = chelis_adt_get_field(chelis_adt_borrow_value({value}), {slot});"));
+                lines.push(format!("const __chelis_entry_path {child_path} = {{ &{path}, {}, 0 }};", c_string_literal(&segment)));
+                emit_delta_recipe(lines, delta, child, recipe, &child_value, &child_path, frame, keys, states, count, serial)?;
+                lines.push(format!("chelis_value_release({child_value});"));
+                lines.push("}".into());
+            }
+        }
+        Recipe::ListInterval { before, after: _ } => {
+            let ClaimNode::List(child) = delta.proof.pattern().node(node) else { unreachable!("derived List pattern"); };
+            let old = delta.old_list_len.expect("List interval retains prior length");
+            let list = format!("delta_list_{id}");
+            lines.push(format!("const chelis_list *{list} = chelis_list_borrow_value({value});"));
+            // Fresh prefix, inherited ordered witnesses, then fresh suffix.
+            for (part, start, end) in [(0, "0".to_owned(), before.to_string()), (1, format!("{before} + {old}"), format!("chelis_list_len({list})"))] {
+                if part == 1 {
+                    let inherited = format!("delta_inherited_path_{id}");
+                    lines.push(format!("const __chelis_entry_path {inherited} = {{ &{path}, NULL, {before} }};"));
+                    replay(lines, &inherited, false);
+                }
+                lines.push(format!("for (int64_t fresh_{id}_{part} = {start}; fresh_{id}_{part} < {end}; ++fresh_{id}_{part}) {{"));
+                let fresh_value = format!("delta_fresh_value_{id}_{part}");
+                let fresh_path = format!("delta_fresh_path_{id}_{part}");
+                lines.push(format!("chelis_value {fresh_value} = chelis_list_index({list}, fresh_{id}_{part});"));
+                lines.push(format!("const __chelis_entry_path {fresh_path} = {{ &{path}, NULL, fresh_{id}_{part} }};"));
+                lines.push(format!("__chelis_entry_claim_walk(&{frame}, {}, {fresh_value}, &{fresh_path}, {keys}, {states}, {count});", child.index()));
+                lines.push(format!("chelis_value_release({fresh_value});"));
+                lines.push("}".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// How a check names the tensor it reads: a format fragment and the

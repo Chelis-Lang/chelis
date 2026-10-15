@@ -2122,7 +2122,7 @@ absent field would disagree (no trap), a static five-element literal field
 (checker rejection, unchanged), effects before and after the producer, and a
 call of the generic `make` whose result meets no claim (no guard emitted). HIP and Metal follow the platform interlocks below.
 
-#### C6.6 Stationary fold and scan accumulator claims
+#### C6.6 Fold and scan accumulator entry evidence
 
 A stationary-accumulator proof names a checked callback's first formal and
 proves that every admitted result path returns that same immutable value.
@@ -2147,12 +2147,42 @@ callback body still runs on every iteration.
 Empty inputs execute no callback entry. Independent result and caller claims
 keep their existing schedule and checks.
 
-A callback that constructs or changes the accumulator or introduces another
-extent-bearing formal retains complete per-invocation validation. Eval also
-retains full checks for callable invocation adapters and their independent
-contracts. Discharging growing
-accumulators requires producer postconditions and component evidence; the
-stationary proof supplies neither and does not authorize skipping those walks.
+Growing accumulators use a separate checked construction recipe. An inherited
+component names the original first formal and the identical root node of that
+formal's claim graph. Nominal dimension arguments are canonicalized by the
+checked declaration's parameter kind before graph memoization; a type slot
+remains a type slot, and each graph belongs to its one authored claim source.
+The recipe admits nominal constructions with exact inherited fields, and a
+fixed fresh prefix or suffix around a complete `List[tensor[...]]` accumulator.
+It is derived from checked source and validated against the lowered callback;
+shadowed bindings, arbitrary equal-shaped values and unproved result paths
+supply no evidence.
+
+The first invocation checks the complete seed. The next invocation checks
+fresh components in declared depth-first order and replays the inherited
+component's established binder observations at that component's position.
+A successful entry retains only the first observation of each binder, including
+its value, axis and bounded source path. Compression and replay visit each
+retained observation once. C records observation ordinals and stores the next
+summary by ordinal, so declaration order cannot replace runtime first-witness
+order. Direct-tensor List intervals retain their prior length and shift the
+first element's witness index by the fixed prefix; traversal skips the old
+interval in constant work. The List's metadata pass likewise admits only new
+elements after the first complete admission, before any extent comparison.
+
+Every invocation starts with fresh binder state. A prepended tensor can become
+the first witness; inherited witnesses are compared against it rather than
+silently binding the old extent. The entry creates its next receipt only after
+all checks succeed. New components are not checked at callback production:
+later callback effects, the next-entry trap position, invalid final-step
+results and empty inputs retain spec/04 section4.7's schedule. Dependent local
+and result guards read the current invocation's original lexical witness state.
+
+Other callbacks retain complete validation, including named calls without a
+checked construction postcondition, callable invocation adapters, additional
+extent-bearing formals, and unproved transformations. List storage copying,
+scan-owned output histories and invocation origin-arena lifetimes are separate
+from accumulator entry evidence.
 
 ## Part II: remaining delivery sequence
 

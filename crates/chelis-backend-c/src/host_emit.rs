@@ -447,7 +447,7 @@ fn program_has_nested_claims(program: &HostProgram) -> bool {
         }
     }
     fn callback_expr(callback: &HostCallback) -> bool {
-        match &callback.kind {
+        callback.accumulator_delta.is_some() || match &callback.kind {
             HostCallbackKind::Named { .. } => false,
             HostCallbackKind::Inline { body, .. } => uses(body),
         }
@@ -4552,7 +4552,7 @@ fn entry_named_state_lines_named(names: &[String], variable: &str) -> Vec<String
     let mut lines = vec![format!("__chelis_entry_named_state {variable}[] = {{")];
     for name in names {
         lines.push(format!(
-            "    {{ {}, {}, 0, 0, 0, {{0}} }},",
+            "    {{ {}, {}, 0, 0, 0, {{0}}, 0, 0 }},",
             c_string_literal(name),
             c_string_literal(&chelis_ir::lower::extent_binder_label(name))
         ));
@@ -5798,13 +5798,17 @@ fn verified_helper_result_origins(
 }
 
 fn stationary_callback_entry(callback: &HostCallback) -> Option<&HostExpr> {
-    let proof = callback.stationary_accumulator.as_ref()?;
     let HostCallbackKind::Inline { params, body } = &callback.kind else {
         return None;
     };
-    if !proof.validates_body(body) {
-        return None;
-    }
+    let parameter = if let Some(proof) = &callback.stationary_accumulator {
+        if !proof.validates_body(body) { return None; }
+        proof.parameter()
+    } else {
+        let proof = callback.accumulator_delta.as_ref()?;
+        if !proof.validates_body(body) { return None; }
+        proof.parameter()
+    };
 
     let HostExprKind::Let { bindings, .. } = &body.kind else {
         return None;
@@ -5825,7 +5829,7 @@ fn stationary_callback_entry(callback: &HostCallback) -> Option<&HostExpr> {
         || lists.len() != 1
         || lists[0].position != 0
         || lists[0].name != params[0].name
-        || proof.parameter() != params[0].name
+        || parameter != params[0].name
         || contract.formals()[1].pattern().has_tensor()
     {
         return None;
@@ -5854,6 +5858,9 @@ struct StationaryEntryGuard {
     expression: *const HostExpr,
     checked: String,
     states: Option<(String, usize)>,
+    binders: Vec<String>,
+    delta: Option<chelis_ir::host::AccumulatorDeltaProof>,
+    old_list_len: Option<String>,
 }
 
 struct HostEmitter<'a> {
@@ -7672,6 +7679,18 @@ impl<'a> HostEmitter<'a> {
                 }
             }
         }
+        if let Some(proof) = &callback.accumulator_delta {
+            for binder in proof.pattern().binders() {
+                if !binders.contains(&binder) { binders.push(binder); }
+            }
+        }
+        let old_list_len = callback.accumulator_delta.as_ref().and_then(|proof| {
+            matches!(proof.recipe(), chelis_ir::host::AccumulatorDeltaRecipe::ListInterval { .. }).then(|| {
+                let name = self.next_temp("delta_prior_length");
+                self.lines.push(format!("{}int64_t {name} = 0;", self.indent));
+                name
+            })
+        });
         let states = if binders.is_empty() {
             None
         } else {
@@ -7687,6 +7706,9 @@ impl<'a> HostEmitter<'a> {
             expression: entry as *const HostExpr,
             checked,
             states,
+            binders,
+            delta: callback.accumulator_delta.clone(),
+            old_list_len,
         })
     }
 
@@ -7700,6 +7722,18 @@ impl<'a> HostEmitter<'a> {
         if let Some(guard) = &self.stationary_entry
             && std::ptr::eq(guard.expression, expression)
         {
+            if guard.delta.is_some() {
+                // Each new entry gets fresh binder state. Replay retains prior
+                // witness order, rather than fixing the old binder's value.
+                self.lines.extend(entry_named_state_lines(&guard.binders).into_iter().map(|line| format!("{}{line}", self.indent)));
+                self.lines.extend(lines);
+                if let Some((saved, count)) = &guard.states {
+                    self.lines.push(format!("{}for (size_t i = 0; i < {count}; ++i) {saved}[i].seen = 0;", self.indent));
+                    self.lines.push(format!("{}for (size_t i = 0; i < {count}; ++i) if (__chelis_entry_named_states[i].seen) {saved}[__chelis_entry_named_states[i].ordinal] = __chelis_entry_named_states[i];", self.indent));
+                }
+                self.lines.push(format!("{}{} = true;", self.indent, guard.checked));
+                return;
+            }
             // Keep the invocation's witness variable in its original lexical
             // scope. Result/local claims following entry can still read it.
             if let Some((states, count)) = &guard.states {
@@ -8364,6 +8398,10 @@ impl<'a> HostEmitter<'a> {
                             }
                         }
                     }
+                    let delta_guard = self.stationary_entry.as_ref().filter(|guard| std::ptr::eq(guard.expression, expr)).filter(|guard| guard.delta.is_some());
+                    if let Some(guard) = delta_guard {
+                        named_list_binders = guard.binders.clone();
+                    }
                     let mut work = entry_walk::FunctionEntryWork {
                         args: actuals.clone(),
                         owners: positions.clone(),
@@ -8387,6 +8425,24 @@ impl<'a> HostEmitter<'a> {
                     for entry in lists {
                         let temp = self.next_temp("entry_list");
                         self.emit_expr_to_var(&entry.value, &temp, &host_type(&entry.value))?;
+                        if let Some(guard) = self.stationary_entry.as_ref().filter(|guard| std::ptr::eq(guard.expression, expr))
+                            && let Some(proof) = &guard.delta {
+                            let param = HostParam { name: entry.name.clone(), ty: host_type(&entry.value) };
+                            if entry.claim.is_none() {
+                                let full_metadata = entry_walk::retained_list_pass(&entry.ty, &temp, &entry.name, false, work.named_list_binders.len()).join(" ");
+                                let fresh_metadata = entry_walk::delta_list_metadata(&param, &temp, proof, guard.old_list_len.as_deref().expect("List prior length"));
+                                work.params[entry.position].metadata.push(format!("if (!{}) {{ {full_metadata} }} else {{ {fresh_metadata} }}", guard.checked));
+                            }
+                            let step = entry_walk::delta_entry_step(&param, &temp, entry.position, &work.named_list_binders, entry_walk::DeltaWalkContext {
+                                proof,
+                                checked: &guard.checked,
+                                prior_states: guard.states.as_ref().map(|(name, count)| (name.as_str(), *count)),
+                                old_list_len: guard.old_list_len.as_deref(),
+                            })?;
+                            work.params[entry.position].extents.push(step.clone());
+                            work.params[entry.position].ordered_extents.push(entry_walk::ExtentStep::Walk(step));
+                            continue;
+                        }
                         if let Some(pattern) = &entry.claim {
                             let step = entry_walk::nested_entry_step(
                                 pattern,
