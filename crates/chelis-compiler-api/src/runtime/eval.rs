@@ -3481,6 +3481,10 @@ impl<'a> EvalContext<'a> {
                 let index = ordinal * 2;
                 if !local_regions.contains_key(&index)
                     && let Some((frame, _)) = forwarding_cursor
+                    && self.loop_compositions[frame]
+                        .proof
+                        .forwarding()
+                        .is_returned_invocation()
                 {
                     #[cfg(test)]
                     FORWARDING_ROUTE_WORK.with(|work| work.set(work.get() + 1));

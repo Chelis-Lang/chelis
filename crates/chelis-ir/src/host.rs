@@ -8870,7 +8870,10 @@ fn lower_host_expr_kind(
                     let initializer = binding.initializer;
                     let index = ordinal * 2;
                     let selected = forwarding.as_ref().and_then(|target| {
-                        if target.retained || local_regions.contains_key(&index) {
+                        if target.retained
+                            || !target.plan.is_returned_invocation()
+                            || local_regions.contains_key(&index)
+                        {
                             return None;
                         }
                         target
