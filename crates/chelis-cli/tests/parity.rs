@@ -807,6 +807,16 @@ fn parity_kinded_nominal_dimensions() {
 }
 
 #[test]
+fn parity_rank_helper_composition() {
+    let path = examples_root().join("rank_helper_composition.ch");
+    assert_eq!(
+        run_eval(&path),
+        b"out = tensor(shape=[2, 3], data=[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0])\n"
+    );
+    drive_parity(&path, true);
+}
+
+#[test]
 fn parity_rank_poly_borrow_library_only() {
     drive_parity(&examples_root().join("rank_poly_borrow.ch"), false);
 }

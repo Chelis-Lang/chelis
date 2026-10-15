@@ -85,6 +85,14 @@ unify with another dimension but is never generalized. A declared result
 dimension can restore a named shape claim, with a runtime equality check when
 the size cannot be proved statically.
 
+A rank spread carries an ordered row of dimensions. A rank-polymorphic function
+can call another checked helper when the checker establishes that its complete
+body preserves those names under the call's uniquely determined row relation.
+The helper keeps its dtype bounds, effects, and ownership requirements. A matching
+function signature alone supplies no body evidence; local or computed callable
+values cannot borrow evidence from a declaration with the same spelling. See the
+[helper composition example](../../../examples/rank_helper_composition.ch).
+
 ### Dtype bounds
 
 A binder in the `[...]` clause may carry a dtype bound, which restricts every dtype it can

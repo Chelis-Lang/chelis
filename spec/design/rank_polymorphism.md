@@ -1,107 +1,88 @@
-# Rank Polymorphism (Tier 2: identity + erasure rank variables)
+# Rank polymorphism
 
 ## Checked helper composition
 
 `spec/04-type-system.md` §4.5.3 owns name-preserving composition. The
 historical tier analysis below does not override its named-axis forms or its
-checked helper rule. The implementation proposal for chelis#3668 extends the
-existing body-discipline owner rather than exempting user-defined functions.
+checked helper rule.
 
-The checker establishes a private declaration summary only after successful
-inference and row-discipline validation of that declaration's complete body. It
-records the canonical declaration owner, complete quantified row relation,
-and the checked direct-call dependencies needed to derive name preservation.
-The ordinary scheme remains the authority for dtype bounds, effects, and
-ownership; the summary adds body evidence, not a second type scheme. A boolean
-attached to a function spelling or a matching return type cannot establish it.
+The checker establishes private declaration evidence after checking a complete
+body. The evidence binds the canonical declaration digest, its complete checked
+type, its recursive component, and the declaration owners used by its direct
+references. The ordinary scheme remains the authority for quantified ordered
+rows, dtype bounds, effects, and ownership. Body evidence adds no second type
+scheme. A matching function type or an intrinsic spelling cannot establish it.
 
-`TopLevelReferenceGraph` already resolves top-level references with lexical
-parameter/block shadowing and supplies dependency-first strongly connected
-components. Extend that owner to expose the per-application resolved target
-needed by body discipline; do not implement another name resolver or walk text.
-Keep body-discipline classification at the existing structural expression
-boundary, using the same lexical resolution. Validate dependencies in SCC
-order. For a recursive component, check all local operations and complete
-internal call-row relations jointly, with accepted summaries supplying the
-external edges. Publish the component's summaries atomically only after every
-member and edge has passed. Never use an in-progress signature or a cycle's
-existence as body evidence. Reject missing declarations, computed targets,
-unsafe members, and incomplete/cancelled analysis without publishing the
-component. Ordinary recursive-instantiation checks remain independently
-required.
+`TopLevelReferenceGraph` resolves every application through its existing
+lexical parameter/block scope walk. Body discipline consumes those resolved
+targets and the inference product's dependency-first strongly connected
+components. Accepted bodies use the existing identity, named-axis,
+ordered-prefix, and inert builtin classes or other checked declarations.
+Local/computed callees and function-taking transforms supply no declaration
+body evidence merely from their function type. Ordinary row unification and
+procedural named-axis checks remain required.
 
-The finite proof checks the bodies once rather than unfolding recursive
-execution. Every local operation preserves the required named-row relation,
-and every internal edge passes that relation to another fully checked body;
-therefore each finite execution prefix preserves it. This establishes safety
-of executed operations and returned values, including when execution never
-returns. Acyclic-only admission would be an implementation restriction, not a
-consequence of name preservation or §3.1.1.
+For a recursive component, all bodies and internal call relations are checked
+jointly; accepted external declarations supply its outgoing evidence. The
+checker publishes the component atomically after every member passes. An
+in-progress signature or a cycle's existence supplies no proof. The finite
+check establishes preservation along every finite execution prefix without
+claiming termination. Recursive instantiation keeps §3.1.1's uniform rule.
 
-The existing per-definition call to `check_rank_body_discipline` runs during
-inference and sees only a user-name set. Move its compositional decision into
-the shared `validate_semantic_program` protocol, where the checked inference
-product, complete declared-type view, and existing reference graph coexist.
-Preserve all existing builtin class checks and procedural named-axis checks;
-changing validation order must not turn their failures into successful
-summaries. Stage summaries privately during one check and publish them only
-across the existing empty-errors/totality boundary. A row summary certifies
-only the body discipline: `TypeEnv` construction is not a substitute for the
-effect and linearity passes. Section 7.1 infers effects after HM inference;
-its inherited-effect fixed point and declared-effect checks remain required,
-as do the existing ownership checks. Full compiler-library construction must
-retain those acceptance boundaries before publishing executable artifacts.
-No backend executor or numeric carrier changes are required by this proposal.
+The shared `validate_semantic_program` protocol stages this evidence after
+inference. Only the successful, complete checker result publishes it to a
+library context. A row summary certifies body discipline: it does not replace
+the effect fixed point, declared-effect checks, or ownership checks. Compiler
+library construction retains those acceptance boundaries before publishing
+executable artifacts. The implementation adds no executor or numeric carrier.
 
 ### Library and cache ownership
 
-Layered checker APIs intentionally do not re-read base bodies.
-`build_compiled_library_context_with_base` checks only the new layer, and
-`check_ir_with_signature_context` receives a `TypeEnv` rather than the base
-`CheckedProgram`. Imported helper evidence therefore cannot be recovered by
-revalidating the current AST alone.
+Layered checker APIs check only their new declarations. `TypeEnvInner`
+transports the private evidence so signature-context checking does not need
+base bodies. Its canonical digest participates in `LibraryProofId` and in
+`matches_checked_program`; final annotation binds new summaries to the same
+checked declarations and types that the context carries. A body-less public
+signature supplies no evidence.
 
-Transport the accepted summaries within the existing private `TypeEnvInner`
-callable-provenance owner. Include their canonical digest in `LibraryProofId`
-and its `matches_checked_program` validation, alongside existing selector
-provenance. Only the successful checker constructor creates summaries; a
-body-less public signature supplies none. Layer construction clones the base
-snapshot, removes replaced owners before resolving the new declarations, and
-adds only accepted new summaries. Checking a snippet never mutates the base.
-The summary's declaration/type ownership must agree with the restored proof
-envelope; missing, stale, or mismatched evidence fails closed. Source-free
-snapshots retain the existing trusted-producer/cache-envelope boundary and do
-not purport to re-prove maliciously edited summaries.
+Layer construction clones the immutable base, replaces canonical declaration
+owners, and invalidates inherited summaries whose required owner changed.
+Invalidation reaches requiring callers transitively and removes a jointly
+checked recursive component as one unit. Unrelated summaries survive. This
+matches the existing name-based replacement of combined checked programs;
+there is no separate execution namespace for old dependencies. Checking a
+snippet never mutates the base.
 
-Adding this private payload requires coordinated TypeEnv and compiler-api
-cache invalidation. chelis#3631 also changes the private Metadata carrier and
-checked binding ledger: preserve its occurrence identity when transporting
-ASTs, and allocate the composed format against the actual integration base.
-Independent incompatible layouts must not reuse one encoding number. No
-format number is allocated by this proposal.
+The private wire payload is mandatory. Restored evidence must agree with its
+declaration, type, component, dependency owners, and library proof. Missing,
+stale, or mismatched evidence fails closed. Source-free snapshots retain the
+existing trusted-producer/cache-envelope boundary; they do not independently
+re-prove a maliciously edited summary. Changes to the private layout invalidate
+both TypeEnv and compiler-api caches. Independently incompatible layouts use
+distinct format identities when integrated; AST transport preserves full
+Metadata and never derives authorship from inferred ABI stamps.
 
 ### Bounded acceptance oracle
 
-The test-first slice uses existing public checker APIs and CLI test harnesses.
-It covers direct/multi-hop rank helpers, `Float` and `{f32, f64}` bounds,
-unitary named-anchor reduction, monolithic/context/layered/serialized checks,
-replacement and lexical shadowing, body-less declarations, jointly safe and
-unsafe recursive components, hidden
-fixed-rank shape rewrites, and precision/effect/row mismatches. CLI positives
-add canonical formatting and actual Eval/C compilation/link/execution at
-ranks zero through three with unequal extents and exact finite values.
-Package fixtures exercise selective and qualified imports through two helper
-hops. Recursive controls distinguish jointly safe bodies, unchecked or
-shape-rewriting members, incompatible recursive rows/precision, inherited IO,
-and restored component evidence. Divergent recursive controls run only through
-the checker; finite branch controls additionally require Eval/native-C
-agreement. Native lowering qualification is independent of the finite
-body-evidence proof and remains part of the oracle. The finite oracle does
-not claim all ranks, dtypes, modules, or call graphs have been exhaustively
-sampled. Existing negative tests stay enabled.
+The checker tests cover direct and multi-hop helpers, `Float` and `{f32, f64}`
+bounds, unitary named-anchor reduction, monolithic/context/layered/serialized
+checks, replacement and lexical shadowing, body-less signatures, safe and
+unsafe recursive components, hidden fixed-rank rewrites, and
+precision/effect/row mismatches. CLI tests add canonical formatting and actual
+Eval/C compilation, linking, and execution at ranks zero through three with
+unequal extents and exact finite values. Package fixtures exercise selective
+and qualified imports through two helper hops. Divergent recursion is checked
+without executing it; finite recursive branches additionally compare Eval and
+native results. These finite cases do not claim exhaustive sampling of ranks,
+dtypes, modules, or call graphs. Existing negative tests remain enabled.
 
-This source-first proposal has no executed qualification; implementation
-follows an observed semantic RED on these fixtures.
+`examples/rank_helper_composition.ch` is the executable two-hop example; its
+canonical parity test checks the six negated values on a nonsquare tensor.
+
+## Historical tier analysis
+
+The following analysis records earlier implementation boundaries. The numbered
+specification and the checked-composition owner above control the active rule.
 
 **Status:** IDENTITY TIER SHIPPED, INCLUDING BACKEND LOWERING. The identity
 position (`&tensor[..r, p] -> tensor[..r, p]`) is implemented and gated by the
@@ -128,8 +109,7 @@ What landed vs. the plan below, with two deliberate divergences:
   follow spec/04 §4.5.3: shape identity, named-axis operations,
   ordered-prefix key derivations, and inert operations. Ordered-prefix
   derivations retain each operand axis in order and let `split_keys` append
-  its count axis; their checked operation relations own the result shapes. Calling a user-defined function from a rank-poly body
-  remains conservatively rejected.
+  its count axis; their checked operation relations own the result shapes.
 - **Erasure tier is deferred.** `&tensor[..r, p] -> tensor[p]` requires a
   genuine order-invariant *all-reduce-to-scalar* primitive; Chelis's `sum`/`mean`
   are axis-indexed (rank-reducing = Tier-3 rank arithmetic), so there is no

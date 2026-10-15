@@ -32,6 +32,16 @@ pub(super) struct TopLevelReference {
     pub(super) kind: TopLevelReferenceKind,
 }
 
+/// One application's lexical target, resolved by the declaration graph's
+/// existing scope walk. Addresses are session-local AST occurrence keys.
+#[derive(Clone, Debug)]
+pub(super) enum ResolvedApplication {
+    Definition(usize),
+    Unshadowed(String),
+    Local(String),
+    Computed,
+}
+
 /// One canonical syntactic reference graph for top-level inference.
 ///
 /// Vertices are name-keyed top-level `def`s. `item_references` additionally
@@ -46,16 +56,6 @@ pub(super) struct TopLevelReference {
 /// such input, the first definition owns the vertex/ordinal while the last
 /// occurrence supplies its outgoing edges, matching the previous function
 /// planner and cycle detector.
-/// One application's lexical target, resolved by the declaration graph's
-/// existing scope walk. Addresses are session-local AST occurrence keys.
-#[derive(Clone, Debug)]
-pub(super) enum ResolvedApplication {
-    Definition(usize),
-    Unshadowed(String),
-    Local(String),
-    Computed,
-}
-
 #[derive(Clone, Debug, Default)]
 pub(super) struct TopLevelReferenceGraph {
     pub(super) definitions: Vec<TopLevelDefinition>,
