@@ -2280,6 +2280,15 @@ reason = "the compiled-artifact manifest codec cases are executed by PR script-u
 tracking_issue = "chelis#1354"
 
 [[path_rule]]
+prefix = "scripts/test_capacity_census_wire_operations.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script-unit executes exact numeric wire operation registrations and their atom/type rejection controls"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
 prefix = "scripts/capacity_census_wire_operations.py"
 disposition = "owner"
 workflow = "ci.yml"
