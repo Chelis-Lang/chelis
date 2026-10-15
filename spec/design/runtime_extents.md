@@ -1276,6 +1276,13 @@ next because it names a site, and a literal comes last because no lane declares
 an entry literal today, so preferring one over an available site would leave
 the name undeclared.
 
+A candidate sized by an exact metadata read of a guarded restamp depends on
+that restamp; it supplies no independent declaration witness. Follow tensor
+axis carriers and rank-zero `shape` reads through `copy` and `realize` when
+identifying that dependency, including inverse reshapes synthesized by AD.
+Arithmetic scalar targets remain independent. This changes declaration-source
+selection only: the original producer guards and their source order remain.
+
 A declaration is keyed by NAME across the whole graph, which is correct only
 while one name means one extent in one emitted function. Two roots merged into
 one function can each declare the same binder from their own signature, and

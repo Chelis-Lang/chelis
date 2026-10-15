@@ -2113,3 +2113,143 @@ fn synthesized_dim_names_are_told_apart_from_user_spelled_ones() {
         );
     }
 }
+
+/// A backward reshape restores a forward shape; its Shape/Copy chain does
+/// not supply an independent declaration for the forward result's claim.
+/// C4.4 must keep the earlier producer, while an independent binder still wins.
+#[test]
+fn shape_carriers_do_not_redeclare_the_restamp_they_observe() {
+    for carrier in 0..3 {
+        for independent in [false, true] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("shape-carrier");
+            let x = load(&mut dag, decl, "x", vec![named("m")]);
+            let restamp = dag.add_node(
+                decl,
+                RiscOp::Neg,
+                vec![x],
+                ty(vec![named("n")], Prim::F32),
+                None,
+            );
+            let mut extent = dag.add_node(
+                decl,
+                RiscOp::Shape { axis: 0 },
+                vec![restamp],
+                scalar(Prim::Int64),
+                None,
+            );
+            if carrier == 1 {
+                extent = dag.add_node(decl, RiscOp::Copy, vec![extent], scalar(Prim::Int64), None);
+                extent = dag.add_node(
+                    decl,
+                    RiscOp::Realize,
+                    vec![extent],
+                    scalar(Prim::Int64),
+                    None,
+                );
+            }
+            let restored = dag.add_node(
+                decl,
+                RiscOp::Reshape {
+                    new_shape: vec![if carrier == 2 {
+                        RtDim::InputAxis {
+                            tensor: 1,
+                            axis: RtAxis::Lit(0),
+                        }
+                    } else {
+                        RtDim::Node(1)
+                    }],
+                },
+                vec![restamp, if carrier == 2 { restamp } else { extent }],
+                ty(vec![named("n")], Prim::F32),
+                None,
+            );
+            dag.add_root(restored);
+            let canonical = if independent {
+                let witness = load(&mut dag, decl, "independent", vec![named("n")]);
+                let sum = dag.add_node(
+                    decl,
+                    RiscOp::Add,
+                    vec![restored, witness],
+                    ty(vec![named("n")], Prim::F32),
+                    None,
+                );
+                dag.set_roots(vec![sum]);
+                witness
+            } else {
+                x
+            };
+            assert_eq!(
+                dim_extent_origins(&dag)
+                    .into_iter()
+                    .find(|(name, _)| name == "n"),
+                Some((
+                    "n".into(),
+                    ExtentOrigin::ExternalAxis {
+                        load: canonical,
+                        axis: 0
+                    }
+                )),
+                "carrier={carrier}, independent={independent}",
+            );
+        }
+    }
+}
+
+#[test]
+fn arithmetic_extent_carrier_remains_an_independent_local_origin() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("arithmetic-carrier");
+    let x = load(&mut dag, decl, "x", vec![named("m")]);
+    let restamp = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![x],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    let extent = dag.add_node(
+        decl,
+        RiscOp::Shape { axis: 0 },
+        vec![restamp],
+        scalar(Prim::Int64),
+        None,
+    );
+    let one = dag.add_node(
+        decl,
+        RiscOp::synth_const(Prim::Int64, 1.0),
+        vec![],
+        scalar(Prim::Int64),
+        None,
+    );
+    let changed = dag.add_node(
+        decl,
+        RiscOp::Add,
+        vec![extent, one],
+        scalar(Prim::Int64),
+        None,
+    );
+    let resized = dag.add_node(
+        decl,
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Node(1)],
+        },
+        vec![restamp, changed],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    dag.add_root(resized);
+    assert_eq!(
+        dim_extent_origins(&dag)
+            .into_iter()
+            .find(|(name, _)| name == "n"),
+        Some((
+            "n".into(),
+            ExtentOrigin::ScalarInput {
+                value: changed,
+                at: resized,
+                axis: 0
+            }
+        )),
+    );
+}

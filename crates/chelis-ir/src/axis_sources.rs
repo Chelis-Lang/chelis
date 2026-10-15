@@ -1712,8 +1712,10 @@ pub fn claim_sized_nodes(dag: &Dag) -> Result<std::collections::BTreeSet<NodeId>
     Ok(nodes)
 }
 
-/// Whether `(node, axis)` is a guarded restamp or forwards one unchanged
-/// through pass-through axes.
+/// Whether `(node, axis)` observes a guarded restamp through exact axis or
+/// scalar metadata reads. A reshape/expand sized by `shape(restamp, axis)`
+/// observes that same extent; it is not an independent declaration witness.
+/// Arithmetic on the scalar is a new value and ends this walk.
 fn forwards_a_guarded_restamp(
     dag: &Dag,
     node: NodeId,
@@ -1731,20 +1733,25 @@ fn forwards_a_guarded_restamp(
         let Some(owner) = dag.get(node) else {
             return false;
         };
-        if sets_axis(&owner.op, axis) {
-            return false;
-        }
-        let Some(AxisSource::InputAxis {
-            input,
-            axis: RtAxis::Lit(read),
-        }) = output_axis_sources(dag, node).get(axis).cloned()
-        else {
+        let next = match output_axis_sources(dag, node).get(axis) {
+            Some(AxisSource::InputAxis {
+                input,
+                axis: RtAxis::Lit(read),
+            }) => owner
+                .inputs
+                .get(*input)
+                .copied()
+                .zip(usize::try_from(*read).ok()),
+            Some(AxisSource::ScalarInput { input }) => owner
+                .inputs
+                .get(*input)
+                .and_then(|value| scalar_metadata_axis(dag.nodes(), *value)),
+            _ => None,
+        };
+        let Some(next) = next else {
             return false;
         };
-        let (Some(next), Ok(read)) = (owner.inputs.get(input), usize::try_from(read)) else {
-            return false;
-        };
-        (node, axis) = (*next, read);
+        (node, axis) = next;
     }
     false
 }
@@ -1821,6 +1828,28 @@ pub(crate) fn expand_or_reshape_carrier(op: &RiscOp, axis: usize) -> Option<&RtD
     matches!(carrier, RtDim::Node(_) | RtDim::InputAxis { .. }).then_some(carrier)
 }
 
+/// Exact tensor metadata carried by a rank-zero i64 value. Copy and
+/// realization preserve the value; arithmetic, casts and claims do not prove
+/// that it is the same metadata observation.
+fn scalar_metadata_axis(nodes: &[DagNode], mut value: NodeId) -> Option<(NodeId, usize)> {
+    for _ in 0..nodes.len() {
+        let scalar = nodes.get(value.0)?;
+        if scalar.output_type.precision != Prim::Int64 || !scalar.output_type.dims.is_empty() {
+            return None;
+        }
+        match scalar.op {
+            RiscOp::Shape { axis } => {
+                let source = *scalar.inputs.first()?;
+                nodes.get(source.0)?.output_type.dims.get(axis)?;
+                return Some((source, axis));
+            }
+            RiscOp::Copy | RiscOp::Realize => value = *scalar.inputs.first()?,
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// The existing tensor whose complete ordered shape a reshape target
 /// restores. Unlike arbitrary scalar targets, this shape has already been
 /// admitted and remains valid for an inactive inverse reshape's cotangent.
@@ -1834,18 +1863,7 @@ pub fn reshape_restored_shape_source(nodes: &[DagNode], node: &DagNode) -> Optio
                 tensor,
                 axis: RtAxis::Lit(axis),
             } => Some((*node.inputs.get(*tensor)?, usize::try_from(*axis).ok()?)),
-            RtDim::Node(slot) => {
-                let mut source = *node.inputs.get(*slot)?;
-                for _ in 0..nodes.len() {
-                    let scalar = nodes.get(source.0)?;
-                    match scalar.op {
-                        RiscOp::Shape { axis } => return Some((*scalar.inputs.first()?, axis)),
-                        RiscOp::Copy | RiscOp::Realize => source = *scalar.inputs.first()?,
-                        _ => return None,
-                    }
-                }
-                None
-            }
+            RtDim::Node(slot) => scalar_metadata_axis(nodes, *node.inputs.get(*slot)?),
             _ => None,
         }
     };
