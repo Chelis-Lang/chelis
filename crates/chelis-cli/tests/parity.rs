@@ -410,6 +410,11 @@ fn parity_grad_disconnected() {
 }
 
 #[test]
+fn parity_grad_consumption() {
+    drive_parity(&examples_root().join("grad_consumption.ch"), true);
+}
+
+#[test]
 fn parity_grad_bitwise() {
     let path = examples_root().join("grad_bitwise.ch");
     drive_parity(&path, true);

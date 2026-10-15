@@ -6852,13 +6852,59 @@ fn record_projection_path(expr: &Expr) -> Option<Vec<String>> {
     Some(path)
 }
 
+/// Whether this known value carrier requires a host payload boundary. An
+/// unresolved numeric type or a checked callable is not evidence of a host
+/// payload: its existing inference/specialization route still decides it.
+fn tensor_helper_input_is_host_payload(ty: &HostTypeTerm) -> bool {
+    match ty {
+        HostTypeTerm::Adt(..)
+        | HostTypeTerm::List(_)
+        | HostTypeTerm::Dict(..)
+        | HostTypeTerm::Tuple(_)
+        | HostTypeTerm::Option(_)
+        | HostTypeTerm::MappedFile
+        | HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::String)) => true,
+        HostTypeTerm::Scalar(_)
+        | HostTypeTerm::Fn(..)
+        | HostTypeTerm::CheckedBuiltinCallable(_)
+        | HostTypeTerm::CheckedCallableChoice(_)
+        | HostTypeTerm::Dimension(_)
+        | HostTypeTerm::Tensor(_)
+        | HostTypeTerm::PolymorphicTensor(_)
+        | HostTypeTerm::Unit
+        | HostTypeTerm::TypeVariable(_)
+        | HostTypeTerm::InferenceVariable(_)
+        | HostTypeTerm::Never => false,
+    }
+}
+
 // Observation changes the returned product, never helper admission or failure
 // policy. Keep this guard outside both concrete lowering implementations.
 fn lower_tensor_helper_with<T>(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
     lower: impl FnOnce() -> Result<T, crate::lower::LowerDiagnostic>,
 ) -> Option<T> {
+    // A helper captures only scalar/tensor inputs. Dropping a lexical host
+    // value from that scope makes its spelling free in the DAG lowerer,
+    // which can then resolve a same-spelled top-level initializer instead.
+    // Keep the value on the host until its projection becomes a typed tensor
+    // input; callable operands still belong to transform specialization.
+    if chelis_types::linearity::free_runtime_variables(expr)
+        .into_iter()
+        .any(|name| {
+            LoadStoreName::top_level_source_for_label(&name)
+                .ok()
+                .flatten()
+                .is_none()
+                && scope
+                    .get(&name)
+                    .is_some_and(tensor_helper_input_is_host_payload)
+        })
+    {
+        return None;
+    }
     // Do not lower a returned/dynamically-computed callable through the DAG:
     // that path beta-reduces the inner application and loses the outer call.
     // The caller falls back to host lowering, which preserves the unsupported
@@ -6909,7 +6955,7 @@ fn lower_tensor_helper_dag(
     context: &crate::lower::SubexprLoweringContext,
     root_operation: Option<CheckedBuiltinCallable>,
 ) -> Option<crate::Dag> {
-    lower_tensor_helper_with(expr, program, || {
+    lower_tensor_helper_with(expr, program, scope, || {
         let dag = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
             expr,
             collect_tensor_scope(program, scope, Some(expr)).into_sorted(),
@@ -6950,7 +6996,7 @@ fn lower_tensor_helper_product(
         .unwrap_or_else(|| cached_subexpr_lowering_context(program));
     #[cfg(feature = "lowering-trace")]
     if collect_trace {
-        return lower_tensor_helper_with(expr, program, || {
+        return lower_tensor_helper_with(expr, program, scope, || {
             let scoped = collect_tensor_scope(program, scope, Some(expr)).into_sorted();
             let (dag, trace) =
                 crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
@@ -6985,29 +7031,16 @@ fn lower_tensor_helper_dag_with_controls(
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
 ) -> Option<crate::lower::LoweredSubexprWithControls> {
-    let defs = cached_program_defs(program);
-    if expr_reaches_forward_fail(expr, &defs, &mut UnordSet::new()) {
-        record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
-        return None;
-    }
     let context = cached_subexpr_lowering_context(program);
-    let mut lowered = match crate::lower::try_lower_subexpr_program_with_context_and_controls(
-        expr,
-        collect_tensor_scope(program, scope, Some(expr)),
-        &context,
-    ) {
-        Ok(lowered) => lowered,
-        Err(diagnostic) if diagnostic.fatal => {
-            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
-        }
-        Err(_) => {
-            record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
-            return None;
-        }
-    };
-    lowered.dag = remap_tensor_helper_dim_symbols(&lowered.dag, scope, expected)
-        .unwrap_or_else(|diagnostic| crate::lower::raise_fatal_lowering_diagnostic(diagnostic));
-    Some(lowered)
+    lower_tensor_helper_with(expr, program, scope, || {
+        let mut lowered = crate::lower::try_lower_subexpr_program_with_context_and_controls(
+            expr,
+            collect_tensor_scope(program, scope, Some(expr)),
+            &context,
+        )?;
+        lowered.dag = remap_tensor_helper_dim_symbols(&lowered.dag, scope, expected)?;
+        Ok(lowered)
+    })
 }
 
 fn finish_tensor_helper_call(
@@ -27116,6 +27149,150 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
             chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
         chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
+    }
+
+    #[test]
+    fn tensor_helpers_preserve_lexical_host_value_boundaries() {
+        let checked = surf_check(
+            "type Model = | Model { value: tensor[2, f32] }\n\
+             m = Model { value: to_tensor([1.0f32, 2.0f32]) }\n\
+             def inspect(m: &Model) -> f32 = tensor_to_scalar(sum(m.value, 0i32))\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        let (_, body) = session.def_named("inspect").unwrap();
+        let signature = host_def_signature("inspect", body, None, &session).unwrap();
+        let context = cached_subexpr_lowering_context(&session);
+        // A lexical host parameter cannot become the same-spelled global
+        // just because the helper's numeric input list omits its ADT type.
+        assert!(
+            lower_tensor_helper_dag(
+                &signature.body_expr,
+                &session,
+                &signature.scope,
+                &TensorType::scalar_f32(),
+                &context,
+                None,
+            )
+            .is_none()
+        );
+        assert!(
+            lower_tensor_helper_dag_with_controls(
+                &signature.body_expr,
+                &session,
+                &signature.scope,
+                &TensorType::scalar_f32(),
+            )
+            .is_none()
+        );
+        #[cfg(feature = "lowering-trace")]
+        assert!(
+            lower_tensor_helper_product(
+                &signature.body_expr,
+                &session,
+                &signature.scope,
+                &TensorType::scalar_f32(),
+                true,
+                Some(&context),
+                None,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn tensor_helpers_keep_numeric_inner_binders_and_callable_operands() {
+        let checked = surf_check(
+            "def square(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0i32))\n\
+             def inner(x: tensor[2, f32]) -> tensor[2, f32] = {\n  m = x\n  mul(m, m)\n}\n\
+             def differentiated(x: tensor[2, f32]) -> tensor[2, f32] = grad(square)(x)\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        let context = cached_subexpr_lowering_context(&session);
+        for name in ["inner", "differentiated"] {
+            let (_, body) = session.def_named(name).unwrap();
+            let mut signature = host_def_signature(name, body, None, &session).unwrap();
+            // The inner tensor binder shadows this unrelated outer host
+            // value; a free-variable boundary must not inspect it as a use.
+            signature
+                .scope
+                .insert("m".into(), HostTypeTerm::Adt("Model".into(), Vec::new()));
+            signature.scope.insert(
+                "square".into(),
+                HostTypeTerm::Fn(
+                    vec![signature.params[0].ty.clone()],
+                    Box::new(HostTypeTerm::Float32),
+                ),
+            );
+            let expected = tensor_type_from_host_input(&signature.ret_ty).unwrap();
+            assert!(
+                lower_tensor_helper_dag(
+                    &signature.body_expr,
+                    &session,
+                    &signature.scope,
+                    &expected,
+                    &context,
+                    None,
+                )
+                .is_some(),
+                "{name} must retain its numeric helper"
+            );
+            #[cfg(feature = "lowering-trace")]
+            assert!(
+                lower_tensor_helper_product(
+                    &signature.body_expr,
+                    &session,
+                    &signature.scope,
+                    &expected,
+                    true,
+                    Some(&context),
+                    None,
+                )
+                .is_some(),
+                "{name} must retain its traced numeric helper"
+            );
+        }
+    }
+
+    #[test]
+    fn tensor_helpers_keep_checked_operation_specialization() {
+        let checked =
+            surf_check("def finite(x: tensor[2, f32]) -> tensor[2, bool] = is_finite(x)\n");
+        let session = HostLoweringSession::new(&checked);
+        let (_, body) = session.def_named("finite").unwrap();
+        let mut signature = host_def_signature("finite", body, None, &session).unwrap();
+        let operation = CheckedBuiltinCallable::FloatClassify(chelis_types::FloatClassify::Finite);
+        signature.scope.insert(
+            "is_finite".into(),
+            HostTypeTerm::CheckedBuiltinCallable(operation),
+        );
+        let context = cached_subexpr_lowering_context(&session);
+        let expected = tensor_type_from_host_input(&signature.ret_ty).unwrap();
+        // A checked callable is selected by the operation authority, rather
+        // than captured as either a numeric input or an aggregate payload.
+        assert!(
+            lower_tensor_helper_dag(
+                &signature.body_expr,
+                &session,
+                &signature.scope,
+                &expected,
+                &context,
+                Some(operation),
+            )
+            .is_some()
+        );
+        #[cfg(feature = "lowering-trace")]
+        assert!(
+            lower_tensor_helper_product(
+                &signature.body_expr,
+                &session,
+                &signature.scope,
+                &expected,
+                true,
+                Some(&context),
+                Some(operation),
+            )
+            .is_some()
+        );
     }
 
     /// A typed local callable carries `surf_binding_type` on its bind value.
