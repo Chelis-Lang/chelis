@@ -135,6 +135,11 @@ fn scan_integer_forward_overflow_and_bool_rejection() {
                 .contains("overflow")
         );
     }
+    let (reverse_integer, _) = graph(&[3], Prim::Int32, 0, ScanDirection::Decreasing, false);
+    let values =
+        TensorValue::finalize_from_wide_int("oracle", Prim::Int32, vec![3], vec![1, 2, -1])
+            .unwrap();
+    assert!(eval_tensor(&reverse_integer, &UnordMap::from([("x".into(), values)])).is_err());
     let (dag, _) = graph(&[1], Prim::Bool, 0, ScanDirection::Increasing, false);
     let value = TensorValue::from_storage(
         vec![1],

@@ -30,6 +30,16 @@ class OperationFields(unittest.TestCase):
                 ):
                     validate_operation_atoms((contract,), changed)
 
+    def test_scan_axis_has_exact_op33_authority(self):
+        from capacity_census_wire_operations import operation_contracts, validate_operation_atoms
+
+        scan = next(c for c in operation_contracts() if c.field.endswith("::Cumsum.axis"))
+        self.assertEqual(scan.atom, "[05-OP-33]")
+        spec = (ROOT / "spec/05-risc-primitives.md").read_text()
+        validate_operation_atoms((scan,), spec)
+        with self.assertRaisesRegex(GraphError, "authority anchor"):
+            validate_operation_atoms((replace(scan, atom="[05-OP-30]"),), spec)
+
     def test_descriptor_type_and_selected_atom_are_both_checked(self):
         from capacity_census_wire_operations import (
             operation_contracts,

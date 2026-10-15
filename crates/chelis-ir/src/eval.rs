@@ -2637,6 +2637,9 @@ fn ordered_scan(
             input.shape.len()
         ));
     }
+    if direction == crate::dag::ScanDirection::Decreasing && !input.prim().is_float() {
+        return Err("decreasing cumsum requires a float operand".into());
+    }
     let result = input.prim().default_reduce_sum_result_precision()?;
     admit_result("cumsum", &input.shape, result)?;
     if input.is_empty() {
