@@ -284,25 +284,27 @@ fn compiled_growing_claim_reads_are_linear_with_a_quadratic_counterfactual() {
 
 #[test]
 fn a_lexically_shadowed_list_operation_cannot_supply_delta_evidence() {
-    for size in [3, 5] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("size");
-        std::fs::write(&path, "x".repeat(size)).unwrap();
-        let source = list_source(path.to_str().unwrap(), 2, "3", false, false)
+    for native in [false, true] {
+        for size in [3, 5] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("size");
+            std::fs::write(&path, "x".repeat(size)).unwrap();
+            let source = list_source(path.to_str().unwrap(), 2, "3", false, false)
             .replace("= len(fold", "= {\n append = fn (xs: List[tensor[*, f32]], x: tensor[*, f32]) -> [produce(size), produce(3i64)]\n len(fold")
             .replace("range(0i64, steps)))", "range(0i64, steps)))\n}");
-        let (success, output) = result_claims::run(&source, false);
-        assert_eq!(success, size == 3, "{source}\n{output}");
-        if size == 5 {
-            assert!(
-                output.contains("numeric trap: domain in load at i64"),
-                "{output}"
-            );
-            assert_eq!(
-                output.lines().filter(|line| *line == "before").count(),
-                1,
-                "{output}"
-            );
+            let (success, output) = result_claims::run(&source, native);
+            assert_eq!(success, size == 3, "{source}\n{output}");
+            if size == 5 {
+                assert!(
+                    output.contains("numeric trap: domain in load at i64"),
+                    "{output}"
+                );
+                assert_eq!(
+                    output.lines().filter(|line| *line == "before").count(),
+                    1,
+                    "{output}"
+                );
+            }
         }
     }
 }
@@ -457,44 +459,58 @@ fn top_level_builtin_shadowing_is_rejected_before_delta_lowering() {
 
 #[test]
 fn aliases_and_selected_callables_retain_complete_entry_validation() {
-    for route in ["append_step", "alias", "selected"] {
-        for size in [3, 5] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("size");
-            std::fs::write(&path, "x".repeat(size)).unwrap();
-            let mut source = list_source(path.to_str().unwrap(), 2, "3", false, false)
-                .replace("def run(", "def append_step(xs: List[tensor[*, f32]], x: tensor[*, f32]) -> List[tensor[*, f32]] = append(xs, x)\ndef run(");
-            if route != "append_step" {
-                let value = if route == "alias" {
-                    "append_step"
-                } else {
-                    "if gt(size, 4i64) then append_step else append_step"
-                };
-                source = source
-                    .replace("= len(fold", &format!("= {{\n step = {value}\n len(fold"))
-                    .replace("range(0i64, steps)))", "range(0i64, steps)))\n}");
+    for native in [false, true] {
+        for route in ["append_step", "alias", "selected"] {
+            // C ownership lowering does not admit these computed callees;
+            // the direct named call is executed on both lanes.
+            if native && route != "append_step" {
+                continue;
             }
-            source = source.replace(
-                "append(acc, v)",
-                if route == "append_step" {
-                    "append_step(acc, v)"
-                } else {
-                    "step(acc, v)"
-                },
-            );
-            let (success, output) = result_claims::run(&source, false);
-            assert_eq!(success, size == 3, "{source}\n{output}");
-            if size == 5 {
-                assert!(
-                    output.contains("numeric trap: domain in load at i64"),
-                    "{output}"
+            for size in [3, 5] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("size");
+                std::fs::write(&path, "x".repeat(size)).unwrap();
+                let mut source = list_source(path.to_str().unwrap(), 2, "3", false, false)
+                .replace("def run(", "def append_step(xs: List[tensor[*, f32]], x: tensor[*, f32]) -> List[tensor[*, f32]] = append(xs, x)\ndef run(");
+                if route != "append_step" {
+                    let value = if route == "alias" {
+                        "append_step"
+                    } else {
+                        "if gt(size, 4i64) then append_step else append_step"
+                    };
+                    source = source
+                        .replace("= len(fold", &format!("= {{\n step = {value}\n len(fold"))
+                        .replace("range(0i64, steps)))", "range(0i64, steps)))\n}");
+                }
+                source = source.replace(
+                    "append(acc, v)",
+                    if route == "append_step" {
+                        "append_step(acc, v)"
+                    } else {
+                        "step(acc, v)"
+                    },
                 );
-                assert!(output.contains("acc[1] axis 0 = 5"), "{output}");
-                assert_eq!(
-                    output.lines().filter(|line| *line == "after").count(),
-                    1,
-                    "{output}"
-                );
+                let (success, output) = result_claims::run(&source, native);
+                assert_eq!(success, size == 3, "{source}\n{output}");
+                if size == 5 {
+                    assert!(
+                        output.contains("numeric trap: domain in load at i64"),
+                        "{output}"
+                    );
+                    assert!(
+                        output.contains(if native {
+                            "input `acc[1]` axis 0 expected 3, got 5"
+                        } else {
+                            "acc[1] axis 0 = 5"
+                        }),
+                        "{output}"
+                    );
+                    assert_eq!(
+                        output.lines().filter(|line| *line == "after").count(),
+                        1,
+                        "{output}"
+                    );
+                }
             }
         }
     }
@@ -603,6 +619,34 @@ fn growing_named_receipts_restore_dependent_local_witnesses() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn original_linked_chain_witness_has_bounded_native_claim_work() {
+    for formal in ["n", "unclaimed"] {
+        for steps in [100, 400] {
+            let source = format!(
+                "type Chain[n] =\n | End {{ v: tensor[n, f32] }}\n | Link {{ v: tensor[n, f32], next: Chain[n] }}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef grow[n](size: i64, k: i64) -> Chain[n] = fold(fn (acc: Chain[{formal}], i: i64) -> Link {{ v: produce(size), next: acc }}, End {{ v: produce(size) }}, range(0i64, k))\ndef head_width[n](c: Chain[n]) -> i64 = match c with {{ | End {{ v }} => shape(v, 0i32) | Link {{ v, next }} => shape(v, 0i32) }}\nout = head_width(grow(3i64, {steps}i64))\n"
+            );
+            let source = if formal == "unclaimed" {
+                source
+                    .replace("type Chain[n]", "type Chain[T]")
+                    .replace("v: tensor[n, f32]", "v: T")
+                    .replace("next: Chain[n]", "next: Chain[T]")
+                    .replace("Chain[unclaimed]", "Chain[tensor[*, f32]]")
+                    .replace("Chain[n]", "Chain[tensor[*, f32]]")
+                    .replace("def grow[n]", "def grow")
+                    .replace("def head_width[n]", "def head_width")
+            } else {
+                source
+            };
+            let (work, origins) = counted_native(&source);
+            eprintln!(
+                "C original Chain formal={formal} K={steps}: {work} claim work units; origins={origins}"
+            );
+            assert!(work <= 60 * steps as u64 + 60, "{work}");
         }
     }
 }

@@ -5164,3 +5164,41 @@ fn named_definition_accumulator_claim_retains_full_entry_work() {
         }
     }
 }
+
+#[test]
+fn original_linked_chain_witness_keeps_final_claims_and_linear_entry_work() {
+    for formal in ["n", "unclaimed"] {
+        for steps in [100, 400] {
+            let source = format!(
+                "type Chain[n] =\n | End {{ v: tensor[n, f32] }}\n | Link {{ v: tensor[n, f32], next: Chain[n] }}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef grow[n](size: i64, k: i64) -> Chain[n] = fold(fn (acc: Chain[{formal}], i: i64) -> Link {{ v: produce(size), next: acc }}, End {{ v: produce(size) }}, range(0i64, k))\ndef head_width[n](c: Chain[n]) -> i64 = match c with {{ | End {{ v }} => shape(v, 0i32) | Link {{ v, next }} => shape(v, 0i32) }}\nout = head_width(grow(3i64, {steps}i64))\n"
+            );
+            let source = if formal == "unclaimed" {
+                source
+                    .replace("type Chain[n]", "type Chain[T]")
+                    .replace("v: tensor[n, f32]", "v: T")
+                    .replace("next: Chain[n]", "next: Chain[T]")
+                    .replace("Chain[unclaimed]", "Chain[tensor[*, f32]]")
+                    .replace("Chain[n]", "Chain[tensor[*, f32]]")
+                    .replace("def grow[n]", "def grow")
+                    .replace("def head_width[n]", "def head_width")
+            } else {
+                source
+            };
+            let checked = checked_surf(&source);
+            let empty = UnordMap::new();
+            let inputs = HostEvaluationInputs {
+                roots: &empty,
+                bindings: None,
+            };
+            super::eval::reset_entry_claim_work();
+            let outcome = evaluate_host_program_with_library_and_types(
+                &checked, None, None, inputs, None, None,
+            )
+            .expect("original Chain witness evaluates");
+            assert_eq!(render_value(&outcome.host_bindings["out"]), "3");
+            let work = super::eval::entry_claim_work();
+            eprintln!("original Chain formal={formal} K={steps}: {work} entry work units");
+            assert!(work <= 40 * steps as u64 + 40, "{work}");
+        }
+    }
+}
