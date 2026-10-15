@@ -4181,11 +4181,11 @@ impl WireConditionalPlans {
         authority.dedup();
         // A witness epoch, not a filtered source maximum. Different cutoffs
         // inside the same epoch describe exactly the same historical graph.
-        let epoch = cache.witnesses.as_ref().map_or(0, |ws| {
-            ws.partition_point(|i| {
-                wire_ingress_work!(conditional_prefix_probes);
-                nodes[*i].id < cutoff
-            })
+        // An absent witness-list authority cannot certify a complete prefix.
+        // Defer to the original resolver instead of inventing an empty epoch.
+        let epoch = cache.witnesses.as_ref()?.partition_point(|i| {
+            wire_ingress_work!(conditional_prefix_probes);
+            nodes[*i].id < cutoff
         });
         let mut held = cache.conditional_overlay.as_ref()?.borrow_mut();
         if held.as_ref().is_none_or(|o| {
@@ -4233,11 +4233,20 @@ impl WireConditionalPlans {
                 }
             }
             let k = active.len();
-            let budget = k
-                .checked_mul(k.saturating_add(1))
-                .map(|n| n / 2)
-                .unwrap_or(usize::MAX);
-            if budget <= degree {
+            // Divide the even factor first. If this exact pair count cannot
+            // fit usize, it is larger than every representable incidence count:
+            // incidence traversal is necessarily the smaller strategy.
+            let use_pairs = k
+                .checked_add(1)
+                .and_then(|next| {
+                    if k.is_multiple_of(2) {
+                        (k / 2).checked_mul(next)
+                    } else {
+                        k.checked_mul(next / 2)
+                    }
+                })
+                .is_some_and(|budget| budget <= degree);
+            if use_pairs {
                 for (a, oa) in &active {
                     for (b, ob) in active.range(*a..) {
                         wire_ingress_work!(conditional_pair_probes);
