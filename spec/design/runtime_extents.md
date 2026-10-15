@@ -2195,6 +2195,31 @@ extent-bearing formals, and unproved transformations. List storage copying,
 scan-owned output histories and invocation origin-arena lifetimes are separate
 from accumulator entry evidence.
 
+Direct named callbacks derive their construction postcondition from the
+checked function body, independently of its declared result type. Exact
+two-argument forwarding through an inline callback composes two receipts: the
+outer callback's original admission and the named callee's original formal
+obligation. Wildcard-only direct tensor Lists retain an admission pattern with
+empty extent axes; this records tensor positions without inventing claims.
+Nominal walks retain their original claim positions rather than admitting
+previously unobserved wildcard fields.
+
+Eval owns composition frames within the active loop application. A frame binds
+the exact checked call site and canonical callee definition and consumes its
+inner receipt during that one application, so recursive or unrelated calls
+cannot borrow it. Callable and capture resolution remain at the original call
+site. A mismatch disables reuse and retains complete checks.
+
+C retains the named invocation's staged payloads, formal ingress, signature
+entry and result claim scopes. The entry receipt validates immutable forwarding
+through the staged bindings, the exact original obligation and the lowered
+construction over that entry's renamed formal. Each proved boundary owns a
+separate successful-entry flag, witness summary and construction recipe; an
+outer claim cannot authorize the callee's guard or fix its first witnesses.
+Every boundary in the sequence is validated before reuse is enabled. Rank and precision
+polymorphism, unproved callables and unsupported compositions likewise retain
+their complete checks.
+
 ## Part II: remaining delivery sequence
 
 Each row below is an owner of concrete work, not a claim that a PR exists.

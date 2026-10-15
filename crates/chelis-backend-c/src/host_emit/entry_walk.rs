@@ -1144,8 +1144,14 @@ pub(super) fn delta_list_metadata(
     param: &HostParam,
     value: &str,
     proof: &chelis_ir::host::AccumulatorDeltaProof,
-    old: &str,
+    old: Option<&str>,
 ) -> String {
+    if matches!(
+        proof.recipe(),
+        chelis_ir::host::AccumulatorDeltaRecipe::Inherited
+    ) {
+        return String::new();
+    }
     let HostAbiType::List(inner) = &param.ty else {
         unreachable!("eligible direct tensor List");
     };
@@ -1156,6 +1162,7 @@ pub(super) fn delta_list_metadata(
     else {
         unreachable!("List interval");
     };
+    let old = old.expect("List interval has a retained prior length");
     let index_type = HostAbiType::Int64
         .c_type_name()
         .expect("i64 is a resolved C host ABI type");

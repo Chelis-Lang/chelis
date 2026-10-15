@@ -159,8 +159,26 @@ impl std::error::Error for ClaimPatternError {}
 impl ClaimPattern {
     /// The pattern of `authored`, an alias-normalized authored type.
     pub fn derive(authored: &Expr, registry: &AdtRegistry) -> Result<Self, ClaimPatternError> {
+        Self::derive_with_admission(authored, registry, false)
+    }
+
+    /// Tensor positions for metadata admission, including wildcard-only
+    /// tensors. Empty axes remain empty: admission supplies no extent claim.
+    pub fn derive_admission(
+        authored: &Expr,
+        registry: &AdtRegistry,
+    ) -> Result<Self, ClaimPatternError> {
+        Self::derive_with_admission(authored, registry, true)
+    }
+
+    fn derive_with_admission(
+        authored: &Expr,
+        registry: &AdtRegistry,
+        admission: bool,
+    ) -> Result<Self, ClaimPatternError> {
         let mut builder = Builder {
             registry,
+            admission,
             nodes: Vec::new(),
             memo: BTreeMap::new(),
             alias_targets: BTreeMap::new(),
@@ -257,6 +275,7 @@ pub enum ClaimStep<'a> {
 
 struct Builder<'a> {
     registry: &'a AdtRegistry,
+    admission: bool,
     nodes: Vec<Option<ClaimNode>>,
     memo: BTreeMap<String, ClaimNodeId>,
     /// A recursive alias application's node stands for the node of its
@@ -349,9 +368,8 @@ impl Builder<'_> {
                 Some(inner) => self.node(inner),
                 None => Ok(None),
             },
-            DeepTag::TTensor => {
-                Ok(tensor_claim(ty, children)?.map(|t| self.push(ClaimNode::Tensor(t))))
-            }
+            DeepTag::TTensor => Ok(tensor_claim(ty, children, self.admission)?
+                .map(|t| self.push(ClaimNode::Tensor(t)))),
             DeepTag::TTuple => {
                 let items = children
                     .iter()
@@ -680,7 +698,11 @@ fn symbol(expr: &Expr) -> Option<&str> {
 }
 
 /// The obligations of one tensor type, or `None` when it claims nothing.
-fn tensor_claim(ty: &Expr, children: &[Expr]) -> Result<Option<ClaimTensor>, ClaimPatternError> {
+fn tensor_claim(
+    ty: &Expr,
+    children: &[Expr],
+    admission: bool,
+) -> Result<Option<ClaimTensor>, ClaimPatternError> {
     let Some((_, dims)) = children.split_last() else {
         return Err(ClaimPatternError::Malformed(
             "t-tensor has no precision".into(),
@@ -715,7 +737,7 @@ fn tensor_claim(ty: &Expr, children: &[Expr]) -> Result<Option<ClaimTensor>, Cla
         };
         axes.push(ClaimAxis { position, claim });
     }
-    Ok((!axes.is_empty()).then(|| ClaimTensor {
+    Ok((admission || !axes.is_empty()).then(|| ClaimTensor {
         ty: ty.clone(),
         rank: spread.is_none().then_some(fixed),
         min_rank: fixed,
@@ -1068,13 +1090,27 @@ mod tests {
     fn admission_pattern_retains_wildcards_without_creating_extent_claims() {
         let registry = registry(BOX);
         let authored = ty("(t-adt {} Box (d-name {} *))");
-        assert!(ClaimPattern::derive(&authored, &registry).unwrap().is_empty());
+        assert!(
+            ClaimPattern::derive(&authored, &registry)
+                .unwrap()
+                .is_empty()
+        );
         let admission = ClaimPattern::derive_admission(&authored, &registry).unwrap();
         let root = admission.nested_root().unwrap();
         let leaf = tensor(&admission, field(&admission, root, "Box", 0));
         assert!(leaf.axes.is_empty());
         assert_eq!(leaf.rank, Some(1));
-        assert!(admission.child(root, ClaimStep::Field { ctor: "Box", field: 1 }).is_none());
+        assert!(
+            admission
+                .child(
+                    root,
+                    ClaimStep::Field {
+                        ctor: "Box",
+                        field: 1
+                    }
+                )
+                .is_none()
+        );
     }
 
     #[test]

@@ -1914,6 +1914,7 @@ pub struct HostCallback<T = HostTypeTerm> {
     /// second-formal entry obligation (runtime_extents.md C6.6).
     pub stationary_accumulator: Option<StationaryAccumulatorProof>,
     pub accumulator_delta: Option<Arc<AccumulatorDeltaProof>>,
+    pub accumulator_composition: Option<Arc<AccumulatorCompositionProof>>,
     pub kind: HostCallbackKind<T>,
     pub ret_ty: T,
 }
@@ -2512,6 +2513,7 @@ fn resolve_host_callback(
     Ok(ConcreteHostCallback {
         stationary_accumulator: callback.stationary_accumulator,
         accumulator_delta: callback.accumulator_delta,
+        accumulator_composition: callback.accumulator_composition,
         kind,
         ret_ty: callback.ret_ty.into_concrete()?,
     })
@@ -12493,6 +12495,7 @@ fn materialize_runtime_grad_list_element(
         callback: HostCallback {
             stationary_accumulator: None,
             accumulator_delta: None,
+            accumulator_composition: None,
             kind: HostCallbackKind::Inline {
                 params: vec![HostParam {
                     name: item_name.into(),
@@ -12686,6 +12689,7 @@ fn pack_grad_roots(plan: &GradPackPlan, roots: &mut impl Iterator<Item = HostExp
                 callback: HostCallback {
                     stationary_accumulator: None,
                     accumulator_delta: None,
+                    accumulator_composition: None,
                     kind: HostCallbackKind::Inline {
                         params: vec![HostParam {
                             name: "__chelis_grad_list_row".into(),
@@ -18875,6 +18879,7 @@ fn checked_tensor_scan_callback(
         ret_ty,
         stationary_accumulator: _,
         accumulator_delta: _,
+        accumulator_composition: _,
     } = callback;
     let (params, body) = match kind {
         HostCallbackKind::Inline { params, body } => (params, *body),
@@ -18918,6 +18923,7 @@ fn checked_tensor_scan_callback(
     HostCallback {
         stationary_accumulator: None,
         accumulator_delta: None,
+        accumulator_composition: None,
         kind: HostCallbackKind::Inline {
             params,
             body: Box::new(body),
@@ -19080,7 +19086,39 @@ fn lower_host_callback(
             let Some(body_expr) = kids.get(1) else {
                 return Ok(None);
             };
-            let mut body = lower_host_expr(body_expr, program, &callback_scope, tensor_helpers)?;
+            let composition = stamped_parts(body_expr)
+                .filter(|(tag, _, _)| *tag == DeepTag::App)
+                .and_then(|(_, _, args)| args.first())
+                .and_then(|callee| as_node(callee).filter(|node| node.tag() == DeepTag::Var))
+                .and_then(|callee| callee.children_slice().first().and_then(symbol_name))
+                .filter(|name| !host_lexically_binds(&callback_scope, name))
+                .and_then(|name| {
+                    program.def_named(name).and_then(|(_, callee)| {
+                        accumulator_composition_proof(expr, callee, program.adt_registry())
+                            .filter(|proof| proof.inner().has_extent_claim())
+                    })
+                });
+            let retained = if let Some(proof) = &composition {
+                lower_named_retained_host_invocation(
+                    body_expr,
+                    &proof.callee_name,
+                    &ret_ty,
+                    program,
+                    &callback_scope,
+                    tensor_helpers,
+                    true,
+                )?
+            } else {
+                None
+            };
+            let composed_delta = retained
+                .as_ref()
+                .and(composition.as_ref())
+                .map(|proof| Arc::new(proof.inner.clone()));
+            let mut body = match retained {
+                Some((body, _)) => body,
+                None => lower_host_expr(body_expr, program, &callback_scope, tensor_helpers)?,
+            };
             // Actualized callback types choose representation; the authored
             // parameter still supplies the obligation checked at invocation.
             // Both inline and retained callbacks use SignatureEntry so List
@@ -19198,8 +19236,10 @@ fn lower_host_callback(
             };
             Ok(Some(HostCallback {
                 stationary_accumulator: stationary_accumulator_proof(expr, program.adt_registry()),
-                accumulator_delta: accumulator_delta_proof(expr, program.adt_registry())
-                    .map(Arc::new),
+                accumulator_delta: composed_delta.or_else(|| {
+                    accumulator_delta_proof(expr, program.adt_registry()).map(Arc::new)
+                }),
+                accumulator_composition: composition.map(Arc::new),
                 kind: HostCallbackKind::Inline {
                     params,
                     body: Box::new(body),
@@ -19238,6 +19278,42 @@ fn lower_host_callback(
             else {
                 return Ok(None);
             };
+            if let Some((_, checked_callee)) = program.def_named(name)
+                && let Some(proof) =
+                    accumulator_construction_proof(checked_callee, program.adt_registry())
+                        .filter(AccumulatorDeltaProof::has_extent_claim)
+            {
+                let params = positional_host_params(param_tys.clone(), &program_callee.callee());
+                let application = synthesize_callable_application(expr, &params, None, None);
+                let mut callback_scope = scope.clone();
+                for parameter in &params {
+                    bind_host_local(
+                        &mut callback_scope,
+                        parameter.name.clone(),
+                        parameter.ty.clone(),
+                    );
+                }
+                if let Some((body, _)) = lower_named_retained_host_invocation(
+                    &application,
+                    name,
+                    &ret_ty,
+                    program,
+                    &callback_scope,
+                    tensor_helpers,
+                    true,
+                )? {
+                    return Ok(Some(HostCallback {
+                        stationary_accumulator: None,
+                        accumulator_delta: Some(Arc::new(proof)),
+                        accumulator_composition: None,
+                        kind: HostCallbackKind::Inline {
+                            params,
+                            body: Box::new(body),
+                        },
+                        ret_ty,
+                    }));
+                }
+            }
             Ok(Some(named_host_callback(
                 program_callee.callee(),
                 param_tys,
@@ -19273,6 +19349,7 @@ fn named_host_callback(
     HostCallback {
         stationary_accumulator: None,
         accumulator_delta: None,
+        accumulator_composition: None,
         kind: HostCallbackKind::Named {
             params: positional_host_params(param_tys, &callee),
             callee,
@@ -22814,6 +22891,7 @@ fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> Hos
         ret_ty,
         stationary_accumulator,
         accumulator_delta,
+        accumulator_composition,
     } = callback;
     let ret_ty = if ret_ty.is_unresolved() && !expected.is_unresolved() {
         expected.clone()
@@ -22832,6 +22910,7 @@ fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> Hos
         ret_ty,
         stationary_accumulator,
         accumulator_delta,
+        accumulator_composition,
     }
 }
 
@@ -30405,6 +30484,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let callback = HostCallback {
             stationary_accumulator: None,
             accumulator_delta: None,
+            accumulator_composition: None,
             kind: HostCallbackKind::Inline {
                 params: vec![
                     HostParam {
@@ -30763,6 +30843,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 callback: HostCallback {
                     stationary_accumulator: None,
                     accumulator_delta: None,
+                    accumulator_composition: None,
                     kind: HostCallbackKind::Named {
                         callee: HostCallee::test_local(function),
                         params: vec![HostParam {
@@ -31331,6 +31412,9 @@ impl AccumulatorDeltaProof {
     pub fn recipe(&self) -> &AccumulatorDeltaRecipe {
         &self.recipe
     }
+    pub fn has_extent_claim(&self) -> bool {
+        self.pattern.nodes().iter().any(|node| matches!(node, crate::claim_pattern::ClaimNode::Tensor(tensor) if !tensor.axes.is_empty()))
+    }
     /// A List recipe requires this exact builtin after lexical resolution.
     /// C validates its lowered Builtin identity; Eval uses its ordinary
     /// builtin-dispatch authority in the closure's captured frame.
@@ -31343,25 +31427,70 @@ impl AccumulatorDeltaProof {
 
     /// Transport never turns this proof into an unchecked backend opt-out.
     pub fn validates_body<T: AccumulatorTypeIdentity>(&self, body: &HostExpr<T>) -> bool {
-        fn variable<T>(expr: &HostExpr<T>, parameter: &str) -> bool {
-            matches!(&expr.kind, HostExprKind::Var(name, _) if name == parameter)
+        self.validates_body_as(body, &self.parameter)
+    }
+
+    /// Validate the retained invocation's alpha-renamed formal. Consumers
+    /// must additionally prove its entry value forwards the loop accumulator
+    /// and that the original formal owns the identical obligation.
+    pub fn validates_body_as<T: AccumulatorTypeIdentity>(
+        &self,
+        body: &HostExpr<T>,
+        parameter: &str,
+    ) -> bool {
+        fn alias<T>(expr: &HostExpr<T>) -> Option<&str> {
+            match &expr.kind {
+                HostExprKind::Var(name, _) => Some(name),
+                HostExprKind::FormalIngress { value, .. } => alias(value),
+                _ => None,
+            }
+        }
+        fn variable<T>(
+            expr: &HostExpr<T>,
+            parameter: &str,
+            aliases: &BTreeMap<String, String>,
+        ) -> bool {
+            alias(expr).is_some_and(|name| {
+                aliases.get(name).map(String::as_str).unwrap_or(name) == parameter
+            })
         }
         fn validate<T: AccumulatorTypeIdentity>(
             expr: &HostExpr<T>,
             parameter: &str,
             recipe: &AccumulatorDeltaRecipe,
+            aliases: &BTreeMap<String, String>,
         ) -> bool {
             match &expr.kind {
                 HostExprKind::Let { bindings, body, .. }
                 | HostExprKind::RetainedInvocation { bindings, body, .. } => {
-                    bindings.iter().all(|binding| binding.name != parameter)
-                        && validate(body, parameter, recipe)
+                    if bindings.iter().any(|binding| binding.name == parameter) {
+                        return false;
+                    }
+                    let mut local = aliases.clone();
+                    for binding in bindings {
+                        let source = alias(&binding.value).map(|name| {
+                            local
+                                .get(name)
+                                .map(String::as_str)
+                                .unwrap_or(name)
+                                .to_owned()
+                        });
+                        local.remove(&binding.name);
+                        if let Some(source) = source {
+                            local.insert(binding.name.clone(), source);
+                        }
+                    }
+                    validate(body, parameter, recipe, &local)
                 }
-                HostExprKind::ResultClaimScope { body, .. } => validate(body, parameter, recipe),
-                HostExprKind::ExtentSites { value, .. } => validate(value, parameter, recipe),
+                HostExprKind::ResultClaimScope { body, .. } => {
+                    validate(body, parameter, recipe, aliases)
+                }
+                HostExprKind::ExtentSites { value, .. } => {
+                    validate(value, parameter, recipe, aliases)
+                }
                 _ => match recipe {
                     AccumulatorDeltaRecipe::Fresh => true,
-                    AccumulatorDeltaRecipe::Inherited => variable(expr, parameter),
+                    AccumulatorDeltaRecipe::Inherited => variable(expr, parameter, aliases),
                     AccumulatorDeltaRecipe::Constructor {
                         owner,
                         constructor,
@@ -31369,7 +31498,7 @@ impl AccumulatorDeltaProof {
                     } => {
                         matches!(&expr.kind, HostExprKind::AdtConstruct { ctor, fields: actuals, ty }
                             if ty.accumulator_nominal_identity() == Some(owner.as_str()) && ctor == constructor && actuals.len() == fields.len()
-                                && actuals.iter().zip(fields).all(|(actual, recipe)| validate(actual, parameter, recipe)))
+                                && actuals.iter().zip(fields).all(|(actual, recipe)| validate(actual, parameter, recipe, aliases)))
                     }
                     AccumulatorDeltaRecipe::ListInterval {
                         operation,
@@ -31383,13 +31512,13 @@ impl AccumulatorDeltaProof {
                             return false;
                         }
                         match (name.as_str(), args.as_slice(), *before, *after) {
-                            ("append", [old, _], 0, 1) => variable(old, parameter),
+                            ("append", [old, _], 0, 1) => variable(old, parameter, aliases),
                             ("concat", [old, fresh], 0, after) => {
-                                variable(old, parameter)
+                                variable(old, parameter, aliases)
                                     && matches!(&fresh.kind, HostExprKind::List(items, _) if items.len() == after)
                             }
                             ("concat", [fresh, old], before, 0) => {
-                                variable(old, parameter)
+                                variable(old, parameter, aliases)
                                     && matches!(&fresh.kind, HostExprKind::List(items, _) if items.len() == before)
                             }
                             _ => false,
@@ -31398,7 +31527,7 @@ impl AccumulatorDeltaProof {
                 },
             }
         }
-        validate(body, &self.parameter, &self.recipe)
+        validate(body, parameter, &self.recipe, &BTreeMap::new())
     }
 }
 
@@ -31407,6 +31536,102 @@ impl AccumulatorDeltaProof {
 pub fn accumulator_delta_proof(
     expr: &Expr,
     registry: &chelis_types::adt::AdtRegistry,
+) -> Option<AccumulatorDeltaProof> {
+    let (types, result) = expr_fn_type(expr)?;
+    if types.first()? != &result {
+        return None;
+    }
+    accumulator_construction_proof_impl(expr, registry, None, false)
+}
+
+/// A checked immutable construction postcondition is independent of the
+/// function's declared result claim. In particular a wildcard result neither
+/// proves nor invalidates reuse of the exact first formal's components.
+pub fn accumulator_construction_proof(
+    expr: &Expr,
+    registry: &chelis_types::adt::AdtRegistry,
+) -> Option<AccumulatorDeltaProof> {
+    accumulator_construction_proof_impl(expr, registry, None, true)
+}
+
+/// Independent obligations composed through one exact direct forwarding call.
+/// The caller must resolve `callee_name` by its checked lexical authority and
+/// retain the exact callee definition; this proof does not resolve spellings.
+#[derive(Debug, Clone)]
+pub struct AccumulatorCompositionProof {
+    callee_name: String,
+    callsite: Expr,
+    outer: AccumulatorDeltaProof,
+    inner: AccumulatorDeltaProof,
+}
+
+impl AccumulatorCompositionProof {
+    pub fn callee_name(&self) -> &str {
+        &self.callee_name
+    }
+    pub fn callsite(&self) -> &Expr {
+        &self.callsite
+    }
+    pub fn outer(&self) -> &AccumulatorDeltaProof {
+        &self.outer
+    }
+    pub fn inner(&self) -> &AccumulatorDeltaProof {
+        &self.inner
+    }
+}
+
+pub fn accumulator_composition_proof(
+    callback: &Expr,
+    callee: &Expr,
+    registry: &chelis_types::adt::AdtRegistry,
+) -> Option<AccumulatorCompositionProof> {
+    fn bare(expr: &Expr) -> &Expr {
+        match expr {
+            Expr::MetaExpr(meta, _) => bare(&meta.expr),
+            _ => expr,
+        }
+    }
+    let callback_node = as_node(bare(callback)).filter(|node| node.tag() == DeepTag::Fn)?;
+    let params = as_node(callback_node.children_slice().first()?)?;
+    let [acc, item] = params.children_slice() else {
+        return None;
+    };
+    let (types, _) = expr_fn_type(callback)?;
+    if types.len() != 2 || !matches!(types[1], HostTypeTerm::Scalar(_) | HostTypeTerm::Unit) {
+        return None;
+    }
+    let body = callback_node.children_slice().get(1)?;
+    let app = as_node(bare(body)).filter(|node| node.tag() == DeepTag::App)?;
+    let [function, first, second] = app.children_slice() else {
+        return None;
+    };
+    let variable = |expr: &Expr| {
+        as_node(bare(expr))
+            .filter(|node| node.tag() == DeepTag::Var)
+            .and_then(|node| node.children_slice().first())
+            .and_then(symbol_name)
+            .map(str::to_owned)
+    };
+    let parameter = param_name(acc)?;
+    if variable(first)? != parameter || variable(second)? != param_name(item)? {
+        return None;
+    }
+    let authored = param_declared_type_expr(acc)?;
+    let mut outer = accumulator_construction_proof_impl(callee, registry, Some(&authored), true)?;
+    outer.parameter = parameter;
+    Some(AccumulatorCompositionProof {
+        callee_name: variable(function)?,
+        callsite: body.clone(),
+        outer,
+        inner: accumulator_construction_proof(callee, registry)?,
+    })
+}
+
+fn accumulator_construction_proof_impl(
+    expr: &Expr,
+    registry: &chelis_types::adt::AdtRegistry,
+    forwarded_formal: Option<&Expr>,
+    admission: bool,
 ) -> Option<AccumulatorDeltaProof> {
     use crate::claim_pattern::{ClaimNode, ClaimNodeId, ClaimPattern};
     fn variable(expr: &Expr, name: &str) -> bool {
@@ -31550,7 +31775,12 @@ pub fn accumulator_delta_proof(
         }
     }
     if let Expr::MetaExpr(meta, _) = expr {
-        return accumulator_delta_proof(&meta.expr, registry);
+        return accumulator_construction_proof_impl(
+            &meta.expr,
+            registry,
+            forwarded_formal,
+            admission,
+        );
     }
     let node = as_node(expr).filter(|node| node.tag() == DeepTag::Fn)?;
     let params = node
@@ -31561,15 +31791,22 @@ pub fn accumulator_delta_proof(
     let [acc, _] = params.children_slice() else {
         return None;
     };
-    let (types, result_type) = expr_fn_type(expr)?;
-    if types.len() != 2
-        || types[0] != result_type
-        || !matches!(types[1], HostTypeTerm::Scalar(_) | HostTypeTerm::Unit)
-    {
+    let (types, _) = expr_fn_type(expr)?;
+    if types.len() != 2 || !matches!(types[1], HostTypeTerm::Scalar(_) | HostTypeTerm::Unit) {
         return None;
     }
-    let authored = param_declared_type_expr(acc)?;
-    let pattern = ClaimPattern::derive(&authored, registry).ok()?;
+    let declared = param_declared_type_expr(acc)?;
+    let authored = forwarded_formal.unwrap_or(&declared);
+    let mut pattern = ClaimPattern::derive(authored, registry).ok()?;
+    if admission
+        && pattern.is_empty()
+        && matches!(decode_host_type(authored), Ok(HostTypeTerm::List(element)) if matches!(*element, HostTypeTerm::Tensor(_)))
+    {
+        // Ordinary direct List admission already visits wildcard elements.
+        // Do not introduce new admission of nominal fields that the original
+        // claim walk did not own.
+        pattern = ClaimPattern::derive_admission(authored, registry).ok()?;
+    }
     // The receipt represents extent witnesses, not polymorphic rank or
     // precision bindings. Preserve full admission while those extra binding
     // kinds have no receipt representation.
@@ -31588,10 +31825,10 @@ pub fn accumulator_delta_proof(
         root,
         root,
     )?;
-    (reused && !matches!(recipe, AccumulatorDeltaRecipe::Inherited)).then_some(
+    (reused && (admission || !matches!(recipe, AccumulatorDeltaRecipe::Inherited))).then_some(
         AccumulatorDeltaProof {
             parameter,
-            formal_type: decode_host_type(&authored).ok()?,
+            formal_type: decode_host_type(authored).ok()?,
             pattern: Arc::new(pattern),
             recipe,
         },

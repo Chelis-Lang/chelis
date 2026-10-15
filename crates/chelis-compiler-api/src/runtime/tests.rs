@@ -253,6 +253,7 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
         claim_patterns: Default::default(),
+        loop_compositions: Vec::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
@@ -308,6 +309,7 @@ fn issue_1125_eval_checked_root(
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
         claim_patterns: Default::default(),
+        loop_compositions: Vec::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
@@ -2029,6 +2031,7 @@ fn eval_deep_with_bindings(
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
         claim_patterns: Default::default(),
+        loop_compositions: Vec::new(),
         transcript: Vec::new(),
         transcript_capture: None,
         resolving_top_levels: Vec::new(),
@@ -5139,31 +5142,57 @@ fn growing_accumulator_claim_work_is_bounded_by_new_components() {
 #[test]
 fn named_definition_accumulator_claim_has_independent_compositional_receipts() {
     for combine in ["fold", "scan"] {
-        for steps in [100, 400] {
-            let source = format!(
-                "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, produce(3i64))\ndef run(seed: List[tensor[3, f32]], steps: i64) -> i64 = len({combine}(fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i), seed, range(0i64, steps)))\nout = run([produce(3i64)], {steps}i64)\n"
-            );
-            let checked = checked_surf(&source);
-            let empty = UnordMap::new();
-            let inputs = HostEvaluationInputs {
-                roots: &empty,
-                bindings: None,
-            };
-            super::eval::reset_entry_claim_work();
-            let outcome = evaluate_host_program_with_library_and_types(
-                &checked, None, None, inputs, None, None,
-            )
-            .expect("named callback evaluates");
-            assert_eq!(
-                render_value(&outcome.host_bindings["out"]),
-                (if combine == "scan" { steps } else { steps + 1 }).to_string()
-            );
-            let work = super::eval::entry_claim_work();
-            eprintln!("Eval named definition {combine} K={steps}: {work}");
-            // §4.7: the outer wildcard admission does not discharge the
-            // helper's stronger formal. Both boundaries need their own
-            // first successful entry and construction postcondition.
-            assert!(work <= 40 * steps as u64 + 100, "{work}");
+        for direct in [false, true] {
+            for unproved in [false, true] {
+                for seed_size in [1, 100] {
+                    for steps in [100, 400] {
+                        let callback = if direct {
+                            "step"
+                        } else {
+                            "fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i)"
+                        };
+                        let body = if unproved {
+                            "{\n old = acc\n append(old, produce(3i64))\n}"
+                        } else {
+                            "append(acc, produce(3i64))"
+                        };
+                        let source = format!(
+                            "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = {body}\ndef run(seed: List[tensor[3, f32]], steps: i64) -> i64 = len({combine}({callback}, seed, range(0i64, steps)))\nout = run(map(fn (i: i64) -> produce(3i64), range(0i64, {seed_size}i64)), {steps}i64)\n"
+                        );
+                        let checked = checked_surf(&source);
+                        let empty = UnordMap::new();
+                        let inputs = HostEvaluationInputs {
+                            roots: &empty,
+                            bindings: None,
+                        };
+                        super::eval::reset_entry_claim_work();
+                        let outcome = evaluate_host_program_with_library_and_types(
+                            &checked, None, None, inputs, None, None,
+                        )
+                        .expect("named callback evaluates");
+                        assert_eq!(
+                            render_value(&outcome.host_bindings["out"]),
+                            (if combine == "scan" {
+                                steps
+                            } else {
+                                steps + seed_size
+                            })
+                            .to_string()
+                        );
+                        let work = super::eval::entry_claim_work();
+                        eprintln!(
+                            "Eval named definition {combine} direct={direct} unproved={unproved} N={seed_size} K={steps}: {work}"
+                        );
+                        if unproved {
+                            assert!(work >= steps as u64 * steps as u64 / 2, "{work}");
+                        } else {
+                            // The outer wildcard cannot discharge the stronger
+                            // helper formal; both first entries remain checked.
+                            assert!(work <= 40 * (steps + seed_size) as u64 + 100, "{work}");
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -821,6 +821,7 @@ fn evaluate_host_program_core(
         active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
         claim_patterns: Default::default(),
+        loop_compositions: Vec::new(),
         transcript: Vec::new(),
         transcript_capture: crate::transcript_capture::current_transcript_capture(),
         resolving_top_levels: Vec::new(),
@@ -1298,6 +1299,8 @@ fn descend_manifest_path(value: RuntimeValue, step: RootPathStep) -> Option<Runt
 }
 
 struct EvalContext<'a> {
+    /// Ephemeral exact-callsite receipts owned by active loop callbacks.
+    loop_compositions: Vec<eval::LoopCompositionReceipt>,
     #[cfg(feature = "clarabel-provider")]
     native_clarabel_solve: bool,
     /// Only lexical values; successful declarations never enter this frame.

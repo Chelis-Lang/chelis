@@ -1031,6 +1031,30 @@ struct EntryActual {
 struct LoopEntryReceipt {
     witnesses: Option<Vec<(String, NamedResultSource, usize)>>,
     delta: Option<DeltaEntryReceipt>,
+    composition: Option<LoopCompositionReceipt>,
+    disabled: bool,
+}
+
+pub(super) struct LoopCompositionReceipt {
+    proof: chelis_ir::host::AccumulatorCompositionProof,
+    canonical: String,
+    checked_callee: Expr,
+    inner: Option<Box<LoopEntryReceipt>>,
+    entered: bool,
+}
+
+impl LoopEntryReceipt {
+    fn delta(proof: chelis_ir::host::AccumulatorDeltaProof) -> Self {
+        Self {
+            delta: Some(DeltaEntryReceipt {
+                proof,
+                checked: None,
+                pending: Vec::new(),
+                old_list_len: 0,
+            }),
+            ..Self::default()
+        }
+    }
 }
 
 struct DeltaEntryReceipt {
@@ -2790,6 +2814,58 @@ impl<'a> EvalContext<'a> {
         } else {
             self.eval_expr(func)?
         };
+        let composition_index = self.loop_compositions.len().checked_sub(1).filter(|index| {
+            let frame = &self.loop_compositions[*index];
+            if frame.entered
+                || frame.inner.is_none()
+                || tagged_expr_children(frame.proof.callsite()) != tagged_expr_children(node.expr)
+                || var_name(func) != Some(frame.proof.callee_name())
+            {
+                return false;
+            }
+            let RuntimeValue::Closure {
+                checked_function,
+                def_name,
+                invocation_contracts,
+                env,
+                ..
+            } = &callable
+            else {
+                return false;
+            };
+            def_name.as_ref() == Some(&frame.canonical)
+                && invocation_contracts.is_empty()
+                && tagged_expr_children(checked_function)
+                    == tagged_expr_children(&frame.checked_callee)
+                && frame
+                    .proof
+                    .inner()
+                    .required_list_operation()
+                    .is_none_or(|operation| {
+                        self.active_builtin_symbol_in_frame(operation.symbol(), env)
+                    })
+        });
+        if let Some(index) = composition_index {
+            let mut inner = self.loop_compositions[index]
+                .inner
+                .take()
+                .expect("armed callee receipt");
+            #[cfg(test)]
+            ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
+            let result = self.apply_resolved_callable_under_result_claim_with_receipt(
+                callable,
+                args,
+                &arg_type_exprs,
+                result_type_expr.as_ref(),
+                claims,
+                None,
+                Some(&mut inner),
+            );
+            let frame = &mut self.loop_compositions[index];
+            frame.inner = Some(inner);
+            frame.entered = result.is_ok();
+            return result;
+        }
         self.apply_resolved_callable_under_result_claim(
             callable,
             args,
@@ -3614,7 +3690,6 @@ impl<'a> EvalContext<'a> {
         let RuntimeValue::Closure {
             checked_function,
             invocation_contracts,
-            def_name: None,
             env,
             ..
         } = callback
@@ -3629,21 +3704,47 @@ impl<'a> EvalContext<'a> {
         {
             return Some(LoopEntryReceipt::default());
         }
-        let proof = chelis_ir::host::accumulator_delta_proof(checked_function, &self.adt_registry)?;
+        let proof =
+            chelis_ir::host::accumulator_construction_proof(checked_function, &self.adt_registry);
+        let Some(proof) = proof else {
+            // Reading a checked declaration does not initialize its captures.
+            // Actual callable resolution and its independent first entry stay
+            // at the original application in the callback body.
+            let (DeepTag::Fn, children) = tagged_expr_children(checked_function)? else {
+                return None;
+            };
+            let body = children.get(1)?;
+            let (DeepTag::App, app) = tagged_expr_children(body)? else {
+                return None;
+            };
+            let name = var_name(app.first()?)?;
+            if env.contains_key(name) {
+                return None;
+            }
+            let (canonical, callee) = self.lookup_top_level_def(name)?;
+            let composition = chelis_ir::host::accumulator_composition_proof(
+                checked_function,
+                &callee,
+                &self.adt_registry,
+            )?;
+            let mut outer = LoopEntryReceipt::delta(composition.outer().clone());
+            outer.composition = Some(LoopCompositionReceipt {
+                canonical,
+                checked_callee: callee,
+                inner: Some(Box::new(LoopEntryReceipt::delta(
+                    composition.inner().clone(),
+                ))),
+                proof: composition,
+                entered: false,
+            });
+            return Some(outer);
+        };
         if let Some(operation) = proof.required_list_operation()
             && !self.active_builtin_symbol_in_frame(operation.symbol(), env)
         {
             return None;
         }
-        Some(LoopEntryReceipt {
-            witnesses: None,
-            delta: Some(DeltaEntryReceipt {
-                proof,
-                checked: None,
-                pending: Vec::new(),
-                old_list_len: 0,
-            }),
-        })
+        Some(LoopEntryReceipt::delta(proof))
     }
 
     fn apply_loop_callback(
@@ -3662,11 +3763,25 @@ impl<'a> EvalContext<'a> {
                 result_type,
             );
         };
+        if receipt.disabled {
+            return self.apply_resolved_callable_with_arg_types(
+                callback,
+                args,
+                arg_types,
+                result_type,
+            );
+        }
         let _stack_frame = EvalCallStackFrame::enter();
         if EvalCallStackFrame::budget_exhausted() {
             return Err("evaluation stack budget exhausted during a function call".to_owned());
         }
-        self.apply_resolved_callable_with_arg_types_impl(
+        let composed = receipt.composition.take();
+        let has_composition = composed.is_some();
+        if let Some(mut composition) = composed {
+            composition.entered = false;
+            self.loop_compositions.push(composition);
+        }
+        let result = self.apply_resolved_callable_with_arg_types_impl(
             callback,
             args,
             arg_types,
@@ -3674,7 +3789,16 @@ impl<'a> EvalContext<'a> {
             &[],
             None,
             Some(receipt),
-        )
+        );
+        if has_composition {
+            let frame = self
+                .loop_compositions
+                .pop()
+                .expect("active loop composition frame");
+            receipt.disabled = !frame.entered;
+            receipt.composition = Some(frame);
+        }
+        result
     }
 
     /// Like [`Self::apply_resolved_callable`], but additionally records a
@@ -3707,6 +3831,28 @@ impl<'a> EvalContext<'a> {
         result_type_expr: Option<&Expr>,
         claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
+    ) -> Result<RuntimeValue, String> {
+        self.apply_resolved_callable_under_result_claim_with_receipt(
+            callable,
+            args,
+            arg_type_exprs,
+            result_type_expr,
+            claims,
+            present,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_resolved_callable_under_result_claim_with_receipt(
+        &mut self,
+        callable: RuntimeValue,
+        args: Vec<RuntimeValue>,
+        arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
+        claims: &[DeclaredResultClaim],
+        present: Option<&[bool]>,
+        receipt: Option<&mut LoopEntryReceipt>,
     ) -> Result<RuntimeValue, String> {
         let _stack_frame = EvalCallStackFrame::enter();
         if EvalCallStackFrame::budget_exhausted() {
@@ -3768,7 +3914,7 @@ impl<'a> EvalContext<'a> {
             result_type_expr,
             &formal_claims,
             present,
-            None,
+            receipt,
         )
     }
 
@@ -7274,6 +7420,7 @@ mod legacy_capture_order_tests {
             active_declaration_names: Vec::new(),
             def_kernels: UnordMap::new(),
             claim_patterns: Default::default(),
+            loop_compositions: Vec::new(),
             transcript: Vec::new(),
             transcript_capture: None,
             resolving_top_levels: Vec::new(),
