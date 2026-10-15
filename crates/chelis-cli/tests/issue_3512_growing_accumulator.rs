@@ -494,14 +494,20 @@ fn aliases_and_selected_callables_retain_complete_entry_validation() {
                         .replace("= len(fold", &format!("= {{\n step = {value}\n len(fold"))
                         .replace("range(0i64, steps)))", "range(0i64, steps)))\n}");
                 }
-                source = source.replace(
-                    "append(acc, v)",
-                    if route == "append_step" {
-                        "append_step(acc, v)"
-                    } else {
-                        "step(acc, v)"
-                    },
+                let intrinsic_call = "append(older, v)";
+                assert_eq!(
+                    source.matches(intrinsic_call).count(),
+                    1,
+                    "the fixture must contain exactly one callback construction: {source}"
                 );
+                let routed_call = if route == "append_step" {
+                    "append_step(older, v)"
+                } else {
+                    "step(older, v)"
+                };
+                source = source.replacen(intrinsic_call, routed_call, 1);
+                assert_eq!(source.matches(routed_call).count(), 1, "{source}");
+                assert!(!source.contains(intrinsic_call), "{source}");
                 let (success, output) = result_claims::run(&source, native);
                 assert_eq!(success, size == 3, "{source}\n{output}");
                 if size == 5 {
