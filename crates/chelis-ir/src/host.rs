@@ -32982,4 +32982,25 @@ mod accumulator_forwarding_wrapper_tests {
         }
         assert!(plan.advance(position, DeepTag::Let, 1).is_none());
     }
+
+    #[test]
+    fn forwarding_plan_retains_the_application_beneath_legacy_metadata() {
+        let source = "def step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = acc\nout = fold(fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i), [to_tensor([1.0f32, 2.0f32, 3.0f32])], range(0i64, 1i64))\n";
+        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
+        let callback = checked.exprs().last().and_then(find_lambda).unwrap();
+        let node = as_node(callback).unwrap();
+        let mut children = node.children_slice().to_vec();
+        children[1] = Expr::MetaExpr(
+            chelis_deep::ast::MetaExpr {
+                metadata: Metadata::default(),
+                expr: Box::new(children[1].clone()),
+            },
+            children[1].span(),
+        );
+        let wrapped = Expr::node(DeepTag::Fn, node.meta().clone(), children, callback.span());
+        let plan = accumulator_forwarding_plan(&wrapped).unwrap();
+        assert_eq!(plan.callsite().tag(), Some(DeepTag::App));
+    }
 }

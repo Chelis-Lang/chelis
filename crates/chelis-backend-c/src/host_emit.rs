@@ -17000,3 +17000,99 @@ mod storage_narrowing_tests {
         assert_eq!(total, 0, "{total} misrounded conversions over 2^32 inputs");
     }
 }
+
+#[cfg(test)]
+mod forwarding_entry_identity_tests {
+    use super::*;
+
+    fn checked_callback() -> HostCallback {
+        let source = "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, produce(3i64))\nout = len(fold(fn (acc: List[tensor[*, f32]], i: i64) -> { old0 = acc\n item0 = i\n old1 = old0\n item1 = item0\n step(old1, item1) }, [produce(3i64)], range(0i64, 2i64)))\n";
+        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let checked = chelis_types::check_typed_program(&deep).unwrap();
+        let checked = chelis_effects::check_program(&checked).unwrap();
+        let checked = chelis_types::check_linearity(&checked).unwrap();
+        let realizability = chelis_effects::realizability::infer_realizability(
+            &checked,
+            crate::TENSOR_CAPABLE_PRIMS,
+        );
+        let manifest =
+            chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
+        let lowered =
+            chelis_ir::host::try_lower_compiled_program_with_manifest(&checked, &manifest).unwrap();
+        let host = crate::prepare_host_program_for_codegen(lowered.host.unwrap()).unwrap();
+        let manifested = chelis_types::manifest::ManifestedProgram::new(
+            checked,
+            manifest,
+            chelis_types::types::Target::C,
+        );
+        let verified = chelis_ir::ownership::verify_ownership(
+            chelis_ir::ownership::lower_host_ownership(&manifested, host).unwrap(),
+        )
+        .unwrap();
+        let projected = crate::host_abi::project_program(verified.emission()).unwrap();
+        fn find(expr: &HostExpr) -> Option<&HostCallback> {
+            match &expr.kind {
+                HostExprKind::Fold { callback, .. } => Some(callback),
+                HostExprKind::Builtin { args, .. } => args.iter().find_map(find),
+                HostExprKind::Let { bindings, body, .. } => bindings
+                    .iter()
+                    .find_map(|binding| find(&binding.value))
+                    .or_else(|| find(body)),
+                HostExprKind::ResultClaimScope { body, .. }
+                | HostExprKind::ExtentSites { value: body, .. } => find(body),
+                _ => None,
+            }
+        }
+        projected
+            .program()
+            .globals
+            .iter()
+            .find_map(|binding| find(&binding.value))
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn retained_forwarding_entries_validate_original_item_staging() {
+        let callback = checked_callback();
+        let composition = callback.accumulator_composition.as_ref().unwrap();
+        let mut proofs = Vec::new();
+        if let Some(outer) = composition.outer().filter(|proof| proof.has_extent_claim()) {
+            proofs.push(std::sync::Arc::new(outer.clone()));
+        }
+        proofs.push(std::sync::Arc::new(composition.inner().clone()));
+        let HostCallbackKind::Inline { params, body } = &callback.kind else {
+            panic!("inline callback");
+        };
+        assert!(retained_accumulator_entries(params, body, &proofs).is_some());
+        fn mutate(expr: &mut HostExpr, target: &str) -> bool {
+            match &mut expr.kind {
+                HostExprKind::Let { bindings, body, .. }
+                | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+                    for binding in bindings {
+                        if binding.name == target {
+                            binding.value = HostExpr::new(HostExprKind::Var(
+                                "unrelated_item".into(),
+                                HostAbiType::Int64,
+                            ));
+                            return true;
+                        }
+                    }
+                    mutate(body, target)
+                }
+                HostExprKind::ResultClaimScope { body, .. }
+                | HostExprKind::ExtentSites { value: body, .. } => mutate(body, target),
+                _ => false,
+            }
+        }
+        for target in ["item0", "item1"] {
+            let mut changed = body.clone();
+            assert!(mutate(&mut changed, target));
+            assert!(
+                retained_accumulator_entries(params, &changed, &proofs).is_none(),
+                "changed original item: {target}"
+            );
+        }
+    }
+}

@@ -2261,8 +2261,8 @@ their complete checks.
 
 Checked forwarding wrappers retain an exact final application occurrence beneath
 sequential immutable `Let`, metadata and block-tail nodes. A private shared
-forwarding plan records the original accumulator/item roles, lexical binding
-occurrences and selected call path; it does not infer identity from equal values
+forwarding plan derives the selected call path from the original accumulator/item
+roles and sequential lexical binding occurrences; it does not infer identity from equal values
 or a callee spelling. Initializers resolve before their binders enter scope;
 shadowing invalidates the affected role. Alias analysis processes each binding
 once without cloning the complete environment at every nested Let.
