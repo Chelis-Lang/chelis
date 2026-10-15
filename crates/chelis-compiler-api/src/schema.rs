@@ -3945,6 +3945,9 @@ impl WireWitnessIndex {
             required,
             ..
         } = question;
+        // No witness-list authority means this index has not certified which
+        // prefix exists, even when it is still cold. Preserve original lookup.
+        cache.witnesses.as_ref()?;
         self.advance(nodes, cutoff, cache);
         let proof = match (
             self.origins.get(&WireWitnessKey(left)),
@@ -4226,10 +4229,13 @@ impl WireConditionalPlans {
             for id in active.keys() {
                 wire_ingress_work!(conditional_selection_steps);
                 if let Some(adj) = self.adjacency.get(id) {
-                    degree = degree.saturating_add(adj.partition_point(|(stamp, _)| {
+                    // Each active adjacency is counted once. Its eligible
+                    // prefix is part of the index's live allocated edge slots,
+                    // so the aggregate count fits usize without saturation.
+                    degree += adj.partition_point(|(stamp, _)| {
                         wire_ingress_work!(conditional_prefix_probes);
                         *stamp < cutoff
-                    }));
+                    });
                 }
             }
             let k = active.len();
@@ -7227,6 +7233,29 @@ mod tests {
             }
             let origins = WireIngressOrigins::new(&nodes);
             let a = WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 };
+            let missing_sources = [0, 1, nodes.len() as u64];
+            let mut missing_authority = origins.comparison(&nodes, &missing_sources);
+            missing_authority.witnesses = None;
+            let b = WireSemanticAxisOrigin::ExternalAxis { load: 1, axis: 0 };
+            // A cold index has not examined this graph. Missing authority must
+            // defer, never certify an empty prefix or invent epoch zero.
+            assert!(wire_witnessed_origin_equal(
+                &nodes,
+                a,
+                b,
+                &missing_sources,
+                false,
+                &missing_authority
+            ));
+            let disconnected = WireSemanticAxisOrigin::ExternalAxis { load: n, axis: 0 };
+            assert!(!wire_witnessed_origin_equal(
+                &nodes,
+                a,
+                disconnected,
+                &missing_sources,
+                false,
+                &missing_authority
+            ));
             WIRE_INGRESS_WORK.with(|work| work.set(Some(WireIngressWork::default())));
             for source in 1..n {
                 for selected in [source, (source + 1) % n, source] {
