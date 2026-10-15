@@ -5147,31 +5147,36 @@ fn ordered_scan_prefix_suffix_bits_on_device() {
                 -0.0,
             ],
         ] {
-            let mut dag = Dag::new();
-            let owner = dag.declare("scan");
-            let ty = vec_f32(data.len());
-            let x = dag.add_node(
-                owner,
-                RiscOp::Load { name: "x".into() },
-                vec![],
-                ty.clone(),
-                None,
-            );
-            let root = dag.add_node(
-                owner,
-                RiscOp::Cumsum { axis: 0, direction },
-                vec![x],
-                ty,
-                None,
-            );
-            dag.add_root(root);
-            let inputs = [TestInput::new("x", &[data.len()], &data)];
-            let actual = compile_and_run_single_output(&dag, "scan_bits", &inputs);
-            let expected = expected_single_output(&dag, &inputs);
-            assert_eq!(
-                actual.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
-                expected.into_iter().map(f32::to_bits).collect::<Vec<_>>()
-            );
+            let geometries = if data.len() == 6 {
+                vec![(vec![6], 0), (vec![2, 3], 0), (vec![2, 3], 1)]
+            } else {
+                vec![(vec![data.len()], 0)]
+            };
+            for (shape, axis) in geometries {
+                let mut dag = Dag::new();
+                let owner = dag.declare("scan");
+                let ty = TensorType {
+                    dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision: Prim::F32,
+                };
+                let x = dag.add_node(
+                    owner,
+                    RiscOp::Load { name: "x".into() },
+                    vec![],
+                    ty.clone(),
+                    None,
+                );
+                let root =
+                    dag.add_node(owner, RiscOp::Cumsum { axis, direction }, vec![x], ty, None);
+                dag.add_root(root);
+                let inputs = [TestInput::new("x", &shape, &data)];
+                let actual = compile_and_run_single_output(&dag, "scan_bits", &inputs);
+                let expected = expected_single_output(&dag, &inputs);
+                assert_eq!(
+                    actual.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+                    expected.into_iter().map(f32::to_bits).collect::<Vec<_>>()
+                );
+            }
         }
     }
 }

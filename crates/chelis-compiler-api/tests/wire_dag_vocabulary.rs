@@ -135,6 +135,8 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "pow",
         // Version 29: stored-width float classification.
         "float_classify",
+        // Version 30: ordered prefix/suffix scan metadata.
+        "cumsum",
     ];
     // Version 26 (chelis#759): `cast_trunc` became the `trunc` rung of the
     // tagged `named_cast` operation, so the count is unchanged.
@@ -144,7 +146,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         WIRE_DAG_SCHEMA_VERSION, 30,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 83);
+    assert_eq!(actual.len(), 84);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"

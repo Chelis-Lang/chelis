@@ -184,16 +184,16 @@ def dag_cases():
                 )
             )
 
-    empty = {"schema_version": 29, "declarations": [], "nodes": [], "roots": []}
+    empty = {"schema_version": 30, "declarations": [], "nodes": [], "roots": []}
     add("empty", empty, True)
-    for version in (None, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 30):
+    for version in (None, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 31):
         value = {**empty, "schema_version": version}
         if version is None:
             del value["schema_version"]
         add("version-" + str(version), value, False)
     scalar = {"dtype": "f64", "bits": "8000000000000000"}
     const = {
-        "schema_version": 29,
+        "schema_version": 30,
         "declarations": ["entry"],
         "nodes": [
             {
@@ -234,7 +234,7 @@ def dag_cases():
 
     def graph(op):
         return {
-            "schema_version": 29,
+            "schema_version": 30,
             "declarations": ["entry"],
             "nodes": [
                 copy.deepcopy(load),
@@ -265,6 +265,33 @@ def dag_cases():
         bad = copy.deepcopy(softmax)
         bad["nodes"][1][target] = value
         add("softmax-invalid-" + label, bad, False)
+
+    for dtype in ("f16", "bf16", "f32", "f64", "i8", "i16", "i32", "i64"):
+        directions = ("increasing", "decreasing") if dtype.startswith("f") or dtype == "bf16" else ("increasing",)
+        for direction in directions:
+            scan = graph({"kind": "cumsum", "axis": 0, "direction": direction})
+            scan["nodes"][0]["output_type"]["precision"] = dtype
+            scan["nodes"][1]["output_type"]["precision"] = "i32" if dtype in ("i8", "i16") else dtype
+            add(f"cumsum-{dtype}-{direction}", scan, True)
+    scan = graph({"kind": "cumsum", "axis": 0, "direction": "increasing"})
+    for label, target, value in (
+        ("axis", "op", {"kind": "cumsum", "axis": 1, "direction": "increasing"}),
+        ("negative-axis", "op", {"kind": "cumsum", "axis": -1, "direction": "increasing"}),
+        ("direction", "op", {"kind": "cumsum", "axis": 0, "direction": "sideways"}),
+        ("missing-direction", "op", {"kind": "cumsum", "axis": 0}),
+        ("missing-axis", "op", {"kind": "cumsum", "direction": "increasing"}),
+        ("arity", "inputs", []),
+        ("dtype", "output_type", {"dims": [{"kind": "lit", "size": 2}], "precision": "f64"}),
+        ("shape", "output_type", {"dims": [{"kind": "lit", "size": 3}], "precision": "f32"}),
+    ):
+        bad = copy.deepcopy(scan)
+        bad["nodes"][1][target] = value
+        add("cumsum-invalid-" + label, bad, False)
+    for dtype, direction in (("bool", "increasing"), ("i32", "decreasing")):
+        bad = graph({"kind": "cumsum", "axis": 0, "direction": direction})
+        for node in bad["nodes"]:
+            node["output_type"]["precision"] = dtype
+        add(f"cumsum-invalid-{dtype}", bad, False)
 
     good = graph({"kind": "copy"})
     add("owned-reference", good, True)
@@ -371,7 +398,7 @@ def dag_cases():
     witness_node["op"]["name"] = "witness"
     witness_node["output_type"]["dims"] = [{"kind": "lit", "size": 4}]
     reference_graph = {
-        "schema_version": 29,
+        "schema_version": 30,
         "declarations": ["entry"],
         "nodes": [
             value_node,
@@ -477,7 +504,7 @@ def dag_cases():
             add(f"owner-{owner}-to-end", changed, False, "forbids the to_end carrier")
 
     witness = {
-        "schema_version": 29,
+        "schema_version": 30,
         "declarations": ["entry"],
         "nodes": [
             copy.deepcopy(load),
@@ -732,7 +759,7 @@ def result_reference_cases():
 
     cases = []
     dag = {
-        "schema_version": 29,
+        "schema_version": 30,
         "declarations": ["entry"],
         "nodes": [
             {
@@ -789,7 +816,7 @@ def result_reference_cases():
                             "outside the owning DAG",
                         )
                     )
-        for version in (10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 30):
+        for version in (10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 31):
             bad = copy.deepcopy(good)
             bad["dag"]["schema_version"] = version
             cases.append(

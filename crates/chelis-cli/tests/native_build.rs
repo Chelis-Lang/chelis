@@ -1211,6 +1211,13 @@ fn nan_atom_coverage(
         Id::Atan => (RiscOp::Atan, BuiltinInventory),
         Id::Tanh => (RiscOp::Tanh, BuiltinInventory),
         Id::Softmax => (RiscOp::Softmax { axis: 0 }, Rows),
+        Id::Cumsum => (
+            RiscOp::Cumsum {
+                axis: 0,
+                direction: chelis_ir::dag::ScanDirection::Increasing,
+            },
+            Rows,
+        ),
         Id::Erf => (RiscOp::Erf, BuiltinInventory),
         Id::Erfc => (RiscOp::Erfc, BuiltinInventory),
         Id::Abs => (RiscOp::Abs, BuiltinInventory),
@@ -1459,6 +1466,20 @@ fn nan_atom_rows(
     let f32_only = name == "f32";
     match atom {
         Id::Softmax => vec![row("softmax", x3(), vec![3], "softmax(&x, 0i32)".into())],
+        Id::Cumsum => vec![
+            row(
+                "cumsum_first_leaf",
+                vec![("x", vec![3, 1], vec![p, n, s])],
+                vec![3, 1],
+                "cumsum(x, 1i32)".into(),
+            ),
+            row(
+                "cumsum_prefix",
+                vec![("x", vec![4], vec![w.inf, neg_inf, p, s])],
+                vec![4],
+                "cumsum(x, 0i32)".into(),
+            ),
+        ],
         Id::Sum => vec![
             row(
                 "sum",

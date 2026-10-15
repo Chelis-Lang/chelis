@@ -43,4 +43,5 @@ fn scan_wire_rejects_wrong_axis_dtype_shape_arity_and_direction() {
         );
     }
     assert!(WireDag::from_validated_json(&graph("bool", "increasing").to_string()).is_err());
+    assert!(WireDag::from_validated_json(&graph("i32", "decreasing").to_string()).is_err());
 }

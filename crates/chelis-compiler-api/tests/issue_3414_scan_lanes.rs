@@ -26,6 +26,10 @@ fn runtime_scan_grad_and_vmap_execute_in_eval_and_c() {
         .collect::<String>();
     assert!(displayed.contains("data=[3.0, 2.0, 1.0]"), "{displayed}");
     assert!(displayed.contains("6.0, 4.0, 9.0, 15.0]"), "{displayed}");
+    assert!(
+        displayed.contains("data=[127, 128, 127, 2, 5, 9]"),
+        "{displayed}"
+    );
     let generated = ownership_support::emit(source, "scan_lanes");
     let (ledger, compiled) = ownership_support::run_program(&generated);
     ownership_support::balanced(&ledger);

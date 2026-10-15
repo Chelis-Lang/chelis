@@ -13393,3 +13393,98 @@ int main() {{
         }
     }
 }
+
+#[test]
+fn ordered_scan_activation_suppresses_only_inactive_overflow() {
+    use chelis_ir::dag::ScanDirection;
+    let mut dag = Dag::new();
+    let declaration = dag.declare("gated scan");
+    let active = dag.add_node(
+        declaration,
+        RiscOp::Load {
+            name: "active".into(),
+        },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Bool,
+        },
+        None,
+    );
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(3)],
+        precision: Prim::Int32,
+    };
+    let x = dag.add_node(
+        declaration,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let root = dag.add_node(
+        Owner::new(declaration, Some(active)),
+        RiscOp::Cumsum {
+            axis: 0,
+            direction: ScanDirection::Increasing,
+        },
+        vec![x],
+        ty,
+        None,
+    );
+    dag.add_root(root);
+    let generated = support::codegen(&dag, "gated_scan").unwrap();
+    assert_eq!(generated.input_labels, ["active", "x"]);
+    for active in [false, true] {
+        let values = UnordMap::from([
+            (
+                "active".into(),
+                TensorValue::from_storage(
+                    vec![],
+                    chelis_types::finalize_tensor(
+                        "oracle",
+                        Prim::Bool,
+                        chelis_types::RawTensor::Int(vec![i64::from(active)]),
+                    )
+                    .unwrap(),
+                ),
+            ),
+            (
+                "x".into(),
+                TensorValue::finalize_from_wide_int(
+                    "oracle",
+                    Prim::Int32,
+                    vec![3],
+                    vec![i64::from(i32::MAX), 1, -1],
+                )
+                .unwrap(),
+            ),
+        ]);
+        assert_eq!(eval_tensor(&dag, &values).is_err(), active);
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+extern void gated_scan(chelis_tensor**,int,chelis_tensor**,int);
+int main() {{
+ uint8_t active={active}; int32_t data[]={{INT32_MAX,1,-1}};int64_t shape[]={{3}};
+ chelis_tensor *a=chelis_tensor_entry_borrow(0,NULL,CHELIS_DTYPE_BOOL,&active,sizeof(active));
+ chelis_tensor *x=chelis_tensor_entry_borrow(1,shape,CHELIS_DTYPE_I32,data,sizeof(data));
+ chelis_tensor *inputs[]={{a,x}},*outputs[]={{NULL}};gated_scan(inputs,2,outputs,1);
+ const int32_t *out=chelis_tensor_read_view(outputs[0]).data;
+ int ok=out[0]==0 && out[1]==0 && out[2]==0;
+ chelis_tensor_release(a);chelis_tensor_release(x);chelis_tensor_release(outputs[0]);return ok?0:1;
+}}
+"#,
+            active = u8::from(active)
+        );
+        let (ok, stderr) =
+            compile_and_run_kernel_capturing("gated_scan", &generated.c_source, &harness);
+        if active {
+            assert!(
+                !ok && stderr.contains("numeric trap: overflow in cumsum"),
+                "{stderr}"
+            );
+        } else {
+            assert!(ok, "{stderr}");
+        }
+    }
+}

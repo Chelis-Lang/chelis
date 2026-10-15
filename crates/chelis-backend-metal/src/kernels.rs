@@ -1060,16 +1060,16 @@ pub fn ordered_scan(name: &str, precision: Prim, reverse: bool) -> String {
         format!(
             r#"#include <metal_stdlib>
 using namespace metal;
-kernel void {name}(device const {input}* input [[buffer(0)]], device {output}* output [[buffer(1)]], device atomic_uint* status [[buffer(2)]], device const uchar* activation [[buffer(3)]], constant uint4& dims [[buffer(4)]], constant uint& active_count [[buffer(5)]], uint lane [[thread_position_in_grid]]) {{
+kernel void {name}(device const {input}* input [[buffer(0)]], device {output}* output [[buffer(1)]], device atomic_uint* status [[buffer(2)]], device const uchar* activation [[buffer(3)]], constant uint4& dims [[buffer(4)]], constant uint2& gate [[buffer(5)]], uint lane [[thread_position_in_grid]]) {{
  if (lane >= dims.x) return;
  uint n = dims.y, inner = dims.z;
  uint base = (lane / inner) * n * inner + lane % inner;
  {acc} state = 0;
  for (uint step = 0; step < n; ++step) {{
    uint position = base + ({coordinate}) * inner;
-   bool active = active_count == 0;
-   if (active_count != 0 && dims.w != 0) active = activation[position / dims.w] != 0;
-   if (active_count != 0 && dims.w == 0) for (uint row = 0; row < active_count; ++row) active |= activation[row] != 0;
+   bool active = gate.y == 0;
+   if (gate.y != 0 && dims.w != 0) active = activation[position / dims.w] != 0;
+   if (gate.y != 0 && dims.w == 0) for (uint row = 0; row < gate.x; ++row) active |= activation[row] != 0;
    {acc} value = active ? ({acc})input[position] : ({acc})0;
    if (step == 0) state = value; else {{ {combine} }}
    {canonical}

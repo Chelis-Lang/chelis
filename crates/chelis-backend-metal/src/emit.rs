@@ -1101,7 +1101,9 @@ impl<'plan> Emitter<'plan> {
             // Reading the accumulator field (not destructure-`..`) is the
             // memory-rule-pinned discipline so silent precision downgrades
             // surface as kernel-template panics rather than wrong answers.
-            RiscOp::Cumsum { axis, direction } => self.emit_ordered_scan(node, *axis, *direction),
+            RiscOp::Cumsum { axis, direction } => {
+                self.emit_ordered_scan(dag, node, *axis, *direction)
+            }
             RiscOp::Sum {
                 axis: 0,
                 accumulator,
@@ -1835,6 +1837,7 @@ impl<'plan> Emitter<'plan> {
     /// `accumulator_override` is `None`.
     fn emit_ordered_scan(
         &mut self,
+        dag: VerifiedDagView<'_>,
         node: &DagNode,
         axis: usize,
         direction: chelis_ir::dag::ScanDirection,
@@ -1888,6 +1891,7 @@ impl<'plan> Emitter<'plan> {
         let activation = node
             .owner
             .activation
+            .filter(|_| dag.trap_seeds().is_activation_gated(node))
             .map(|id| {
                 self.plan_of(id)
                     .cloned()
@@ -1907,7 +1911,8 @@ impl<'plan> Emitter<'plan> {
             .as_ref()
             .map_or(status.as_str(), |plan| plan.buf.as_str());
         self.body.push(format!(
-            "uint32_t scan_active_count_{id} = {active_count}u;"
+            "uint32_t scan_gate_{id}[2] = {{ {active_count}u, {}u }};",
+            u8::from(activation.is_some())
         ));
         self.body.push(format!(
             "uint32_t scan_dims_{id}[4] = {{ {lanes}u, {n}u, {inner}u, {row_length}u }};"
@@ -1919,7 +1924,7 @@ impl<'plan> Emitter<'plan> {
             &[&input.buf, &output, &status, activation_buf],
             &[
                 (&format!("scan_dims_{id}"), "sizeof(uint32_t) * 4"),
-                (&format!("&scan_active_count_{id}"), "sizeof(uint32_t)"),
+                (&format!("scan_gate_{id}"), "sizeof(uint32_t) * 2"),
             ],
         ));
         let overflow = NumericTrap::Overflow {

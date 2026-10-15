@@ -226,6 +226,36 @@ fn scan_adjoint_reverses_direction_without_zero_seed_at_all_float_widths() {
                     vec![(-0.0_f64).to_bits(); n],
                     "{p:?} {n} {direction:?}"
                 );
+                if n == 5 {
+                    let (big, tiny) = match p {
+                        Prim::F16 => (2048.0, 0.0001220703125),
+                        Prim::Bf16 => (256.0, 0.0000152587890625),
+                        Prim::F32 => (16777216.0, 1.0),
+                        Prim::F64 => (9007199254740992.0, 1.0),
+                        _ => unreachable!(),
+                    };
+                    let weights = TensorValue::finalize_from_wide(
+                        "oracle",
+                        p,
+                        vec![n],
+                        vec![big, tiny, -big, 0.0, 0.0],
+                    )
+                    .unwrap();
+                    let lane = if direction == ScanDirection::Increasing {
+                        (0..n).rev().collect::<Vec<_>>()
+                    } else {
+                        (0..n).collect()
+                    };
+                    let expected = cumsum_tensor_lanes(weights.storage(), &[lane]).unwrap();
+                    let mut cancellation = inputs.clone();
+                    cancellation.insert("w".into(), weights);
+                    let actual = eval_tensor(&gradient.dag, &cancellation).unwrap();
+                    assert_eq!(
+                        bits(actual[&root].storage()),
+                        bits(&expected),
+                        "cancellation {p:?} {direction:?}"
+                    );
+                }
                 // A positive-zero boundary cotangent changes the result.
                 if n > 0 {
                     let mut positive = inputs.clone();
