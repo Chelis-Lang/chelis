@@ -32198,11 +32198,7 @@ impl<R: Copy> AccumulatorIdentities<R> {
         charge_accumulator_identity_work(1);
         self.bindings.contains_key(name)
     }
-    fn bind(
-        &mut self,
-        name: &str,
-        role: Option<R>,
-    ) -> Option<Option<R>> {
+    fn bind(&mut self, name: &str, role: Option<R>) -> Option<Option<R>> {
         #[cfg(test)]
         charge_accumulator_identity_work(1);
         self.bindings.insert(name.to_owned(), role)
@@ -32441,7 +32437,9 @@ pub fn bound_accumulator_forwarding_plan(
                     let callee = accumulator_identity_variable(function)?;
                     if roles.is_bound(callee)
                         || roles.role(accumulator_identity_variable(first)?)
-                            != Some(BoundForwardingRole::Original(AccumulatorRootRole::Accumulator))
+                            != Some(BoundForwardingRole::Original(
+                                AccumulatorRootRole::Accumulator,
+                            ))
                         || roles.role(accumulator_identity_variable(second)?)
                             != Some(BoundForwardingRole::Original(AccumulatorRootRole::Item))
                     {
@@ -32504,10 +32502,19 @@ pub fn bound_accumulator_forwarding_plan(
         return None;
     };
     let mut roles = AccumulatorIdentities::new([
-        (param_name(acc)?, BoundForwardingRole::Original(AccumulatorRootRole::Accumulator)),
-        (param_name(item)?, BoundForwardingRole::Original(AccumulatorRootRole::Item)),
+        (
+            param_name(acc)?,
+            BoundForwardingRole::Original(AccumulatorRootRole::Accumulator),
+        ),
+        (
+            param_name(item)?,
+            BoundForwardingRole::Original(AccumulatorRootRole::Item),
+        ),
     ]);
-    let mut walk = Walk { routes: Vec::new(), candidates: Vec::new() };
+    let mut walk = Walk {
+        routes: Vec::new(),
+        candidates: Vec::new(),
+    };
     let BoundForwardingRole::InvocationResult(occurrence) =
         walk.value(node.children_slice().get(1)?, None, &mut roles)?
     else {
@@ -33340,12 +33347,56 @@ mod accumulator_forwarding_wrapper_tests {
     #[test]
     fn returned_invocation_plan_selects_occurrences_not_expression_equality() {
         let first = returned_plan("{ result = step(acc, i)\n _ = step(acc, i)\n result }").unwrap();
-        let second = returned_plan("{ _ = step(acc, i)\n result = step(acc, i)\n result }").unwrap();
+        let second =
+            returned_plan("{ _ = step(acc, i)\n result = step(acc, i)\n result }").unwrap();
         assert_eq!(first.callee_name(), second.callee_name());
         assert_eq!(first.analysis_records().0, 2);
         assert_eq!(second.analysis_records().0, 2);
         assert_ne!(first.occurrence(), second.occurrence());
         assert_ne!(first.route(), second.route());
+    }
+
+    #[test]
+    fn returned_invocation_plan_counts_alias_and_candidate_records_separately() {
+        for length in [40, 80, 160] {
+            let mut body = String::from("{ result = step(acc, i)\n");
+            for index in 0..length {
+                let previous = if index == 0 {
+                    "result".to_owned()
+                } else {
+                    format!("alias{}", index - 1)
+                };
+                body.push_str(&format!("alias{index} = {previous}\n"));
+                body.push_str("_ = step(acc, i)\n");
+            }
+            body.push_str(&format!("alias{} }}", length - 1));
+            ACCUMULATOR_IDENTITY_WORK.with(|work| work.set(0));
+            let plan = returned_plan(&body).unwrap();
+            let work = ACCUMULATOR_IDENTITY_WORK.with(std::cell::Cell::get);
+            let (candidates, routes) = plan.analysis_records();
+            assert_eq!(plan.occurrence(), 0);
+            assert_eq!(candidates, length + 1);
+            assert!(routes <= 16 * length + 64, "L={length}: routes={routes}");
+            assert!(work <= 128 * length + 2048, "L={length}: work={work}");
+            // Whole callback/callee byte comparisons and ordered-map
+            // comparisons are separate from these structural visit units.
+        }
+    }
+
+    #[test]
+    fn returned_invocation_plan_keeps_post_call_effects_and_saved_roles_opaque() {
+        for body in [
+            "{ old = acc\n item = i\n result = step(old, item)\n _ = print(\"after\")\n saved = result\n result = old\n saved }",
+            "{ result = step(acc, i)\n _ = step(acc, i)\n result }",
+        ] {
+            assert!(returned_plan(body).is_some(), "{body}");
+        }
+        for body in [
+            "{ result = step(acc, i)\n alias = result\n alias = acc\n alias }",
+            "{ old = acc\n old = []\n result = step(old, i)\n result }",
+        ] {
+            assert!(returned_plan(body).is_none(), "{body}");
+        }
     }
 
     #[test]
