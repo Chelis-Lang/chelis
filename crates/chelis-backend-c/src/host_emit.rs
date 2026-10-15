@@ -17104,8 +17104,25 @@ mod forwarding_entry_identity_tests {
     use super::*;
 
     fn checked_callback() -> HostCallback {
+        checked_callback_for(false, false)
+    }
+
+    fn checked_callback_for(returned: bool, strong: bool) -> HostCallback {
         let source = "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, produce(3i64))\nout = len(fold(fn (acc: List[tensor[*, f32]], i: i64) -> { old0 = acc\n item0 = i\n old1 = old0\n item1 = item0\n step(old1, item1) }, [produce(3i64)], range(0i64, 2i64)))\n";
-        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let source = if returned {
+            source.replace("step(old1, item1) }", "selected_result = step(old1, item1)\n saved_result = selected_result\n saved_result }")
+        } else {
+            source.to_owned()
+        };
+        let source = if strong {
+            source.replace(
+                "fn (acc: List[tensor[*, f32]]",
+                "fn (acc: List[tensor[3, f32]]",
+            )
+        } else {
+            source
+        };
+        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
         let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
         let checked = chelis_types::check_typed_program(&deep).unwrap();
         let checked = chelis_effects::check_program(&checked).unwrap();
@@ -17200,6 +17217,84 @@ mod forwarding_entry_identity_tests {
                 .is_none(),
                 "changed original item: {target}"
             );
+        }
+    }
+    #[test]
+    fn bound_result_entries_require_return_lineage_item_recipe_and_source_authority() {
+        fn change(value: &mut HostExpr, mode: &str) -> bool {
+            match &mut value.kind {
+                HostExprKind::RetainedInvocation {
+                    forwarding, body, ..
+                } => {
+                    if mode == "marker" && forwarding.is_some() {
+                        *forwarding = None;
+                        true
+                    } else {
+                        change(body, mode)
+                    }
+                }
+                HostExprKind::Let { bindings, body, .. } => {
+                    for binding in bindings {
+                        if mode == "item" && binding.name == "item1" {
+                            binding.value = HostExpr::new(HostExprKind::Var(
+                                "unrelated_item".into(),
+                                HostAbiType::Int64,
+                            ));
+                            return true;
+                        }
+                        if change(&mut binding.value, mode) {
+                            return true;
+                        }
+                    }
+                    change(body, mode)
+                }
+                HostExprKind::Var(name, _) if mode == "return" && name == "saved_result" => {
+                    *name = "unrelated_result".into();
+                    true
+                }
+                HostExprKind::Builtin { name, .. }
+                    if mode == "recipe" && name.as_str() == "append" =>
+                {
+                    *name = "concat".into();
+                    true
+                }
+                HostExprKind::ResultClaimScope { body, .. }
+                | HostExprKind::ExtentSites { value: body, .. } => change(body, mode),
+                _ => false,
+            }
+        }
+        for strong in [false, true] {
+            let callback = checked_callback_for(true, strong);
+            let composition = callback
+                .accumulator_composition
+                .as_ref()
+                .expect("bound composition");
+            let HostCallbackKind::Inline { params, body } = &callback.kind else {
+                panic!("inline")
+            };
+            let mut proofs = Vec::new();
+            if let Some(outer) = composition.outer().filter(|proof| proof.has_extent_claim()) {
+                proofs.push(std::sync::Arc::new(outer.clone()));
+            }
+            proofs.push(std::sync::Arc::new(composition.inner().clone()));
+            assert!(
+                retained_accumulator_entries(params, body, &proofs, Some(composition.forwarding()))
+                    .is_some()
+            );
+            for mode in ["marker", "item", "recipe", "return"] {
+                let mut changed = body.clone();
+                assert!(change(&mut changed, mode), "mutation target: {mode}");
+                assert!(
+                    retained_accumulator_entries(
+                        params,
+                        &changed,
+                        &proofs,
+                        Some(composition.forwarding())
+                    )
+                    .is_none(),
+                    "accepted changed {mode}"
+                );
+            }
         }
     }
 }
