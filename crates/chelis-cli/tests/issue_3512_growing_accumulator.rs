@@ -650,3 +650,55 @@ fn original_linked_chain_witness_has_bounded_native_claim_work() {
         }
     }
 }
+
+#[test]
+fn empty_list_seeds_bind_the_first_observed_named_witness_at_its_entry() {
+    for native in [false, true] {
+        for claim in ["3", "n"] {
+            for scan in [false, true] {
+                for steps in [0, 1, 2, 3] {
+                    for size in [3, 5] {
+                        let dir = tempfile::tempdir().unwrap();
+                        let path = dir.path().join("size");
+                        std::fs::write(&path, "x".repeat(size)).unwrap();
+                        let source = list_source(path.to_str().unwrap(), steps, claim, false, scan)
+                            .replace("out = run([produce(3i64)]", "out = run([]")
+                            .replace(
+                                "v = produce(size)",
+                                "v = produce(if eq(i, 0i64) then size else 3i64)",
+                            );
+                        let (success, output) = result_claims::run(&source, native);
+                        let first_bad_entry = if claim == "3" { 2 } else { 3 };
+                        let bad = size == 5 && steps >= first_bad_entry;
+                        assert_eq!(success, !bad, "{source}\n{output}");
+                        let callbacks = if bad { first_bad_entry - 1 } else { steps };
+                        assert_eq!(
+                            output.lines().filter(|line| *line == "before").count(),
+                            callbacks,
+                            "{output}"
+                        );
+                        assert_eq!(
+                            output.lines().filter(|line| *line == "after").count(),
+                            callbacks,
+                            "{output}"
+                        );
+                        if bad {
+                            assert!(
+                                output.contains("numeric trap: domain in load at i64"),
+                                "{output}"
+                            );
+                            if claim == "n" {
+                                assert!(
+                                    output.contains("acc[0] axis 0 = 5, acc[1] axis 0 = 3"),
+                                    "{output}"
+                                );
+                            }
+                        } else {
+                            assert!(output.contains(&format!("out = {steps}")), "{output}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
