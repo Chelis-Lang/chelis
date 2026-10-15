@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -45,6 +47,27 @@ def mutate(root: Path, relative: str, old: str, new: str) -> None:
 class OracleContractTests(unittest.TestCase):
     def test_current_tree_satisfies_every_contract(self):
         oracle.validate_source_contracts()
+
+    def test_direct_and_package_entrypoints_execute_original_contracts(self):
+        identities = (
+            "OracleContractTests.test_current_tree_satisfies_every_contract",
+            "OracleMutationTests.test_dtype_erasing_tensor_scan_fails",
+        )
+        entrypoints = (
+            [sys.executable, "-B", "scripts/test_dtype_compiled_host_effect_oracle.py", *identities],
+            [sys.executable, "-B", "-m", "unittest", *(
+                f"scripts.test_dtype_compiled_host_effect_oracle.{identity}"
+                for identity in identities
+            )],
+        )
+        for argv in entrypoints:
+            with self.subTest(argv=argv):
+                result = subprocess.run(
+                    argv, cwd=oracle.REPO_ROOT, capture_output=True, text=True, check=False
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Ran 2 tests", result.stderr)
+                self.assertIn("OK", result.stderr)
 
     def test_every_operation_family_names_both_lanes(self):
         names = {contract.name for contract in oracle.source_contracts()}
@@ -104,12 +127,95 @@ class OracleMutationTests(unittest.TestCase):
             "Ok::<String, ()>(String::from_utf8_lossy(&stdout).into_owned())",
         )
 
+    def assert_scan_owner_mutation_fails(self, owner: str, old: str, new: str) -> None:
+        with MutatedTree() as root:
+            path = root / "crates/chelis-ir/src/host.rs"
+            source = path.read_text()
+            start, end = oracle.rust_owner_span(source, owner)
+            body = source[start:end]
+            self.assertEqual(body.count(old), 1, "one actual owner expression")
+            path.write_text(source[:start] + body.replace(old, new, 1) + source[end:])
+            with self.assertRaisesRegex(oracle.OracleFailure, "tensor_scan.*missing"):
+                oracle.validate_source_contracts(root)
+
     def test_dtype_erasing_tensor_scan_fails(self):
-        self.assert_mutation_fails(
-            "crates/chelis-ir/src/host.rs",
-            'name: "to_tensor".to_string(),',
-            'name: "to_tensor_f64".to_string(),',
+        self.assert_scan_owner_mutation_fails(
+            oracle.TENSOR_SCAN_OWNER,
+            'name: "to_tensor".into(),',
+            'name: "to_tensor_f64".into(),',
         )
+
+    def test_unrelated_generic_conversion_cannot_mask_scan_dtype_erasure(self):
+        with MutatedTree() as root:
+            path = root / "crates/chelis-ir/src/host.rs"
+            source = path.read_text()
+            start, end = oracle.rust_owner_span(source, oracle.TENSOR_SCAN_OWNER)
+            self.assertIn('name: "to_tensor".into(),', source[:start])
+            body = source[start:end].replace(
+                'name: "to_tensor".into(),', 'name: "to_tensor_f64".into(),'
+            )
+            path.write_text(source[:start] + body + source[end:])
+            with self.assertRaisesRegex(oracle.OracleFailure, 'tensor_scan.*to_tensor'):
+                oracle.validate_source_contracts(root)
+
+    def test_tensor_scan_stack_identity_must_belong_to_scan(self):
+        self.assert_scan_owner_mutation_fails(
+            oracle.TENSOR_SCAN_OWNER,
+            "name: TENSOR_SCAN_STACK.into(),",
+            'name: "to_tensor".into(),',
+        )
+
+    def test_tensor_scan_state_identity_must_belong_to_checked_callback(self):
+        self.assert_scan_owner_mutation_fails(
+            oracle.TENSOR_SCAN_CALLBACK_OWNER,
+            "name: TENSOR_SCAN_STATE.into(),",
+            'name: "copy".into(),',
+        )
+
+    def test_tensor_scan_state_dtype_is_derived_from_initial_state(self):
+        self.assert_scan_owner_mutation_fails(
+            oracle.TENSOR_SCAN_OWNER,
+            "let state_ty = host_expr_type(&init_expr);",
+            "let state_ty = HostTypeTerm::Bool;",
+        )
+
+    def test_tensor_scan_callback_keeps_template_state_type(self):
+        self.assert_scan_owner_mutation_fails(
+            oracle.TENSOR_SCAN_CALLBACK_OWNER,
+            "HostExprKind::Var(template.to_string(), state_ty.clone())",
+            "HostExprKind::Var(template.to_string(), HostTypeTerm::Bool)",
+        )
+
+    def test_required_scan_expressions_in_comments_cannot_supply_evidence(self):
+        self.assert_scan_owner_mutation_fails(
+            oracle.TENSOR_SCAN_OWNER,
+            'name: "to_tensor".into(),',
+            '// name: "to_tensor".into(),\n                name: "to_tensor_f64".into(),',
+        )
+
+    def test_scan_owner_absence_or_ambiguity_fails_closed(self):
+        for owner in (oracle.TENSOR_SCAN_OWNER, oracle.TENSOR_SCAN_CALLBACK_OWNER):
+            for replacement in ("missing_owner", owner + " {}\n" + owner):
+                with self.subTest(owner=owner, replacement=replacement), MutatedTree() as root:
+                    mutate(root, "crates/chelis-ir/src/host.rs", owner, replacement)
+                    with self.assertRaisesRegex(oracle.OracleFailure, "owner.*exactly one"):
+                        oracle.validate_source_contracts(root)
+
+    def test_owner_without_body_cannot_capture_the_next_function(self):
+        for owner in (oracle.TENSOR_SCAN_OWNER, oracle.TENSOR_SCAN_CALLBACK_OWNER):
+            with self.subTest(owner=owner):
+                source = owner + ";\nfn unrelated() { let value = 1; }"
+                with self.assertRaisesRegex(oracle.OracleFailure, "owner.*missing body"):
+                    oracle.rust_owner_span(source, owner)
+
+    def test_comment_and_literal_owner_decoys_are_not_owners(self):
+        with MutatedTree() as root:
+            path = root / "crates/chelis-ir/src/host.rs"
+            source = path.read_text()
+            for owner in (oracle.TENSOR_SCAN_OWNER, oracle.TENSOR_SCAN_CALLBACK_OWNER):
+                source = f'// {owner} {{}}\nconst DECOY: &str = r#"{owner} {{}}"#;\n' + source
+            path.write_text(source)
+            oracle.validate_source_contracts(root)
 
     def test_reordered_tensor_scan_bounds_check_fails(self):
         self.assert_mutation_fails(
