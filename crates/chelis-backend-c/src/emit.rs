@@ -7918,10 +7918,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         ty: &TensorType,
     ) {
         self.emit_slot_wrapper(id, ty);
+        let index = Self::index_c_type();
+        let axis_type = Self::prim_elem_type(Prim::Int32);
         let reverse = direction == chelis_ir::dag::ScanDirection::Decreasing;
         let rank = Self::ndim(ty);
-        self.line(&format!("int64_t t{id}_scan_shape[{rank}];"));
-        self.line(&format!("for (int32_t d = 0; d < {rank}; ++d) t{id}_scan_shape[d] = chelis_tensor_shape(t{input}, d);"));
+        self.line(&format!("{index} t{id}_scan_shape[{rank}];"));
+        self.line(&format!("for ({axis_type} d = 0; d < {rank}; ++d) t{id}_scan_shape[d] = chelis_tensor_shape(t{input}, d);"));
         self.line(&format!("chelis_tensor *t{id}_scan_input = chelis_alloc({rank}, t{id}_scan_shape, t{input}_dtype);"));
         self.line(&format!(
             "chelis_tensor_write *t{id}_scan_guard = chelis_tensor_begin_write(t{id}_scan_input);"
@@ -7930,11 +7932,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "void *t{id}_scan_data = chelis_tensor_write_view(t{id}_scan_guard).data;"
         ));
         self.line(&format!(
-            "int64_t t{id}_scan_width = chelis_dtype_size(t{input}_dtype);"
+            "{index} t{id}_scan_width = chelis_dtype_size(t{input}_dtype);"
         ));
         if reverse {
-            self.line(&format!("int64_t t{id}_scan_inner = 1;"));
-            self.line(&format!("if (t{input}_size != 0) for (int32_t d = {}; d < {rank}; ++d) t{id}_scan_inner *= t{id}_scan_shape[d];", axis + 1));
+            self.line(&format!("{index} t{id}_scan_inner = 1;"));
+            self.line(&format!("if (t{input}_size != 0) for ({axis_type} d = {}; d < {rank}; ++d) t{id}_scan_inner *= t{id}_scan_shape[d];", axis + 1));
         }
         self.open_element_loop(id, "i", &format!("t{input}_size"), None);
         let source = if reverse {
@@ -7944,7 +7946,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         } else {
             "i".to_owned()
         };
-        self.line(&format!("int64_t t{id}_scan_source = {source};"));
+        self.line(&format!("{index} t{id}_scan_source = {source};"));
         if let Some(gate) = &self.gate {
             self.line(&format!("if ({})", gate.element));
         }
@@ -7961,11 +7963,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "const void *t{id}_scan_result_data = chelis_tensor_read_view(t{id}_scan_result).data;"
         ));
         self.line(&format!(
-            "int64_t t{id}_scan_output_width = chelis_dtype_size(t{id}_dtype);"
+            "{index} t{id}_scan_output_width = chelis_dtype_size(t{id}_dtype);"
         ));
-        self.line(&format!("for (int64_t i = 0; i < t{id}_size; ++i) {{"));
+        self.line(&format!("for ({index} i = 0; i < t{id}_size; ++i) {{"));
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_scan_source = {source};"));
+        self.line(&format!("{index} t{id}_scan_source = {source};"));
         if ty.precision.is_float() {
             let et = Self::prim_elem_type(ty.precision);
             let read = format!("((const {et}*)t{id}_scan_result_data)[t{id}_scan_source]");

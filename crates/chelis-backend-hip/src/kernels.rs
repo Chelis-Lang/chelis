@@ -2799,23 +2799,25 @@ pub fn ordered_scan(
     gate: Option<&OperandGate>,
 ) -> String {
     use chelis_types::types::Prim;
+    let f32_type = ElemKind::F32.c_type();
+    let f64_type = ElemKind::F64.c_type();
     let (input, acc, output, load, store) = match precision {
         Prim::F16 => (
             "chelis_u16",
-            "float",
+            f32_type,
             "chelis_u16",
             "chelis_f16_to_f32(a[idx])",
             "chelis_f32_to_f16(acc)",
         ),
         Prim::Bf16 => (
             "chelis_u16",
-            "float",
+            f32_type,
             "chelis_u16",
             "chelis_bf16_to_f32(a[idx])",
             "chelis_f32_to_bf16(acc)",
         ),
-        Prim::F32 => ("float", "float", "float", "a[idx]", "acc"),
-        Prim::F64 => ("double", "double", "double", "a[idx]", "acc"),
+        Prim::F32 => (f32_type, f32_type, f32_type, "a[idx]", "acc"),
+        Prim::F64 => (f64_type, f64_type, f64_type, "a[idx]", "acc"),
         Prim::Int8 => ("chelis_i8", "chelis_i32", "chelis_i32", "a[idx]", "acc"),
         Prim::Int16 => ("chelis_i16", "chelis_i32", "chelis_i32", "a[idx]", "acc"),
         Prim::Int32 => ("chelis_i32", "chelis_i32", "chelis_i32", "a[idx]", "acc"),
