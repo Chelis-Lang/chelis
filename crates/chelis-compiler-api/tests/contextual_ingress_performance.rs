@@ -197,7 +197,7 @@ fn measure_observation_case(
             peak <= decoded.nodes.len() * 2048 + 64 * 1024,
             "context authority must not retain every prefix memo: {peak}"
         );
-        if !contextual_observations && (!witnesses || changing) {
+        if !witnesses || changing {
             assert!(
                 allocated <= decoded.nodes.len() * 4096 + 64 * 1024,
                 "repeated contextual ingress allocates expanded prefix paths: {allocated}"
