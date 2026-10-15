@@ -5749,3 +5749,56 @@ fn bound_result_wrappers_have_bounded_complete_eval_entry_work() {
     }
     assert!(excessive.is_empty(), "{}", excessive.join("\n"));
 }
+
+#[test]
+fn bound_result_nominal_aliases_count_complete_eval_entry_work() {
+    for collection in ["Chain", "Box"] {
+        for claim in ["3", "n"] {
+            for combine in ["fold", "scan"] {
+                for steps in [100, 400] {
+                    for unproved in [false, true] {
+                        let source = immutable_nominal_alias_source(
+                            collection, claim, "composed", combine, steps,
+                        );
+                        let tail = if unproved {
+                            "if i == 0i64 then saved else saved"
+                        } else {
+                            "saved"
+                        };
+                        let source = source.replace("-> step(acc, i)", &format!("-> {{ old = acc\n item = i\n result = step(old, item)\n saved = result\n {tail} }}"));
+                        let checked = checked_surf(&source);
+                        let empty = UnordMap::new();
+                        super::eval::reset_entry_claim_work();
+                        let outcome = evaluate_host_program_with_library_and_types(
+                            &checked,
+                            None,
+                            None,
+                            HostEvaluationInputs {
+                                roots: &empty,
+                                bindings: None,
+                            },
+                            None,
+                            None,
+                        )
+                        .expect("bound nominal result evaluates");
+                        assert_eq!(
+                            render_value(&outcome.host_bindings["out"]),
+                            steps.to_string()
+                        );
+                        let observations = super::eval::entry_claim_work();
+                        let traversal = super::eval::entry_claim_traversal_work();
+                        let total = observations + traversal;
+                        eprintln!(
+                            "bound nominal Eval {collection}/{claim}/{combine} K={steps} unproved={unproved}: observations={observations} traversal={traversal} total={total}"
+                        );
+                        if unproved {
+                            assert!(total >= (steps * steps / 2) as u64, "{total}");
+                        } else {
+                            assert!(total <= 96 * steps as u64 + 200, "{total}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
