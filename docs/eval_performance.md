@@ -81,13 +81,17 @@ contraction rather than validating tags at every leaf. The shared IR contraction
 all-values evaluation and explicitly selected intermediate roots retain dense
 values. Views own their source values across last-use reclamation. Cartesian
 index views retain Add overflow and Gather domain checks at their original node
-positions: vector extrema prove the complete index interval, and an interval
+positions. Window views permit one data reader plus auxiliary expansion extent
+readers. Vector extrema prove the complete index interval, and an interval
 that cannot prove bounds falls back to row-major first-invalid-index checking.
 
 Default cases compare stored bits against dense all-values evaluation for all
-four float dtypes and admitted accumulator widths, cancellation, nonfinite
+four float dtypes and admitted accumulator widths, static and runtime extent
+lowering, cancellation, nonfinite
 values, signed zeros, selected intermediate roots, convolution gradients, and
-Cartesian overflow/invalid/empty controls. A many-contraction case reports
+Cartesian overflow/invalid/empty controls. A nonempty Add still overflows before
+an empty Gather output, and key-valued gathers preserve opaque key storage.
+A many-contraction case reports
 planner scaling; the planner uses one graph scan for source Drop positions.
 
 Run the model-sized pointwise pair separately:

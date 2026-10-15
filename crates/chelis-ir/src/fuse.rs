@@ -591,11 +591,26 @@ pub struct CartesianGatherIndices {
     pub gather: NodeId,
     pub index_sum: NodeId,
     pub views: [NodeId; 2],
+    /// One data reader; auxiliary Expand InputAxis readers observe extents.
     pub private_gather: bool,
 }
 
 pub fn cartesian_gather_indices(dag: &Dag) -> Vec<CartesianGatherIndices> {
     let counts = build_consumer_counts(dag);
+    // Auxiliary InputAxis reads observe only extents. A window's one data
+    // reader can coexist with those reads without requiring dense windows.
+    let mut data_counts = counts.clone();
+    for node in dag.nodes() {
+        if let RiscOp::Expand {
+            size: crate::dag::RtDim::InputAxis { tensor, .. },
+            ..
+        } = &node.op
+            && *tensor != 0
+            && let Some(input) = node.inputs.get(*tensor)
+        {
+            data_counts[input.0] -= 1;
+        }
+    }
     let mut dependency = vec![false; dag.len()];
     for node in dag.nodes() {
         for id in node.shape_deps.iter().chain(&node.result_claim_deps) {
@@ -635,8 +650,8 @@ pub fn cartesian_gather_indices(dag: &Dag) -> Vec<CartesianGatherIndices> {
         };
         if !matches!(row.op, RiscOp::Expand { axis: 1, .. })
             || !matches!(col.op, RiscOp::Expand { axis: 0, .. })
-            || row.inputs.len() != 1
-            || col.inputs.len() != 1
+            || row.inputs.is_empty()
+            || col.inputs.is_empty()
             || !private(row)
             || !private(col)
             || row.output_type != sum.output_type
@@ -657,7 +672,9 @@ pub fn cartesian_gather_indices(dag: &Dag) -> Vec<CartesianGatherIndices> {
             gather: gather.id,
             index_sum: sum.id,
             views: [row.id, col.id],
-            private_gather: private(gather),
+            private_gather: data_counts[gather.id.0] == 1
+                && !dependency[gather.id.0]
+                && gather.owner.activation.is_none(),
         });
     }
     found

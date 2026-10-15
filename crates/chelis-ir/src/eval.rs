@@ -5624,6 +5624,7 @@ where
                     && *axis == 0
                     && *batch_rank == 0
                     && source.shape.len() == 1
+                    && source.prim() != Prim::Key
                     && matches!(&indices.storage,EvalStorage::View(view) if matches!(view.kind,TensorViewKind::CartesianAdd{..}))
                 {
                     cartesian_gather(source, indices)?

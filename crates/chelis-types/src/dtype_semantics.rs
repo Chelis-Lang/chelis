@@ -6388,7 +6388,18 @@ mod tests {
                         prim,
                         RawTensor::Float(
                             (0..len)
-                                .map(|i| [2048.0, -2048.0, 0.00006103515625, -0.0, 1.0][i % 5])
+                                .map(|i| {
+                                    [
+                                        2048.0,
+                                        -2048.0,
+                                        0.00006103515625,
+                                        -0.0,
+                                        1.0,
+                                        0.1,
+                                        0.3,
+                                        1.0009765625,
+                                    ][i % 8]
+                                })
                                 .collect(),
                         ),
                     )
@@ -6396,7 +6407,11 @@ mod tests {
                     let b = finalize_tensor(
                         "oracle",
                         prim,
-                        RawTensor::Float((0..len).map(|i| [1.0, -1.0, 0.5][i % 3]).collect()),
+                        RawTensor::Float(
+                            (0..len)
+                                .map(|i| [1.0, -1.0, 0.5, 0.3, 1.00390625][i % 5])
+                                .collect(),
+                        ),
                     )
                     .unwrap();
                     let product = float_tensor_binop(FloatBinOp::Mul, &a, &b).unwrap();
