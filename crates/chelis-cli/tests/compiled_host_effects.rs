@@ -1181,6 +1181,7 @@ fn wildcard_matmul_agrees_at_every_float_dtype() {
         ("f16", "f32"),
         ("f32", "f64"),
         ("bf16", "f64"),
+        ("f16", "f64"),
     ] {
         let result = dtype;
         let source = format!(

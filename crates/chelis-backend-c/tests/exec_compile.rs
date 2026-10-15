@@ -12769,7 +12769,7 @@ fn inlined_matmul_products_match_evaluator_bits_under_sanitizers() {
             (Prim::F16, Some(2), true),
         ] {
             let acc = if matches!(prim, Prim::F16 | Prim::Bf16) {
-                Prim::F32
+                if wildcard { Prim::F64 } else { Prim::F32 }
             } else {
                 prim
             };
@@ -12832,12 +12832,41 @@ fn inlined_matmul_products_match_evaluator_bits_under_sanitizers() {
                 "{generated}"
             );
 
-            let lhs = operand(lead.iter().product::<usize>() * m * k, 1);
+            // Reduced-width cases need finite products as well as exceptional
+            // values; otherwise saturation could hide missing leaf rounding.
+            let stored_values = |values: Vec<f64>| {
+                values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        if !value.is_finite() || value == 0.0 {
+                            return value;
+                        }
+                        if index % 17 == 7 {
+                            let tiny = match prim {
+                                Prim::F16 => 2f64.powi(-24),
+                                Prim::Bf16 => 2f64.powi(-133),
+                                Prim::F32 => f64::from(f32::from_bits(1)),
+                                _ => f64::from_bits(1),
+                            };
+                            return value.signum() * tiny;
+                        }
+                        if matches!(prim, Prim::F16 | Prim::Bf16) {
+                            value.signum()
+                                * (1.0 + (index * 17 % 100) as f64 / 100.0)
+                                * 2f64.powi((index % 11) as i32 - 5)
+                        } else {
+                            value
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let lhs = stored_values(operand(lead.iter().product::<usize>() * m * k, 1));
             let alias = m == k && k == n;
             let rhs = if alias {
                 lhs.clone()
             } else {
-                operand(lead.iter().product::<usize>() * k * n, 2)
+                stored_values(operand(lead.iter().product::<usize>() * k * n, 2))
             };
             let inputs: UnordMap<String, TensorValue> = [
                 (
@@ -12866,6 +12895,13 @@ fn inlined_matmul_products_match_evaluator_bits_under_sanitizers() {
             };
             assert_eq!(bits(&rooted[&sum]), bits(&dense[&sum]));
             let expected = rooted[&sum].to_f64_lossy_vec();
+            if matches!(prim, Prim::F16 | Prim::Bf16) && (m, k, n) == (3, 13, 17) {
+                assert!(
+                    expected
+                        .iter()
+                        .any(|value| value.is_finite() && *value != 0.0)
+                );
+            }
             let (native, bits, format) = match acc {
                 Prim::F32 => ("float", "uint32_t", "%08x"),
                 _ => ("double", "uint64_t", "%016llx"),
@@ -12965,6 +13001,43 @@ int main(void) {{
                 expected,
                 "{prim:?} {batch:?}"
             );
+            if prim == Prim::F16 && batch.is_none() && !wildcard && (m, k, n) == (3, 13, 17) {
+                // Counterfactual: retain typed operand loads but omit the
+                // product's f16 store/load before the f32 tree.
+                let prefix = "chelis_f16_to_f32(chelis_f32_to_f16(";
+                let first = generated.find(prefix).expect("one narrowed product leaf");
+                let inner = first + prefix.len();
+                let mut depth = 2;
+                let last = generated[inner..]
+                    .char_indices()
+                    .find_map(|(offset, ch)| {
+                        if ch == '(' {
+                            depth += 1;
+                        }
+                        if ch == ')' {
+                            depth -= 1;
+                        }
+                        (depth == 0).then_some(inner + offset + 1)
+                    })
+                    .expect("balanced product conversion");
+                let mutant = format!(
+                    "{}({}){}",
+                    &generated[..first],
+                    &generated[inner..last - 2],
+                    &generated[last..]
+                );
+                let wrong = checked_indexing_run(&mutant, &harness);
+                assert!(
+                    wrong.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&wrong.stderr)
+                );
+                assert_ne!(
+                    String::from_utf8_lossy(&wrong.stdout),
+                    expected,
+                    "finite f16 witness must detect missing product rounding"
+                );
+            }
         }
     }
 }
