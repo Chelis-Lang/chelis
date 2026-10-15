@@ -1902,11 +1902,7 @@ impl<'plan> Emitter<'plan> {
         if active_count > u32::MAX as usize {
             return Err("Metal scan activation exceeds uint32 indexing".into());
         }
-        let row_length = if active_count == 0 {
-            0
-        } else {
-            input.n / active_count
-        };
+        let row_length = input.n.checked_div(active_count).unwrap_or(0);
         let activation_buf = activation
             .as_ref()
             .map_or(status.as_str(), |plan| plan.buf.as_str());
