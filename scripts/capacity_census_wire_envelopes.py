@@ -266,12 +266,12 @@ def dag_cases():
         bad["nodes"][1][target] = value
         add("softmax-invalid-" + label, bad, False)
 
-    for dtype in ("f16", "bf16", "f32", "f64", "i8", "i16", "i32", "i64"):
+    for dtype in ("f16", "bf16", "f32", "f64", "int8", "int16", "int32", "int64"):
         directions = ("increasing", "decreasing") if dtype.startswith("f") or dtype == "bf16" else ("increasing",)
         for direction in directions:
             scan = graph({"kind": "cumsum", "axis": 0, "direction": direction})
             scan["nodes"][0]["output_type"]["precision"] = dtype
-            scan["nodes"][1]["output_type"]["precision"] = "i32" if dtype in ("i8", "i16") else dtype
+            scan["nodes"][1]["output_type"]["precision"] = "int32" if dtype in ("int8", "int16") else dtype
             add(f"cumsum-{dtype}-{direction}", scan, True)
     scan = graph({"kind": "cumsum", "axis": 0, "direction": "increasing"})
     for label, target, value in (
@@ -287,7 +287,7 @@ def dag_cases():
         bad = copy.deepcopy(scan)
         bad["nodes"][1][target] = value
         add("cumsum-invalid-" + label, bad, False)
-    for dtype, direction in (("bool", "increasing"), ("i32", "decreasing")):
+    for dtype, direction in (("bool", "increasing"), ("int32", "decreasing")):
         bad = graph({"kind": "cumsum", "axis": 0, "direction": direction})
         for node in bad["nodes"]:
             node["output_type"]["precision"] = dtype

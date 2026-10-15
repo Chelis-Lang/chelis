@@ -656,9 +656,9 @@ class SchemaCases(unittest.TestCase):
         for label in ("axis", "negative-axis", "arity", "dtype", "shape"):
             self.assertIsNone(cases[f"WireDag/json/softmax-invalid-{label}"].expected)
         for codec in ("json", "construct", "admit"):
-            for dtype in ("f16", "bf16", "f32", "f64", "i8", "i16", "i32", "i64"):
+            for dtype in ("f16", "bf16", "f32", "f64", "int8", "int16", "int32", "int64"):
                 self.assertIsNotNone(cases[f"WireDag/{codec}/cumsum-{dtype}-increasing"].expected)
-            for label in ("axis", "negative-axis", "direction", "missing-direction", "missing-axis", "arity", "dtype", "shape", "bool", "i32"):
+            for label in ("axis", "negative-axis", "direction", "missing-direction", "missing-axis", "arity", "dtype", "shape", "bool", "int32"):
                 self.assertIsNone(cases[f"WireDag/{codec}/cumsum-invalid-{label}"].expected)
             for owner in ("expand", "reshape", "pad", "shrink", "stride"):
                 prefix = f"WireDag/{codec}/owner-{owner}-"

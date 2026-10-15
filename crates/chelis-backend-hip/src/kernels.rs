@@ -2789,6 +2789,101 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
+/// Ordered OP33 scan: one lane thread writes all prefixes in pinned order.
+pub fn ordered_scan(
+    rank: usize,
+    name: &str,
+    axis: usize,
+    reverse: bool,
+    precision: chelis_types::types::Prim,
+    gate: Option<&OperandGate>,
+) -> String {
+    use chelis_types::types::Prim;
+    let (input, acc, output, load, store) = match precision {
+        Prim::F16 => (
+            "chelis_u16",
+            "float",
+            "chelis_u16",
+            "chelis_f16_to_f32(a[idx])",
+            "chelis_f32_to_f16(acc)",
+        ),
+        Prim::Bf16 => (
+            "chelis_u16",
+            "float",
+            "chelis_u16",
+            "chelis_bf16_to_f32(a[idx])",
+            "chelis_f32_to_bf16(acc)",
+        ),
+        Prim::F32 => ("float", "float", "float", "a[idx]", "acc"),
+        Prim::F64 => ("double", "double", "double", "a[idx]", "acc"),
+        Prim::Int8 => ("chelis_i8", "chelis_i32", "chelis_i32", "a[idx]", "acc"),
+        Prim::Int16 => ("chelis_i16", "chelis_i32", "chelis_i32", "a[idx]", "acc"),
+        Prim::Int32 => ("chelis_i32", "chelis_i32", "chelis_i32", "a[idx]", "acc"),
+        Prim::Int64 => ("chelis_i64", "chelis_i64", "chelis_i64", "a[idx]", "acc"),
+        _ => panic!("scan requires a numeric dtype"),
+    };
+    let combine = if precision.is_integer() {
+        let (min, max) = if precision == Prim::Int64 {
+            ("(-9223372036854775807LL - 1LL)", "9223372036854775807LL")
+        } else {
+            ("(-2147483647 - 1)", "2147483647")
+        };
+        format!(
+            "if ((value > 0 && acc > {max} - value) || (value < 0 && acc < {min} - value)) {{ chelis_record_numeric_failure((unsigned long long)i); return; }} acc += value;"
+        )
+    } else {
+        "acc += value;".to_owned()
+    };
+    let canonical = if precision.is_float() {
+        if precision == Prim::F64 {
+            "if (isnan(acc)) acc = __longlong_as_double(0x7ff8000000000000LL);"
+        } else {
+            "if (isnan(acc)) acc = chelis_f32_from_storage_bits(0x7fc00000u);"
+        }
+    } else {
+        ""
+    };
+    format!(
+        r#"{DEVICE_HELPERS}{REDUCED_FLOAT_COMPARISON_HELPERS}{helper}
+extern "C" __global__ void {name}(
+ const {input} *a, {strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+ {output} *out, {shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size{params}) {{
+{build_strides}
+{build_shape}
+ chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
+ if (i >= out_size) return;
+ chelis_device_metadata inner = 1;
+ for (chelis_device_metadata d = {axis}+1; d < out_ndim; ++d) inner *= out_sh[d];
+ chelis_device_metadata n = out_sh[{axis}], lanes = out_size / n;
+ if (i >= lanes) return;
+ chelis_device_metadata indices[{rank}];
+ chelis_device_metadata base = (i / inner) * n * inner + i % inner;
+ {acc} acc = 0;
+ for (chelis_device_metadata step = 0; step < n; ++step) {{
+   chelis_device_metadata pos = base + ({coordinate}) * inner;
+   chelis_flat_to_indices(pos, out_sh, out_ndim, indices);
+   chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+{active}
+   {acc} value = {load};
+   if (step == 0) acc = value; else {{ {combine} }}
+   {canonical}
+   out[pos] = {store};
+ }}
+}}
+"#,
+        helper = OperandGate::helper(gate),
+        params = OperandGate::params(gate, rank),
+        active =
+            OperandGate::prologue(gate, rank).replace("chelis_act_row, i)", "chelis_act_row, pos)"),
+        strides = stride_params(rank, "a"),
+        shape = shape_params(rank, "out"),
+        build_strides = build_array(rank, "a_s", "a", "s"),
+        build_shape = build_array(rank, "out_sh", "out", "sh"),
+        load = OperandGate::read(gate, 0, load, acc),
+        coordinate = if reverse { "n - 1 - step" } else { "step" }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3125,99 +3220,4 @@ mod tests {
             assert!(src.contains("CHELIS_GUARD_INDEX"));
         }
     }
-}
-
-/// Ordered OP33 scan: one lane thread writes all prefixes in pinned order.
-pub fn ordered_scan(
-    rank: usize,
-    name: &str,
-    axis: usize,
-    reverse: bool,
-    precision: chelis_types::types::Prim,
-    gate: Option<&OperandGate>,
-) -> String {
-    use chelis_types::types::Prim;
-    let (input, acc, output, load, store) = match precision {
-        Prim::F16 => (
-            "chelis_u16",
-            "float",
-            "chelis_u16",
-            "chelis_f16_to_f32(a[idx])",
-            "chelis_f32_to_f16(acc)",
-        ),
-        Prim::Bf16 => (
-            "chelis_u16",
-            "float",
-            "chelis_u16",
-            "chelis_bf16_to_f32(a[idx])",
-            "chelis_f32_to_bf16(acc)",
-        ),
-        Prim::F32 => ("float", "float", "float", "a[idx]", "acc"),
-        Prim::F64 => ("double", "double", "double", "a[idx]", "acc"),
-        Prim::Int8 => ("chelis_i8", "chelis_i32", "chelis_i32", "a[idx]", "acc"),
-        Prim::Int16 => ("chelis_i16", "chelis_i32", "chelis_i32", "a[idx]", "acc"),
-        Prim::Int32 => ("chelis_i32", "chelis_i32", "chelis_i32", "a[idx]", "acc"),
-        Prim::Int64 => ("chelis_i64", "chelis_i64", "chelis_i64", "a[idx]", "acc"),
-        _ => panic!("scan requires a numeric dtype"),
-    };
-    let combine = if precision.is_integer() {
-        let (min, max) = if precision == Prim::Int64 {
-            ("(-9223372036854775807LL - 1LL)", "9223372036854775807LL")
-        } else {
-            ("(-2147483647 - 1)", "2147483647")
-        };
-        format!(
-            "if ((value > 0 && acc > {max} - value) || (value < 0 && acc < {min} - value)) {{ chelis_record_numeric_failure((unsigned long long)i); return; }} acc += value;"
-        )
-    } else {
-        "acc += value;".to_owned()
-    };
-    let canonical = if precision.is_float() {
-        if precision == Prim::F64 {
-            "if (isnan(acc)) acc = __longlong_as_double(0x7ff8000000000000LL);"
-        } else {
-            "if (isnan(acc)) acc = chelis_f32_from_storage_bits(0x7fc00000u);"
-        }
-    } else {
-        ""
-    };
-    format!(
-        r#"{DEVICE_HELPERS}{REDUCED_FLOAT_COMPARISON_HELPERS}{helper}
-extern "C" __global__ void {name}(
- const {input} *a, {strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
- {output} *out, {shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size{params}) {{
-{build_strides}
-{build_shape}
- chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
- if (i >= out_size) return;
- chelis_device_metadata inner = 1;
- for (chelis_device_metadata d = {axis}+1; d < out_ndim; ++d) inner *= out_sh[d];
- chelis_device_metadata n = out_sh[{axis}], lanes = out_size / n;
- if (i >= lanes) return;
- chelis_device_metadata indices[{rank}];
- chelis_device_metadata base = (i / inner) * n * inner + i % inner;
- {acc} acc = 0;
- for (chelis_device_metadata step = 0; step < n; ++step) {{
-   chelis_device_metadata pos = base + ({coordinate}) * inner;
-   chelis_flat_to_indices(pos, out_sh, out_ndim, indices);
-   chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-{active}
-   {acc} value = {load};
-   if (step == 0) acc = value; else {{ {combine} }}
-   {canonical}
-   out[pos] = {store};
- }}
-}}
-"#,
-        helper = OperandGate::helper(gate),
-        params = OperandGate::params(gate, rank),
-        active =
-            OperandGate::prologue(gate, rank).replace("chelis_act_row, i)", "chelis_act_row, pos)"),
-        strides = stride_params(rank, "a"),
-        shape = shape_params(rank, "out"),
-        build_strides = build_array(rank, "a_s", "a", "s"),
-        build_shape = build_array(rank, "out_sh", "out", "sh"),
-        load = OperandGate::read(gate, 0, load, acc),
-        coordinate = if reverse { "n - 1 - step" } else { "step" }
-    )
 }

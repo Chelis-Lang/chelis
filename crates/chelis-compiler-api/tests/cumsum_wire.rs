@@ -15,6 +15,14 @@ fn scan_wire_roundtrip_and_version_rejection() {
             assert_eq!(serde_json::to_value(decoded).unwrap(), value);
         }
     }
+    for p in ["int8", "int16", "int32", "int64"] {
+        let mut value = graph(p, "increasing");
+        if matches!(p, "int8" | "int16") {
+            value["nodes"][1]["output_type"]["precision"] = json!("int32");
+        }
+        let decoded = WireDag::from_validated_json(&value.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+    }
     let mut missing = graph("f32", "increasing");
     missing.as_object_mut().unwrap().remove("schema_version");
     assert!(WireDag::from_validated_json(&missing.to_string()).is_err());
@@ -43,5 +51,5 @@ fn scan_wire_rejects_wrong_axis_dtype_shape_arity_and_direction() {
         );
     }
     assert!(WireDag::from_validated_json(&graph("bool", "increasing").to_string()).is_err());
-    assert!(WireDag::from_validated_json(&graph("i32", "decreasing").to_string()).is_err());
+    assert!(WireDag::from_validated_json(&graph("int32", "decreasing").to_string()).is_err());
 }
