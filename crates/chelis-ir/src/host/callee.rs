@@ -185,3 +185,102 @@ pub(super) fn resolve_value(
         _ => HostAppCallee::Program(ProgramCallee(name)),
     }
 }
+
+/// A resolved application retains closed producer identity before execution
+/// lane selection. Ordinary function signatures never establish this case.
+pub(super) enum ResolvedHostApplication<'s> {
+    Closed(super::CheckedBuiltinCallable),
+    Lexical(LexicalCallee<'s>),
+    Program(ProgramCallee),
+}
+
+pub(super) fn resolve_application<'s>(
+    name: String,
+    scope: &'s UnordMap<String, HostTypeTerm>,
+    declarations: &std::collections::BTreeMap<String, super::CheckedBuiltinCallable>,
+    has_definition: bool,
+) -> ResolvedHostApplication<'s> {
+    match resolve(name, scope) {
+        HostAppCallee::Lexical(callee) => match callee.binding() {
+            HostTypeTerm::CheckedBuiltinCallable(operation) => {
+                ResolvedHostApplication::Closed(*operation)
+            }
+            _ => ResolvedHostApplication::Lexical(callee),
+        },
+        HostAppCallee::Program(callee) => {
+            if callee
+                .name()
+                .starts_with(|first: char| first.is_ascii_uppercase())
+            {
+                return ResolvedHostApplication::Program(callee);
+            }
+            let operation = declarations.get(callee.name()).copied().or_else(|| {
+                (!has_definition)
+                    .then(|| super::CheckedBuiltinCallable::from_symbol(callee.name()))
+                    .flatten()
+                    .filter(|operation| {
+                        matches!(operation, super::CheckedBuiltinCallable::FloatClassify(_))
+                    })
+            });
+            match operation {
+                Some(operation) => ResolvedHostApplication::Closed(operation),
+                None => ResolvedHostApplication::Program(callee),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod checked_application_tests {
+    use super::*;
+    use crate::host_type_state::CheckedBuiltinCallable;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn closed_application_resolution_uses_producer_identity_and_lexical_precedence() {
+        let finite = CheckedBuiltinCallable::from_symbol("is_finite").unwrap();
+        let nan = CheckedBuiltinCallable::from_symbol("is_nan").unwrap();
+        let declarations = BTreeMap::from([("predicate".into(), finite), ("Some".into(), finite)]);
+        let mut scope = UnordMap::new();
+        assert!(
+            matches!(resolve_application("predicate".into(), &scope, &declarations, false), ResolvedHostApplication::Closed(op) if op == finite)
+        );
+        assert!(
+            matches!(resolve_application("is_finite".into(), &scope, &declarations, false), ResolvedHostApplication::Closed(op) if op == finite)
+        );
+        scope.insert(
+            "predicate".into(),
+            HostTypeTerm::CheckedBuiltinCallable(nan),
+        );
+        assert!(
+            matches!(resolve_application("predicate".into(), &scope, &declarations, false), ResolvedHostApplication::Closed(op) if op == nan)
+        );
+        // A signature is not operation identity, even with a canonical name.
+        let ordinary = HostTypeTerm::Fn(vec![HostTypeTerm::Bool], Box::new(HostTypeTerm::Bool));
+        scope.insert("predicate".into(), ordinary.clone());
+        scope.insert("is_finite".into(), ordinary);
+        assert!(matches!(
+            resolve_application("predicate".into(), &scope, &declarations, false),
+            ResolvedHostApplication::Lexical(_)
+        ));
+        assert!(matches!(
+            resolve_application("is_finite".into(), &scope, &declarations, false),
+            ResolvedHostApplication::Lexical(_)
+        ));
+        scope.clear();
+        // Canonical key operations retain their separate direct-call policies.
+        assert!(matches!(
+            resolve_application("split_key".into(), &scope, &declarations, false),
+            ResolvedHostApplication::Program(_)
+        ));
+        assert!(matches!(
+            resolve_application("is_finite".into(), &scope, &declarations, true),
+            ResolvedHostApplication::Program(_)
+        ));
+        scope.insert("Some".into(), HostTypeTerm::CheckedBuiltinCallable(finite));
+        assert!(matches!(
+            resolve_application("Some".into(), &scope, &declarations, false),
+            ResolvedHostApplication::Program(_)
+        ));
+    }
+}

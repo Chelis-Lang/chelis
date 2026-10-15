@@ -12,3 +12,7 @@ rank_zero = predicate(scalar_to_tensor(1.0f16))
 def captured_finite(x: f32) -> bool = predicate(x)
 captured = captured_finite(1.0f32)
 runtime_shaped = predicate(stride(values, 2i64))
+wrapped_runtime = Some(predicate(stride(values, 2i64)))
+def choose_runtime(flag: bool, x: tensor[4, f32]) -> tensor[*, bool] = if flag then predicate(stride(x, 2i64)) else runtime_shaped
+chosen_runtime = choose_runtime(true, values)
+bound_runtime = choose_runtime(false, values)

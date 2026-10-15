@@ -2386,9 +2386,8 @@ pub type ConcreteHostExpr = HostExpr<ConcreteHostType>;
 pub type ConcreteHostExprKind = HostExprKind<ConcreteHostType>;
 
 fn resolve_host_program(
-    mut program: HostProgram,
+    program: HostProgram,
 ) -> Result<ConcreteHostProgram, crate::HostTypeResolutionError> {
-    normalize_checked_application_relations(&mut program)?;
     Ok(ConcreteHostProgram {
         globals: program
             .globals
@@ -5834,6 +5833,7 @@ fn lower_def_body_kernel(
                 &context,
                 Some(&expected),
                 true,
+                None,
             )
         } else {
             crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
@@ -5971,6 +5971,7 @@ fn lower_kernel_dag(
             &context,
             declaring_params.is_some().then_some(expected),
             declaring_params.is_some(),
+            None,
         )?
     } else {
         crate::lower::try_lower_subexpr_program_with_ordered_inputs(
@@ -6305,7 +6306,7 @@ fn try_lower_tensor_helper_call(
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
 ) -> Option<HostExpr> {
-    try_lower_tensor_helper_call_inner(expr, program, scope, tensor_helpers, expected, None)
+    try_lower_tensor_helper_call_inner(expr, program, scope, tensor_helpers, expected, None, None)
 }
 
 fn try_lower_tensor_helper_call_with_context(
@@ -6323,6 +6324,7 @@ fn try_lower_tensor_helper_call_with_context(
         tensor_helpers,
         expected,
         Some(lowering_context),
+        None,
     )
 }
 
@@ -6333,6 +6335,7 @@ fn try_lower_tensor_helper_call_inner(
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
+    root_operation: Option<CheckedBuiltinCallable>,
 ) -> Option<HostExpr> {
     if let Some((DeepTag::Var, _, kids)) = stamped_parts(expr)
         && let Some(name) = kids.first().and_then(symbol_name)
@@ -6373,6 +6376,7 @@ fn try_lower_tensor_helper_call_inner(
         &expected,
         tensor_helpers.collect_trace,
         specialized_context.as_ref().or(lowering_context),
+        root_operation,
     ) else {
         record_host_work(|profile| profile.tensor_helper_fallbacks += 1);
         return None;
@@ -6895,6 +6899,7 @@ fn lower_tensor_helper_dag(
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
     context: &crate::lower::SubexprLoweringContext,
+    root_operation: Option<CheckedBuiltinCallable>,
 ) -> Option<crate::Dag> {
     lower_tensor_helper_with(expr, program, || {
         let dag = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
@@ -6903,6 +6908,7 @@ fn lower_tensor_helper_dag(
             context,
             None,
             false,
+            root_operation,
         )?;
         remap_tensor_helper_dim_symbols(&dag, scope, expected)
     })
@@ -6921,6 +6927,7 @@ fn lower_tensor_helper_product(
     expected: &TensorType,
     collect_trace: bool,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
+    root_operation: Option<CheckedBuiltinCallable>,
 ) -> Option<LoweredTensorHelper> {
     #[cfg(not(feature = "lowering-trace"))]
     let _ = collect_trace;
@@ -6939,7 +6946,12 @@ fn lower_tensor_helper_product(
             let scoped = collect_tensor_scope(program, scope, Some(expr)).into_sorted();
             let (dag, trace) =
                 crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
-                    expr, scoped, &context, None, false,
+                    expr,
+                    scoped,
+                    &context,
+                    None,
+                    false,
+                    root_operation,
                 )?;
             let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected)?;
             let mut trace = trace;
@@ -6950,7 +6962,7 @@ fn lower_tensor_helper_product(
             })
         });
     }
-    lower_tensor_helper_dag(expr, program, scope, expected, &context).map(|dag| {
+    lower_tensor_helper_dag(expr, program, scope, expected, &context, root_operation).map(|dag| {
         LoweredTensorHelper {
             dag,
             #[cfg(feature = "lowering-trace")]
@@ -13517,8 +13529,23 @@ fn lower_app_host_expr(
             }
         })
         .to_string();
-    match callee::resolve(name, scope) {
-        HostAppCallee::Lexical(callee) => lower_lexical_host_call(
+    let has_definition = program.def_named(&name).is_some();
+    match callee::resolve_application(
+        name,
+        scope,
+        &cached_checked_builtin_callables(program),
+        has_definition,
+    ) {
+        callee::ResolvedHostApplication::Closed(operation) => lower_closed_host_application(
+            app_expr,
+            list,
+            operation,
+            program,
+            scope,
+            tensor_helpers,
+            expected_ty,
+        ),
+        callee::ResolvedHostApplication::Lexical(callee) => lower_lexical_host_call(
             app_expr,
             list,
             callee,
@@ -13527,7 +13554,7 @@ fn lower_app_host_expr(
             tensor_helpers,
             expected_ty,
         ),
-        HostAppCallee::Program(callee) => lower_program_host_app(
+        callee::ResolvedHostApplication::Program(callee) => lower_program_host_app(
             app_expr,
             list,
             callee,
@@ -13537,6 +13564,76 @@ fn lower_app_host_expr(
             expected_ty,
         ),
     }
+}
+
+/// Closed identity is fixed before lane selection. Tensor applications enter
+/// the same claim-aware helper owner as direct operations; only actual host
+/// operands/callbacks retain the host operation and its exact result relation.
+fn lower_closed_host_application(
+    app_expr: &Expr,
+    list: &Node,
+    operation: CheckedBuiltinCallable,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+    expected_ty: Option<&HostTypeTerm>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let checked_ty = expr_host_type(app_expr, program, scope);
+    let expected = expected_ty
+        .filter(|_| checked_ty.is_unresolved())
+        .cloned()
+        .unwrap_or(checked_ty);
+    if let CheckedBuiltinCallable::FloatClassify(_) = operation
+        && let HostTypeTerm::Tensor(tensor_ty) = &expected
+        && !should_keep_tensor_expr_in_host_lane(app_expr)
+    {
+        let (helper, helper_scope, bindings) = hoist_host_lane_tensor_bindings(
+            app_expr,
+            program,
+            scope,
+            None,
+            tensor_helpers,
+            HoistedOperands::HostLane,
+        )?;
+        if let Some(value) = try_lower_tensor_helper_call_inner(
+            helper.as_ref(),
+            program,
+            helper_scope.as_ref(),
+            tensor_helpers,
+            tensor_ty.clone(),
+            None,
+            Some(operation),
+        ) {
+            if bindings.is_empty() {
+                return Ok(value);
+            }
+            let ty = host_expr_type(&value);
+            return Ok(HostExpr::new(HostExprKind::Let {
+                bindings,
+                body: Box::new(value),
+                ty,
+            }));
+        }
+    }
+    let args = list.children_slice()[1..]
+        .iter()
+        .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ty = match operation {
+        CheckedBuiltinCallable::FloatClassify(kind) => CheckedApplicationRelation(kind)
+            .instantiate(&args, &expected)
+            .map_err(|error| host_expr_lowering_error(app_expr, error.to_string()))?,
+        _ if expected.is_unresolved() => infer_builtin_host_type(operation.symbol(), &args)
+            .ok_or_else(|| {
+                host_expr_lowering_error(app_expr, "checked builtin has no concrete result type")
+            })?,
+        _ => expected,
+    };
+    Ok(HostExpr::new(HostExprKind::Builtin {
+        name: operation.into(),
+        args,
+        ty,
+    }))
 }
 
 /// A call through a lexical binding: the operation or function value the
@@ -13561,23 +13658,6 @@ fn lower_lexical_host_call(
         .iter()
         .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
         .collect::<Result<Vec<_>, _>>()?;
-    if let HostTypeTerm::CheckedBuiltinCallable(op) = binding {
-        // This identity came from the resolved value's producer, including
-        // aliases and tuple projections. The application metadata selects
-        // its concrete result; the alias's spelling selects nothing.
-        let ty = if explicit_ty.is_unresolved() {
-            infer_builtin_host_type(op.symbol(), &args).ok_or_else(|| {
-                host_expr_lowering_error(app_expr, "checked key call has no concrete result type")
-            })?
-        } else {
-            explicit_ty
-        };
-        return Ok(HostExpr::new(HostExprKind::Builtin {
-            name: (*op).into(),
-            args,
-            ty,
-        }));
-    }
     let (param_tys, ret_ty) = host_fn_signature(binding)
         .or_else(|| kids.first().and_then(expr_fn_type))
         .ok_or_else(|| {
@@ -13614,35 +13694,6 @@ fn lower_program_host_app(
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = list.children_slice();
     let name = program_callee.name().to_string();
-    if let Some(operation) = cached_checked_builtin_callables(program)
-        .get(&name)
-        .copied()
-    {
-        let args = kids[1..]
-            .iter()
-            .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
-            .collect::<Result<Vec<_>, _>>()?;
-        let checked_ty = expr_host_type(app_expr, program, scope);
-        let ty = expected_ty
-            .filter(|_| checked_ty.is_unresolved())
-            .cloned()
-            .unwrap_or(checked_ty);
-        let ty = if ty.is_unresolved() {
-            infer_builtin_host_type(operation.symbol(), &args).ok_or_else(|| {
-                host_expr_lowering_error(
-                    app_expr,
-                    "checked builtin capture has no concrete result type",
-                )
-            })?
-        } else {
-            ty
-        };
-        return Ok(HostExpr::new(HostExprKind::Builtin {
-            name: operation.into(),
-            args,
-            ty,
-        }));
-    }
     let fn_sig = scope
         .get(&name)
         .and_then(host_fn_signature)
@@ -22588,18 +22639,12 @@ fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> Hos
 
 /// A checked application's result relation is retained by its typed
 /// operation identity, not reconstructed from an alias or a result snapshot.
-/// Keys retain their distinct existing result rules; this plan instantiates
-/// only [05-OP-20..22]'s same-surface, same-axis Bool relation.
+/// Keys retain their distinct existing result rules. This application owner
+/// instantiates [05-OP-20..22]'s relation only for genuine host operands; static
+/// numeric applications use the same DAG producer owner as direct calls.
 struct CheckedApplicationRelation(chelis_types::FloatClassify);
 
 impl CheckedApplicationRelation {
-    fn for_identity(identity: &HostBuiltinIdentity) -> Option<Self> {
-        match identity.checked_operation() {
-            Some(CheckedBuiltinCallable::FloatClassify(kind)) => Some(Self(kind)),
-            _ => None,
-        }
-    }
-
     fn instantiate(
         &self,
         args: &[HostExpr],
@@ -22630,8 +22675,8 @@ impl CheckedApplicationRelation {
 }
 
 /// Metadata may be coarse; it cannot contradict a known actual. Authored
-/// runtime requirements remain in their existing claim carriers, which this
-/// pass neither rewrites nor reorders.
+/// runtime requirements remain in their existing claim carriers. Validation
+/// neither rewrites nor reorders those requirements.
 fn validate_checked_result_requirement(
     expected: &HostTypeTerm,
     actual: &HostTypeTerm,
@@ -22682,347 +22727,9 @@ fn validate_checked_result_requirement(
     }
 }
 
-/// Mandatory after helper actualization, before ConcreteHostType/ABI
-/// projection. Returns a refinement only along a checked result's value path.
-/// Ordinary builtin inference and key policies are otherwise untouched.
-fn normalize_checked_host_expr(
-    expr: &mut HostExpr,
-    scope: &mut UnordMap<String, HostTypeTerm>,
-) -> Result<Option<HostTypeTerm>, crate::HostTypeResolutionError> {
-    let mut normalize_many = |items: &mut [HostExpr]| -> Result<
-        Vec<Option<HostTypeTerm>>,
-        crate::HostTypeResolutionError,
-    > {
-        items
-            .iter_mut()
-            .map(|item| normalize_checked_host_expr(item, scope))
-            .collect()
-    };
-    match &mut expr.kind {
-        HostExprKind::Var(name, ty) => {
-            if let Some(actual) = scope.get(name) {
-                validate_checked_result_requirement(ty, actual, "checked value reference")?;
-                *ty = actual.clone();
-                Ok(Some(actual.clone()))
-            } else {
-                Ok(None)
-            }
-        }
-        HostExprKind::Builtin { name, args, ty } => {
-            let refinements = normalize_many(args)?;
-            if !args.is_empty()
-                && let Some(relation) = CheckedApplicationRelation::for_identity(name)
-            {
-                let actual = relation.instantiate(args, ty)?;
-                *ty = actual.clone();
-                return Ok(Some(actual));
-            }
-            if refinements.iter().any(Option::is_some)
-                && name.checked_operation().is_none()
-                && let Some(actual) = infer_builtin_host_type(name, args)
-                && !actual.is_unresolved()
-            {
-                validate_checked_result_requirement(ty, &actual, name)?;
-                *ty = actual.clone();
-                return Ok(Some(actual));
-            }
-            Ok(None)
-        }
-        HostExprKind::Tuple(items, ty) => {
-            let refinements = normalize_many(items)?;
-            if refinements.iter().any(Option::is_some) {
-                let actual = HostTypeTerm::Tuple(items.iter().map(host_expr_type).collect());
-                validate_checked_result_requirement(ty, &actual, "checked tuple result")?;
-                *ty = actual.clone();
-                Ok(Some(actual))
-            } else {
-                Ok(None)
-            }
-        }
-        HostExprKind::List(items, ty) => {
-            let refinements = normalize_many(items)?;
-            if refinements.iter().any(Option::is_some)
-                && let Some(first) = items.first().map(host_expr_type)
-                && items.iter().all(|item| host_expr_type(item) == first)
-            {
-                let actual = HostTypeTerm::List(Box::new(first));
-                validate_checked_result_requirement(ty, &actual, "checked list result")?;
-                *ty = actual.clone();
-                Ok(Some(actual))
-            } else {
-                Ok(None)
-            }
-        }
-        HostExprKind::Let { bindings, body, ty }
-        | HostExprKind::RetainedInvocation { bindings, body, ty } => {
-            let mut local = scope.clone();
-            for binding in bindings {
-                if let Some(actual) = normalize_checked_host_expr(&mut binding.value, &mut local)? {
-                    validate_checked_result_requirement(&binding.ty, &actual, "checked binding")?;
-                    binding.ty = actual.clone();
-                    local.insert(binding.name.clone(), actual);
-                } else {
-                    local.remove(&binding.name);
-                }
-            }
-            let actual = normalize_checked_host_expr(body, &mut local)?;
-            if let Some(actual) = &actual {
-                validate_checked_result_requirement(ty, actual, "checked enclosing result")?;
-                *ty = actual.clone();
-            }
-            Ok(actual)
-        }
-        HostExprKind::ResultClaimScope { body, ty, .. }
-        | HostExprKind::FormalIngress { value: body, ty }
-        | HostExprKind::ExtentSites {
-            value: body, ty, ..
-        } => {
-            let actual = normalize_checked_host_expr(body, scope)?;
-            if let Some(actual) = &actual {
-                validate_checked_result_requirement(ty, actual, "checked enclosing result")?;
-                *ty = actual.clone();
-            }
-            Ok(actual)
-        }
-        HostExprKind::If {
-            cond,
-            then_expr,
-            else_expr,
-            ty,
-        } => {
-            normalize_checked_host_expr(cond, scope)?;
-            let left = normalize_checked_host_expr(then_expr, &mut scope.clone())?;
-            let right = normalize_checked_host_expr(else_expr, &mut scope.clone())?;
-            for actual in [left.as_ref(), right.as_ref()].into_iter().flatten() {
-                validate_checked_result_requirement(ty, actual, "checked branch result")?;
-            }
-            if (left.is_some() || right.is_some())
-                && host_expr_type(then_expr) == host_expr_type(else_expr)
-            {
-                let actual = host_expr_type(then_expr);
-                validate_checked_result_requirement(ty, &actual, "checked branch result")?;
-                *ty = actual.clone();
-                Ok(Some(actual))
-            } else {
-                Ok(None)
-            }
-        }
-        HostExprKind::MatchOption {
-            scrutinee,
-            bind_name,
-            some_expr,
-            none_expr,
-            ty,
-        } => {
-            let input = normalize_checked_host_expr(scrutinee, scope)?;
-            let mut local = scope.clone();
-            local.remove(bind_name);
-            if let Some(HostTypeTerm::Option(inner)) = input {
-                local.insert(bind_name.clone(), *inner);
-            }
-            let some = normalize_checked_host_expr(some_expr, &mut local)?;
-            let none = normalize_checked_host_expr(none_expr, &mut scope.clone())?;
-            for actual in [some.as_ref(), none.as_ref()].into_iter().flatten() {
-                validate_checked_result_requirement(ty, actual, "checked option branch result")?;
-            }
-            if (some.is_some() || none.is_some())
-                && host_expr_type(some_expr) == host_expr_type(none_expr)
-            {
-                let actual = host_expr_type(some_expr);
-                *ty = actual.clone();
-                return Ok(Some(actual));
-            }
-            Ok(None)
-        }
-        HostExprKind::MatchAdt {
-            scrutinee,
-            arms,
-            default_expr,
-            ..
-        } => {
-            normalize_checked_host_expr(scrutinee, scope)?;
-            for arm in arms {
-                let mut local = scope.clone();
-                for binding in &arm.bindings {
-                    local.remove(&binding.name);
-                }
-                normalize_checked_host_expr(&mut arm.expr, &mut local)?;
-            }
-            if let Some(default) = default_expr {
-                normalize_checked_host_expr(default, &mut scope.clone())?;
-            }
-            Ok(None)
-        }
-        HostExprKind::Call { args, arg_tys, .. } => {
-            let refined = normalize_many(args)?;
-            for (index, actual) in refined.into_iter().enumerate() {
-                if let Some(actual) = actual {
-                    let expected = arg_tys.get_mut(index).ok_or_else(|| {
-                        crate::HostTypeResolutionError::InvalidCheckedApplication {
-                            operation: "checked consumer call".into(),
-                            detail: "missing checked argument type".into(),
-                        }
-                    })?;
-                    validate_checked_result_requirement(
-                        expected,
-                        &actual,
-                        "checked consumer argument",
-                    )?;
-                    *expected = actual;
-                }
-            }
-            Ok(None)
-        }
-        HostExprKind::TensorCall { args, .. } | HostExprKind::AdtConstruct { fields: args, .. } => {
-            normalize_many(args)?;
-            Ok(None)
-        }
-        HostExprKind::AdtFieldAccess { base, .. } => {
-            normalize_checked_host_expr(base, scope)?;
-            Ok(None)
-        }
-        HostExprKind::SignatureEntry { args, lists, .. } => {
-            normalize_many(args)?;
-            for list in lists {
-                normalize_checked_host_expr(&mut list.value, scope)?;
-            }
-            Ok(None)
-        }
-        HostExprKind::Map { callback, list, ty } => {
-            normalize_checked_host_expr(list, scope)?;
-            if let Some(actual) = normalize_checked_host_callback(callback, scope)? {
-                let actual = HostTypeTerm::List(Box::new(actual));
-                validate_checked_result_requirement(ty, &actual, "checked map result")?;
-                *ty = actual.clone();
-                return Ok(Some(actual));
-            }
-            Ok(None)
-        }
-        HostExprKind::Filter { callback, list, ty } => {
-            let actual = normalize_checked_host_expr(list, scope)?;
-            normalize_checked_host_callback(callback, scope)?;
-            if let Some(actual) = &actual {
-                validate_checked_result_requirement(ty, actual, "checked filter result")?;
-                *ty = actual.clone();
-            }
-            Ok(actual)
-        }
-        HostExprKind::Partition { callback, list, ty } => {
-            let actual = normalize_checked_host_expr(list, scope)?;
-            normalize_checked_host_callback(callback, scope)?;
-            if let Some(actual) = actual {
-                let actual = HostTypeTerm::Tuple(vec![actual.clone(), actual]);
-                validate_checked_result_requirement(ty, &actual, "checked partition result")?;
-                *ty = actual.clone();
-                return Ok(Some(actual));
-            }
-            Ok(None)
-        }
-        HostExprKind::FlatMap { callback, list, ty } => {
-            normalize_checked_host_expr(list, scope)?;
-            let actual = normalize_checked_host_callback(callback, scope)?;
-            if let Some(actual) = &actual {
-                validate_checked_result_requirement(ty, actual, "checked flat-map result")?;
-                *ty = actual.clone();
-            }
-            Ok(actual)
-        }
-        HostExprKind::Fold {
-            callback,
-            init,
-            list,
-            ty,
-        } => {
-            let init_actual = normalize_checked_host_expr(init, scope)?;
-            normalize_checked_host_expr(list, scope)?;
-            let actual = normalize_checked_host_callback(callback, scope)?.or(init_actual);
-            if let Some(actual) = &actual {
-                validate_checked_result_requirement(ty, actual, "checked fold result")?;
-                *ty = actual.clone();
-            }
-            Ok(actual)
-        }
-        HostExprKind::Scan {
-            callback,
-            init,
-            list,
-            ty,
-        } => {
-            let init_actual = normalize_checked_host_expr(init, scope)?;
-            normalize_checked_host_expr(list, scope)?;
-            if let Some(actual) = normalize_checked_host_callback(callback, scope)?.or(init_actual)
-            {
-                let actual = HostTypeTerm::List(Box::new(actual));
-                validate_checked_result_requirement(ty, &actual, "checked scan result")?;
-                *ty = actual.clone();
-                return Ok(Some(actual));
-            }
-            Ok(None)
-        }
-        HostExprKind::Int(_)
-        | HostExprKind::Float(_)
-        | HostExprKind::Bool(_)
-        | HostExprKind::String(_)
-        | HostExprKind::Unit => Ok(None),
-    }
-}
-
-fn normalize_checked_host_callback(
-    callback: &mut HostCallback,
-    scope: &UnordMap<String, HostTypeTerm>,
-) -> Result<Option<HostTypeTerm>, crate::HostTypeResolutionError> {
-    if let HostCallbackKind::Inline { params, body } = &mut callback.kind {
-        let mut local = scope.clone();
-        for param in params {
-            local.remove(&param.name);
-        }
-        if let Some(actual) = normalize_checked_host_expr(body, &mut local)? {
-            validate_checked_result_requirement(&callback.ret_ty, &actual, "checked callback")?;
-            callback.ret_ty = actual.clone();
-            return Ok(Some(actual));
-        }
-    }
-    Ok(None)
-}
-
-fn normalize_checked_application_relations(
-    program: &mut HostProgram,
-) -> Result<(), crate::HostTypeResolutionError> {
-    let mut scope = UnordMap::new();
-    for binding in &mut program.globals {
-        if let Some(actual) = normalize_checked_host_expr(&mut binding.value, &mut scope)? {
-            validate_checked_result_requirement(&binding.ty, &actual, "checked global binding")?;
-            binding.ty = actual.clone();
-            scope.insert(binding.name.clone(), actual.clone());
-            scope.insert(
-                LoadStoreName::top_level(&binding.name).as_str().into(),
-                actual,
-            );
-        } else {
-            scope.remove(&binding.name);
-        }
-    }
-    for function in &mut program.functions {
-        let mut local = scope.clone();
-        for param in &function.params {
-            local.remove(&param.name);
-        }
-        if let Some(actual) = normalize_checked_host_expr(&mut function.body, &mut local)? {
-            validate_checked_result_requirement(
-                &function.ret_ty,
-                &actual,
-                "checked function result",
-            )?;
-            function.ret_ty = actual;
-        }
-    }
-    Ok(())
-}
-
-/// Materialize checked context into every host-program root before term
-/// resolution. This checked-expectation stage precedes the mandatory
-/// producer-relation normalization at concrete resolution; codegen receives
-/// one resolved tree and cannot choose a type when annotations disagree.
+/// Materialize checked context into host-program roots. Closed applications
+/// have already selected their producer-derived execution route; concrete
+/// resolution projects that tree without a second inference/repair visitor.
 fn conform_host_program_types(program: &mut HostProgram) {
     for binding in &mut program.globals {
         binding.value = force_host_expr_type(binding.value.clone(), binding.ty.clone());
@@ -25146,90 +24853,101 @@ mod tests {
     use chelis_types::types::Prim;
 
     #[test]
-    fn predicate_relation_finalizes_enclosing_type_from_actual_producer_axes() {
-        for name in ["is_nan", "is_finite", "is_infinite"] {
+    fn predicate_host_application_owns_actual_surface_and_axes() {
+        for kind in [
+            chelis_types::FloatClassify::Nan,
+            chelis_types::FloatClassify::Finite,
+            chelis_types::FloatClassify::Infinite,
+        ] {
             for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
                 let axes = vec![
                     DimInfo::Named("batch".into(), None),
                     DimInfo::Named("_rt_producer_axis".into(), None),
                 ];
-                let input = HostTypeTerm::Tensor(TensorType {
-                    dims: axes.clone(),
-                    precision,
-                });
+                let input = HostExpr::new(HostExprKind::Var(
+                    "input".into(),
+                    HostTypeTerm::Tensor(TensorType {
+                        dims: axes.clone(),
+                        precision,
+                    }),
+                ));
                 let coarse = HostTypeTerm::Tensor(TensorType {
                     dims: vec![DimInfo::Named("*".into(), None); 2],
                     precision: Prim::Bool,
                 });
-                let mut program = HostProgram::default();
-                program.globals.push(HostBinding {
-                    name: "result".into(),
-                    display_name: None,
-                    display_roots: vec![],
-                    ty: coarse.clone(),
-                    value: HostExpr::new(HostExprKind::Builtin {
-                        name: name.into(),
-                        args: vec![HostExpr::new(HostExprKind::Var("input".into(), input))],
-                        ty: coarse,
-                    }),
-                });
-                conform_host_program_types(&mut program);
-                normalize_checked_application_relations(&mut program).unwrap();
-                let expected = HostTypeTerm::Tensor(TensorType {
-                    dims: axes,
-                    precision: Prim::Bool,
-                });
+                let actual = CheckedApplicationRelation(kind)
+                    .instantiate(&[input], &coarse)
+                    .unwrap();
                 assert_eq!(
-                    program.globals[0].ty, expected,
-                    "enclosing type must follow the producer relation"
+                    actual,
+                    HostTypeTerm::Tensor(TensorType {
+                        dims: axes,
+                        precision: Prim::Bool
+                    })
                 );
-                assert_eq!(host_expr_type(&program.globals[0].value), expected);
+                let scalar = HostExpr::new(HostExprKind::Var(
+                    "input".into(),
+                    HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)),
+                ));
+                assert_eq!(
+                    CheckedApplicationRelation(kind)
+                        .instantiate(&[scalar], &HostTypeTerm::Bool)
+                        .unwrap(),
+                    HostTypeTerm::Bool
+                );
             }
         }
     }
 
     #[test]
     fn predicate_shape_conformance_keeps_known_conflicts_for_rejection() {
-        for name in ["is_nan", "is_finite", "is_infinite"] {
+        for kind in [
+            chelis_types::FloatClassify::Nan,
+            chelis_types::FloatClassify::Finite,
+            chelis_types::FloatClassify::Infinite,
+        ] {
             for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
                 let input_ty = HostTypeTerm::Tensor(TensorType {
                     dims: vec![DimInfo::Lit(2)],
                     precision,
                 });
-                let output_ty = HostTypeTerm::Tensor(TensorType {
+                let wrong = HostTypeTerm::Tensor(TensorType {
                     dims: vec![DimInfo::Lit(3)],
                     precision: Prim::Bool,
                 });
-                let expr = HostExpr::new(HostExprKind::Builtin {
-                    name: name.into(),
-                    args: vec![HostExpr::new(HostExprKind::Var(
-                        "x".into(),
-                        input_ty.clone(),
-                    ))],
-                    ty: output_ty.clone(),
-                });
-                let conformed = force_host_expr_type(expr, output_ty.clone());
-                let HostExprKind::Builtin { args, ty, .. } = conformed.kind else {
-                    panic!("classification must retain its builtin identity");
+                let value = force_host_expr_type(
+                    HostExpr::new(HostExprKind::Builtin {
+                        name: CheckedBuiltinCallable::FloatClassify(kind).into(),
+                        args: vec![HostExpr::new(HostExprKind::Var(
+                            "x".into(),
+                            input_ty.clone(),
+                        ))],
+                        ty: wrong.clone(),
+                    }),
+                    wrong.clone(),
+                );
+                let HostExprKind::Builtin { args, ty, .. } = value.kind else {
+                    panic!("closed operation must retain identity");
                 };
                 assert_eq!(host_expr_type(&args[0]), input_ty);
-                assert_eq!(ty, output_ty);
-                let mut expr = HostExpr::new(HostExprKind::Builtin {
-                    name: name.into(),
-                    args,
-                    ty,
-                });
-                assert!(matches!(
-                    normalize_checked_host_expr(&mut expr, &mut UnordMap::new()),
-                    Err(crate::HostTypeResolutionError::InvalidCheckedApplication { .. })
-                ));
+                assert_eq!(ty, wrong);
+                assert!(
+                    CheckedApplicationRelation(kind)
+                        .instantiate(&args, &ty)
+                        .is_err()
+                );
             }
         }
     }
 
     #[test]
-    fn predicate_relation_rejects_wrong_surface_precision_rank_and_enclosing_extent() {
-        for name in ["is_nan", "is_finite", "is_infinite"] {
+    fn predicate_host_relation_rejects_wrong_family_surface_precision_rank_and_enclosing_extent() {
+        for kind in [
+            chelis_types::FloatClassify::Nan,
+            chelis_types::FloatClassify::Finite,
+            chelis_types::FloatClassify::Infinite,
+        ] {
+            let relation = CheckedApplicationRelation(kind);
             let input = HostExpr::new(HostExprKind::Var(
                 "x".into(),
                 HostTypeTerm::Tensor(TensorType {
@@ -25247,182 +24965,63 @@ mod tests {
                     dims: vec![],
                     precision: Prim::Bool,
                 }),
-            ] {
-                let mut value = HostExpr::new(HostExprKind::Builtin {
-                    name: name.into(),
-                    args: vec![input.clone()],
-                    ty: wrong,
-                });
-                assert!(normalize_checked_host_expr(&mut value, &mut UnordMap::new()).is_err());
-            }
-            let mut program = HostProgram::default();
-            program.globals.push(HostBinding {
-                name: "result".into(),
-                display_name: None,
-                display_roots: vec![],
-                ty: HostTypeTerm::Tensor(TensorType {
+                HostTypeTerm::Tensor(TensorType {
                     dims: vec![DimInfo::Lit(3)],
                     precision: Prim::Bool,
                 }),
-                value: HostExpr::new(HostExprKind::Builtin {
-                    name: name.into(),
-                    args: vec![input],
-                    ty: HostTypeTerm::Tensor(TensorType {
-                        dims: vec![DimInfo::Named("*".into(), None)],
-                        precision: Prim::Bool,
-                    }),
-                }),
-            });
-            assert!(
-                normalize_checked_application_relations(&mut program).is_err(),
-                "enclosing known contradiction cannot be erased"
-            );
-        }
-    }
-
-    #[test]
-    fn predicate_relation_validates_aggregate_enclosures_and_preserves_claim_plans() {
-        let axes = vec![
-            DimInfo::Named("batch".into(), None),
-            DimInfo::Named("_rt_actual".into(), None),
-        ];
-        let actual = HostTypeTerm::Tensor(TensorType {
-            dims: axes.clone(),
-            precision: Prim::Bool,
-        });
-        let coarse = HostTypeTerm::Tensor(TensorType {
-            dims: vec![DimInfo::Named("*".into(), None); 2],
-            precision: Prim::Bool,
-        });
-        let wrong = HostTypeTerm::Tensor(TensorType {
-            dims: vec![DimInfo::Lit(3)],
-            precision: Prim::Bool,
-        });
-        for name in ["is_nan", "is_finite", "is_infinite"] {
-            let predicate = || {
-                HostExpr::new(HostExprKind::Builtin {
-                    name: name.into(),
-                    args: vec![HostExpr::new(HostExprKind::Var(
-                        "x".into(),
-                        HostTypeTerm::Tensor(TensorType {
-                            dims: axes.clone(),
-                            precision: Prim::F32,
-                        }),
-                    ))],
-                    ty: coarse.clone(),
-                })
-            };
-            for (requirement, succeeds) in [(&coarse, true), (&wrong, false)] {
-                let cases = [
-                    (
-                        HostExprKind::List(
-                            vec![predicate()],
-                            HostTypeTerm::List(Box::new(requirement.clone())),
-                        ),
-                        HostTypeTerm::List(Box::new(actual.clone())),
-                    ),
-                    (
-                        HostExprKind::Map {
-                            callback: HostCallback {
-                                kind: HostCallbackKind::Inline {
-                                    params: vec![HostParam {
-                                        name: "x".into(),
-                                        ty: HostTypeTerm::Tensor(TensorType {
-                                            dims: axes.clone(),
-                                            precision: Prim::F32,
-                                        }),
-                                    }],
-                                    body: Box::new(predicate()),
-                                },
-                                ret_ty: coarse.clone(),
-                            },
-                            list: Box::new(HostExpr::new(HostExprKind::List(
-                                vec![],
-                                HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(TensorType {
-                                    dims: axes.clone(),
-                                    precision: Prim::F32,
-                                }))),
-                            ))),
-                            ty: HostTypeTerm::List(Box::new(requirement.clone())),
-                        },
-                        HostTypeTerm::List(Box::new(actual.clone())),
-                    ),
-                    (
-                        HostExprKind::Tuple(
-                            vec![predicate()],
-                            HostTypeTerm::Tuple(vec![requirement.clone()]),
-                        ),
-                        HostTypeTerm::Tuple(vec![actual.clone()]),
-                    ),
-                    (
-                        HostExprKind::Let {
-                            bindings: vec![],
-                            body: Box::new(predicate()),
-                            ty: requirement.clone(),
-                        },
-                        actual.clone(),
-                    ),
-                    (
-                        HostExprKind::If {
-                            cond: Box::new(HostExpr::new(HostExprKind::Bool(true))),
-                            then_expr: Box::new(predicate()),
-                            else_expr: Box::new(predicate()),
-                            ty: requirement.clone(),
-                        },
-                        actual.clone(),
-                    ),
-                ];
-                for (kind, expected) in cases {
-                    let mut value = HostExpr::new(kind);
-                    let result = normalize_checked_host_expr(&mut value, &mut UnordMap::new());
-                    assert_eq!(result.is_ok(), succeeds, "{name}: {result:?}");
-                    if succeeds {
-                        assert_eq!(host_expr_type(&value), expected);
-                    }
-                }
-                let mut callback = HostCallback {
-                    kind: HostCallbackKind::Inline {
-                        params: vec![],
-                        body: Box::new(predicate()),
-                    },
-                    ret_ty: requirement.clone(),
-                };
-                assert_eq!(
-                    normalize_checked_host_callback(&mut callback, &UnordMap::new()).is_ok(),
-                    succeeds
+            ] {
+                assert!(
+                    relation
+                        .instantiate(std::slice::from_ref(&input), &wrong)
+                        .is_err()
                 );
-                if succeeds {
-                    assert_eq!(callback.ret_ty, actual);
-                }
             }
-            let plan = HostResultClaimPlan {
-                result: TensorType {
-                    dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-                    precision: Prim::Bool,
-                },
-                axes: vec![
-                    (0, HostResultRequirementPlan::Literal(2)),
-                    (1, HostResultRequirementPlan::Literal(3)),
-                ],
-                outer_claims_first: true,
-                nested: None,
-            };
-            let mut value = HostExpr::new(HostExprKind::ResultClaimScope {
-                plan: plan.clone(),
-                body: Box::new(predicate()),
-                ty: coarse.clone(),
+            for precision in [Prim::Int32, Prim::Bool] {
+                let input = HostExpr::new(HostExprKind::Var(
+                    "x".into(),
+                    HostTypeTerm::Tensor(TensorType {
+                        dims: vec![DimInfo::Lit(2)],
+                        precision,
+                    }),
+                ));
+                assert!(
+                    relation
+                        .instantiate(&[input], &fresh_host_inference())
+                        .is_err()
+                );
+            }
+            assert!(relation.instantiate(&[], &HostTypeTerm::Bool).is_err());
+            assert!(
+                relation
+                    .instantiate(&[input.clone(), input], &HostTypeTerm::Bool)
+                    .is_err()
+            );
+            let actual = HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::Bool,
             });
-            normalize_checked_host_expr(&mut value, &mut UnordMap::new()).unwrap();
-            let HostExprKind::ResultClaimScope {
-                plan: retained, ty, ..
-            } = value.kind
-            else {
-                panic!("claim scope must survive")
-            };
-            assert_eq!(ty, actual);
-            assert_eq!(retained.result(), plan.result());
-            assert_eq!(retained.axes(), plan.axes());
-            assert_eq!(retained.outer_claims_first(), plan.outer_claims_first());
+            let stale = HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::Bool,
+            });
+            for (expected, actual) in [
+                (
+                    HostTypeTerm::List(Box::new(stale.clone())),
+                    HostTypeTerm::List(Box::new(actual.clone())),
+                ),
+                (
+                    HostTypeTerm::Option(Box::new(stale.clone())),
+                    HostTypeTerm::Option(Box::new(actual.clone())),
+                ),
+                (
+                    HostTypeTerm::Tuple(vec![stale]),
+                    HostTypeTerm::Tuple(vec![actual]),
+                ),
+            ] {
+                assert!(
+                    validate_checked_result_requirement(&expected, &actual, kind.name()).is_err()
+                );
+            }
         }
     }
 
@@ -28497,7 +28096,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         };
         let session = HostLoweringSession::new(&checked);
         let context = cached_subexpr_lowering_context(&session);
-        let dag = lower_tensor_helper_dag(body, &session, &scope, &expected, &context)
+        let dag = lower_tensor_helper_dag(body, &session, &scope, &expected, &context, None)
             .expect("helper dag");
         let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
         assert_eq!(root.op, RiscOp::Exp, "{:?}", dag.nodes());

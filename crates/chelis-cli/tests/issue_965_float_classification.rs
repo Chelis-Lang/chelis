@@ -3,6 +3,123 @@ mod common;
 use assert_cmd::Command;
 use common::build_and_run;
 
+/// [04-INF-9]/[05-OP-20..22]: statically resolved aliases use the
+/// direct operation's producer route even beneath an enclosing value.
+#[test]
+fn closed_predicate_routes_are_congruent_inside_option_payloads() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for predicate in ["is_nan", "is_finite", "is_infinite"] {
+            let mask = match predicate {
+                "is_nan" => "[false, true]",
+                "is_finite" => "[true, false]",
+                _ => "[false, false]",
+            };
+            for alias in [false, true] {
+                let callee = if alias { "f" } else { predicate };
+                let source = format!(
+                    r#"
+f = {predicate}
+x = to_tensor([1.0{dtype},2.0{dtype},div(0.0{dtype},0.0{dtype})])
+wrapped = Some({callee}(stride(x,2i64)))
+def captured_option(z: tensor[3,{dtype}]) -> Option[tensor[*,bool]] = Some(f(stride(z,2i64)))
+def local_option(z: tensor[3,{dtype}]) -> Option[tensor[*,bool]] = {{
+  local = {predicate}
+  Some(local(stride(z,2i64)))
+}}
+def borrowed_option[n,p: Float](h: (&tensor[n,p] -> tensor[n,bool]), z: tensor[n,p]) -> Option[tensor[n,bool]] = Some(h(z))
+def producer_shadow({predicate}: (&tensor[3,{dtype}] -> tensor[3,bool]), z: tensor[3,{dtype}]) -> Option[tensor[*,bool]] = Some(f(stride(z,2i64)))
+wrapped_captured = captured_option(x)
+wrapped_local = local_option(x)
+wrapped_borrowed = borrowed_option(f,stride(x,2i64))
+wrapped_shadow = producer_shadow(is_nan,x)
+inside = match wrapped with {{
+  | Some(value) => value
+  | None => to_tensor([false,false])
+}}
+"#
+                );
+                let evaluated = evaluate(&source);
+                assert!(
+                    evaluated.contains(&format!("inside = tensor(shape=[2], data={mask})")),
+                    "{evaluated}"
+                );
+                let native = build_and_run(&source, &format!("option_{predicate}_{dtype}_{alias}"));
+                assert_eq!(native, evaluated);
+            }
+        }
+    }
+}
+
+/// Independent runtime producers remain valid at either branch choice;
+/// binding one operand earlier cannot change alias executability.
+#[test]
+fn closed_predicate_routes_are_congruent_at_mixed_runtime_branch_joins() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for predicate in ["is_nan", "is_finite", "is_infinite"] {
+            let mask = match predicate {
+                "is_nan" => "[false, true]",
+                "is_finite" => "[true, false]",
+                _ => "[false, false]",
+            };
+            for alias in [false, true] {
+                let callee = if alias { "f" } else { predicate };
+                let source = format!(
+                    r#"
+f = {predicate}
+x = to_tensor([1.0{dtype},2.0{dtype},div(0.0{dtype},0.0{dtype})])
+bound = {callee}(stride(x,2i64))
+def choose(flag: bool, z: tensor[3,{dtype}]) -> tensor[*,bool] = if flag then {callee}(stride(z,2i64)) else bound
+left = choose(true,x)
+right = choose(false,x)
+"#
+                );
+                let evaluated = evaluate(&source);
+                for root in ["left", "right"] {
+                    assert!(
+                        evaluated.contains(&format!("{root} = tensor(shape=[2], data={mask})")),
+                        "{evaluated}"
+                    );
+                }
+                assert_eq!(
+                    build_and_run(&source, &format!("branch_{predicate}_{dtype}_{alias}")),
+                    evaluated
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn enclosing_predicate_values_reject_family_surface_and_known_shape_conflicts() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for predicate in ["is_nan", "is_finite", "is_infinite"] {
+            for body in [
+                "bad = Some(f(to_tensor([1i32,2i32])))\n".to_owned(),
+                format!(
+                    "def bad(z: tensor[2,{dtype}]) -> Option[tensor[3,bool]] = Some(f(z))\ny = bad(to_tensor([1.0{dtype},2.0{dtype}]))\n"
+                ),
+                format!(
+                    "def bad(z: {dtype}) -> Option[tensor[bool]] = Some(f(z))\ny = bad(1.0{dtype})\n"
+                ),
+                format!(
+                    "def bad(z: tensor[2,{dtype}]) -> tensor[2,{dtype}] = if true then f(z) else z\ny = bad(to_tensor([1.0{dtype},2.0{dtype}]))\n"
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("bad_enclosure.ch");
+                std::fs::write(&path, format!("f = {predicate}\n{body}")).unwrap();
+                Command::cargo_bin("chelis")
+                    .unwrap()
+                    .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                    .args(["check", "--file"])
+                    .arg(path)
+                    .assert()
+                    .failure();
+            }
+        }
+    }
+}
+
 fn evaluate(source: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("classification.ch");

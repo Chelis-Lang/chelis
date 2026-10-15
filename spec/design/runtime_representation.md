@@ -1073,15 +1073,21 @@ closed checked-callable signature selector serves direct and aliased host
 applications as well as borrowed callbacks. A declaration-alias index retains
 closed operation identities under both source names and generated global labels;
 host and numeric lowering consult that identity relation after lexical bindings.
-Host IR carries the closed discriminator in `HostBuiltinIdentity`; its private
-representation prevents a checked operation from becoming an ordinary string
-builtin during rewriting. Before `ConcreteHostType` and ABI projection, mandatory
-checked-application normalization instantiates the same-surface, same-axis Bool
-relation from the actual lowered operand, including producer-created runtime
-axes. Related binding and enclosing value metadata follows that result; known
-surface, precision, rank and extent contradictions remain errors. Authored
-result and local extent claim plans retain their identity and declaration order
-independently of the inferred ABI type. C ABI equality remains exact.
+Host application resolution retains the closed discriminator before selecting
+an execution lane. Direct operations and statically resolved local, global and
+captured aliases enter the same ordered, claim-aware tensor helper pipeline.
+A typed root-operation authority accompanies the original application; numeric
+scope contains operands rather than callable pseudo-inputs. The helper resolves
+its result from the actual producer axes, including runtime movement axes,
+without rewriting a source callee name or consulting a same-spelled shadow.
+Ordinary function signatures cannot establish closed operation identity.
+Genuine host operands and borrowed callbacks retain `HostBuiltinIdentity` and
+instantiate the same-surface, same-axis Bool relation at their application.
+Enclosing values use the existing direct-call lowering path; concrete type and
+ABI projection do not run a second transitive inference visitor. Known surface,
+precision, rank and extent contradictions remain errors. Authored result and
+local extent claim plans retain their identity and declaration order independently
+of the inferred ABI type. C ABI equality remains exact.
 Key-only helper emission retains
 its separately registered `append_key_callable_helpers` owner and key execution
 controls. The classifier registrations bind to the executed all-width raw-bit
