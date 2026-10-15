@@ -1,7 +1,14 @@
 """Regression checks for the scheduled ecosystem drift workflow."""
 
 from pathlib import Path
+import json
+import os
 import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import textwrap
 import unittest
 
 
@@ -159,6 +166,171 @@ def named_step(workflow: str, name: str) -> str:
     if next_index == -1:
         return workflow[self_index:]
     return workflow[self_index:next_index]
+
+
+def cearchin_recipe(workflow: str) -> str:
+    block = workflow.split("          - repo: c-earchin\n", 1)[1].split(
+        "          - repo:", 1
+    )[0]
+    return textwrap.dedent(block.split("            cargo_recipe: |\n", 1)[1])
+
+
+def step_run(step: str) -> str:
+    return textwrap.dedent(step.split("        run: |\n", 1)[1])
+
+
+class CEarchinHeadRecipeTests(unittest.TestCase):
+    """Execute the workflow shell with process-boundary doubles, without Cargo."""
+
+    def run_recipe(
+        self, *, fail_matrix: bool = False, fail_refresh: bool = False,
+        workflow: str | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "bin"
+            tools.mkdir()
+            (root / "tests/integration/consumer").mkdir(parents=True)
+            log = root / "commands.jsonl"
+            stub = tools / "stub"
+            stub.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, pathlib, sys\n"
+                "entry = dict(tool=pathlib.Path(sys.argv[0]).name, args=sys.argv[1:], "
+                "cwd=os.getcwd(), compiler=os.environ.get('CHELIS_BIN'))\n"
+                "with open(os.environ['COMMAND_LOG'], 'a') as stream: "
+                "stream.write(json.dumps(entry) + '\\n')\n"
+                "if entry['args'][:1] == ['scripts/check_examples.py']:\n"
+                "    assert entry['compiler'] == os.environ['EXPECTED_COMPILER']\n"
+                "    assert entry['args'] == ['scripts/check_examples.py', '--regenerate']\n"
+                "    if os.environ.get('FAIL_MATRIX') == '1': sys.exit(19)\n"
+                "if entry['args'][:2] == ['reef', 'update'] and os.environ.get('FAIL_REFRESH') == '1': sys.exit(18)\n"
+                "if entry['tool'] == 'chelis' and any(a.endswith('.dp') for a in entry['args']): sys.exit(20)\n"
+            )
+            stub.chmod(0o755)
+            for name in ("cargo", "chelis", "python3"):
+                (tools / name).symlink_to(stub)
+            expected = str(tools / "chelis")
+            result = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", cearchin_recipe(workflow or WORKFLOW.read_text())],
+                cwd=root, capture_output=True, text=True,
+                env=dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}",
+                         CHELIS_TOOLCHAIN=str(root), CHELIS_BIN="/stale/release/chelis",
+                         EXPECTED_COMPILER=expected, COMMAND_LOG=str(log),
+                         FAIL_MATRIX=str(int(fail_matrix)), FAIL_REFRESH=str(int(fail_refresh))),
+            )
+            entries = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+            return result, entries
+
+    def test_head_recipe_runs_native_matrix_and_both_reef_consumers(self) -> None:
+        result, entries = self.run_recipe()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = [(entry["tool"], entry["args"]) for entry in entries]
+        for command in (
+            ("cargo", ["build", "--workspace", "--all-targets", "--locked"]),
+            ("cargo", ["test", "--workspace", "--locked"]),
+            ("cargo", ["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"]),
+            ("cargo", ["fmt", "--all", "--", "--check"]),
+            ("python3", ["scripts/generate_vocabulary.py", "--check"]),
+            ("chelis", ["check", "src/vocabulary.ch"]),
+            ("chelis", ["check", "tests/integration/consumer/src/main.ch"]),
+            ("chelis", ["test", "tests_neg/", "--expect", "neg"]),
+            ("python3", ["scripts/check_examples.py", "--regenerate"]),
+            ("chelis", ["reef", "build", "--no-auto-fetch", "tests/integration/consumer"]),
+            ("chelis", ["reef", "build", "--no-auto-fetch", "."]),
+        ):
+            self.assertIn(command, commands)
+        self.assertTrue(all(entry["compiler"].endswith("/bin/chelis") for entry in entries))
+        refresh = [entry for entry in entries if entry["args"] == ["reef", "update", "chelis-std", "--offline"]]
+        self.assertEqual(len(refresh), 2)
+        self.assertTrue(refresh[1]["cwd"].endswith("/tests/integration/consumer"))
+        self.assertLess(entries.index(refresh[-1]), commands.index(("cargo", ["build", "--workspace", "--all-targets", "--locked"])))
+
+    def test_failed_native_matrix_fails_the_lane_before_packaging(self) -> None:
+        result, entries = self.run_recipe(fail_matrix=True)
+        self.assertEqual(result.returncode, 19, result.stderr)
+        self.assertFalse(any(entry["args"][:2] == ["reef", "build"] for entry in entries))
+
+    def test_failed_runtime_refresh_prevents_compiler_acceptance(self) -> None:
+        result, entries = self.run_recipe(fail_refresh=True)
+        self.assertEqual(result.returncode, 18, result.stderr)
+        self.assertFalse(any(entry["tool"] == "cargo" for entry in entries))
+
+    def test_path_alone_cannot_select_the_matrix_compiler(self) -> None:
+        workflow = WORKFLOW.read_text()
+        mutated = workflow.replace('export CHELIS_BIN="$CHELIS_TOOLCHAIN/bin/chelis"', "", 1)
+        self.assertNotEqual(mutated, workflow)
+        result, _ = self.run_recipe(workflow=mutated)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("AssertionError", result.stderr)
+
+    def test_staged_capabilities_require_boolean_smt_before_native_probe(self) -> None:
+        workflow = WORKFLOW.read_text()
+        run = step_run(named_step(workflow, "Verify staged HEAD proof support"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "chelis-head-toolchain/bin/chelis"
+            binary.parent.mkdir(parents=True)
+            binary.write_text(
+                f"#!{sys.executable}\nimport os, sys\n"
+                "assert sys.argv[1:] == ['prove', '--capabilities']\n"
+                "print(os.environ['CAPABILITIES'])\n"
+            )
+            binary.chmod(0o755)
+            tools = root / "tools"
+            tools.mkdir()
+            python = tools / "python3"
+            python.write_text(
+                f"#!{sys.executable}\nimport os, pathlib, sys\n"
+                "if sys.argv[1:2] == ['-c']: os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
+                "assert sys.argv[1:] == ['.github/scripts/verify_release_smt.py', '--tarball', 'chelis-head-toolchain.tar.gz']\n"
+                "pathlib.Path('native-probe-ran').touch()\n"
+                "sys.exit(int(os.environ.get('NATIVE_STATUS', '0')))\n"
+            )
+            python.chmod(0o755)
+            for capabilities, accepted in (({"smt_available": True}, True), ({"smt_available": False}, False), ({}, False), ({"smt_available": "true"}, False)):
+                with self.subTest(capabilities=capabilities):
+                    receipt = root / "native-probe-ran"
+                    receipt.unlink(missing_ok=True)
+                    result = subprocess.run(
+                        ["bash", "-c", run], cwd=root, capture_output=True, text=True,
+                        env=dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", CAPABILITIES=json.dumps(capabilities), NATIVE_STATUS="0"),
+                    )
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    self.assertEqual(receipt.exists(), accepted)
+            result = subprocess.run(
+                ["bash", "-c", run], cwd=root, capture_output=True, text=True,
+                env=dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", CAPABILITIES='{"smt_available": true}', NATIVE_STATUS="7"),
+            )
+            self.assertEqual(result.returncode, 7, "native Surf provenance rejection must fail artifact readiness")
+
+    def assert_smt_artifact_contract(self, workflow: str) -> None:
+        build = named_step(workflow, "Build chelis-cli (release, smt)")
+        command = shlex.split(build.split("        run: ", 1)[1])
+        self.assertEqual(command[:4], ["python3", "scripts/ci_cvc5_build.py", "--", "cargo"])
+        self.assertIn("smt", command[command.index("--features") + 1].split(","))
+        self.assertIn("sealed-runtime", command[command.index("--features") + 1].split(","))
+        dependencies = named_step(workflow, "Install SMT build dependencies (cvc5)")
+        self.assertTrue({"g++", "cmake", "libclang-dev", "git", "libgmp-dev", "libmpfr-dev"}.issubset(shlex.split(dependencies.split("        run: ", 1)[1])))
+        build_job = workflow.split("  build-chelis:\n", 1)[1].split("  drift:\n", 1)[0]
+        self.assertIn("timeout-minutes: 75", build_job)
+        self.assertLess(workflow.index("- name: Verify staged HEAD proof support"), workflow.index("- name: Upload HEAD toolchain artifact"))
+
+    def test_uploaded_toolchain_requires_sealed_smt_build(self) -> None:
+        self.assert_smt_artifact_contract(WORKFLOW.read_text())
+
+    def test_solver_free_build_or_unverified_upload_is_rejected(self) -> None:
+        workflow = WORKFLOW.read_text()
+        readiness = named_step(workflow, "Verify staged HEAD proof support")
+        for mutated in (
+            workflow.replace("--features sealed-runtime,smt", "--features sealed-runtime", 1),
+            workflow.replace(readiness, "", 1),
+            workflow.replace("scripts/ci_cvc5_build.py -- cargo", "scripts/unbounded_retry.py -- cargo", 1),
+        ):
+            with self.subTest():
+                self.assertNotEqual(mutated, workflow)
+                with self.assertRaises((AssertionError, ValueError)):
+                    self.assert_smt_artifact_contract(mutated)
 
 
 class EcosystemDriftWorkflowTests(unittest.TestCase):
