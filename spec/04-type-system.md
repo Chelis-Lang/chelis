@@ -1875,6 +1875,17 @@ or a result claim, and does not suppress callback effects. The first callback
 invocation retains its entry checks; an empty input invokes no callback and
 introduces no callback-entry check.
 
+Composition through a direct checked function call retains each invocation
+boundary's own obligation and witness scope. A callback's wildcard admission or
+weaker formal claim supplies no evidence for a stronger callee formal. Reuse at
+the repeated direct call site requires its own first successful callee entry,
+the identical checked callee and call site, immutable accumulator forwarding,
+and an independently checked construction postcondition. That postcondition
+describes retained components independently of the declared result claim; it
+neither strengthens nor discharges that claim. Argument effects, capture
+initialization, callee entry checks and producer checks retain their original
+order. An uninvoked callback introduces no callee entry or capture initialization.
+
 A runtime extent guard is the check that a declared, named, or otherwise
 claimed extent agrees with the value actually observed, or that a runtime
 extent is non-negative. Each guard is evaluated exactly once, after every

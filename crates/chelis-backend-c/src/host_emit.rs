@@ -5802,6 +5802,12 @@ fn stationary_callback_entry(callback: &HostCallback) -> Option<&HostExpr> {
     let HostCallbackKind::Inline { params, body } = &callback.kind else {
         return None;
     };
+    if let Some(proof) = &callback.accumulator_delta
+        && let Some(entries) =
+            retained_accumulator_entries(params, body, std::slice::from_ref(proof))
+    {
+        return entries.first().map(|(entry, _)| *entry);
+    }
     let parameter = if let Some(proof) = &callback.stationary_accumulator {
         if !proof.validates_body(body) {
             return None;
@@ -5851,6 +5857,106 @@ fn stationary_callback_entry(callback: &HostCallback) -> Option<&HostExpr> {
     Some(entry)
 }
 
+/// Retained calls stage payloads and stamp formal ingress before their own
+/// signature check. Reuse is authorized only by exact immutable forwarding
+/// from callback argument zero, the original formal obligation, and the
+/// independently validated lowered construction postcondition.
+fn retained_accumulator_entries<'a>(
+    params: &[HostParam],
+    body: &'a HostExpr,
+    proofs: &[std::sync::Arc<chelis_ir::host::AccumulatorDeltaProof>],
+) -> Option<
+    Vec<(
+        &'a HostExpr,
+        std::sync::Arc<chelis_ir::host::AccumulatorDeltaProof>,
+    )>,
+> {
+    fn variable(value: &HostExpr) -> Option<&str> {
+        match &value.kind {
+            HostExprKind::Var(name, _) => Some(name),
+            HostExprKind::FormalIngress { value, .. } => variable(value),
+            _ => None,
+        }
+    }
+    type Candidate<'a> = (
+        &'a HostExpr,
+        &'a HostExpr,
+        std::collections::BTreeMap<String, String>,
+    );
+    fn collect<'a>(
+        value: &'a HostExpr,
+        aliases: &mut std::collections::BTreeMap<String, String>,
+        out: &mut Vec<Candidate<'a>>,
+    ) -> Option<()> {
+        match &value.kind {
+            HostExprKind::Let { bindings, body, .. }
+            | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+                for (index, binding) in bindings.iter().enumerate() {
+                    if matches!(binding.value.kind, HostExprKind::SignatureEntry { .. }) {
+                        if index + 1 != bindings.len() {
+                            return None;
+                        }
+                        out.push((&binding.value, body, aliases.clone()));
+                    } else {
+                        let source = variable(&binding.value)
+                            .and_then(|name| aliases.get(name))
+                            .cloned();
+                        aliases.remove(&binding.name);
+                        if let Some(source) = source {
+                            aliases.insert(binding.name.clone(), source);
+                        }
+                    }
+                }
+                collect(body, aliases, out)
+            }
+            HostExprKind::ResultClaimScope { body, .. } => collect(body, aliases, out),
+            HostExprKind::ExtentSites { value, .. } => collect(value, aliases, out),
+            _ => Some(()),
+        }
+    }
+    let [acc, _] = params else {
+        return None;
+    };
+    let mut aliases = std::collections::BTreeMap::from([(acc.name.clone(), acc.name.clone())]);
+    let mut candidates = Vec::new();
+    collect(body, &mut aliases, &mut candidates)?;
+    if candidates.len() != proofs.len() {
+        return None;
+    }
+    candidates
+        .into_iter()
+        .zip(proofs)
+        .map(|((value, tail, aliases), proof)| {
+            let HostExprKind::SignatureEntry {
+                contract,
+                args,
+                lists,
+                ..
+            } = &value.kind
+            else {
+                return None;
+            };
+            let [entry] = lists.as_slice() else {
+                return None;
+            };
+            let name = variable(&entry.value)?;
+            let same_obligation = match &entry.claim {
+                Some(pattern) => proof.validates_pattern(pattern),
+                None => proof.validates_formal_type(&entry.ty),
+            };
+            (contract.formals().len() == 2
+                && args.is_empty()
+                && entry.position == 0
+                && entry.name == proof.parameter()
+                && !contract.formals()[1].pattern().has_tensor()
+                && aliases.get(name).is_some_and(|source| source == &acc.name)
+                && same_obligation
+                && proof.validates_body_as(tail, name))
+            .then(|| (value, proof.clone()))
+        })
+        .collect()
+}
+
 struct CallbackAt<'a> {
     callback: &'a HostCallback,
     span: Option<&'a str>,
@@ -5880,7 +5986,7 @@ struct StationaryEntryGuard {
 struct HostEmitter<'a> {
     /// Exact inline entry expression and its loop-local successful-check flag.
     /// The checked callback proof guarantees the accumulator cannot change.
-    stationary_entry: Option<StationaryEntryGuard>,
+    stationary_entry: Vec<StationaryEntryGuard>,
     lines: Vec<String>,
     /// [04-NUM-2]: the NaN finalization of the tensor builtin whose
     /// elementwise loop is being emitted.
@@ -5967,6 +6073,56 @@ struct FirstSiteFrames {
     /// the elements when the invocation started; empty when the body holds
     /// no such states.
     list_states: Vec<String>,
+}
+
+/// One lexical activation's local/output witness authority and claim chain.
+/// Retained bodies replace and restore this unit; caller witnesses are never
+/// used to fill missing callee entry state.
+struct RetainedWitnessAuthority {
+    frames: Option<FirstSiteFrames>,
+    claims: Option<String>,
+    on_spine: bool,
+}
+
+impl RetainedWitnessAuthority {
+    fn lower(
+        list_states: Vec<String>,
+        emitter: &mut HostEmitter<'_>,
+        lower: impl FnOnce(&mut HostEmitter<'_>) -> Result<(), Unsupported>,
+    ) -> Result<(), Unsupported> {
+        let caller = Self {
+            frames: emitter.first_site_frames.take(),
+            claims: emitter.result_claims.take(),
+            on_spine: emitter.claim_on_spine,
+        };
+        let parent = caller.claims.as_deref().unwrap_or("NULL").to_owned();
+        let scoped_claims = emitter.next_temp("retained_site_claims");
+        emitter.first_site_frames = Some(FirstSiteFrames {
+            result_dims: None,
+            frames: Vec::new(),
+            list_states,
+        });
+        emitter.result_claims = Some(scoped_claims.clone());
+        let declarations_at = emitter.lines.len();
+        let result = lower(emitter);
+        let frames = emitter
+            .first_site_frames
+            .take()
+            .expect("retained witness authority");
+        emitter.first_site_frames = caller.frames;
+        emitter.result_claims = caller.claims;
+        emitter.claim_on_spine = caller.on_spine;
+        result?;
+        let (mut declarations, head) = frames.declare(&emitter.indent, &parent);
+        declarations.push(format!(
+            "{}const __chelis_host_result_claim *{scoped_claims} = {head};",
+            emitter.indent
+        ));
+        emitter
+            .lines
+            .splice(declarations_at..declarations_at, declarations);
+        Ok(())
+    }
 }
 
 impl FirstSiteFrames {
@@ -6326,7 +6482,7 @@ impl<'a> HostEmitter<'a> {
                 .cloned()
                 .collect(),
             expression_site_index: 0,
-            stationary_entry: None,
+            stationary_entry: Vec::new(),
             entry_projection: entry::Projection::default(),
             external_helpers: UnordSet::new(),
             interface_reload_names: UnordSet::new(),
@@ -7671,11 +7827,37 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
-    fn prepare_stationary_entry(
+    fn prepare_stationary_entry(&mut self, callback: &HostCallback) -> Vec<StationaryEntryGuard> {
+        if let Some(composition) = &callback.accumulator_composition {
+            let HostCallbackKind::Inline { params, body } = &callback.kind else {
+                return Vec::new();
+            };
+            let mut proofs = Vec::new();
+            if let Some(outer) = composition.outer().filter(|proof| proof.has_extent_claim()) {
+                proofs.push(std::sync::Arc::new(outer.clone()));
+            }
+            proofs.push(std::sync::Arc::new(composition.inner().clone()));
+            let Some(entries) = retained_accumulator_entries(params, body, &proofs) else {
+                return Vec::new();
+            };
+            return entries
+                .into_iter()
+                .filter_map(|(entry, proof)| self.prepare_one_stationary_entry(entry, Some(proof)))
+                .collect();
+        }
+        let Some(entry) = stationary_callback_entry(callback) else {
+            return Vec::new();
+        };
+        self.prepare_one_stationary_entry(entry, callback.accumulator_delta.clone())
+            .into_iter()
+            .collect()
+    }
+
+    fn prepare_one_stationary_entry(
         &mut self,
-        callback: &HostCallback,
+        entry: &HostExpr,
+        delta: Option<std::sync::Arc<chelis_ir::host::AccumulatorDeltaProof>>,
     ) -> Option<StationaryEntryGuard> {
-        let entry = stationary_callback_entry(callback)?;
         let HostExprKind::SignatureEntry {
             contract, lists, ..
         } = &entry.kind
@@ -7693,14 +7875,14 @@ impl<'a> HostEmitter<'a> {
                 }
             }
         }
-        if let Some(proof) = &callback.accumulator_delta {
+        if let Some(proof) = &delta {
             for binder in proof.pattern().binders() {
                 if !binders.contains(&binder) {
                     binders.push(binder);
                 }
             }
         }
-        let old_list_len = callback.accumulator_delta.as_ref().and_then(|proof| {
+        let old_list_len = delta.as_ref().and_then(|proof| {
             matches!(
                 proof.recipe(),
                 chelis_ir::host::AccumulatorDeltaRecipe::ListInterval { .. }
@@ -7731,20 +7913,22 @@ impl<'a> HostEmitter<'a> {
             checked,
             states,
             binders,
-            delta: callback.accumulator_delta.clone(),
+            delta: delta.clone(),
             old_list_len,
         })
     }
 
     fn stationary_entry_matches(&self, expression: &HostExpr) -> bool {
         self.stationary_entry
-            .as_ref()
-            .is_some_and(|guard| std::ptr::eq(guard.expression, expression))
+            .iter()
+            .any(|guard| std::ptr::eq(guard.expression, expression))
     }
 
     fn emit_stationary_entry_validation(&mut self, expression: &HostExpr, lines: Vec<String>) {
-        if let Some(guard) = &self.stationary_entry
-            && std::ptr::eq(guard.expression, expression)
+        if let Some(guard) = self
+            .stationary_entry
+            .iter()
+            .find(|guard| std::ptr::eq(guard.expression, expression))
         {
             if guard.delta.is_some() {
                 // Each new entry gets fresh binder state. Replay retains prior
@@ -8235,8 +8419,31 @@ impl<'a> HostEmitter<'a> {
                         self.local_aliases.remove(&binding.name),
                     ));
                 }
-                self.claim_on_spine = on_result_spine;
-                self.assign_expr(target, body, ty)?;
+                // The retained callee owns an activation-local witness scope.
+                // Caller list states and output-inferred sites cannot stand in
+                // for its independently checked formals or local ascriptions.
+                let mut list_states = Vec::new();
+                for binding in bindings {
+                    if let HostExprKind::SignatureEntry {
+                        contract, lists, ..
+                    } = &binding.value.kind
+                    {
+                        for binder in contract.named_list_binders().iter().cloned().chain(
+                            lists
+                                .iter()
+                                .filter_map(|entry| entry.claim.as_ref())
+                                .flat_map(|pattern| pattern.binders()),
+                        ) {
+                            if !list_states.contains(&binder) {
+                                list_states.push(binder);
+                            }
+                        }
+                    }
+                }
+                RetainedWitnessAuthority::lower(list_states, self, |emitter| {
+                    emitter.claim_on_spine = on_result_spine;
+                    emitter.assign_expr(target, body, ty)
+                })?;
                 self.emit_expression_site(site, target)?;
                 self.interface_reload_names
                     .extend(shadowed_interface_globals);
@@ -8432,8 +8639,8 @@ impl<'a> HostEmitter<'a> {
                     }
                     let delta_guard = self
                         .stationary_entry
-                        .as_ref()
-                        .filter(|guard| std::ptr::eq(guard.expression, expr))
+                        .iter()
+                        .find(|guard| std::ptr::eq(guard.expression, expr))
                         .filter(|guard| guard.delta.is_some());
                     if let Some(guard) = delta_guard {
                         named_list_binders = guard.binders.clone();
@@ -8463,8 +8670,8 @@ impl<'a> HostEmitter<'a> {
                         self.emit_expr_to_var(&entry.value, &temp, &host_type(&entry.value))?;
                         if let Some(guard) = self
                             .stationary_entry
-                            .as_ref()
-                            .filter(|guard| std::ptr::eq(guard.expression, expr))
+                            .iter()
+                            .find(|guard| std::ptr::eq(guard.expression, expr))
                             && let Some(proof) = &guard.delta
                         {
                             let param = HostParam {
@@ -8484,7 +8691,7 @@ impl<'a> HostEmitter<'a> {
                                     &param,
                                     &temp,
                                     proof,
-                                    guard.old_list_len.as_deref().expect("List prior length"),
+                                    guard.old_list_len.as_deref(),
                                 );
                                 work.params[entry.position].metadata.push(format!(
                                     "if (!{}) {{ {full_metadata} }} else {{ {fresh_metadata} }}",
