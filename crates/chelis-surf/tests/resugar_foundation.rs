@@ -514,3 +514,62 @@ fn semantic_resugaring_preserves_converting_named_and_binder_casts() {
         );
     }
 }
+
+#[test]
+fn nested_grad_resugaring_preserves_callable_selector_identity() {
+    use chelis_surf::resugar::{
+        normalize_deep_for_surface_roundtrip, resugar_program, resugar_program_for_analysis,
+    };
+
+    // Named selectors retain their formal parameter identity (spec/03 §2.7),
+    // including on a surrounding grad. Reconstruction does not implement AD.
+    for target in ["fn (x: f32, w: f32) -> x * w", "pair"] {
+        let source = format!(
+            "def pair(x: f32, w: f32) -> f32 = x * w\nselected = grad(grad({target}, wrt=w), wrt=x)\n"
+        );
+        let canonical = desugar_program(&parse_surf(&source).unwrap()).unwrap();
+        for reconstructed in [
+            resugar_program(&canonical),
+            resugar_program_for_analysis(&canonical),
+        ] {
+            let reconstructed = reconstructed.expect("valid nested selectors reconstruct");
+            let roundtrip = desugar_program(&reconstructed).unwrap();
+            assert_eq!(
+                print_canonical(&normalize_deep_for_surface_roundtrip(&roundtrip).unwrap()),
+                print_canonical(&normalize_deep_for_surface_roundtrip(&canonical).unwrap())
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_grad_resugaring_rejects_contradictory_outer_and_inner_selectors() {
+    use chelis_surf::resugar::{ResugarError, resugar_program, resugar_program_for_analysis};
+
+    for (outer, inner) in [(1, 1), (0, 0), (2, 1), (0, 2)] {
+        let source = format!(
+            "(def {{}} selected (grad {{wrt: (var {{}} x)}} \
+               (grad {{wrt: (var {{}} w)}} \
+                 (fn {{}} (params {{}} x w) (app {{}} (var {{}} mul) (var {{}} x) (var {{}} w))) \
+                 (lit {{type: (t-prim {{}} i32)}} {inner})) \
+               (lit {{type: (t-prim {{}} i32)}} {outer})))"
+        );
+        let canonical = parse_deep(&source).unwrap();
+        for result in [
+            resugar_program(&canonical),
+            resugar_program_for_analysis(&canonical),
+        ] {
+            if outer == 2 || inner == 2 {
+                assert!(
+                    matches!(result, Err(ResugarError::InvalidGradSelectorIndex { .. })),
+                    "{result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(ResugarError::ContradictoryGradSelector { .. })),
+                    "{result:?}"
+                );
+            }
+        }
+    }
+}

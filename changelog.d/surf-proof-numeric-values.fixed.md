@@ -7,3 +7,6 @@ standalone signatures and typed local bindings, before inlined goal or guard
 planning. Source presentation and concrete evaluation retain authored inputs.
 Scalar-gradient coefficients and direct expressions share canonical scalar
 decoding, including subnormal literals and values that round to zero.
+Canonical reconstruction preserves nested gradient selector identity so valid
+unsupported transforms retain their diagnostic and leave numerical siblings
+and guarded sampling unaffected.

@@ -300,6 +300,15 @@ mod proof_numeric_values {
     }
 
     fn prove_with_tier(source: &str, deep: bool, tier: &str) -> (i32, Vec<Value>) {
+        prove_with_options(source, deep, tier, &[])
+    }
+
+    fn prove_with_options(
+        source: &str,
+        deep: bool,
+        tier: &str,
+        extra: &[&str],
+    ) -> (i32, Vec<Value>) {
         let directory = tempfile::tempdir().unwrap();
         let surf = directory.path().join("numeric.ch");
         std::fs::write(&surf, source).unwrap();
@@ -330,6 +339,7 @@ mod proof_numeric_values {
             .arg("prove")
             .arg(input)
             .args(["--json", "--tier", tier, "--seed", "37"])
+            .args(extra)
             .env_remove("CHELIS_STYLE_GATE_DISABLE")
             .output()
             .unwrap();
@@ -350,6 +360,61 @@ mod proof_numeric_values {
             .iter()
             .find(|r| r["kind"] == "property" && r["name"] == name)
             .unwrap_or_else(|| panic!("missing {name}: {records:?}"))
+    }
+
+    #[test]
+    fn nested_grad_sibling_preserves_numeric_smt_verdicts_and_own_boundary() {
+        let source = "def declared(dummy: i32) -> f64 = 1.3\n@property nested_grad forall(x: f32):\n  grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=xx)(x) >= 0.0\n@property numeric_true forall(x: i32):\n  declared(x) == 1.3f64\n@property numeric_false forall(x: i32):\n  declared(x) != 1.3f64\n";
+        for deep in [false, true] {
+            for (extra, expected_names) in [
+                (vec![], vec!["nested_grad", "numeric_true", "numeric_false"]),
+                (
+                    vec!["--only", "numeric_*"],
+                    vec!["numeric_true", "numeric_false"],
+                ),
+                (vec!["--only", "nested_grad"], vec!["nested_grad"]),
+            ] {
+                let (code, records) = prove_with_options(source, deep, "smt-only", &extra);
+                assert_eq!(
+                    code,
+                    if expected_names.contains(&"numeric_false") {
+                        1
+                    } else {
+                        2
+                    },
+                    "{records:#?}"
+                );
+                let names = records
+                    .iter()
+                    .filter(|r| r["kind"] == "property")
+                    .map(|r| r["name"].as_str().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(names, expected_names, "{records:#?}");
+                for name in expected_names {
+                    let record = property(&records, name);
+                    assert_eq!(record["proof_tier"], "smt", "{record}");
+                    assert_eq!(record["samples"], 0, "{record}");
+                    assert_eq!(
+                        record["status"],
+                        match name {
+                            "numeric_true" => "passed",
+                            "numeric_false" => "failed",
+                            _ => "unsupported",
+                        },
+                        "{record}"
+                    );
+                    if name == "nested_grad" {
+                        assert_eq!(
+                            record["reason"],
+                            "scalar grad SMT lowering does not support nested gradients",
+                            "{record}"
+                        );
+                    }
+                }
+                let summary = records.iter().find(|r| r["kind"] == "summary").unwrap();
+                assert_eq!(summary["errors"], 0, "{summary}");
+            }
+        }
     }
     fn mutate_one_definition(source: &str, original: &str, replacement: &str) -> String {
         assert_eq!(source.matches(original).count(), 1);

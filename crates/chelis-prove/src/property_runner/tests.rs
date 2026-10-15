@@ -2087,6 +2087,36 @@ fn declared_f64_guard_interval_executes_through_default_enabled_fuzz_runner() {
 }
 
 #[test]
+fn nested_grad_sibling_preserves_selected_numeric_fuzz_guards() {
+    let source = "@property nested_grad forall(x: f32):\n  grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=xx)(x) >= 0.0\ndef declared(dummy: i32) -> f64 = 1.3\n@property exact forall(x: f64) where x >= declared(0), x <= 1.3f64:\n  x == 1.3f64\n@property false_twin forall(x: f64) where x >= declared(0), x <= 1.3f64:\n  x != 1.3f64\n";
+    for (name, expected) in [
+        ("exact", PropertyStatus::Passed),
+        ("false_twin", PropertyStatus::Failed),
+    ] {
+        let options = PropertyRunOptions {
+            tier: "fuzz-only".into(),
+            only: Some(name.into()),
+            samples: 3,
+            seed: 83,
+            ..PropertyRunOptions::new(&chelis_std_bundle::EMBEDDED_RUNTIME)
+        };
+        let PropertyRunResult::Ran(outcomes) =
+            run_surf_source_properties(source, &options).unwrap();
+        assert_eq!(outcomes.len(), 1, "{outcomes:#?}");
+        let outcome = &outcomes[0];
+        assert_eq!(outcome.name, name);
+        assert_eq!(outcome.status, expected, "{outcome:#?}");
+        assert_eq!(outcome.proof_tier, PropertyTier::Fuzz, "{outcome:#?}");
+        assert!(outcome.accepted_samples > 0, "{outcome:#?}");
+        assert_eq!(outcome.rejected_samples, 0, "{outcome:#?}");
+        assert_eq!(
+            outcome.sampling_method.as_deref(),
+            Some("constraint_directed")
+        );
+    }
+}
+
+#[test]
 fn induction_plan_lowers_declared_helpers_from_the_cached_semantic_view() {
     use crate::solver::{CmpOp, SmtExpr};
     for (dtype, literal, expected) in [

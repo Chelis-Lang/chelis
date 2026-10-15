@@ -199,6 +199,10 @@ leaf-by-leaf desugaring cannot reconstruct a declaration's expected dtype.
 Original declarations still own property discovery paths, source attribution,
 displayed goals, concrete evaluation and trusted dependency membership.
 Semantic-view preparation does not add inference or change source formatting.
+Canonical reconstruction retains callable parameter identity through `grad`
+and validates every inner and outer selector. Valid nested transforms reach
+their existing property-local capability boundaries without changing supported
+numerical siblings or their guard plans.
 
 Tier B interprets numeric literals through the canonical Surf-to-Deep literal
 boundary (`spec/03` §6.4, `spec/04` [04-LIT-2], §5.6). A checked cast that

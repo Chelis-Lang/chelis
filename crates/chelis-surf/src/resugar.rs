@@ -831,6 +831,12 @@ fn deep_callable_origin_in_scope(
         return DeepCallableOrigin::Unknown;
     };
     match node.tag {
+        DeepTag::Grad if matches!(node.children.len(), 1 | 2) => {
+            // Like the Surf selector resolver, retain the target's formal
+            // parameter identity through grad. Each transform's operative
+            // selector is still checked by walk_grad_selector_consistency.
+            deep_callable_origin_in_scope(&node.children[0], callables, locals)
+        }
         DeepTag::If if node.children.len() == 3 => {
             let consequence = deep_callable_origin_in_scope(&node.children[1], callables, locals);
             let alternative = deep_callable_origin_in_scope(&node.children[2], callables, locals);
