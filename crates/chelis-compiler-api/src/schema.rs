@@ -6459,6 +6459,14 @@ mod tests {
             name: "rows".into(),
             size: None,
         };
+        let origins = WireIngressOrigins::new(&nodes);
+        let cache = origins.comparison(&nodes, &[]);
+        assert!(wire_axis_origin_cached(&nodes, &nodes[3], 0, 3, &[], true, &cache).is_none());
+        assert_eq!(
+            wire_axis_origin_cached(&nodes, &nodes[3], 0, 4, &[], true, &cache),
+            Some(WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 })
+        );
+        assert!(wire_axis_origin_cached(&nodes, &nodes[3], 0, 3, &[], true, &cache).is_none());
         nodes[2].output_type.dims[0] = WireDimInfo::Named {
             name: "own".into(),
             size: None,
@@ -6506,14 +6514,14 @@ mod tests {
             name: "rows".into(),
             size: None,
         };
-        for id in 1..nodes.len() {
+        for (id, node) in nodes.iter_mut().enumerate().skip(1) {
             if id % 7 == 0 {
-                nodes[id].output_type.dims[0] = WireDimInfo::Named {
+                node.output_type.dims[0] = WireDimInfo::Named {
                     name: format!("dim{id}"),
                     size: None,
                 };
             }
-            nodes[id].shape_deps = vec![(id / 2) as u64, 0];
+            node.shape_deps = vec![(id / 2) as u64, 0];
         }
         let origins = WireIngressOrigins::new(&nodes);
         for sources in [vec![], vec![0], vec![3, 7, 21], vec![7, 0], vec![], vec![0]] {
