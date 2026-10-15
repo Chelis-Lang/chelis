@@ -9,12 +9,6 @@ pub(crate) struct RankBodyContext {
     declarations: BTreeMap<String, [u8; 32]>,
 }
 
-fn mentions_rank(expr: &deep::Expr) -> bool {
-    stack_guard!("rank_body_signature", expr, false);
-    stamped_parts(expr)
-        .is_some_and(|(tag, _, kids)| tag == DeepTag::DRank || kids.iter().any(mentions_rank))
-}
-
 fn rank_body_error(def_name: &str, message: String) -> CheckError {
     CheckError::new(
         CheckErrorKind::DimensionMismatch,
@@ -89,7 +83,7 @@ fn check_body(
 /// caller's empty-errors/totality boundary owns publication.
 pub(super) fn validate_rank_bodies(
     exprs: &[deep::Expr],
-    types: &IrTypeEnv,
+    product: &InferenceProduct,
     graph: &TopLevelReferenceGraph,
     base: &RankBodyContext,
     errors: &mut DiagnosticSink<'_>,
@@ -152,8 +146,11 @@ pub(super) fn validate_rank_bodies(
         }
         for (vertex, index, failures) in checked {
             let name = &graph.definition(vertex).name;
-            let required =
-                types.get(name).is_some_and(mentions_rank) && !is_exact_op35_wrapper(name);
+            let (_, _, def_kids) = stamped_parts(items[index]).expect("checked definition");
+            let required = product
+                .owner_type(&def_kids[1], "rank-body function", errors)
+                .is_some_and(|ty| type_contains_rank(&ty))
+                && !is_exact_op35_wrapper(name);
             if component_valid {
                 accepted.insert(vertex);
                 let canonical =

@@ -89,7 +89,7 @@ pub(super) fn validate_semantic_program(
     }
     validate_rank_bodies(
         exprs,
-        type_env,
+        product,
         top_level_references,
         &RankBodyContext::default(),
         errors,
