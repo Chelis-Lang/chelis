@@ -1220,7 +1220,9 @@ thread_local! {
 /// program, whereas accumulator size changes during the measured loop.
 #[cfg(test)]
 fn charge_composition_source_comparison(left: &Expr, right: &Expr) {
-    let bytes = serde_json::to_vec(&(left, right)).expect("checked source serializes").len() as u64;
+    let bytes = serde_json::to_vec(&(left, right))
+        .expect("checked source serializes")
+        .len() as u64;
     COMPOSITION_SOURCE_BYTES.with(|work| work.set(work.get() + bytes));
 }
 

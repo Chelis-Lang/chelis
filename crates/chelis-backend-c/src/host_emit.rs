@@ -6105,14 +6105,22 @@ impl RetainedWitnessAuthority {
         emitter.result_claims = Some(scoped_claims.clone());
         let declarations_at = emitter.lines.len();
         let result = lower(emitter);
-        let frames = emitter.first_site_frames.take().expect("retained witness authority");
+        let frames = emitter
+            .first_site_frames
+            .take()
+            .expect("retained witness authority");
         emitter.first_site_frames = caller.frames;
         emitter.result_claims = caller.claims;
         emitter.claim_on_spine = caller.on_spine;
         result?;
         let (mut declarations, head) = frames.declare(&emitter.indent, &parent);
-        declarations.push(format!("{}const __chelis_host_result_claim *{scoped_claims} = {head};", emitter.indent));
-        emitter.lines.splice(declarations_at..declarations_at, declarations);
+        declarations.push(format!(
+            "{}const __chelis_host_result_claim *{scoped_claims} = {head};",
+            emitter.indent
+        ));
+        emitter
+            .lines
+            .splice(declarations_at..declarations_at, declarations);
         Ok(())
     }
 }
@@ -8416,11 +8424,19 @@ impl<'a> HostEmitter<'a> {
                 // for its independently checked formals or local ascriptions.
                 let mut list_states = Vec::new();
                 for binding in bindings {
-                    if let HostExprKind::SignatureEntry { contract, lists, .. } = &binding.value.kind {
+                    if let HostExprKind::SignatureEntry {
+                        contract, lists, ..
+                    } = &binding.value.kind
+                    {
                         for binder in contract.named_list_binders().iter().cloned().chain(
-                            lists.iter().filter_map(|entry| entry.claim.as_ref()).flat_map(|pattern| pattern.binders())
+                            lists
+                                .iter()
+                                .filter_map(|entry| entry.claim.as_ref())
+                                .flat_map(|pattern| pattern.binders()),
                         ) {
-                            if !list_states.contains(&binder) { list_states.push(binder); }
+                            if !list_states.contains(&binder) {
+                                list_states.push(binder);
+                            }
                         }
                     }
                 }

@@ -769,17 +769,32 @@ fn captured_shadowed_callee_keeps_its_own_formal_and_effects() {
         for direct in [false, true] {
             for steps in [0, 1, 2] {
                 for seed in [3, 5] {
-                    let callback = if direct { "step" } else { "fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i)" };
+                    let callback = if direct {
+                        "step"
+                    } else {
+                        "fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i)"
+                    };
                     let source = format!(
                         "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{\n _ = print(\"global\")\n append(acc, produce(3i64))\n}}\ndef run(seed: List[tensor[*, f32]], size: i64) -> i64 ! {{ IO }} = {{\n step = fn (acc: List[tensor[5, f32]], i: i64) -> {{\n _ = print(\"shadow\")\n append(acc, produce(size))\n }}\n _ = fold({callback}, seed, range(0i64, {steps}i64))\n 42i64\n}}\nout = run([produce({seed}i64)], 3i64)\n"
                     );
                     let (success, output) = result_claims::run(&source, native);
                     let failed = steps > 0 && (seed == 3 || steps > 1);
                     assert_eq!(success, !failed, "{source}\n{output}");
-                    assert_eq!(output.lines().filter(|line| *line == "global").count(), 0, "{output}");
-                    assert_eq!(output.lines().filter(|line| *line == "shadow").count(), usize::from(seed == 5 && steps > 0), "{output}");
+                    assert_eq!(
+                        output.lines().filter(|line| *line == "global").count(),
+                        0,
+                        "{output}"
+                    );
+                    assert_eq!(
+                        output.lines().filter(|line| *line == "shadow").count(),
+                        usize::from(seed == 5 && steps > 0),
+                        "{output}"
+                    );
                     if failed {
-                        assert!(output.contains("numeric trap: domain in load at i64"), "{output}");
+                        assert!(
+                            output.contains("numeric trap: domain in load at i64"),
+                            "{output}"
+                        );
                     }
                 }
             }
@@ -795,18 +810,36 @@ fn named_empty_seed_binds_only_at_the_first_populated_entry() {
                 for combine in ["fold", "scan"] {
                     for steps in [0, 1, 2, 3] {
                         let generic = if claim == "n" { "[n]" } else { "" };
-                        let construction = if prepend { "concat([v], acc)" } else { "append(acc, v)" };
+                        let construction = if prepend {
+                            "concat([v], acc)"
+                        } else {
+                            "append(acc, v)"
+                        };
                         let source = format!(
                             "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step{generic}(acc: List[tensor[{claim}, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{\n _ = print(\"body\")\n v = produce(if i == 0i64 then 5i64 else 3i64)\n {construction}\n}}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = {{\n _ = {combine}(fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i), seed, range(0i64, {steps}i64))\n 42i64\n}}\nout = run([])\n"
                         );
                         let (success, output) = result_claims::run(&source, native);
                         let first_bad = if claim == "3" { 2 } else { 3 };
                         assert_eq!(success, steps < first_bad, "{source}\n{output}");
-                        assert_eq!(output.lines().filter(|line| *line == "body").count(), steps.min(first_bad - 1), "{output}");
+                        assert_eq!(
+                            output.lines().filter(|line| *line == "body").count(),
+                            steps.min(first_bad - 1),
+                            "{output}"
+                        );
                         if steps >= first_bad {
-                            assert!(output.contains("numeric trap: domain in load at i64"), "{output}");
+                            assert!(
+                                output.contains("numeric trap: domain in load at i64"),
+                                "{output}"
+                            );
                             if claim == "n" {
-                                assert!(output.contains(if prepend { "acc[0] axis 0 = 3, acc[1] axis 0 = 5" } else { "acc[0] axis 0 = 5, acc[1] axis 0 = 3" }), "{output}");
+                                assert!(
+                                    output.contains(if prepend {
+                                        "acc[0] axis 0 = 3, acc[1] axis 0 = 5"
+                                    } else {
+                                        "acc[0] axis 0 = 5, acc[1] axis 0 = 3"
+                                    }),
+                                    "{output}"
+                                );
                             }
                         }
                     }
@@ -826,24 +859,49 @@ fn named_entry_receipts_restore_the_callee_witness_for_local_claims() {
                     let path = dir.path().join("size");
                     std::fs::write(&path, "xxxxx").unwrap();
                     let source = format!(
-                        "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef independent[m](seed: List[tensor[m, f32]], size: i64) -> i64 = {{\n v: tensor[m, f32] = produce(size)\n len(seed)\n}}\ndef step[m](acc: List[tensor[m, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{\n _ = print(\"before\")\n _ = independent([produce(5i64)], 5i64)\n size = string_len(read_file(\"{}\"))\n v: tensor[m, f32] = produce(if i == 0i64 then 3i64 else size)\n _ = print(\"after\")\n append(acc, v)\n}}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = {{\n _ = {combine}(fn (acc: List[tensor[{outer}, f32]], i: i64) -> step(acc, i), seed, range(0i64, {steps}i64))\n 42i64\n}}\nout = run([produce(3i64)])\n", path.display()
+                        "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef independent[m](seed: List[tensor[m, f32]], size: i64) -> i64 = {{\n v: tensor[m, f32] = produce(size)\n len(seed)\n}}\ndef step[m](acc: List[tensor[m, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{\n _ = print(\"before\")\n _ = independent([produce(5i64)], 5i64)\n size = string_len(read_file(\"{}\"))\n v: tensor[m, f32] = produce(if i == 0i64 then 3i64 else size)\n _ = print(\"after\")\n append(acc, v)\n}}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = {{\n _ = {combine}(fn (acc: List[tensor[{outer}, f32]], i: i64) -> step(acc, i), seed, range(0i64, {steps}i64))\n 42i64\n}}\nout = run([produce(3i64)])\n",
+                        path.display()
                     );
-                    let counterfactual = source.replace("-> step(acc, i)", "-> { old = acc\n step(old, i) }");
+                    let counterfactual =
+                        source.replace("-> step(acc, i)", "-> { old = acc\n step(old, i) }");
                     let (old_success, old_output) = result_claims::run(&counterfactual, native);
                     let (success, output) = result_claims::run(&source, native);
-                    assert_eq!((success, &output), (old_success, &old_output), "proved/unproved differ native={native}: {source}");
+                    assert_eq!(
+                        (success, &output),
+                        (old_success, &old_output),
+                        "proved/unproved differ native={native}: {source}"
+                    );
                     assert_eq!(success, steps < 2, "{source}\n{output}");
-                    assert_eq!(output.lines().filter(|line| *line == "before").count(), steps, "{output}");
-                    assert_eq!(output.lines().filter(|line| *line == "after").count(), steps.min(1), "{output}");
+                    assert_eq!(
+                        output.lines().filter(|line| *line == "before").count(),
+                        steps,
+                        "{output}"
+                    );
+                    assert_eq!(
+                        output.lines().filter(|line| *line == "after").count(),
+                        steps.min(1),
+                        "{output}"
+                    );
                     if steps == 2 {
-                        assert!(output.contains("numeric trap: domain in insert at i64"), "{output}");
+                        assert!(
+                            output.contains("numeric trap: domain in insert at i64"),
+                            "{output}"
+                        );
                     }
                     if steps == 1 {
-                        let independent_bad = source.replace("[produce(5i64)], 5i64)", "[produce(5i64)], 6i64)");
+                        let independent_bad =
+                            source.replace("[produce(5i64)], 5i64)", "[produce(5i64)], 6i64)");
                         let (success, output) = result_claims::run(&independent_bad, native);
                         assert!(!success, "{output}");
-                        assert!(output.contains("extent `m`: claimed = 5, insert axis 0 = 6"), "{output}");
-                        assert_eq!(output.lines().filter(|line| *line == "before").count(), 1, "{output}");
+                        assert!(
+                            output.contains("extent `m`: claimed = 5, insert axis 0 = 6"),
+                            "{output}"
+                        );
+                        assert_eq!(
+                            output.lines().filter(|line| *line == "before").count(),
+                            1,
+                            "{output}"
+                        );
                         assert!(!output.lines().any(|line| line == "after"), "{output}");
                     }
                 }

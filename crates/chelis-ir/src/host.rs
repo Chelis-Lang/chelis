@@ -15149,7 +15149,11 @@ struct RetainedBodyLoweringAuthority {
 }
 
 impl RetainedBodyLoweringAuthority {
-    fn enter<R>(self, sink: &mut TensorHelperSink, lower: impl FnOnce(&mut TensorHelperSink) -> R) -> R {
+    fn enter<R>(
+        self,
+        sink: &mut TensorHelperSink,
+        lower: impl FnOnce(&mut TensorHelperSink) -> R,
+    ) -> R {
         let _types = self.substitutions.map(ActiveTypeSubstGuard::push);
         let _dimensions = self.dimensions.map(ActiveDimSubstGuard::push);
         let caller = sink.declaration_name.replace(self.declaration);
@@ -19272,7 +19276,11 @@ fn lower_host_callback(
             };
             let stationary_accumulator = stationary_accumulator_proof(expr, program.adt_registry());
             let accumulator_delta = composed_delta.or_else(|| {
-                stationary_accumulator.is_none().then(|| accumulator_construction_proof(expr, program.adt_registry())).flatten().map(Arc::new)
+                stationary_accumulator
+                    .is_none()
+                    .then(|| accumulator_construction_proof(expr, program.adt_registry()))
+                    .flatten()
+                    .map(Arc::new)
             });
             Ok(Some(HostCallback {
                 stationary_accumulator,
