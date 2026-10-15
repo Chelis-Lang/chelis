@@ -1860,6 +1860,15 @@ A constraint that depends on runtime values is checked before allocation or
 element access and traps `Domain` or `Overflow` under the owning operation.
 Every execution mode observes the same values and traps.
 
+A `fold` or `scan` may discharge a repeated accumulator entry claim from a
+previous successful check only with independent evidence that the accumulator
+satisfies the identical obligation against the same witnesses. A checked
+callback whose result is the unchanged immutable accumulator supplies that
+evidence. Reuse does not discharge another formal's claim, a caller's claim,
+or a result claim, and does not suppress callback effects. The first callback
+invocation retains its entry checks; an empty input invokes no callback and
+introduces no callback-entry check.
+
 A runtime extent guard is the check that a declared, named, or otherwise
 claimed extent agrees with the value actually observed, or that a runtime
 extent is non-negative. Each guard is evaluated exactly once, after every

@@ -1910,6 +1910,9 @@ pub struct HelperSummaryRejection {
 
 #[derive(Debug, Clone)]
 pub struct HostCallback<T = HostTypeTerm> {
+    /// Checked source proves an unchanged immutable accumulator with no
+    /// second-formal entry obligation (runtime_extents.md C6.6).
+    pub stationary_accumulator: Option<StationaryAccumulatorProof>,
     pub kind: HostCallbackKind<T>,
     pub ret_ty: T,
 }
@@ -2506,6 +2509,7 @@ fn resolve_host_callback(
         },
     };
     Ok(ConcreteHostCallback {
+        stationary_accumulator: callback.stationary_accumulator,
         kind,
         ret_ty: callback.ret_ty.into_concrete()?,
     })
@@ -12485,6 +12489,7 @@ fn materialize_runtime_grad_list_element(
     let mapped_ty = HostTypeTerm::List(Box::new(mapped_ty));
     let mapped = HostExpr::new(HostExprKind::Map {
         callback: HostCallback {
+            stationary_accumulator: None,
             kind: HostCallbackKind::Inline {
                 params: vec![HostParam {
                     name: item_name.into(),
@@ -12676,6 +12681,7 @@ fn pack_grad_roots(plan: &GradPackPlan, roots: &mut impl Iterator<Item = HostExp
             };
             HostExpr::new(HostExprKind::Map {
                 callback: HostCallback {
+                    stationary_accumulator: None,
                     kind: HostCallbackKind::Inline {
                         params: vec![HostParam {
                             name: "__chelis_grad_list_row".into(),
@@ -18860,7 +18866,11 @@ fn checked_tensor_scan_callback(
     next: String,
     checked: String,
 ) -> HostCallback {
-    let HostCallback { kind, ret_ty } = callback;
+    let HostCallback {
+        kind,
+        ret_ty,
+        stationary_accumulator: _,
+    } = callback;
     let (params, body) = match kind {
         HostCallbackKind::Inline { params, body } => (params, *body),
         HostCallbackKind::Named { callee, params } => {
@@ -18901,12 +18911,131 @@ fn checked_tensor_scan_callback(
         ty: ret_ty.clone(),
     });
     HostCallback {
+        stationary_accumulator: None,
         kind: HostCallbackKind::Inline {
             params,
             body: Box::new(body),
         },
         ret_ty,
     }
+}
+
+/// Checked-source evidence scoped to the first formal of one inline callback.
+/// Only the shared derivation constructs it; ABI projection transports it
+/// without accepting an externally supplied opt-out from entry checking.
+#[derive(Debug, Clone)]
+pub struct StationaryAccumulatorProof {
+    parameter: String,
+    pattern: Arc<crate::claim_pattern::ClaimPattern>,
+}
+impl StationaryAccumulatorProof {
+    pub fn parameter(&self) -> &str {
+        &self.parameter
+    }
+    pub fn pattern(&self) -> &crate::claim_pattern::ClaimPattern {
+        &self.pattern
+    }
+    /// Revalidate the forwarding property after host transformations. A proof
+    /// cannot be transplanted onto a callback that constructs another value.
+    pub fn validates_body<T>(&self, body: &HostExpr<T>) -> bool {
+        fn forwards<T>(body: &HostExpr<T>, parameter: &str) -> bool {
+            match &body.kind {
+                HostExprKind::Var(name, _) => name == parameter,
+                HostExprKind::Let { bindings, body, .. }
+                | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+                    bindings.iter().all(|binding| binding.name != parameter)
+                        && forwards(body, parameter)
+                }
+                HostExprKind::If {
+                    then_expr,
+                    else_expr,
+                    ..
+                } => forwards(then_expr, parameter) && forwards(else_expr, parameter),
+                HostExprKind::ResultClaimScope { body, .. } => forwards(body, parameter),
+                HostExprKind::ExtentSites { value, .. } => forwards(value, parameter),
+                _ => false,
+            }
+        }
+        forwards(body, &self.parameter)
+    }
+}
+
+/// Independent checked-source evidence for the stationary accumulator rule.
+/// Only an inline two-argument callback with a scalar item qualifies. Its
+/// result must forward the original first binding on every admitted path;
+/// equal spelling under a shadowing let is not that binding.
+pub fn stationary_accumulator_proof(
+    expr: &Expr,
+    registry: &chelis_types::adt::AdtRegistry,
+) -> Option<StationaryAccumulatorProof> {
+    fn forwards(expr: &Expr, parameter: &str) -> bool {
+        if let Expr::MetaExpr(meta, _) = expr {
+            return forwards(&meta.expr, parameter);
+        }
+        let Some(node) = as_node(expr) else {
+            return false;
+        };
+        let children = node.children_slice();
+        match node.tag() {
+            DeepTag::Var => children.first().and_then(symbol_name) == Some(parameter),
+            DeepTag::Block => children
+                .last()
+                .is_some_and(|tail| forwards(tail, parameter)),
+            DeepTag::If => {
+                children.len() == 3
+                    && forwards(&children[1], parameter)
+                    && forwards(&children[2], parameter)
+            }
+            DeepTag::Let => {
+                let Some(bindings) = children.first().and_then(as_node) else {
+                    return false;
+                };
+                let (pairs, remainder) = bindings.children_slice().as_chunks::<2>();
+                bindings.tag() == DeepTag::Bind
+                    && remainder.is_empty()
+                    && pairs.iter().all(|pair| {
+                        // Reject every shadow of the original binding, even if a
+                        // new binding happens to contain an equal value.
+                        {
+                            let mut names = UnordSet::new();
+                            collect_binder_names(&pair[0], &mut names);
+                            !names.contains(parameter)
+                        }
+                    })
+                    && children
+                        .get(1)
+                        .is_some_and(|body| forwards(body, parameter))
+            }
+            _ => false,
+        }
+    }
+    if let Expr::MetaExpr(meta, _) = expr {
+        return stationary_accumulator_proof(&meta.expr, registry);
+    }
+    let node = as_node(expr).filter(|node| node.tag() == DeepTag::Fn)?;
+    let params = node
+        .children_slice()
+        .first()
+        .and_then(as_node)
+        .filter(|node| node.tag() == DeepTag::Params)?;
+    let [acc, _item] = params.children_slice() else {
+        return None;
+    };
+    let (types, _) = expr_fn_type(expr)?;
+    if types.len() != 2 || !matches!(types[1], HostTypeTerm::Scalar(_) | HostTypeTerm::Unit) {
+        return None;
+    }
+    let authored = param_declared_type_expr(acc)?;
+    let pattern = crate::claim_pattern::ClaimPattern::derive(&authored, registry).ok()?;
+    pattern.nested_root()?;
+    let name = param_name(acc)?;
+    node.children_slice()
+        .get(1)
+        .filter(|body| forwards(body, &name))
+        .map(|_| StationaryAccumulatorProof {
+            parameter: name,
+            pattern: Arc::new(pattern),
+        })
 }
 
 fn lower_host_callback(
@@ -19062,6 +19191,7 @@ fn lower_host_callback(
                 ret_ty
             };
             Ok(Some(HostCallback {
+                stationary_accumulator: stationary_accumulator_proof(expr, program.adt_registry()),
                 kind: HostCallbackKind::Inline {
                     params,
                     body: Box::new(body),
@@ -19133,6 +19263,7 @@ fn named_host_callback(
     ret_ty: HostTypeTerm,
 ) -> HostCallback {
     HostCallback {
+        stationary_accumulator: None,
         kind: HostCallbackKind::Named {
             params: positional_host_params(param_tys, &callee),
             callee,
@@ -22669,7 +22800,11 @@ fn conform_host_subexprs(exprs: Vec<HostExpr>) -> Vec<HostExpr> {
 /// unresolved. A named callback is a separate function the program-level pass
 /// conforms itself.
 fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> HostCallback {
-    let HostCallback { kind, ret_ty } = callback;
+    let HostCallback {
+        kind,
+        ret_ty,
+        stationary_accumulator,
+    } = callback;
     let ret_ty = if ret_ty.is_unresolved() && !expected.is_unresolved() {
         expected.clone()
     } else {
@@ -22682,7 +22817,11 @@ fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> Hos
         },
         named @ HostCallbackKind::Named { .. } => named,
     };
-    HostCallback { kind, ret_ty }
+    HostCallback {
+        kind,
+        ret_ty,
+        stationary_accumulator,
+    }
 }
 
 /// A checked application's result relation is retained by its typed
@@ -24951,6 +25090,67 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn stationary_accumulator_proof_is_checked_and_revalidated_after_host_transforms() {
+        fn find_fn(expr: &Expr) -> Option<&Expr> {
+            if let Expr::MetaExpr(meta, _) = expr {
+                return find_fn(&meta.expr);
+            }
+            let node = as_node(expr)?;
+            if node.tag() == DeepTag::Fn {
+                return Some(expr);
+            }
+            node.children_slice().iter().find_map(find_fn)
+        }
+        fn proof(body: &str, item_type: &str, items: &str) -> Option<StationaryAccumulatorProof> {
+            let source = format!(
+                "out = fold(fn (acc: List[tensor[3, f32]], i: {item_type}) -> {body}, [to_tensor([1.0f32, 2.0f32, 3.0f32])], {items})\n"
+            );
+            let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+            let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+            let checked = chelis_types::check_ir_program(&deep).unwrap();
+            let function = checked.exprs().iter().find_map(find_fn).unwrap();
+            stationary_accumulator_proof(function, checked.adt_registry())
+        }
+        for body in [
+            "acc",
+            "{ _ = print(i)\n acc }",
+            "if i == 0i64 then acc else acc",
+        ] {
+            let proof = proof(body, "i64", "range(0i64, 2i64)")
+                .expect("same checked formal on every result path");
+            assert_eq!(proof.parameter(), "acc");
+            assert!(proof.pattern().nested_root().is_some());
+            let same = HostExpr::new(HostExprKind::Var("acc".into(), HostTypeTerm::Unit));
+            assert!(proof.validates_body(&same));
+            let other = HostExpr::new(HostExprKind::Var("other".into(), HostTypeTerm::Unit));
+            assert!(
+                !proof.validates_body(&other),
+                "a transported proof cannot name another formal"
+            );
+            let fresh = HostExpr::new(HostExprKind::List(Vec::new(), HostTypeTerm::Unit));
+            assert!(
+                !proof.validates_body(&fresh),
+                "a transported proof cannot approve a constructed result"
+            );
+        }
+        for body in [
+            "[to_tensor([1.0f32, 2.0f32, 3.0f32])]",
+            "{ acc = [to_tensor([1.0f32, 2.0f32, 3.0f32])]\n acc }",
+            "if i == 0i64 then acc else [to_tensor([1.0f32, 2.0f32, 3.0f32])]",
+        ] {
+            assert!(proof(body, "i64", "range(0i64, 2i64)").is_none());
+        }
+        assert!(
+            proof(
+                "acc",
+                "tensor[3, f32]",
+                "[to_tensor([1.0f32, 2.0f32, 3.0f32])]"
+            )
+            .is_none(),
+            "another tensor formal keeps its independent entry checks"
+        );
+    }
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
 
@@ -30192,6 +30392,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     #[test]
     fn a_fold_conforms_its_seed_and_callback_body() {
         let callback = HostCallback {
+            stationary_accumulator: None,
             kind: HostCallbackKind::Inline {
                 params: vec![
                     HostParam {
@@ -30548,6 +30749,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let named = |function: &str| {
             HostExpr::new(HostExprKind::Map {
                 callback: HostCallback {
+                    stationary_accumulator: None,
                     kind: HostCallbackKind::Named {
                         callee: HostCallee::test_local(function),
                         params: vec![HostParam {

@@ -1146,3 +1146,31 @@ fn checked_callable_choice_is_a_logical_value_without_a_c_abi() {
         );
     }
 }
+
+#[test]
+fn stationary_fold_and_scan_entry_checks_have_a_loop_local_success_guard() {
+    for combinator in ["fold", "scan"] {
+        let source = format!(
+            r#"def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)
+out = len({combinator}(fn (acc: List[tensor[3, f32]], i: i64) -> acc, [to_tensor([1.0f32, 2.0f32, 3.0f32])], range(0i64, 3i64)))
+"#
+        );
+        let verified = verified_host_from_source(&source);
+        let emitted = crate::codegen_host_program(&verified, "stationary_entry")
+            .unwrap()
+            .c_source;
+        let main = emitted_function_body(&emitted, "main");
+        assert!(main.contains("bool __stationary_entry_checked_"), "{main}");
+        assert!(main.contains("if (!__stationary_entry_checked_"), "{main}");
+        assert!(main.contains(" = true;"), "{main}");
+        let changed = source.replace("-> acc,", "-> { acc = acc\n acc },");
+        let verified = verified_host_from_source(&changed);
+        let emitted = crate::codegen_host_program(&verified, "changed_entry")
+            .unwrap()
+            .c_source;
+        assert!(
+            !emitted.contains("bool __stationary_entry_checked_"),
+            "{emitted}"
+        );
+    }
+}

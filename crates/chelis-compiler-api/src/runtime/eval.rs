@@ -388,7 +388,7 @@ struct ResultAxisClaim {
 #[derive(Clone, PartialEq)]
 struct NamedResultSource {
     claim: String,
-    parameter: String,
+    parameter: Arc<str>,
     axis: usize,
 }
 
@@ -897,6 +897,8 @@ fn collect_nested_entry_actuals(
         let step = match (pattern.node(visit.node), visit.value) {
             (ClaimNode::Tensor(claim), RuntimeValue::Tensor(tensor)) => {
                 if index == 0 {
+                    #[cfg(test)]
+                    ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
                     out.push(EntryActual {
                         checked: claim.ty.clone(),
                         authored: claim.ty.clone(),
@@ -994,6 +996,7 @@ fn check_callable_invocation_contract(
         session,
         present,
         nested,
+        None,
     )?;
     let mut entry_inputs = Vec::with_capacity(actualized.len());
     let mut entry_shapes: Vec<Vec<usize>> = Vec::with_capacity(actualized.len());
@@ -1020,6 +1023,25 @@ struct EntryActual {
     shape: Vec<usize>,
 }
 
+/// A loop-local successful entry proof. The shared checked-source proof
+/// guarantees that this loop returns the identical accumulator and has a
+/// scalar item, so no other formal can change its witness bindings.
+#[derive(Default)]
+struct StationaryEntryReceipt {
+    witnesses: Option<Vec<(String, NamedResultSource, usize)>>,
+}
+
+#[cfg(test)]
+thread_local! { static ENTRY_CLAIM_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(super) fn reset_entry_claim_work() {
+    ENTRY_CLAIM_WORK.with(|v| v.set(0));
+}
+#[cfg(test)]
+pub(super) fn entry_claim_work() -> u64 {
+    ENTRY_CLAIM_WORK.with(std::cell::Cell::get)
+}
+
 /// Rebuild tensor declarations, including List elements, at one invocation.
 ///
 /// Runtime shapes determine rank-spread widths and dtypes, but their extents
@@ -1028,6 +1050,7 @@ struct EntryActual {
 /// also why two actuals for the same rank spread may disagree in extent and
 /// must reach [`check_signature_entry_plan`] instead of being rejected during
 /// specialization.
+#[allow(clippy::too_many_arguments)]
 fn actualize_tensor_entry_parameters(
     checked_params: Option<&[Expr]>,
     authored_params: &[Option<Expr>],
@@ -1036,7 +1059,11 @@ fn actualize_tensor_entry_parameters(
     session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
     present: Option<&[bool]>,
     nested: Option<EntryClaimPatterns<'_>>,
+    stationary_entry: Option<&StationaryEntryReceipt>,
 ) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
+    if stationary_entry.is_some_and(|receipt| receipt.witnesses.is_some()) {
+        return Ok(Vec::new());
+    }
     fn collect(
         pattern: &EntryPattern<Expr>,
         checked: Option<&Expr>,
@@ -1051,6 +1078,8 @@ fn actualize_tensor_entry_parameters(
                         "input `{path}` does not match its declared tensor type"
                     ));
                 };
+                #[cfg(test)]
+                ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
                 out.push(EntryActual {
                     checked: checked
                         .filter(|checked| tensor_type_dim_exprs(checked).is_some())
@@ -1410,7 +1439,7 @@ impl<'a> EvalContext<'a> {
                             source: axis.source.as_ref().map(|source| {
                                 chelis_ir::axis_sources::ClaimSource {
                                     claim: source.claim.clone(),
-                                    parameter: source.parameter.clone(),
+                                    parameter: source.parameter.to_string(),
                                     axis: source.axis,
                                 }
                             }),
@@ -3393,6 +3422,56 @@ impl<'a> EvalContext<'a> {
         )
     }
 
+    fn stationary_callback_receipt(
+        &self,
+        callback: &RuntimeValue,
+    ) -> Option<StationaryEntryReceipt> {
+        let RuntimeValue::Closure {
+            checked_function,
+            invocation_contracts,
+            def_name: None,
+            ..
+        } = callback
+        else {
+            return None;
+        };
+        (invocation_contracts.is_empty()
+            && chelis_ir::host::stationary_accumulator_proof(checked_function, &self.adt_registry)
+                .is_some())
+        .then(StationaryEntryReceipt::default)
+    }
+
+    fn apply_loop_callback(
+        &mut self,
+        callback: RuntimeValue,
+        args: Vec<RuntimeValue>,
+        arg_types: &[Option<Expr>],
+        result_type: Option<&Expr>,
+        receipt: Option<&mut StationaryEntryReceipt>,
+    ) -> Result<RuntimeValue, String> {
+        let Some(receipt) = receipt else {
+            return self.apply_resolved_callable_with_arg_types(
+                callback,
+                args,
+                arg_types,
+                result_type,
+            );
+        };
+        let _stack_frame = EvalCallStackFrame::enter();
+        if EvalCallStackFrame::budget_exhausted() {
+            return Err("evaluation stack budget exhausted during a function call".to_owned());
+        }
+        self.apply_resolved_callable_with_arg_types_impl(
+            callback,
+            args,
+            arg_types,
+            result_type,
+            &[],
+            None,
+            Some(receipt),
+        )
+    }
+
     /// Like [`Self::apply_resolved_callable`], but additionally records a
     /// static Deep type expression per argument into the callee frame's
     /// `binding_types` (chelis#338 named-axis routing). The closure's own
@@ -3457,7 +3536,7 @@ impl<'a> EvalContext<'a> {
                                 name.clone(),
                                 NamedResultSource {
                                     claim: chelis_ir::lower::extent_binder_label(name),
-                                    parameter: path.clone(),
+                                    parameter: path.clone().into(),
                                     axis,
                                 },
                                 *size,
@@ -3484,9 +3563,11 @@ impl<'a> EvalContext<'a> {
             result_type_expr,
             &formal_claims,
             present,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_resolved_callable_with_arg_types_impl(
         &mut self,
         callable: RuntimeValue,
@@ -3495,6 +3576,7 @@ impl<'a> EvalContext<'a> {
         result_type_expr: Option<&Expr>,
         inherited_claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
+        stationary_entry: Option<&mut StationaryEntryReceipt>,
     ) -> Result<RuntimeValue, String> {
         // A caller's first-site axes resolve in the caller's activation,
         // whose sites have all run by the time its callee produces the
@@ -3575,7 +3657,15 @@ impl<'a> EvalContext<'a> {
                     // unbound textual runtime name (chelis#1382).
                     let mut dimension_bindings: UnordMap<String, usize> = UnordMap::new();
                     let mut named_result_witnesses: Vec<(String, NamedResultSource, usize)> =
-                        Vec::new();
+                        stationary_entry
+                            .as_ref()
+                            .and_then(|receipt| receipt.witnesses.clone())
+                            .unwrap_or_default();
+                    for (name, _, extent) in &named_result_witnesses {
+                        dimension_bindings.insert(name.clone(), *extent);
+                        #[cfg(test)]
+                        ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
+                    }
                     let checked_params = checked_signature
                         .as_ref()
                         .and_then(checked_function_children)
@@ -3592,25 +3682,29 @@ impl<'a> EvalContext<'a> {
                             registry: &self.adt_registry,
                             cache: &self.claim_patterns,
                         }),
+                        stationary_entry.as_deref(),
                     )?;
                     let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
                     let mut entry_shapes: Vec<Vec<usize>> =
                         Vec::with_capacity(actualized_entries.len());
                     for (parameter, ty, shape) in actualized_entries {
                         for (axis, (dim, size)) in ty.dims.iter().zip(&shape).enumerate() {
+                            #[cfg(test)]
+                            ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
                             if let DimInfo::Named(name, _) = dim
                                 && name != "*"
                             {
                                 dimension_bindings.entry(name.clone()).or_insert(*size);
-                                if !named_result_witnesses
-                                    .iter()
-                                    .any(|(seen, _, _)| seen == name)
-                                {
+                                if !named_result_witnesses.iter().any(|(seen, _, _)| {
+                                    #[cfg(test)]
+                                    ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
+                                    seen == name
+                                }) {
                                     named_result_witnesses.push((
                                         name.clone(),
                                         NamedResultSource {
                                             claim: chelis_ir::lower::extent_binder_label(name),
-                                            parameter: parameter.clone(),
+                                            parameter: parameter.clone().into(),
                                             axis,
                                         },
                                         *size,
@@ -3629,6 +3723,14 @@ impl<'a> EvalContext<'a> {
                         &entry_plan,
                         &entry_shapes.iter().map(Vec::as_slice).collect::<Vec<_>>(),
                     )?;
+                    if let Some(receipt) = stationary_entry
+                        && receipt.witnesses.is_none()
+                    {
+                        receipt.witnesses = Some(named_result_witnesses.clone());
+                        #[cfg(test)]
+                        ENTRY_CLAIM_WORK
+                            .with(|v| v.set(v.get() + named_result_witnesses.len() as u64));
+                    }
                     let caller_precisions = saved_precisions.clone();
                     let mut call_precisions = UnordMap::new();
                     for (declared, actual) in param_types.iter().zip(arg_type_exprs) {
@@ -4156,7 +4258,7 @@ impl<'a> EvalContext<'a> {
                     site.binder.clone(),
                     NamedResultSource {
                         claim: site.binder,
-                        parameter: site.binding,
+                        parameter: site.binding.into(),
                         axis: site.axis,
                     },
                     observed,
@@ -4700,12 +4802,14 @@ impl<'a> EvalContext<'a> {
                         .and_then(checked_list_element)
                         .cloned(),
                 ];
+                let mut receipt = self.stationary_callback_receipt(&callback);
                 for item in items {
-                    acc = self.apply_resolved_callable_with_arg_types(
+                    acc = self.apply_loop_callback(
                         callback.clone(),
                         vec![acc, item],
                         &callback_arg_types,
                         result_type_expr,
+                        receipt.as_mut(),
                     )?;
                 }
                 Ok(acc)
@@ -4730,12 +4834,14 @@ impl<'a> EvalContext<'a> {
                 ];
                 let callback_result_type = result_type_expr.and_then(checked_list_element);
                 let mut out = Vec::with_capacity(items.len());
+                let mut receipt = self.stationary_callback_receipt(&callback);
                 for item in items {
-                    acc = self.apply_resolved_callable_with_arg_types(
+                    acc = self.apply_loop_callback(
                         callback.clone(),
                         vec![acc, item],
                         &callback_arg_types,
                         callback_result_type,
+                        receipt.as_mut(),
                     )?;
                     out.push(acc.clone());
                 }
@@ -6833,6 +6939,7 @@ mod tensor_entry_actualization_tests {
             None,
             None,
             None,
+            None,
         )
         .expect("scalar neighbors do not contaminate the rank-zero tensor formal");
         assert_eq!(
@@ -6856,6 +6963,7 @@ mod tensor_entry_actualization_tests {
                 RuntimeValue::int64(3),
             ],
             &names,
+            None,
             None,
             None,
             None,

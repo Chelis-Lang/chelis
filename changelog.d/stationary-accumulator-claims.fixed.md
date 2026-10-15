@@ -1,0 +1,1 @@
+Avoid repeated nested extent walks in `fold` and `scan` callbacks proven to return their unchanged immutable accumulator, while retaining the first entry check, callback effects, and independent claims.
