@@ -4,10 +4,15 @@
 use chelis_deep::Expr;
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::errors::CheckErrorKind;
+use chelis_types::infer::{
+    FunctionSignatureInference, ParamSignatureInference, SignatureInferenceMetadata,
+};
+use chelis_types::types::Type;
 use chelis_types::{
     CheckedProgram, InferResult, TypeEnv, build_compiled_library_context,
     build_compiled_library_context_with_base, check_ir_program, check_ir_with_context,
-    check_linearity, check_typed_program,
+    check_ir_with_signature_context, check_linearity, check_typed_program,
+    install_linked_program_guard,
 };
 
 fn parse(source: &str) -> Vec<Expr> {
@@ -282,12 +287,77 @@ fn replacement_owner_does_not_inherit_base_evidence_or_mutate_the_base() {
 
 #[test]
 fn a_function_signature_without_a_checked_body_supplies_no_evidence() {
-    both(
-        "sig foreign[r, p: Float]: &tensor[..r, p] -> tensor[..r, p]\n\
-         foreign = foreign\n\
-         def outer[s, q: Float](x: &tensor[..s, q]) -> tensor[..s, q] = foreign(x)\n",
-        false,
+    const EXTERNAL: &str = "pkg__dep__Api__external";
+    // The existing linked-interface ingress (#850) admits this complete
+    // signature without inventing an authored orphan or an eager value cycle.
+    let (context, _) = {
+        let _linked = install_linked_program_guard();
+        build_compiled_library_context(&parse(&format!(
+            "sig {EXTERNAL}[r, p: Float]: &tensor[..r, p] -> tensor[..r, p]\n"
+        )))
+        .expect("valid linked signature-only context")
+    };
+    let scheme = context
+        .scheme(EXTERNAL)
+        .expect("external signature is bound");
+    assert_eq!(scheme.rvars.len(), 1);
+    assert_eq!(scheme.tvars.len(), 1);
+    assert_eq!(scheme.tvar_restrictions.len(), 1, "Float bound retained");
+    let signature = scheme.body.clone();
+    let Type::Fn(params, _) = &signature else {
+        panic!("external signature must be callable");
+    };
+    assert_eq!(params.len(), 1);
+    let mut signatures = SignatureInferenceMetadata::default();
+    signatures.functions.insert(
+        EXTERNAL.to_string(),
+        FunctionSignatureInference {
+            name: EXTERNAL.to_string(),
+            authored_signature: true,
+            authored_signature_type: Some(signature.clone()),
+            recursive_cycle: false,
+            checked_signature: signature.clone(),
+            display_signature: signature.clone(),
+            params: vec![ParamSignatureInference {
+                index: 0,
+                name: "x".to_string(),
+                written: true,
+                inferred_read_only: false,
+                checked_type: params[0].clone(),
+                display_type: params[0].clone(),
+            }],
+        },
     );
+    // Concrete call typing needs the signature, not a row-body certificate.
+    // This control makes no execution claim for the absent implementation.
+    clean(
+        check_ir_with_signature_context(
+            &context,
+            &signatures,
+            &parse(&format!(
+                "def concrete(x: &tensor[2, 3, f32]) -> tensor[2, 3, f32] = {EXTERNAL}(x)\n"
+            )),
+        ),
+        "signature context resolves and instantiates the callable",
+    );
+    let result = check_ir_with_signature_context(
+        &context,
+        &signatures,
+        &parse(&format!(
+            "def outer[s, q: Float](x: &tensor[..s, q]) -> tensor[..s, q] = {EXTERNAL}(x)\n"
+        )),
+    );
+    let errors = &result.as_ref().expect_err("body evidence is absent").errors;
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.kind == CheckErrorKind::DimensionMismatch
+                && error.message.contains(EXTERNAL)
+                && error.message.contains("rank-polymorphic")
+                && error.message.contains("body evidence")),
+        "expected the missing body-evidence rejection, not a binding failure: {errors:?}"
+    );
+    reject(result, "body-less callable has no rank-body authority");
 }
 
 #[test]
