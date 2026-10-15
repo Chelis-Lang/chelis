@@ -432,6 +432,31 @@ impl Parser {
             .map(|token| &token.kind)
     }
 
+    /// Look only through grouping around the sole 2^63 magnitude token.
+    /// Operators, ascriptions, calls, tuples and unmatched delimiters are not
+    /// transparent here; the ordinary parser retains their diagnostics.
+    fn peek_signed_minimum_magnitude(&self) -> Option<(Option<LiteralSuffix>, usize)> {
+        let mut kinds = self.tokens[self.pos..]
+            .iter()
+            .filter(|token| !matches!(token.kind, TokenKind::Newline))
+            .map(|token| &token.kind);
+        let mut kind = kinds.next()?;
+        let mut groups = 0;
+        while matches!(kind, TokenKind::LParen) {
+            groups += 1;
+            kind = kinds.next()?;
+        }
+        let TokenKind::IntMinMagnitude(suffix) = kind else {
+            return None;
+        };
+        for _ in 0..groups {
+            if !matches!(kinds.next(), Some(TokenKind::RParen)) {
+                return None;
+            }
+        }
+        Some((*suffix, groups))
+    }
+
     /// The record-update operator and delimited device handler share `with`.
     /// Use the actual update introducer in both parsing and the pipe guard.
     fn starts_record_update(&self, start: usize) -> bool {
@@ -2445,8 +2470,15 @@ impl Parser {
             }
             TokenKind::Minus => {
                 let tok = self.advance();
-                if let TokenKind::IntMinMagnitude(suffix) = self.peek().clone() {
+                if let Some((suffix, groups)) = self.peek_signed_minimum_magnitude() {
+                    for _ in 0..groups {
+                        self.advance();
+                    }
                     let magnitude = self.advance();
+                    let mut end = magnitude.span;
+                    for _ in 0..groups {
+                        end = self.advance().span;
+                    }
                     // The positive magnitude 2^63 cannot fit in the signed
                     // payload carried by `Literal`. Keep the signed minimum
                     // only as an internal magnitude sentinel, but preserve
@@ -2461,7 +2493,7 @@ impl Parser {
                     return Ok(Expr::Unary(
                         UnaryOp::Neg,
                         Box::new(operand),
-                        tok.span.merge(magnitude.span),
+                        tok.span.merge(end),
                     ));
                 }
                 let operand = self.parse_expr(13)?;

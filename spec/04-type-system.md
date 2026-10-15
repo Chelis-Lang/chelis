@@ -2183,7 +2183,13 @@ scope. Nested ascriptions retain every checking constraint.
 > each member its kind admits of a dtype binder such a construct states, the
 > §5.3 default, or, for a literal pattern, the scrutinee's primitive
 > ([04-PAT-1]). An integer dtype admits the value exactly or rejects the
-> literal, and a float dtype rounds it per [04-NUM-2]. A literal whose value
+> literal, and a float dtype rounds it per [04-NUM-2]. For one syntactic
+> unary minus directly applied to an integer literal with the magnitude of
+> the minimum at its suffix or default dtype, finalization SHALL use the signed
+> minimum without first binding its positive magnitude. Grouping SHALL be
+> transparent. This rule SHALL NOT change the dtype, accept positive overflow,
+> or apply to an explicit `neg(...)` call or another intervening expression.
+> A literal whose value
 > at any of its dtypes is out of range or non-finite SHALL be rejected at
 > every ingress before any evaluation or lowering lane runs. Rounding a
 > nonzero value to zero or to a subnormal is ordinary rounding, not a
@@ -2246,6 +2252,14 @@ value rounds to infinity at the declared width is not a literal of that type
 ([04-LIT-2]).
 Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`) attach to integer literal
 tokens only; `1.0i8` is a parse error.
+
+The unary spelling of each signed minimum is admitted by [04-LIT-2] even
+though its magnitude does not fit that dtype: `-128i8`, `-32768i16`,
+`-2147483648i32`, and `-9223372036854775808i64`. The unsuffixed
+`-2147483648` takes the `i32` default in an ordinary operand position.
+This is exact signed-literal finalization, not implicit promotion or a
+callee-selected dtype. Positive overflow and values below the minimum
+remain range errors.
 
 Suffix lexing rule: a suffix is part of the literal token only if it
 **immediately** follows the digit sequence with no intervening whitespace,
@@ -2357,8 +2371,8 @@ admits the target, and the target is a primitive; that target is then a
 numeric primitive, and the cast is the value of the literal bound at the
 target. For a non-negative literal that is the same value as the literal with
 the target's suffix (§5.5); a negated literal is the one signed literal
-described above, so `cast(-128, i8)` is the `i8` minimum, which has no
-suffixed spelling. `cast(1.1, f64)` binds the decimal at `f64`, exactly
+described above, so `cast(-128, i8)` is the `i8` minimum, the same value as
+`-128i8` under §5.5. `cast(1.1, f64)` binds the decimal at `f64`, exactly
 `0x3ff199999999999a`, and is the same value as `1.1f64`; it never rounds
 through the `f32` default first, which would yield `1.100000023841858`.
 Likewise `cast(3000000000, i64)` binds at `i64`, which is what lets an

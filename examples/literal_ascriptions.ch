@@ -6,3 +6,6 @@ local = {
   value: f64 = 1.5f64
   value
 }
+def keep_i32(value: i32) -> i32 = value
+minimum_i32 = keep_i32(-2147483648i32)
+minimum_default = keep_i32(-2147483648)

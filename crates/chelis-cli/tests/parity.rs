@@ -971,7 +971,7 @@ fn parity_literal_ascriptions() {
     let path = examples_root().join("literal_ascriptions.ch");
     assert_eq!(
         run_eval(&path),
-        b"same = 1.5\nwidened = 1.100000023841858\nadopted = 1.1\nlocal = 1.5\n",
+        b"same = 1.5\nwidened = 1.100000023841858\nadopted = 1.1\nlocal = 1.5\nminimum_i32 = -2147483648\nminimum_default = -2147483648\n",
     );
     drive_parity(&examples_root().join("literal_ascriptions.ch"), true);
 }

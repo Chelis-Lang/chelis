@@ -1027,6 +1027,15 @@ not `i64`. A bare `1.0` binds at `f32`, not `f64`. See
 
 **Negative literals:** `-42` is always parsed as unary minus applied to `42`,
 not as a signed literal token. A negative argument is written `f(-42)`.
+A direct unary minus whose integer literal operand has the magnitude of the
+minimum at its own suffix, or at the `i32` default when unsuffixed, denotes
+that signed minimum: `-128i8`, `-32768i16`, `-2147483648i32`,
+`-9223372036854775808i64`, and `-2147483648` are valid in ordinary operand
+positions. The signed value is finalized once at that dtype under [04-LIT-2],
+without binding the unrepresentable positive magnitude or widening its type.
+Grouping is transparent. This rule changes neither the unary AST shape nor
+an explicit `neg(...)` application; a positive out-of-range literal and a
+value below the signed minimum remain rejected.
 Literal patterns are the exception because patterns contain no unary
 expression node: `-42`, `-1.5`, and `-0.0` decode directly to a negative
 `pat-lit`, including the full `i64` minimum.
@@ -1929,7 +1938,10 @@ There is no Surf `let ... in` expression form. `let` and `in` are ordinary ident
 `-42` in expression position is always unary minus applied to `42`. The
 literal itself is non-negative. `f -42` parses as `f - 42` (infix). Use parens
 for negative arguments: `f(-42)`. During constant folding, `neg(42)` collapses
-to a negative literal in Deep. Pattern position has no unary-expression node,
+to a negative literal in Deep. A direct unary-minus integer minimum (§P10)
+lowers to that signed literal before its magnitude is bound; an explicit
+`neg(...)` call keeps ordinary operand binding and arithmetic semantics.
+Pattern position has no unary-expression node,
 so minus plus an unsuffixed numeric token decodes directly to a negative
 `pat-lit`; `-0` is rejected in favor of `0`, while `-0.0` preserves IEEE
 negative zero.

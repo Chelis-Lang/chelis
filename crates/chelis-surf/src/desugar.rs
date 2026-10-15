@@ -2826,6 +2826,15 @@ impl<'a> DesugarCtx<'a> {
             }
 
             Expr::Unary(op, operand, _) => {
+                // [04-LIT-2] finalizes a direct signed minimum as one exact
+                // literal. Its positive magnitude cannot first bind at that
+                // width. This is not the explicit `neg(...)` call path and
+                // does not fold other unary/arithmetic expressions.
+                if *op == UnaryOp::Neg
+                    && let Some(minimum) = signed_integer_minimum_operand(operand)
+                {
+                    return attach_span_metadata(desugar_literal(&minimum), expr_span(expr));
+                }
                 let op_name = match op {
                     UnaryOp::Neg => "neg",
                     UnaryOp::Not => "not",
@@ -3577,6 +3586,29 @@ fn collapsed_cast_literal(literal: &NumericLiteral<'_>, primitive: &str) -> deep
         _ => unreachable!("only an unsuffixed literal collapses into a cast"),
     };
     desugar_literal(&suffixed)
+}
+
+/// The narrower signed minima have a representable i64 magnitude, unlike
+/// the parser's i64-minimum sentinel. Admit only a direct integer token at
+/// its own suffix/default; the checker retains all ordinary range checks.
+fn signed_integer_minimum_operand(expr: &Expr) -> Option<Literal> {
+    match expr {
+        Expr::Lit(Literal::Int(value), _) if *value == -(i32::MIN as i64) => {
+            Some(Literal::Int(i32::MIN as i64))
+        }
+        Expr::Lit(Literal::TypedInt(value, suffix), _) => {
+            let minimum = match suffix {
+                LiteralSuffix::I8 => i8::MIN as i64,
+                LiteralSuffix::I16 => i16::MIN as i64,
+                LiteralSuffix::I32 => i32::MIN as i64,
+                // The i64 sentinel is handled before ordinary unary lowering;
+                // float suffixes never enter this integer finalization rule.
+                _ => return None,
+            };
+            (*value == -minimum).then_some(Literal::TypedInt(minimum, *suffix))
+        }
+        _ => None,
+    }
 }
 
 fn is_i64_min_magnitude_sentinel(expr: &Expr) -> bool {
