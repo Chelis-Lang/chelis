@@ -188,6 +188,18 @@ Legacy c-earchin Deep compatibility:
 
 ### Canonical numeric values and typed input domains
 
+Surf Tier B prepares one owned semantic declaration view per property run.
+The complete declaration set first desugars to canonical Deep, resolving all
+§5.6 declaration sites and standalone signatures. Semantic resugaring retains
+every literal dtype instead of stripping suffixes for source presentation.
+Direct goals, induction numerical plans, guard plans and helper substitutions
+use that same immutable view; authored declarations still decide induction
+admission and recursion routing;
+leaf-by-leaf desugaring cannot reconstruct a declaration's expected dtype.
+Original declarations still own property discovery paths, source attribution,
+displayed goals, concrete evaluation and trusted dependency membership.
+Semantic-view preparation does not add inference or change source formatting.
+
 Tier B interprets numeric literals through the canonical Surf-to-Deep literal
 boundary (`spec/03` §6.4, `spec/04` [04-LIT-2], §5.6). A checked cast that
 states an unsuffixed literal's numeric dtype denotes that literal, including

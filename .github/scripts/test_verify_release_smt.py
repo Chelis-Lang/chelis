@@ -276,6 +276,13 @@ class NumericProofRecordsTest(unittest.TestCase):
         self.assertFalse(VRS.numeric_records_match(bad, {"bound": "passed"}))
         self.assertFalse(VRS.numeric_records_match(records, {"bound": "passed", "missing": "passed"}))
 
+    def test_declared_result_false_twin_must_be_refuted(self):
+        records = self.records("declared_false", "failed")
+        self.assertIn("declared_false", VRS.NUMERIC_FALSE_PROPERTY_NAMES)
+        self.assertTrue(VRS.numeric_records_match(records, {"declared_false": "failed"}))
+        self.assertFalse(VRS.numeric_records_match(self.records("declared_false", "passed"),
+                                                  {"declared_false": "failed"}))
+
     def test_mutant_requires_failed_smt_and_exact_minimum_counterexample(self):
         record = self.records("guard_i64", "failed")[0]
         record["counterexample"] = {"x": "(- 9223372036854775808)"}

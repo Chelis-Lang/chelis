@@ -1619,8 +1619,10 @@ fn tier_b_contract_variables(source: &str) -> (Vec<String>, Vec<String>) {
     let [property] = properties.as_slice() else {
         panic!("exactly one property: {properties:?}");
     };
-    let lowered = lower_surf_tier_b_goal(&decls, &trusted, property, &expanded_contracts(property))
-        .expect("the fixture's contract symbols are fresh");
+    let semantic = SemanticSurfProgram::new(&decls).expect("semantic program");
+    let lowered =
+        lower_surf_tier_b_goal(&semantic, &trusted, property, &expanded_contracts(property))
+            .expect("the fixture's contract symbols are fresh");
     assert!(
         lowered.postcondition.is_some() && lowered.preconditions.is_some(),
         "the fixture lowers to Tier B"
@@ -1969,6 +1971,94 @@ fn chelis_3267_injection_roots_avoid_a_module_definition_of_their_spelling() {
             let refuted = &outcomes[1];
             assert_eq!(refuted.status, PropertyStatus::Failed, "{refuted:#?}");
             assert!(refuted.counterexample.is_some(), "{refuted:#?}");
+        }
+    }
+}
+
+#[test]
+fn semantic_declaration_view_keeps_exact_production_lowering_and_authored_properties() {
+    use crate::solver::{CmpOp, SmtExpr};
+    let source = "def declared(dummy: i32) -> f64 = 1.1\ndef wide(dummy: i32) -> i64 = 3000000000\n@property true_case forall(x: i32): declared(x) == 1.1f64\n@property false_case forall(x: i32): declared(x) != 1.1f64\n@property wide_case forall(x: i32): wide(x) == 3000000000i64\n";
+    let declarations = chelis_surf::parser::parse_str(source).unwrap();
+    let original = declarations.clone();
+    let properties = collect_surf_properties(&declarations, &declarations, None).unwrap();
+    let semantic = SemanticSurfProgram::new(&declarations).unwrap();
+    for (property, expected) in properties.iter().zip([
+        SmtExpr::Cmp(
+            CmpOp::Eq,
+            Box::new(SmtExpr::RealLit(1.1)),
+            Box::new(SmtExpr::RealLit(1.1)),
+        ),
+        SmtExpr::Cmp(
+            CmpOp::Ne,
+            Box::new(SmtExpr::RealLit(1.1)),
+            Box::new(SmtExpr::RealLit(1.1)),
+        ),
+        SmtExpr::Cmp(
+            CmpOp::Eq,
+            Box::new(SmtExpr::IntLit(3000000000)),
+            Box::new(SmtExpr::IntLit(3000000000)),
+        ),
+    ]) {
+        let view = semantic.property(property).unwrap();
+        assert_eq!(view.decl_path, property.decl_path);
+        assert_eq!(view.name, property.name);
+        assert_eq!(view.samples, property.samples);
+        assert_eq!(view.contracts, property.contracts);
+        let lowered = lower_surf_tier_b_goal(&semantic, &[], property, &[]).unwrap();
+        assert_eq!(lowered.postcondition, Some(expected));
+    }
+    assert_eq!(
+        declarations, original,
+        "analysis never rewrites authored declarations"
+    );
+}
+
+#[test]
+fn declared_f64_guard_interval_executes_through_default_enabled_fuzz_runner() {
+    let source = "def declared(dummy: i32) -> f64 = 1.1\n@property exact forall(x: f64) where x >= declared(0), x <= 1.1f64:\n  x == 1.1f64\n@property false_twin forall(x: f64) where x >= declared(0), x <= 1.1f64:\n  x != 1.1f64\n";
+    let declarations = chelis_surf::parser::parse_str(source).unwrap();
+    let properties = collect_surf_properties(&declarations, &declarations, None).unwrap();
+    let outcomes = run_surf(source, "fuzz-only");
+    assert_eq!(outcomes[0].status, PropertyStatus::Passed, "{outcomes:?}");
+    assert_eq!(outcomes[1].status, PropertyStatus::Failed, "{outcomes:?}");
+    assert_eq!(outcomes[0].accepted_samples, 32);
+    assert_eq!(outcomes[0].attempted_samples, 32);
+    assert_eq!(
+        outcomes[0].sampling_method.as_deref(),
+        Some("constraint_directed")
+    );
+    for (property, outcome) in properties.iter().zip(&outcomes) {
+        assert_eq!(
+            outcome.goal.as_ref().unwrap(),
+            &chelis_surf::format::format_proposition(
+                &property.params,
+                &property.preconditions,
+                &property.body
+            )
+        );
+    }
+}
+
+#[test]
+fn induction_plan_lowers_declared_helpers_from_the_cached_semantic_view() {
+    use crate::solver::{CmpOp, SmtExpr};
+    for (dtype, literal, expected) in [
+        ("f64", "1.1", SmtExpr::RealLit(1.1)),
+        ("i64", "3000000000", SmtExpr::IntLit(3000000000)),
+    ] {
+        let source = format!(
+            "def declared(dummy: i32) -> {dtype} = {literal}\ndef model(n: i32) -> {dtype} = if n <= 0 then declared(n) else model(n - 1)\n@property positive forall(n: i32) where n >= 0:\n  model(n) == {literal}{dtype}\n@property negative forall(n: i32) where n >= 0:\n  model(n) != {literal}{dtype}\n"
+        );
+        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+        let semantic = SemanticSurfProgram::new(&declarations).unwrap();
+        let properties = collect_surf_properties(&declarations, &declarations, None).unwrap();
+        for (property, comparison) in properties.iter().zip([CmpOp::Eq, CmpOp::Ne]) {
+            let plan = classify_surf_induction(&declarations, property, &semantic).unwrap();
+            assert_eq!(plan.base_expr, expected);
+            assert!(
+                matches!(plan.proposition, SmtExpr::Cmp(found, _, ref right) if found == comparison && right.as_ref() == &expected)
+            );
         }
     }
 }

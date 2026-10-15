@@ -268,6 +268,8 @@ def verify_property_spans(chelis: Path) -> int:
 NUMERIC_PROPERTY_PROGRAM = """def value_i32(x: i32) -> i32 = x
 def value_i64(x: i64) -> i64 = x
 def nearby(dummy: i32) -> i32 = cast(-3, i32)
+def declared(dummy: i32) -> f64 = 1.1
+def wide(dummy: i32) -> i64 = 3000000000
 @property bound_i32 forall(x: i32):
   value_i32(x) >= cast(-2147483648, i32)
 @property bound_i64 forall(x: i64):
@@ -284,11 +286,18 @@ def nearby(dummy: i32) -> i32 = cast(-3, i32)
   cast(16777217, f32) == 16777216f32
 @property nearby_cast forall(x: i32) where x == cast(-3, i32):
   nearby(x) == x
+@property declared_true forall(x: i32):
+  declared(x) == 1.1f64
+@property declared_false forall(x: i32):
+  declared(x) != 1.1f64
+@property wide_true forall(x: i32):
+  wide(x) == 3000000000i64
 """
 NUMERIC_PROPERTY_NAMES = frozenset({
     "bound_i32", "bound_i64", "upper_i64", "guard_i32", "guard_i64",
-    "sentinel", "rounding", "nearby_cast",
+    "sentinel", "rounding", "nearby_cast", "declared_true", "declared_false", "wide_true",
 })
+NUMERIC_FALSE_PROPERTY_NAMES = frozenset({"declared_false"})
 
 
 def numeric_records_match(records: list[dict], expected: dict[str, str]) -> bool:
@@ -334,7 +343,15 @@ def verify_numeric_properties(chelis: Path) -> int:
         for dtype, minimum in [("i32", -(2**31)), ("i64", -(2**63))]:
             original = f"def value_{dtype}(x: {dtype}) -> {dtype} = x\n"
             mutant = original.rstrip("\n") + f" + cast(1, {dtype})\n"
-            variants.append((dtype, NUMERIC_PROPERTY_PROGRAM.replace(original, mutant), minimum))
+            if NUMERIC_PROPERTY_PROGRAM.count(original) != 1:
+                print("verify_release_smt: numeric mutant definition is ambiguous", file=sys.stderr)
+                return 8
+            program = NUMERIC_PROPERTY_PROGRAM.replace(original, mutant, 1)
+            if (program.split("@property", 1)[1] != NUMERIC_PROPERTY_PROGRAM.split("@property", 1)[1]
+                    or program.replace(mutant, original, 1) != NUMERIC_PROPERTY_PROGRAM):
+                print("verify_release_smt: numeric mutant changed property bytes", file=sys.stderr)
+                return 8
+            variants.append((dtype, program, minimum))
         try:
             for label, program, minimum in variants:
                 src = root / f"{label}.ch"
@@ -344,13 +361,14 @@ def verify_numeric_properties(chelis: Path) -> int:
                 if formatted.returncode:
                     raise ValueError(f"numeric formatter {label}: {formatted.stderr}")
                 command = [str(chelis), "prove", str(src), "--json", "--tier", "smt-only", "--seed", "37"]
-                expected = {name: "passed" for name in NUMERIC_PROPERTY_NAMES}
+                expected = {name: "failed" if name in NUMERIC_FALSE_PROPERTY_NAMES else "passed"
+                            for name in NUMERIC_PROPERTY_NAMES}
                 if minimum is not None:
                     command.extend(["--only", f"guard_{label}"])
                     expected = {f"guard_{label}": "failed"}
                 result = subprocess.run(command, capture_output=True, text=True, timeout=120)
                 records = parse_records(result.stdout)
-                expected_code = 0 if minimum is None else 1
+                expected_code = 1 if "failed" in expected.values() else 0
                 if result.returncode != expected_code or not numeric_records_match(records, expected):
                     raise ValueError(f"numeric proof {label}: {result.stdout}\n{result.stderr}")
                 if minimum is not None:

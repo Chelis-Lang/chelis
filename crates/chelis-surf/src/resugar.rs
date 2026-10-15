@@ -227,6 +227,21 @@ fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 /// Deep has erased a canonical source distinction such as module-path casing
 /// or a grouped `dim` declaration.
 pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
+    resugar_program_with_literal_types(exprs, false)
+}
+
+/// Reconstruct a semantic Surf view for analysis, retaining every literal's
+/// canonical dtype even where source presentation could omit its suffix.
+/// Consumers may then inspect a leaf without reconstructing its declaration
+/// context. This is an AST API; it does not define another source spelling.
+pub fn resugar_program_for_analysis(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
+    resugar_program_with_literal_types(exprs, true)
+}
+
+fn resugar_program_with_literal_types(
+    exprs: &[DeepExpr],
+    retain_literal_types: bool,
+) -> Result<Vec<Decl>, ResugarError> {
     chelis_deep::metadata::validate_metadata(exprs)?;
     validate_grad_selector_consistency(exprs)?;
     for expr in exprs {
@@ -235,7 +250,9 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
     let _declared = DeclaredTensorsScope::install(DeclaredTensors::collect(exprs));
     let _explicit = ExplicitLiteralSpansScope::install();
     let mut declarations = resugar_declaration_sequence(exprs)?;
-    strip_redundant_suffixes(&mut declarations);
+    if !retain_literal_types {
+        strip_redundant_suffixes(&mut declarations);
+    }
     validate_surface_declarations(&declarations)?;
     Ok(declarations)
 }

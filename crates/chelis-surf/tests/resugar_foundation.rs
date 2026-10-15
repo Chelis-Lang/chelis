@@ -436,3 +436,81 @@ fn swapped_cmplt_still_resugars_faithfully_as_less_than() {
 
     assert_eq!(format_expression(&surf_ast), "(b < a)");
 }
+
+#[test]
+fn semantic_resugaring_keeps_declaration_bound_literal_dtypes_before_source_elision() {
+    use chelis_deep::LiteralSuffix;
+    use chelis_surf::ast::{Decl, Expr, Literal};
+    use chelis_surf::resugar::{resugar_program, resugar_program_for_analysis};
+    let declarations = parse_surf("sig standalone: i32 -> f64\ndef unrelated(x: i32) -> i32 = x\ndef standalone(dummy: i32) = 1.1\ndef declared(dummy: i32) -> f64 = 1.1\ndef wide(dummy: i32) -> i64 = 3000000000\ndef integer_float(dummy: i32) -> f64 = 16777217\ndef local(dummy: i32) -> f64 = { \n  value: f64 = 1.1\n  value\n}\n").unwrap();
+    let canonical = desugar_program(&declarations).unwrap();
+    let semantic = resugar_program_for_analysis(&canonical).unwrap();
+    let source = resugar_program(&canonical).unwrap();
+    let body = |declarations: &[Decl], name: &str| -> Expr {
+        declarations
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::FunDef {
+                    name: found, body, ..
+                } if found == name => Some(body.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    for name in ["standalone", "declared"] {
+        assert!(
+            matches!(body(&semantic, name), Expr::Lit(Literal::TypedFloat(value, LiteralSuffix::F64), _) if value == 1.1)
+        );
+    }
+    assert!(
+        matches!(body(&source, "declared"), Expr::Lit(Literal::Float(value), _) if value == 1.1)
+    );
+    assert!(matches!(
+        body(&semantic, "wide"),
+        Expr::Lit(Literal::TypedInt(3000000000, LiteralSuffix::I64), _)
+    ));
+    assert!(
+        matches!(body(&semantic, "integer_float"), Expr::Lit(Literal::TypedFloat(value, LiteralSuffix::F64), _) if value == 16777217.0)
+    );
+    let Expr::Block(ref bindings, _, _) = body(&semantic, "local") else {
+        panic!("local declaration retained");
+    };
+    assert!(
+        matches!(bindings[0].value, Expr::Lit(Literal::TypedFloat(value, LiteralSuffix::F64), _) if value == 1.1)
+    );
+    // Presentation remains the existing canonical source contract.
+    let printed = chelis_surf::format::format_program(&source);
+    assert_eq!(
+        printed,
+        chelis_surf::format::format_source(&printed).unwrap()
+    );
+}
+
+#[test]
+fn semantic_resugaring_preserves_converting_named_and_binder_casts() {
+    use chelis_deep::NamedCastMode;
+    use chelis_surf::ast::{CastMode, Decl, Expr};
+    use chelis_surf::resugar::resugar_program_for_analysis;
+    let source = "def convert(dummy: i32) -> f64 = cast(1.1f32, f64)\ndef named(dummy: i32) -> i32 = cast_trunc(1.5, i32)\ndef binder[p: Float](dummy: p) -> p = cast(1.1, p)\n";
+    let canonical = desugar_program(&parse_surf(source).unwrap()).unwrap();
+    let semantic = resugar_program_for_analysis(&canonical).unwrap();
+    for (name, mode) in [
+        ("convert", CastMode::Checked),
+        ("named", CastMode::Named(NamedCastMode::Trunc)),
+        ("binder", CastMode::Checked),
+    ] {
+        let body = semantic
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::FunDef {
+                    name: found, body, ..
+                } if found == name => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            matches!(body, Expr::Cast(_, _, found, _) if *found == mode),
+            "{name}: {body:?}"
+        );
+    }
+}

@@ -19,7 +19,7 @@
 use chelis_deep::annotations::{MetadataValue as M, TypeSyntax};
 use chelis_deep::{DeepTag, ExprCarrier};
 use std::{
-    cell::RefCell,
+    cell::{OnceCell, RefCell},
     collections::{BTreeMap, BTreeSet},
 };
 
@@ -35,7 +35,7 @@ mod numeric_values;
 #[cfg(all(feature = "clarabel-provider", feature = "smt"))]
 mod qp_ideal;
 mod smt_lower;
-use numeric_values::integer_input_domains;
+use numeric_values::{SemanticSurfProgram, integer_input_domains};
 #[cfg(all(feature = "clarabel-provider", feature = "smt"))]
 pub use qp_ideal::with_registered_clarabel_contract;
 use smt_lower::{
@@ -557,6 +557,9 @@ pub fn run_surf_decls_properties_with_contract_decls(
     options: &PropertyRunOptions,
 ) -> Result<PropertyRunResult, String> {
     let properties = collect_surf_properties(entry_decls, module_decls, options.only.as_deref())?;
+    // Prepared lazily once, shared by every scalar SMT goal and guard plan.
+    // The source declarations continue to own discovery and concrete execution.
+    let semantic_program = OnceCell::new();
     // Proof-only scalar extraction bypasses the runtime lowerer. Check the
     // exact linked declaration set once for all selected scalar Beacon goals,
     // before any result can be reported by Tide or a direct library caller.
@@ -586,6 +589,7 @@ pub fn run_surf_decls_properties_with_contract_decls(
                 property,
                 options,
                 &scalar_check,
+                &semantic_program,
             )
             .with_goal(goal),
         );
@@ -763,6 +767,7 @@ fn prove_surf_property(
     property: &Property,
     options: &PropertyRunOptions,
     scalar_check: &Result<(), String>,
+    semantic_program: &OnceCell<Result<SemanticSurfProgram, String>>,
 ) -> PropertyOutcome {
     if expanded_contracts(property)
         .iter()
@@ -852,7 +857,7 @@ fn prove_surf_property(
                 Vec::new(),
             );
         }
-        let mut outcome = try_surf_induction(decls, property, options, seed);
+        let mut outcome = try_surf_induction(decls, property, options, seed, semantic_program);
         outcome.append_assumptions(contract_assumptions);
         return outcome;
     }
@@ -896,8 +901,16 @@ fn prove_surf_property(
 
     // Tier B: attempt SMT proof when --tier auto / smt-only.
     if options.tier == "auto" || options.tier == "smt-only" {
+        let semantic = match semantic_program.get_or_init(|| SemanticSurfProgram::new(decls)) {
+            Ok(semantic) => semantic,
+            Err(reason) => {
+                let mut outcome = unsupported(&property.name, seed, reason.clone());
+                outcome.append_assumptions(contract_assumptions);
+                return outcome;
+            }
+        };
         if let Some(mut outcome) =
-            try_surf_tier_b(decls, trusted_contract_decls, property, options, seed)
+            try_surf_tier_b(semantic, trusted_contract_decls, property, options, seed)
         {
             outcome.append_assumptions(contract_assumptions);
             return outcome;
@@ -923,7 +936,7 @@ fn prove_surf_property(
     }
 
     // Tier C: fuzz.
-    let mut outcome = prove_surf_property_fuzz(decls, property, options, seed);
+    let mut outcome = prove_surf_property_fuzz(decls, property, options, seed, semantic_program);
     outcome.append_assumptions(contract_assumptions);
     outcome
 }
@@ -1367,6 +1380,7 @@ fn try_surf_induction(
     property: &Property,
     options: &PropertyRunOptions,
     seed: u64,
+    semantic_program: &OnceCell<Result<SemanticSurfProgram, String>>,
 ) -> PropertyOutcome {
     if !property.contracts.is_empty() {
         return induction_unsupported(
@@ -1375,7 +1389,11 @@ fn try_surf_induction(
             "contract abstractions are not in the induction lane",
         );
     }
-    let plan = match classify_surf_induction(decls, property) {
+    let semantic = match semantic_program.get_or_init(|| SemanticSurfProgram::new(decls)) {
+        Ok(semantic) => semantic,
+        Err(reason) => return induction_unsupported(property, seed, reason.clone()),
+    };
+    let plan = match classify_surf_induction(decls, property, semantic) {
         Ok(plan) => plan,
         Err(reason) => return induction_unsupported(property, seed, reason),
     };
@@ -1781,6 +1799,7 @@ fn induction_terminal_reason(case: &str, result: &crate::tier_b::TierBResult) ->
 fn classify_surf_induction(
     decls: &[Decl],
     property: &Property,
+    semantic: &SemanticSurfProgram,
 ) -> Result<SurfInductionPlan, String> {
     use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
     let variables: Vec<(String, SmtSort)> = property
@@ -1806,12 +1825,14 @@ fn classify_surf_induction(
         })
         .collect::<Result<_, _>>()?;
 
+    let semantic_property = semantic.property(property)?;
+    // Model/type admission stays on the authored declarations. Only numerical
+    // lowering uses the canonical view, including every helper body.
     for decl in decls {
         let Decl::FunDef {
             name,
             params,
             ret_ty,
-            body,
             ..
         } = decl
         else {
@@ -1836,7 +1857,8 @@ fn classify_surf_induction(
             }
             _ => continue,
         };
-        let without_model: Vec<Decl> = decls
+        let body = semantic.function_body(name)?;
+        let without_model: Vec<Decl> = semantic.declarations()
             .iter()
             .filter(|candidate| !matches!(candidate, Decl::FunDef { name: candidate_name, .. } if candidate_name == name))
             .cloned()
@@ -1849,7 +1871,7 @@ fn classify_surf_induction(
             contracts: None,
             grad_diagnostic: None,
         };
-        let Some(proposition) = surf_expr_to_smt(&property.body, &ctx) else {
+        let Some(proposition) = surf_expr_to_smt(&semantic_property.body, &ctx) else {
             continue;
         };
         let mut outer_calls = Vec::new();
@@ -1880,7 +1902,7 @@ fn classify_surf_induction(
             continue;
         }
 
-        let preconditions: Vec<SmtExpr> = property
+        let preconditions: Vec<SmtExpr> = semantic_property
             .preconditions
             .iter()
             .map(|expr| {
@@ -2343,11 +2365,14 @@ fn check_contract_symbols_fresh(
 /// of those names, and [`check_contract_symbols_fresh`] rejects the goal if
 /// the result still captured one.
 fn lower_surf_tier_b_goal(
-    decls: &[Decl],
+    semantic: &SemanticSurfProgram,
     trusted_contract_decls: &[Decl],
     property: &Property,
     contracts: &[String],
 ) -> Result<LoweredSurfTierBGoal, String> {
+    let semantic_property = semantic.property(property)?;
+    let property = &semantic_property;
+    let decls = semantic.declarations();
     let discovery = lower_surf_tier_b_pass(
         decls,
         trusted_contract_decls,
@@ -2439,31 +2464,31 @@ fn lower_surf_tier_b_pass(
 /// when the contract-abstraction lowering passes disagree under `auto`, or
 /// the solver timed out / errored).
 fn try_surf_tier_b(
-    decls: &[Decl],
+    semantic: &SemanticSurfProgram,
     trusted_contract_decls: &[Decl],
     property: &Property,
     options: &PropertyRunOptions,
     seed: u64,
 ) -> Option<PropertyOutcome> {
     let contracts = expanded_contracts(property);
-    let lowered = match lower_surf_tier_b_goal(decls, trusted_contract_decls, property, &contracts)
-    {
-        Ok(lowered) => lowered,
-        Err(_) if options.tier != "smt-only" => return None,
-        Err(reason) => {
-            return Some(PropertyOutcome::new(
-                property.name.clone(),
-                PropertyStatus::Unsupported,
-                PropertyTier::Smt,
-                0,
-                seed,
-                None,
-                Some(reason),
-                false,
-                Vec::new(),
-            ));
-        }
-    };
+    let lowered =
+        match lower_surf_tier_b_goal(semantic, trusted_contract_decls, property, &contracts) {
+            Ok(lowered) => lowered,
+            Err(_) if options.tier != "smt-only" => return None,
+            Err(reason) => {
+                return Some(PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Unsupported,
+                    PropertyTier::Smt,
+                    0,
+                    seed,
+                    None,
+                    Some(reason),
+                    false,
+                    Vec::new(),
+                ));
+            }
+        };
     let LoweredSurfTierBGoal {
         postcondition,
         preconditions,
@@ -3283,6 +3308,7 @@ fn prove_surf_property_fuzz(
     property: &Property,
     options: &PropertyRunOptions,
     seed: u64,
+    semantic_program: &OnceCell<Result<SemanticSurfProgram, String>>,
 ) -> PropertyOutcome {
     let samples_needed = if options.samples != 100 {
         options.samples
@@ -3298,7 +3324,7 @@ fn prove_surf_property_fuzz(
         return unsupported(&property.name, seed, reason);
     }
 
-    let constraint_plan = match surf_constraint_sampling_plan(decls, property) {
+    let constraint_plan = match surf_constraint_sampling_plan(decls, property, semantic_program) {
         Ok(plan) => plan,
         Err(reason) => {
             return unsupported(&property.name, seed, reason).with_sampling(
@@ -3583,6 +3609,7 @@ fn sample_property(property: &Property, rng: &mut Lcg) -> Result<Sample, String>
 fn surf_constraint_sampling_plan(
     decls: &[Decl],
     property: &Property,
+    semantic_program: &OnceCell<Result<SemanticSurfProgram, String>>,
 ) -> Result<Option<ConstraintSamplingPlan>, String> {
     if property.preconditions.is_empty()
         || !property.params.iter().all(|param| {
@@ -3591,6 +3618,13 @@ fn surf_constraint_sampling_plan(
     {
         return Ok(None);
     }
+    let semantic = semantic_program
+        .get_or_init(|| SemanticSurfProgram::new(decls))
+        .as_ref()
+        .map_err(Clone::clone)?;
+    let semantic_property = semantic.property(property)?;
+    let property = &semantic_property;
+    let decls = semantic.declarations();
     let ctx = InlineCtx {
         decls,
         depth: 0,

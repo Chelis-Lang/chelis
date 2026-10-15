@@ -8,3 +8,6 @@ local = {
 }
 @property integer_input_minimum forall(x: i32):
   (x >= cast(-2147483648, i32))
+def declared_wide(dummy: i32) -> f64 = 1.1
+@property declared_literal forall(x: i32):
+  (declared_wide(x) == 1.1f64)

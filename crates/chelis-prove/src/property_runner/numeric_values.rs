@@ -3,8 +3,81 @@
 use crate::solver::{CmpOp, SmtExpr};
 use chelis_deep::ast::{Atom, Expr as DeepExpr};
 use chelis_deep::{DeepTag, ExprCarrier};
-use chelis_surf::ast::{Expr, Param, TypeExpr, UnaryOp};
+use chelis_surf::ast::{Decl, Expr, Param, TypeExpr, UnaryOp};
 use chelis_types::{scalar_from_f64, scalar_from_i64, types::Prim};
+
+/// An immutable semantic view prepared once from the full declaration set.
+/// Binding dtypes come from canonical whole-program desugaring, never a second
+/// inference pass in the prover. Source declaration indices remain separate.
+pub(super) struct SemanticSurfProgram {
+    declarations: Vec<Decl>,
+}
+
+impl SemanticSurfProgram {
+    pub(super) fn new(authored: &[Decl]) -> Result<Self, String> {
+        let deep = chelis_surf::desugar::desugar_program(authored)
+            .map_err(|error| format!("semantic Surf desugaring failed: {error}"))?;
+        let semantic = chelis_surf::resugar::resugar_program_for_analysis(&deep)
+            .map_err(|error| format!("semantic Surf reconstruction failed: {error}"))?;
+        Ok(Self {
+            declarations: super::flatten_module_decls(&semantic),
+        })
+    }
+
+    pub(super) fn declarations(&self) -> &[Decl] {
+        &self.declarations
+    }
+
+    pub(super) fn function_body(&self, name: &str) -> Result<&Expr, String> {
+        let mut candidates = self.declarations.iter().filter_map(|decl| match decl {
+            Decl::FunDef {
+                name: candidate,
+                body,
+                ..
+            } if candidate == name => Some(body),
+            _ => None,
+        });
+        let body = candidates
+            .next()
+            .ok_or_else(|| format!("semantic function `{name}` is absent"))?;
+        if candidates.next().is_some() {
+            return Err(format!("semantic function `{name}` has ambiguous identity"));
+        }
+        Ok(body)
+    }
+
+    pub(super) fn property(&self, authored: &super::Property) -> Result<super::Property, String> {
+        let mut candidates = self.declarations.iter().filter_map(|decl| match decl {
+            Decl::Property {
+                name,
+                params,
+                preconditions,
+                body,
+                ..
+            } if name == &authored.name => Some((params, preconditions, body)),
+            _ => None,
+        });
+        let Some((params, preconditions, body)) = candidates.next() else {
+            return Err(format!("semantic property `{}` is absent", authored.name));
+        };
+        if candidates.next().is_some()
+            || !params
+                .iter()
+                .map(|p| &p.name)
+                .eq(authored.params.iter().map(|p| &p.name))
+        {
+            return Err(format!(
+                "semantic property `{}` has ambiguous identity",
+                authored.name
+            ));
+        }
+        let mut property = authored.clone();
+        property.params = params.clone();
+        property.preconditions = preconditions.clone();
+        property.body = body.clone();
+        Ok(property)
+    }
+}
 
 /// Ask the language's canonical boundary whether this spelling denotes one
 /// literal. Converting/binder/named casts retain their Deep node and decline.
