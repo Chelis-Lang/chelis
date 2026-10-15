@@ -556,6 +556,59 @@ mod proof_numeric_values {
     }
 
     #[test]
+    fn surf_gradient_literals_keep_smt_and_runtime_verdicts_and_implementation_mutants() {
+        let source = "def coefficient(x: f32) -> f32 = x * 1.1f32\ndef negative_coefficient(x: f32) -> f32 = x * -1.1f32\ndef helper(x: f32) -> f32 = coefficient(x)\ndef tiny(x: f32) -> f32 = x * 1e-45f32\ndef underflow(x: f32) -> f32 = x * 1e-46f32\ndef wide_coefficient(x: f64) -> f64 = x * 1.1f64\n@property gradient_true forall(x: f32):\n  grad(coefficient, wrt=x)(x) == 1.1f32\n@property gradient_false forall(x: f32):\n  grad(coefficient, wrt=x)(x) != 1.1f32\n@property negative_true forall(x: f32):\n  grad(negative_coefficient, wrt=x)(x) == -1.1f32\n@property negative_false forall(x: f32):\n  grad(negative_coefficient, wrt=x)(x) != -1.1f32\n@property nested_true forall(x: f32):\n  grad(helper, wrt=x)(x) == 1.1f32\n@property inline_true forall(x: f32):\n  grad(fn (v: f32) -> v * 1.1f32, wrt=v)(x) == 1.1f32\n@property tiny_true forall(x: f32):\n  grad(tiny, wrt=x)(x) == 1e-45f32\n@property tiny_false forall(x: f32):\n  grad(tiny, wrt=x)(x) != 1e-45f32\n@property underflow_true forall(x: f32):\n  grad(underflow, wrt=x)(x) == 0.0f32\n@property underflow_false forall(x: f32):\n  grad(underflow, wrt=x)(x) != 0.0f32\n@property wide_true forall(x: f64):\n  grad(wide_coefficient, wrt=x)(x) == 1.1f64\n@property wide_false forall(x: f64):\n  grad(wide_coefficient, wrt=x)(x) != 1.1f64\n";
+        for tier in ["smt-only", "fuzz-only"] {
+            let (code, records) = prove_with_tier(source, false, tier);
+            assert_eq!(code, 1, "{records:?}");
+            for name in [
+                "gradient_true",
+                "gradient_false",
+                "negative_true",
+                "negative_false",
+                "nested_true",
+                "inline_true",
+                "tiny_true",
+                "tiny_false",
+                "underflow_true",
+                "underflow_false",
+                "wide_true",
+                "wide_false",
+            ] {
+                let record = property(&records, name);
+                assert_eq!(
+                    record["status"],
+                    if name.ends_with("_false") {
+                        "failed"
+                    } else {
+                        "passed"
+                    },
+                    "{record}"
+                );
+                assert_eq!(
+                    record["proof_tier"],
+                    if tier == "smt-only" { "smt" } else { "fuzz" },
+                    "{record}"
+                );
+                if tier == "smt-only" {
+                    assert_eq!(record["samples"], 0, "{record}");
+                }
+            }
+            let mutant = mutate_one_definition(
+                source,
+                "def coefficient(x: f32) -> f32 = x * 1.1f32\n",
+                "def coefficient(x: f32) -> f32 = x * 1.2f32\n",
+            );
+            let (code, records) = prove_with_tier(&mutant, false, tier);
+            assert_eq!(code, 1, "{records:?}");
+            for name in ["gradient_true", "nested_true"] {
+                assert_eq!(property(&records, name)["status"], "failed", "{records:?}");
+            }
+            assert_eq!(property(&records, "gradient_false")["status"], "passed");
+        }
+    }
+
+    #[test]
     fn canonical_guard_plan_preserves_authored_fuzz_evaluation_at_an_exact_f64_interval() {
         let source = "def declared(dummy: i32) -> f64 = 1.1\n@property exact_interval forall(x: f64) where x >= declared(0), x <= 1.1f64:\n  x == 1.1f64\n";
         for deep in [false, true] {

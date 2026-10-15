@@ -204,7 +204,8 @@ Tier B interprets numeric literals through the canonical Surf-to-Deep literal
 boundary (`spec/03` §6.4, `spec/04` [04-LIT-2], §5.6). A checked cast that
 states an unsuffixed literal's numeric dtype denotes that literal, including
 its signed value and one target-width finalization. Direct and substituted
-arithmetic lowering share this interpretation. Integer payloads remain exact
+arithmetic lowering and scalar-gradient literal coefficients share this
+interpretation. Integer payloads remain exact
 integers; float literals round at their stated dtype before entering the
 ideal-arithmetic goal. The parser's signed-i64-minimum sentinel contributes
 one minus sign. This rule does not erase a conversion of an already-bound

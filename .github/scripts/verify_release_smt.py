@@ -270,6 +270,7 @@ def value_i64(x: i64) -> i64 = x
 def nearby(dummy: i32) -> i32 = cast(-3, i32)
 def declared(dummy: i32) -> f64 = 1.1
 def wide(dummy: i32) -> i64 = 3000000000
+def coefficient(x: f32) -> f32 = x * 1.1f32
 @property bound_i32 forall(x: i32):
   value_i32(x) >= cast(-2147483648, i32)
 @property bound_i64 forall(x: i64):
@@ -292,12 +293,17 @@ def wide(dummy: i32) -> i64 = 3000000000
   declared(x) != 1.1f64
 @property wide_true forall(x: i32):
   wide(x) == 3000000000i64
+@property gradient_true forall(x: f32):
+  grad(coefficient, wrt=x)(x) == 1.1f32
+@property gradient_false forall(x: f32):
+  grad(coefficient, wrt=x)(x) != 1.1f32
 """
 NUMERIC_PROPERTY_NAMES = frozenset({
     "bound_i32", "bound_i64", "upper_i64", "guard_i32", "guard_i64",
     "sentinel", "rounding", "nearby_cast", "declared_true", "declared_false", "wide_true",
+    "gradient_true", "gradient_false",
 })
-NUMERIC_FALSE_PROPERTY_NAMES = frozenset({"declared_false"})
+NUMERIC_FALSE_PROPERTY_NAMES = frozenset({"declared_false", "gradient_false"})
 
 
 def numeric_records_match(records: list[dict], expected: dict[str, str]) -> bool:

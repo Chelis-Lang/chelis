@@ -1488,14 +1488,18 @@ fn scalar_dual(
             .get(name)
             .cloned()
             .ok_or_else(|| format!("scalar grad SMT lowering cannot resolve scalar `{name}`")),
-        Expr::Lit(Literal::Float(value) | Literal::TypedFloat(value, _), _) => Ok(ScalarDual {
-            value: SmtExpr::RealLit(*value),
-            tangent: real(0.0),
-        }),
-        Expr::Lit(Literal::Int(value) | Literal::TypedInt(value, _), _) => Ok(ScalarDual {
-            value: SmtExpr::IntLit(*value),
-            tangent: real(0.0),
-        }),
+        Expr::Lit(
+            Literal::Float(_)
+            | Literal::TypedFloat(_, _)
+            | Literal::Int(_)
+            | Literal::TypedInt(_, _),
+            _,
+        ) => surf_literal_value(expr)
+            .map(|value| ScalarDual {
+                value,
+                tangent: real(0.0),
+            })
+            .ok_or_else(|| "scalar grad SMT lowering cannot finalize numeric literal".to_string()),
         Expr::Unary(UnaryOp::Neg, inner, _) => {
             let inner = scalar_dual(inner, env, ctx)?;
             Ok(ScalarDual {

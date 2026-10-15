@@ -2015,6 +2015,52 @@ fn semantic_declaration_view_keeps_exact_production_lowering_and_authored_proper
 }
 
 #[test]
+fn scalar_grad_literals_share_finalized_values_with_ordinary_lowering() {
+    use crate::solver::{CmpOp, SmtExpr};
+    for (dtype, literal, expected) in [
+        ("f32", "1.1f32", f64::from(1.1f32)),
+        ("f32", "1e-45f32", f64::from(f32::from_bits(1))),
+        ("f32", "1e-46f32", 0.0),
+        ("f64", "1.1f64", 1.1),
+    ] {
+        let source = format!(
+            "def coefficient(x: {dtype}) -> {dtype} = x * {literal}\ndef helper(x: {dtype}) -> {dtype} = coefficient(x)\n@property positive forall(x: {dtype}): grad(coefficient, wrt=x)(x) == {literal}\n@property negative forall(x: {dtype}): grad(coefficient, wrt=x)(x) != {literal}\n@property nested forall(x: {dtype}): grad(helper, wrt=x)(x) == {literal}\n@property inline forall(x: {dtype}): grad(fn (xx: {dtype}) -> xx * {literal}, wrt=xx)(x) == {literal}\n"
+        );
+        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+        let original = declarations.clone();
+        let properties = collect_surf_properties(&declarations, &declarations, None).unwrap();
+        let semantic = SemanticSurfProgram::new(&declarations).unwrap();
+        for (property, comparison) in
+            properties
+                .iter()
+                .zip([CmpOp::Eq, CmpOp::Ne, CmpOp::Eq, CmpOp::Eq])
+        {
+            let goal = lower_surf_tier_b_goal(&semantic, &[], property, &[]).unwrap();
+            assert_eq!(
+                goal.postcondition,
+                Some(SmtExpr::Cmp(
+                    comparison,
+                    Box::new(SmtExpr::RealLit(expected)),
+                    Box::new(SmtExpr::RealLit(expected)),
+                )),
+                "{source}"
+            );
+        }
+        assert_eq!(declarations, original);
+        let outcomes = run_surf(&source, "fuzz-only");
+        assert_eq!(outcomes.len(), 4, "{outcomes:?}");
+        for (outcome, expected) in outcomes.iter().zip([
+            PropertyStatus::Passed,
+            PropertyStatus::Failed,
+            PropertyStatus::Passed,
+            PropertyStatus::Passed,
+        ]) {
+            assert_eq!(outcome.status, expected, "{outcome:?}");
+        }
+    }
+}
+
+#[test]
 fn declared_f64_guard_interval_executes_through_default_enabled_fuzz_runner() {
     let source = "def declared(dummy: i32) -> f64 = 1.1\n@property exact forall(x: f64) where x >= declared(0), x <= 1.1f64:\n  x == 1.1f64\n@property false_twin forall(x: f64) where x >= declared(0), x <= 1.1f64:\n  x != 1.1f64\n";
     let declarations = chelis_surf::parser::parse_str(source).unwrap();

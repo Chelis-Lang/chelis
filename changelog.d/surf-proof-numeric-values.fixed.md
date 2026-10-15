@@ -5,3 +5,5 @@ changing the qualified ideal-arithmetic model of intermediate operations.
 Declaration-bound literal dtypes survive semantic reconstruction, including
 standalone signatures and typed local bindings, before inlined goal or guard
 planning. Source presentation and concrete evaluation retain authored inputs.
+Scalar-gradient coefficients and direct expressions share canonical scalar
+decoding, including subnormal literals and values that round to zero.
