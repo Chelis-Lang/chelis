@@ -5601,6 +5601,8 @@ fn fn_param_names(params: &Expr) -> Vec<String> {
 /// Every name a `let` binder or a match pattern introduces (`pat-var` leaves,
 /// plus the bare-name and tuple forms a `bind` uses).
 fn collect_binder_names(pattern: &Expr, out: &mut UnordSet<String>) {
+    #[cfg(test)]
+    charge_accumulator_identity_work(1);
     match pattern {
         Expr::Atom(Atom::Name(name), _) => {
             out.insert(name.clone());
@@ -32033,56 +32035,37 @@ impl AccumulatorDeltaProof {
                 _ => None,
             }
         }
-        fn variable<T>(
-            expr: &HostExpr<T>,
-            parameter: &str,
-            aliases: &BTreeMap<String, String>,
-        ) -> bool {
-            alias(expr).is_some_and(|name| {
-                aliases.get(name).map(String::as_str).unwrap_or(name) == parameter
-            })
+        fn variable<T>(expr: &HostExpr<T>, aliases: &AccumulatorIdentities) -> bool {
+            alias(expr).and_then(|name| aliases.role(name))
+                == Some(AccumulatorRootRole::Accumulator)
         }
         fn validate<T: AccumulatorTypeIdentity>(
             expr: &HostExpr<T>,
-            parameter: &str,
             recipe: &AccumulatorDeltaRecipe,
-            aliases: &BTreeMap<String, String>,
+            aliases: &mut AccumulatorIdentities,
         ) -> bool {
+            #[cfg(test)]
+            charge_accumulator_identity_work(1);
             match &expr.kind {
                 HostExprKind::Let { bindings, body, .. }
                 | HostExprKind::RetainedInvocation { bindings, body, .. } => {
-                    if bindings.iter().any(|binding| binding.name == parameter) {
-                        return false;
-                    }
-                    #[cfg(test)]
-                    charge_accumulator_identity_work(aliases.len());
-                    let mut local = aliases.clone();
+                    let mut undo = Vec::with_capacity(bindings.len());
                     for binding in bindings {
-                        #[cfg(test)]
-                        charge_accumulator_identity_work(1);
-                        let source = alias(&binding.value).map(|name| {
-                            local
-                                .get(name)
-                                .map(String::as_str)
-                                .unwrap_or(name)
-                                .to_owned()
-                        });
-                        local.remove(&binding.name);
-                        if let Some(source) = source {
-                            local.insert(binding.name.clone(), source);
-                        }
+                        let source = alias(&binding.value).and_then(|name| aliases.role(name));
+                        let previous = aliases.bind(&binding.name, source);
+                        undo.push((binding.name.as_str(), previous));
                     }
-                    validate(body, parameter, recipe, &local)
+                    let valid = validate(body, recipe, aliases);
+                    for (name, previous) in undo.into_iter().rev() {
+                        aliases.restore(name, previous);
+                    }
+                    valid
                 }
-                HostExprKind::ResultClaimScope { body, .. } => {
-                    validate(body, parameter, recipe, aliases)
-                }
-                HostExprKind::ExtentSites { value, .. } => {
-                    validate(value, parameter, recipe, aliases)
-                }
+                HostExprKind::ResultClaimScope { body, .. } => validate(body, recipe, aliases),
+                HostExprKind::ExtentSites { value, .. } => validate(value, recipe, aliases),
                 _ => match recipe {
                     AccumulatorDeltaRecipe::Fresh => true,
-                    AccumulatorDeltaRecipe::Inherited => variable(expr, parameter, aliases),
+                    AccumulatorDeltaRecipe::Inherited => variable(expr, aliases),
                     AccumulatorDeltaRecipe::Constructor {
                         owner,
                         constructor,
@@ -32090,7 +32073,7 @@ impl AccumulatorDeltaProof {
                     } => {
                         matches!(&expr.kind, HostExprKind::AdtConstruct { ctor, fields: actuals, ty }
                             if ty.accumulator_nominal_identity() == Some(owner.as_str()) && ctor == constructor && actuals.len() == fields.len()
-                                && actuals.iter().zip(fields).all(|(actual, recipe)| validate(actual, parameter, recipe, aliases)))
+                                && actuals.iter().zip(fields).all(|(actual, recipe)| validate(actual, recipe, aliases)))
                     }
                     AccumulatorDeltaRecipe::ListInterval {
                         operation,
@@ -32104,13 +32087,13 @@ impl AccumulatorDeltaProof {
                             return false;
                         }
                         match (name.as_str(), args.as_slice(), *before, *after) {
-                            ("append", [old, _], 0, 1) => variable(old, parameter, aliases),
+                            ("append", [old, _], 0, 1) => variable(old, aliases),
                             ("concat", [old, fresh], 0, after) => {
-                                variable(old, parameter, aliases)
+                                variable(old, aliases)
                                     && matches!(&fresh.kind, HostExprKind::List(items, _) if items.len() == after)
                             }
                             ("concat", [fresh, old], before, 0) => {
-                                variable(old, parameter, aliases)
+                                variable(old, aliases)
                                     && matches!(&fresh.kind, HostExprKind::List(items, _) if items.len() == before)
                             }
                             _ => false,
@@ -32119,7 +32102,14 @@ impl AccumulatorDeltaProof {
                 },
             }
         }
-        validate(body, parameter, &self.recipe, &BTreeMap::new())
+        validate(
+            body,
+            &self.recipe,
+            &mut AccumulatorIdentities::new([(
+                parameter.to_owned(),
+                AccumulatorRootRole::Accumulator,
+            )]),
+        )
     }
 }
 
@@ -32168,11 +32158,69 @@ fn charge_accumulator_identity_work(units: usize) {
     ACCUMULATOR_IDENTITY_WORK.with(|work| work.set(work.get() + units));
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccumulatorRootRole {
+    Accumulator,
+    Item,
+}
+
+/// One lexical analysis frame. Deliberately not Clone: entering a Let records
+/// only its changed bindings, and leaving restores them in reverse order.
+struct AccumulatorIdentities {
+    bindings: BTreeMap<String, Option<AccumulatorRootRole>>,
+}
+
+impl AccumulatorIdentities {
+    fn new(roots: impl IntoIterator<Item = (String, AccumulatorRootRole)>) -> Self {
+        let mut scope = Self {
+            bindings: BTreeMap::new(),
+        };
+        for (name, role) in roots {
+            scope.bind(&name, Some(role));
+        }
+        scope
+    }
+    fn role(&self, name: &str) -> Option<AccumulatorRootRole> {
+        #[cfg(test)]
+        charge_accumulator_identity_work(1);
+        self.bindings.get(name).copied().flatten()
+    }
+    fn is_bound(&self, name: &str) -> bool {
+        #[cfg(test)]
+        charge_accumulator_identity_work(1);
+        self.bindings.contains_key(name)
+    }
+    fn bind(
+        &mut self,
+        name: &str,
+        role: Option<AccumulatorRootRole>,
+    ) -> Option<Option<AccumulatorRootRole>> {
+        #[cfg(test)]
+        charge_accumulator_identity_work(1);
+        self.bindings.insert(name.to_owned(), role)
+    }
+    fn restore(&mut self, name: &str, previous: Option<Option<AccumulatorRootRole>>) {
+        #[cfg(test)]
+        charge_accumulator_identity_work(1);
+        if let Some(previous) = previous {
+            self.bindings.insert(name.to_owned(), previous);
+        } else {
+            self.bindings.remove(name);
+        }
+    }
+}
+
 /// Whole immutable-variable identity is shared by construction and
 /// forwarding proofs; metadata never creates a new binding occurrence.
 fn accumulator_identity_variable(mut expr: &Expr) -> Option<&str> {
-    while let Expr::MetaExpr(meta, _) = expr {
-        expr = &meta.expr;
+    loop {
+        #[cfg(test)]
+        charge_accumulator_identity_work(1);
+        if let Expr::MetaExpr(meta, _) = expr {
+            expr = &meta.expr;
+        } else {
+            break;
+        }
     }
     let node = as_node(expr).filter(|node| node.tag() == DeepTag::Var)?;
     node.children_slice().first().and_then(symbol_name)
@@ -32221,8 +32269,10 @@ pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForward
     };
     let acc = param_name(acc)?;
     let item = param_name(item)?;
-    let mut roles = BTreeMap::from([(acc.clone(), 0), (item.clone(), 1)]);
-    let mut bound = BTreeSet::from([acc.clone(), item.clone()]);
+    let mut roles = AccumulatorIdentities::new([
+        (acc, AccumulatorRootRole::Accumulator),
+        (item, AccumulatorRootRole::Item),
+    ]);
     let mut tails = Vec::new();
     let mut current = callback.children_slice().get(1)?;
     loop {
@@ -32237,16 +32287,14 @@ pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForward
                 }
                 for [binder, initializer] in pairs {
                     let role = accumulator_identity_variable(initializer)
-                        .and_then(|name| roles.get(name))
-                        .copied();
+                        .and_then(|name| roles.role(name));
                     let mut names = UnordSet::new();
                     collect_binder_names(binder, &mut names);
                     for name in names.into_sorted() {
-                        roles.remove(&name);
-                        bound.insert(name);
+                        roles.bind(&name, None);
                     }
                     if let (Some(role), Some(name)) = (role, symbol_name(binder)) {
-                        roles.insert(name.to_owned(), role);
+                        roles.bind(name, Some(role));
                     }
                 }
                 tails.push(DeepTag::Let);
@@ -32260,10 +32308,15 @@ pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForward
                 let [function, first, second] = children else {
                     return None;
                 };
+                if function.tag() != Some(DeepTag::Var) {
+                    return None;
+                }
                 let callee = accumulator_identity_variable(function)?;
-                if bound.contains(callee)
-                    || roles.get(accumulator_identity_variable(first)?) != Some(&0)
-                    || roles.get(accumulator_identity_variable(second)?) != Some(&1)
+                if roles.is_bound(callee)
+                    || roles.role(accumulator_identity_variable(first)?)
+                        != Some(AccumulatorRootRole::Accumulator)
+                    || roles.role(accumulator_identity_variable(second)?)
+                        != Some(AccumulatorRootRole::Item)
                 {
                     return None;
                 }
@@ -32354,9 +32407,9 @@ fn accumulator_construction_proof_impl(
     admission: bool,
 ) -> Option<AccumulatorDeltaProof> {
     use crate::claim_pattern::{ClaimNode, ClaimNodeId, ClaimPattern};
-    fn variable(expr: &Expr, parameter: &str, aliases: &BTreeSet<String>) -> bool {
-        accumulator_identity_variable(expr)
-            .is_some_and(|name| name == parameter || aliases.contains(name))
+    fn variable(expr: &Expr, aliases: &AccumulatorIdentities) -> bool {
+        accumulator_identity_variable(expr).and_then(|name| aliases.role(name))
+            == Some(AccumulatorRootRole::Accumulator)
     }
     fn recipe(
         expr: &Expr,
@@ -32364,19 +32417,16 @@ fn accumulator_construction_proof_impl(
         pattern: &ClaimPattern,
         position: ClaimNodeId,
         root: ClaimNodeId,
-        aliases: &BTreeSet<String>,
-        shadowed: &BTreeSet<String>,
+        aliases: &mut AccumulatorIdentities,
     ) -> Option<(AccumulatorDeltaRecipe, bool)> {
         #[cfg(test)]
         charge_accumulator_identity_work(1);
         if let Expr::MetaExpr(meta, _) = expr {
-            return recipe(
-                &meta.expr, parameter, pattern, position, root, aliases, shadowed,
-            );
+            return recipe(&meta.expr, parameter, pattern, position, root, aliases);
         }
         let node = as_node(expr)?;
         let children = node.children_slice();
-        if variable(expr, parameter, aliases) {
+        if variable(expr, aliases) {
             return (position == root).then_some((AccumulatorDeltaRecipe::Inherited, true));
         }
         match node.tag() {
@@ -32387,7 +32437,6 @@ fn accumulator_construction_proof_impl(
                 position,
                 root,
                 aliases,
-                shadowed,
             ),
             DeepTag::Let => {
                 let bindings = children.first().and_then(as_node)?;
@@ -32395,40 +32444,38 @@ fn accumulator_construction_proof_impl(
                 if bindings.tag() != DeepTag::Bind || !remainder.is_empty() {
                     return None;
                 }
-                #[cfg(test)]
-                charge_accumulator_identity_work(aliases.len() + shadowed.len());
-                let mut local_aliases = aliases.clone();
-                let mut local_shadowed = shadowed.clone();
-                for pair in pairs {
-                    #[cfg(test)]
-                    charge_accumulator_identity_work(1);
-                    // Deep let bindings are sequential: read the old lexical
-                    // environment before introducing this pair's binders.
-                    let inherited = variable(&pair[1], parameter, &local_aliases);
-                    let mut names = UnordSet::new();
-                    collect_binder_names(&pair[0], &mut names);
-                    if names.contains(parameter) {
-                        return None;
+                let mut undo = Vec::new();
+                let result = (|| {
+                    for [binder, initializer] in pairs {
+                        let role = accumulator_identity_variable(initializer)
+                            .and_then(|name| aliases.role(name));
+                        let mut names = UnordSet::new();
+                        collect_binder_names(binder, &mut names);
+                        if names.contains(parameter) {
+                            return None;
+                        }
+                        for name in names.into_sorted() {
+                            let previous = aliases.bind(&name, None);
+                            undo.push((name, previous));
+                        }
+                        if let (Some(role), Some(name)) = (role, symbol_name(binder)) {
+                            let previous = aliases.bind(name, Some(role));
+                            undo.push((name.to_owned(), previous));
+                        }
                     }
-                    for name in names.into_sorted() {
-                        local_aliases.remove(&name);
-                        local_shadowed.insert(name);
-                    }
-                    // Patterns invalidate every name they bind, but only a
-                    // whole-value variable binding transports root identity.
-                    if inherited && let Some(name) = symbol_name(&pair[0]) {
-                        local_aliases.insert(name.to_owned());
-                    }
+                    recipe(
+                        children.get(1)?,
+                        parameter,
+                        pattern,
+                        position,
+                        root,
+                        aliases,
+                    )
+                })();
+                for (name, previous) in undo.into_iter().rev() {
+                    aliases.restore(&name, previous);
                 }
-                recipe(
-                    children.get(1)?,
-                    parameter,
-                    pattern,
-                    position,
-                    root,
-                    &local_aliases,
-                    &local_shadowed,
-                )
+                result
             }
             DeepTag::Record => {
                 let ClaimNode::Nominal {
@@ -32461,7 +32508,7 @@ fn accumulator_construction_proof_impl(
                         .flatten()
                     })?;
                     let (part, inherits) =
-                        recipe(source, parameter, pattern, child, root, aliases, shadowed)?;
+                        recipe(source, parameter, pattern, child, root, aliases)?;
                     reused |= inherits;
                     fields.push(part);
                 }
@@ -32483,7 +32530,7 @@ fn accumulator_construction_proof_impl(
                     return Some((AccumulatorDeltaRecipe::Fresh, false));
                 }
                 let name = callee.children_slice().first().and_then(symbol_name)?;
-                if shadowed.contains(name) {
+                if aliases.is_bound(name) {
                     return None;
                 }
                 fn length(expr: &Expr) -> Option<usize> {
@@ -32496,11 +32543,11 @@ fn accumulator_construction_proof_impl(
                     Some(length)
                 }
                 let result = match (name, &children[1..]) {
-                    ("append", [old, _]) if variable(old, parameter, aliases) => Some((0, 1)),
-                    ("concat", [old, fresh]) if variable(old, parameter, aliases) => {
+                    ("append", [old, _]) if variable(old, aliases) => Some((0, 1)),
+                    ("concat", [old, fresh]) if variable(old, aliases) => {
                         length(fresh).map(|after| (0, after))
                     }
-                    ("concat", [fresh, old]) if variable(old, parameter, aliases) => {
+                    ("concat", [fresh, old]) if variable(old, aliases) => {
                         length(fresh).map(|before| (before, 0))
                     }
                     _ => None,
@@ -32575,8 +32622,7 @@ fn accumulator_construction_proof_impl(
         &pattern,
         root,
         root,
-        &BTreeSet::new(),
-        &BTreeSet::new(),
+        &mut AccumulatorIdentities::new([(parameter.clone(), AccumulatorRootRole::Accumulator)]),
     )?;
     (reused && (admission || !matches!(recipe, AccumulatorDeltaRecipe::Inherited))).then_some(
         AccumulatorDeltaProof {
@@ -32669,6 +32715,46 @@ mod accumulator_delta_tests {
             bindings[0].value = var("equal_shape_unproved".to_owned());
             assert!(!proof.validates_body(&lowered));
         }
+    }
+
+    #[test]
+    fn lexical_identity_undo_preserves_sibling_constructor_components() {
+        let source = "type Node[T] =\n | End { v: T }\n | Link { values: List[T], next: Node[T] }\ndef step(acc: Node[tensor[3, f32]], i: i64) -> Node[tensor[*, f32]] = { old = acc\n Link { values: { old = [to_tensor([1.0f32, 2.0f32, 3.0f32])]\n old }, next: old } }\nout = 3i64\n";
+        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
+        let session = HostLoweringSession::new(&checked);
+        let (_, callee) = session.def_named("step").unwrap();
+        let proof = accumulator_construction_proof(callee, checked.adt_registry()).unwrap();
+        let host = try_lower_compiled_program(&checked).unwrap().host.unwrap();
+        let body = &host
+            .functions
+            .iter()
+            .find(|function| function.name == "step")
+            .unwrap()
+            .body;
+        assert!(
+            proof.validates_body(body),
+            "the fresh field's shadow must not escape to its sibling"
+        );
+        fn change(expr: &mut ConcreteHostExpr) -> bool {
+            match &mut expr.kind {
+                HostExprKind::Let { body, .. }
+                | HostExprKind::ResultClaimScope { body, .. }
+                | HostExprKind::ExtentSites { value: body, .. } => change(body),
+                HostExprKind::AdtConstruct { ctor, fields, ty } if ctor == "Link" => {
+                    fields[1] = ConcreteHostExpr::new(HostExprKind::Var(
+                        "equal_shape_unproved".into(),
+                        ty.clone(),
+                    ));
+                    true
+                }
+                _ => false,
+            }
+        }
+        let mut changed = body.clone();
+        assert!(change(&mut changed));
+        assert!(!proof.validates_body(&changed));
     }
 
     #[test]
@@ -33078,5 +33164,27 @@ mod accumulator_forwarding_wrapper_tests {
         let wrapped = Expr::node(DeepTag::Fn, node.meta().clone(), children, callback.span());
         let plan = accumulator_forwarding_plan(&wrapped).unwrap();
         assert_eq!(plan.callsite().tag(), Some(DeepTag::App));
+        let app = as_node(&node.children_slice()[1]).unwrap();
+        let mut actuals = app.children_slice().to_vec();
+        actuals[0] = Expr::MetaExpr(
+            chelis_deep::ast::MetaExpr {
+                metadata: Metadata::default(),
+                expr: Box::new(actuals[0].clone()),
+            },
+            actuals[0].span(),
+        );
+        let mut children = node.children_slice().to_vec();
+        children[1] = Expr::node(
+            DeepTag::App,
+            app.meta().clone(),
+            actuals,
+            children[1].span(),
+        );
+        let callee_wrapper =
+            Expr::node(DeepTag::Fn, node.meta().clone(), children, callback.span());
+        assert!(
+            accumulator_forwarding_plan(&callee_wrapper).is_none(),
+            "callable wrappers retain their own full admission"
+        );
     }
 }

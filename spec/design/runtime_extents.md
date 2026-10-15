@@ -2264,8 +2264,12 @@ sequential immutable `Let`, metadata and block-tail nodes. A private shared
 forwarding plan derives the selected call path from the original accumulator/item
 roles and sequential lexical binding occurrences; it does not infer identity from equal values
 or a callee spelling. Initializers resolve before their binders enter scope;
-shadowing invalidates the affected role. Alias analysis processes each binding
-once without cloning the complete environment at every nested Let.
+shadowing invalidates the affected role while saved aliases retain their original
+role. Source construction, forwarding and lowered postcondition validation share
+a scoped role environment that cannot be cloned. Each binding has bounded map
+and undo operations; nested constructor components and failed analyses restore
+their enclosing bindings. Ordered-map comparisons add their logarithmic factor
+without copying the complete environment at every nested Let.
 
 Ordinary wrapper evaluation/lowering retains effects, independent local claims,
 result scopes and producer provenance. Only the selected continuation may arm
@@ -2274,6 +2278,9 @@ recursive call or unrelated activation cannot consume it. C retains precisely
 that application inside the original wrappers, preparing actuals in caller
 scope before entering the grouped callee lowering/witness authority. Both lanes
 validate the exact callee, original obligations and staged forwarding edges.
+C identifies retained scalar actuals from ordered `FormalIngress` bindings,
+because scalar arguments do not appear in `SignatureEntry`'s observation list;
+uncertain formal/ingress alignment retains complete checking.
 An unproved wrapper, lexical callee shadow or changed accumulator/item retains
 complete checks. Selected callables and rank/precision polymorphism remain
 outside this forwarding representation. Additional independent claims retain
