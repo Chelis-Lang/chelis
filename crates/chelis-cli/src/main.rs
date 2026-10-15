@@ -3386,7 +3386,16 @@ fn cmd_check_one_on_grown_stack(
     if let Some(prepared_ref) = &prepared
         && prepared_ref.entry_decls.is_empty()
     {
-        return synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+        // Linking removes module/import/export forms from entry_decls. They
+        // remain source declarations, so a named empty library checks just as
+        // it does outside Reef. Reject genuinely declaration-free source.
+        match chelis_surf::parser::parse_str(&source) {
+            Ok(decls) if decls.is_empty() => {
+                return synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+            }
+            Err(err) => return synthetic_check_report_with_error(&err.to_string()),
+            Ok(_) => {}
+        }
     }
     let mut report = check_prepared_file(prepared.as_ref(), &source, show_inferred);
     // chelis#3269: a linked program's diagnostics name its declarations as

@@ -364,3 +364,51 @@ fn rt_wave1_207_empty_file_build_rejects_with_same_message() {
         "build on empty file must mention 'empty program'; combined output={combined}"
     );
 }
+
+#[test]
+fn named_module_without_members_checks_inside_and_outside_reef() {
+    let root = tempfile::tempdir().unwrap();
+    let bare = root.path().join("empty.ch");
+    std::fs::write(&bare, "module Demo.Empty\n").unwrap();
+    let (code, stdout) = run_check_capture(&bare);
+    assert_eq!(code, Some(0), "bare module: {stdout}");
+    assert!(parse_errors_array(&stdout).is_empty());
+
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("reef.toml"), format!("schema = \"1\"\n[package]\nname = \"empty-module\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Demo\"\n", env!("CARGO_PKG_VERSION"))).unwrap();
+    let entry = root.path().join("src/empty.ch");
+    std::fs::write(&entry, "module Demo.Empty\n").unwrap();
+    let (code, stdout) = run_check_capture(&entry);
+    assert_eq!(code, Some(0), "Reef module: {stdout}");
+    assert!(parse_errors_array(&stdout).is_empty());
+
+    // An empty library must still validate its declared package identity.
+    for invalid in [
+        "module Wrong.Empty\n",
+        "module Demo.Empty\nimport Demo.Missing (value)\n",
+    ] {
+        std::fs::write(&entry, invalid).unwrap();
+        let (code, stdout) = run_check_capture(&entry);
+        assert_eq!(code, Some(CHECK_ERRORS_EXIT_CODE), "{invalid:?}: {stdout}");
+        assert!(!parse_errors_array(&stdout).is_empty());
+    }
+}
+
+#[test]
+fn reef_blank_and_comment_files_remain_structured_errors() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("reef.toml"), format!("schema = \"1\"\n[package]\nname = \"empty-module\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Demo\"\n", env!("CARGO_PKG_VERSION"))).unwrap();
+    let entry = root.path().join("src/empty.ch");
+    for source in ["", " \n\t\n", "-- a comment\n"] {
+        std::fs::write(&entry, source).unwrap();
+        let (code, stdout) = run_check_capture(&entry);
+        assert_eq!(code, Some(CHECK_ERRORS_EXIT_CODE), "{source:?}: {stdout}");
+        assert!(
+            parse_errors_array(&stdout).iter().any(|e| e["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("exactly one top-level module declaration"))),
+            "{source:?}: {stdout}"
+        );
+    }
+}

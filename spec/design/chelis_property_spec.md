@@ -173,13 +173,16 @@ The Deep `def` name is the property name. There is no `property_name` or
 source; `property_quantifiers` is required as a serialization aid and must match
 the parameter list.
 
-c-earchin compatibility:
+Legacy c-earchin Deep compatibility:
 
 - Property discovery requires canonical `chelis_role: "property"` and its
   required schema. `c_earchin_role` is opaque producer data, not a discovery
   synonym (`spec/03-deep-syntax.md` [03-META-3]).
-- c-earchin v0.2 and later emit both canonical metadata and existing
-  `c_earchin_*` metadata indefinitely.
+- c-earchin v0.2 and v0.3 emitted canonical metadata alongside
+  `c_earchin_*` producer metadata. Those artifacts retain Deep discovery.
+- c-earchin v0.4 emits typed Surf properties with versioned source spans.
+  The structured property JSON adapter retains the historical `PropertySpec`
+  input schema; the Surf pipeline uses native property discovery.
 - The witness `def` name is the property name. `property_source_id` carries the
   EARS ID.
 
