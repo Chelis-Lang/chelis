@@ -65,6 +65,10 @@ a retained callee's own named extent witness. The private C projection compares
 nominal arguments by value layout when assigning values, because a dimension
 has no C value slot. Logical equality and accumulator reuse certificates still
 compare the exact dimension terms; entry and result claims enforce their extents.
+An empty collection of a known nominal type needs no numeric dimension witness
+for its parametric value layout. Dimension metadata stays distinct from an
+unresolved stored type or precision, and nonempty tensor fields supply the
+activation's actual extent witnesses.
 
 The call-site instantiation already used for authored parameter/result claims
 in `chelis-ir/src/lower.rs` is the starting point. The implementation should
