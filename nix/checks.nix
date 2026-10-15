@@ -179,6 +179,21 @@ let
         touch "$out"
       '';
 
+  # chelis-image-id identifies the running compiler by its GNU build id.
+  # Without one, each chelis process hashes its whole executable.
+  buildId =
+    if !pkgs.stdenv.hostPlatform.isLinux then
+      null
+    else
+      pkgs.runCommand "chelis-build-id" { nativeBuildInputs = [ pkgs.binutils-unwrapped ]; } ''
+        notes="$(readelf --notes ${packages.chelis}/bin/chelis)"
+        if ! grep -q 'Build ID: [0-9a-f]' <<<"$notes"; then
+          echo "the chelis executable has no GNU build id" >&2
+          exit 1
+        fi
+        touch "$out"
+      '';
+
   # Only native Linux produces a gate verdict.  Darwin evaluation never
   # constructs (or attempts to run) an x86_64-linux check derivation.
   laneCheck =
@@ -445,7 +460,10 @@ let
     runtimeCorrespondence
     runtimeShape
   ]
-  ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ laneCheck ];
+  ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+    buildId
+    laneCheck
+  ];
   native = pkgs.runCommand "chelis-native-contracts" { } ''
     ${lib.concatMapStringsSep "\n" (check: "test -e ${check}") contractChecks}
     test -e ${packages.chelis}
@@ -475,4 +493,7 @@ in
   chelis-runtime = packages.chelis-runtime;
   chelisup = packages.chelisup;
 }
-// lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux { lane-check = laneCheck; }
+// lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+  build-id = buildId;
+  lane-check = laneCheck;
+}
