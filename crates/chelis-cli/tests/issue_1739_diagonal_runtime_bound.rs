@@ -2071,12 +2071,80 @@ fn no_shipped_example_gains_a_host_lane_guard() {
             "keyed_state_wrapper: main guards __result axis 2 claiming 1",
             "keyed_state_wrapper: main guards __result axis 3 claiming 1",
             "list_shared_extent: main guards __result axis 0 claiming 2",
+            "recurrence_extent_scope: stage guards __result axis 0 claiming n",
             "staged_adt_control: main guards __result axis 0 claiming 2",
             "staged_adt_control: main guards __result axis 1 claiming 1",
         ],
         "these shipped defs changed their host-lane result guards; each change \
          needs positive and negative both-lane checks before it lands"
     );
+}
+
+/// The shipped recurrence example's `stage[n]` result claim executes on its
+/// real path and traps when a valid one-element block changes the fold result
+/// extent. The input still witnesses `n`; only the fold result disagrees.
+#[test]
+fn shipped_recurrence_stage_result_claim_executes_and_traps_in_both_lanes() {
+    assert!(
+        gcc_available(),
+        "native C is required for this result-claim obligation check"
+    );
+    let shipped = include_str!("../../../examples/recurrence_extent_scope.ch");
+    let dir = tempdir().expect("tempdir");
+
+    check_scores_one(&dir, "recurrence-stage-positive", shipped);
+    let (eval_ok, eval_stdout, eval_stderr) =
+        eval_source(&dir, "recurrence-stage-positive", shipped);
+    let (c_ok, c_output) = build_link_run(&dir, "recurrence-stage-positive", shipped);
+    let eval_output = format!("{eval_stdout}{eval_stderr}");
+    for (lane, ok, output) in [
+        ("Eval", eval_ok, eval_output.as_str()),
+        ("C", c_ok, c_output.as_str()),
+    ] {
+        assert!(ok, "{lane} must execute the shipped recurrence: {output}");
+        assert!(output.contains("main.0 = 40.0"), "{lane}: {output}");
+        assert!(
+            output.contains("main.1 = Model([5.0, 5.0])"),
+            "{lane}: {output}"
+        );
+    }
+
+    let original_stage = "def stage[n](x: tensor[n, f32], blocks: List[f32]) -> tensor[n, f32] = fold(fn (acc: tensor[n, f32], v: f32) -> add(acc, insert(scalar_to_tensor(v), 0i32, shape(acc, 0i32))), x, blocks)";
+    let growing_stage = "def stage[n](x: tensor[n, f32], blocks: List[f32]) -> tensor[n, f32] = fold(fn (acc: tensor[*, f32], v: f32) -> insert(scalar_to_tensor(v), 0i32, 1i64), x, blocks)";
+    assert_eq!(shipped.matches(original_stage).count(), 1);
+    let failing = shipped
+        .replace(original_stage, growing_stage)
+        .replace("blocks: [2.0f32, 3.0f32]", "blocks: [9.0f32]");
+    assert_ne!(
+        failing, shipped,
+        "the negative witness must mutate the shipped body"
+    );
+    check_scores_one(&dir, "recurrence-stage-negative", &failing);
+
+    let (eval_ok, eval_stdout, eval_stderr) =
+        eval_source(&dir, "recurrence-stage-negative", &failing);
+    let (c_ok, c_output) = build_link_run(&dir, "recurrence-stage-negative", &failing);
+    for (lane, ok, output) in [
+        ("Eval", eval_ok, format!("{eval_stdout}{eval_stderr}")),
+        ("C", c_ok, c_output),
+    ] {
+        assert!(
+            !ok,
+            "{lane} accepted a fold result outside stage[n]: {output}"
+        );
+        assert!(
+            output.contains("extent `n`: x axis 0 = 2, fold axis 0 = 1"),
+            "{lane} must identify the authored result claim and fold witness: {output}"
+        );
+        assert!(
+            output.contains("numeric trap: domain in fold at i64"),
+            "{lane} must trap at the result-producing fold: {output}"
+        );
+        assert!(
+            !output.contains("main.0 ="),
+            "{lane} exposed invalid result: {output}"
+        );
+    }
 }
 
 #[test]
