@@ -246,7 +246,7 @@ pub fn lower_obligation(
                 // declared numeric type (U2), matching the int-sorted field
                 // vars declared just above.
                 let pre =
-                    crate::opaque::lower_predicate_flattened_in(input_inv, pname, consts, exprs)?;
+                    crate::opaque::lower_predicate_flattened(input_inv, pname, consts, exprs)?;
                 preconditions.push(pre);
                 opaque_params.insert(pname.clone(), input_inv.clone());
                 // No subst entry: the param stays `p`, and its field

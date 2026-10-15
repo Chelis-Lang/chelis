@@ -368,6 +368,13 @@ fn emit(
         ) {
             value["arith_model"] = json!("real");
         }
+        // chelis#3634: what the machine-arithmetic refutation search `auto` runs
+        // after an over-the-reals green established. Absent when no check was
+        // attempted (an explicitly selected tier, or a base that is not over
+        // the reals), so absence is never confused with "nothing found".
+        if let Some(check) = &outcome.machine_arithmetic {
+            value["machine_arithmetic"] = json!(check);
+        }
         if let Some(evidence) = &outcome.induction_evidence {
             value["induction"] = json!(evidence);
         }
@@ -400,6 +407,23 @@ fn emit(
                     println!(
                         "property: {} -- proved (induction: base + step){suffix}",
                         outcome.name
+                    )
+                } else if let Some(check) = &outcome.machine_arithmetic {
+                    // chelis#3634: an over-the-reals proof has no sample ratio,
+                    // and `0/0 passed` read as one. Print the disclosure and
+                    // what the machine-arithmetic check established instead.
+                    println!(
+                        "property: {} -- {} ({}){suffix}",
+                        outcome.name,
+                        outcome.composite_verdict.as_str(),
+                        check.disclosure()
+                    )
+                } else if outcome.discloses_real_arithmetic() {
+                    println!(
+                        "property: {} -- {} ({}){suffix}",
+                        outcome.name,
+                        outcome.composite_verdict.as_str(),
+                        chelis_prove::machine_arith::UNCHECKED_DISCLOSURE
                     )
                 } else {
                     println!(

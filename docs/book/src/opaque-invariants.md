@@ -103,8 +103,14 @@ A `"fuzz"` result means sampled values passed; it is validation over those
 samples, not a proof for all inputs. An `"smt"` result proves the stated goal
 using real-number arithmetic. `"arith_model":"real"` and
 `"composite_verdict":"proven_modulo_real_arithmetic"` disclose that it does
-not certify IEEE floating-point execution. Read `"proof_tier"` and
-`"composite_verdict"` alongside `"status"` before relying on a passed record.
+not certify IEEE floating-point execution. Under `--tier auto` such an
+obligation is sampled again in machine arithmetic to look for a counterexample the
+real-arithmetic model cannot see, and the record's additive
+`"machine_arithmetic"` field reports whether that search `refuted`,
+`corroborated`, or left the proof `unchecked`; see
+[Checking Properties](proving.md). Read `"proof_tier"`,
+`"composite_verdict"`, and `"machine_arithmetic"` alongside `"status"` before
+relying on a passed record.
 
 If you replace the exported `probability` definition with one that omits the
 upper guard, the producer obligation fails. For example, `x = 2.0` meets the

@@ -56,11 +56,14 @@ pub struct ObligationOutcome {
     /// type definition (chelis#436). `None` for a producer-set declaration
     /// error that carries no invariant to render.
     pub goal: Option<String>,
+    /// The machine-arithmetic check `auto` runs after an over-the-reals green
+    /// (chelis#3634). `None` when no check was attempted.
+    pub machine_arithmetic: Option<crate::machine_arith::MachineArithmeticCheck>,
 }
 
 impl ObligationOutcome {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub(crate) fn new(
         name: impl Into<String>,
         meta: ObligationMeta,
         status: ObligationStatus,
@@ -164,6 +167,7 @@ impl ObligationOutcome {
             assumptions,
             composite_verdict,
             goal: None,
+            machine_arithmetic: None,
         }
     }
 
@@ -178,6 +182,22 @@ impl ObligationOutcome {
     fn with_goal(mut self, goal: impl Into<String>) -> Self {
         self.goal = Some(goal.into());
         self
+    }
+
+    pub(crate) fn with_machine_arithmetic(
+        mut self,
+        check: crate::machine_arith::MachineArithmeticCheck,
+    ) -> Self {
+        self.machine_arithmetic = Some(check);
+        self
+    }
+
+    /// Whether this record's PUBLISHED caveats disclose that its green was
+    /// decided over the reals (chelis#3634); such a decision rules out no
+    /// machine-arithmetic counterexample.
+    pub fn discloses_real_arithmetic(&self) -> bool {
+        self.disclosed_qualifiers()
+            .contains(&crate::discharge::Qualifier::RealArith.as_str())
     }
 
     /// The base discharge `(soundness, qualifiers)` this outcome's verdict was
@@ -617,7 +637,7 @@ fn run_one(
                     } else {
                         ObligationStatus::Passed
                     };
-                    return outcome_with_assumptions(
+                    let green = outcome_with_assumptions(
                         ob,
                         status,
                         ObligationTier::Smt,
@@ -628,6 +648,21 @@ fn run_one(
                         reason,
                         assumptions,
                     );
+                    // chelis#3634: the SMT discharge decided this obligation
+                    // over the REALS, so it rules out no machine-arithmetic
+                    // counterexample. `auto` runs Tier C against the green as a
+                    // refutation search; only a concrete counterexample can
+                    // change the verdict.
+                    if crate::machine_arith::corroboration_required(
+                        &options.tier,
+                        green.status == ObligationStatus::Passed
+                            && green.composite_verdict.is_green(),
+                        &green.disclosed_qualifiers(),
+                    ) {
+                        let probe = run_tier_c(exprs, inv, invariants, ob, sigs, consts, options);
+                        return crate::machine_arith::resolve_obligation(green, probe);
+                    }
+                    return green;
                 }
                 TierBResult::Disproved(model) => {
                     // chelis#422 (symmetric): thread the discharge so a disproof
@@ -1760,7 +1795,7 @@ fn eval_constant_obligation(
     consts: &ConstEnv,
     runtime: &'static chelis_reef::EmbeddedRuntime,
 ) -> Result<bool, String> {
-    let predicate = crate::opaque::lower_predicate_flattened(inv, &inv.binder, consts)
+    let predicate = crate::opaque::lower_predicate_flattened(inv, &inv.binder, consts, exprs)
         .ok_or_else(|| "invariant predicate does not lower for validation".to_string())?;
     let module_source = chelis_deep::printer::print_canonical(exprs);
     let call = deep_var(&ob.producer);
@@ -1850,7 +1885,7 @@ fn eval_obligation_body_values(
         deep_node("app", app)
     };
 
-    let predicate = crate::opaque::lower_predicate_flattened(inv, &inv.binder, consts)
+    let predicate = crate::opaque::lower_predicate_flattened(inv, &inv.binder, consts, exprs)
         .ok_or_else(|| "invariant predicate does not lower for validation".to_string())?;
     let module_source = chelis_deep::printer::print_canonical(exprs);
     // Evaluate the producer ONCE and validate the produced value's
