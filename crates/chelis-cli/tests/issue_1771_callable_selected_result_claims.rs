@@ -1218,7 +1218,7 @@ fn assert_native_list_pattern_skip_routes() {
             "{generated}"
         );
         let suffix_sites = generated
-            .match_indices(" = __chelis_host_result_origin_list_suffix(")
+            .match_indices(", __chelis_host_result_origin_list_suffix(")
             .map(|(offset, _)| offset)
             .collect::<Vec<_>>();
         let mut drop_sites = generated
@@ -1228,6 +1228,30 @@ fn assert_native_list_pattern_skip_routes() {
             .collect::<Vec<_>>();
         drop_sites.sort_unstable();
         assert_eq!(suffix_sites.len(), drop_sites.len(), "{generated}");
+        for (suffix, drop) in suffix_sites.iter().zip(&drop_sites) {
+            let suffix_start = generated[..*suffix].rfind('\n').unwrap() + 1;
+            let suffix_end = generated[*suffix..].find('\n').unwrap() + suffix;
+            let prefix = "__chelis_global_origin_assign(&";
+            let line = generated[suffix_start..suffix_end].trim();
+            let (destination, tail) = line
+                .strip_prefix(prefix)
+                .unwrap()
+                .split_once(", __chelis_host_result_origin_list_suffix(__chelis_origin_arena, ")
+                .unwrap();
+            let (origin, count) = tail.strip_suffix("));").unwrap().split_once(", ").unwrap();
+            let drop_start = generated[..*drop].rfind('\n').unwrap() + 1;
+            let drop_end = generated[*drop..].find('\n').unwrap() + drop;
+            let (target, call) = generated[drop_start..drop_end]
+                .trim()
+                .split_once(" = ")
+                .unwrap();
+            let args = call.split_once('(').unwrap().1.strip_suffix(");").unwrap();
+            let (value, amount) = args.split_once(", ").unwrap();
+            assert_eq!(destination, format!("__chelis_result_origin_{target}"));
+            assert_eq!(origin, format!("__chelis_result_origin_{value}"));
+            assert_eq!(count, amount);
+        }
+
         assert!(
             suffix_sites
                 .iter()

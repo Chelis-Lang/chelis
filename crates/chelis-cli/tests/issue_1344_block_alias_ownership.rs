@@ -141,6 +141,71 @@ fn emitted_function<'a>(emitted: &'a str, signature: &str) -> &'a str {
     &rest[..end]
 }
 
+fn assigned_call<'a>(body: &'a str, callee: &str) -> (&'a str, Vec<&'a str>) {
+    assigned_call_to(body, callee, None)
+}
+
+fn assigned_call_to<'a>(
+    body: &'a str,
+    callee: &str,
+    expected_target: Option<&str>,
+) -> (&'a str, Vec<&'a str>) {
+    let marker = format!(" = {callee}(");
+    let calls: Vec<_> = body
+        .lines()
+        .filter_map(|line| {
+            let (target, tail) = line.trim().split_once(&marker)?;
+            let target = target.split_whitespace().last()?;
+            if expected_target.is_some_and(|expected| target != expected) {
+                return None;
+            }
+            Some((target, tail.strip_suffix(");")?.split(", ").collect()))
+        })
+        .collect();
+    assert_eq!(calls.len(), 1, "unique {callee} call: {body}");
+    calls.into_iter().next().unwrap()
+}
+
+fn copied_string_owner<'a>(body: &'a str, value: &'a str) -> &'a str {
+    let mut value = value;
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        assert!(seen.insert(value), "cyclic owner alias: {body}");
+        let prefix = format!("{value} = ");
+        let sources: Vec<_> = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(&prefix)?.strip_suffix(';'))
+            .collect();
+        if let [source] = sources.as_slice()
+            && source
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            value = source;
+        } else {
+            assert!(
+                body.lines()
+                    .any(|line| line.trim() == format!("chelis_string {value};")),
+                "declared string owner: {body}"
+            );
+            return value;
+        }
+    }
+}
+
+#[test]
+fn ownership_oracle_traces_roles_and_rejects_wrong_or_cyclic_owners() {
+    let source = "chelis_string owned_71;\n owned_71 = fresh();\n alias_93 = owned_71;\n n = chelis_string_len(alias_93);";
+    let (_, args) = assigned_call(source, "chelis_string_len");
+    assert_eq!(copied_string_owner(source, args[0]), "owned_71");
+    for changed in [
+        source.replace("alias_93 = owned_71;", "alias_93 = wrong;"),
+        source.replace("alias_93 = owned_71;", "alias_93 = alias_93;"),
+    ] {
+        assert!(std::panic::catch_unwind(|| copied_string_owner(&changed, "alias_93")).is_err());
+    }
+}
+
 fn count_in(body: &str, call: &str) -> usize {
     body.matches(call).count()
 }
@@ -225,6 +290,9 @@ fn parameter_alias_arm_retains_before_block_release() {
         shared_line(&eval_stdout(PARAM_ALIAS_ARM, "param_alias_arm"), "n"),
     );
     let body = emitted_function(&emitted, "int64_t gate(chelis_string text, bool negative)");
+    let (_, arguments) = assigned_call_to(body, "chelis_string_len", Some("__result"));
+    let joined = copied_string_owner(body, arguments[0]);
+    let joined_release_call = format!("chelis_string_release({joined});");
     assert_eq!(
         count_in(body, "chelis_string_retain("),
         1,
@@ -238,7 +306,7 @@ fn parameter_alias_arm_retains_before_block_release() {
          exclusive branch:\n{body}"
     );
     assert_eq!(
-        count_in(body, "chelis_string_release(__let_0);"),
+        count_in(body, &joined_release_call),
         1,
         "the joined branch-result owner must be released once after use:\n{body}"
     );
@@ -257,7 +325,7 @@ fn parameter_alias_arm_retains_before_block_release() {
             .find("chelis_string_release(text);")
             .expect("parameter-aliasing arm release");
     let joined_release = body
-        .find("chelis_string_release(__let_0);")
+        .find(&joined_release_call)
         .expect("joined-result release");
     assert!(
         alias_retain < alias_release && alias_release < joined_release,
@@ -333,6 +401,7 @@ fn fresh_binding_takes_no_alias_retain() {
         shared_line(&eval_stdout(FRESH_ONLY, "fresh_only"), "n"),
     );
     let body = emitted_function(&emitted, "int64_t fresh_only()");
+    let (owner, concat_args) = assigned_call(body, "chelis_string_concat_owned");
     assert_eq!(
         count_in(body, "chelis_string_retain("),
         0,
@@ -340,7 +409,7 @@ fn fresh_binding_takes_no_alias_retain() {
          would leak once per call:\n{body}"
     );
     assert_eq!(
-        count_in(body, "chelis_string_release(__let_0);"),
+        count_in(body, &format!("chelis_string_release({owner});")),
         1,
         "the block releases its fresh binding exactly once:\n{body}"
     );
@@ -355,12 +424,12 @@ fn fresh_binding_takes_no_alias_retain() {
         "falling back to the cloning concat would hide a stale ownership oracle:\n{body}"
     );
     assert_eq!(
-        count_in(body, "chelis_string_release(__arg0_1);"),
+        count_in(body, &format!("chelis_string_release({});", concat_args[0])),
         0,
         "the lhs literal owner is consumed by concat and must not be released again:\n{body}"
     );
     assert_eq!(
-        count_in(body, "chelis_string_release(__arg1_2);"),
+        count_in(body, &format!("chelis_string_release({});", concat_args[1])),
         1,
         "the borrowed rhs literal remains independently owned and releases once:\n{body}"
     );
@@ -419,13 +488,19 @@ fn binding_mediated_parameter_return_composes_exactly_once() {
         "the transferred parameter is returned, not released in `f`:\n{f_body}"
     );
     let g2_body = emitted_function(&emitted, "int64_t g2()");
+    let (raw, concat_args) = assigned_call(g2_body, "chelis_string_concat_owned");
+    let (out, call_args) = assigned_call(
+        g2_body,
+        &format!("{}__chelis_owned_body", common::authored_c_symbol("f")),
+    );
+    assert_eq!(copied_string_owner(g2_body, call_args[0]), raw);
     assert_eq!(
         count_in(g2_body, "chelis_string_retain("),
         1,
         "the internal consuming call receives exactly one clone of `raw`; \
          its returned owner is then claimed without a second retain:\n{g2_body}"
     );
-    for (owner, label) in [("__let_3", "out"), ("__let_0", "raw")] {
+    for (owner, label) in [(out, "out"), (raw, "raw")] {
         assert_eq!(
             count_in(g2_body, &format!("chelis_string_release({owner});")),
             1,
@@ -444,12 +519,18 @@ fn binding_mediated_parameter_return_composes_exactly_once() {
         "falling back to the cloning concat would hide a stale ownership oracle:\n{g2_body}"
     );
     assert_eq!(
-        count_in(g2_body, "chelis_string_release(__arg0_1);"),
+        count_in(
+            g2_body,
+            &format!("chelis_string_release({});", concat_args[0])
+        ),
         0,
         "the lhs literal owner is consumed by concat and must not be released again:\n{g2_body}"
     );
     assert_eq!(
-        count_in(g2_body, "chelis_string_release(__arg1_2);"),
+        count_in(
+            g2_body,
+            &format!("chelis_string_release({});", concat_args[1])
+        ),
         1,
         "the borrowed rhs literal remains independently owned and releases once:\n{g2_body}"
     );

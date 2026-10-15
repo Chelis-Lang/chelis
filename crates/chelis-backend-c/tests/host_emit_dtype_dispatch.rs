@@ -806,14 +806,49 @@ fn to_tensor_list_ingress_uses_only_the_exact_registered_constructor() {
     }
 }
 
+fn declared_scalar_helper_input(source: &str) -> &str {
+    let values: Vec<_> = source
+        .lines()
+        .filter_map(|line| {
+            let (target, _) = line.trim().split_once(" = ")?;
+            (target.starts_with("__tensor_scalar0_") && !target.contains(' ')).then_some(target)
+        })
+        .collect();
+    assert_eq!(values.len(), 1, "one scalar helper input: {source}");
+    let input = values[0];
+    assert!(
+        source.lines().any(|line| line
+            .trim()
+            .strip_suffix(';')
+            .and_then(|declaration| declaration.split_once(' '))
+            .is_some_and(|(_, name)| name == input)),
+        "declared scalar input: {source}"
+    );
+    input
+}
+
+#[test]
+fn scalar_helper_oracle_rejects_missing_or_ambiguous_input_roles() {
+    let source = "scalar_type __tensor_scalar0_71;\n__tensor_scalar0_71 = value;";
+    assert_eq!(declared_scalar_helper_input(source), "__tensor_scalar0_71");
+    for changed in [
+        source.replace("scalar_type __tensor_scalar0_71;", ""),
+        source.replace("__tensor_scalar0_71", "__wrong_role_71"),
+        format!("{source}\nscalar_type __tensor_scalar0_93;\n__tensor_scalar0_93 = other;"),
+    ] {
+        assert!(std::panic::catch_unwind(|| declared_scalar_helper_input(&changed)).is_err());
+    }
+}
+
 #[test]
 fn scalar_to_tensor_coercion_bool_uses_exact_tagged_carrier() {
     let program =
         make_tensor_call_with_scalar_arg(HostType::Bool, HostExpr::new(HostExprKind::Bool(true)));
     let src = emit_host_program(&program, "scalar_bool").unwrap();
+    let input = declared_scalar_helper_input(&src);
     assert!(
         src.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL,")
-            && src.contains("__tensor_scalar0_0 ? 1 : 0"),
+            && src.contains(&format!("{input} ? 1 : 0")),
         "bool helper input must use the exact tagged Bool8 carrier:\n{src}"
     );
     assert!(
@@ -829,8 +864,9 @@ fn scalar_to_tensor_coercion_f64_preserves_tag_and_bits() {
         HostExpr::new(HostExprKind::Float(7.5)),
     );
     let src = emit_host_program(&program, "scalar_f64").unwrap();
+    let input = declared_scalar_helper_input(&src);
     assert!(
-        src.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits(__tensor_scalar0_0)))"),
+        src.contains(&format!("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits({input})))")),
         "f64 helper input must retain its F64 tag and bits (#381):\n{src}"
     );
     assert!(
@@ -847,12 +883,13 @@ fn scalar_to_tensor_coercion_int64_preserves_tag_and_integer_bits() {
         HostExpr::new(HostExprKind::Int(9_007_199_254_740_993)),
     );
     let src = emit_host_program(&program, "scalar_i64").unwrap();
+    let input = declared_scalar_helper_input(&src);
     assert!(
-        src.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)__tensor_scalar0_0))"),
+        src.contains(&format!("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t){input}))")),
         "i64 helper input must preserve its tag and all integer bits:\n{src}"
     );
     assert!(
-        !src.contains("chelis_host_f64_bits(__tensor_scalar0_0)"),
+        !src.contains(&format!("chelis_host_f64_bits({input})")),
         "i64 helper input must not round-trip through f64:\n{src}"
     );
 }

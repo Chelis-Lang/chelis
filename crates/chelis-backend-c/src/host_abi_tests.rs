@@ -1084,7 +1084,7 @@ fn assigned_call(body: &str, target: &str, callee: &str, arguments: &[&str]) -> 
 
 #[test]
 fn emitted_binding_oracle_rejects_broken_edges_and_calls() {
-    let body = "chelis_key (*__let_71)(int64_t);\nchelis_key (*__let_binding_84)(int64_t);\n__let_71 = builtin;\n__let_binding_84 = __let_71;\nresult = __let_binding_84(arg, arena, NULL, claims, &origin);";
+    let body = "chelis_key (*__let_71)(argument_type);\nchelis_key (*__let_binding_84)(argument_type);\n__let_71 = builtin;\n__let_binding_84 = __let_71;\nresult = __let_binding_84(arg, arena, NULL, claims, &origin);";
     let aliases = lexical_function_aliases(body);
     assert_eq!(aliases, ["__let_binding_84"]);
     assert!(alias_reaches(
@@ -1102,7 +1102,7 @@ fn emitted_binding_oracle_rejects_broken_edges_and_calls() {
     for changed in [
         body.replace("__let_71 = builtin;", "__let_71 = wrong;"),
         body.replace("__let_71 = builtin;", "__let_71 = __let_binding_84;"),
-        body.replace("chelis_key (*__let_71)(int64_t);", ""),
+        body.replace("chelis_key (*__let_71)(argument_type);", ""),
     ] {
         assert!(!alias_reaches(
             &changed,
@@ -1166,7 +1166,11 @@ fn typed_key_alias_chain_calls_the_declared_let_alias() {
         ),
         "{body}"
     );
-    let argument = declared_c_role(&body, "int64_t", "__call_arg0_");
+    let argument = declared_c_role(
+        &body,
+        HostAbiType::Int64.c_type_name().unwrap(),
+        "__call_arg0_",
+    );
     assert!(
         assigned_call(&body, "__result", aliases[1], &[argument]),
         "the call must go through the second binding's declared alias:\n{body}"
@@ -1203,7 +1207,11 @@ fn named_loop_callbacks_call_the_declared_let_alias() {
         "{mapped}"
     );
     let result = declared_c_role(&mapped, "chelis_key", "__map_result_");
-    let item = declared_c_role(&mapped, "int64_t", "__map_item_");
+    let item = declared_c_role(
+        &mapped,
+        HostAbiType::Int64.c_type_name().unwrap(),
+        "__map_item_",
+    );
     assert!(
         assigned_call(&mapped, result, aliases[0], &[item]),
         "map must call the declared alias:\n{mapped}"
@@ -1229,7 +1237,11 @@ fn named_loop_callbacks_call_the_declared_let_alias() {
         "{folded}"
     );
     let acc = declared_c_role(&folded, "chelis_key", "__fold_acc_");
-    let item = declared_c_role(&folded, "int64_t", "__fold_item_");
+    let item = declared_c_role(
+        &folded,
+        HostAbiType::Int64.c_type_name().unwrap(),
+        "__fold_item_",
+    );
     assert!(
         assigned_call(&folded, "__result", aliases[0], &[acc, item]),
         "fold must call the declared alias:\n{folded}"
@@ -1263,7 +1275,11 @@ fn key_alias_shadowing_a_def_calls_the_alias() {
         "{call}"
     );
     let arg0 = declared_c_role(&call, "chelis_key", "__call_arg0_");
-    let arg1 = declared_c_role(&call, "int64_t", "__call_arg1_");
+    let arg1 = declared_c_role(
+        &call,
+        HostAbiType::Int64.c_type_name().unwrap(),
+        "__call_arg1_",
+    );
     assert!(
         assigned_call(&call, "__result", aliases[0], &[arg0, arg1]),
         "the call must go through the alias:\n{call}"
@@ -1291,7 +1307,11 @@ fn key_alias_shadowing_a_def_calls_the_alias() {
         "{mapped}"
     );
     let result = declared_c_role(&mapped, "chelis_key", "__map_result_");
-    let item = declared_c_role(&mapped, "int64_t", "__map_item_");
+    let item = declared_c_role(
+        &mapped,
+        HostAbiType::Int64.c_type_name().unwrap(),
+        "__map_item_",
+    );
     assert!(
         assigned_call(&mapped, result, aliases[0], &[item]),
         "map must call the alias:\n{mapped}"
@@ -1312,7 +1332,11 @@ fn unshadowed_def_callees_call_the_private_body() {
          out = direct()\n",
         "direct",
     );
-    let argument = declared_c_role(&direct, "int64_t", "__call_arg0_");
+    let argument = declared_c_role(
+        &direct,
+        HostAbiType::Int64.c_type_name().unwrap(),
+        "__call_arg0_",
+    );
     assert!(
         assigned_call(
             &direct,
@@ -1335,7 +1359,11 @@ fn unshadowed_def_callees_call_the_private_body() {
         "mapped",
     );
     let result = declared_c_role(&mapped, "chelis_key", "__map_result_");
-    let item = declared_c_role(&mapped, "int64_t", "__map_item_");
+    let item = declared_c_role(
+        &mapped,
+        HostAbiType::Int64.c_type_name().unwrap(),
+        "__map_item_",
+    );
     let origin = format!("&__chelis_result_origin_{result}");
     assert!(
         assigned_call(
@@ -1360,8 +1388,16 @@ fn callback_parameter_shadowing_a_def_is_the_exported_callee() {
          out = apply_all(twice, [1i64, 2i64])\n",
         "apply_all",
     );
-    let result = declared_c_role(&body, "int64_t", "__map_result_");
-    let item = declared_c_role(&body, "int64_t", "__map_item_");
+    let result = declared_c_role(
+        &body,
+        HostAbiType::Int64.c_type_name().unwrap(),
+        "__map_result_",
+    );
+    let item = declared_c_role(
+        &body,
+        HostAbiType::Int64.c_type_name().unwrap(),
+        "__map_item_",
+    );
     assert!(
         assigned_call(&body, result, "inc", &[item]),
         "the callback must be the parameter:\n{body}"

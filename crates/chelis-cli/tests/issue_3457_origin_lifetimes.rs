@@ -146,6 +146,20 @@ fn live_metadata_with_sanitizers(name: &str, source: &str, sanitized: bool) -> L
                 needs_blas: false,
             },
         );
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(destination.join(chelis_runtime_bundle::RECEIPT_FILE_NAME)).unwrap(),
+        )
+        .unwrap();
+        let archive = receipt["archive"].as_str().expect("staged archive path");
+        assert_eq!(std::path::Path::new(archive).components().count(), 1);
+        let archive = destination.join(archive);
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            format!("{:x}", Sha256::digest(std::fs::read(&archive).unwrap())),
+            receipt["archive_sha256"]
+                .as_str()
+                .expect("staged archive digest")
+        );
         let linked = std::process::Command::new(toolchain.compiler)
             .current_dir(&destination)
             .args([
@@ -156,7 +170,7 @@ fn live_metadata_with_sanitizers(name: &str, source: &str, sanitized: bool) -> L
             ])
             .args(toolchain.compile_flags)
             .arg("lifetime.c")
-            .arg("libchelis_runtime.a")
+            .arg(&archive)
             .args(toolchain.link_flags)
             .args(["-o", "lifetime"])
             .status()
