@@ -7244,7 +7244,7 @@ mod tests {
 
     #[test]
     fn conditional_observation_all_cutoffs_orders_and_opaque_match_original() {
-        for variant in 0..5 {
+        for variant in 0..6 {
             let mut nodes = shared_axis_diamond(0);
             let mut other = nodes[0].clone();
             other.id = 1;
@@ -7281,6 +7281,13 @@ mod tests {
             } else if variant == 4 {
                 // Const source choice does not impose an extra precision check.
                 nodes[0].output_type.precision = "f64".into();
+            } else if variant == 5 {
+                let WireRiscOp::Const { value } = &nodes[2].op else {
+                    unreachable!()
+                };
+                nodes[2].op = WireRiscOp::ConstTensor {
+                    data: chelis_types::tensor_from_scalars(Prim::F32, std::slice::from_ref(value)),
+                };
             }
             let observed = nodes.last().unwrap().id;
             let anchor = append_test_witness(&mut nodes, 0, &[]);
@@ -7327,6 +7334,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn public_conditional_const_tensor_preserves_acceptance_and_shape_rejection() {
+        let mut dag = contextual_prefix_comparisons(0, 1);
+        let mut constant = dag.nodes[1].clone();
+        let mut compare = dag.nodes[2].clone();
+        let WireRiscOp::Const { value } = &constant.op else {
+            unreachable!()
+        };
+        constant.op = WireRiscOp::ConstTensor {
+            data: chelis_types::tensor_from_scalars(Prim::F32, std::slice::from_ref(value)),
+        };
+        dag.nodes = contextual_witness_nodes(false, false);
+        dag.nodes.truncate(2);
+        constant.id = 2;
+        constant.shape_deps = vec![1];
+        dag.nodes.push(constant);
+        let anchor = append_test_witness(&mut dag.nodes, 0, &[]);
+        append_test_witness(&mut dag.nodes, 2, &[anchor]);
+        compare.id = dag.nodes.len() as u64;
+        compare.inputs = vec![0, 1];
+        compare.shape_deps = vec![0];
+        dag.roots = vec![compare.id];
+        dag.nodes.push(compare);
+        let json = public_witness_json(&dag);
+        assert!(WireDag::from_validated_json(&json).is_ok());
+        assert!(original_public_witness_result(&json).is_ok());
+        dag.nodes[2].shape_deps = vec![0];
+        let bad = public_witness_json(&dag);
+        let error = WireDag::from_validated_json(&bad).unwrap_err().to_string();
+        assert!(error.contains("requires two same-shape"), "{error}");
+        assert_eq!(error, original_public_witness_result(&bad).unwrap_err());
     }
 
     #[test]
