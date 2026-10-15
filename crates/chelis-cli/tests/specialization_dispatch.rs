@@ -68,8 +68,16 @@ fn build_and_classify(name: &'static str, source: &str) -> Dispatch {
         || c.contains("chelis_tensor_cumsum(")
         || c.contains("chelis_tensor_sort(");
     let sparse_gather_loop = c.contains("chelis_tensor_sparse_plan(")
-        && c.contains("chelis_sparse_index_slot(")
-        && c.contains("chelis_sparse_data_index(")
+        && c.contains("CHELIS_SPARSE_INDEX")
+        && c.contains("CHELIS_SPARSE_BASE")
+        && c.contains("CHELIS_SPARSE_SELECTED")
+        && c.contains("_sparse_count; ++")
+        && c.contains("_index_slot = ")
+        && c.contains("_base_index = ")
+        && c.contains("_selected * ")
+        && c.contains("chelis_sparse_check_index(")
+        && !c.contains("chelis_sparse_index_slot(")
+        && !c.contains("chelis_sparse_data_index(")
         && c.contains("chelis_sparse_check_target(")
         && c.contains("chelis_sparse_plan_release(")
         && c.contains("CHELIS_DTYPE_I64");
