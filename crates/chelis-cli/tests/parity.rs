@@ -945,6 +945,11 @@ fn parity_grad_list_model() {
 }
 
 #[test]
+fn parity_recurrence_extent_scope() {
+    drive_parity(&examples_root().join("recurrence_extent_scope.ch"), true);
+}
+
+#[test]
 fn parity_grad_host_selectors() {
     let path = examples_root().join("grad_host_selectors.ch");
     drive_parity(&path, true);

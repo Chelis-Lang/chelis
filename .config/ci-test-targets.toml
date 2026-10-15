@@ -662,6 +662,11 @@ prefix = "examples/grad_list_model.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+[[path_rule]]
+prefix = "examples/recurrence_extent_scope.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
 # chelis#606: exercise imported IO and pure controls through a real Reef
 # package. This target does not compile or link generated C.
 [[standing_target]]

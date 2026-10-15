@@ -19738,13 +19738,7 @@ impl<'program> LowerCtx<'program> {
             result,
             scan,
         };
-        let result = self.dag.add_node(
-            self.owner(),
-            RiscOp::RuntimeRecurrence(Box::new(recurrence)),
-            inputs,
-            output_ty,
-            self.current_span_id.clone(),
-        );
+        let result = self.add_runtime_recurrence(recurrence, inputs, output_ty);
         Some(if scan {
             tensor_list_value(result)
         } else {
@@ -19982,18 +19976,40 @@ impl<'program> LowerCtx<'program> {
             result,
             scan,
         };
-        let result = self.dag.add_node(
-            self.owner(),
-            RiscOp::RuntimeRecurrence(Box::new(recurrence)),
-            inputs,
-            output_ty,
-            self.current_span_id.clone(),
-        );
+        let result = self.add_runtime_recurrence(recurrence, inputs, output_ty);
         Some(if scan {
             tensor_list_value(result)
         } else {
             LoweredValue::Node(result)
         })
+    }
+
+    /// A callback is a private graph: its dimension names and witnesses do
+    /// not declare extents in the caller. Publish each unknown state-result
+    /// axis anonymously; axis-source derivation supplies its identity after
+    /// transforms, from this recurrence's own computed extent. The callback
+    /// retains its entry/result claims, and surrounding calls retain theirs; neither
+    /// is replaced by a seed's extent (an empty fold returns the seed, while
+    /// a nonempty fold can change shape).
+    fn add_runtime_recurrence(
+        &mut self,
+        recurrence: crate::dag::RuntimeRecurrence,
+        inputs: Vec<NodeId>,
+        mut output_ty: TensorType,
+    ) -> NodeId {
+        for dim in output_ty.dims.iter_mut().skip(usize::from(recurrence.scan)) {
+            *dim = match dim {
+                DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => DimInfo::Lit(*extent),
+                DimInfo::Named(_, None) => DimInfo::Named("*".into(), None),
+            };
+        }
+        self.dag.add_node(
+            self.owner(),
+            RiscOp::RuntimeRecurrence(Box::new(recurrence)),
+            inputs,
+            output_ty,
+            self.current_span_id.clone(),
+        )
     }
 
     fn staged_tensor_list(&mut self, source: NodeId) -> Option<LoweredValue> {
