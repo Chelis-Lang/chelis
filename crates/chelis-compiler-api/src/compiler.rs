@@ -6961,7 +6961,14 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         }
         RiscOp::Cumsum { axis, direction } => WireRiscOp::Cumsum {
             axis: wire_axis(*axis)?,
-            direction: *direction,
+            direction: match direction {
+                chelis_ir::dag::ScanDirection::Increasing => {
+                    crate::schema::WireScanDirection::Increasing
+                }
+                chelis_ir::dag::ScanDirection::Decreasing => {
+                    crate::schema::WireScanDirection::Decreasing
+                }
+            },
         },
         RiscOp::Add => WireRiscOp::Add,
         RiscOp::Sub => WireRiscOp::Sub,
@@ -10685,5 +10692,18 @@ bad = shape(scalar_to_tensor(cast(3, i64)), axis)
             .dag
             .validate_schema_version()
             .expect("the produced gradient DAG validates");
+    }
+    #[test]
+    fn ordered_scan_directions_cross_the_explicit_wire_boundary() {
+        for (direction, spelling) in [
+            (chelis_ir::dag::ScanDirection::Increasing, "increasing"),
+            (chelis_ir::dag::ScanDirection::Decreasing, "decreasing"),
+        ] {
+            let wire = wire_op(&RiscOp::Cumsum { axis: 2, direction }).unwrap();
+            assert_eq!(
+                serde_json::to_value(wire).unwrap(),
+                serde_json::json!({"kind":"cumsum","axis":2,"direction":spelling})
+            );
+        }
     }
 }

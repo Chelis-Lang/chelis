@@ -2805,7 +2805,7 @@ impl WireDag {
                             let p = Prim::parse_interchange_name(&input.output_type.precision);
                             p.is_none_or(|p| {
                                 !(p.is_float() || p.is_integer())
-                                    || (*direction == chelis_ir::dag::ScanDirection::Decreasing
+                                    || (*direction == WireScanDirection::Decreasing
                                         && !p.is_float())
                                     || p.default_reduce_sum_result_precision()
                                         .ok()
@@ -5076,12 +5076,20 @@ pub struct WireExtentClaim {
     pub requirement_declares: bool,
 }
 
+/// Closed traversal metadata for the ordered scan wire operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireScanDirection {
+    Increasing,
+    Decreasing,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireRiscOp {
     Cumsum {
         axis: i32,
-        direction: chelis_ir::dag::ScanDirection,
+        direction: WireScanDirection,
     },
     Iota,
     ListMapCapture {
