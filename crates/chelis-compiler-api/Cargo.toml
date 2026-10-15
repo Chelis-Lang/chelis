@@ -299,5 +299,10 @@ name = "untaken_arm_gradients"
 path = "tests/untaken_arm_gradients.rs"
 required-features = ["ownership-ledger"]
 
+[[test]]
+name = "issue_3414_scan_lanes"
+path = "tests/issue_3414_scan_lanes.rs"
+required-features = ["ownership-ledger"]
+
 [lints]
 workspace = true

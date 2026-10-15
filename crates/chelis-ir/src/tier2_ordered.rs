@@ -2,16 +2,13 @@
 //! atoms pin an exact selection, scan, or contraction order ([05-OP-53],
 //! [05-OP-33], [05-OP-51]).
 //!
-//! Each lowering composes existing Tier 1 movement and arithmetic nodes so
-//! that the operation's adjoint follows from the IR graph; no backend
-//! supplies an adjoint (spec/05 §5). Every graph here is built only from
-//! statically known extents; a runtime extent is an [`OrderedGap`] the caller
-//! rejects (chelis#3378).
+//! Movement and contraction lowerings compose Tier 1 nodes. The directional
+//! scan retains its ordered identity so its adjoint reverses traversal without
+//! introducing an additive base. Scans accept runtime extents; the other
+//! ordered lowerings require statically known extents (chelis#3378).
 //!
-//! Float forms only for `trace`, `cumsum`, and `einsum`: their integer forms are
-//! forward-only and check overflow at every arithmetic step in the atom's
-//! order, which an elementwise IR graph does not reproduce trap for trap
-//! (chelis#3377).
+//! Integer scans are forward-only and check every accumulator addition.
+//! Integer trace and einsum retain their checked host paths (chelis#3377).
 
 use chelis_types::types::Prim;
 
@@ -137,33 +134,6 @@ impl Builder<'_> {
         out[axis] = end - start;
         self.node(RiscOp::Shrink { bounds }, vec![x], &out, precision)
     }
-
-    /// Pad `axis` with `-0`, the IEEE additive identity: adding the padded
-    /// cells to anything leaves its stored bits unchanged, `-0` included.
-    fn identity_pad_axis(
-        &mut self,
-        x: NodeId,
-        dims: &[usize],
-        axis: usize,
-        before: usize,
-        after: usize,
-        precision: Prim,
-    ) -> NodeId {
-        let padding = (0..dims.len())
-            .map(|i| {
-                if i == axis {
-                    (RtDim::Lit(before), RtDim::Lit(after))
-                } else {
-                    (RtDim::Lit(0), RtDim::Lit(0))
-                }
-            })
-            .collect();
-        let mut out = dims.to_vec();
-        out[axis] += before + after;
-        let fill = chelis_types::scalar_from_f64("pad", precision, -0.0)
-            .expect("negative zero finalizes at every float dtype");
-        self.node(RiscOp::Pad { padding, fill }, vec![x], &out, precision)
-    }
 }
 
 /// [05-OP-53] `diagonal(x, axis1, axis2)` for distinct normalized axes, as
@@ -270,23 +240,8 @@ pub fn lower_trace(
     Ok(b.cast(sum, &out_dims, accumulator, result))
 }
 
-/// [05-OP-33] float `cumsum(x, axis)`: in increasing axis order the first
-/// input is the first prefix and each later input is added to the previous
-/// prefix at the accumulator dtype; every prefix is finalized to the result
-/// dtype. The graph is that sequential chain over unit slabs of the axis,
-/// `r_0 = -0 + x_0` and `r_k = r_(k-1) + x_k`. Adding `-0`, the IEEE
-/// additive identity, keeps every stored bit of `x_0`, a `-0` included, and
-/// finalizes a NaN as a one-leaf sum does.
-///
-/// Slabs are cut and the prefixes rejoined by balanced halving, so the
-/// adjoint's work is `O(numel * log n)` rather than one zero-padded
-/// contribution per slab. Rejoining adds disjoint halves padded with `-0`,
-/// so each join keeps every prefix exactly. The reverse derivative of the
-/// chain is the inclusive decreasing-axis scan of the cotangent at the same
-/// accumulator dtype, finalized at the operand dtype by the leading cast's
-/// adjoint, except for the sign of a zero suffix: when the axis has two or
-/// more elements, each slab's cotangent returns to `x` through a shrink
-/// adjoint's `+0` fill, so a `-0` suffix accumulates to `+0` (chelis#3414).
+/// [05-OP-33] ordered scan. Keeping the identity through AD and vmap
+/// preserves the inclusive reverse rule without padded cotangent additions.
 pub fn lower_cumsum(
     owner: Owner,
     dag: &mut Dag,
@@ -295,98 +250,36 @@ pub fn lower_cumsum(
     axis: usize,
     span: Option<&str>,
 ) -> Result<NodeId, OrderedGap> {
-    let precision = x_ty.precision;
-    if !precision.is_float() {
-        return Err(OrderedGap::IntegerForm(format!(
-            "`cumsum` over `{}` is forward-only",
-            precision.name()
-        )));
-    }
-    let dims = static_dims(x_ty, "cumsum")?;
-    if axis >= dims.len() {
+    let p = x_ty.precision;
+    if !(p.is_float() || p.is_integer()) {
         return Err(format!(
-            "`cumsum` axis {axis} is out of range for rank {}",
-            dims.len()
+            "cumsum requires signed-integer or float input, got {}",
+            p.name()
         )
         .into());
     }
-    let accumulator = precision.default_reduce_sum_accumulator()?;
-    let result = precision.sum_result_precision(accumulator);
-    let mut b = Builder { owner, dag, span };
-    let n = dims[axis];
-    if n == 0 {
-        return Ok(b.cast(x, &dims, precision, result));
+    if axis >= x_ty.dims.len() {
+        return Err(format!(
+            "cumsum axis {axis} is out of range for rank {}",
+            x_ty.dims.len()
+        )
+        .into());
     }
-    let wide = b.cast(x, &dims, precision, accumulator);
-    let mut slab_dims = dims.clone();
-    slab_dims[axis] = 1;
-    let mut slabs = Vec::with_capacity(n);
-    split_slabs(&mut b, wide, &dims, axis, accumulator, &mut slabs);
-    let mut running = b.node(
-        RiscOp::synth_const(accumulator, -0.0),
-        vec![],
-        &slab_dims,
-        accumulator,
-    );
-    let mut prefixes = Vec::with_capacity(n);
-    for slab in slabs {
-        // Addition commutes exactly. The slab is the left operand so an axis
-        // query reads its extent through the O(log n) slab cut instead of
-        // walking the whole running chain, which made extent resolution over
-        // every prefix quadratic in n.
-        running = b.node(RiscOp::Add, vec![slab, running], &slab_dims, accumulator);
-        prefixes.push(running);
-    }
-    let joined = join_slabs(&mut b, &prefixes, &slab_dims, axis, accumulator);
-    Ok(b.cast(joined, &dims, accumulator, result))
-}
-
-fn split_slabs(
-    b: &mut Builder<'_>,
-    x: NodeId,
-    dims: &[usize],
-    axis: usize,
-    precision: Prim,
-    out: &mut Vec<NodeId>,
-) {
-    let n = dims[axis];
-    if n == 1 {
-        out.push(x);
-        return;
-    }
-    let mid = n / 2;
-    let left = b.shrink_axis(x, dims, axis, 0, mid, precision);
-    let right = b.shrink_axis(x, dims, axis, mid, n, precision);
-    let mut left_dims = dims.to_vec();
-    left_dims[axis] = mid;
-    let mut right_dims = dims.to_vec();
-    right_dims[axis] = n - mid;
-    split_slabs(b, left, &left_dims, axis, precision, out);
-    split_slabs(b, right, &right_dims, axis, precision, out);
-}
-
-fn join_slabs(
-    b: &mut Builder<'_>,
-    slabs: &[NodeId],
-    slab_dims: &[usize],
-    axis: usize,
-    precision: Prim,
-) -> NodeId {
-    if slabs.len() == 1 {
-        return slabs[0];
-    }
-    let mid = slabs.len() / 2;
-    let left = join_slabs(b, &slabs[..mid], slab_dims, axis, precision);
-    let right = join_slabs(b, &slabs[mid..], slab_dims, axis, precision);
-    let mut left_dims = slab_dims.to_vec();
-    left_dims[axis] = mid;
-    let mut right_dims = slab_dims.to_vec();
-    right_dims[axis] = slabs.len() - mid;
-    let left = b.identity_pad_axis(left, &left_dims, axis, 0, slabs.len() - mid, precision);
-    let right = b.identity_pad_axis(right, &right_dims, axis, mid, 0, precision);
-    let mut dims = slab_dims.to_vec();
-    dims[axis] = slabs.len();
-    b.node(RiscOp::Add, vec![left, right], &dims, precision)
+    let result = p.default_reduce_sum_result_precision()?;
+    Ok(add_synth(
+        owner,
+        dag,
+        RiscOp::Cumsum {
+            axis,
+            direction: crate::dag::ScanDirection::Increasing,
+        },
+        vec![x],
+        TensorType {
+            dims: x_ty.dims.clone(),
+            precision: result,
+        },
+        span,
+    ))
 }
 
 /// [05-OP-33] / [05-OP-51] float `einsum(equation, a, b)` at `accumulator`.

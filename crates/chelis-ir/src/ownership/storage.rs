@@ -786,6 +786,7 @@ fn classify_nodes(
                 | RiscOp::DropoutReplay
                 | RiscOp::UniformBoundAdjoint { .. }
                 | RiscOp::Copy
+                | RiscOp::Cumsum { .. }
                 | RiscOp::Sum { .. }
                 | RiscOp::Count { .. }
                 | RiscOp::MaxReduce { .. }

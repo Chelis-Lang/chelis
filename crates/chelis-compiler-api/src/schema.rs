@@ -2414,7 +2414,8 @@ pub struct WireRecordPatternField {
 /// - `28`: `Pow` and its fused step are the [05-OP-79] Tier 1 primitive; a
 ///   version-27 reader does not know the operation.
 /// - `29`: `FloatClassify` retains the stored-width predicates [05-OP-20..22].
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 29;
+/// - `30`: `Cumsum` retains inclusive ordered prefix/suffix scans [05-OP-33].
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 30;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2790,6 +2791,40 @@ impl WireDag {
                     {
                         return Err(WireDagContractError::new(format!(
                             "WireDag Where node {} requires a same-shape Bool condition and exactly matching branch/output types",
+                            node.id
+                        )));
+                    }
+                }
+                WireRiscOp::Cumsum { axis, direction } => {
+                    let input = node
+                        .inputs
+                        .first()
+                        .and_then(|id| self.nodes[..index].iter().find(|input| input.id == *id));
+                    if node.inputs.len() != 1
+                        || input.is_none_or(|input| {
+                            let p = Prim::parse_interchange_name(&input.output_type.precision);
+                            p.is_none_or(|p| {
+                                !(p.is_float() || p.is_integer())
+                                    || (*direction == WireScanDirection::Decreasing
+                                        && !p.is_float())
+                                    || p.default_reduce_sum_result_precision()
+                                        .ok()
+                                        .map(|p| p.interchange_name().to_owned())
+                                        != Some(node.output_type.precision.clone())
+                            }) || usize::try_from(*axis)
+                                .ok()
+                                .is_none_or(|axis| axis >= input.output_type.dims.len())
+                                || input.output_type.dims.len() != node.output_type.dims.len()
+                                || input
+                                    .output_type
+                                    .dims
+                                    .iter()
+                                    .zip(&node.output_type.dims)
+                                    .any(|(a, b)| !wire_dim_info_equal(a, b))
+                        })
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Cumsum node {} requires numeric input, default result dtype, same shape and valid axis; reverse is float-only",
                             node.id
                         )));
                     }
@@ -4656,6 +4691,7 @@ fn wire_axis_origin_uncached(
             }
         }
         WireRiscOp::ListMapCapture { .. } => input_axis(1, axis),
+        WireRiscOp::Cumsum { .. } => input_axis(0, axis),
         WireRiscOp::OrderedAdjointSum { .. } => None,
         WireRiscOp::Permute { axes } => input_axis(0, usize::try_from(*axes.get(axis)?).ok()?),
         WireRiscOp::Expand {
@@ -5315,9 +5351,21 @@ pub struct WireExtentClaim {
     pub requirement_declares: bool,
 }
 
+/// Closed traversal metadata for the ordered scan wire operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireScanDirection {
+    Increasing,
+    Decreasing,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireRiscOp {
+    Cumsum {
+        axis: i32,
+        direction: WireScanDirection,
+    },
     Iota,
     ListMapCapture {
         first: bool,

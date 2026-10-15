@@ -13221,3 +13221,270 @@ int main(void) {{
     }
     assert_eq!(traps, [-1, 5], "both disagreeing extents trap");
 }
+
+#[test]
+fn ordered_scan_c_exec_bits_at_all_float_widths_runtime_axes_and_empty() {
+    use chelis_ir::dag::ScanDirection;
+    use chelis_types::dtype_semantics::{StorageView, TensorStorage};
+    fn bytes(storage: &TensorStorage) -> Vec<u8> {
+        match storage.view() {
+            StorageView::F64(v) => v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect(),
+            StorageView::F32(v) => v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect(),
+            StorageView::F16(v) => v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect(),
+            StorageView::Bf16(v) => v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect(),
+            _ => panic!("float oracle"),
+        }
+    }
+    for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        for axis in 0..2 {
+            for n in [0, 1, 5] {
+                for direction in [ScanDirection::Increasing, ScanDirection::Decreasing] {
+                    let shape = if axis == 0 { vec![n, 2] } else { vec![2, n] };
+                    let mut dag = Dag::new();
+                    let owner = dag.declare("scan");
+                    let ty = TensorType {
+                        dims: vec![DimInfo::Named("*".into(), None); 2],
+                        precision,
+                    };
+                    let x = dag.add_node(
+                        owner,
+                        RiscOp::Load { name: "x".into() },
+                        vec![],
+                        ty.clone(),
+                        None,
+                    );
+                    let root =
+                        dag.add_node(owner, RiscOp::Cumsum { axis, direction }, vec![x], ty, None);
+                    dag.add_root(root);
+                    let pattern = [-0.0, 0.1, 2048.0, -2048.0, f64::NAN];
+                    let value = TensorValue::finalize_from_wide(
+                        "oracle",
+                        precision,
+                        shape.clone(),
+                        (0..n * 2).map(|i| pattern[i % 5]).collect(),
+                    )
+                    .unwrap();
+                    let expected =
+                        eval_tensor(&dag, &UnordMap::from([("x".into(), value.clone())])).unwrap();
+                    let input = bytes(value.storage());
+                    let output = bytes(expected[&root].storage());
+                    let list = |v: &[u8]| {
+                        if v.is_empty() {
+                            "0".into()
+                        } else {
+                            v.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+                        }
+                    };
+                    let source = support::codegen(&dag, "ordered_scan_exec")
+                        .unwrap()
+                        .c_source;
+                    let harness = format!(
+                        r#"{HARNESS_HEADER}
+extern void ordered_scan_exec(chelis_tensor**, int, chelis_tensor**, int);
+int main() {{
+ unsigned char data[] = {{ {input} }}, expected[] = {{ {expected} }};
+ int64_t shape[] = {{ {a}, {b} }};
+ chelis_tensor *x = chelis_tensor_entry_borrow(2,shape,{dtype},data,{input_len});
+ chelis_tensor *inputs[] = {{x}}, *outputs[] = {{NULL}};
+ ordered_scan_exec(inputs,1,outputs,1);
+ int ok = chelis_tensor_byte_count(outputs[0]) == {output_len} && memcmp(chelis_tensor_read_view(outputs[0]).data,expected,{output_len}) == 0;
+ chelis_tensor_release(x); chelis_tensor_release(outputs[0]);
+ printf("%s\n",ok?"PASS":"FAIL"); return ok?0:1;
+}}
+"#,
+                        input = list(&input),
+                        expected = list(&output),
+                        a = shape[0],
+                        b = shape[1],
+                        dtype = precision.runtime_dtype().unwrap().c_macro(),
+                        input_len = input.len(),
+                        output_len = output.len()
+                    );
+                    let (ok, text) =
+                        compile_and_run_kernel_capturing("scan_bits", &source, &harness);
+                    assert!(
+                        ok && text.contains("PASS"),
+                        "{precision:?} axis{axis} n{n} {direction:?}: {text}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn ordered_scan_c_exec_integer_forward_and_intermediate_overflow() {
+    use chelis_ir::dag::ScanDirection;
+    for precision in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+        let mut dag = Dag::new();
+        let owner = dag.declare("scan integer");
+        let input_ty = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision,
+        };
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty,
+            None,
+        );
+        let output_precision = precision.default_reduce_sum_result_precision().unwrap();
+        let root = dag.add_node(
+            owner,
+            RiscOp::Cumsum {
+                axis: 0,
+                direction: ScanDirection::Increasing,
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: output_precision,
+            },
+            None,
+        );
+        dag.add_root(root);
+        let source = support::codegen(&dag, "integer_scan").unwrap().c_source;
+        let (input_type, output_type) = match precision {
+            Prim::Int8 => ("int8_t", "int32_t"),
+            Prim::Int16 => ("int16_t", "int32_t"),
+            Prim::Int32 => ("int32_t", "int32_t"),
+            Prim::Int64 => ("int64_t", "int64_t"),
+            _ => unreachable!(),
+        };
+        for overflow in [false, true] {
+            if overflow && matches!(precision, Prim::Int8 | Prim::Int16) {
+                continue;
+            }
+            let values = if overflow {
+                if precision == Prim::Int64 {
+                    "INT64_MAX,1,-1"
+                } else {
+                    "INT32_MAX,1,-1"
+                }
+            } else {
+                "1,2,-1"
+            };
+            let harness = format!(
+                r#"{HARNESS_HEADER}
+extern void integer_scan(chelis_tensor**,int,chelis_tensor**,int);
+int main() {{
+ {input_type} data[] = {{ {values} }}; int64_t shape[] = {{3}};
+ chelis_tensor *x = chelis_tensor_entry_borrow(1,shape,{dtype},data,sizeof(data));
+ chelis_tensor *inputs[]={{x}}, *outputs[]={{NULL}};
+ integer_scan(inputs,1,outputs,1);
+ const {output_type} *out = chelis_tensor_read_view(outputs[0]).data;
+ int ok = out[0]==1 && out[1]==3 && out[2]==2;
+ chelis_tensor_release(x); chelis_tensor_release(outputs[0]);
+ printf("%s\n",ok?"PASS":"FAIL"); return ok?0:1;
+}}
+"#,
+                dtype = precision.runtime_dtype().unwrap().c_macro()
+            );
+            let (ok, text) = compile_and_run_kernel_capturing("integer_scan", &source, &harness);
+            if overflow {
+                assert!(
+                    !ok && text.contains("numeric trap: overflow in cumsum"),
+                    "{text}"
+                );
+            } else {
+                assert!(ok && text.contains("PASS"), "{text}");
+            }
+        }
+    }
+}
+
+#[test]
+fn ordered_scan_activation_suppresses_only_inactive_overflow() {
+    use chelis_ir::dag::ScanDirection;
+    let mut dag = Dag::new();
+    let declaration = dag.declare("gated scan");
+    let active = dag.add_node(
+        declaration,
+        RiscOp::Load {
+            name: "active".into(),
+        },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Bool,
+        },
+        None,
+    );
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(3)],
+        precision: Prim::Int32,
+    };
+    let x = dag.add_node(
+        declaration,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let root = dag.add_node(
+        Owner::new(declaration, Some(active)),
+        RiscOp::Cumsum {
+            axis: 0,
+            direction: ScanDirection::Increasing,
+        },
+        vec![x],
+        ty,
+        None,
+    );
+    dag.add_root(root);
+    let generated = support::codegen(&dag, "gated_scan").unwrap();
+    assert_eq!(generated.input_labels, ["active", "x"]);
+    for active in [false, true] {
+        let values = UnordMap::from([
+            (
+                "active".into(),
+                TensorValue::from_storage(
+                    vec![],
+                    chelis_types::finalize_tensor(
+                        "oracle",
+                        Prim::Bool,
+                        chelis_types::RawTensor::Int(vec![i64::from(active)]),
+                    )
+                    .unwrap(),
+                ),
+            ),
+            (
+                "x".into(),
+                TensorValue::finalize_from_wide_int(
+                    "oracle",
+                    Prim::Int32,
+                    vec![3],
+                    vec![i64::from(i32::MAX), 1, -1],
+                )
+                .unwrap(),
+            ),
+        ]);
+        assert_eq!(eval_tensor(&dag, &values).is_err(), active);
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+extern void gated_scan(chelis_tensor**,int,chelis_tensor**,int);
+int main() {{
+ uint8_t active={active}; int32_t data[]={{INT32_MAX,1,-1}};int64_t shape[]={{3}};
+ chelis_tensor *a=chelis_tensor_entry_borrow(0,NULL,CHELIS_DTYPE_BOOL,&active,sizeof(active));
+ chelis_tensor *x=chelis_tensor_entry_borrow(1,shape,CHELIS_DTYPE_I32,data,sizeof(data));
+ chelis_tensor *inputs[]={{a,x}},*outputs[]={{NULL}};gated_scan(inputs,2,outputs,1);
+ const int32_t *out=chelis_tensor_read_view(outputs[0]).data;
+ int ok=out[0]==0 && out[1]==0 && out[2]==0;
+ chelis_tensor_release(a);chelis_tensor_release(x);chelis_tensor_release(outputs[0]);return ok?0:1;
+}}
+"#,
+            active = u8::from(active)
+        );
+        let (ok, stderr) =
+            compile_and_run_kernel_capturing("gated_scan", &generated.c_source, &harness);
+        if active {
+            assert!(
+                !ok && stderr.contains("numeric trap: overflow in cumsum"),
+                "{stderr}"
+            );
+        } else {
+            assert!(ok, "{stderr}");
+        }
+    }
+}

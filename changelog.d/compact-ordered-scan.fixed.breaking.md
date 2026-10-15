@@ -1,0 +1,1 @@
+Preserve first-element and negative-zero suffix semantics in differentiated cumulative sums, with compact directional scan graphs and bounded C, HIP and Metal kernels. Cumulative sums inside transforms accept runtime extents. Wire DAG version 30 records the scan direction explicitly.

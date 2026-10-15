@@ -42,6 +42,33 @@ pub fn msl_type(prec: Prim) -> &'static str {
     }
 }
 
+/// Closed 32-bit unsigned metadata shared by Metal launch geometry and
+/// numeric status words. Tensor payloads use `msl_type` independently.
+#[derive(Clone, Copy)]
+pub(crate) struct MetalU32Metadata;
+
+impl MetalU32Metadata {
+    pub(crate) fn host_type(self) -> &'static str {
+        "unsigned int"
+    }
+    pub(crate) fn host_sizeof_expr(self) -> &'static str {
+        host_sizeof_expr(Prim::Int32)
+    }
+    pub(crate) fn msl_type(self) -> &'static str {
+        "uint"
+    }
+    pub(crate) fn msl_atomic_type(self) -> &'static str {
+        "atomic_uint"
+    }
+    pub(crate) fn host_width_assertion(self) -> String {
+        format!(
+            "static_assert(sizeof({ty}) * CHAR_BIT == 32 && sizeof({ty}) == {size}, \"Metal launch/status metadata requires uint32 layout\");",
+            ty = self.host_type(),
+            size = self.host_sizeof_expr()
+        )
+    }
+}
+
 /// Per-element byte size for an active Metal dtype.
 ///
 /// Mirrors `chelis_backend_hip::memory::bytes_per_element` and the
@@ -240,6 +267,43 @@ pub fn matmul_accumulator(operand_prec: Prim) -> Prim {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_metadata_host_width_and_layout_compile_and_reject_wrong_width() {
+        let authority = MetalU32Metadata;
+        assert_eq!(authority.msl_type(), "uint");
+        assert_eq!(authority.msl_atomic_type(), "atomic_uint");
+        assert_eq!(authority.host_sizeof_expr(), "sizeof(int32_t)");
+        // Host C++ is available on the actual Metal execution platform.
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for wrong_width in [false, true] {
+            let assertion = authority.host_width_assertion();
+            let assertion = if wrong_width {
+                assertion.replace("== 32", "== 64")
+            } else {
+                assertion
+            };
+            let path = dir.path().join("metadata.cpp");
+            std::fs::write(&path, format!(
+                "#include <stdint.h>\n#include <limits.h>\n{assertion}\nstruct Launch {{ {ty} dims[4]; {ty} gate[2]; }};\nstatic_assert(sizeof(Launch) == 6 * {size});\nstatic_assert(alignof(Launch) == alignof({ty}));\n",
+                ty=authority.host_type(), size=authority.host_sizeof_expr()
+            )).unwrap();
+            let result = std::process::Command::new("clang++")
+                .args(["-std=c++17", "-fsyntax-only"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert_eq!(
+                result.status.success(),
+                !wrong_width,
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
 
     #[test]
     fn msl_type_covers_active_metal_dtypes() {

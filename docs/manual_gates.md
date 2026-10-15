@@ -15,6 +15,8 @@ assertion failures unless an explicit different success condition is given.
 
 | Test | Crate | Manual command | Prerequisite | Owning phase |
 |---|---|---|---|---|
+| `ordered_scan_prefix_suffix_bits_on_device` | `chelis-backend-hip` | `.venv/bin/python scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness ordered_scan_prefix_suffix_bits_on_device -- --ignored --test-threads=1` | HIP device and `hipcc`; default CI does not run it. Expected: increasing prefixes and decreasing suffixes preserve f32 signed-zero and cancellation bits. | Ordered scans ([05-OP-33], chelis#3414) |
+| `ordered_scan_prefix_suffix_bits_on_device`, `ordered_scan_dtype_bits_and_integer_overflow_on_device` | `chelis-backend-metal` | `cargo nextest run -p chelis-backend-metal --test gpu_correctness --run-ignored only -E 'test(ordered_scan)'` | Apple Silicon Metal device and Command Line Tools; default CI does not run them. Expected: empty/singleton/odd f32 scans on leading/trailing axes and f16/bf16/f32 default-accumulator scans match stored bits, including non-finite values and signed-zero suffixes; signed integer widths match forward scans, i32/i64 intermediate overflow traps, and active/inactive i32 overflow controls. | Ordered scans ([05-OP-33], chelis#3414) |
 | `metal_native_library_executes_tensor_kernel` | `chelis-cli` | `cargo test -p chelis-cli --test native_build -- --ignored --test-threads=1` | macOS with Command Line Tools and a real Metal device. Builds a native tensor library, links a driver against the carried runtime, and executes a vector-add kernel. CPU acceptance is `cargo test -p chelis-cli --test native_build`; HIP runtime testing is deferred to the user and is not a readiness gate. | chelis#2828 |
 | `every_binary32_input_is_correctly_rounded` | `chelis-crmath` | `cargo test -p chelis-crmath --test crmath_exhaustive_binary32 -- --ignored --nocapture` | Default toolchain and `gmpy2` (MPFR) in the checkout's `.venv` (`uv pip install --python .venv/bin/python gmpy2`). Expected: zero mismatches over 2^32 inputs for each of `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `tanh`, `erf`, and `erfc` through the `chelis-crmath` API, with the inputs the binary64 kernel cannot decide resolved against MPFR. Run it when the vendored CORE-MATH kernels or the amalgamation change. Expected result: zero misrounded inputs per function. The built-executable lane of this gate is listed under Not yet wired. | chelis#2957 |
 | `half_dtype_phi_and_gelu_error_bounds_hold_on_every_input` | `chelis-types` | `cargo nextest run -p chelis-types --lib --run-ignored only -E 'test(half_dtype_phi_and_gelu_error_bounds_hold_on_every_input)'` | Default toolchain. Expected: over every finite f16 and bf16 input, `standard_normal_cdf` is monotone and within half a unit in the last place plus `1.5 * 2^-13` (f16) or `1.5 * 2^-16` (bf16) units of the f64 reference `0.5 * erfc(-x/sqrt(2))`, and `gelu` is within half a unit of its result plus `\|x\|` times that `Phi` error (`spec/design/correctly_rounded_math.md` §12.3). Run it when the spec/05 §3.3 `Phi` graph, its constants, or the `erfc` kernel change. | chelis#2957 |
@@ -133,6 +135,15 @@ Expected success: every output bit agrees with the canonical-tree/scalar-GELU
 reference, evaluation finishes within 90 seconds, and peak live heap increase
 stays below 96 MiB on an idle runner. Default PR CI runs smaller bit and heap
 controls. Owner: chelis#828, private exact contractions (chelis#3588).
+
+The ordered-scan gradient row runs in default PR CI:
+`cargo nextest run -p chelis-ir --test eval_performance -E 'test(=eval_performance_ordered_scan_gradient_linear_storage)' --no-capture`.
+It checks every suffix at lengths 4,096 and 65,536, bounds the graph at twelve
+nodes and measured peak heap at `128 * numel + 1 MiB`, and prints allocation
+and wall-time receipts. The C emission row is
+`cargo nextest run -p chelis-backend-c --test issue_3414_compact_cumsum --no-capture`;
+it compares source size at 16, 64 and 4,096 elements. Owner: ordered scans
+([05-OP-33], chelis#3414). These bounds cover the named rows, not full models.
 
 The suite's full-size movement/reduction witnesses are also manual:
 `cargo nextest run -p chelis-ir --test eval_performance --run-ignored only -E 'test(/large_window_movement_coordinates|large_axis_reduction_coordinates/)' --no-capture`.

@@ -1746,11 +1746,88 @@ fn host_selector_named_result_obligation_executes_and_traps_in_both_lanes() {
     }
 }
 
+/// Keep each shipped scan signature's named result obligation. The negative
+/// producer removes one input cell through a List before scanning, so its
+/// runtime result denies the original input extent without changing the claim.
+#[test]
+fn shipped_scan_named_result_claims_execute_and_trap_in_both_lanes() {
+    assert!(
+        gcc_available(),
+        "native C executes the result-claim control"
+    );
+    let example = include_str!("../../../examples/grad_cumsum.ch");
+    let dir = tempdir().expect("tempdir");
+    for (function, binder, operand, expected) in [
+        (
+            "prefixes_of",
+            "n",
+            "[1.0f32, 2.0f32, 3.0f32]",
+            "[1.0, 3.0, 6.0]",
+        ),
+        (
+            "integer_prefixes",
+            "time",
+            "[127i8, 1i8, -1i8]",
+            "[127, 128, 127]",
+        ),
+    ] {
+        let declaration = example
+            .lines()
+            .find(|line| line.starts_with(&format!("def {function}[")))
+            .expect("shipped scan declaration");
+        for agrees in [true, false] {
+            let declaration = if agrees {
+                declaration.to_owned()
+            } else {
+                declaration.replace(
+                    "cumsum(x, 0i32)",
+                    "cumsum(to_tensor(skip(to_list(x), 1i64)), 0i32)",
+                )
+            };
+            let source = format!("{declaration}\nout = {function}(to_tensor({operand}))\n");
+            let stem = format!("scan-claim-{function}-{agrees}");
+            check_scores_one(&dir, &stem, &source);
+            let (eval_ok, stdout, stderr) = eval_source(&dir, &stem, &source);
+            let (c_ok, c_output) = build_link_run(&dir, &stem, &source);
+            for (lane, ok, output) in [
+                ("eval", eval_ok, format!("{stdout}{stderr}")),
+                ("c", c_ok, c_output),
+            ] {
+                assert_eq!(ok, agrees, "{function}/{lane}: {output}");
+                if agrees {
+                    assert!(
+                        output.contains(&format!("out = tensor(shape=[3], data={expected})")),
+                        "{function}/{lane}: {output}"
+                    );
+                } else {
+                    assert!(
+                        output.contains("numeric trap: domain in cumsum at i64"),
+                        "{function}/{lane}: {output}"
+                    );
+                    assert!(
+                        output.contains(&format!(
+                            "extent `{binder}`: x axis 0 = 3, cumsum axis 0 = 2"
+                        )),
+                        "{function}/{lane}: {output}"
+                    );
+                    assert!(
+                        !output.contains("out ="),
+                        "invalid result escaped: {output}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// THE CENSUS. Every executable Phase 0 example is offered to C. Recorded
 /// capability refusals are asserted; local and forwarded declared-result
 /// obligations are read back from the generated program. The host selector's
 /// named result is covered by
 /// `host_selector_named_result_obligation_executes_and_traps_in_both_lanes`.
+/// The scan signatures retain their named axis claims; positive and denying
+/// producer cells execute in both lanes in
+/// `shipped_scan_named_result_claims_execute_and_trap_in_both_lanes`.
 /// The keyed State wrapper retains four checked result axes through its tuple;
 /// positive and per-axis negative Eval/C witnesses live in `key_pair_host_staging`.
 ///
@@ -1905,6 +1982,8 @@ fn no_shipped_example_gains_a_host_lane_guard() {
     assert_eq!(
         census,
         vec![
+            "grad_cumsum: prefixes_of guards __result axis 0 claiming n",
+            "grad_cumsum: integer_prefixes guards __result axis 0 claiming time",
             "grad_host_selectors: pick guards __result axis 0 claiming n",
             "grad_runtime_basis: basis guards __result axis 0 claiming n",
             "keyed_state_wrapper: main guards __let_19 axis 0 claiming 2",

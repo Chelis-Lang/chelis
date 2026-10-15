@@ -1397,8 +1397,8 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 29 is explicitly\npresent", "wire v29 presence"),
-            ("versions 1 through 28", "wire old-version rejection"),
+            ("Schema version 30 is explicitly\npresent", "wire v30 presence"),
+            ("versions 1 through 29", "wire old-version rejection"),
             (
                 "Version 23 requires an explicit `batch_rank` on `Gather`, `ScatterAdd`, and\n"
                 "`Scatter` wire operations",

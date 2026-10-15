@@ -2806,9 +2806,7 @@ exact ADT identity by [05-OP-34].
 > addition. A zero-length axis returns an empty tensor. The float adjoint is
 > the inclusive decreasing-axis scan of the cotangent at the same accumulator
 > dtype under the same rule: the last cotangent is the last suffix, no base
-> value enters, and each suffix is emitted at the operand dtype. (Not fully
-> implemented for a `-0` suffix on an axis of two or more elements; see
-> [chelis#3414](https://github.com/Chelis-Lang/chelis/issues/3414).)
+> value enters, and each suffix is emitted at the operand dtype.
 > Integers are forward-only and bool is a type error.
 >
 > `sort` admits signed-integer and float tensors and returns `(values,

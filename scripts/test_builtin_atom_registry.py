@@ -106,6 +106,32 @@ class SemanticAuthorityTests(unittest.TestCase):
             (root / "spec/registry/builtin_semantic_identities.md").read_text()
         )
 
+    def test_ordered_scan_contract_requires_each_decided_semantic_clause(self):
+        semantics.validate_semantics(self.rows, self.spec)
+        self.assertEqual(self.rows["Numeric:Cumsum:TableA"], "[05-OP-33]")
+        block = registry.atom_blocks(self.spec)["[05-OP-33]"]
+        normalized = semantics.normalized(block)
+        for clause in (
+            "`cumsum` admits signed-integer and float tensors",
+            "`sum_result(p, default(p))` at the input shape",
+            "the first input, converted exactly to §5.7.1's default sum-accumulator dtype, is the first prefix",
+            "No base value enters the scan",
+            "first prefix keeps the first input's stored value, a `-0` included",
+            "Every prefix is finalized to the result dtype for output without narrowing the continuing accumulator",
+            "Integer overflow is checked at each addition",
+            "A zero-length axis returns an empty tensor",
+            "float adjoint is the inclusive decreasing-axis scan of the cotangent at the same accumulator dtype under the same rule",
+            "last cotangent is the last suffix",
+            "each suffix is emitted at the operand dtype",
+            "Integers are forward-only and bool is a type error",
+        ):
+            with self.subTest(clause=clause):
+                self.assertIn(clause, normalized)
+                changed = self.spec.replace(block, "> " + normalized.replace(clause, "REMOVED") + "\n")
+                self.assertNotEqual(changed, self.spec)
+                with self.assertRaisesRegex(registry.RegistryError, "lost semantic obligation"):
+                    semantics.validate_semantics(self.rows, changed)
+
     def test_reference_to_callable_does_not_confer_its_authority(self):
         for identity, wrong_atom in (
             ("Numeric:div:TableA", "[05-OP-11]"),

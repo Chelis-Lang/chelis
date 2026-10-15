@@ -517,6 +517,7 @@ fn integer_computation(node: &DagNode) -> Option<IntegerComputation> {
         | RiscOp::Erf
         | RiscOp::Erfc
         | RiscOp::Abs
+        | RiscOp::Cumsum { .. }
         | RiscOp::Sum { .. }
         | RiscOp::MaxReduce { .. }
         | RiscOp::MinReduce { .. }
@@ -768,6 +769,7 @@ fn operand_slot(op: &RiscOp, slot: usize) -> OperandSlot {
         | RiscOp::Ceil
         | RiscOp::Round
         | RiscOp::Recip
+        | RiscOp::Cumsum { .. }
         | RiscOp::Sum { .. }
         | RiscOp::Count { .. }
         | RiscOp::MaxReduce { .. }
@@ -1079,6 +1081,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::FoldIn => "fold_in",
         RiscOp::SplitN { .. } => "split_keys",
         RiscOp::KeySelect => "key_select",
+        RiscOp::Cumsum { .. } => "cumsum",
         RiscOp::Sum { .. } => "sum",
         RiscOp::Count { .. } => "count",
         RiscOp::MaxReduce { .. } => "max_reduce",
@@ -2538,6 +2541,28 @@ fn compute_adjoints(
         | RiscOp::SplitN { .. }
         | RiscOp::KeySelect => Some(Vec::new()),
         // --- Reduction ---
+        RiscOp::Cumsum { axis, direction } => {
+            let x = node.inputs[0];
+            let ty = forward
+                .get(x)
+                .expect("scan operand exists")
+                .output_type
+                .clone();
+            if !ty.precision.is_float() {
+                return Ok(None);
+            }
+            let dx = dag.add_node(
+                node.owner,
+                RiscOp::Cumsum {
+                    axis: *axis,
+                    direction: direction.reversed(),
+                },
+                vec![g],
+                ty,
+                None,
+            );
+            Some(vec![(x, dx)])
+        }
         RiscOp::Sum { axis, .. } => {
             // d/dx sum(x, axis) = expand(g, axis, original_size)
             //

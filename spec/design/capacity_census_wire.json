@@ -300,6 +300,15 @@
     },
     {
       "authority": "NumericOperation",
+      "contract": "[05-OP-33]",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Cumsum.axis: i32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "NumericOperation",
       "contract": "[05-OP-65]",
       "flags": [
         "numeric-field"

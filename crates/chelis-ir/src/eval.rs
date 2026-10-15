@@ -2626,6 +2626,48 @@ fn projected_product(input: &TensorValue) -> Option<ProjectedProduct<'_>> {
     })
 }
 
+fn ordered_scan(
+    input: &TensorValue,
+    axis: usize,
+    direction: crate::dag::ScanDirection,
+) -> Result<TensorValue, String> {
+    if axis >= input.shape.len() {
+        return Err(format!(
+            "cumsum axis {axis} is out of range for rank {}",
+            input.shape.len()
+        ));
+    }
+    if direction == crate::dag::ScanDirection::Decreasing && !input.prim().is_float() {
+        return Err("decreasing cumsum requires a float operand".into());
+    }
+    let result = input.prim().default_reduce_sum_result_precision()?;
+    admit_result("cumsum", &input.shape, result)?;
+    if input.is_empty() {
+        let storage = chelis_types::dtype_semantics::cumsum_tensor_lanes_iter(
+            input.storage(),
+            std::iter::empty::<std::iter::Empty<usize>>(),
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(TensorValue::from_storage(input.shape.clone(), storage));
+    }
+    let outer = input.shape[..axis].iter().product::<usize>();
+    let inner = input.shape[axis + 1..].iter().product::<usize>();
+    let n = input.shape[axis];
+    let lanes = (0..outer * inner).map(|lane| {
+        (0..n).map(move |k| {
+            let k = if direction == crate::dag::ScanDirection::Decreasing {
+                n - 1 - k
+            } else {
+                k
+            };
+            (lane / inner * n + k) * inner + lane % inner
+        })
+    });
+    let storage = chelis_types::dtype_semantics::cumsum_tensor_lanes_iter(input.storage(), lanes)
+        .map_err(|e| e.to_string())?;
+    Ok(TensorValue::from_storage(input.shape.clone(), storage))
+}
+
 /// Axis reduction through the closed Phase 2 typed kernel.
 /// `name` is the primitive's [04-NUM-9] name and `result` its result dtype.
 fn reduce(
@@ -5537,6 +5579,9 @@ where
                     return Err(message.clone());
                 }
                 values[&node.inputs[1]].clone()
+            }
+            RiscOp::Cumsum { axis, direction } => {
+                ordered_scan(&values[&node.inputs[0]], *axis, *direction)?
             }
             RiscOp::Sum { axis, accumulator } => reduce(
                 "sum",

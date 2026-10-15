@@ -643,6 +643,11 @@ reason = "the domain integration-support slice executes every compiled unreprese
 tracking_issue = "chelis#908"
 
 [[path_rule]]
+prefix = "examples/grad_cumsum.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-compiler-api"]
+
+[[path_rule]]
 prefix = "examples/grad_extent_claim.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
@@ -2213,6 +2218,15 @@ packages = ["chelis-cli"]
 # script-unit selection discovers every named test module; production oracles
 # with stronger standing jobs retain those jobs as their owners below.
 [[path_rule]]
+prefix = "scripts/test_builtin_atom_registry.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script-unit executes the builtin identity governance and semantic-clause deletion controls"
+tracking_issue = "chelis#1294"
+
+[[path_rule]]
 prefix = "scripts/builtin_atom_semantic_contracts.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2283,6 +2297,15 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "the compiled-artifact manifest codec cases are executed by PR script-unit census controls and the nightly schema-codec census"
 tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_operations.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script-unit executes exact numeric wire operation registrations and their atom/type rejection controls"
+tracking_issue = "chelis#1592"
 
 [[path_rule]]
 prefix = "scripts/capacity_census_wire_operations.py"

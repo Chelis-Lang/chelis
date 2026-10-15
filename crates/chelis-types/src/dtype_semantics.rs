@@ -3389,6 +3389,18 @@ pub fn cumsum_tensor_lanes(
     input: &TensorStorage,
     lanes: &[Vec<usize>],
 ) -> Result<TensorStorage, NumericKernelError> {
+    cumsum_tensor_lanes_iter(input, lanes.iter().map(|lane| lane.iter().copied()))
+}
+
+/// Ordered lanes with source-sized output and no retained coordinate matrix.
+pub fn cumsum_tensor_lanes_iter<G, I>(
+    input: &TensorStorage,
+    lanes: G,
+) -> Result<TensorStorage, NumericKernelError>
+where
+    G: IntoIterator<Item = I>,
+    I: IntoIterator<Item = usize>,
+{
     const OP: &str = "cumsum";
     let prim = input.prim();
     let signature = prim
@@ -3416,7 +3428,7 @@ pub fn cumsum_tensor_lanes(
     let mut values = vec![within_family(OP, zero, result)?; input.len()];
     for lane in lanes {
         let mut running = None;
-        for &index in lane {
+        for index in lane {
             let leaf = within_family(OP, input.scalar_at(index), accumulator)?;
             let prefix = match running {
                 None => canonical_nan_scalar(leaf),

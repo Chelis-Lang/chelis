@@ -1561,3 +1561,65 @@ fn eval_performance_convolution_index_witness() {
         "eval-performance conv [1,128,56,56] x [1,128,7,7] wall={elapsed:?} peak_heap_delta={peak} PASS"
     );
 }
+
+#[test]
+fn eval_performance_ordered_scan_gradient_linear_storage() {
+    use chelis_ir::grad::grad_dag_checked;
+    use chelis_ir::tier2_ordered::lower_cumsum;
+    for n in [4096, 65536] {
+        let mut dag = Dag::new();
+        let owner = dag.declare("scan oracle");
+        let input_ty = ty(n, Prim::F32);
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty.clone(),
+            None,
+        );
+        let scan = lower_cumsum(owner.into(), &mut dag, x, &input_ty, 0, None)
+            .unwrap_or_else(|_| panic!("scan lowers"));
+        let loss = dag.add_node(
+            owner,
+            RiscOp::sum_default(0, Prim::F32).unwrap(),
+            vec![scan],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let gradient = grad_dag_checked(&dag, loss, &[x]).unwrap();
+        let root = gradient.grad_nodes[&x];
+        assert!(gradient.dag.len() <= 12, "scan graph expands with length");
+        let input =
+            TensorValue::finalize_from_wide("oracle", Prim::F32, vec![n], vec![0.1; n]).unwrap();
+        let before_bytes = BYTES.load(Ordering::Relaxed);
+        let before_live = LIVE.load(Ordering::Relaxed);
+        PEAK.store(before_live, Ordering::Relaxed);
+        let start = Instant::now();
+        let output = chelis_ir::eval::eval_tensor_roots_with(&gradient.dag, &[root], |_| {
+            Some(input.clone())
+        })
+        .unwrap();
+        let elapsed = start.elapsed();
+        let peak = PEAK.load(Ordering::Relaxed).saturating_sub(before_live);
+        let allocated = BYTES.load(Ordering::Relaxed) - before_bytes;
+        assert_eq!(output[&root].shape, vec![n]);
+        for i in 0..n {
+            assert_eq!(
+                output[&root]
+                    .storage()
+                    .scalar_at(i)
+                    .as_f64_lossy()
+                    .to_bits(),
+                ((n - i) as f64).to_bits()
+            );
+        }
+        assert!(
+            peak <= 128 * n + 1024 * 1024,
+            "unbounded scan storage: {peak}"
+        );
+        eprintln!(
+            "eval-performance ordered-scan gradient n={n} nodes={} wall={elapsed:?} allocated={allocated} peak_heap_delta={peak} PASS",
+            gradient.dag.len()
+        );
+    }
+}
