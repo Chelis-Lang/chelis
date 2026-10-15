@@ -131,7 +131,7 @@ pub struct CEmitter {
     /// claims compare against their numeric canonical value instead.
     declared_dim_names: chelis_unord::UnordSet<String>,
     inherited_result_sites: Vec<chelis_ir::axis_sources::ResultExtentSite>,
-    inherited_result_rank: Option<usize>,
+    inherited_result_roots: Vec<(usize, Vec<chelis_ir::axis_sources::ResultExtentSite>)>,
     /// Node descriptors whose exclusive runtime write lease remains live
     /// while the generated kernel fills and consumes its private storage.
     /// All leases are ended before any descriptor is returned or released.
@@ -1099,16 +1099,31 @@ impl CEmitter {
                 })
                 .collect(),
             declared_dim_names: chelis_unord::UnordSet::new(),
-            inherited_result_sites: if private_invocation_context && dag.roots().len() == 1 {
-                dag.result_extent_sites(dag.roots()[0])
+            inherited_result_sites: if private_invocation_context {
+                output_specs
+                    .iter()
+                    .flat_map(|output| dag.result_extent_sites(output.id))
+                    .collect()
             } else {
                 Vec::new()
             },
-            inherited_result_rank: dag
-                .roots()
-                .first()
-                .and_then(|id| dag.get(*id))
-                .map(|node| node.output_type.dims.len()),
+            inherited_result_roots: if private_invocation_context {
+                output_specs
+                    .iter()
+                    .map(|output| {
+                        (
+                            dag.get(output.id)
+                                .expect("verified output")
+                                .output_type
+                                .dims
+                                .len(),
+                            dag.result_extent_sites(output.id),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             write_nodes: chelis_unord::UnordSet::new(),
             gate: None,
         };
@@ -1232,7 +1247,7 @@ impl CEmitter {
         // Only host-owned tensor helpers receive the invocation context.
         // Standalone/public kernels keep the four-argument tensor ABI.
         let invocation_param = if private_invocation_context {
-            ", const __chelis_host_result_claim *__chelis_caller_result_claims".to_string()
+            ", const __chelis_host_result_claim *const *__chelis_caller_result_claims".to_string()
         } else {
             String::new()
         };
@@ -10278,38 +10293,37 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         extents: &[(usize, String)],
         same_shape: bool,
     ) {
-        let sites = self
-            .inherited_result_sites
-            .iter()
-            .filter(|site| {
-                site.producer() == NodeId(id)
-                    && Self::is_same_shape_observation(site.observation()) == same_shape
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if sites.is_empty() {
-            return;
+        let mut checks = Vec::new();
+        for (root_index, (rank, root_sites)) in self.inherited_result_roots.iter().enumerate() {
+            let sites = root_sites
+                .iter()
+                .filter(|site| {
+                    site.producer() == NodeId(id)
+                        && Self::is_same_shape_observation(site.observation()) == same_shape
+                })
+                .collect::<Vec<_>>();
+            let observations = sites
+                .iter()
+                .filter_map(|site| {
+                    let chelis_ir::dag::RtAxis::Lit(producer_axis) = site.producer_axis();
+                    let chelis_ir::dag::RtAxis::Lit(output_axis) = site.output_axis();
+                    extents
+                        .iter()
+                        .find(|(axis, _)| *axis == producer_axis as usize)
+                        .map(|(_, value)| {
+                            format!("{{ {output_axis}, {producer_axis}, ({value}) }}")
+                        })
+                })
+                .collect::<Vec<_>>();
+            if observations.is_empty() {
+                continue;
+            }
+            let op = sites[0].operation();
+            checks.push(format!("__chelis_check_host_result_extent_claims(__chelis_caller_result_claims == NULL ? NULL : __chelis_caller_result_claims[{root_index}], {rank}, (const int64_t[][3]){{ {} }}, {}, \"{op}\", \"numeric trap: domain in {op} at i64\");", observations.join(", "), observations.len()));
         }
-        let observations = sites
-            .iter()
-            .filter_map(|site| {
-                let chelis_ir::dag::RtAxis::Lit(producer_axis) = site.producer_axis();
-                let chelis_ir::dag::RtAxis::Lit(output_axis) = site.output_axis();
-                extents
-                    .iter()
-                    .find(|(axis, _)| *axis == producer_axis as usize)
-                    .map(|(_, value)| format!("{{ {output_axis}, {producer_axis}, ({value}) }}"))
-            })
-            .collect::<Vec<_>>();
-        if observations.is_empty() {
-            return;
+        for check in checks {
+            self.line(&check);
         }
-        let rank = self
-            .inherited_result_rank
-            .expect("inherited result sites require an existing result root");
-        let op = sites[0].operation();
-        self.line(&format!("__chelis_check_host_result_extent_claims(__chelis_caller_result_claims, {}, (const int64_t[][3]){{ {} }}, {}, \"{op}\", \"numeric trap: domain in {op} at i64\");",
-            rank, observations.join(", "), observations.len()));
     }
 
     /// chelis#616 (defense in depth): a RUNTIME axis whose output dim

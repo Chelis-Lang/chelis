@@ -4240,9 +4240,11 @@ where
     eval_tensor_internal_with_result_claims(dag, scope, strict_loads, &[], load_input)
 }
 
-/// One caller's declared-result obligation on a graph's single root.
+/// One caller's declared-result obligation on an explicitly selected value root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InheritedResultClaim {
+    /// Structural reference to the returned tensor, excluding observable-only roots.
+    pub root: NodeId,
     pub rank: usize,
     pub axes: Vec<InheritedResultAxis>,
 }
@@ -4266,6 +4268,17 @@ fn eval_tensor_internal_with_result_claims<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
+    for claim in result_claims {
+        if dag.get(claim.root).is_none() {
+            return Err("inherited result claim refers to a missing value root".to_string());
+        }
+        if scope
+            .retained_roots()
+            .is_some_and(|roots| !roots.contains(&claim.root))
+        {
+            return Err("inherited result claim refers to an unselected value root".to_string());
+        }
+    }
     // Reject an incomplete claim/producer relationship before any input
     // preparation or entry guard can observe runtime state.
     let declared_local_guard_sites = crate::axis_sources::local_dim_guard_sites(dag)?;
@@ -4470,11 +4483,14 @@ where
             .or_default()
             .push((axis, claim));
     }
-    if !result_claims.is_empty() && dag.roots().len() == 1 {
-        let root = dag.roots()[0];
-        let rank = dag.get(root).expect("result root").output_type.dims.len();
+    for claim in result_claims {
+        let root = claim.root;
+        let node = dag
+            .get(root)
+            .expect("claim roots validated before input preparation");
+        let rank = node.output_type.dims.len();
         let result_sites = crate::axis_sources::result_extent_sites(dag, root);
-        for claim in result_claims.iter().filter(|claim| claim.rank == rank) {
+        if claim.rank == rank {
             for site in &result_sites {
                 let RtAxis::Lit(output_axis) = site.output_axis();
                 let RtAxis::Lit(producer_axis) = site.producer_axis();
@@ -10503,6 +10519,56 @@ mod value_reclamation {
             .expect("named root");
         assert_eq!(scoped.len(), 1);
         assert_eq!(elements(&scoped, root), vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn explicit_result_claims_cover_multiple_roots_without_guarding_ancestors() {
+        let (dag, [x, a, _b, _c, d]) = diamond();
+        for required in [3, 4] {
+            let claim = InheritedResultClaim {
+                root: d,
+                rank: 1,
+                axes: vec![InheritedResultAxis {
+                    axis: 0,
+                    required,
+                    source: None,
+                }],
+            };
+            let result =
+                eval_tensor_roots_exact_with_result_claims(&dag, &[a, d], &[claim], load_x());
+            if required == 3 {
+                let values = result.expect("matching claim on the second returned value");
+                assert_eq!(values.len(), 2);
+                assert_eq!(elements(&values, d), vec![0.0, 0.0, 0.0]);
+            } else {
+                let error = result.expect_err("second returned value still owes its claim");
+                assert!(error.contains("claimed = 4"), "{error}");
+                assert!(
+                    error.contains("numeric trap: domain in add at i64"),
+                    "{error}"
+                );
+            }
+        }
+        for root in [x, NodeId(usize::MAX)] {
+            let mut loads = 0;
+            let claim = InheritedResultClaim {
+                root,
+                rank: 1,
+                axes: Vec::new(),
+            };
+            let result = eval_tensor_roots_exact_with_result_claims(&dag, &[d], &[claim], |_| {
+                loads += 1;
+                Some(x_input())
+            });
+            assert!(
+                result.is_err(),
+                "an ancestor or missing node is not a selected value root"
+            );
+            assert_eq!(
+                loads, 0,
+                "invalid relationships fail before input preparation"
+            );
+        }
     }
 
     /// The one reader edge whose loss is SILENT, exercised through the

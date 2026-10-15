@@ -10,7 +10,7 @@ use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
 use chelis_ir::lower::SubexprLoweringContext;
 use chelis_types::types::{NominalArg, Prim, TensorPrec, Type, TypeVar};
 
-use super::eval::tensor_result_producer;
+use super::eval::{DeclaredResultClaim, tensor_result_producer};
 use super::host_ops::terminal_name_matches;
 use super::named_axis::*;
 use super::*;
@@ -364,6 +364,87 @@ impl<'a> EvalContext<'a> {
         })
     }
 
+    /// Project caller obligations using exactly the same value-root layout
+    /// that repacking below consumes, before executing any graph producer.
+    fn transform_result_claims(
+        &self,
+        dag: &chelis_ir::dag::Dag,
+        roots: &[chelis_ir::dag::NodeId],
+        repacks: &[ArgRepack],
+        gradient: bool,
+        claims: &[DeclaredResultClaim],
+    ) -> Result<Vec<chelis_ir::eval::InheritedResultClaim>, String> {
+        use chelis_ir::claim_pattern::ClaimStep;
+        let shapes = if gradient && !repacks.is_empty() {
+            repacks
+                .iter()
+                .map(|slot| match slot {
+                    ArgRepack::Tensor => GradListShape::Leaf,
+                    ArgRepack::Scalar(prim) => GradListShape::ScalarLeaf(*prim),
+                    ArgRepack::Structured { shape } => shape.clone(),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![GradListShape::Leaf; roots.len()]
+        };
+        let mut pending = Vec::new();
+        for (index, shape) in shapes.iter().enumerate().rev() {
+            let projected = if shapes.len() == 1 {
+                claims.to_vec()
+            } else {
+                Self::project_result_claims(claims, ClaimStep::Component(index))
+            };
+            pending.push((shape, projected));
+        }
+        let mut roots = roots.iter();
+        let mut result = Vec::new();
+        while let Some((shape, claims)) = pending.pop() {
+            match shape {
+                GradListShape::Leaf | GradListShape::ScalarLeaf(_) => {
+                    let root = *roots
+                        .next()
+                        .ok_or("transform result claim layout exceeds value roots")?;
+                    if matches!(shape, GradListShape::Leaf) {
+                        let rank = dag
+                            .get(root)
+                            .ok_or("transform value root is missing")?
+                            .output_type
+                            .dims
+                            .len();
+                        result.extend(self.transform_tensor_result_claims(root, rank, &claims)?);
+                    }
+                }
+                GradListShape::Unit => {}
+                GradListShape::List(items) | GradListShape::Tuple(items) => {
+                    for (index, item) in items.iter().enumerate().rev() {
+                        let step = if matches!(shape, GradListShape::List(_)) {
+                            ClaimStep::Element
+                        } else {
+                            ClaimStep::Component(index)
+                        };
+                        pending.push((item, Self::project_result_claims(&claims, step)));
+                    }
+                }
+                GradListShape::Adt { ctor, fields, .. } => {
+                    for (index, field) in fields.iter().enumerate().rev() {
+                        let mut projected = Self::project_result_claims(
+                            &claims,
+                            ClaimStep::Field { ctor, field: index },
+                        );
+                        if ctor == "Some" && index == 0 {
+                            projected.extend(Self::project_result_claims(&claims, ClaimStep::Some));
+                        }
+                        pending.push((field, projected));
+                    }
+                }
+            }
+        }
+        if roots.next().is_some() {
+            return Err("transform result claim layout omits value roots".to_string());
+        }
+        Ok(result)
+    }
+
     /// Bucket 1 entry point: evaluate `(grad f)(args...)` /
     /// `(vmap f)(args...)` in the host runtime. Synthesizes a Deep
     /// `(app {} <transform-expr> (var __chelis_xform_arg_k))` form and
@@ -378,6 +459,7 @@ impl<'a> EvalContext<'a> {
         transform_expr: &Expr,
         captured_env: Frame,
         args: Vec<RuntimeValue>,
+        inherited_claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
         // wrt indices for this grad call, if narrowed (`grad(f, wrt=i)`).
         // `None` means differentiate every differentiable argument, exactly
@@ -816,7 +898,19 @@ impl<'a> EvalContext<'a> {
             }
         }
         let load = |name: &str| prepared_inputs.get(name).cloned();
-        let result = chelis_ir::eval::eval_tensor_roots_exact(dag, &roots, load);
+        let result_claims = self.transform_result_claims(
+            dag,
+            &value_roots,
+            &arg_repacks,
+            matches!(kind, TransformKind::Grad),
+            inherited_claims,
+        )?;
+        let result = chelis_ir::eval::eval_tensor_roots_exact_with_result_claims(
+            dag,
+            &roots,
+            &result_claims,
+            load,
+        );
         let result = self.mark_numeric_trap_from_trusted_result(result);
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every

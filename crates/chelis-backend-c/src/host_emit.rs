@@ -2649,7 +2649,7 @@ fn append_helper(
         ));
         out.push("    (void)n_in;".to_string());
         out.push("    (void)n_out;".to_string());
-        out.push("    __chelis_check_host_result_claims(__chelis_caller_result_claims, inputs[0], \"load\", \"numeric trap: domain in load at i64\");".to_string());
+        out.push("    __chelis_check_host_result_claims(__chelis_caller_result_claims == NULL ? NULL : __chelis_caller_result_claims[0], inputs[0], \"load\", \"numeric trap: domain in load at i64\");".to_string());
         out.push("    outputs[0] = inputs[0];".to_string());
         out.push("}".to_string());
         out.push(String::new());
@@ -3425,7 +3425,7 @@ fn c_string_literal(text: &str) -> String {
 fn private_host_params(params: &str) -> String {
     join_params(
         params,
-        "const __chelis_host_result_claim *__chelis_caller_result_claims",
+        "const __chelis_host_result_claim *const *__chelis_caller_result_claims",
     )
 }
 
@@ -12277,7 +12277,40 @@ impl<'a> HostEmitter<'a> {
             root_count.to_string(),
         ];
         if !self.external_helpers.contains(&base) {
-            helper_args.push(result_claims.unwrap_or("NULL").to_string());
+            let mut pending = vec![(ty, result_claims.unwrap_or("NULL").to_string())];
+            let mut frames = Vec::new();
+            while let Some((part, claims)) = pending.pop() {
+                if let HostType::Tuple(parts) = part {
+                    // The compilation-wide pattern census proves there are
+                    // no aggregate claim frames in this translation unit.
+                    // An ordinary tensor frame claims the whole tensor, never
+                    // one component of a tuple. Avoid referencing pattern
+                    // support that this program therefore does not emit.
+                    if !nested_claims_emitted() {
+                        frames.extend(std::iter::repeat_n(
+                            "NULL".to_string(),
+                            tensor_result_leaf_count(part),
+                        ));
+                        continue;
+                    }
+                    let mut children = Vec::new();
+                    for (index, child) in parts.iter().enumerate() {
+                        let projected = self.next_temp("tensor_result_claim");
+                        self.lines.push(format!("{}const __chelis_host_result_claim *{projected} = __chelis_project_host_result_claims(__chelis_origin_arena, {claims}, 1, NULL, {index});", self.indent));
+                        children.push((child, projected));
+                    }
+                    pending.extend(children.into_iter().rev());
+                } else {
+                    frames.push(claims);
+                }
+            }
+            let frame_array = self.next_temp("tensor_result_claims");
+            self.lines.push(format!(
+                "{}const __chelis_host_result_claim *{frame_array}[{root_count}] = {{ {} }};",
+                self.indent,
+                frames.join(", ")
+            ));
+            helper_args.push(frame_array);
         }
         self.lines.push(format!(
             "{}{}({});",

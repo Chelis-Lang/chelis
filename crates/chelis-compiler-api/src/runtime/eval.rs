@@ -216,7 +216,7 @@ fn sequential_eval_let_chain(expr: &Expr) -> Option<SequentialEvalLetChain<'_>> 
 /// diagonal(x, 0, 1)` applied at `n = 2` returned a two-element tensor under a
 /// three-element declaration, on both lanes and with no diagnostic.
 #[derive(Clone)]
-struct DeclaredResultClaim {
+pub(super) struct DeclaredResultClaim {
     /// Declared rank. A rank disagreement is NOT this guard's business: the
     /// checker owns rank, and reporting it here would duplicate a verdict with
     /// a worse message.
@@ -1694,6 +1694,7 @@ impl<'a> EvalContext<'a> {
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 Ok(chelis_ir::eval::InheritedResultClaim {
+                    root: roots[0],
                     rank: claim.rank,
                     axes,
                 })
@@ -3221,10 +3222,60 @@ impl<'a> EvalContext<'a> {
         Ok(())
     }
 
+    /// Resolve one returned tensor position before the DAG executes. Nested
+    /// rank-polymorphic tensor patterns use the checked root's concrete rank.
+    pub(super) fn transform_tensor_result_claims(
+        &self,
+        root: NodeId,
+        rank: usize,
+        claims: &[DeclaredResultClaim],
+    ) -> Result<Vec<chelis_ir::eval::InheritedResultClaim>, String> {
+        claims
+            .iter()
+            .map(|claim| {
+                let resolved = self.resolve_first_sites(claim);
+                let claim = match &resolved.nested {
+                    Some(nested)
+                        if matches!(nested.pattern.node(nested.node), ClaimNode::Tensor(_)) =>
+                    {
+                        nested.tensor_claim(rank)
+                    }
+                    Some(_) => return Ok(None),
+                    None => resolved,
+                };
+                let axes = claim
+                    .axes
+                    .iter()
+                    .map(|axis| {
+                        Ok(chelis_ir::eval::InheritedResultAxis {
+                            axis: axis.axis,
+                            required: usize::try_from(axis.required).map_err(|_| {
+                                "declared result extent is outside the admitted range".to_string()
+                            })?,
+                            source: axis.source.as_ref().map(|source| {
+                                chelis_ir::axis_sources::ClaimSource {
+                                    claim: source.claim.clone(),
+                                    parameter: source.parameter.to_string(),
+                                    axis: source.axis,
+                                }
+                            }),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(Some(chelis_ir::eval::InheritedResultClaim {
+                    root,
+                    rank: claim.rank,
+                    axes,
+                }))
+            })
+            .filter_map(|result| result.transpose())
+            .collect()
+    }
+
     /// The claims a component of a value under construction owes: each
     /// nested claim projected to that component. A claim on the whole value
     /// says nothing about a component.
-    fn project_result_claims(
+    pub(super) fn project_result_claims(
         claims: &[DeclaredResultClaim],
         step: chelis_ir::claim_pattern::ClaimStep<'_>,
     ) -> Vec<DeclaredResultClaim> {
@@ -4380,7 +4431,7 @@ impl<'a> EvalContext<'a> {
                 transform_expr,
                 captured_env,
                 invocation_contracts: _,
-            } => self.apply_transform(kind, &transform_expr, captured_env, args),
+            } => self.apply_transform(kind, &transform_expr, captured_env, args, inherited_claims),
             other => Err(format!("value is not callable: {other:?}")),
         }
     }
