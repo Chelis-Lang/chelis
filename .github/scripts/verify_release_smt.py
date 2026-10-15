@@ -264,6 +264,106 @@ def verify_property_spans(chelis: Path) -> int:
     return 0
 
 
+
+NUMERIC_PROPERTY_PROGRAM = """def value_i32(x: i32) -> i32 = x
+def value_i64(x: i64) -> i64 = x
+def nearby(dummy: i32) -> i32 = cast(-3, i32)
+@property bound_i32 forall(x: i32):
+  value_i32(x) >= cast(-2147483648, i32)
+@property bound_i64 forall(x: i64):
+  value_i64(x) >= cast(-9223372036854775808, i64)
+@property upper_i64 forall(x: i64):
+  value_i64(x) <= 9223372036854775807i64
+@property guard_i32 forall(x: i32) where x == cast(-2147483648, i32):
+  value_i32(x) == x
+@property guard_i64 forall(x: i64) where x == cast(-9223372036854775808, i64):
+  value_i64(x) == x
+@property sentinel forall(x: i64):
+  -9223372036854775808i64 < 0i64
+@property rounding forall(x: f32):
+  cast(16777217, f32) == 16777216f32
+@property nearby_cast forall(x: i32) where x == cast(-3, i32):
+  nearby(x) == x
+"""
+NUMERIC_PROPERTY_NAMES = frozenset({
+    "bound_i32", "bound_i64", "upper_i64", "guard_i32", "guard_i64",
+    "sentinel", "rounding", "nearby_cast",
+})
+
+
+def numeric_records_match(records: list[dict], expected: dict[str, str]) -> bool:
+    """Require the complete property set and honest SMT-only summary."""
+    properties = [r for r in records if r.get("kind") == "property"]
+    summaries = [r for r in records if r.get("kind") == "summary"]
+    if len(properties) != len(expected) or len(summaries) != 1:
+        return False
+    if {r.get("name") for r in properties} != set(expected):
+        return False
+    if any(r.get("status") != expected[r["name"]]
+           or r.get("proof_tier") != "smt" or r.get("samples") != 0
+           for r in properties):
+        return False
+    summary = summaries[0]
+    return (summary.get("total") == len(expected)
+            and summary.get("passed") == sum(s == "passed" for s in expected.values())
+            and summary.get("failed") == sum(s == "failed" for s in expected.values())
+            and summary.get("errors") == 0 and summary.get("unsupported") == 0)
+
+
+def numeric_mutant_matches(record: dict, minimum: int) -> bool:
+    """A real implementation mutant fails at the exact typed minimum."""
+    if record.get("status") != "failed" or record.get("proof_tier") != "smt":
+        return False
+    value = record.get("counterexample", {}).get("x")
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("(- ") and text.endswith(")"):
+            text = "-" + text[3:-1].strip()
+        try:
+            value = int(text)
+        except ValueError:
+            return False
+    return type(value) is int and value == minimum
+
+
+def verify_numeric_properties(chelis: Path) -> int:
+    """Exercise finalized literals, typed input domains, and actual mutants."""
+    with tempfile.TemporaryDirectory(prefix="chelis_numeric_proof_") as tmp:
+        root = Path(tmp)
+        variants = [("conforming", NUMERIC_PROPERTY_PROGRAM, None)]
+        for dtype, minimum in [("i32", -(2**31)), ("i64", -(2**63))]:
+            original = f"def value_{dtype}(x: {dtype}) -> {dtype} = x\n"
+            mutant = original.rstrip("\n") + f" + cast(1, {dtype})\n"
+            variants.append((dtype, NUMERIC_PROPERTY_PROGRAM.replace(original, mutant), minimum))
+        try:
+            for label, program, minimum in variants:
+                src = root / f"{label}.ch"
+                src.write_text(program)
+                formatted = subprocess.run([str(chelis), "fmt", "--inplace", str(src)],
+                                           capture_output=True, text=True, timeout=60)
+                if formatted.returncode:
+                    raise ValueError(f"numeric formatter {label}: {formatted.stderr}")
+                command = [str(chelis), "prove", str(src), "--json", "--tier", "smt-only", "--seed", "37"]
+                expected = {name: "passed" for name in NUMERIC_PROPERTY_NAMES}
+                if minimum is not None:
+                    command.extend(["--only", f"guard_{label}"])
+                    expected = {f"guard_{label}": "failed"}
+                result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+                records = parse_records(result.stdout)
+                expected_code = 0 if minimum is None else 1
+                if result.returncode != expected_code or not numeric_records_match(records, expected):
+                    raise ValueError(f"numeric proof {label}: {result.stdout}\n{result.stderr}")
+                if minimum is not None:
+                    record = next(r for r in records if r.get("kind") == "property")
+                    if not numeric_mutant_matches(record, minimum):
+                        raise ValueError(f"numeric mutant {label} lacks exact minimum witness: {record}")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            print(f"verify_release_smt: numeric proof probe failed: {error}", file=sys.stderr)
+            return 8
+    print("verify_release_smt: OK -- finalized literals, integer domains and exact-minimum mutants")
+    return 0
+
+
 def verify_binary(chelis: Path, *, clarabel: bool = False) -> int:
     """Run the cvc5-discharge probe against `chelis` and return an exit code.
 
@@ -306,6 +406,9 @@ def verify_binary(chelis: Path, *, clarabel: bool = False) -> int:
         spans_result = verify_property_spans(chelis)
         if spans_result:
             return spans_result
+        numeric_result = verify_numeric_properties(chelis)
+        if numeric_result:
+            return numeric_result
         return verify_clarabel(chelis) if clarabel else 0
 
     print(

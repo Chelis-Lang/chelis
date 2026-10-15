@@ -186,6 +186,29 @@ Legacy c-earchin Deep compatibility:
 - The witness `def` name is the property name. `property_source_id` carries the
   EARS ID.
 
+### Canonical numeric values and typed input domains
+
+Tier B interprets numeric literals through the canonical Surf-to-Deep literal
+boundary (`spec/03` §6.4, `spec/04` [04-LIT-2], §5.6). A checked cast that
+states an unsuffixed literal's numeric dtype denotes that literal, including
+its signed value and one target-width finalization. Direct and substituted
+arithmetic lowering share this interpretation. Integer payloads remain exact
+integers; float literals round at their stated dtype before entering the
+ideal-arithmetic goal. The parser's signed-i64-minimum sentinel contributes
+one minus sign. This rule does not erase a conversion of an already-bound
+value, a named cast, or a cast to a dtype binder.
+
+A property's typed integer inputs range over their representable value sets
+(`spec/04` §4.6, [04-NUM-8], §9.1). Both Surf and Deep Tier B goals constrain
+each signed integer input to its exact minimum and maximum, using the type
+system's `Prim::integer_range`. The SMT sort remains unbounded `Int`;
+intermediate arithmetic retains the ideal-arithmetic model and its existing
+qualifier. Inlining inherits the property inputs' domains; it does not add
+range assumptions for computed helper arguments or results. Intrinsic input
+domains are type semantics, not authored `where` assumptions. They participate
+in satisfiability/non-vacuity checks without creating a user-assumption record;
+non-vacuity evidence distinguishes their count from authored assumptions.
+
 ## Generation And Evaluation
 
 V1 generators support:
@@ -517,7 +540,8 @@ spelling keeps its definition and its verdict (chelis#3267).
 A `proof_tier:"smt"` obligation (or property) is discharged by the SMT
 solver over the **reals**, while runtime arithmetic is IEEE
 floating-point (and integer widths lower to an unbounded integer sort, so
-overflow is not modelled either). The gap is now disclosed ON THE VERDICT:
+overflow is not modelled either); typed integer inputs still have their exact
+representable domains. The gap is now disclosed ON THE VERDICT:
 such artifacts carry the `real_arithmetic` qualifier and render the
 `proven_modulo_real_arithmetic` token (chelis#422), so a consumer reading
 `composite_verdict` alone sees the caveat rather than only the legacy

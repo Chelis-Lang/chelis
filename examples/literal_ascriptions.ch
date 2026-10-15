@@ -6,3 +6,5 @@ local = {
   value: f64 = 1.5f64
   value
 }
+@property integer_input_minimum forall(x: i32):
+  (x >= cast(-2147483648, i32))

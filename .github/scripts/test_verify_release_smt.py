@@ -250,5 +250,53 @@ class FindChelisInTreeTest(unittest.TestCase):
             self.assertEqual(VRS.find_chelis_in_tree(root), canonical)
 
 
+
+class NumericProofRecordsTest(unittest.TestCase):
+    def records(self, name="bound", status="passed"):
+        return [
+            {"kind": "property", "name": name, "status": status,
+             "proof_tier": "smt", "samples": 0},
+            {"kind": "summary", "total": 1, "passed": int(status == "passed"),
+             "failed": int(status == "failed"), "errors": 0, "unsupported": 0},
+        ]
+
+    def test_exact_smt_property_set_and_summary_are_required(self):
+        import copy
+        records = self.records()
+        self.assertTrue(VRS.numeric_records_match(records, {"bound": "passed"}))
+        for key, value in [("proof_tier", "fuzz"), ("status", "unsupported"),
+                           ("samples", 100), ("name", "other")]:
+            bad = copy.deepcopy(records)
+            bad[0][key] = value
+            self.assertFalse(VRS.numeric_records_match(bad, {"bound": "passed"}))
+        self.assertFalse(VRS.numeric_records_match(records + [records[0]], {"bound": "passed"}))
+        self.assertFalse(VRS.numeric_records_match(records[:-1], {"bound": "passed"}))
+        bad = copy.deepcopy(records)
+        bad[1]["errors"] = 1
+        self.assertFalse(VRS.numeric_records_match(bad, {"bound": "passed"}))
+        self.assertFalse(VRS.numeric_records_match(records, {"bound": "passed", "missing": "passed"}))
+
+    def test_mutant_requires_failed_smt_and_exact_minimum_counterexample(self):
+        record = self.records("guard_i64", "failed")[0]
+        record["counterexample"] = {"x": "(- 9223372036854775808)"}
+        self.assertTrue(VRS.numeric_mutant_matches(record, -(2**63)))
+        record["counterexample"]["x"] = "(- 9223372036854775807)"
+        self.assertFalse(VRS.numeric_mutant_matches(record, -(2**63)))
+        record["counterexample"]["x"] = float(-(2**63))
+        self.assertFalse(VRS.numeric_mutant_matches(record, -(2**63)))
+        record["counterexample"]["x"] = "(- 9223372036854775808)"
+        record["status"] = "passed"
+        self.assertFalse(VRS.numeric_mutant_matches(record, -(2**63)))
+
+    def test_numeric_probe_is_mandatory_after_live_solver_and_spans(self):
+        from unittest.mock import patch
+        with patch.object(VRS, "run_prove", return_value='{"kind":"obligation"}'), \
+             patch.object(VRS, "record_is_cvc5_smt", return_value=True), \
+             patch.object(VRS, "verify_property_spans", return_value=0), \
+             patch.object(VRS, "verify_numeric_properties", return_value=8) as numeric:
+            self.assertEqual(VRS.verify_binary(Path("/unused/chelis")), 8)
+            numeric.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

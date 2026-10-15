@@ -20,6 +20,8 @@ use chelis_surf::ast::{
     BinOp, Decl, Expr, LetPattern, Literal, Param, TypeExpr, UnaryOp, VariantFields,
 };
 
+use super::numeric_values::{deep_literal_value, surf_literal_value};
+
 use crate::contracts::{
     NORMAL_CDF_IMPLEMENTATION, NORMAL_CDF_MONOTONICITY, NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION,
     QUANTILE_BOUNDARY, QUANTILE_MONOTONICITY, QUANTILE_RANGE,
@@ -824,11 +826,8 @@ fn deep_arith(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<crate::solver::Smt
     if let Some(name) = deep_var_name(expr) {
         return Some(SmtExpr::Var(name.to_string()));
     }
-    if let Some(value) = deep_float_lit(expr) {
-        return Some(SmtExpr::RealLit(value));
-    }
-    if let Some(value) = deep_int_lit(expr) {
-        return Some(SmtExpr::IntLit(value));
+    if let Some(value) = deep_literal_value(expr) {
+        return Some(value);
     }
     if let Some((name, args)) = deep_app_name_and_args(expr) {
         let smt_args: Option<Vec<_>> = args.iter().map(|arg| deep_arith(arg, ctx)).collect();
@@ -907,11 +906,8 @@ fn deep_arith_subst(
             .cloned()
             .or_else(|| Some(SmtExpr::Var(name.to_string())));
     }
-    if let Some(value) = deep_float_lit(expr) {
-        return Some(SmtExpr::RealLit(value));
-    }
-    if let Some(value) = deep_int_lit(expr) {
-        return Some(SmtExpr::IntLit(value));
+    if let Some(value) = deep_literal_value(expr) {
+        return Some(value);
     }
     if let Some((name, args)) = deep_app_name_and_args(expr) {
         let smt_args: Option<Vec<_>> = args
@@ -1125,28 +1121,6 @@ fn deep_var_name(expr: &DeepExpr) -> Option<&str> {
         return None;
     }
     children.first().and_then(deep_symbol_text)
-}
-
-fn deep_float_lit(expr: &DeepExpr) -> Option<f64> {
-    let (tag, children) = deep_node_parts(expr)?;
-    if tag != DeepTag::Lit {
-        return None;
-    }
-    match children.first()? {
-        DeepExpr::Atom(DeepAtom::Float(value), _) => Some(*value),
-        _ => None,
-    }
-}
-
-fn deep_int_lit(expr: &DeepExpr) -> Option<i64> {
-    let (tag, children) = deep_node_parts(expr)?;
-    if tag != DeepTag::Lit {
-        return None;
-    }
-    match children.first()? {
-        DeepExpr::Atom(DeepAtom::Int(value), _) => Some(*value),
-        _ => None,
-    }
 }
 
 fn deep_bool_lit(expr: &DeepExpr) -> Option<bool> {
@@ -1683,10 +1657,12 @@ fn scalar_dual(
 
 pub(super) fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, SmtExpr};
+    if let Some(value) = surf_literal_value(expr) {
+        return Some(value);
+    }
     match expr {
         Expr::Var(name, _) => Some(SmtExpr::Var(name.clone())),
-        Expr::Lit(Literal::Float(v) | Literal::TypedFloat(v, _), _) => Some(SmtExpr::RealLit(*v)),
-        Expr::Lit(Literal::Int(v) | Literal::TypedInt(v, _), _) => Some(SmtExpr::IntLit(*v)),
+        Expr::Lit(_, _) => surf_literal_value(expr),
         Expr::Unary(UnaryOp::Neg, inner, _) => Some(SmtExpr::Arith(
             SA::Neg,
             Box::new(surf_arith(inner, ctx)?),
@@ -1834,6 +1810,9 @@ fn surf_arith_subst(
     ctx: &InlineCtx,
 ) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, BoolOp as SB, CmpOp as SC, SmtExpr};
+    if let Some(value) = surf_literal_value(expr) {
+        return Some(value);
+    }
     match expr {
         Expr::Var(name, _) => {
             if let Some(replacement) = subst.get(name.as_str()) {
@@ -1844,8 +1823,7 @@ fn surf_arith_subst(
                 Some(SmtExpr::Var(name.clone()))
             }
         }
-        Expr::Lit(Literal::Float(v) | Literal::TypedFloat(v, _), _) => Some(SmtExpr::RealLit(*v)),
-        Expr::Lit(Literal::Int(v) | Literal::TypedInt(v, _), _) => Some(SmtExpr::IntLit(*v)),
+        Expr::Lit(_, _) => surf_literal_value(expr),
         Expr::Unary(UnaryOp::Neg, inner, _) => Some(SmtExpr::Arith(
             SA::Neg,
             Box::new(surf_arith_subst(inner, subst, ctx)?),

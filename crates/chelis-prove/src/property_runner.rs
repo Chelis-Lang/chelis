@@ -31,9 +31,11 @@ use chelis_surf::ast::{
 };
 use chelis_types::types::Prim;
 
+mod numeric_values;
 #[cfg(all(feature = "clarabel-provider", feature = "smt"))]
 mod qp_ideal;
 mod smt_lower;
+use numeric_values::integer_input_domains;
 #[cfg(all(feature = "clarabel-provider", feature = "smt"))]
 pub use qp_ideal::with_registered_clarabel_contract;
 use smt_lower::{
@@ -1217,6 +1219,7 @@ fn expanded_contracts(property: &Property) -> Vec<String> {
 fn try_envelope_lane(
     property_name: &str,
     smt_prop: &crate::tier_b::SmtProperty,
+    authored_goal: &crate::tier_b::SmtProperty,
     options: &PropertyRunOptions,
     seed: u64,
 ) -> Option<PropertyOutcome> {
@@ -1281,14 +1284,15 @@ fn try_envelope_lane(
 
     // Non-vacuity of the ORIGINAL property (its preconditions must be
     // satisfiable), mirroring the base SMT path.
-    let non_vacuity = smt_non_vacuity_record(smt_prop, options.smt_timeout_ms);
+    let non_vacuity =
+        smt_non_vacuity_record_with_domains(smt_prop, authored_goal, options.smt_timeout_ms);
     let reason = match non_vacuity.status {
         NonVacuityStatus::Established => None,
         NonVacuityStatus::Invalid | NonVacuityStatus::Unsupported => non_vacuity.reason.clone(),
     };
     let assumptions = property_assumption_records(
         property_name,
-        smt_prop,
+        authored_goal,
         AssumptionDischarge::new(
             DischargeMethod::Smt,
             serde_json::json!({
@@ -2590,11 +2594,16 @@ fn try_surf_tier_b(
     variables.extend(abstraction.variables());
     let mut preconditions = preconditions;
     preconditions.extend(abstraction.preconditions());
-    let smt_prop = crate::tier_b::SmtProperty {
+    let mut smt_prop = crate::tier_b::SmtProperty {
         variables,
         preconditions,
         postcondition,
     };
+    // Keep type domains out of authored WHERE assumption identities/counts.
+    let authored_goal = smt_prop.clone();
+    smt_prop
+        .preconditions
+        .extend(integer_input_domains(&property.params));
     if !matches!(
         crate::classify_inlineability(&smt_prop.postcondition),
         crate::Inlineability::Inlineable
@@ -2606,7 +2615,9 @@ fn try_surf_tier_b(
         // the residual (-> proven_modulo_certified_envelope); on any non-proof it
         // declines and the existing honest paths (smt-only transcendental
         // `unsupported`, or auto fuzz) run unchanged.
-        if let Some(outcome) = try_envelope_lane(&property.name, &smt_prop, options, seed) {
+        if let Some(outcome) =
+            try_envelope_lane(&property.name, &smt_prop, &authored_goal, options, seed)
+        {
             return Some(outcome);
         }
         return None;
@@ -2631,7 +2642,11 @@ fn try_surf_tier_b(
     let discharge_result = discharge.into_result();
     match discharge_result {
         crate::tier_b::TierBResult::Proved => {
-            let non_vacuity = smt_non_vacuity_record(&smt_prop, options.smt_timeout_ms);
+            let non_vacuity = smt_non_vacuity_record_with_domains(
+                &smt_prop,
+                &authored_goal,
+                options.smt_timeout_ms,
+            );
             let reason = match non_vacuity.status {
                 NonVacuityStatus::Established => None,
                 NonVacuityStatus::Invalid | NonVacuityStatus::Unsupported => {
@@ -2640,7 +2655,7 @@ fn try_surf_tier_b(
             };
             let assumptions = property_assumption_records(
                 &property.name,
-                &smt_prop,
+                &authored_goal,
                 AssumptionDischarge::new(
                     DischargeMethod::Smt,
                     serde_json::json!({
@@ -2747,6 +2762,22 @@ fn try_surf_tier_b(
             }
         }
     }
+}
+
+/// Check the complete typed domain, but do not report intrinsic constraints
+/// as authored assumptions. The additional count explains the solver inputs.
+fn smt_non_vacuity_record_with_domains(
+    smt_prop: &crate::tier_b::SmtProperty,
+    authored_goal: &crate::tier_b::SmtProperty,
+    timeout_ms: u64,
+) -> NonVacuityRecord {
+    let mut record = smt_non_vacuity_record(smt_prop, timeout_ms);
+    let intrinsic_count = smt_prop.preconditions.len() - authored_goal.preconditions.len();
+    if intrinsic_count != 0 {
+        record.evidence["assumption_count"] = serde_json::json!(authored_goal.preconditions.len());
+        record.evidence["intrinsic_domain_count"] = serde_json::json!(intrinsic_count);
+    }
+    record
 }
 
 fn smt_non_vacuity_record(
@@ -4684,11 +4715,16 @@ fn try_deep_tier_b(
     if preconditions.len() != property.preconditions.len() {
         return None;
     }
-    let smt_prop = crate::tier_b::SmtProperty {
+    let mut smt_prop = crate::tier_b::SmtProperty {
         variables,
         preconditions,
         postcondition,
     };
+    // Keep type domains out of authored WHERE assumption identities/counts.
+    let authored_goal = smt_prop.clone();
+    smt_prop
+        .preconditions
+        .extend(integer_input_domains(&property.params));
     if !matches!(
         crate::classify_inlineability(&smt_prop.postcondition),
         crate::Inlineability::Inlineable
@@ -4700,7 +4736,9 @@ fn try_deep_tier_b(
         // the residual (-> proven_modulo_certified_envelope); on any non-proof it
         // declines and the existing honest paths (smt-only transcendental
         // `unsupported`, or auto fuzz) run unchanged.
-        if let Some(outcome) = try_envelope_lane(&property.name, &smt_prop, options, seed) {
+        if let Some(outcome) =
+            try_envelope_lane(&property.name, &smt_prop, &authored_goal, options, seed)
+        {
             return Some(outcome);
         }
         return None;
@@ -4712,7 +4750,11 @@ fn try_deep_tier_b(
     let base_discharge = Some((discharge.soundness(), discharge.qualifier_set().clone()));
     match discharge.into_result() {
         crate::tier_b::TierBResult::Proved => {
-            let non_vacuity = smt_non_vacuity_record(&smt_prop, options.smt_timeout_ms);
+            let non_vacuity = smt_non_vacuity_record_with_domains(
+                &smt_prop,
+                &authored_goal,
+                options.smt_timeout_ms,
+            );
             let reason = match non_vacuity.status {
                 NonVacuityStatus::Established => None,
                 NonVacuityStatus::Invalid | NonVacuityStatus::Unsupported => {
@@ -4721,7 +4763,7 @@ fn try_deep_tier_b(
             };
             let assumptions = property_assumption_records(
                 &property.name,
-                &smt_prop,
+                &authored_goal,
                 AssumptionDischarge::new(
                     DischargeMethod::Smt,
                     serde_json::json!({

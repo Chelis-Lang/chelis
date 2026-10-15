@@ -13,6 +13,9 @@
 //! `#[cfg(feature = "smt")]`. Without the feature the obligation path is not
 //! compiled, mirroring `prove_invariant_obligations.rs`.
 //!
+//! This required SMT target also owns canonical numeric literal values and
+//! typed integer input domains on both Surf and Deep (support/proof_numeric_values.rs).
+//!
 //! Run: `cargo nextest run -p chelis-cli --features smt
 //!   --test prove_deep_obligations`
 //! with `LD_LIBRARY_PATH` set to the uv python lib (see AGENTS.md).
@@ -285,3 +288,7 @@ fn type_broken_deep_module_with_no_invariant_errors_not_silent_pass() {
         "the type-check failure must be surfaced as a check-error record: {records:?}"
     );
 }
+
+// Numeric literal/domain parity shares this required, feature-enabled SMT owner.
+#[path = "support/proof_numeric_values.rs"]
+mod proof_numeric_values;
