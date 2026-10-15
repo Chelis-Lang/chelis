@@ -47,6 +47,444 @@ fn ty(n: usize, precision: Prim) -> TensorType {
     }
 }
 
+fn shaped_ty(shape: &[usize], precision: Prim) -> TensorType {
+    TensorType {
+        dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    }
+}
+
+fn coordinate_case(
+    shape: &[usize],
+    out_shape: &[usize],
+    op: RiscOp,
+    source_index: impl Fn(usize) -> usize,
+) {
+    let mut dag = Dag::new();
+    let decl = dag.declare("coordinate oracle");
+    let input = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        shaped_ty(shape, Prim::Int64),
+        None,
+    );
+    let root = dag.add_node(
+        decl,
+        op,
+        vec![input],
+        shaped_ty(out_shape, Prim::Int64),
+        None,
+    );
+    dag.add_root(root);
+    let len: usize = shape.iter().product();
+    let out_len: usize = out_shape.iter().product();
+    let inputs = UnordMap::from([(
+        "x".into(),
+        TensorValue::finalize_from_wide_int(
+            "oracle",
+            Prim::Int64,
+            shape.to_vec(),
+            (0..len).map(|i| (1_i64 << 53) + i as i64).collect(),
+        )
+        .unwrap(),
+    )]);
+    let start_live = LIVE.load(Ordering::Relaxed);
+    PEAK.store(start_live, Ordering::Relaxed);
+    let before = BYTES.load(Ordering::Relaxed);
+    let start = Instant::now();
+    let values = eval_tensor(&dag, &inputs).unwrap();
+    let elapsed = start.elapsed();
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(start_live);
+    let allocated = BYTES.load(Ordering::Relaxed) - before;
+    assert_eq!(values.len(), 2, "all-values API retains both nodes");
+    let rooted =
+        chelis_ir::eval::eval_tensor_roots_with(&dag, &[root], |name| inputs.get(name).cloned())
+            .unwrap();
+    assert_eq!(rooted.len(), 1);
+    assert_eq!(values[&root].storage(), rooted[&root].storage());
+    for i in 0..out_len {
+        assert_eq!(
+            values[&root].storage().scalar_at(i).as_i64_exact(),
+            Some((1_i64 << 53) + source_index(i) as i64)
+        );
+    }
+    // Resolved input, loaded value and copied output are permitted. A usize
+    // per output is not.
+    assert!(
+        peak < (2 * len + out_len) * 8 + 1024 * 1024,
+        "coordinate scratch: shape={shape:?}, output={out_shape:?}, peak={peak}"
+    );
+    eprintln!(
+        "eval-performance movement shape={shape:?} output={out_shape:?} wall={elapsed:?} allocated={allocated} peak_heap_delta={peak} PASS"
+    );
+}
+
+#[test]
+fn eval_performance_regular_movement_coordinates() {
+    use chelis_ir::dag::RtDim;
+    coordinate_case(
+        &[32, 64, 512],
+        &[512, 32, 64],
+        RiscOp::Permute {
+            axes: vec![2, 0, 1],
+        },
+        |i| ((i / 64) % 32 * 64 + i % 64) * 512 + i / (32 * 64),
+    );
+    coordinate_case(
+        &[256, 1, 256],
+        &[256, 16, 256],
+        RiscOp::Expand {
+            axis: 1,
+            size: RtDim::Lit(16),
+        },
+        |i| i / (16 * 256) * 256 + i % 256,
+    );
+    coordinate_case(
+        &[256, 256],
+        &[256, 16, 256],
+        RiscOp::Expand {
+            axis: 1,
+            size: RtDim::Lit(16),
+        },
+        |i| i / (16 * 256) * 256 + i % 256,
+    );
+    coordinate_case(
+        &[1024, 1024],
+        &[768, 896],
+        RiscOp::Shrink {
+            bounds: vec![
+                (RtDim::Lit(128), RtDim::Lit(896)),
+                (RtDim::Lit(64), RtDim::Lit(960)),
+            ],
+        },
+        |i| (i / 896 + 128) * 1024 + i % 896 + 64,
+    );
+    coordinate_case(
+        &[1024, 1024],
+        &[512, 342],
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2), RtDim::Lit(3)],
+        },
+        |i| i / 342 * 2 * 1024 + i % 342 * 3,
+    );
+}
+
+#[test]
+fn eval_performance_depthwise_window_gather_composition() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("depthwise window oracle");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        shaped_ty(&[1, 2, 8, 8], Prim::Int64),
+        None,
+    );
+    let indices = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        shaped_ty(&[8, 3], Prim::Int64),
+        None,
+    );
+    let rows = dag.add_node(
+        decl,
+        RiscOp::Gather {
+            axis: 2,
+            batch_rank: 0,
+        },
+        vec![x, indices],
+        shaped_ty(&[1, 2, 8, 3, 8], Prim::Int64),
+        None,
+    );
+    let cols = dag.add_node(
+        decl,
+        RiscOp::Gather {
+            axis: 4,
+            batch_rank: 0,
+        },
+        vec![rows, indices],
+        shaped_ty(&[1, 2, 8, 3, 8, 3], Prim::Int64),
+        None,
+    );
+    let root = dag.add_node(
+        decl,
+        RiscOp::Permute {
+            axes: vec![0, 1, 2, 4, 3, 5],
+        },
+        vec![cols],
+        shaped_ty(&[1, 2, 8, 8, 3, 3], Prim::Int64),
+        None,
+    );
+    dag.add_root(root);
+    let inputs = UnordMap::from([
+        (
+            "x".into(),
+            TensorValue::finalize_from_wide_int(
+                "oracle",
+                Prim::Int64,
+                vec![1, 2, 8, 8],
+                (0..128).map(|i| (1_i64 << 53) + i).collect(),
+            )
+            .unwrap(),
+        ),
+        (
+            "indices".into(),
+            TensorValue::finalize_from_wide_int(
+                "oracle",
+                Prim::Int64,
+                vec![8, 3],
+                (0..24).map(|i| (i / 3 + i % 3) % 8).collect(),
+            )
+            .unwrap(),
+        ),
+    ]);
+    let start_live = LIVE.load(Ordering::Relaxed);
+    PEAK.store(start_live, Ordering::Relaxed);
+    let start = Instant::now();
+    let result = eval_tensor(&dag, &inputs).unwrap();
+    let elapsed = start.elapsed();
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(start_live);
+    for i in 0..1152 {
+        let kx = i % 3;
+        let ky = i / 3 % 3;
+        let x = i / 9 % 8;
+        let y = i / 72 % 8;
+        let c = i / 576;
+        let source = (c * 8 + (y + ky) % 8) * 8 + (x + kx) % 8;
+        assert_eq!(
+            result[&root].storage().scalar_at(i).as_i64_exact(),
+            Some((1_i64 << 53) + source as i64)
+        );
+    }
+    assert!(peak < 128 * 1024, "window scratch {peak}");
+    eprintln!(
+        "eval-performance depthwise gather composition wall={elapsed:?} peak_heap_delta={peak} PASS"
+    );
+}
+
+#[test]
+fn eval_performance_large_gather_coordinates() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("large gather oracle");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        shaped_ty(&[32, 1024], Prim::Int64),
+        None,
+    );
+    let indices = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        ty(32768, Prim::Int64),
+        None,
+    );
+    let root = dag.add_node(
+        decl,
+        RiscOp::Gather {
+            axis: 1,
+            batch_rank: 0,
+        },
+        vec![x, indices],
+        shaped_ty(&[32, 32768], Prim::Int64),
+        None,
+    );
+    dag.add_root(root);
+    let inputs = UnordMap::from([
+        (
+            "x".into(),
+            TensorValue::finalize_from_wide_int(
+                "oracle",
+                Prim::Int64,
+                vec![32, 1024],
+                (0..32768).map(|i| (1_i64 << 53) + i).collect(),
+            )
+            .unwrap(),
+        ),
+        (
+            "indices".into(),
+            TensorValue::finalize_from_wide_int(
+                "oracle",
+                Prim::Int64,
+                vec![32768],
+                (0..32768).map(|i| (i * 7 + 3) % 1024).collect(),
+            )
+            .unwrap(),
+        ),
+    ]);
+    let start_live = LIVE.load(Ordering::Relaxed);
+    PEAK.store(start_live, Ordering::Relaxed);
+    let start = Instant::now();
+    let result = eval_tensor(&dag, &inputs).unwrap();
+    let elapsed = start.elapsed();
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(start_live);
+    for flat in 0..1048576 {
+        let source = flat / 32768 * 1024 + (flat % 32768 * 7 + 3) % 1024;
+        assert_eq!(
+            result[&root].storage().scalar_at(flat).as_i64_exact(),
+            Some((1_i64 << 53) + source as i64)
+        );
+    }
+    assert!(
+        peak < (2 * 65536 + 1048576) * 8 + 1024 * 1024,
+        "gather coordinate scratch {peak}"
+    );
+    eprintln!("eval-performance large gather wall={elapsed:?} peak_heap_delta={peak} PASS");
+}
+
+#[test]
+#[ignore = "large movement witness; docs/manual_gates.md eval-performance"]
+fn eval_performance_large_window_movement_coordinates() {
+    use chelis_ir::dag::RtDim;
+    coordinate_case(
+        &[1, 128, 56, 56, 7, 7],
+        &[1, 128, 56, 7, 56, 7],
+        RiscOp::Permute {
+            axes: vec![0, 1, 2, 4, 3, 5],
+        },
+        |i| {
+            let kx = i % 7;
+            let x = i / 7 % 56;
+            let ky = i / (7 * 56) % 7;
+            let cy = i / (7 * 56 * 7);
+            ((cy * 56 + x) * 7 + ky) * 7 + kx
+        },
+    );
+    coordinate_case(
+        &[1, 128, 56, 56, 1, 7],
+        &[1, 128, 56, 56, 7, 7],
+        RiscOp::Expand {
+            axis: 4,
+            size: RtDim::Lit(7),
+        },
+        |i| i / 49 * 7 + i % 7,
+    );
+}
+
+fn axis_sum_case(shape: &[usize], axis: usize) {
+    axis_reduction_case(
+        shape,
+        axis,
+        RiscOp::Sum {
+            axis,
+            accumulator: Prim::Int64,
+        },
+    );
+}
+
+fn axis_reduction_case(shape: &[usize], axis: usize, op: RiscOp) {
+    let mut dag = Dag::new();
+    let decl = dag.declare("axis oracle");
+    let mut out_shape = shape.to_vec();
+    let axis_len = out_shape.remove(axis);
+    let input = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        shaped_ty(shape, Prim::Int64),
+        None,
+    );
+    let root = dag.add_node(
+        decl,
+        op.clone(),
+        vec![input],
+        shaped_ty(&out_shape, Prim::Int64),
+        None,
+    );
+    dag.add_root(root);
+    let len: usize = shape.iter().product();
+    let out_len: usize = out_shape.iter().product();
+    let inner: usize = shape[axis + 1..].iter().product();
+    let inputs = UnordMap::from([(
+        "x".into(),
+        TensorValue::finalize_from_wide_int(
+            "oracle",
+            Prim::Int64,
+            shape.to_vec(),
+            (0..len).map(|i| (i % 13) as i64 - 6).collect(),
+        )
+        .unwrap(),
+    )]);
+    let start_live = LIVE.load(Ordering::Relaxed);
+    PEAK.store(start_live, Ordering::Relaxed);
+    let start = Instant::now();
+    let values = eval_tensor(&dag, &inputs).unwrap();
+    let elapsed = start.elapsed();
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(start_live);
+    assert_eq!(values.len(), 2, "all-values API retains both nodes");
+    let rooted =
+        chelis_ir::eval::eval_tensor_roots_with(&dag, &[root], |name| inputs.get(name).cloned())
+            .unwrap();
+    assert_eq!(rooted.len(), 1);
+    assert_eq!(values[&root].storage(), rooted[&root].storage());
+    for i in 0..out_len {
+        let base = i / inner * axis_len * inner + i % inner;
+        let elements: Vec<_> = (0..axis_len)
+            .map(|j| ((base + j * inner) % 13) as i64 - 6)
+            .collect();
+        let expected = match op {
+            RiscOp::Sum { .. } => elements.iter().sum::<i64>(),
+            RiscOp::ProdReduce { .. } => elements.iter().product::<i64>(),
+            RiscOp::MaxReduce { .. } => *elements.iter().max().unwrap(),
+            RiscOp::MinReduce { .. } => *elements.iter().min().unwrap(),
+            RiscOp::Argmax { .. } => elements
+                .iter()
+                .position(|x| x == elements.iter().max().unwrap())
+                .unwrap() as i64,
+            RiscOp::Argmin { .. } => elements
+                .iter()
+                .position(|x| x == elements.iter().min().unwrap())
+                .unwrap() as i64,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            values[&root].storage().scalar_at(i).as_i64_exact(),
+            Some(expected)
+        );
+    }
+    // Input load, typed result construction and output are permitted, with
+    // a fixed margin for graph scheduling; index/leaf arrays are not.
+    assert!(
+        peak < len * 16 + out_len * 48 + 1024 * 1024,
+        "axis scratch shape={shape:?} axis={axis} peak={peak}"
+    );
+    eprintln!(
+        "eval-performance reduction op={op:?} shape={shape:?} axis={axis} wall={elapsed:?} peak_heap_delta={peak} PASS"
+    );
+}
+
+#[test]
+fn eval_performance_axis_reduction_coordinates() {
+    axis_sum_case(&[1048576], 0);
+    axis_sum_case(&[65536, 16], 1);
+    axis_sum_case(&[128, 64, 128], 0);
+    axis_sum_case(&[128, 64, 128], 1);
+    axis_sum_case(&[128, 64, 128], 2);
+    for op in [
+        RiscOp::ProdReduce { axis: 1 },
+        RiscOp::MaxReduce { axis: 1 },
+        RiscOp::MinReduce { axis: 1 },
+        RiscOp::Argmax { axis: 1 },
+        RiscOp::Argmin { axis: 1 },
+    ] {
+        axis_reduction_case(&[65536, 16], 1, op);
+    }
+}
+
+#[test]
+#[ignore = "large reduction witness; docs/manual_gates.md eval-performance"]
+fn eval_performance_large_axis_reduction_coordinates() {
+    axis_sum_case(&[19668992], 0);
+    axis_sum_case(&[3136, 6272], 1);
+}
+
 fn sparse_case(n: usize, prim: Prim, invalid: Option<i64>) {
     let mut dag = Dag::new();
     let decl = dag.declare("sparse oracle");

@@ -44,6 +44,8 @@
 //! kernel raised the trap after lowering; composed evaluation forwards the
 //! message unchanged.
 
+use std::borrow::Borrow;
+
 use crate::activation::{ActivationGraph, DerivedActivation, lower_activation};
 use crate::observation::ElementRef;
 use crate::types::Prim;
@@ -1562,8 +1564,22 @@ impl TensorStorage {
     /// that provably preserve elements (reshape, permute, expand, shrink,
     /// stride, gather). Every use site cites this contract.
     pub fn reuse_gather(&self, indices: &[usize]) -> TensorStorage {
-        fn pick<T: Copy>(src: &[T], indices: &[usize]) -> Vec<T> {
-            indices.iter().map(|&i| src[i]).collect()
+        self.reuse_gather_iter(indices)
+    }
+
+    /// The same element-preserving movement boundary, with coordinates
+    /// generated on demand rather than retained in a slice.
+    pub fn reuse_gather_iter<I>(&self, indices: I) -> TensorStorage
+    where
+        I: IntoIterator,
+        I::Item: std::borrow::Borrow<usize>,
+    {
+        fn pick<T: Copy, I>(src: &[T], indices: I) -> Vec<T>
+        where
+            I: IntoIterator,
+            I::Item: std::borrow::Borrow<usize>,
+        {
+            indices.into_iter().map(|i| src[*i.borrow()]).collect()
         }
         let buf = match &self.buf {
             Buf::F64(v) => Buf::F64(pick(v, indices)),
@@ -2733,14 +2749,32 @@ fn scalar_is_nan(value: ScalarValue) -> bool {
 fn reduce_sum_group(
     op: TensorReduceOp,
     input: &TensorStorage,
-    group: &[usize],
+    group: impl Iterator<Item = usize>,
     accumulator: Prim,
 ) -> Result<ScalarValue, NumericKernelError> {
-    let leaves = group
-        .iter()
-        .map(|&index| scalar_at_reduction_width(op, input, index, accumulator))
-        .collect::<Result<Vec<_>, _>>()?;
-    match checked_adjacent_pair_fold(leaves, |left, right| reduction_add(op, left, right))? {
+    // Each occupied level holds the completed left-to-right subtree of
+    // 2^level leaves. Carrying combines adjacent equal-sized subtrees.
+    // Finalize from the smallest occupied level upward: the odd right tail
+    // is carried unchanged until the next left subtree joins it. This is
+    // the breadth-first adjacent-pair tree, including non-power-of-two sizes.
+    let mut levels = [None; usize::BITS as usize];
+    for index in group {
+        let mut carry = scalar_at_reduction_width(op, input, index, accumulator)?;
+        let mut level = 0;
+        while let Some(left) = levels[level].take() {
+            carry = reduction_add(op, left, carry)?;
+            level += 1;
+        }
+        levels[level] = Some(carry);
+    }
+    let mut right = None;
+    for left in levels.into_iter().flatten() {
+        right = Some(match right {
+            Some(tail) => reduction_add(op, left, tail)?,
+            None => left,
+        });
+    }
+    match right {
         Some(value) => Ok(value),
         None => reduction_seed(op, accumulator, 0, 0.0),
     }
@@ -2772,7 +2806,7 @@ pub fn canonical_nan_scalar(value: ScalarValue) -> ScalarValue {
 fn reduce_group(
     op: TensorReduceOp,
     input: &TensorStorage,
-    group: &[usize],
+    group: impl ExactSizeIterator<Item = usize>,
     accumulator: Prim,
 ) -> Result<ScalarValue, NumericKernelError> {
     match op {
@@ -2792,14 +2826,15 @@ fn reduce_group(
 fn reduce_arithmetic_group(
     op: TensorReduceOp,
     input: &TensorStorage,
-    group: &[usize],
+    group: impl ExactSizeIterator<Item = usize>,
     accumulator: Prim,
 ) -> Result<ScalarValue, NumericKernelError> {
     match op {
         TensorReduceOp::Sum { .. } => reduce_sum_group(op, input, group, accumulator),
         TensorReduceOp::ReduceWindowSum => reduce_sum_group(op, input, group, accumulator),
         TensorReduceOp::ReduceWindowMean => {
-            if group.is_empty() {
+            let len = group.len();
+            if len == 0 {
                 return Err(NumericTrap::Domain {
                     op: op.name(),
                     prim: input.prim(),
@@ -2807,12 +2842,12 @@ fn reduce_arithmetic_group(
                 .into());
             }
             let sum = reduce_sum_group(op, input, group, accumulator)?;
-            let divisor = reduction_seed(op, accumulator, group.len() as i64, group.len() as f64)?;
+            let divisor = reduction_seed(op, accumulator, len as i64, len as f64)?;
             reduction_div_float(op, sum, divisor)
         }
         TensorReduceOp::ProdReduce => {
             let mut acc = reduction_seed(op, accumulator, 1, 1.0)?;
-            for &index in group {
+            for index in group {
                 acc = reduction_mul(
                     op,
                     acc,
@@ -2831,14 +2866,14 @@ fn reduce_arithmetic_group(
 fn reduce_extreme_group(
     op: TensorReduceOp,
     input: &TensorStorage,
-    group: &[usize],
+    mut group: impl Iterator<Item = usize>,
 ) -> Result<ScalarValue, NumericKernelError> {
     match op {
         TensorReduceOp::MaxReduce
         | TensorReduceOp::MinReduce
         | TensorReduceOp::ReduceWindowMax
         | TensorReduceOp::ReduceWindowMin => {
-            let Some((&first_index, remaining)) = group.split_first() else {
+            let Some(first_index) = group.next() else {
                 return Err(NumericTrap::Domain {
                     op: op.name(),
                     prim: input.prim(),
@@ -2853,7 +2888,7 @@ fn reduce_extreme_group(
             if scalar_is_nan(acc) {
                 return Ok(acc);
             }
-            for &index in remaining {
+            for index in group {
                 let value = input.scalar_at(index);
                 if scalar_is_nan(value) {
                     return Ok(value);
@@ -2983,10 +3018,27 @@ pub fn reduce_tensor_groups(
     input: &TensorStorage,
     groups: &[Vec<usize>],
 ) -> Result<TensorStorage, NumericKernelError> {
+    reduce_tensor_groups_iter(op, input, groups)
+}
+
+/// Ordered groups and coordinates supplied on demand. Arithmetic and
+/// finalization are identical to [`reduce_tensor_groups`].
+pub fn reduce_tensor_groups_iter<G, I>(
+    op: TensorReduceOp,
+    input: &TensorStorage,
+    groups: G,
+) -> Result<TensorStorage, NumericKernelError>
+where
+    G: IntoIterator<Item = I>,
+    I: IntoIterator,
+    I::IntoIter: ExactSizeIterator,
+    I::Item: std::borrow::Borrow<usize>,
+{
     let (accumulator, result) = reduction_signature(op, input.prim())?;
     let values = groups
-        .iter()
+        .into_iter()
         .map(|group| {
+            let group = group.into_iter().map(|i| *i.borrow());
             reduce_group(op, input, group, accumulator)
                 .and_then(|value| reduction_result_scalar(op, value, result))
         })
@@ -3154,6 +3206,21 @@ pub fn arg_reduce_tensor_groups(
     input: &TensorStorage,
     groups: &[Vec<usize>],
 ) -> Result<TensorStorage, NumericKernelError> {
+    arg_reduce_tensor_groups_iter(op, input, groups)
+}
+
+/// Argument reduction over ordered coordinate iterators, with the same
+/// stored-width comparisons and first-winner rule as the slice boundary.
+pub fn arg_reduce_tensor_groups_iter<G, I>(
+    op: ArgReduceOp,
+    input: &TensorStorage,
+    groups: G,
+) -> Result<TensorStorage, NumericKernelError>
+where
+    G: IntoIterator<Item = I>,
+    I: IntoIterator,
+    I::Item: std::borrow::Borrow<usize>,
+{
     if !input.prim().is_integer() && !input.prim().is_float() {
         return Err(NumericKernelError::WrongFamily {
             op: op.name(),
@@ -3161,25 +3228,27 @@ pub fn arg_reduce_tensor_groups(
             actual: input.prim(),
         });
     }
-    let mut indices = Vec::with_capacity(groups.len());
+    let groups = groups.into_iter();
+    let mut indices = Vec::with_capacity(groups.size_hint().0);
     for group in groups {
-        if group.is_empty() {
+        let mut group = group.into_iter().map(|i| *i.borrow());
+        let Some(first_index) = group.next() else {
             return Err(NumericTrap::Domain {
                 op: op.name(),
                 prim: Prim::Int64,
             }
             .into());
-        }
-        let mut best_value = input.scalar_at(group[0]);
+        };
+        let mut best_value = input.scalar_at(first_index);
         let mut best_index = 0i64;
-        for (axis_index, &input_index) in group.iter().enumerate().skip(1) {
+        for (axis_index, input_index) in group.enumerate() {
             let candidate = input.scalar_at(input_index);
             if !scalar_is_nan(best_value)
                 && (scalar_is_nan(candidate)
                     || compare_scalars(op.compare(), candidate, best_value)?)
             {
                 best_value = candidate;
-                best_index = axis_index as i64;
+                best_index = axis_index as i64 + 1;
             }
         }
         indices.push(best_index);
@@ -3265,7 +3334,7 @@ pub fn reduce_window_grad_tensor_groups(
                     continue;
                 }
 
-                let extreme = reduce_group(forward_op, input, group, accumulator)?;
+                let extreme = reduce_group(forward_op, input, group.iter().copied(), accumulator)?;
                 let mut selected = Vec::new();
                 for &input_index in group {
                     if compare_scalars(CompareOp::Eq, input.scalar_at(input_index), extreme)? {
@@ -6033,6 +6102,160 @@ mod tests {
             g.to_i64_exact_vec(),
             Some(vec![5, 9007199254740993, 9007199254740993])
         );
+    }
+
+    #[test]
+    fn movement_reuse_preserves_float_payloads_and_signed_zeros() {
+        fn bits(storage: &TensorStorage) -> Vec<u64> {
+            match storage.view() {
+                StorageView::F64(v) => v.iter().map(|x| x.to_bits()).collect(),
+                StorageView::F32(v) => v.iter().map(|x| u64::from(x.to_bits())).collect(),
+                StorageView::F16(v) => v.iter().map(|x| u64::from(x.to_bits())).collect(),
+                StorageView::Bf16(v) => v.iter().map(|x| u64::from(x.to_bits())).collect(),
+                _ => panic!("float movement oracle"),
+            }
+        }
+        for buf in [
+            Buf::F64(vec![
+                f64::from_bits(0xfff8123456789abc),
+                -0.0,
+                0.0,
+                f64::INFINITY,
+            ]),
+            Buf::F32(vec![f32::from_bits(0xffc12345), -0.0, 0.0, f32::INFINITY]),
+            Buf::F16(vec![
+                half::f16::from_bits(0xfd35),
+                half::f16::NEG_ZERO,
+                half::f16::ZERO,
+                half::f16::INFINITY,
+            ]),
+            Buf::Bf16(vec![
+                half::bf16::from_bits(0xff95),
+                half::bf16::NEG_ZERO,
+                half::bf16::ZERO,
+                half::bf16::INFINITY,
+            ]),
+        ] {
+            let input = TensorStorage { buf };
+            let original = bits(&input);
+            let picks = [2, 1, 0, 3, 0];
+            let output = input.reuse_gather_iter((0..5).map(|i| picks[i]));
+            assert_eq!(bits(&output), picks.map(|i| original[i]));
+        }
+    }
+
+    #[test]
+    fn product_coordinate_iterators_keep_checked_integer_multiplications() {
+        for (prim, max) in [
+            (Prim::Int8, i64::from(i8::MAX)),
+            (Prim::Int16, i64::from(i16::MAX)),
+            (Prim::Int32, i64::from(i32::MAX)),
+            (Prim::Int64, i64::MAX),
+        ] {
+            for factor in [1, 2] {
+                let input =
+                    finalize_tensor("oracle", prim, RawTensor::Int(vec![max, factor, 0])).unwrap();
+                let output = reduce_tensor_groups_iter(
+                    TensorReduceOp::ProdReduce,
+                    &input,
+                    std::iter::once(0..3),
+                );
+                if factor == 1 {
+                    assert_eq!(output.unwrap().to_i64_exact_vec(), Some(vec![0]));
+                } else {
+                    assert_eq!(
+                        output,
+                        Err(NumericTrap::Overflow {
+                            op: "prod_reduce",
+                            prim
+                        }
+                        .into())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_sum_matches_breadth_first_tree_at_every_odd_length_and_width() {
+        for prim in [
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::F16,
+            Prim::Bf16,
+            Prim::F32,
+            Prim::F64,
+        ] {
+            let raw = if prim.is_integer() {
+                RawTensor::Int((0..128).map(|i| i % 5 - 2).collect())
+            } else {
+                // Keep half inputs finite, with a tiny representable leaf
+                // that f32 accumulation loses beside the large one. Wider
+                // source dtypes exercise cancellation even in f64 accumulators.
+                let (large, small) = if prim == Prim::F16 {
+                    (2048.0, 2.0_f64.powi(-24))
+                } else {
+                    (2.0_f64.powi(60), 1.0)
+                };
+                RawTensor::Float(
+                    (0..128)
+                        .map(|i| match i % 7 {
+                            0 => large,
+                            1 => small,
+                            2 => -large,
+                            3 => -0.0,
+                            4 => 0.0,
+                            5 => 2.0,
+                            _ => -1.0,
+                        })
+                        .collect(),
+                )
+            };
+            let input = finalize_tensor("oracle", prim, raw).unwrap();
+            for accumulator in [Prim::Int32, Prim::Int64, Prim::F32, Prim::F64] {
+                if !valid_sum_accumulator(prim, accumulator) {
+                    continue;
+                }
+                let result = if prim.is_integer() { accumulator } else { prim };
+                let op = TensorReduceOp::Sum {
+                    accumulator,
+                    result,
+                };
+                for len in 0..=65 {
+                    let group: Vec<usize> = (0..len).map(|i| (i * 3 + 1) % 128).collect();
+                    let leaves = group
+                        .iter()
+                        .map(|&i| scalar_at_reduction_width(op, &input, i, accumulator).unwrap())
+                        .collect();
+                    let expected =
+                        checked_adjacent_pair_fold(leaves, |a, b| reduction_add(op, a, b))
+                            .unwrap()
+                            .unwrap_or_else(|| reduction_seed(op, accumulator, 0, 0.0).unwrap());
+                    let expected =
+                        reduction_result_scalar(op, canonical_nan_scalar(expected), result)
+                            .unwrap();
+                    let output = reduce_tensor_groups(op, &input, &[group]).unwrap();
+                    let expected = tensor_from_scalars(result, &[expected]);
+                    match (output.view(), expected.view()) {
+                        (StorageView::F64(a), StorageView::F64(b)) => {
+                            assert_eq!(a[0].to_bits(), b[0].to_bits())
+                        }
+                        (StorageView::F32(a), StorageView::F32(b)) => {
+                            assert_eq!(a[0].to_bits(), b[0].to_bits())
+                        }
+                        (StorageView::F16(a), StorageView::F16(b)) => {
+                            assert_eq!(a[0].to_bits(), b[0].to_bits())
+                        }
+                        (StorageView::Bf16(a), StorageView::Bf16(b)) => {
+                            assert_eq!(a[0].to_bits(), b[0].to_bits())
+                        }
+                        _ => assert_eq!(output, expected, "{prim:?} {accumulator:?} length {len}"),
+                    }
+                }
+            }
+        }
     }
 
     #[test]
