@@ -1406,7 +1406,7 @@ name = "prove_invariant_obligations"
 workflow = "smt-full-prove.yml"
 job = "full-smt-prove"
 cadence = "daily 09:00 UTC and workflow_dispatch"
-reason = "every test is smt-gated; `cargo test -p chelis-cli --features smt --test prove_invariant_obligations` runs it with cvc5. This derived-obligation acceptance oracle predates any single owning issue, unlike its siblings here; chelis#3634 is the change that first selected it on a pull request and so stands in as the owner"
+reason = "every test is smt-gated; `cargo test -p chelis-cli --features smt --test prove_invariant_obligations` runs it with cvc5. This derived-obligation acceptance oracle predates any single owning issue; chelis#3634 is the change that first selected it on a pull request and so stands in as the owner, as chelis#3164 does for the prove_injection_starvation row above"
 tracking_issue = "chelis#3634"
 [[target_exclusion]]
 package = "chelis-prove"
