@@ -349,12 +349,12 @@ fn a_function_signature_without_a_checked_body_supplies_no_evidence() {
     );
     let errors = &result.as_ref().expect_err("body evidence is absent").errors;
     assert!(
-        errors
-            .iter()
-            .any(|error| error.kind == CheckErrorKind::DimensionMismatch
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
                 && error.message.contains(EXTERNAL)
                 && error.message.contains("rank-polymorphic")
-                && error.message.contains("body evidence")),
+                && error.message.contains("body evidence")
+        ),
         "expected the missing body-evidence rejection, not a binding failure: {errors:?}"
     );
     reject(result, "body-less callable has no rank-body authority");
