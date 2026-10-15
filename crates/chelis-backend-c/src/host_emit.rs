@@ -3510,16 +3510,16 @@ typedef struct __chelis_host_result_origin {
     const struct __chelis_host_result_origin *children[];
 } __chelis_host_result_origin;
 
-typedef struct __chelis_host_result_origin_root {
-    struct __chelis_host_result_origin_root *previous;
+typedef struct __chelis_global_origin_root {
+    struct __chelis_global_origin_root *previous;
     const __chelis_host_result_origin **slot;
-} __chelis_host_result_origin_root;
+} __chelis_global_origin_root;
 
 typedef struct __chelis_host_result_origin_arena {
     __chelis_host_result_origin *head;
     __chelis_host_result_origin *leaf_head;
     __chelis_host_result_claim_block *claim_head;
-    __chelis_host_result_origin_root *root_head;
+    __chelis_global_origin_root *root_head;
 #ifdef __CHELIS_HOST_STACK_GUARD
     uintptr_t stack_low;
     uintptr_t stack_high;
@@ -3527,12 +3527,12 @@ typedef struct __chelis_host_result_origin_arena {
 #endif
 } __chelis_host_result_origin_arena;
 
-typedef struct __chelis_host_result_origin_scope {
-    __chelis_host_result_origin_root *roots;
+typedef struct __chelis_global_origin_scope {
+    __chelis_global_origin_root *roots;
     __chelis_host_result_claim_block *claims;
-} __chelis_host_result_origin_scope;
+} __chelis_global_origin_scope;
 
-static void __chelis_host_result_origin_retain(const __chelis_host_result_origin *origin) {
+static void __chelis_global_origin_retain(const __chelis_host_result_origin *origin) {
     if (origin != NULL) {
         __chelis_host_result_origin *node = (__chelis_host_result_origin *)origin;
         if (node->references == SIZE_MAX) abort();
@@ -3543,7 +3543,7 @@ static void __chelis_host_result_origin_retain(const __chelis_host_result_origin
 /* Detach a zero-reference node in constant work, then use its former arena
    link as an iterative retirement queue. Shared children are enqueued only
    when their last edge/root disappears. */
-static void __chelis_host_result_origin_retire(const __chelis_host_result_origin *origin, __chelis_host_result_origin **pending) {
+static void __chelis_global_origin_retire(const __chelis_host_result_origin *origin, __chelis_host_result_origin **pending) {
     if (origin == NULL) return;
     __chelis_host_result_origin *node = (__chelis_host_result_origin *)origin;
     if (node->references == 0) abort();
@@ -3554,46 +3554,46 @@ static void __chelis_host_result_origin_retire(const __chelis_host_result_origin
     *pending = node;
 }
 
-static void __chelis_host_result_origin_release(const __chelis_host_result_origin *origin) {
+static void __chelis_global_origin_release(const __chelis_host_result_origin *origin) {
     __chelis_host_result_origin *pending = NULL;
-    __chelis_host_result_origin_retire(origin, &pending);
+    __chelis_global_origin_retire(origin, &pending);
     while (pending != NULL) {
         __chelis_host_result_origin *node = pending;
         pending = node->allocation_next;
         if (node->backing_owner != NULL) {
-            __chelis_host_result_origin_retire(node->backing_owner, &pending);
+            __chelis_global_origin_retire(node->backing_owner, &pending);
         } else if (node->child_count > 0) {
             for (int64_t i = 0; i < node->child_count; ++i) {
-                __chelis_host_result_origin_retire(node->children[i], &pending);
+                __chelis_global_origin_retire(node->children[i], &pending);
             }
         }
         free(node);
     }
 }
 
-static void __chelis_host_result_origin_assign(const __chelis_host_result_origin **slot, const __chelis_host_result_origin *origin) {
-    __chelis_host_result_origin_retain(origin);
+static void __chelis_global_origin_assign(const __chelis_host_result_origin **slot, const __chelis_host_result_origin *origin) {
+    __chelis_global_origin_retain(origin);
     const __chelis_host_result_origin *previous = *slot;
     *slot = origin;
-    __chelis_host_result_origin_release(previous);
+    __chelis_global_origin_release(previous);
 }
 
-static void __chelis_host_result_origin_root_enter(__chelis_host_result_origin_arena *arena, __chelis_host_result_origin_root *root, const __chelis_host_result_origin **slot) {
+static void __chelis_global_origin_root_enter(__chelis_host_result_origin_arena *arena, __chelis_global_origin_root *root, const __chelis_host_result_origin **slot) {
     root->previous = arena->root_head;
     root->slot = slot;
     arena->root_head = root;
-    __chelis_host_result_origin_retain(*slot);
+    __chelis_global_origin_retain(*slot);
 }
 
-static __chelis_host_result_origin_scope __chelis_host_result_origin_scope_enter(__chelis_host_result_origin_arena *arena) {
-    return (__chelis_host_result_origin_scope){ arena->root_head, arena->claim_head };
+static __chelis_global_origin_scope __chelis_global_origin_scope_enter(__chelis_host_result_origin_arena *arena) {
+    return (__chelis_global_origin_scope){ arena->root_head, arena->claim_head };
 }
 
-static void __chelis_host_result_origin_scope_leave(__chelis_host_result_origin_arena *arena, __chelis_host_result_origin_scope scope) {
+static void __chelis_global_origin_scope_leave(__chelis_host_result_origin_arena *arena, __chelis_global_origin_scope scope) {
     while (arena->root_head != scope.roots) {
-        __chelis_host_result_origin_root *root = arena->root_head;
+        __chelis_global_origin_root *root = arena->root_head;
         arena->root_head = root->previous;
-        __chelis_host_result_origin_assign(root->slot, NULL);
+        __chelis_global_origin_assign(root->slot, NULL);
     }
     while (arena->claim_head != scope.claims) {
         __chelis_host_result_claim_block *block = arena->claim_head;
@@ -3612,7 +3612,7 @@ typedef struct __chelis_entry_receipt {
 } __chelis_entry_receipt;
 
 static void __chelis_host_result_origin_arena_destroy(__chelis_host_result_origin_arena *arena) {
-    __chelis_host_result_origin_scope_leave(arena, (__chelis_host_result_origin_scope){ NULL, NULL });
+    __chelis_global_origin_scope_leave(arena, (__chelis_global_origin_scope){ NULL, NULL });
     __chelis_host_result_origin *node = arena->head;
     while (node != NULL) {
         __chelis_host_result_origin *next = node->allocation_next;
@@ -3669,7 +3669,7 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_leaf(__che
     node->child_count = -1;
     node->leaf_next = arena->leaf_head;
     arena->leaf_head = node;
-    __chelis_host_result_origin_retain(node);
+    __chelis_global_origin_retain(node);
     return node;
 }
 
@@ -3700,7 +3700,7 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_aggregate(
     __chelis_host_result_origin *node = __chelis_host_result_origin_alloc(arena, child_count);
     for (int64_t i = 0; i < child_count; ++i) {
         node->children[i] = children[i];
-        __chelis_host_result_origin_retain(children[i]);
+        __chelis_global_origin_retain(children[i]);
     }
     node->child_view = node->children;
     return node;
@@ -3732,7 +3732,7 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_list_suffi
     suffix->child_count = origin->child_count - count;
     suffix->child_view = origin->child_view + count;
     suffix->backing_owner = origin->backing_owner != NULL ? origin->backing_owner : origin;
-    __chelis_host_result_origin_retain(suffix->backing_owner);
+    __chelis_global_origin_retain(suffix->backing_owner);
     return suffix;
 }
 
@@ -3750,7 +3750,7 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_list_prefi
     prefix->child_count = count;
     prefix->child_view = origin->child_view;
     prefix->backing_owner = origin->backing_owner != NULL ? origin->backing_owner : origin;
-    __chelis_host_result_origin_retain(prefix->backing_owner);
+    __chelis_global_origin_retain(prefix->backing_owner);
     return prefix;
 }
 
@@ -5079,7 +5079,7 @@ fn emit_function(
     emitter.entry_projection = entry::helper_coverage_with_verified(function, verified_helpers);
     emitter.external_helpers = external_helpers.clone();
     emitter.interface_reload_names = captured_globals.iter().cloned().collect();
-    emitter.lines.push("    __chelis_host_result_origin_scope __chelis_function_origin_scope = __chelis_host_result_origin_scope_enter(__chelis_origin_arena);".to_string());
+    emitter.lines.push("    __chelis_global_origin_scope __chelis_global_origin_function_scope = __chelis_global_origin_scope_enter(__chelis_origin_arena);".to_string());
     for param in &function.params {
         emitter.interface_reload_names.remove(&param.name);
         emitter.declare_result_origin(&param.name, &param.ty, Some("load"));
@@ -5252,12 +5252,12 @@ fn emit_function(
         })?;
     emitter.emit_terminal_site(terminal, Some("__result"))?;
     emitter.lines.push(format!(
-        "{}if ({PRIVATE_RESULT_ORIGIN_RETURN_SLOT} != NULL) __chelis_host_result_origin_assign({PRIVATE_RESULT_ORIGIN_RETURN_SLOT}, {});",
+        "{}if ({PRIVATE_RESULT_ORIGIN_RETURN_SLOT} != NULL) __chelis_global_origin_assign({PRIVATE_RESULT_ORIGIN_RETURN_SLOT}, {});",
         emitter.indent,
         result_origin_name("__result")
     ));
     emitter.finish_expression_sites()?;
-    emitter.end_result_origin_scope("__chelis_function_origin_scope");
+    emitter.end_result_origin_scope("__chelis_global_origin_function_scope");
     if emitter.tail_loop_used {
         let plan = emitter.tail_loop.as_ref().ok_or_else(|| {
             invalid_abi_shape(
@@ -6818,20 +6818,24 @@ impl<'a> HostEmitter<'a> {
     }
 
     fn register_result_origin_root(&mut self, origin: &str) {
+        // The value-sidecar namespace admits authored suffixes such as
+        // `x_root`. Root records instead occupy the existing compiler-only
+        // namespace, and retain the injective sidecar name as their suffix.
+        let root = format!("__chelis_global_origin_root_{origin}");
         self.lines.push(format!(
-            "{}__chelis_host_result_origin_root {origin}_root;",
+            "{}__chelis_global_origin_root {root};",
             self.indent
         ));
         self.lines.push(format!(
-            "{}__chelis_host_result_origin_root_enter(__chelis_origin_arena, &{origin}_root, &{origin});",
+            "{}__chelis_global_origin_root_enter(__chelis_origin_arena, &{root}, &{origin});",
             self.indent
         ));
     }
 
     fn begin_result_origin_scope(&mut self) -> String {
-        let scope = self.next_temp("origin_scope");
+        let scope = self.next_temp("chelis_global_origin_scope");
         self.lines.push(format!(
-            "{}__chelis_host_result_origin_scope {scope} = __chelis_host_result_origin_scope_enter(__chelis_origin_arena);",
+            "{}__chelis_global_origin_scope {scope} = __chelis_global_origin_scope_enter(__chelis_origin_arena);",
             self.indent
         ));
         scope
@@ -6839,7 +6843,7 @@ impl<'a> HostEmitter<'a> {
 
     fn end_result_origin_scope(&mut self, scope: &str) {
         self.lines.push(format!(
-            "{}__chelis_host_result_origin_scope_leave(__chelis_origin_arena, {scope});",
+            "{}__chelis_global_origin_scope_leave(__chelis_origin_arena, {scope});",
             self.indent
         ));
     }
@@ -6860,7 +6864,7 @@ impl<'a> HostEmitter<'a> {
         let origin = result_origin_name(target);
         let initializer = Self::interface_result_origin_expr(ty);
         self.lines.push(format!(
-            "{}__chelis_host_result_origin_assign(&{origin}, {initializer});",
+            "{}__chelis_global_origin_assign(&{origin}, {initializer});",
             self.indent
         ));
     }
@@ -6869,7 +6873,7 @@ impl<'a> HostEmitter<'a> {
         let origin = result_origin_name(target);
         if children.is_empty() {
             self.lines.push(format!(
-                "{}__chelis_host_result_origin_assign(&{origin}, NULL);",
+                "{}__chelis_global_origin_assign(&{origin}, NULL);",
                 self.indent
             ));
             return;
@@ -6886,7 +6890,7 @@ impl<'a> HostEmitter<'a> {
                 .join(", ")
         ));
         self.lines.push(format!(
-            "{}__chelis_host_result_origin_assign(&{origin}, __chelis_host_result_origin_aggregate(__chelis_origin_arena, {}, {child_array}));",
+            "{}__chelis_global_origin_assign(&{origin}, __chelis_host_result_origin_aggregate(__chelis_origin_arena, {}, {child_array}));",
             self.indent,
             children.len()
         ));
@@ -7924,7 +7928,7 @@ impl<'a> HostEmitter<'a> {
                 self.lines
                     .push(format!("{}{} = {};", self.indent, alias, temp));
                 self.lines.push(format!(
-                    "{}__chelis_host_result_origin_assign(&{}, {});",
+                    "{}__chelis_global_origin_assign(&{}, {});",
                     self.indent,
                     result_origin_name(&alias),
                     result_origin_name(&temp)
@@ -8260,7 +8264,7 @@ impl<'a> HostEmitter<'a> {
                     if self.interface_reload_names.contains(name) {
                         let load = Self::interface_result_origin_expr(ty);
                         self.lines.push(format!(
-                            "{}__chelis_host_result_origin_assign(&{target_origin}, {load});",
+                            "{}__chelis_global_origin_assign(&{target_origin}, {load});",
                             self.indent
                         ));
                     } else {
@@ -8272,7 +8276,7 @@ impl<'a> HostEmitter<'a> {
                             .get(name)
                             .map_or(name.as_str(), String::as_str);
                         self.lines.push(format!(
-                            "{}__chelis_host_result_origin_assign(&{target_origin}, {});",
+                            "{}__chelis_global_origin_assign(&{target_origin}, {});",
                             self.indent,
                             result_origin_name(source_origin)
                         ));
@@ -8461,7 +8465,7 @@ impl<'a> HostEmitter<'a> {
                 }
                 self.declare_result_origin(bind_name, &inner_ty, None);
                 self.lines.push(format!(
-                    "{}__chelis_host_result_origin_assign(&{}, __chelis_host_result_origin_child({}, 0));",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_child({}, 0));",
                     self.indent,
                     result_origin_name(bind_name),
                     result_origin_name(&option_var)
@@ -8558,7 +8562,7 @@ impl<'a> HostEmitter<'a> {
                         temp
                     ));
                     self.lines.push(format!(
-                        "{}__chelis_host_result_origin_assign(&{}, {});",
+                        "{}__chelis_global_origin_assign(&{}, {});",
                         self.indent,
                         result_origin_name(&binding.name),
                         result_origin_name(&temp)
@@ -8964,7 +8968,7 @@ impl<'a> HostEmitter<'a> {
         }
         let origin = result_origin_name(target);
         self.lines.push(format!(
-            "{}__chelis_host_result_origin_assign(&{origin}, __chelis_host_result_origin_uniform(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\"));",
+            "{}__chelis_global_origin_assign(&{origin}, __chelis_host_result_origin_uniform(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\"));",
             self.indent
         ));
     }
@@ -8976,7 +8980,7 @@ impl<'a> HostEmitter<'a> {
         let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
         let origin = result_origin_name(target);
         self.lines.push(format!(
-            "{}__chelis_host_result_origin_assign(&{origin}, __chelis_host_result_origin_leaf(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\"));",
+            "{}__chelis_global_origin_assign(&{origin}, __chelis_host_result_origin_leaf(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\"));",
             self.indent
         ));
     }
@@ -9866,7 +9870,7 @@ impl<'a> HostEmitter<'a> {
                 ));
                 self.assign_unboxed_value(target, ty, &value_var)?;
                 self.lines.push(format!(
-                    "{}__chelis_host_result_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
                     self.indent,
                     result_origin_name(target),
                     result_origin_name(&arg_vars[0].0),
@@ -9882,7 +9886,7 @@ impl<'a> HostEmitter<'a> {
                 ));
                 self.assign_unboxed_value(target, ty, &value_var)?;
                 self.lines.push(format!(
-                    "{}__chelis_host_result_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
                     self.indent,
                     result_origin_name(target),
                     result_origin_name(&arg_vars[0].0),
@@ -10051,7 +10055,7 @@ impl<'a> HostEmitter<'a> {
             "take" => {
                 // A selection: the prefix keeps each element's producer.
                 self.lines.push(format!(
-                    "{}__chelis_host_result_origin_assign(&{}, __chelis_host_result_origin_list_prefix(__chelis_origin_arena, {}, {}));",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_list_prefix(__chelis_origin_arena, {}, {}));",
                     self.indent,
                     result_origin_name(target),
                     result_origin_name(&arg_vars[0].0),
@@ -10081,7 +10085,7 @@ impl<'a> HostEmitter<'a> {
                 // Build the immutable metadata view before the consuming
                 // entry point can release or advance the source payload.
                 self.lines.push(format!(
-                    "{}__chelis_host_result_origin_assign(&{}, __chelis_host_result_origin_list_suffix(__chelis_origin_arena, {}, {}));",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_list_suffix(__chelis_origin_arena, {}, {}));",
                     self.indent,
                     result_origin_name(target),
                     result_origin_name(&arg_vars[0].0),
@@ -13040,7 +13044,7 @@ impl<'a> HostEmitter<'a> {
                     self.indent
                 ));
             }
-            self.end_result_origin_scope("__chelis_function_origin_scope");
+            self.end_result_origin_scope("__chelis_global_origin_function_scope");
             self.lines
                 .push(format!("{}goto __chelis_tail_loop_entry;", self.indent));
             self.tail_loop_used = true;
@@ -13196,7 +13200,7 @@ impl<'a> HostEmitter<'a> {
         ));
         self.assign_unboxed_value(target, ty, &value_var)?;
         self.lines.push(format!(
-            "{}__chelis_host_result_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
+            "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
             self.indent,
             result_origin_name(target),
             result_origin_name(&base_var),
@@ -13295,7 +13299,7 @@ impl<'a> HostEmitter<'a> {
                 self.assign_unboxed_value(&binding.name, &binding.ty, &field_var)?;
                 self.declare_result_origin(&binding.name, &binding.ty, None);
                 self.lines.push(format!(
-                    "{}__chelis_host_result_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
                     self.indent,
                     result_origin_name(&binding.name),
                     result_origin_name(&scrutinee_var),
