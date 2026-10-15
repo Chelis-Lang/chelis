@@ -306,6 +306,7 @@ pub(crate) fn wire_slot_read(op: &WireRiscOp, slot: usize) -> SlotRead {
         | WireRiscOp::MinElem
         | WireRiscOp::ExtremaAdjoint { .. }
         | WireRiscOp::Relu
+        | WireRiscOp::Cumsum { .. }
         | WireRiscOp::Softmax { .. }
         | WireRiscOp::ReluAdjoint
         | WireRiscOp::Neg
@@ -400,6 +401,7 @@ fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
         | WireRiscOp::MinElem
         | WireRiscOp::ExtremaAdjoint { .. }
         | WireRiscOp::Relu
+        | WireRiscOp::Cumsum { .. }
         | WireRiscOp::Softmax { .. }
         | WireRiscOp::ReluAdjoint
         | WireRiscOp::Neg
@@ -786,7 +788,8 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
         Prim::parse_interchange_name(&node.output_type.precision)
             .ok_or_else(|| reject("unknown output dtype"))?;
         match &node.op {
-            WireRiscOp::Sum { axis: a, .. }
+            WireRiscOp::Cumsum { axis: a, .. }
+            | WireRiscOp::Sum { axis: a, .. }
             | WireRiscOp::MaxReduce { axis: a }
             | WireRiscOp::MinReduce { axis: a }
             | WireRiscOp::ProdReduce { axis: a }

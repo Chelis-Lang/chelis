@@ -77,7 +77,7 @@ fn cumsum_adjoint_last_suffix_preserves_negative_zero() {
 #[test]
 fn cumsum_grad_emission_is_independent_of_scan_length() {
     let mut sizes = Vec::new();
-    for n in [16, 64] {
+    for n in [16, 64, 4096] {
         let (dag, root) = gradient(n);
         let slots: usize = dag
             .nodes()
@@ -113,14 +113,14 @@ fn cumsum_grad_emission_is_independent_of_scan_length() {
         let elapsed = start.elapsed();
         let lines = source.lines().count();
         eprintln!(
-            "cumsum baseline n={n} nodes={} lines={lines} bytes={} emit_wall={elapsed:?}",
+            "cumsum candidate n={n} nodes={} lines={lines} bytes={} emit_wall={elapsed:?}",
             dag.len(),
             source.len()
         );
         sizes.push(lines);
     }
     assert!(
-        sizes[1] <= sizes[0] + 1024,
+        sizes.iter().all(|&lines| lines <= sizes[0] + 1024),
         "scan emission scales with axis length: {sizes:?}"
     );
 }

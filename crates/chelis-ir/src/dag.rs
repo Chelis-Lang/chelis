@@ -897,6 +897,23 @@ pub struct RuntimeRecurrenceBackward {
     pub targets: Vec<usize>,
 }
 
+/// The pinned inclusive scan order ([05-OP-33]). No identity leaf enters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanDirection {
+    Increasing,
+    Decreasing,
+}
+
+impl ScanDirection {
+    pub fn reversed(self) -> Self {
+        match self {
+            Self::Increasing => Self::Decreasing,
+            Self::Decreasing => Self::Increasing,
+        }
+    }
+}
+
 /// A RISC primitive operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RiscOp {
@@ -1469,6 +1486,13 @@ pub enum RiscOp {
     ScatterElements {
         axis: usize,
     },
+    /// Ordered inclusive prefix/suffix scan with the default sum accumulator.
+    /// The first visited input seeds the running state; output finalization
+    /// never narrows that state. Its float adjoint reverses the direction.
+    Cumsum {
+        axis: usize,
+        direction: ScanDirection,
+    },
 }
 
 /// Canonical semantic identities discovered from the RISC IR before Phase 4C
@@ -1537,6 +1561,7 @@ pub enum RiscAtomIdentity {
     SplitKeys,
     FoldIn,
     Sum,
+    Cumsum,
     MaxReduce,
     MinReduce,
     ProdReduce,
@@ -1629,6 +1654,7 @@ impl RiscAtomIdentity {
         Self::SplitKeys,
         Self::FoldIn,
         Self::Sum,
+        Self::Cumsum,
         Self::MaxReduce,
         Self::MinReduce,
         Self::ProdReduce,
@@ -1721,6 +1747,7 @@ impl RiscAtomIdentity {
             Self::SplitKeys => "split_keys",
             Self::FoldIn => "fold_in",
             Self::Sum => "sum",
+            Self::Cumsum => "Cumsum",
             Self::MaxReduce => "max_reduce",
             Self::MinReduce => "min_reduce",
             Self::ProdReduce => "prod_reduce",
@@ -1892,6 +1919,7 @@ impl RiscOp {
             // callable Table-A operation: it selects one of two existing keys.
             Self::KeySelect => Structural,
             Self::Sum { .. } => Semantic(Id::Sum),
+            Self::Cumsum { .. } => Semantic(Id::Cumsum),
             Self::MaxReduce { .. } => Semantic(Id::MaxReduce),
             Self::MinReduce { .. } => Semantic(Id::MinReduce),
             Self::ProdReduce { .. } => Semantic(Id::ProdReduce),
@@ -2192,6 +2220,8 @@ impl RiscOp {
             // fallback's envelope through would silently drop the abort — the
             // exact substitution [05-OP-68] exists to prevent.
             RiscOp::FloatClassify(_) | RiscOp::GuardedFail { .. } => false,
+            // Ordered scans need a directional prefix-envelope transformer.
+            RiscOp::Cumsum { .. } => false,
 
             // --- Unary elementwise math ---
             // `Exp`, `Log`, `Sqrt` are direct ports of the auto_LiRPA
@@ -2605,7 +2635,9 @@ impl DagNode {
             RiscOp::Cast { new_precision } | RiscOp::NamedCast { new_precision, .. } => {
                 value_check(new_precision.is_integer() || *new_precision == Prim::Bool)
             }
-            RiscOp::Sum { .. } | RiscOp::ProdReduce { .. } => value_check(integer),
+            RiscOp::Cumsum { .. } | RiscOp::Sum { .. } | RiscOp::ProdReduce { .. } => {
+                value_check(integer)
+            }
             // An integer window sum overflows; a window is never empty, and
             // max and min select without arithmetic.
             RiscOp::ReduceWindow { reducer, .. } => value_check(
@@ -5299,6 +5331,10 @@ mod tests {
                 batch_rank: 0,
             },
             RiscOp::ScatterElements { axis: 0 },
+            RiscOp::Cumsum {
+                axis: 0,
+                direction: ScanDirection::Increasing,
+            },
             RiscOp::Relu,
             RiscOp::Softmax { axis: 0 },
             RiscOp::ReluAdjoint,
@@ -5511,8 +5547,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            77,
-            "one_of_every_risc_op must list all 77 classified samples"
+            78,
+            "one_of_every_risc_op must list all 78 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -5549,7 +5585,7 @@ mod tests {
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 40,
+            excluded, 41,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 

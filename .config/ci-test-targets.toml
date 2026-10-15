@@ -643,6 +643,11 @@ reason = "the domain integration-support slice executes every compiled unreprese
 tracking_issue = "chelis#908"
 
 [[path_rule]]
+prefix = "examples/grad_cumsum.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-compiler-api"]
+
+[[path_rule]]
 prefix = "examples/grad_extent_claim.ch"
 disposition = "packages"
 packages = ["chelis-cli"]

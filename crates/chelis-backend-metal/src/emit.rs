@@ -269,6 +269,7 @@ pub(crate) fn allocation_nodes(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
                 | RiscOp::Mul
                 | RiscOp::Bitwise(_)
                 | RiscOp::ReluAdjoint
+                | RiscOp::Cumsum { .. }
                 | RiscOp::Sum { axis: 0, .. }
                 | RiscOp::MaxReduce { axis: 0 }
                 | RiscOp::MinReduce { axis: 0 }
@@ -1100,6 +1101,7 @@ impl<'plan> Emitter<'plan> {
             // Reading the accumulator field (not destructure-`..`) is the
             // memory-rule-pinned discipline so silent precision downgrades
             // surface as kernel-template panics rather than wrong answers.
+            RiscOp::Cumsum { axis, direction } => self.emit_ordered_scan(node, *axis, *direction),
             RiscOp::Sum {
                 axis: 0,
                 accumulator,
@@ -1831,6 +1833,111 @@ impl<'plan> Emitter<'plan> {
     /// `reduce_sum` (per spec §5.7.1). For `max`/`min` reductions the
     /// accumulator equals the operand precision (no upgrade) and
     /// `accumulator_override` is `None`.
+    fn emit_ordered_scan(
+        &mut self,
+        node: &DagNode,
+        axis: usize,
+        direction: chelis_ir::dag::ScanDirection,
+    ) -> Result<(), String> {
+        let input = self
+            .plan_of(node.inputs[0])
+            .ok_or_else(|| "scan input is not materialized".to_owned())?
+            .clone();
+        Self::require_metal_admissible(input.prec, "scan input")?;
+        let id = node.id.0;
+        let n = input.shape[axis];
+        let (inner, lanes) = if input.n == 0 {
+            (1, 0)
+        } else {
+            (
+                input.shape[axis + 1..].iter().product::<usize>(),
+                input.n / n,
+            )
+        };
+        if input.n > u32::MAX as usize || n > u32::MAX as usize || inner > u32::MAX as usize {
+            return Err("Metal cumsum exceeds uint32 device indexing limit".into());
+        }
+        let kernel = format!("k_cumsum_{id}");
+        let pso = format!("pso_{id}");
+        let source = kernels::ordered_scan(
+            &kernel,
+            input.prec,
+            direction == chelis_ir::dag::ScanDirection::Decreasing,
+        );
+        self.kernels.push((
+            pso.clone(),
+            kernel.clone(),
+            Self::prepend_span_comments_to_kernel_source(node, source),
+        ));
+        let allocation = self.claim_allocation(node.id)?;
+        let output = format!("buf_{id}");
+        let status = format!("scan_status_{id}");
+        self.body.push(format!(
+            "id<MTLBuffer> {output} = chelis_metal_alloc({}u * {});",
+            input.n,
+            dtype::host_sizeof_expr(node.output_type.precision)
+        ));
+        self.body.push(format!(
+            "id<MTLBuffer> {status} = chelis_metal_alloc_status_word(sizeof(uint32_t));"
+        ));
+        self.extra_peak_device_bytes = self
+            .extra_peak_device_bytes
+            .checked_add(4)
+            .expect("scan status accounting");
+        self.body.push(format!("id<MTLComputePipelineState> {pso} = chelis_metal_get_pipeline({pso}_src, @\"{kernel}\");"));
+        let activation = node
+            .owner
+            .activation
+            .map(|id| {
+                self.plan_of(id)
+                    .cloned()
+                    .ok_or_else(|| "scan activation is not materialized".to_owned())
+            })
+            .transpose()?;
+        let active_count = activation.as_ref().map_or(0, |plan| plan.n);
+        if active_count > u32::MAX as usize {
+            return Err("Metal scan activation exceeds uint32 indexing".into());
+        }
+        let row_length = if active_count == 0 {
+            0
+        } else {
+            input.n / active_count
+        };
+        let activation_buf = activation
+            .as_ref()
+            .map_or(status.as_str(), |plan| plan.buf.as_str());
+        self.body.push(format!(
+            "uint32_t scan_active_count_{id} = {active_count}u;"
+        ));
+        self.body.push(format!(
+            "uint32_t scan_dims_{id}[4] = {{ {lanes}u, {n}u, {inner}u, {row_length}u }};"
+        ));
+        self.body.extend(launch_1d(
+            &pso,
+            lanes.max(1),
+            lanes.clamp(1, 256),
+            &[&input.buf, &output, &status, activation_buf],
+            &[
+                (&format!("scan_dims_{id}"), "sizeof(uint32_t) * 4"),
+                (&format!("&scan_active_count_{id}"), "sizeof(uint32_t)"),
+            ],
+        ));
+        let overflow = NumericTrap::Overflow {
+            op: "cumsum",
+            prim: node.output_type.precision,
+        }
+        .to_string();
+        self.body.push(format!("if (*((uint32_t*)[{status} contents]) != 0) {{ fprintf(stderr, \"%s\\n\", {overflow:?}); abort(); }}"));
+        self.plans[id] = Some(TensorPlan {
+            buf: output,
+            prec: node.output_type.precision,
+            n: input.n,
+            shape: input.shape,
+            allocation,
+        });
+        Ok(())
+    }
+
     fn emit_reduce(
         &mut self,
         _dag: VerifiedDagView<'_>,

@@ -132,7 +132,7 @@ fn scan_integer_forward_overflow_and_bool_rejection() {
         assert!(
             eval_tensor(&dag, &UnordMap::from([("x".into(), value)]))
                 .unwrap_err()
-                .contains("Overflow")
+                .contains("overflow")
         );
     }
     let (dag, _) = graph(&[1], Prim::Bool, 0, ScanDirection::Increasing, false);
@@ -172,4 +172,75 @@ fn reduced_float_scan_keeps_wide_running_state() {
         .unwrap();
         assert_eq!(values[&root].storage().scalar_at(3).as_f64_lossy(), last);
     }
+}
+
+#[test]
+fn scan_adjoint_reverses_direction_without_zero_seed_at_all_float_widths() {
+    use chelis_ir::grad::grad_dag_checked;
+    for p in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        for n in [0, 1, 5] {
+            for direction in [ScanDirection::Increasing, ScanDirection::Decreasing] {
+                let (mut dag, scan) = graph(&[n], p, 0, direction, true);
+                let x = dag.nodes()[0].id;
+                let owner = dag.nodes()[0].owner;
+                let ty = dag.get(scan).unwrap().output_type.clone();
+                let weights = dag.add_node(
+                    owner,
+                    RiscOp::Load { name: "w".into() },
+                    vec![],
+                    ty.clone(),
+                    None,
+                );
+                let weighted = dag.add_node(owner, RiscOp::Mul, vec![scan, weights], ty, None);
+                let acc = RiscOp::default_reduce_sum_accumulator(p).unwrap();
+                let loss = dag.add_node(
+                    owner,
+                    RiscOp::Sum {
+                        axis: 0,
+                        accumulator: acc,
+                    },
+                    vec![weighted],
+                    TensorType {
+                        dims: vec![],
+                        precision: acc,
+                    },
+                    None,
+                );
+                let gradient = grad_dag_checked(&dag, loss, &[x]).unwrap();
+                let root = gradient.grad_nodes[&x];
+                let inputs = UnordMap::from([
+                    (
+                        "x".into(),
+                        TensorValue::finalize_from_wide("oracle", p, vec![n], vec![0.0; n])
+                            .unwrap(),
+                    ),
+                    (
+                        "w".into(),
+                        TensorValue::finalize_from_wide("oracle", p, vec![n], vec![-0.0; n])
+                            .unwrap(),
+                    ),
+                ]);
+                let actual = eval_tensor(&gradient.dag, &inputs).unwrap();
+                assert_eq!(
+                    bits(actual[&root].storage()),
+                    vec![(-0.0_f64).to_bits(); n],
+                    "{p:?} {n} {direction:?}"
+                );
+                // A positive-zero boundary cotangent changes the result.
+                if n > 0 {
+                    let mut positive = inputs.clone();
+                    positive.insert(
+                        "w".into(),
+                        TensorValue::finalize_from_wide("oracle", p, vec![n], vec![0.0; n])
+                            .unwrap(),
+                    );
+                    let actual = eval_tensor(&gradient.dag, &positive).unwrap();
+                    assert_eq!(bits(actual[&root].storage()), vec![0.0_f64.to_bits(); n]);
+                }
+            }
+        }
+    }
+    let (mut dag, scan) = graph(&[3], Prim::Int32, 0, ScanDirection::Increasing, false);
+    dag.add_root(scan);
+    assert!(grad_dag_checked(&dag, scan, &[dag.nodes()[0].id]).is_err());
 }

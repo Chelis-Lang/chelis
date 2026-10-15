@@ -23,11 +23,17 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 29 is explicitly
+WireDag JSON is an exact-version contract. Schema version 30 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 28, and every future version are decode errors before any IR
+versions 1 through 29, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
+
+`Cumsum` carries a normalized nonnegative axis and an explicit `increasing`
+or `decreasing` direction. It preserves input extents and uses [05-OP-33]'s
+first-leaf inclusive scan and default accumulator. Decreasing scans require
+float operands. Both directions finalize each prefix or suffix without
+narrowing the continuing accumulator.
 
 Version 23 requires an explicit `batch_rank` on `Gather`, `ScatterAdd`, and
 `Scatter` wire operations. Its leading index dimensions must equal the

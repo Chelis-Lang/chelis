@@ -3168,7 +3168,7 @@ fn ordered_scan_emits_one_kernel_for_thousands_of_prefixes() {
             None,
         );
         dag.add_root(root);
-        let source = codegen_hip(&dag, "scan").c_source;
+        let source = codegen_hip(&dag, "scan").unwrap().c_source;
         assert!(source.contains("cumsum"));
         lengths.push(source.len());
     }

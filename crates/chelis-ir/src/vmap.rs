@@ -139,6 +139,10 @@ fn vectorize_axis0_impl(
                     "runtime range inside vmap requires a shared cardinality representation".into(),
                 );
             }
+            RiscOp::Cumsum { axis, direction } => RiscOp::Cumsum {
+                axis: axis + 1,
+                direction: *direction,
+            },
             RiscOp::Sum { axis, accumulator } => RiscOp::Sum {
                 axis: axis + 1,
                 accumulator: *accumulator,

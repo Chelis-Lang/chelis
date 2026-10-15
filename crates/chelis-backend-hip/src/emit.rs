@@ -1703,6 +1703,7 @@ impl HipEmitter {
             // both source and accumulator dtype when they differ
             // (i8/i16 → i32 path), so the kernel-source emission can
             // dispatch unambiguously from the name.
+            RiscOp::Cumsum { .. } => Some(format!("kernel_cumsum_{}", node.id.0)),
             RiscOp::Sum { axis, accumulator } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -2162,6 +2163,14 @@ impl HipEmitter {
             // dispatches on (source, accumulator) and uses the
             // promoted-accumulator template for the i8/i16 → i32
             // case.
+            RiscOp::Cumsum { axis, direction } => kernels::ordered_scan(
+                self.kernel_rank,
+                name,
+                *axis,
+                *direction == chelis_ir::dag::ScanDirection::Decreasing,
+                operand_prec(),
+                take_gate(),
+            ),
             RiscOp::Sum { axis, accumulator } => {
                 let input_id = node.inputs[0];
                 let operand_kind = Self::elem_kind(&dag.get(input_id).unwrap().output_type)?;
@@ -2793,6 +2802,29 @@ impl HipEmitter {
             // name agrees with the kernel-source-side name (otherwise
             // hipModuleGetFunction fails to resolve the launched
             // symbol against the registered source).
+            RiscOp::Cumsum { .. } => {
+                let kernel = format!("kernel_cumsum_{id}");
+                let trap = dag
+                    .get(node.inputs[0])
+                    .unwrap()
+                    .output_type
+                    .precision
+                    .is_integer()
+                    .then(|| {
+                        NumericTrap::Overflow {
+                            op: "cumsum",
+                            prim: node.output_type.precision,
+                        }
+                        .to_string()
+                    });
+                self.emit_unary_launch_with_trap(
+                    id,
+                    &kernel,
+                    &node.inputs,
+                    &node.output_type,
+                    trap.as_deref(),
+                );
+            }
             RiscOp::Sum { axis, accumulator } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -5421,7 +5453,8 @@ impl HipEmitter {
             | RiscOp::RuntimeRecurrenceAdjoint { .. }
             | RiscOp::Iota
             | RiscOp::ListMapCapture { .. }
-            | RiscOp::OrderedAdjointSum { .. } => true,
+            | RiscOp::OrderedAdjointSum { .. }
+            | RiscOp::Cumsum { .. } => true,
             RiscOp::Load { .. } => false,
             RiscOp::Const { .. }
             | RiscOp::ConstTensor { .. }

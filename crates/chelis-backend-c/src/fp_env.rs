@@ -124,6 +124,7 @@ pub fn risc_nan_finalization(op: &chelis_ir::dag::RiscOp) -> Option<NanFinalizat
         | RiscOp::Ceil
         | RiscOp::Round
         | RiscOp::Recip
+        | RiscOp::Cumsum { .. }
         | RiscOp::Sum { .. }
         | RiscOp::ProdReduce { .. }
         | RiscOp::OrderedAdjointSum { .. }

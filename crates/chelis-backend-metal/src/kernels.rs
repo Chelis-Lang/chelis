@@ -1030,3 +1030,55 @@ mod tests {
         assert!(src.contains("device const float* A"));
     }
 }
+
+/// OP33 ordered scan: one independent lane per thread, one store per prefix.
+pub fn ordered_scan(name: &str, precision: Prim, reverse: bool) -> String {
+    let accumulator =
+        chelis_ir::dag::RiscOp::default_reduce_sum_accumulator(precision).expect("numeric scan");
+    let result = precision.sum_result_precision(accumulator);
+    let input = dtype::msl_type(precision);
+    let output = dtype::msl_type(result);
+    let acc = dtype::msl_type(accumulator);
+    let combine = if precision.is_integer() {
+        let (minimum, maximum) = if accumulator == Prim::Int64 {
+            ("(-9223372036854775807L - 1L)", "9223372036854775807L")
+        } else {
+            ("(-2147483647 - 1)", "2147483647")
+        };
+        format!(
+            "if ((value > 0 && state > {maximum} - value) || (value < 0 && state < {minimum} - value)) {{ atomic_fetch_or_explicit(status, 1u, memory_order_relaxed); return; }} state += value;"
+        )
+    } else {
+        "state += value;".to_owned()
+    };
+    let canonical = if precision.is_float() {
+        "if ((as_type<uint>(state) & 0x7fffffffu) > 0x7f800000u) state = as_type<float>(0x7fc00000u);"
+    } else {
+        ""
+    };
+    maybe_wrap_msl_320(
+        format!(
+            r#"#include <metal_stdlib>
+using namespace metal;
+kernel void {name}(device const {input}* input [[buffer(0)]], device {output}* output [[buffer(1)]], device atomic_uint* status [[buffer(2)]], device const uchar* activation [[buffer(3)]], constant uint4& dims [[buffer(4)]], constant uint& active_count [[buffer(5)]], uint lane [[thread_position_in_grid]]) {{
+ if (lane >= dims.x) return;
+ uint n = dims.y, inner = dims.z;
+ uint base = (lane / inner) * n * inner + lane % inner;
+ {acc} state = 0;
+ for (uint step = 0; step < n; ++step) {{
+   uint position = base + ({coordinate}) * inner;
+   bool active = active_count == 0;
+   if (active_count != 0 && dims.w != 0) active = activation[position / dims.w] != 0;
+   if (active_count != 0 && dims.w == 0) for (uint row = 0; row < active_count; ++row) active |= activation[row] != 0;
+   {acc} value = active ? ({acc})input[position] : ({acc})0;
+   if (step == 0) state = value; else {{ {combine} }}
+   {canonical}
+   output[position] = ({output})state;
+ }}
+}}
+"#,
+            coordinate = if reverse { "n - 1 - step" } else { "step" }
+        ),
+        &[precision, result],
+    )
+}

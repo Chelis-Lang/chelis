@@ -848,6 +848,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::KeySelect
         | RiscOp::Copy
         | RiscOp::Drop
+        | RiscOp::Cumsum { .. }
         | RiscOp::Sum { .. }
         | RiscOp::MaxReduce { .. }
         | RiscOp::MinReduce { .. }

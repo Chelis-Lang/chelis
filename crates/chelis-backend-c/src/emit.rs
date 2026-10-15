@@ -2369,6 +2369,9 @@ impl CEmitter {
             // the F1 footgun (silent precision downgrade via
             // `..`-destructure) cannot recur — neither for WS-A1's f64
             // accumulator nor for WS-A4's i8/i16 → i32 promoted path.
+            RiscOp::Cumsum { axis, direction } => {
+                self.emit_ordered_scan(id, node.inputs[0].0, *axis, *direction, &node.output_type);
+            }
             RiscOp::Sum { axis, accumulator } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -7902,6 +7905,87 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             ]);
         }
         lines
+    }
+
+    /// Stage the ordered input through the checked runtime scan. The staging
+    /// also neutralizes inactive integer rows before any checked arithmetic.
+    fn emit_ordered_scan(
+        &mut self,
+        id: usize,
+        input: usize,
+        axis: usize,
+        direction: chelis_ir::dag::ScanDirection,
+        ty: &TensorType,
+    ) {
+        self.emit_slot_wrapper(id, ty);
+        let reverse = direction == chelis_ir::dag::ScanDirection::Decreasing;
+        let rank = Self::ndim(ty);
+        self.line(&format!("int64_t t{id}_scan_shape[{rank}];"));
+        self.line(&format!("for (int32_t d = 0; d < {rank}; ++d) t{id}_scan_shape[d] = chelis_tensor_shape(t{input}, d);"));
+        self.line(&format!("chelis_tensor *t{id}_scan_input = chelis_alloc({rank}, t{id}_scan_shape, t{input}_dtype);"));
+        self.line(&format!(
+            "chelis_tensor_write *t{id}_scan_guard = chelis_tensor_begin_write(t{id}_scan_input);"
+        ));
+        self.line(&format!(
+            "void *t{id}_scan_data = chelis_tensor_write_view(t{id}_scan_guard).data;"
+        ));
+        self.line(&format!(
+            "int64_t t{id}_scan_width = chelis_dtype_size(t{input}_dtype);"
+        ));
+        if reverse {
+            self.line(&format!("int64_t t{id}_scan_inner = 1;"));
+            self.line(&format!("if (t{input}_size != 0) for (int32_t d = {}; d < {rank}; ++d) t{id}_scan_inner *= t{id}_scan_shape[d];", axis + 1));
+        }
+        self.open_element_loop(id, "i", &format!("t{input}_size"), None);
+        let source = if reverse {
+            format!(
+                "i + (t{id}_scan_shape[{axis}] - 1 - 2 * ((i / t{id}_scan_inner) % t{id}_scan_shape[{axis}])) * t{id}_scan_inner"
+            )
+        } else {
+            "i".to_owned()
+        };
+        self.line(&format!("int64_t t{id}_scan_source = {source};"));
+        if let Some(gate) = &self.gate {
+            self.line(&format!("if ({})", gate.element));
+        }
+        self.line(&format!("memcpy((char*)t{id}_scan_data + i * t{id}_scan_width, (const char*)t{input}_data + t{id}_scan_source * t{id}_scan_width, (size_t)t{id}_scan_width);"));
+        if self.gate.is_some() {
+            self.line(&format!("else memset((char*)t{id}_scan_data + i * t{id}_scan_width, 0, (size_t)t{id}_scan_width);"));
+        }
+        self.close_element_loop();
+        self.line(&format!("chelis_tensor_end_write(t{id}_scan_guard);"));
+        self.line(&format!(
+            "chelis_tensor *t{id}_scan_result = chelis_tensor_cumsum(t{id}_scan_input, {axis});"
+        ));
+        self.line(&format!(
+            "const void *t{id}_scan_result_data = chelis_tensor_read_view(t{id}_scan_result).data;"
+        ));
+        self.line(&format!(
+            "int64_t t{id}_scan_output_width = chelis_dtype_size(t{id}_dtype);"
+        ));
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; ++i) {{"));
+        self.indent += 1;
+        self.line(&format!("int64_t t{id}_scan_source = {source};"));
+        if ty.precision.is_float() {
+            let et = Self::prim_elem_type(ty.precision);
+            let read = format!("((const {et}*)t{id}_scan_result_data)[t{id}_scan_source]");
+            let value = if Self::is_reduced_float(ty) {
+                format!(
+                    "{}({}({read}))",
+                    Self::f32_to_reduced_fn(ty.precision),
+                    Self::reduced_to_f32_fn(ty.precision)
+                )
+            } else {
+                finalize_elem(self.nan_finalization, read, ty)
+            };
+            self.line(&format!("(({et}*)t{id}_data)[i] = {value};"));
+        } else {
+            self.line(&format!("memcpy((char*)t{id}_data + i * t{id}_scan_output_width, (const char*)t{id}_scan_result_data + t{id}_scan_source * t{id}_scan_output_width, (size_t)t{id}_scan_output_width);"));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("chelis_tensor_release(t{id}_scan_result);"));
+        self.line(&format!("chelis_tensor_release(t{id}_scan_input);"));
     }
 
     /// Allocate the leaves of [05-OP-30]'s adjacent-pair tree. An empty

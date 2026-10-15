@@ -279,6 +279,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::FoldIn {}
             | WireRiscOp::KeySelect {}
             | WireRiscOp::SplitN { .. }
+            | WireRiscOp::Cumsum { .. }
             | WireRiscOp::Sum { .. }
             | WireRiscOp::Count { .. }
             | WireRiscOp::MaxReduce { .. }
@@ -642,7 +643,8 @@ const _: () = {
     // `Div`; it embeds no numeric payload.
     // Version 29 adds stored-bit FloatClassify predicates with no embedded
     // numeric payload; they have no real-valued envelope transformer.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 29);
+    // Version 30 retains ordered scan metadata without embedded numeric payload.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 30);
 };
 
 #[cfg(test)]

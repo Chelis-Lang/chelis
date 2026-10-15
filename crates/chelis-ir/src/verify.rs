@@ -1289,6 +1289,7 @@ pub fn slot_read(op: &RiscOp, slot: usize) -> SlotRead {
         | RiscOp::Split { .. }
         | RiscOp::FoldIn
         | RiscOp::KeySelect
+        | RiscOp::Cumsum { .. }
         | RiscOp::Sum { .. }
         | RiscOp::Count { .. }
         | RiscOp::MaxReduce { .. }
@@ -2985,6 +2986,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Copy
             | RiscOp::Drop
             | RiscOp::Realize
+            | RiscOp::Cumsum { .. }
             | RiscOp::Sum { .. }
             | RiscOp::MaxReduce { .. }
             | RiscOp::MinReduce { .. }
@@ -3174,9 +3176,24 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
         }
 
+        if let RiscOp::Cumsum { direction, .. } = &node.op
+            && arity == 1
+            && let Some(input) = dag.get(node.inputs[0])
+        {
+            let p = input.output_type.precision;
+            let expected = p.default_reduce_sum_result_precision();
+            if !(p.is_float() || p.is_integer())
+                || (*direction == crate::dag::ScanDirection::Decreasing && !p.is_float())
+                || expected.ok() != Some(node.output_type.precision)
+                || input.output_type.dims != node.output_type.dims
+            {
+                errors.push(format!("cumsum at node {} requires same-shape numeric input and default result precision; reverse scans require floats",node.id.0));
+            }
+        }
         // C3: validate reduction axis bounds.
         match &node.op {
-            RiscOp::Sum { axis, .. }
+            RiscOp::Cumsum { axis, .. }
+            | RiscOp::Sum { axis, .. }
             | RiscOp::MaxReduce { axis }
             | RiscOp::MinReduce { axis }
             | RiscOp::ProdReduce { axis }

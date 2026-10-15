@@ -1665,6 +1665,8 @@ fn ordered_scan_prefix_suffix_bits_on_device() {
     use chelis_ir::dag::ScanDirection;
     for direction in [ScanDirection::Increasing, ScanDirection::Decreasing] {
         for data in [
+            vec![],
+            vec![-0.0_f32],
             vec![-0.0_f32; 5],
             vec![
                 -0.0,
@@ -1700,6 +1702,186 @@ fn ordered_scan_prefix_suffix_bits_on_device() {
                 actual.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
                 expected.into_iter().map(f32::to_bits).collect::<Vec<_>>()
             );
+        }
+    }
+}
+
+#[test]
+#[ignore = "ordered scan dtype/trap device execution; docs/manual_gates.md"]
+fn ordered_scan_dtype_bits_and_integer_overflow_on_device() {
+    use chelis_ir::dag::ScanDirection;
+    use chelis_types::dtype_semantics::{StorageView, TensorStorage};
+    fn bytes(storage: &TensorStorage) -> Vec<u8> {
+        match storage.view() {
+            StorageView::F32(v) => v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect(),
+            StorageView::F16(v) => v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect(),
+            StorageView::Bf16(v) => v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect(),
+            StorageView::I8(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            StorageView::I16(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            StorageView::I32(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            StorageView::I64(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            _ => panic!("Metal scan oracle dtype"),
+        }
+    }
+    for p in [
+        Prim::F16,
+        Prim::Bf16,
+        Prim::F32,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+    ] {
+        let directions = if p.is_float() {
+            vec![ScanDirection::Increasing, ScanDirection::Decreasing]
+        } else {
+            vec![ScanDirection::Increasing]
+        };
+        for direction in directions {
+            for extra in [false, true] {
+                let overflow = extra && p.is_integer();
+                if overflow && !matches!(p, Prim::Int32 | Prim::Int64) {
+                    continue;
+                }
+                let data = if p.is_float() {
+                    let tiny = if p == Prim::F16 {
+                        0.000244140625
+                    } else {
+                        0.001953125
+                    };
+                    TensorValue::finalize_from_wide(
+                        "oracle",
+                        p,
+                        vec![7],
+                        if extra {
+                            vec![-0.0; 7]
+                        } else {
+                            vec![-0.0, 1.0, tiny, tiny, tiny, f64::NAN, -0.0]
+                        },
+                    )
+                    .unwrap()
+                } else {
+                    let values = if overflow {
+                        vec![
+                            if p == Prim::Int64 {
+                                i64::MAX
+                            } else {
+                                i64::from(i32::MAX)
+                            },
+                            1,
+                            -1,
+                        ]
+                    } else {
+                        vec![1, 2, -1]
+                    };
+                    TensorValue::finalize_from_wide_int("oracle", p, vec![values.len()], values)
+                        .unwrap()
+                };
+                let mut dag = Dag::new();
+                let owner = dag.declare("scan");
+                let ty = TensorType {
+                    dims: vec![DimInfo::Lit(data.shape[0])],
+                    precision: p,
+                };
+                let x = dag.add_node(
+                    owner,
+                    RiscOp::Load { name: "x".into() },
+                    vec![],
+                    ty.clone(),
+                    None,
+                );
+                let root = dag.add_node(
+                    owner,
+                    RiscOp::Cumsum { axis: 0, direction },
+                    vec![x],
+                    TensorType {
+                        dims: ty.dims,
+                        precision: p.default_reduce_sum_result_precision().unwrap(),
+                    },
+                    None,
+                );
+                dag.add_root(root);
+                let expected = eval_tensor_roots_with_strict(&dag, &[root], |_| Some(data.clone()));
+                let expected = if overflow {
+                    assert!(expected.is_err());
+                    vec![]
+                } else {
+                    bytes(expected.unwrap()[&root].storage())
+                };
+                let input = bytes(data.storage());
+                let list = |v: &[u8]| {
+                    if v.is_empty() {
+                        "0".into()
+                    } else {
+                        v.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+                    }
+                };
+                let driver = format!(
+                    r#"#import <Foundation/Foundation.h>
+#include "chelis_runtime.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+extern "C" void scan_dtype(chelis_tensor**,int,chelis_tensor**,int);
+int main() {{ @autoreleasepool {{
+ unsigned char data[]={{ {input} }}, expected[]={{ {expected} }};
+ int64_t shape[]={{ {n} }};
+ chelis_tensor *x=chelis_alloc(1,shape,{dtype});
+ chelis_tensor_write *guard=chelis_tensor_begin_write(x);
+ memcpy(chelis_tensor_write_view(guard).data,data,{input_len});chelis_tensor_end_write(guard);
+ chelis_tensor *inputs[]={{x}},*outputs[]={{NULL}};scan_dtype(inputs,1,outputs,1);
+ int ok=chelis_tensor_byte_count(outputs[0])=={output_len} && memcmp(chelis_tensor_read_view(outputs[0]).data,expected,{output_len})==0;
+ chelis_tensor_release(x);chelis_tensor_release(outputs[0]);return ok?0:1;
+}} }}
+"#,
+                    input = list(&input),
+                    expected = list(&expected),
+                    n = data.shape[0],
+                    dtype = p.runtime_dtype().unwrap().c_macro(),
+                    input_len = input.len(),
+                    output_len = expected.len()
+                );
+                let generated = codegen_metal(&dag, "scan_dtype");
+                let temp = tempfile::tempdir().unwrap();
+                write_temp_file(
+                    temp.path(),
+                    "chelis_metal_runtime.h",
+                    &fs::read_to_string(metal_runtime_src_dir().join("chelis_metal_runtime.h"))
+                        .unwrap(),
+                );
+                let staged = chelis_runtime_bundle::stage(temp.path()).unwrap();
+                write_temp_file(temp.path(), "model.mm", &generated.mm_source);
+                write_temp_file(temp.path(), "driver.mm", &driver);
+                let bin = temp.path().join("scan_bin");
+                let compiled = Command::new("xcrun")
+                    .args(["-sdk", "macosx", "clang++", "-O2"])
+                    .args(&generated.compile_flags)
+                    .arg(temp.path().join("model.mm"))
+                    .arg(temp.path().join("driver.mm"))
+                    .arg(format!("-I{}", temp.path().display()))
+                    .arg(staged.archive)
+                    .args(&generated.link_flags)
+                    .arg("-o")
+                    .arg(&bin)
+                    .output()
+                    .unwrap();
+                assert!(
+                    compiled.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&compiled.stderr)
+                );
+                let run = Command::new(bin).output().unwrap();
+                let stderr = String::from_utf8_lossy(&run.stderr);
+                if overflow {
+                    assert!(
+                        !run.status.success()
+                            && stderr.contains("numeric trap: overflow in cumsum"),
+                        "{stderr}"
+                    );
+                } else {
+                    assert!(run.status.success(), "{p:?} {direction:?}: {stderr}");
+                }
+            }
         }
     }
 }

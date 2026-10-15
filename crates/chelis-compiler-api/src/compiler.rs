@@ -6959,6 +6959,10 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::RuntimeRecurrence(_) | RiscOp::RuntimeRecurrenceAdjoint { .. } => {
             return Err("runtime recurrence has no WireDag schema representation".to_string());
         }
+        RiscOp::Cumsum { axis, direction } => WireRiscOp::Cumsum {
+            axis: wire_axis(*axis)?,
+            direction: *direction,
+        },
         RiscOp::Add => WireRiscOp::Add,
         RiscOp::Sub => WireRiscOp::Sub,
         RiscOp::Mul => WireRiscOp::Mul,
@@ -7374,7 +7378,7 @@ mod tests {
         );
         dag.add_root(root);
         let wire = wire_dag(&dag).expect("IR producer has a wire form");
-        assert_eq!(wire.schema_version, 29);
+        assert_eq!(wire.schema_version, 30);
         assert!(
             matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
@@ -7687,7 +7691,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 29);
+        assert_eq!(json["schema_version"], 30);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()
