@@ -728,6 +728,11 @@ fn recursive_named_calls_cannot_borrow_the_loop_callsite_receipt() {
                     path.display()
                 );
                 let (success, output) = result_claims::run(&source, native);
+                for unproved in [false, true] {
+                    let wrapped =
+                        result_claims::run(&forwarding_wrapper(&source, unproved), native);
+                    assert_eq!((success, &output), (wrapped.0, &wrapped.1));
+                }
                 assert_eq!(success, steps < 2, "{source}\n{output}");
                 assert_eq!(
                     output.lines().filter(|line| *line == "before").count(),
@@ -959,27 +964,31 @@ fn growing_receipts_do_not_discharge_independent_caller_or_result_claims() {
                         "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef consume(xs: {claimed}) -> i64 ! {{ IO }} = {{\n _ = print(\"consume\")\n len(xs)\n}}\ndef grow(seed: List[tensor[3, f32]], size: i64) -> {output_type} ! {{ IO }} = {combine}(fn (acc: List[tensor[3, f32]], i: i64) -> {{\n _ = print(\"body\")\n append(acc, produce(size))\n}}, seed, range(0i64, 1i64))\nsize = string_len(read_file(\"{}\"))\n{end}\n",
                         path.display()
                     );
-                    let (success, output) = result_claims::run(&source, native);
-                    assert_eq!(success, size == 3, "{source}\n{output}");
-                    assert_eq!(
-                        output.lines().filter(|line| *line == "body").count(),
-                        1,
-                        "{output}"
-                    );
-                    if size == 5 {
-                        eprintln!("independent {owner} {combine} native={native}: {output}");
-                        assert!(
-                            output.contains(&format!(
-                                "numeric trap: domain in {} at i64",
-                                if owner == "caller" { "load" } else { combine }
-                            )),
-                            "{output}"
-                        );
+                    let named = source.replace("def consume", "def step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] ! { IO } = { _ = print(\"body\")\n append(acc, produce(size)) }\ndef consume")
+                        .replace("fn (acc: List[tensor[3, f32]], i: i64) -> {\n _ = print(\"body\")\n append(acc, produce(size))\n}", "fn (acc: List[tensor[3, f32]], i: i64) -> { old = acc\n item = i\n step(old, item) }");
+                    for source in [source, named] {
+                        let (success, output) = result_claims::run(&source, native);
+                        assert_eq!(success, size == 3, "{source}\n{output}");
                         assert_eq!(
-                            output.lines().filter(|line| *line == "consume").count(),
-                            0,
+                            output.lines().filter(|line| *line == "body").count(),
+                            1,
                             "{output}"
                         );
+                        if size == 5 {
+                            eprintln!("independent {owner} {combine} native={native}: {output}");
+                            assert!(
+                                output.contains(&format!(
+                                    "numeric trap: domain in {} at i64",
+                                    if owner == "caller" { "load" } else { combine }
+                                )),
+                                "{output}"
+                            );
+                            assert_eq!(
+                                output.lines().filter(|line| *line == "consume").count(),
+                                0,
+                                "{output}"
+                            );
+                        }
                     }
                 }
             }
@@ -1692,8 +1701,11 @@ fn lexical_forwarding_keeps_independent_wrapper_local_claims_in_order() {
                     "{output}"
                 );
                 if !success {
+                    // Preserve the independently reproduced complete-check
+                    // producer in each lane; the unproved path above is exact.
+                    let producer = if native { "append" } else { "load" };
                     assert!(
-                        output.contains("numeric trap: domain in append at i64"),
+                        output.contains(&format!("numeric trap: domain in {producer} at i64")),
                         "{output}"
                     );
                 }

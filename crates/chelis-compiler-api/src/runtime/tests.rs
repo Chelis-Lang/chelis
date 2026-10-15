@@ -5651,3 +5651,44 @@ fn lexical_forwarding_wrappers_have_bounded_complete_eval_entry_work() {
     }
     assert!(excessive.is_empty(), "{}", excessive.join("\n"));
 }
+
+#[test]
+fn lexical_forwarding_stationary_named_entry_work_is_bounded() {
+    for seed in [100, 400] {
+        for steps in [100, 400] {
+            for unproved in [false, true] {
+                let source = forwarding_wrapper_source(seed, steps, 2, unproved)
+                    .replace("append(acc, produce(3i64))", "acc");
+                let checked = checked_surf(&source);
+                let empty = UnordMap::new();
+                super::eval::reset_entry_claim_work();
+                let outcome = evaluate_host_program_with_library_and_types(
+                    &checked,
+                    None,
+                    None,
+                    HostEvaluationInputs {
+                        roots: &empty,
+                        bindings: None,
+                    },
+                    None,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(
+                    render_value(&outcome.host_bindings["out"]),
+                    seed.to_string()
+                );
+                let work =
+                    super::eval::entry_claim_work() + super::eval::entry_claim_traversal_work();
+                eprintln!(
+                    "stationary forwarding Eval N={seed} K={steps} unproved={unproved}: work={work}"
+                );
+                if unproved {
+                    assert!(work >= (seed * steps) as u64, "{work}");
+                } else {
+                    assert!(work <= 128 * (seed + steps) as u64 + 100, "{work}");
+                }
+            }
+        }
+    }
+}
