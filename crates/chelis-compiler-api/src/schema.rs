@@ -2582,6 +2582,7 @@ impl WireDag {
     pub fn validate_wire_contract(&self) -> Result<(), WireDagContractError> {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
         dag_domains::validate(self)?;
+        let origins = std::rc::Rc::default();
         for (index, node) in self.nodes.iter().enumerate() {
             match &node.op {
                 WireRiscOp::Load { name } => {
@@ -2614,9 +2615,8 @@ impl WireDag {
                         .inputs
                         .iter()
                         .map(|input_id| {
-                            self.nodes[..index]
-                                .iter()
-                                .find(|candidate| candidate.id == *input_id)
+                            usize::try_from(*input_id).ok()
+                                .and_then(|id| self.nodes[..index].get(id))
                                 .ok_or_else(|| {
                                     WireDagContractError::new(format!(
                                         "WireDag Compare node {} input {input_id} does not resolve to an earlier node",
@@ -2635,9 +2635,14 @@ impl WireDag {
                     let rhs = inputs[1];
                     let shape_participants = [lhs.id, rhs.id, node.id];
                     let same_shape =
-                        wire_node_shape_equal(&self.nodes, lhs, rhs, &shape_participants);
-                    let output_shape =
-                        wire_node_shape_equal(&self.nodes, lhs, node, &shape_participants);
+                        wire_node_shape_equal(&self.nodes, lhs, rhs, &shape_participants, &origins);
+                    let output_shape = wire_node_shape_equal(
+                        &self.nodes,
+                        lhs,
+                        node,
+                        &shape_participants,
+                        &origins,
+                    );
                     let ordered = matches!(
                         comparison,
                         WireComparisonKind::CmpLt
@@ -2675,9 +2680,8 @@ impl WireDag {
                         .inputs
                         .iter()
                         .map(|input_id| {
-                            self.nodes[..index]
-                                .iter()
-                                .find(|candidate| candidate.id == *input_id)
+                            usize::try_from(*input_id).ok()
+                                .and_then(|id| self.nodes[..index].get(id))
                                 .ok_or_else(|| {
                                     WireDagContractError::new(format!(
                                         "WireDag Logical node {} input {input_id} does not resolve to an earlier node",
@@ -2693,7 +2697,13 @@ impl WireDag {
                         .collect::<Vec<_>>();
                     let valid_inputs = inputs.iter().all(|input| {
                         input.output_type.precision == Prim::Bool.interchange_name()
-                            && wire_node_shape_equal(&self.nodes, input, node, &shape_participants)
+                            && wire_node_shape_equal(
+                                &self.nodes,
+                                input,
+                                node,
+                                &shape_participants,
+                                &origins,
+                            )
                     });
                     if inputs.len() != expected
                         || node.output_type.precision != Prim::Bool.interchange_name()
@@ -2710,9 +2720,8 @@ impl WireDag {
                         .inputs
                         .iter()
                         .map(|input_id| {
-                            self.nodes[..index]
-                                .iter()
-                                .find(|candidate| candidate.id == *input_id)
+                            usize::try_from(*input_id).ok()
+                                .and_then(|id| self.nodes[..index].get(id))
                                 .ok_or_else(|| {
                                     WireDagContractError::new(format!(
                                         "WireDag Where node {} input {input_id} does not resolve to an earlier node",
@@ -2739,18 +2748,21 @@ impl WireDag {
                             then_value,
                             else_value,
                             &shape_participants,
+                            &origins,
                         )
                         || !wire_node_tensor_type_equal(
                             &self.nodes,
                             then_value,
                             node,
                             &shape_participants,
+                            &origins,
                         )
                         || !wire_node_shape_equal(
                             &self.nodes,
                             condition,
                             then_value,
                             &shape_participants,
+                            &origins,
                         )
                         || !branch_precision.is_some_and(|prim| prim.is_data_element_dtype())
                     {
@@ -3556,6 +3568,9 @@ fn wire_witnessed_origin_equal(
     if left == right && !require_witness {
         return true;
     }
+    if cache.strict {
+        return false;
+    }
     let cutoff = relevant_shape_sources
         .iter()
         .copied()
@@ -3624,13 +3639,17 @@ thread_local! {
     static WIRE_SEMANTIC_DIM_VISITS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
-// Each query is scoped to one set of relevant shape sources. Validated DAG
-// edges point to earlier nodes, so fuel cannot expire on a path started with
-// nodes.len(); the memo key need only identify the node, axis, and agreement
-// mode. Keeping the cache per query prevents a different source set from
-// borrowing an answer.
-type WireAxisOriginCache =
+// Strict answers use neither contextual shape sources nor witness equivalence.
+// Their successful origins can be shared across the whole ingress. Contextual
+// answers, including failure, stay scoped to a single shape comparison.
+type WireOriginMemo =
     std::cell::RefCell<BTreeMap<(u64, usize, bool), Option<WireSemanticAxisOrigin>>>;
+#[derive(Default)]
+struct WireAxisOriginCache {
+    stable: std::rc::Rc<WireOriginMemo>,
+    contextual: WireOriginMemo,
+    strict: bool,
+}
 
 #[cfg(test)]
 fn wire_axis_origin(
@@ -3662,6 +3681,24 @@ fn wire_axis_origin_cached(
     require_input_agreement: bool,
     cache: &WireAxisOriginCache,
 ) -> Option<WireSemanticAxisOrigin> {
+    if !cache.strict {
+        let strict = WireAxisOriginCache {
+            stable: cache.stable.clone(),
+            strict: true,
+            ..Default::default()
+        };
+        if let Some(origin) = wire_axis_origin_cached(
+            nodes,
+            node,
+            axis,
+            fuel,
+            &[],
+            require_input_agreement,
+            &strict,
+        ) {
+            return Some(origin);
+        }
+    }
     #[cfg(test)]
     WIRE_AXIS_ORIGIN_VISITS.with(|visits| {
         if let Some(count) = visits.get() {
@@ -3676,7 +3713,12 @@ fn wire_axis_origin_cached(
         return None;
     }
     let key = (node.id, axis, require_input_agreement);
-    if let Some(cached) = cache.borrow().get(&key).copied() {
+    let memo = if cache.strict {
+        &*cache.stable
+    } else {
+        &cache.contextual
+    };
+    if let Some(cached) = memo.borrow().get(&key).copied() {
         return cached;
     }
     let result = stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
@@ -3690,7 +3732,7 @@ fn wire_axis_origin_cached(
             cache,
         )
     });
-    cache.borrow_mut().insert(key, result);
+    memo.borrow_mut().insert(key, result);
     result
 }
 
@@ -4072,19 +4114,41 @@ fn wire_node_shape_equal(
     left: &WireDagNode,
     right: &WireDagNode,
     relevant_shape_sources: &[u64],
+    origins: &std::rc::Rc<WireOriginMemo>,
 ) -> bool {
-    let cache = WireAxisOriginCache::default();
+    let cache = WireAxisOriginCache {
+        stable: origins.clone(),
+        ..Default::default()
+    };
     left.output_type.dims.len() == right.output_type.dims.len()
         && (0..left.output_type.dims.len()).all(|axis| {
-            wire_semantic_node_dim(nodes, left, axis, nodes.len(), relevant_shape_sources)
-                .zip(wire_semantic_node_dim(
+            // Check stable identity first, avoiding another anonymous Where
+            // dimension walk when both sides share a context-free origin.
+            let strict = WireAxisOriginCache {
+                stable: origins.clone(),
+                strict: true,
+                ..Default::default()
+            };
+            wire_axis_origin_cached(nodes, left, axis, nodes.len(), &[], true, &strict)
+                .zip(wire_axis_origin_cached(
                     nodes,
                     right,
                     axis,
                     nodes.len(),
-                    relevant_shape_sources,
+                    &[],
+                    true,
+                    &strict,
                 ))
-                .is_some_and(|(left, right)| wire_semantic_dim_info_equal(left, right))
+                .is_some_and(|(left, right)| left == right)
+                || wire_semantic_node_dim(nodes, left, axis, nodes.len(), relevant_shape_sources)
+                    .zip(wire_semantic_node_dim(
+                        nodes,
+                        right,
+                        axis,
+                        nodes.len(),
+                        relevant_shape_sources,
+                    ))
+                    .is_some_and(|(left, right)| wire_semantic_dim_info_equal(left, right))
                 || wire_semantic_axis_origin(
                     nodes,
                     left,
@@ -4147,9 +4211,10 @@ fn wire_node_tensor_type_equal(
     left: &WireDagNode,
     right: &WireDagNode,
     relevant_shape_sources: &[u64],
+    origins: &std::rc::Rc<WireOriginMemo>,
 ) -> bool {
     left.output_type.precision == right.output_type.precision
-        && wire_node_shape_equal(nodes, left, right, relevant_shape_sources)
+        && wire_node_shape_equal(nodes, left, right, relevant_shape_sources, origins)
 }
 
 /// Combined failure type for [`WireDag::from_validated_json`]. Parse,
@@ -5462,6 +5527,75 @@ mod tests {
             nodes,
             roots: vec![source + 1],
         }
+    }
+
+    #[test]
+    fn shared_prefix_comparisons_have_linear_ingress_origin_work() {
+        let mut dag = shared_axis_comparison(40);
+        let template = dag.nodes.last().unwrap().clone();
+        for _ in 0..40 {
+            let mut compare = template.clone();
+            compare.id = dag.nodes.len() as u64;
+            dag.nodes.push(compare);
+        }
+        WIRE_AXIS_ORIGIN_VISITS.with(|visits| visits.set(Some(0)));
+        let result = dag.validate_wire_contract();
+        let visits = WIRE_AXIS_ORIGIN_VISITS.with(|visits| visits.replace(None).unwrap());
+        result.unwrap();
+        assert!(
+            visits <= dag.nodes.len() * 8,
+            "whole ingress used {visits} axis visits"
+        );
+    }
+
+    #[test]
+    fn warmed_ingress_cache_rejects_a_different_load_origin() {
+        let mut dag = shared_axis_comparison(40);
+        let mut compare = dag.nodes.last().unwrap().clone();
+        let mut other = dag.nodes[0].clone();
+        other.id = dag.nodes.len() as u64;
+        other.op = WireRiscOp::Load {
+            name: "y".to_string(),
+        };
+        compare.inputs[1] = other.id;
+        dag.nodes.push(other);
+        compare.id = dag.nodes.len() as u64;
+        dag.nodes.push(compare);
+        assert!(dag.validate_wire_contract().is_err());
+    }
+
+    #[test]
+    fn ingress_cache_does_not_leak_contextual_shape_sources() {
+        let mut nodes = shared_axis_diamond(0);
+        let mut constant = nodes[0].clone();
+        constant.id = 1;
+        constant.op = WireRiscOp::Const {
+            value: chelis_types::scalar_from_f64("wire cache test", Prim::F32, 0.0).unwrap(),
+        };
+        constant.shape_deps = vec![0];
+        nodes.push(constant);
+        let origins = std::rc::Rc::default();
+        assert!(wire_node_shape_equal(
+            &nodes,
+            &nodes[0],
+            &nodes[1],
+            &[0],
+            &origins
+        ));
+        assert!(!wire_node_shape_equal(
+            &nodes,
+            &nodes[0],
+            &nodes[1],
+            &[],
+            &origins
+        ));
+        assert!(wire_node_shape_equal(
+            &nodes,
+            &nodes[0],
+            &nodes[1],
+            &[0],
+            &origins
+        ));
     }
 
     #[test]
