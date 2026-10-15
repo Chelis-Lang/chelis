@@ -188,7 +188,7 @@ fn live_metadata_with_sanitizers(name: &str, source: &str, sanitized: bool) -> L
     let before = stderr
         .lines()
         .filter_map(|line| line.strip_prefix("__before_metadata_teardown__="))
-        .last()
+        .next_back()
         .unwrap();
     let before = before
         .split(',')
