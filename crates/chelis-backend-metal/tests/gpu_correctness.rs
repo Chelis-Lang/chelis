@@ -1658,3 +1658,48 @@ fn count_input_with_a_non_bool_payload_traps_at_the_runtime_write_boundary() {
     );
     assert!(!failure.contains("count returned"), "{failure}");
 }
+
+#[test]
+#[ignore = "ordered scan device execution; docs/manual_gates.md"]
+fn ordered_scan_prefix_suffix_bits_on_device() {
+    use chelis_ir::dag::ScanDirection;
+    for direction in [ScanDirection::Increasing, ScanDirection::Decreasing] {
+        for data in [
+            vec![-0.0_f32; 5],
+            vec![
+                -0.0,
+                -0.0,
+                1152921504606846976.0,
+                1.0,
+                -1152921504606846976.0,
+                -0.0,
+            ],
+        ] {
+            let mut dag = Dag::new();
+            let owner = dag.declare("scan");
+            let ty = vec_f32(data.len());
+            let x = dag.add_node(
+                owner,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let root = dag.add_node(
+                owner,
+                RiscOp::Cumsum { axis: 0, direction },
+                vec![x],
+                ty,
+                None,
+            );
+            dag.add_root(root);
+            let inputs = [TestInput::new("x", &[data.len()], &data)];
+            let actual = compile_and_run_single_output(&dag, "scan_bits", &inputs);
+            let expected = evaluator_single_output(&dag, &inputs);
+            assert_eq!(
+                actual.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+                expected.into_iter().map(f32::to_bits).collect::<Vec<_>>()
+            );
+        }
+    }
+}

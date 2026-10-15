@@ -1132,3 +1132,39 @@ fn ws8a_pad_2d_uses_movement_dims() {
         "rank-2 pad dims must carry ndim=2 and total=15: {src}"
     );
 }
+
+#[test]
+fn ordered_scan_emits_one_kernel_for_thousands_of_prefixes() {
+    use chelis_ir::dag::ScanDirection;
+    let mut lengths = Vec::new();
+    for n in [5, 4096] {
+        let mut dag = Dag::new();
+        let owner = dag.declare("scan");
+        let ty = vec_f32(n);
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let root = dag.add_node(
+            owner,
+            RiscOp::Cumsum {
+                axis: 0,
+                direction: ScanDirection::Decreasing,
+            },
+            vec![x],
+            ty,
+            None,
+        );
+        dag.add_root(root);
+        let source = codegen_metal(&dag, "scan").mm_source;
+        assert!(source.contains("cumsum"));
+        lengths.push(source.len());
+    }
+    assert!(
+        lengths[1] <= lengths[0] + 1024,
+        "scan kernel source grows with extent: {lengths:?}"
+    );
+}

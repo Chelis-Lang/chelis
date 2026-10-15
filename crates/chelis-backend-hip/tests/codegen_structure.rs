@@ -3141,3 +3141,39 @@ fn s2b_unit_extent_claim_is_guarded_in_the_hip_host_prologue() {
         "with section 4.7's context on its own line:\n{host}"
     );
 }
+
+#[test]
+fn ordered_scan_emits_one_kernel_for_thousands_of_prefixes() {
+    use chelis_ir::dag::ScanDirection;
+    let mut lengths = Vec::new();
+    for n in [5, 4096] {
+        let mut dag = Dag::new();
+        let owner = dag.declare("scan");
+        let ty = vec_f32(n);
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let root = dag.add_node(
+            owner,
+            RiscOp::Cumsum {
+                axis: 0,
+                direction: ScanDirection::Decreasing,
+            },
+            vec![x],
+            ty,
+            None,
+        );
+        dag.add_root(root);
+        let source = codegen_hip(&dag, "scan").c_source;
+        assert!(source.contains("cumsum"));
+        lengths.push(source.len());
+    }
+    assert!(
+        lengths[1] <= lengths[0] + 1024,
+        "scan kernel source grows with extent: {lengths:?}"
+    );
+}
