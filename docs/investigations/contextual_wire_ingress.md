@@ -71,23 +71,22 @@ Issue #3231 remains open for that context-count dependence.
 ## Matched source control
 
 A debug control uses the same benchmark harness against main `2e56e9026` and the
-grouped resolver `293d0087f`. These source-control receipts precede the
-identical-branch Where refinement, which leaves these Add-only fixture paths
-unchanged apart from an empty immutable plan map. Five samples alternate parent/candidate execution order for
-each fixture class. The median user-plus-system CPU for each direct test process
-(including lengths 32/64/128, fixture construction, rejection checks and startup)
-is 100.8/35.2 ms for repeated authority, 136.6/36.9 ms for A/B alternation,
-146.9/64.5 ms for distinct choices and 202.3/129.1 ms with active witnesses.
-These are process receipts, not isolated resolver CPU or universal speedups.
+grouped resolver `4e5d11d33`. Five samples alternate parent/candidate execution
+order for each fixture class. CPU is median user-plus-system time for each direct
+test process, including lengths 32/64/128, fixture construction, rejection checks
+and startup. It is not isolated resolver CPU or a universal speedup.
 
-At length 128, allocated bytes are 6,850,052/844,650 for repeated authority,
-6,850,789/845,615 for A/B, 6,956,999/1,178,219 for distinct choices and
-12,858,200/8,931,644 with active witnesses (parent/grouped). Retained peak heap
-remains linear in the tested classes but increases: distinct choices use
-288,827/377,877 bytes and active witnesses use 520,940/712,678 bytes. Grouped
-questions, answers and immutable plans trade retained storage for reuse; this is
-not a peak-memory reduction claim against main. The all-context-retention
-prototype instead fails the committed peak bound.
+| Fixture | Parent/grouped CPU (ms) | Parent/grouped allocated bytes at 128 | Parent/grouped peak bytes at 128 |
+| --- | --- | --- | --- |
+| Repeated authority | 131.2 / 46.8 | 6,850,052 / 850,818 | 255,535 / 362,243 |
+| A/B alternation | 135.1 / 43.4 | 6,850,789 / 851,783 | 255,701 / 345,939 |
+| Distinct choices | 152.6 / 68.3 | 6,956,999 / 1,184,387 | 288,827 / 377,925 |
+| Active witnesses | 247.2 / 152.8 | 12,858,200 / 8,943,908 | 520,940 / 712,702 |
+
+Retained peak heap remains linear in the tested classes but increases against
+main. Grouped questions, answers and immutable plans trade retained storage for
+reuse; this is not a peak-memory reduction claim against main. The
+all-context-retention prototype instead fails the committed peak bound.
 
 The benchmark temporarily omits only allocation bound assertions in both
 control harnesses; rejection and exact-diagnostic checks remain active. The
