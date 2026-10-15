@@ -3455,7 +3455,23 @@ impl<'a> EvalContext<'a> {
 
             let mut source_layer = None;
             let mut source_ordinal = 0;
+            let mut route_layer = 0;
+            let mut initializer_position = forwarding_cursor.map(|(_, position)| position);
             for (ordinal, binding) in let_bindings.iter().enumerate() {
+                if binding.layer != route_layer {
+                    initializer_position = initializer_position.and_then(|position| {
+                        let layers = binding.layer.checked_sub(route_layer)?;
+                        #[cfg(test)]
+                        FORWARDING_ROUTE_WORK.with(|work| work.set(work.get() + layers as u64));
+                        let (frame, _) = forwarding_cursor?;
+                        self.loop_compositions[frame].proof.forwarding().advance(
+                            position,
+                            DeepTag::Let,
+                            layers,
+                        )
+                    });
+                    route_layer = binding.layer;
+                }
                 if source_layer == Some(binding.layer) {
                     source_ordinal += 1;
                 } else {
@@ -3464,13 +3480,17 @@ impl<'a> EvalContext<'a> {
                 }
                 let index = ordinal * 2;
                 if !local_regions.contains_key(&index)
-                    && let Some((frame, position)) = forwarding_cursor
+                    && let Some((frame, _)) = forwarding_cursor
                 {
-                    self.loop_compositions[frame].forwarding_position = self.loop_compositions
-                        [frame]
-                        .proof
-                        .forwarding()
-                        .initializer(position, binding.layer, source_ordinal);
+                    #[cfg(test)]
+                    FORWARDING_ROUTE_WORK.with(|work| work.set(work.get() + 1));
+                    self.loop_compositions[frame].forwarding_position = initializer_position
+                        .and_then(|position| {
+                            self.loop_compositions[frame]
+                                .proof
+                                .forwarding()
+                                .initializer(position, 0, source_ordinal)
+                        });
                 }
                 let name = symbol_name(binding.binding)
                     .ok_or_else(|| "let binding must bind a name".to_string())?;

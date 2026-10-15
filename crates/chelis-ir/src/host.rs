@@ -8847,7 +8847,19 @@ fn lower_host_expr_kind(
                 .map(|layers| (0..layers.len()).map(|_| Vec::new()).collect::<Vec<_>>());
             let mut source_layer = None;
             let mut source_ordinal = 0;
+            let mut route_layer = 0;
+            let mut initializer_position = forwarding.as_ref().map(|target| target.position);
             for (ordinal, binding) in let_bindings.iter().enumerate() {
+                if binding.layer != route_layer {
+                    initializer_position = initializer_position.and_then(|position| {
+                        let layers = binding.layer.checked_sub(route_layer)?;
+                        forwarding
+                            .as_ref()?
+                            .plan
+                            .advance(position, DeepTag::Let, layers)
+                    });
+                    route_layer = binding.layer;
+                }
                 if source_layer == Some(binding.layer) {
                     source_ordinal += 1;
                 } else {
@@ -8858,15 +8870,12 @@ fn lower_host_expr_kind(
                     let initializer = binding.initializer;
                     let index = ordinal * 2;
                     let selected = forwarding.as_ref().and_then(|target| {
-                        (!target.retained && !local_regions.contains_key(&index))
-                            .then(|| {
-                                target.plan.initializer(
-                                    target.position,
-                                    binding.layer,
-                                    source_ordinal,
-                                )
-                            })
-                            .flatten()
+                        if target.retained || local_regions.contains_key(&index) {
+                            return None;
+                        }
+                        target
+                            .plan
+                            .initializer(initializer_position?, 0, source_ordinal)
                     });
                     let saved_position = forwarding.as_ref().map(|target| target.position);
                     if let Some(position) = selected {
@@ -32431,10 +32440,9 @@ enum BoundForwardingRole {
     InvocationResult(usize),
 }
 
-/// Static preparation only: this plan cannot authorize an entry receipt.
-/// Executors must independently validate the selected lowered region and the
-/// returned-value link before enabling reuse. Existing tail-call plans remain
-/// the only executable composition authority.
+/// Static lineage alone cannot authorize an entry receipt. Executors also
+/// validate the selected lowered region, returned-value link and each owning
+/// obligation before enabling reuse.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundAccumulatorForwardingPlan {
     owner: Expr,
