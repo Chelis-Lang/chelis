@@ -78,6 +78,9 @@ and startup. It is not isolated resolver CPU or a universal speedup.
 The machine also runs independent workloads, so CPU and elapsed timings are
 shared-host observations. Deterministic work counters and allocator bytes
 provide the structural evidence.
+Each sample executes one allocation case in a separate test process. The
+committed owner also serializes its process-wide counters when Cargo runs cases
+together.
 
 | Fixture | Parent/grouped CPU (ms) | Parent/grouped allocated bytes at 128 | Parent/grouped peak bytes at 128 |
 | --- | --- | --- | --- |

@@ -3,6 +3,7 @@ use chelis_compiler_api::schema::{WIRE_DAG_SCHEMA_VERSION, WireDag};
 use chelis_types::{scalar_from_f64, types::Prim};
 use serde_json::{Value, json};
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 struct AllocationWork;
@@ -11,6 +12,9 @@ static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 static BYTES: AtomicUsize = AtomicUsize::new(0);
 static CALLS: AtomicUsize = AtomicUsize::new(0);
+// Cargo's test harness can run these cases in one process. Every case that
+// allocates must own the process-wide measurement window, including diagnostics.
+static MEASUREMENT: Mutex<()> = Mutex::new(());
 fn allocated(size: usize) {
     let live = LIVE.fetch_add(size, Relaxed) + size;
     if ENABLED.load(Relaxed) {
@@ -141,6 +145,7 @@ fn payload(n: usize, changing: bool, witnesses: bool, alternating: bool) -> Stri
     json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":nodes,"roots":roots}).to_string()
 }
 fn measure_contextual_case(changing: bool, witnesses: bool, alternating: bool) {
+    let _measurement = MEASUREMENT.lock().expect("exclusive allocation measurement");
     for n in [32, 64, 128] {
         let json = payload(n, changing, witnesses, alternating);
         let before = LIVE.load(Relaxed);
@@ -196,6 +201,7 @@ fn contextual_distinct_witness_authority_allocation() {
 
 #[test]
 fn public_ingress_preserves_exact_first_diagnostics() {
+    let _measurement = MEASUREMENT.lock().expect("exclusive allocation measurement");
     let mut dag: Value = serde_json::from_str(&payload(4, false, false, false)).unwrap();
     let compare = dag["nodes"]
         .as_array()
