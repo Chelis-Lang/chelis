@@ -12816,7 +12816,15 @@ fn inlined_matmul_products_match_evaluator_bits_under_sanitizers() {
         let rooted =
             chelis_ir::eval::eval_tensor_roots_with(&dag, &[sum], |name| inputs.get(name).cloned())
                 .unwrap();
-        assert_eq!(rooted[&sum], dense[&sum]);
+        assert_eq!(rooted[&sum].shape, dense[&sum].shape);
+        let bits = |value: &TensorValue| {
+            value
+                .to_f64_lossy_vec()
+                .into_iter()
+                .map(f64::to_bits)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&rooted[&sum]), bits(&dense[&sum]));
         let expected = rooted[&sum].to_f64_lossy_vec();
         let (native, bits, format) = match prim {
             Prim::F32 => ("float", "uint32_t", "%08x"),
