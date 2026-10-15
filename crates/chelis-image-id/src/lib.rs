@@ -26,6 +26,11 @@
 //!    [`identify`] reads that instead and falls back to the digest only when
 //!    the image carries none.
 //!
+//! 3. **On Linux, the loader names the main program by `argv[0]`.** A wrapper
+//!    passes its own path as `argv[0]`, and a shell passes the bare command
+//!    name. So for the main program, [`running_image_path`] reads the file
+//!    that the kernel mapped for the code, from `/proc/self/maps` (chelis#3649).
+//!
 //! The crate is deliberately separate from `chelis-compiler-api`, which sets
 //! `#![forbid(unsafe_code)]`. `dladdr` is FFI and cannot be called from there,
 //! and `forbid` cannot be relaxed locally by design. Keeping the one unsafe
@@ -192,23 +197,34 @@ pub fn fingerprint_string(image: Option<&RunningImage>) -> String {
 
 /// The path of the object image containing this crate's code.
 ///
-/// Asks the dynamic loader (`dladdr`) which object a symbol defined *here* was
-/// loaded from. For an ordinary statically linked binary that is the executable
-/// itself; for a `cdylib` loaded into another process it is the shared object,
-/// which is the whole point (see the module docs).
+/// Asks the dynamic loader (`dladdr`) which object a symbol defined *here*
+/// came from. For a `cdylib` loaded into another process, that object is the
+/// shared object, which is the whole point (see the module docs). For the
+/// main program, it is the executable.
 ///
-/// Falls back to [`std::env::current_exe`] when `dladdr` is unavailable or
-/// yields nothing usable.
+/// On Linux, the loader names the main program by `argv[0]`. So for the main
+/// program, this reads the file that the kernel mapped for the code (see
+/// `main_program_path`). In the other cases, it uses
+/// [`std::env::current_exe`] when `dladdr` is unavailable or yields nothing
+/// usable.
 pub fn running_image_path() -> Option<PathBuf> {
-    dladdr_self().or_else(|| std::env::current_exe().ok())
+    running_image_candidates().into_iter().next()
 }
 
 /// Every candidate path for the running image, best first.
 ///
-/// [`running_image`] walks these in order so that a `dladdr` result which
-/// cannot actually be opened (a deleted or replaced shared object) still falls
-/// through to the executable rather than degrading the fingerprint.
+/// [`running_image`] walks these in order. If the loader's path does not
+/// open, the walk reaches the executable, so the fingerprint does not
+/// degrade.
+///
+/// On Linux, the main program has one candidate: the file that the kernel
+/// mapped for its code. [`std::env::current_exe`] is not a candidate there,
+/// because it names the dynamic loader when a user runs `ld.so program`.
 fn running_image_candidates() -> Vec<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if in_main_program() {
+        return main_program_path().into_iter().collect();
+    }
     let mut out = Vec::new();
     if let Some(p) = dladdr_self() {
         out.push(p);
@@ -219,6 +235,74 @@ fn running_image_candidates() -> Vec<PathBuf> {
         out.push(exe);
     }
     out
+}
+
+/// The file that the kernel mapped for the code of the main program.
+///
+/// `dladdr` names the main program by `argv[0]` (chelis#3649). A wrapper passes
+/// its own path, and a shell passes the bare command name, which [`identify`]
+/// opens in the working directory. [`std::env::current_exe`] names the dynamic
+/// loader when a user runs `ld.so program`. The mapping in `/proc/self/maps`
+/// names the file that holds this code in all of these cases. A deleted file
+/// gives `None`, so the fingerprint degrades and never names another build.
+#[cfg(target_os = "linux")]
+fn main_program_path() -> Option<PathBuf> {
+    let maps = std::fs::read("/proc/self/maps").ok()?;
+    mapped_path(&maps, main_program_path as *const () as usize)
+}
+
+/// The file of the mapping that contains `address`, from the text of
+/// `/proc/<pid>/maps`.
+///
+/// Each line holds a range, permissions, an offset, a device, an inode, and
+/// then the path, which can contain spaces. Anonymous and special mappings,
+/// such as `[stack]`, give `None`. A mapping of a deleted file also gives
+/// `None`.
+#[cfg(all(unix, any(target_os = "linux", test)))]
+fn mapped_path(maps: &[u8], address: usize) -> Option<PathBuf> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    /// The first field of `text`, and the rest after the spaces that follow it.
+    fn field(text: &[u8]) -> (&[u8], &[u8]) {
+        let end = text
+            .iter()
+            .position(|&byte| byte == b' ')
+            .unwrap_or(text.len());
+        let rest = &text[end..];
+        let skip = rest
+            .iter()
+            .position(|&byte| byte != b' ')
+            .unwrap_or(rest.len());
+        (&text[..end], &rest[skip..])
+    }
+
+    /// The value of hexadecimal `digits`.
+    fn hex(digits: &[u8]) -> Option<usize> {
+        usize::from_str_radix(std::str::from_utf8(digits).ok()?, 16).ok()
+    }
+
+    for line in maps.split(|&byte| byte == b'\n') {
+        let (range, rest) = field(line);
+        let Some(dash) = range.iter().position(|&byte| byte == b'-') else {
+            continue;
+        };
+        let (Some(start), Some(end)) = (hex(&range[..dash]), hex(&range[dash + 1..])) else {
+            continue;
+        };
+        if !(start..end).contains(&address) {
+            continue;
+        }
+        let (_permissions, rest) = field(rest);
+        let (_offset, rest) = field(rest);
+        let (_device, rest) = field(rest);
+        let (_inode, path) = field(rest);
+        if !path.starts_with(b"/") || path.ends_with(b" (deleted)") {
+            return None;
+        }
+        return Some(PathBuf::from(OsStr::from_bytes(path)));
+    }
+    None
 }
 
 #[cfg(unix)]
@@ -262,6 +346,35 @@ fn dladdr_self() -> Option<PathBuf> {
     // No `dladdr` equivalent is wired up yet. `current_exe` is correct for a
     // statically linked binary, which is every non-unix chelis build today.
     None
+}
+
+/// Whether the object that holds this crate's code is the main program.
+///
+/// The entry point (`AT_ENTRY`) is always in the main program. This crate's
+/// code is in the same object when `dladdr` reports the same base address for
+/// both.
+#[cfg(target_os = "linux")]
+fn in_main_program() -> bool {
+    // SAFETY: `getauxval` only reads the auxiliary vector. It returns 0 for an
+    // entry that the vector does not hold.
+    let entry = unsafe { libc::getauxval(libc::AT_ENTRY) } as *const libc::c_void;
+    let probe = in_main_program as *const () as *const libc::c_void;
+    !entry.is_null() && object_base(probe).is_some_and(|base| object_base(entry) == Some(base))
+}
+
+/// The base address of the loaded object that contains `address`, when the
+/// loader can place it.
+#[cfg(target_os = "linux")]
+fn object_base(address: *const libc::c_void) -> Option<*mut libc::c_void> {
+    let mut info = std::mem::MaybeUninit::<libc::Dl_info>::uninit();
+    // SAFETY: `dladdr` only compares `address` with the loaded objects. It does
+    // not read from it. `info` is a valid, aligned, and writable `Dl_info`, and
+    // this function reads it only after `dladdr` reports success.
+    if unsafe { libc::dladdr(address, info.as_mut_ptr()) } == 0 {
+        return None;
+    }
+    // SAFETY: `dladdr` returned success, so `info` is initialized.
+    Some(unsafe { info.assume_init() }.dli_fbase)
 }
 
 /// Identify one object image at `path`: its byte length and its build id.
@@ -493,6 +606,143 @@ mod tests {
             via_loader.exists(),
             "dladdr reported {via_loader:?}, which does not exist"
         );
+    }
+
+    /// The variable that makes a test binary act as the child of
+    /// `the_running_image_does_not_depend_on_argv0`. Its value is the
+    /// fingerprint that the parent identified.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const ARGV0_CHILD: &str = "CHELIS_IMAGE_ID_ARGV0_CHILD";
+
+    /// The identity of the running image must not depend on how the process
+    /// started (chelis#3649). A wrapper passes its own path as `argv[0]`, and
+    /// a shell passes the bare command name. A user can also start the program
+    /// through the dynamic loader. The test runs this binary again in each of
+    /// these ways, and the child must identify the same image as the parent.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn the_running_image_does_not_depend_on_argv0() {
+        use std::ffi::OsString;
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+        const TEST: &str = "tests::the_running_image_does_not_depend_on_argv0";
+
+        let identity = |image: &RunningImage| OsString::from(fingerprint_string(Some(image)));
+        if let Some(expected) = std::env::var_os(ARGV0_CHILD) {
+            let image = running_image().expect("the child must identify its image");
+            assert_eq!(
+                identity(&image),
+                expected,
+                "argv[0] {:?} made the child identify {:?}",
+                std::env::args_os().next(),
+                image.path
+            );
+            return;
+        }
+
+        let exe = std::env::current_exe().expect("current_exe");
+        let expected = identity(&running_image().expect("the test binary must be identifiable"));
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let decoy = dir.path().join("decoy");
+        std::fs::write(&decoy, b"not the test binary").expect("write the decoy");
+        // The decoy must identify differently. Otherwise the check can pass by accident.
+        let (len, id) = identify(&decoy).expect("identify the decoy");
+        let decoy_image = RunningImage {
+            path: decoy.clone(),
+            len,
+            id,
+        };
+        assert_ne!(identity(&decoy_image), expected);
+
+        let mut decoy_path = Command::new(&exe);
+        decoy_path.arg0(&decoy);
+        let mut bare_name = Command::new(&exe);
+        bare_name.arg0("decoy").current_dir(dir.path());
+        #[cfg(target_os = "linux")]
+        let loader = program_interpreter(&exe).map(|loader| {
+            let mut child = Command::new(loader);
+            child.arg(&exe);
+            ("the dynamic loader starts the program", child)
+        });
+        #[cfg(not(target_os = "linux"))]
+        let loader = None;
+
+        let cases = [
+            ("argv[0] names another file", decoy_path),
+            (
+                "argv[0] is a bare name, and the working directory holds a file with that name",
+                bare_name,
+            ),
+        ];
+        for (case, mut child) in cases.into_iter().chain(loader) {
+            let output = child
+                .args(["--exact", TEST])
+                .env(ARGV0_CHILD, &expected)
+                .output()
+                .expect("run the child");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // `--exact` with a stale test name runs no test and still succeeds.
+            assert!(
+                output.status.success() && stdout.contains("test result: ok. 1 passed"),
+                "{case}: the child identified another image\n{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    /// The program interpreter (`PT_INTERP`) of the ELF file at `path`. That
+    /// is the dynamic loader that the kernel starts for the program.
+    #[cfg(target_os = "linux")]
+    fn program_interpreter(path: &Path) -> Option<PathBuf> {
+        use object::read::elf::{FileHeader, ProgramHeader};
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let data = std::fs::read(path).ok()?;
+        let header = object::elf::FileHeader64::<object::Endianness>::parse(&*data).ok()?;
+        let endian = header.endian().ok()?;
+        let segments = header.program_headers(endian, &*data).ok()?;
+        let interpreter = segments
+            .iter()
+            .find_map(|segment| segment.interpreter(endian, &*data).ok().flatten())?;
+        Some(PathBuf::from(OsStr::from_bytes(interpreter)))
+    }
+
+    /// The maps parser names the file of the mapping that contains an address.
+    /// Anonymous, special, and deleted mappings give no path.
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    #[test]
+    fn a_maps_line_names_the_file_of_its_mapping() {
+        let maps = concat!(
+            "5555c0de0000-5555c0e00000 r--p 00000000 fd:01 1234                       /opt/chelis/bin/chelis\n",
+            "5555c0e00000-5555c0f00000 r-xp 00020000 fd:01 1234                       /opt/chelis/bin/chelis\n",
+            "7f0000000000-7f0000001000 rw-p 00000000 00:00 0\n",
+            "7f0000001000-7f0000002000 r-xp 00000000 fd:01 99                         /opt/a dir/lib chelis.so\n",
+            "7f0000002000-7f0000003000 r-xp 00000000 fd:01 77                         /opt/old/chelis (deleted)\n",
+            "7ffd00000000-7ffd00021000 rw-p 00000000 00:00 0                          [stack]\n",
+        )
+        .as_bytes();
+        let path = |address: usize| mapped_path(maps, address);
+        let chelis = Some(PathBuf::from("/opt/chelis/bin/chelis"));
+        assert_eq!(path(0x5555_c0e0_0010), chelis);
+        assert_eq!(
+            path(0x5555_c0de_0000),
+            chelis,
+            "the start of a range is inclusive"
+        );
+        assert_eq!(
+            path(0x7f00_0000_1000),
+            Some(PathBuf::from("/opt/a dir/lib chelis.so"))
+        );
+        assert_eq!(
+            path(0x5555_c0f0_0000),
+            None,
+            "the end of a range is exclusive"
+        );
+        assert_eq!(path(0x7f00_0000_0800), None, "anonymous mapping");
+        assert_eq!(path(0x7f00_0000_2800), None, "deleted file");
+        assert_eq!(path(0x7ffd_0000_0100), None, "special mapping");
+        assert_eq!(path(0x1000), None, "no mapping");
     }
 
     /// The id must be a function of CONTENT, not of path or timestamp. This is
