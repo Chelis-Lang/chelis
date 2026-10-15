@@ -1670,8 +1670,9 @@ fn guarded_restamp_axes(dag: &Dag) -> Vec<(NodeId, usize)> {
 /// guard site claims an extent of ([`GuardActivation::claimed`]), whatever
 /// the claim (a call's or a callee's result claim, a local ascription, an
 /// extent an operation computes or a carrier sets, a restamp, a unit
-/// extent), and every [`RiscOp::CheckedUnitAxis`], whose unit extent rests on
-/// its witness's requirement. Where its activation holds in no row such a
+/// extent), every [`RiscOp::CheckedUnitAxis`], whose unit extent rests on
+/// its witness's requirement, and every [`RiscOp::Reshape`], whose explicit
+/// target determines its result shape. Where its activation holds in no row such a
 /// node checks nothing and produces zeros of its declared type, each claimed
 /// axis taking the claim's extent, rather than reading an operand whose
 /// extent need not be the one it declares.
@@ -1694,6 +1695,16 @@ pub fn claim_sized_nodes(dag: &Dag) -> Result<std::collections::BTreeSet<NodeId>
         dag.nodes()
             .iter()
             .filter(|node| matches!(node.op, RiscOp::CheckedUnitAxis { .. }))
+            .map(|node| node.id),
+    );
+    // A reshape's explicit target determines its output shape even when no
+    // named claim refers to it. Under a false activation its operand need
+    // not have that element count; retain the target's declared zero value
+    // instead of running the reshape's extent checks on an untaken arm.
+    nodes.extend(
+        dag.nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Reshape { .. }))
             .map(|node| node.id),
     );
     Ok(nodes)
@@ -1806,6 +1817,50 @@ pub(crate) fn expand_or_reshape_carrier(op: &RiscOp, axis: usize) -> Option<&RtD
         _ => return None,
     };
     matches!(carrier, RtDim::Node(_) | RtDim::InputAxis { .. }).then_some(carrier)
+}
+
+/// The existing tensor whose complete ordered shape a reshape target
+/// restores. Unlike arbitrary scalar targets, this shape has already been
+/// admitted and remains valid for an inactive inverse reshape's cotangent.
+pub fn reshape_restored_shape_source(nodes: &[DagNode], node: &DagNode) -> Option<NodeId> {
+    let RiscOp::Reshape { new_shape } = &node.op else {
+        return None;
+    };
+    let metadata_source = |dim: &RtDim| -> Option<(NodeId, usize)> {
+        match dim {
+            RtDim::InputAxis {
+                tensor,
+                axis: RtAxis::Lit(axis),
+            } => Some((*node.inputs.get(*tensor)?, usize::try_from(*axis).ok()?)),
+            RtDim::Node(slot) => {
+                let mut source = *node.inputs.get(*slot)?;
+                for _ in 0..nodes.len() {
+                    let scalar = nodes.get(source.0)?;
+                    match scalar.op {
+                        RiscOp::Shape { axis } => return Some((*scalar.inputs.first()?, axis)),
+                        RiscOp::Copy | RiscOp::Realize => source = *scalar.inputs.first()?,
+                        _ => return None,
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    };
+    let source = new_shape
+        .iter()
+        .find_map(|dim| metadata_source(dim).map(|(source, _)| source))?;
+    let source_ty = &nodes.get(source.0)?.output_type;
+    if source_ty.dims.len() != new_shape.len() {
+        return None;
+    }
+    new_shape.iter().zip(&source_ty.dims).enumerate().all(|(axis, (target, original))| {
+        match target {
+            RtDim::Lit(required) => matches!(original, DimInfo::Lit(actual) | DimInfo::Named(_, Some(actual)) if actual == required),
+            RtDim::Sym(name) => matches!(original, DimInfo::Named(actual, _) if actual == name && !is_anonymous(name)),
+            _ => metadata_source(target) == Some((source, axis)),
+        }
+    }).then_some(source)
 }
 
 /// Whether this axis is a member of its claim's class.

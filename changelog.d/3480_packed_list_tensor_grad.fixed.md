@@ -1,0 +1,1 @@
+C gradients over runtime Lists of fixed numeric ADT blocks preserve each tensor field's row shape, including ragged and empty tensors. Empty Lists need no external extent witness. Reconstructed single-constructor ADT arguments also compile, retaining argument effects in source order.

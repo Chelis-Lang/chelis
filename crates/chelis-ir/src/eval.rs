@@ -6253,8 +6253,19 @@ fn inactive_unchecked_value(
             // carrier for its axis reads, an operand's axis or a scalar
             // operand, as the C lane declares it before the node's branch.
             let sources = crate::axis_sources::output_axis_sources(source, node.id);
+            let restores_admitted_shape =
+                crate::axis_sources::reshape_restored_shape_source(source.nodes(), node).is_some();
             let operand = |input: &usize| node.inputs.get(*input).and_then(|id| values.get(id));
             let carried = |axis: usize| match sources.get(axis)? {
+                // No target is executed in an untaken reshape. An anonymous
+                // runtime target may be negative or arbitrarily large there;
+                // zero is the inactive result extent, not a primal claim.
+                // An inverse restoring an admitted complete shape instead
+                // reads the target operands below. Their graph edges retain
+                // the measured metadata without an extra tensor-lifetime read.
+                _ if matches!(node.op, RiscOp::Reshape { .. }) && !restores_admitted_shape => {
+                    Some(0)
+                }
                 crate::axis_sources::AxisSource::InputAxis {
                     input,
                     axis: RtAxis::Lit(read),

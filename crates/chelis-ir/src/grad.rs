@@ -3871,6 +3871,11 @@ fn reslot_bound(forward_node: &DagNode, bound: &RtDim, inputs: &mut Vec<NodeId>)
 /// symbol is declarable from an input shape in every lane (including HIP,
 /// which rejects `Shape` reads).
 fn load_declares(forward: &Dag, name: &str) -> bool {
+    // Anonymous slots do not declare binders. Restoring one must read the
+    // actual forward axis, even when another Load spells the same wildcard.
+    if name.is_empty() || name == "*" {
+        return false;
+    }
     forward.nodes().iter().any(|n| {
         matches!(&n.op, RiscOp::Load { .. })
             && n.output_type
@@ -5778,69 +5783,81 @@ mod tests {
     fn grad_reshape_roundtrip() {
         use crate::eval::{TensorValue, eval_tensor};
 
-        let vec6_ty = TensorType {
-            dims: vec![DimInfo::Lit(6)],
-            precision: chelis_types::types::Prim::F32,
-        };
-        let mat23_ty = TensorType {
-            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F32,
-        };
-
-        let mut dag = Dag::new();
-        let owner = Owner::from(dag.declare("test"));
-        let x = dag.add_node(
-            owner,
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            vec6_ty.clone(),
-            None,
-        );
-        let reshaped = dag.add_node(
-            owner,
-            RiscOp::Reshape {
-                new_shape: reshape_target(&mat23_ty.dims),
-            },
-            vec![x],
-            mat23_ty.clone(),
-            None,
-        );
-        // Sum all elements to get a scalar
-        let sum0 = dag.add_node(
-            owner,
-            RiscOp::Sum {
-                axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
-            },
-            vec![reshaped],
-            TensorType {
-                dims: vec![DimInfo::Lit(3)],
+        for source_dim in [
+            DimInfo::Lit(6),
+            DimInfo::Named("n".into(), None),
+            DimInfo::Named("*".into(), None),
+            DimInfo::Named(String::new(), None),
+        ] {
+            let vec6_ty = TensorType {
+                dims: vec![source_dim],
                 precision: chelis_types::types::Prim::F32,
-            },
-            None,
-        );
-        let out = dag.add_node(
-            owner,
-            RiscOp::Sum {
-                axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
-            },
-            vec![sum0],
-            scalar_f32(),
-            None,
-        );
+            };
+            let mat23_ty = TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                precision: chelis_types::types::Prim::F32,
+            };
 
-        let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = UnordMap::new();
-        inputs.insert(
-            "x".to_string(),
-            TensorValue::from_vec(vec![6], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
-        );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
-        let grad = &vals[&grad_result.grad_nodes[&x]];
-        // d(sum(reshape(x)))/dx = ones
-        assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
-        assert_eq!(grad.shape, vec![6]);
+            let mut dag = Dag::new();
+            let owner = Owner::from(dag.declare("test"));
+            let x = dag.add_node(
+                owner,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                vec6_ty.clone(),
+                None,
+            );
+            let reshaped = dag.add_node(
+                owner,
+                RiscOp::Reshape {
+                    new_shape: reshape_target(&mat23_ty.dims),
+                },
+                vec![x],
+                mat23_ty.clone(),
+                None,
+            );
+            // Sum all elements to get a scalar
+            let sum0 = dag.add_node(
+                owner,
+                RiscOp::Sum {
+                    axis: 0,
+                    accumulator: chelis_types::types::Prim::F32,
+                },
+                vec![reshaped],
+                TensorType {
+                    dims: vec![DimInfo::Lit(3)],
+                    precision: chelis_types::types::Prim::F32,
+                },
+                None,
+            );
+            let out = dag.add_node(
+                owner,
+                RiscOp::Sum {
+                    axis: 0,
+                    accumulator: chelis_types::types::Prim::F32,
+                },
+                vec![sum0],
+                scalar_f32(),
+                None,
+            );
+
+            let grad_result = grad_dag(&dag, out, &[x]).unwrap();
+            let mut inputs = UnordMap::new();
+            inputs.insert(
+                "x".to_string(),
+                TensorValue::from_vec(vec![6], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            );
+            let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+            let grad = &vals[&grad_result.grad_nodes[&x]];
+            // d(sum(reshape(x)))/dx = ones
+            assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+            assert_eq!(grad.shape, vec![6]);
+            inputs.insert("x".into(), TensorValue::from_vec(vec![5], vec![1.0; 5]));
+            assert!(
+                eval_tensor(&grad_result.dag, &inputs).is_err(),
+                "a source with five elements cannot reshape to [2, 3]"
+            );
+        }
     }
 
     #[test]
