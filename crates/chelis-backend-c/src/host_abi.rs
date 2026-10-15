@@ -1080,6 +1080,7 @@ fn project_expr(
                 projected.push(projected_binding);
             }
             HostAbiExprKind::RetainedInvocation {
+                forwarding,
                 bindings: projected,
                 body: Box::new(project_expr(*body, &visible)?),
                 ty: HostAbiType::try_from_concrete(&ty)?,

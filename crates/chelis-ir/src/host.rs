@@ -23274,7 +23274,6 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             bindings,
             body,
             ty: actual_ty,
-            forwarding,
         } => {
             let mut substitutions = UnordMap::new();
             collect_host_type_variable_substitutions(&actual_ty, &ty, &mut substitutions);
@@ -23298,7 +23297,6 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                 bindings,
                 body: Box::new(force_host_expr_type(*body, ty.clone())),
                 ty,
-                forwarding,
             }
         }
         HostExprKind::Map { callback, list, .. } => HostExprKind::Map {
@@ -23328,6 +23326,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             bindings,
             body,
             ty: actual_ty,
+            forwarding,
         } => {
             let mut substitutions = UnordMap::new();
             collect_host_type_variable_substitutions(&actual_ty, &ty, &mut substitutions);
@@ -23351,6 +23350,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                 bindings,
                 body: Box::new(force_host_expr_type(*body, ty.clone())),
                 ty,
+                forwarding,
             }
         }
         // A scan's result lists the accumulators, so its element type is the
@@ -33563,6 +33563,69 @@ mod accumulator_forwarding_wrapper_tests {
         ] {
             assert!(returned_plan(body).is_none(), "{body}");
         }
+    }
+
+    #[test]
+    fn lowered_returned_invocation_requires_exact_marker_and_whole_lineage() {
+        let plan = accumulator_forwarding_plan(
+            returned_plan("{ result = step(acc, i)\n result }")
+                .unwrap()
+                .owner(),
+        )
+        .unwrap();
+        let other = accumulator_forwarding_plan(
+            returned_plan("{ _ = step(acc, i)\n result = step(acc, i)\n result }")
+                .unwrap()
+                .owner(),
+        )
+        .unwrap();
+        let ty = HostTypeTerm::Unit;
+        let marked = |authority: AccumulatorForwardingPlan| {
+            HostExpr::new(HostExprKind::RetainedInvocation {
+                bindings: Vec::new(),
+                body: Box::new(HostExpr::new(HostExprKind::Unit)),
+                ty: ty.clone(),
+                forwarding: Some(Arc::new(authority)),
+            })
+        };
+        let binding = |name: &str, value| HostBinding {
+            name: name.to_owned(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: ty.clone(),
+            value,
+        };
+        let make = |return_name: &str, second: Option<HostExpr>| {
+            let mut bindings = vec![
+                binding("result", marked(plan.clone())),
+                binding(
+                    "saved",
+                    HostExpr::new(HostExprKind::Var("result".into(), ty.clone())),
+                ),
+            ];
+            if let Some(second) = second {
+                bindings.push(binding("later", second));
+            }
+            HostExpr::new(HostExprKind::Let {
+                bindings,
+                body: Box::new(HostExpr::new(HostExprKind::Var(
+                    return_name.into(),
+                    ty.clone(),
+                ))),
+                ty: ty.clone(),
+            })
+        };
+        assert!(returned_accumulator_invocation(&make("saved", None), &plan).is_some());
+        assert!(returned_accumulator_invocation(&make("unrelated", None), &plan).is_none());
+        assert!(
+            returned_accumulator_invocation(&make("later", Some(marked(other.clone()))), &plan)
+                .is_none()
+        );
+        assert!(
+            returned_accumulator_invocation(&make("saved", Some(marked(plan.clone()))), &plan)
+                .is_none()
+        );
+        assert!(returned_accumulator_invocation(&make("saved", None), &other).is_none());
     }
 
     #[test]
