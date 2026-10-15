@@ -256,6 +256,54 @@ fn issue_3463_nested_constructor_test_selects_the_executed_arm() {
     );
 }
 
+/// Static nested constructor identity survives eager argument evaluation;
+/// every effectful leaf executes once in written field/argument order even
+/// when the constant loss drops all numeric primal loads (spec02§0.1, §3).
+#[test]
+fn issue_3463_static_nested_constructors_keep_argument_effect_order() {
+    let source = format!(
+        r#"{LAYER_TYPES}
+def constant_loss(first: Model, second: Model) -> f32 = 1.0f32
+def announce(label: string, value: tensor[2, f32]) -> tensor[2, f32] ! {{ IO }} = {{
+  _ = print(label)
+  value
+}}
+out = grad(constant_loss)(Model {{ b: announce("first bias", to_tensor([3.0f32, 4.0f32])), layer: Scale {{ k: announce("first layer", to_tensor([1.0f32, 2.0f32])) }} }}, Model {{ layer: Dense {{ w: announce("second layer", to_tensor([1.0f32, 2.0f32])) }}, b: announce("second bias", to_tensor([3.0f32, 4.0f32])) }})
+"#
+    );
+    let (stdout, stderr, ok) = eval_program(&source);
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| !line.starts_with("out"))
+            .collect::<Vec<_>>(),
+        ["first bias", "first layer", "second layer", "second bias"]
+    );
+    assert!(
+        stdout.contains("Model(Scale(tensor(shape=[2], data=[0.0, 0.0]))"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Model(Dense(tensor(shape=[2], data=[0.0, 0.0]))"),
+        "{stdout}"
+    );
+    assert_eq!(common::build_and_run(&source, "static_effects"), stdout);
+}
+
+/// A lexical Model parameter supplies no static tag for its Layer field.
+/// Known constructor syntax must not turn into a guessed runtime variant.
+#[test]
+fn issue_3463_unknown_nested_constructor_stays_rejected_on_c() {
+    let source = format!(
+        "{LAYER_TYPES}def differentiate(m: Model) -> Model = grad(loss_layer)(m)\nout = differentiate(Model {{ layer: Scale {{ k: to_tensor([1.0f32, 2.0f32]) }}, b: to_tensor([3.0f32, 4.0f32]) }})\n"
+    );
+    let (stderr, ok) = build_program(&source);
+    assert!(!ok, "a runtime Layer tag still needs dispatch");
+    assert!(stderr.contains("runtime ADT `Layer`"), "{stderr}");
+    assert_cites_runtime_selection_owner(&stderr);
+}
+
 const DEEP_TYPES: &str = "module Repro.Deep\n\n\
 type Pair =\n\
 \x20 | Pair(tensor[2, f32], tensor[2, f32])\n\n\

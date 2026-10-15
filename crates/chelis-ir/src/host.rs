@@ -11909,9 +11909,9 @@ fn static_list_spine_items(expr: &Expr) -> Option<Vec<Expr>> {
     Some(items)
 }
 
-/// Resolve only the finite recursive shape of a List actual. A top-level
-/// value carries its resolved Load label; a raw name in lexical scope is a
-/// local value and cannot be replaced by a same-spelled declaration.
+/// Resolve constructor and finite List shape without evaluating an actual.
+/// A top-level value carries its resolved Load label; a raw name in lexical
+/// scope cannot be replaced by a same-spelled declaration.
 fn resolve_list_grad_shape_expr(
     actual: &Expr,
     program: &HostLoweringSession<'_>,
@@ -11970,6 +11970,67 @@ fn resolve_list_grad_shape_expr(
         break;
     }
     Ok(resolved)
+}
+
+/// Read admitted constructor syntax without evaluating its fields. The
+/// field map uses declaration order; host evaluation retains written order.
+fn grad_actual_adt_fields<'a>(
+    ty: &HostTypeTerm,
+    actual: &'a Expr,
+    program: &HostLoweringSession<'_>,
+) -> Option<(String, InstantiatedAdtConstructor, Vec<&'a Expr>)> {
+    let (ctor, supplied): (String, Vec<(Option<String>, &Expr)>) = match stamped_parts(actual)? {
+        (DeepTag::Record, _, kids) => {
+            let ctor = kids.first().and_then(symbol_name)?.to_string();
+            let fields = kids
+                .iter()
+                .skip(1)
+                .map(|field| {
+                    let (DeepTag::Kv, _, kv) = stamped_parts(field)? else {
+                        return None;
+                    };
+                    Some((
+                        Some(kv.first().and_then(symbol_name)?.to_string()),
+                        kv.get(1)?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            (ctor, fields)
+        }
+        (DeepTag::App, _, kids) => {
+            let ctor = kids.first().and_then(direct_var_name)?.to_string();
+            (
+                ctor,
+                kids.iter().skip(1).map(|field| (None, field)).collect(),
+            )
+        }
+        (DeepTag::Var, _, kids) => (kids.first().and_then(symbol_name)?.to_string(), Vec::new()),
+        _ => return None,
+    };
+    let AdtConstructorResolution::Unique(definition) =
+        resolve_adt_constructor_definition_for_type(program, &ctor, ty)
+    else {
+        return None;
+    };
+    let instantiated = definition.instantiate(ty).ok()?;
+    let field_exprs = if supplied.iter().all(|(name, _)| name.is_some()) {
+        instantiated
+            .fields
+            .iter()
+            .map(|field| {
+                supplied
+                    .iter()
+                    .find(|(name, _)| name.as_ref() == field.name.as_ref())
+                    .map(|(_, expr)| *expr)
+            })
+            .collect::<Option<Vec<_>>>()?
+    } else {
+        supplied.iter().map(|(_, expr)| *expr).collect()
+    };
+    if instantiated.fields.len() != field_exprs.len() {
+        return None;
+    }
+    Some((ctor, instantiated, field_exprs))
 }
 
 fn grad_pack_plan(
@@ -12047,60 +12108,7 @@ fn grad_pack_plan(
             })
         }
         HostTypeTerm::Adt(_, _) => {
-            let (ctor, supplied): (String, Vec<(Option<String>, &Expr)>) =
-                match stamped_parts(actual)? {
-                    (DeepTag::Record, _, kids) => {
-                        let ctor = kids.first().and_then(symbol_name)?.to_string();
-                        let fields = kids
-                            .iter()
-                            .skip(1)
-                            .map(|field| {
-                                let (DeepTag::Kv, _, kv) = stamped_parts(field)? else {
-                                    return None;
-                                };
-                                Some((
-                                    Some(kv.first().and_then(symbol_name)?.to_string()),
-                                    kv.get(1)?,
-                                ))
-                            })
-                            .collect::<Option<Vec<_>>>()?;
-                        (ctor, fields)
-                    }
-                    (DeepTag::App, _, kids) => {
-                        let ctor = kids.first().and_then(direct_var_name)?.to_string();
-                        (
-                            ctor,
-                            kids.iter().skip(1).map(|field| (None, field)).collect(),
-                        )
-                    }
-                    (DeepTag::Var, _, kids) => {
-                        (kids.first().and_then(symbol_name)?.to_string(), Vec::new())
-                    }
-                    _ => return None,
-                };
-            let AdtConstructorResolution::Unique(definition) =
-                resolve_adt_constructor_definition_for_type(program, &ctor, ty)
-            else {
-                return None;
-            };
-            let instantiated = definition.instantiate(ty).ok()?;
-            let field_exprs = if supplied.iter().all(|(name, _)| name.is_some()) {
-                instantiated
-                    .fields
-                    .iter()
-                    .map(|field| {
-                        supplied
-                            .iter()
-                            .find(|(name, _)| name.as_ref() == field.name.as_ref())
-                            .map(|(_, expr)| *expr)
-                    })
-                    .collect::<Option<Vec<_>>>()?
-            } else {
-                supplied.iter().map(|(_, expr)| *expr).collect()
-            };
-            if instantiated.fields.len() != field_exprs.len() {
-                return None;
-            }
+            let (ctor, instantiated, field_exprs) = grad_actual_adt_fields(ty, actual, program)?;
             let items = instantiated
                 .fields
                 .iter()
@@ -12146,12 +12154,115 @@ fn grad_pack_plan(
     }
 }
 
-/// Expose the leaves of a runtime, single-constructor ADT to the reverse DAG.
+/// Constructor evidence belongs to the argument's shape, independently of
+/// its eager host value. A static nested sum constructor remains known after
+/// the whole argument is bound once; an unknown sum tag still needs dispatch.
+struct RuntimeGradAdtPlan {
+    ty: HostTypeTerm,
+    kind: RuntimeGradAdtPlanKind,
+}
+
+enum RuntimeGradAdtPlanKind {
+    Leaf,
+    List,
+    Adt {
+        ctor: String,
+        fields: Vec<(String, RuntimeGradAdtPlan)>,
+    },
+}
+
+fn runtime_grad_adt_plan(
+    ty: &HostTypeTerm,
+    actual: Option<&Expr>,
+    span: chelis_deep::Span,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> Result<Option<RuntimeGradAdtPlan>, crate::lower::LowerDiagnostic> {
+    let ty = expand_host_type_aliases(program, ty.clone());
+    let kind = if matches!(ty, HostTypeTerm::List(_)) {
+        RuntimeGradAdtPlanKind::List
+    } else if let HostTypeTerm::Adt(adt_name, _) = &ty {
+        let defs = cached_program_defs(program);
+        let resolved = actual
+            .map(|actual| resolve_list_grad_shape_expr(actual, program, defs.as_ref(), scope))
+            .transpose()?;
+        let known = resolved
+            .as_ref()
+            .and_then(|actual| grad_actual_adt_fields(&ty, actual, program));
+        let (ctor, instantiated, actual_fields) = if let Some((ctor, instantiated, fields)) = known
+        {
+            (
+                ctor,
+                instantiated,
+                fields.into_iter().map(Some).collect::<Vec<_>>(),
+            )
+        } else {
+            let definitions = adt_constructor_definitions(program);
+            // The checked owner disambiguates imported equal terminal names.
+            let mut variants = definitions
+                .iter()
+                .filter(|definition| definition.adt_name == *adt_name)
+                .collect::<Vec<_>>();
+            if variants.is_empty() {
+                variants = definitions
+                    .iter()
+                    .filter(|definition| terminal_name_matches(&definition.adt_name, adt_name))
+                    .collect();
+            }
+            if variants.is_empty() {
+                return Ok(None);
+            }
+            let [definition] = variants.as_slice() else {
+                let unsupported = chelis_types::unsupported::Unsupported::new(
+                    chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                        "runtime ADT gradient for `{adt_name}`"
+                    )),
+                    format!("C gradient cannot select a constructor of runtime ADT `{adt_name}`"),
+                    chelis_types::unsupported::Stage::Lowering,
+                    chelis_types::unimplemented_rejection!(
+                        618,
+                        "runtime ADT constructor selection under a C gradient needs compiled tag dispatch"
+                    ),
+                );
+                return Err(crate::lower::LowerDiagnostic::new(
+                    unsupported.to_string(),
+                    Some(span),
+                    None,
+                )
+                .fatal());
+            };
+            let Ok(instantiated) = definition.instantiate(&ty) else {
+                return Ok(None);
+            };
+            let actual_fields = vec![None; instantiated.fields.len()];
+            (definition.ctor_name.clone(), instantiated, actual_fields)
+        };
+        let mut fields = Vec::with_capacity(instantiated.fields.len());
+        for (field, actual) in instantiated.fields.iter().zip(actual_fields) {
+            let Some(name) = field.name.clone() else {
+                return Ok(None);
+            };
+            let Some(plan) = runtime_grad_adt_plan(&field.ty, actual, span, program, scope)? else {
+                return Ok(None);
+            };
+            fields.push((name, plan));
+        }
+        RuntimeGradAdtPlanKind::Adt { ctor, fields }
+    } else if tensor_type_from_host_input(&ty).is_some() {
+        RuntimeGradAdtPlanKind::Leaf
+    } else {
+        // The existing syntax path owns host-only literal/tuple fields;
+        // decline before adding eager bindings or lowering their values.
+        return Ok(None);
+    };
+    Ok(Some(RuntimeGradAdtPlan { ty, kind }))
+}
+
+/// Expose ADT leaves using constructor evidence planned before evaluation.
 /// The host keeps the nominal value and projects each field once; the DAG sees
-/// a constructor with statically known topology and ordinary typed loads.
-/// This is valid for a fixed model struct even when its field tensors have
-/// runtime extents. A sum type needs runtime tag dispatch and is left to the
-/// host transform refusal until that representation exists.
+/// its known constructor topology and ordinary typed loads. Checked unique
+/// variants and resolved actual syntax provide that evidence even when tensor
+/// fields have runtime extents. An unknown sum tag still needs runtime dispatch.
 struct RuntimeGradAdtOutputs<'a> {
     bindings: &'a mut Vec<HostBinding>,
     leaf_scope: &'a mut UnordMap<String, HostTypeTerm>,
@@ -12171,6 +12282,10 @@ fn materialize_runtime_grad_adt(
     if !matches!(ty, HostTypeTerm::Adt(..)) {
         return Ok(None);
     }
+    let Some(plan) = runtime_grad_adt_plan(&ty, Some(actual), actual.span(), program, scope)?
+    else {
+        return Ok(None);
+    };
     let value = if let Some(name) = direct_var_name(actual).filter(|name| scope.contains_key(*name))
     {
         HostExpr::new(HostExprKind::Var(name.to_string(), ty.clone()))
@@ -12204,114 +12319,72 @@ fn materialize_runtime_grad_adt(
         leaf_scope,
         eager_arguments: _,
     } = outputs;
-    materialize_runtime_grad_adt_value(
+    Ok(materialize_runtime_grad_adt_value(
         value,
-        &ty,
+        &plan,
         actual.span(),
         program,
         used_names,
         bindings,
         leaf_scope,
-    )
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn materialize_runtime_grad_adt_value(
     value: HostExpr,
-    ty: &HostTypeTerm,
+    plan: &RuntimeGradAdtPlan,
     span: chelis_deep::Span,
     program: &HostLoweringSession<'_>,
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
     leaf_scope: &mut UnordMap<String, HostTypeTerm>,
-) -> Result<Option<Expr>, crate::lower::LowerDiagnostic> {
-    if let HostTypeTerm::List(element_ty) = ty {
-        return Ok(materialize_runtime_grad_list(
+) -> Option<Expr> {
+    if let RuntimeGradAdtPlanKind::List = &plan.kind {
+        let HostTypeTerm::List(element_ty) = &plan.ty else {
+            unreachable!("List plan retains its checked type")
+        };
+        return materialize_runtime_grad_list(
             value, element_ty, span, program, used_names, bindings, leaf_scope,
-        ));
+        );
     }
-    if let HostTypeTerm::Adt(adt_name, _) = ty {
-        let definitions = adt_constructor_definitions(program);
-        // A linked program can import two ADTs with the same terminal name.
-        // The checked type gives the exact owner; use terminal matching only
-        // for an unqualified local type with one unambiguous declaration.
-        let mut variants = definitions
-            .iter()
-            .filter(|definition| definition.adt_name == *adt_name)
-            .collect::<Vec<_>>();
-        if variants.is_empty() {
-            variants = definitions
-                .iter()
-                .filter(|definition| terminal_name_matches(&definition.adt_name, adt_name))
-                .collect();
-        }
-        if variants.is_empty() {
-            return Ok(None);
-        }
-        let [definition] = variants.as_slice() else {
-            let unsupported = chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Construct(format!(
-                    "runtime ADT gradient for `{adt_name}`"
-                )),
-                format!("C gradient cannot select a constructor of runtime ADT `{adt_name}`"),
-                chelis_types::unsupported::Stage::Lowering,
-                chelis_types::unimplemented_rejection!(
-                    618,
-                    "runtime ADT constructor selection under a C gradient needs compiled tag dispatch"
-                ),
-            );
-            return Err(crate::lower::LowerDiagnostic::new(
-                unsupported.to_string(),
-                Some(span),
-                None,
-            )
-            .fatal());
-        };
-        let Some(instantiated) = definition.instantiate(ty).ok() else {
-            return Ok(None);
-        };
-        let mut fields = Vec::with_capacity(instantiated.fields.len() + 1);
-        fields.push(Expr::Atom(Atom::Name(definition.ctor_name.clone()), span));
-        for (index, field) in instantiated.fields.iter().enumerate() {
+    if let RuntimeGradAdtPlanKind::Adt {
+        ctor,
+        fields: plans,
+    } = &plan.kind
+    {
+        let mut fields = Vec::with_capacity(plans.len() + 1);
+        fields.push(Expr::Atom(Atom::Name(ctor.clone()), span));
+        for (index, (name, field_plan)) in plans.iter().enumerate() {
             let field_value = HostExpr::new(HostExprKind::AdtFieldAccess {
                 base: Box::new(value.clone()),
                 field_index: index,
-                ty: field.ty.clone(),
+                ty: field_plan.ty.clone(),
             });
-            let Some(field_expr) = materialize_runtime_grad_adt_value(
+            let field_expr = materialize_runtime_grad_adt_value(
                 field_value,
-                &field.ty,
+                field_plan,
                 span,
                 program,
                 used_names,
                 bindings,
                 leaf_scope,
-            )?
-            else {
-                return Ok(None);
-            };
-            let Some(field_name) = field.name.clone() else {
-                return Ok(None);
-            };
+            )?;
             fields.push(Expr::node(
                 DeepTag::Kv,
                 Metadata::default(),
-                vec![Expr::Atom(Atom::Name(field_name), span), field_expr],
+                vec![Expr::Atom(Atom::Name(name.clone()), span), field_expr],
                 span,
             ));
         }
-        return Ok(Some(Expr::node(
+        return Some(Expr::node(
             DeepTag::Record,
             Metadata::default(),
             fields,
             span,
-        )));
+        ));
     }
-    // A numeric leaf is an ordinary helper input, including discrete leaves
-    // whose cotangent is unit. Other host values have no DAG load carrier.
-    if tensor_type_from_host_input(ty).is_none() {
-        return Ok(None);
-    }
+    // The checked leaf plan includes discrete inputs with unit cotangents.
     let mut index = bindings.len();
     let name = loop {
         let candidate = format!("__chelis_grad_adt_leaf_{index}");
@@ -12324,11 +12397,11 @@ fn materialize_runtime_grad_adt_value(
         name: name.clone(),
         display_name: None,
         display_roots: Vec::new(),
-        ty: ty.clone(),
+        ty: plan.ty.clone(),
         value,
     });
-    leaf_scope.insert(name.clone(), ty.clone());
-    Ok(Some(var_expr_node(&name, span)))
+    leaf_scope.insert(name.clone(), plan.ty.clone());
+    Some(var_expr_node(&name, span))
 }
 
 /// A runtime List enters the tensor DAG as its exact length and one ordered
@@ -12557,6 +12630,7 @@ fn grad_host_inline(params: Vec<HostParam>, body: HostExpr, ret_ty: HostTypeTerm
     HostCallback {
         stationary_accumulator: None,
         accumulator_delta: None,
+        accumulator_composition: None,
         kind: HostCallbackKind::Inline {
             params,
             body: Box::new(body),
