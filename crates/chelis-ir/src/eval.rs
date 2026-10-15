@@ -73,6 +73,7 @@ struct TensorView {
 thread_local! {
     static VIEW_VISITS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
     static DENSE_PRODUCT_REDUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PRODUCT_CELL_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Debug)]
@@ -120,6 +121,10 @@ impl TensorView {
                 numeric + usize::from(matches!(self.kind, TensorViewKind::Product { .. })),
             ));
         });
+        #[cfg(test)]
+        if matches!(self.kind, TensorViewKind::Product { .. }) {
+            PRODUCT_CELL_VISITS.with(|count| count.set(count.get() + 1));
+        }
         match &self.kind {
             TensorViewKind::Reshape { source } => source.scalar_at(index),
             TensorViewKind::Permute {
@@ -1600,6 +1605,10 @@ fn binary_elementwise(
         ));
     }
     .map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    if matches!(op, ElementwiseBinOp::Mul) {
+        PRODUCT_CELL_VISITS.with(|count| count.set(count.get() + lhs.len()));
+    }
     Ok(TensorValue::from_storage(lhs.shape.clone(), storage))
 }
 
@@ -2385,6 +2394,115 @@ fn axis_reduction_groups(
     Ok((out_shape, groups))
 }
 
+/// Checked movement recipes map reduction coordinates without interpreting numeric leaves.
+#[derive(Clone, Copy)]
+enum ProductIndexMap<'a> {
+    Expand {
+        inner: usize,
+        block: usize,
+        source_block: usize,
+    },
+    Permute {
+        shape: &'a [usize],
+        steps: &'a [usize],
+    },
+}
+
+fn product_movement_source<'a>(
+    mut value: &'a TensorValue,
+    maps: &mut Vec<ProductIndexMap<'a>>,
+) -> &'a TensorValue {
+    while let EvalStorage::View(view) = &value.storage {
+        if view.materialized.get().is_some() {
+            break;
+        }
+        value = match &view.kind {
+            TensorViewKind::Reshape { source } => source,
+            TensorViewKind::Permute {
+                source,
+                shape,
+                steps,
+            } => {
+                maps.push(ProductIndexMap::Permute { shape, steps });
+                source
+            }
+            TensorViewKind::Expand {
+                source,
+                inner,
+                block,
+                source_block,
+            } => {
+                maps.push(ProductIndexMap::Expand {
+                    inner: *inner,
+                    block: *block,
+                    source_block: *source_block,
+                });
+                source
+            }
+            _ => break,
+        };
+    }
+    value
+}
+
+fn product_mapped_index(mut index: usize, maps: &[ProductIndexMap<'_>]) -> usize {
+    for map in maps {
+        #[cfg(test)]
+        VIEW_VISITS.with(|count| {
+            let (recipes, numeric) = count.get();
+            count.set((recipes + 1, numeric));
+        });
+        index = match map {
+            ProductIndexMap::Expand {
+                inner,
+                block,
+                source_block,
+            } => index / block * source_block + index % inner,
+            ProductIndexMap::Permute { shape, steps } => movement_offset(index, shape, steps),
+        };
+    }
+    index
+}
+
+struct ProjectedProduct<'a> {
+    lhs: &'a TensorStorage,
+    rhs: &'a TensorStorage,
+    outer: Vec<ProductIndexMap<'a>>,
+    left: Vec<ProductIndexMap<'a>>,
+    right: Vec<ProductIndexMap<'a>>,
+}
+
+fn projected_product(input: &TensorValue) -> Option<ProjectedProduct<'_>> {
+    let mut outer = Vec::new();
+    let product = product_movement_source(input, &mut outer);
+    let EvalStorage::View(product) = &product.storage else {
+        return None;
+    };
+    if product.materialized.get().is_some() {
+        return None;
+    }
+    let TensorViewKind::Product { lhs, rhs } = &product.kind else {
+        return None;
+    };
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    let lhs = product_movement_source(lhs, &mut left);
+    let rhs = product_movement_source(rhs, &mut right);
+    fn dense(value: &TensorValue) -> Option<&TensorStorage> {
+        match &value.storage {
+            EvalStorage::Dense(storage) => Some(storage),
+            EvalStorage::View(view) => view.materialized.get(),
+        }
+    }
+    Some(ProjectedProduct {
+        lhs: dense(lhs)?,
+        rhs: dense(rhs)?,
+        outer,
+        left,
+        right,
+    })
+}
+
 /// Axis reduction through the closed Phase 2 typed kernel.
 /// `name` is the primitive's [04-NUM-9] name and `result` its result dtype.
 fn reduce(
@@ -2435,6 +2553,8 @@ fn reduce(
     {
         #[cfg(test)]
         DENSE_PRODUCT_REDUCTIONS.with(|count| count.set(count.get() + 1));
+        #[cfg(test)]
+        PRODUCT_CELL_VISITS.with(|count| count.set(count.get() + input.len()));
         chelis_types::dtype_semantics::sum_tensor_product_groups(
             a.storage(),
             b.storage(),
@@ -2443,6 +2563,33 @@ fn reduce(
             groups.map(|group| {
                 group.map(move |index| {
                     (index / ab * asb + index % ai, index / bb * bsb + index % bi)
+                })
+            }),
+        )
+    } else if let (
+        Some(projected),
+        TensorReduceOp::Sum {
+            accumulator,
+            result,
+        },
+    ) = (projected_product(input), op)
+    {
+        #[cfg(test)]
+        DENSE_PRODUCT_REDUCTIONS.with(|count| count.set(count.get() + 1));
+        #[cfg(test)]
+        PRODUCT_CELL_VISITS.with(|count| count.set(count.get() + input.len()));
+        chelis_types::dtype_semantics::sum_tensor_product_groups(
+            projected.lhs,
+            projected.rhs,
+            accumulator,
+            result,
+            groups.map(|group| {
+                group.map(|index| {
+                    let index = product_mapped_index(index, &projected.outer);
+                    (
+                        product_mapped_index(index, &projected.left),
+                        product_mapped_index(index, &projected.right),
+                    )
                 })
             }),
         )
@@ -6660,22 +6807,89 @@ mod tests {
         };
         let at = ty(&[3, 13]);
         let bt = ty(&[13, 5]);
-        let a = dag.add_node(owner, RiscOp::Load { name: "a".into() }, vec![], at.clone(), None);
-        let b = dag.add_node(owner, RiscOp::Load { name: "b".into() }, vec![], bt.clone(), None);
+        let a = dag.add_node(
+            owner,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            at.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            owner,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            bt.clone(),
+            None,
+        );
         let output = crate::tier2::lower_matmul_with_accumulator(
-            owner.into(), &mut dag, a, b, &at, &bt, Prim::F32, None,
+            owner.into(),
+            &mut dag,
+            a,
+            b,
+            &at,
+            &bt,
+            Prim::F32,
+            None,
         );
         dag.add_root(output);
         let inputs: UnordMap<String, TensorValue> = [
-            ("a".into(), TensorValue::from_vec(vec![3, 13], vec![0.5; 39])),
-            ("b".into(), TensorValue::from_vec(vec![13, 5], vec![0.25; 65])),
-        ].into_iter().collect();
+            (
+                "a".into(),
+                TensorValue::from_vec(vec![3, 13], vec![0.5; 39]),
+            ),
+            (
+                "b".into(),
+                TensorValue::from_vec(vec![13, 5], vec![0.25; 65]),
+            ),
+        ]
+        .into_iter()
+        .collect();
         DENSE_PRODUCT_REDUCTIONS.with(|count| count.set(0));
         VIEW_VISITS.with(|count| count.set((0, 0)));
-        let value = eval_tensor_roots_with(&dag, &[output], |name| inputs.get(name).cloned()).unwrap();
+        let value =
+            eval_tensor_roots_with(&dag, &[output], |name| inputs.get(name).cloned()).unwrap();
         assert_eq!(DENSE_PRODUCT_REDUCTIONS.with(std::cell::Cell::get), 1);
         assert_eq!(VIEW_VISITS.with(std::cell::Cell::get), (0, 0));
         assert_eq!(value[&output].to_f64_lossy_vec(), vec![1.625; 15]);
+    }
+
+    #[test]
+    fn native_product_adapter_stops_at_uncached_numeric_sources() {
+        let dense = TensorValue::from_storage(
+            vec![3],
+            chelis_types::finalize_tensor(
+                "mul",
+                Prim::F32,
+                chelis_types::RawTensor::Float(vec![0.25, 0.5, 0.75]),
+            )
+            .unwrap(),
+        );
+        let inner = TensorValue::from_view(
+            vec![3],
+            Prim::F32,
+            TensorViewKind::Product {
+                lhs: dense.clone(),
+                rhs: dense.clone(),
+            },
+        );
+        let outer = TensorValue::from_view(
+            vec![3],
+            Prim::F32,
+            TensorViewKind::Product {
+                lhs: inner.clone(),
+                rhs: dense.clone(),
+            },
+        );
+        assert!(projected_product(&dense).is_none());
+        assert!(
+            projected_product(&outer).is_none(),
+            "a nested numeric recipe must not become a dense base implicitly"
+        );
+        let _ = inner.storage();
+        assert!(
+            projected_product(&outer).is_some(),
+            "an explicitly cached numeric source is an immutable native base"
+        );
     }
 
     #[test]
@@ -6728,11 +6942,232 @@ mod tests {
         let inputs = [("x".into(), input.clone())].into_iter().collect();
         let dense = eval_tensor(&dag, &inputs).unwrap();
         VIEW_VISITS.with(|visits| visits.set((0, 0)));
+        PRODUCT_CELL_VISITS.with(|visits| visits.set(0));
         let rooted = eval_tensor_roots_with(&dag, &[sum], |_| Some(input.clone())).unwrap();
         let (recipes, numeric) = VIEW_VISITS.with(std::cell::Cell::get);
         assert_eq!(rooted[&sum].storage(), dense[&sum].storage());
-        assert_eq!(numeric, 17 * 12, "each product cell runs once");
+        assert_eq!(
+            PRODUCT_CELL_VISITS.with(std::cell::Cell::get),
+            17 * 12,
+            "each product cell runs once"
+        );
+        assert!(numeric <= 17 * 12);
         assert!(recipes <= 17 * 12 * 3, "recipe visits={recipes}");
+    }
+
+    #[test]
+    fn nonlinear_contraction_cotangent_products_run_at_source_shape() {
+        let mut dag = Dag::new();
+        let owner = dag.declare("test");
+        let matrix = TensorType {
+            dims: vec![DimInfo::Lit(5); 2],
+            precision: Prim::F32,
+        };
+        let a = dag.add_node(
+            owner,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            matrix.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            owner,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            matrix.clone(),
+            None,
+        );
+        let y = crate::tier2::lower_matmul_with_accumulator(
+            owner.into(),
+            &mut dag,
+            a,
+            b,
+            &matrix,
+            &matrix,
+            Prim::F32,
+            None,
+        );
+        let sine = dag.add_node(owner, RiscOp::Sin, vec![y], matrix, None);
+        let rows = dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            vec![sine],
+            TensorType {
+                dims: vec![DimInfo::Lit(5)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let loss = dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![rows],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let result = crate::grad::grad_dag_checked(&dag, loss, &[a, b]).unwrap();
+        let inputs: UnordMap<String, TensorValue> = [
+            (
+                "a".into(),
+                TensorValue::from_vec(
+                    vec![5, 5],
+                    (0..25).map(|i| (i as f64 - 12.0) / 16.0).collect(),
+                ),
+            ),
+            (
+                "b".into(),
+                TensorValue::from_vec(
+                    vec![5, 5],
+                    (0..25)
+                        .map(|i| ((i * 7 % 23) as f64 - 11.0) / 16.0)
+                        .collect(),
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let dense = eval_tensor(&result.dag, &inputs).unwrap();
+        PRODUCT_CELL_VISITS.with(|count| count.set(0));
+        let rooted = eval_tensor_roots_with(&result.dag, result.dag.roots(), |name| {
+            inputs.get(name).cloned()
+        })
+        .unwrap();
+        assert_eq!(
+            PRODUCT_CELL_VISITS.with(std::cell::Cell::get),
+            3 * 5 * 5 * 5 + 5 * 5
+        );
+        for root in result.dag.roots() {
+            assert_eq!(rooted[root].storage(), dense[root].storage());
+        }
+    }
+
+    #[test]
+    fn einsum_ad_movement_recipes_keep_native_product_reductions() {
+        let mut dag = Dag::new();
+        let owner = dag.declare("test");
+        let matrix = TensorType {
+            dims: vec![DimInfo::Lit(5); 2],
+            precision: Prim::F32,
+        };
+        let a = dag.add_node(
+            owner,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            matrix.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            owner,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            matrix.clone(),
+            None,
+        );
+        let y = crate::tier2_ordered::lower_einsum(
+            owner.into(),
+            &mut dag,
+            "ij,jk->ik",
+            [(a, &matrix), (b, &matrix)],
+            None,
+            None,
+        )
+        .ok()
+        .expect("legal einsum");
+        let rows = dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            vec![y],
+            TensorType {
+                dims: vec![DimInfo::Lit(5)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let loss = dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![rows],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let result = crate::grad::grad_dag_checked(&dag, loss, &[a, b]).unwrap();
+        let inputs: UnordMap<String, TensorValue> = [
+            (
+                "a".into(),
+                TensorValue::from_vec(
+                    vec![5, 5],
+                    (0..25).map(|i| (i as f64 - 12.0) / 16.0).collect(),
+                ),
+            ),
+            (
+                "b".into(),
+                TensorValue::from_vec(
+                    vec![5, 5],
+                    (0..25)
+                        .map(|i| ((i * 7 % 23) as f64 - 11.0) / 16.0)
+                        .collect(),
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let dense = eval_tensor(&result.dag, &inputs).unwrap();
+        DENSE_PRODUCT_REDUCTIONS.with(|count| count.set(0));
+        PRODUCT_CELL_VISITS.with(|count| count.set(0));
+        let rooted = eval_tensor_roots_with(&result.dag, result.dag.roots(), |name| {
+            inputs.get(name).cloned()
+        })
+        .unwrap();
+        assert_eq!(DENSE_PRODUCT_REDUCTIONS.with(std::cell::Cell::get), 3);
+        assert_eq!(
+            PRODUCT_CELL_VISITS.with(std::cell::Cell::get),
+            3 * 5 * 5 * 5
+        );
+        for root in result.dag.roots() {
+            assert_eq!(rooted[root].storage(), dense[root].storage());
+        }
+        let mapped = crate::vmap::vectorize_axis0(&result.dag, DimInfo::Lit(3)).unwrap();
+        let values: UnordMap<String, TensorValue> = ["a", "b"]
+            .into_iter()
+            .map(|name| {
+                let data = inputs[name].to_f64_lossy_vec();
+                (
+                    name.into(),
+                    TensorValue::from_vec(
+                        vec![3, 5, 5],
+                        (0..3).flat_map(|_| data.iter().copied()).collect(),
+                    ),
+                )
+            })
+            .collect();
+        let dense = eval_tensor(&mapped, &values).unwrap();
+        PRODUCT_CELL_VISITS.with(|count| count.set(0));
+        VIEW_VISITS.with(|count| count.set((0, 0)));
+        DENSE_PRODUCT_REDUCTIONS.with(|count| count.set(0));
+        let rooted =
+            eval_tensor_roots_with(&mapped, mapped.roots(), |name| values.get(name).cloned())
+                .unwrap();
+        assert_eq!(
+            PRODUCT_CELL_VISITS.with(std::cell::Cell::get),
+            3 * 3 * 5 * 5 * 5
+        );
+        assert_eq!(DENSE_PRODUCT_REDUCTIONS.with(std::cell::Cell::get), 3);
+        assert!(VIEW_VISITS.with(std::cell::Cell::get).0 <= 8 * 3 * 3 * 5 * 5 * 5);
+        for root in mapped.roots() {
+            assert_eq!(rooted[root].storage(), dense[root].storage());
+        }
     }
 
     /// [05-OP-33] (chelis#2972): add-mode scatter combines each destination's

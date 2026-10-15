@@ -371,7 +371,7 @@ impl<'a> VerifiedDagView<'a> {
             .iter()
             .flat_map(crate::fuse::InlinedProduct::skipped)
             .collect::<Vec<_>>();
-        crate::contraction_views::contraction_views(self.dag, &specialized)
+        crate::contraction_views::contraction_views_excluding(self.dag, &[], &specialized)
     }
 
     pub fn first_integer_abs_node(self) -> Option<NodeId> {

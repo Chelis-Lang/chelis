@@ -2306,7 +2306,9 @@ impl CEmitter {
                     | VerifiedDagAction::OwnedDrop { node: drop, source }
                         if drop == node.id && node.inputs.first() == Some(&source) =>
                     {
-                        if matches!(action, VerifiedDagAction::OwnedDrop { .. }) {
+                        if matches!(action, VerifiedDagAction::OwnedDrop { .. })
+                            && !self.deferred_views.is_deferred(source)
+                        {
                             if self.write_nodes.remove(&source.0) {
                                 self.line(&format!(
                                     "chelis_tensor_end_write(t{}_write_guard);",
@@ -2354,6 +2356,8 @@ impl CEmitter {
                     )?;
                 } else if let Some(inlined) = self.inlined_products.get(&id).copied() {
                     self.emit_inlined_product_sum(id, *axis, inlined, &node.output_type, dag);
+                } else if self.deferred_views.is_deferred(input_id) {
+                    self.emit_deferred_sum(node, *axis, dag);
                 } else {
                     self.emit_reduce_sum(
                         id,
@@ -3749,9 +3753,7 @@ impl CEmitter {
 
     fn emit_deferred_ownership_after_node(&mut self, node: &DagNode) {
         let id = node.id.0;
-        if self.deferred_metadata.contains(&node.id)
-            && !self.emitted_metadata.contains(&node.id)
-        {
+        if self.deferred_metadata.contains(&node.id) && !self.emitted_metadata.contains(&node.id) {
             assert!(!self.deferred_views.is_deferred(node.id));
             self.line(&format!(
                 "chelis_metadata_plan *t{id}_metadata = chelis_metadata_plan_tensor(t{id});"
@@ -3773,12 +3775,18 @@ impl CEmitter {
     fn emit_deferred_retirements(&mut self, position: usize) {
         if let Some(nodes) = self.metadata_retirements.remove(&position) {
             for node in nodes {
-                self.line(&format!("chelis_metadata_plan_release(t{}_metadata);", node.0));
+                self.line(&format!(
+                    "chelis_metadata_plan_release(t{}_metadata);",
+                    node.0
+                ));
             }
         }
         if let Some(nodes) = self.pin_retirements.remove(&position) {
             for node in nodes {
-                self.line(&format!("chelis_tensor_release(t{}_deferred_owner);", node.0));
+                self.line(&format!(
+                    "chelis_tensor_release(t{}_deferred_owner);",
+                    node.0
+                ));
             }
         }
     }
@@ -3984,7 +3992,8 @@ impl CEmitter {
         // Capture its logical extent while the source metadata still names it.
         let extent = format!("t{id}_shape_extent");
         self.line(&format!(
-            "const int64_t {extent} = {};", self.tensor_extent(NodeId(a), axis)
+            "const int64_t {extent} = {};",
+            self.tensor_extent(NodeId(a), axis)
         ));
         self.emit_slot_wrapper(id, ty);
         match ty.precision {
@@ -7368,6 +7377,23 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         operation: &str,
         scratch: bool,
     ) {
+        self.emit_reduction_plan_shape(
+            id, input, input_ty, axes, output_ty, operation, scratch, None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_reduction_plan_shape(
+        &mut self,
+        id: usize,
+        input: Option<usize>,
+        input_ty: &TensorType,
+        axes: &[usize],
+        output_ty: &TensorType,
+        operation: &str,
+        scratch: bool,
+        logical_shape: Option<String>,
+    ) {
         let axes_name = format!("t{id}_reduction_axes");
         self.emit_affine_bounds(
             &axes_name,
@@ -7380,7 +7406,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             self.line(&format!("chelis_reduction_plan *t{id}_reduction = chelis_tensor_reduction_plan(t{input}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {count}), {axes_name}, {exemplar}, {operation});"));
         } else {
             let rank = input_ty.dims.len();
-            let shape = Self::tagged_shape_literal(input_ty);
+            let shape = logical_shape.unwrap_or_else(|| Self::tagged_shape_literal(input_ty));
             self.line(&format!("chelis_reduction_plan *t{id}_reduction = chelis_shape_reduction_plan(chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {count}), {axes_name}, {exemplar}, {operation});"));
         }
         let extents = (0..output_ty.dims.len()).map(|axis|
@@ -7916,6 +7942,104 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
 
     /// Sum loads each source at its storage width, then finalizes every
     /// adjacent pair at the explicitly selected accumulator width.
+    fn emit_deferred_sum(&mut self, node: &DagNode, axis: usize, dag: VerifiedDagView<'_>) {
+        let id = node.id.0;
+        let input = node.inputs[0];
+        let input_ty = &dag
+            .get(input)
+            .expect("verified reduction source")
+            .output_type;
+        let ty = &node.output_type;
+        assert!(matches!(ty.precision, Prim::F32 | Prim::F64));
+        let extents = (0..input_ty.dims.len())
+            .map(|axis| {
+                format!(
+                    "chelis_scalar_from_bits(CHELIS_DTYPE_I64, {})",
+                    self.tensor_extent(input, axis)
+                )
+            })
+            .collect::<Vec<_>>();
+        let logical_shape = if extents.is_empty() {
+            "NULL".into()
+        } else {
+            format!("(chelis_scalar[]){{ {} }}", extents.join(", "))
+        };
+        self.emit_reduction_plan_shape(
+            id,
+            None,
+            input_ty,
+            &[axis],
+            ty,
+            "CHELIS_REDUCE_SUM",
+            false,
+            Some(logical_shape),
+        );
+        self.emit_slot_wrapper(id, ty);
+        let index = Self::prim_elem_type(Prim::Int64);
+        let flag = Self::prim_elem_type(Prim::Bool);
+        let acc = Self::elem_type(ty);
+        self.open_element_loop(
+            id,
+            "outer",
+            &format!("t{id}_size"),
+            Some("#pragma omp parallel for"),
+        );
+        self.line(crate::fp_env::ENTRY);
+        // At most 63 occupied levels represent an admitted signed-i64 leaf
+        // count. Equal-sized left subtrees combine on carries; folding the
+        // remaining right tail upward reproduces the adjacent-pair tree.
+        self.line(&format!("{acc} __carry_level_{id}[64];"));
+        self.line(&format!("{flag} __carry_used_{id}[64] = {{ 0 }};"));
+        self.line(&format!(
+            "for ({index} leaf = 0; leaf < t{id}_leaf_count; ++leaf) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "const {index} src = {};",
+            self.projection_index(id, "outer", "leaf")
+        ));
+        let stored = self.deferred_read(input, "src", dag);
+        let value = if Self::is_reduced_float(input_ty) {
+            format!("{}({stored})", Self::reduced_to_f32_fn(input_ty.precision))
+        } else {
+            stored
+        };
+        self.line(&format!("{acc} carry = ({acc})({value});"));
+        self.line(&format!("{index} depth = 0;"));
+        self.line(&format!("while (__carry_used_{id}[depth]) {{"));
+        self.indent += 1;
+        self.line(&format!("carry = __carry_level_{id}[depth] + carry;"));
+        self.line(&format!("__carry_used_{id}[depth++] = 0;"));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("__carry_level_{id}[depth] = carry;"));
+        self.line(&format!("__carry_used_{id}[depth] = 1;"));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "{acc} total = {};",
+            Self::scalar_zero_literal(ty.precision)
+        ));
+        self.line(&format!("{flag} found = 0;"));
+        self.line(&format!("for ({index} depth = 0; depth < 64; ++depth) {{"));
+        self.indent += 1;
+        self.line(&format!("if (__carry_used_{id}[depth]) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "total = found ? __carry_level_{id}[depth] + total : __carry_level_{id}[depth];"
+        ));
+        self.line("found = 1;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        let total = finalize_elem(self.nan_finalization, "total".into(), ty);
+        self.line(&format!("(({acc}*)t{id}_data)[outer] = {total};"));
+        self.line(crate::fp_env::EXIT);
+        self.close_element_loop();
+        self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
+    }
+
     fn emit_reduce_sum_general(
         &mut self,
         id: usize,
@@ -9353,8 +9477,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             ));
             self.emit_static_dim_guard(id, *axis, extent, ty.dims.get(*axis));
         }
-        if self.deferred_views.is_deferred(NodeId(id))
-            || self.deferred_views.is_deferred(NodeId(a))
+        if self.deferred_views.is_deferred(NodeId(id)) || self.deferred_views.is_deferred(NodeId(a))
         {
             self.line(&format!(
                 "chelis_metadata_plan *t{id}_metadata = chelis_metadata_plan_reshape(t{a}_metadata, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {});",
@@ -9537,7 +9660,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             } => {
                 let source = inputs[*tensor].0;
                 if let Some(rank) = self.deferred_ranks.get(&source) {
-                    let normalized = if *source_axis < 0 { (*rank as i32 + source_axis) as usize } else { *source_axis as usize };
+                    let normalized = if *source_axis < 0 {
+                        (*rank as i32 + source_axis) as usize
+                    } else {
+                        *source_axis as usize
+                    };
                     self.tensor_extent(NodeId(source), normalized)
                 } else {
                     format!("chelis_tensor_shape(t{source}, {source_axis})")
@@ -10210,7 +10337,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         match canonical {
             chelis_ir::axis_sources::CanonicalExtent::Binder(name) => extent_read(name),
             chelis_ir::axis_sources::CanonicalExtent::Witness(witness) => {
-                format!("(({}*)t{}_data)[0]", Self::prim_elem_type(Prim::Int64), witness.0)
+                format!(
+                    "(({}*)t{}_data)[0]",
+                    Self::prim_elem_type(Prim::Int64),
+                    witness.0
+                )
             }
             chelis_ir::axis_sources::CanonicalExtent::Resolved(extent) => extent.to_string(),
         }
