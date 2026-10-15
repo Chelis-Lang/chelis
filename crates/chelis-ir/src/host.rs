@@ -32187,15 +32187,17 @@ fn accumulator_construction_proof_impl(
     admission: bool,
 ) -> Option<AccumulatorDeltaProof> {
     use crate::claim_pattern::{ClaimNode, ClaimNodeId, ClaimPattern};
-    fn variable(expr: &Expr, name: &str) -> bool {
-        let expr = if let Expr::MetaExpr(meta, _) = expr {
-            &meta.expr
-        } else {
-            expr
-        };
+    fn variable(expr: &Expr, parameter: &str, aliases: &BTreeSet<String>) -> bool {
+        if let Expr::MetaExpr(meta, _) = expr {
+            return variable(&meta.expr, parameter, aliases);
+        }
         as_node(expr).is_some_and(|node| {
             node.tag() == DeepTag::Var
-                && node.children_slice().first().and_then(symbol_name) == Some(name)
+                && node
+                    .children_slice()
+                    .first()
+                    .and_then(symbol_name)
+                    .is_some_and(|name| name == parameter || aliases.contains(name))
         })
     }
     fn recipe(
@@ -32204,37 +32206,65 @@ fn accumulator_construction_proof_impl(
         pattern: &ClaimPattern,
         position: ClaimNodeId,
         root: ClaimNodeId,
+        aliases: &BTreeSet<String>,
+        shadowed: &BTreeSet<String>,
     ) -> Option<(AccumulatorDeltaRecipe, bool)> {
         if let Expr::MetaExpr(meta, _) = expr {
-            return recipe(&meta.expr, parameter, pattern, position, root);
+            return recipe(
+                &meta.expr, parameter, pattern, position, root, aliases, shadowed,
+            );
         }
         let node = as_node(expr)?;
         let children = node.children_slice();
-        if variable(expr, parameter) {
+        if variable(expr, parameter, aliases) {
             return (position == root).then_some((AccumulatorDeltaRecipe::Inherited, true));
         }
         match node.tag() {
-            DeepTag::Block => recipe(children.last()?, parameter, pattern, position, root),
+            DeepTag::Block => recipe(
+                children.last()?,
+                parameter,
+                pattern,
+                position,
+                root,
+                aliases,
+                shadowed,
+            ),
             DeepTag::Let => {
                 let bindings = children.first().and_then(as_node)?;
                 let (pairs, remainder) = bindings.children_slice().as_chunks::<2>();
                 if bindings.tag() != DeepTag::Bind || !remainder.is_empty() {
                     return None;
                 }
-                let mut names = UnordSet::new();
+                let mut local_aliases = aliases.clone();
+                let mut local_shadowed = shadowed.clone();
                 for pair in pairs {
+                    // Deep let bindings are sequential: read the old lexical
+                    // environment before introducing this pair's binders.
+                    let inherited = variable(&pair[1], parameter, &local_aliases);
+                    let mut names = UnordSet::new();
                     collect_binder_names(&pair[0], &mut names);
+                    if names.contains(parameter) {
+                        return None;
+                    }
+                    for name in names.into_sorted() {
+                        local_aliases.remove(&name);
+                        local_shadowed.insert(name);
+                    }
+                    // Patterns invalidate every name they bind, but only a
+                    // whole-value variable binding transports root identity.
+                    if inherited && let Some(name) = symbol_name(&pair[0]) {
+                        local_aliases.insert(name.to_owned());
+                    }
                 }
-                if names.contains(parameter) {
-                    return None;
-                }
-                let derived = recipe(children.get(1)?, parameter, pattern, position, root)?;
-                if let AccumulatorDeltaRecipe::ListInterval { operation, .. } = &derived.0
-                    && names.contains(operation.symbol())
-                {
-                    return None;
-                }
-                Some(derived)
+                recipe(
+                    children.get(1)?,
+                    parameter,
+                    pattern,
+                    position,
+                    root,
+                    &local_aliases,
+                    &local_shadowed,
+                )
             }
             DeepTag::Record => {
                 let ClaimNode::Nominal {
@@ -32266,7 +32296,8 @@ fn accumulator_construction_proof_impl(
                         .then(|| kv.children_slice().get(1))
                         .flatten()
                     })?;
-                    let (part, inherits) = recipe(source, parameter, pattern, child, root)?;
+                    let (part, inherits) =
+                        recipe(source, parameter, pattern, child, root, aliases, shadowed)?;
                     reused |= inherits;
                     fields.push(part);
                 }
@@ -32288,6 +32319,9 @@ fn accumulator_construction_proof_impl(
                     return Some((AccumulatorDeltaRecipe::Fresh, false));
                 }
                 let name = callee.children_slice().first().and_then(symbol_name)?;
+                if shadowed.contains(name) {
+                    return None;
+                }
                 fn length(expr: &Expr) -> Option<usize> {
                     if let Expr::MetaExpr(meta, _) = expr {
                         return length(&meta.expr);
@@ -32298,11 +32332,11 @@ fn accumulator_construction_proof_impl(
                     Some(length)
                 }
                 let result = match (name, &children[1..]) {
-                    ("append", [old, _]) if variable(old, parameter) => Some((0, 1)),
-                    ("concat", [old, fresh]) if variable(old, parameter) => {
+                    ("append", [old, _]) if variable(old, parameter, aliases) => Some((0, 1)),
+                    ("concat", [old, fresh]) if variable(old, parameter, aliases) => {
                         length(fresh).map(|after| (0, after))
                     }
-                    ("concat", [fresh, old]) if variable(old, parameter) => {
+                    ("concat", [fresh, old]) if variable(old, parameter, aliases) => {
                         length(fresh).map(|before| (before, 0))
                     }
                     _ => None,
@@ -32377,6 +32411,8 @@ fn accumulator_construction_proof_impl(
         &pattern,
         root,
         root,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
     )?;
     (reused && (admission || !matches!(recipe, AccumulatorDeltaRecipe::Inherited))).then_some(
         AccumulatorDeltaProof {
@@ -32441,6 +32477,82 @@ mod accumulator_delta_tests {
         )
         .unwrap();
         assert!(!proof.validates_pattern(&changed));
+    }
+
+    #[test]
+    fn delta_proof_transports_only_sequential_immutable_root_aliases() {
+        for body in [
+            "{ old = acc\n append(old, to_tensor([1.0f32, 2.0f32, 3.0f32])) }",
+            "{ old = acc\n older = old\n concat(older, [to_tensor([1.0f32, 2.0f32, 3.0f32])]) }",
+            "{ old = acc\n older = old\n concat([to_tensor([1.0f32, 2.0f32, 3.0f32])], older) }",
+        ] {
+            assert!(
+                proof(body).is_some(),
+                "immutable original-root alias: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn delta_proof_rejects_rebound_pattern_shadowed_and_equal_value_aliases() {
+        for body in [
+            "{ old = [to_tensor([1.0f32, 2.0f32, 3.0f32])]\n append(old, to_tensor([1.0f32, 2.0f32, 3.0f32])) }",
+            "{ old = acc\n old = [to_tensor([1.0f32, 2.0f32, 3.0f32])]\n append(old, to_tensor([1.0f32, 2.0f32, 3.0f32])) }",
+            "{ old = if i == 0i64 then acc else acc\n append(old, to_tensor([1.0f32, 2.0f32, 3.0f32])) }",
+            "{ old = acc\n (old, ignored) = ([to_tensor([1.0f32, 2.0f32, 3.0f32])], i)\n append(old, to_tensor([1.0f32, 2.0f32, 3.0f32])) }",
+            "{ old = acc\n append = fn (xs: List[tensor[3, f32]], x: tensor[3, f32]) -> xs\n append(old, to_tensor([1.0f32, 2.0f32, 3.0f32])) }",
+        ] {
+            assert!(proof(body).is_none(), "no original-root authority: {body}");
+        }
+    }
+
+    #[test]
+    fn delta_proof_checks_lowered_alias_identity_independently() {
+        let proof = proof(
+            "{ old = acc\n older = old\n append(older, to_tensor([1.0f32, 2.0f32, 3.0f32])) }",
+        )
+        .unwrap();
+        let variable =
+            |name: &str| HostExpr::new(HostExprKind::Var(name.into(), proof.formal_type.clone()));
+        let binding = |name: &str, value| HostBinding {
+            name: name.into(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: proof.formal_type.clone(),
+            value,
+        };
+        let lowered = |source: &str, operation: &str| {
+            HostExpr::new(HostExprKind::Let {
+                bindings: vec![
+                    binding("old", variable(source)),
+                    binding("older", variable("old")),
+                ],
+                body: Box::new(HostExpr::new(HostExprKind::Builtin {
+                    name: operation.into(),
+                    args: vec![variable("older"), HostExpr::new(HostExprKind::Unit)],
+                    ty: proof.formal_type.clone(),
+                })),
+                ty: proof.formal_type.clone(),
+            })
+        };
+        assert!(proof.validates_body(&lowered("acc", "append")));
+        assert!(
+            !proof.validates_body(&lowered("same_shape", "append")),
+            "a lowered source mutation cannot borrow checked alias authority"
+        );
+        assert!(
+            !proof.validates_body(&lowered("acc", "concat")),
+            "operation identity remains independent evidence"
+        );
+        let mut rebound = lowered("acc", "append");
+        let HostExprKind::Let { bindings, .. } = &mut rebound.kind else {
+            unreachable!()
+        };
+        bindings.push(binding("older", variable("same_shape")));
+        assert!(
+            !proof.validates_body(&rebound),
+            "a lowered rebind invalidates the alias"
+        );
     }
 
     #[test]

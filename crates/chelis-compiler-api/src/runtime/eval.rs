@@ -890,6 +890,10 @@ fn collect_nested_entry_actuals(
         next: 0,
     }];
     while let Some(visit) = pending.last_mut() {
+        // Charge every container dispatch/field slot, including wrappers that
+        // add no tensors. Tensor observations retain their separate counter.
+        #[cfg(test)]
+        ENTRY_CLAIM_TRAVERSAL_WORK.with(|v| v.set(v.get() + 1));
         let index = visit.next;
         visit.next += 1;
         // `None` once the position is done; `Some(None)` when its slot
@@ -1132,6 +1136,8 @@ fn collect_delta_entry_actuals(
                 }
                 for ((field, value), recipe) in layout.fields.iter().zip(fields.iter()).zip(recipes)
                 {
+                    #[cfg(test)]
+                    ENTRY_CLAIM_TRAVERSAL_WORK.with(|v| v.set(v.get() + 1));
                     let Some(child) = field.node else {
                         continue;
                     };
@@ -1212,6 +1218,7 @@ fn collect_delta_entry_actuals(
 #[cfg(test)]
 thread_local! {
     static ENTRY_CLAIM_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static ENTRY_CLAIM_TRAVERSAL_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static COMPOSITION_SOURCE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -1233,11 +1240,19 @@ pub(super) fn composition_source_bytes() -> u64 {
 #[cfg(test)]
 pub(super) fn reset_entry_claim_work() {
     ENTRY_CLAIM_WORK.with(|v| v.set(0));
+    ENTRY_CLAIM_TRAVERSAL_WORK.with(|v| v.set(0));
     COMPOSITION_SOURCE_BYTES.with(|v| v.set(0));
 }
 #[cfg(test)]
 pub(super) fn entry_claim_work() -> u64 {
     ENTRY_CLAIM_WORK.with(std::cell::Cell::get)
+}
+
+/// Collector stack steps and delta constructor field slots, separate from
+/// the existing tensor-observation, witness and recipe-dispatch units.
+#[cfg(test)]
+pub(super) fn entry_claim_traversal_work() -> u64 {
+    ENTRY_CLAIM_TRAVERSAL_WORK.with(std::cell::Cell::get)
 }
 
 /// Rebuild tensor declarations, including List elements, at one invocation.

@@ -2179,9 +2179,17 @@ the original authored direct List type or the identical nested claim graph.
 Nominal constructions retain their exact declaration owner in both views. List
 recipes retain their exact intrinsic operation: Eval resolves it through the
 ordinary builtin-dispatch authority in the closure's captured lexical frame,
-and C validates the lowered builtin identity. A callback-local shadow cannot
-supply the operation. Top-level builtin shadowing remains the checker's
-`BuiltinShadowing` error. Aliases and selected callables require their own
+and C validates the lowered builtin identity. Checked sequential immutable let
+bindings transport whole-root identity only from a bare variable (metadata wrappers included) already naming the original
+first formal. Alias chains retain that identity; each rebinding or pattern
+binder removes the shadowed name before subsequent bindings and the body are
+considered. Rebinding the original formal rejects the recipe. Initializers and
+their effects remain in the callback. Fresh values, calls and conditionals do
+not transport identity, even when their values or shapes agree. The checked
+recipe and the independently validated lowered body both enforce this rule.
+A callback-local shadow cannot supply the operation. Top-level builtin shadowing
+remains the checker's `BuiltinShadowing` error. Callable aliases and selected
+callables require their own
 postcondition evidence and retain full entry validation.
 Shadowed bindings, arbitrary equal-shaped values and unproved result paths
 supply no evidence. The receipt represents fixed-rank, concrete-precision
@@ -2218,7 +2226,11 @@ Direct named callbacks derive their construction postcondition from the
 checked function body, independently of its declared result type. Exact
 two-argument forwarding through an inline callback composes two receipts: the
 outer callback's original admission and the named callee's original formal
-obligation. Wildcard-only direct tensor Lists retain an admission pattern with
+obligation. This forwarding recognizer requires a direct application body;
+local aliases around that call retain complete checking. Supporting those
+wrappers requires preserving their sequential bindings, effects and claim
+scopes around the retained callee entry as well as proving argument identity.
+Wildcard-only direct tensor Lists retain an admission pattern with
 empty extent axes; this records tensor positions without inventing claims.
 Nominal walks retain their original claim positions rather than admitting
 previously unobserved wildcard fields.

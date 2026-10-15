@@ -5160,7 +5160,7 @@ fn named_definition_accumulator_claim_has_independent_compositional_receipts() {
                                     )
                                 };
                                 let body = if unproved {
-                                    "{\n old = acc\n append(old, produce(3i64))\n}"
+                                    "{\n old = if i == 0i64 then acc else acc\n append(old, produce(3i64))\n}"
                                 } else {
                                     "append(acc, produce(3i64))"
                                 };
@@ -5297,6 +5297,274 @@ fn named_nominal_chain_receipts_keep_literal_and_scoped_binder_obligations() {
                         "Eval named Chain direct={direct} claim={claim} {combine} K={steps}: {work}"
                     );
                     assert!(work <= 64 * steps as u64 + 100, "{source}\n{work}");
+                }
+            }
+        }
+    }
+}
+
+fn immutable_alias_source(
+    claim: &str,
+    entry: &str,
+    combine: &str,
+    steps: usize,
+    operation: &str,
+) -> String {
+    let generic = if claim == "n" { "[n]" } else { "" };
+    let construction = match operation {
+        "append" => "append(older, produce(3i64))",
+        "prefix" => "concat([produce(3i64)], older)",
+        "suffix" => "concat(older, [produce(3i64)])",
+        _ => unreachable!(),
+    };
+    let body = format!("{{ old = acc\n older = old\n {construction} }}");
+    let callback = match entry {
+        "inline" => format!("fn (acc: List[tensor[{claim}, f32]], i: i64) -> {body}"),
+        "direct" => "step".to_owned(),
+        "composed" => "fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i)".to_owned(),
+        _ => unreachable!(),
+    };
+    format!(
+        "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step{generic}(acc: List[tensor[{claim}, f32]], i: i64) -> List[tensor[*, f32]] = {body}\ndef run{generic}(seed: List[tensor[{claim}, f32]]) -> i64 = len({combine}({callback}, seed, range(0i64, {steps}i64)))\nout = run([produce(3i64)])\n"
+    )
+}
+
+#[test]
+fn immutable_local_aliases_retain_bounded_accumulator_entry_work() {
+    let mut excessive = Vec::new();
+    for operation in ["append", "prefix", "suffix"] {
+        for claim in ["3", "n"] {
+            for entry in ["inline", "direct", "composed"] {
+                for combine in ["fold", "scan"] {
+                    for steps in [100, 400] {
+                        let source =
+                            immutable_alias_source(claim, entry, combine, steps, operation);
+                        let checked = checked_surf(&source);
+                        let empty = UnordMap::new();
+                        super::eval::reset_entry_claim_work();
+                        let outcome = evaluate_host_program_with_library_and_types(
+                            &checked,
+                            None,
+                            None,
+                            HostEvaluationInputs {
+                                roots: &empty,
+                                bindings: None,
+                            },
+                            None,
+                            None,
+                        )
+                        .expect("alias callback evaluates");
+                        assert_eq!(
+                            render_value(&outcome.host_bindings["out"]),
+                            (if combine == "scan" { steps } else { steps + 1 }).to_string()
+                        );
+                        let work = super::eval::entry_claim_work();
+                        eprintln!(
+                            "Eval immutable aliases {operation} {entry} {combine} claim={claim} K={steps}: {work}"
+                        );
+                        if work > 64 * steps as u64 + 100 {
+                            excessive.push(format!(
+                                "{operation} {entry} {combine} {claim} K={steps}: {work}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(excessive.is_empty(), "{}", excessive.join("\n"));
+}
+
+fn immutable_nominal_alias_source(
+    collection: &str,
+    claim: &str,
+    entry: &str,
+    combine: &str,
+    steps: usize,
+) -> String {
+    let generic = if claim == "n" { "[n]" } else { "" };
+    let (declaration, seed, construction) = if collection == "Chain" {
+        (
+            "type Chain[T] =\n | End { v: T }\n | Link { v: T, next: Chain[T] }",
+            "End { v: produce(3i64) }",
+            "Link { v: produce(3i64), next: older }",
+        )
+    } else {
+        (
+            "type Box[T] =\n | Base { v: T }\n | Wrap { inner: Box[T] }",
+            "Base { v: produce(3i64) }",
+            "Wrap { inner: older }",
+        )
+    };
+    let formal = format!("{collection}[tensor[{claim}, f32]]");
+    let result = format!("{collection}[tensor[*, f32]]");
+    let body = format!("{{ old = acc\n older = old\n {construction} }}");
+    let callback = match entry {
+        "inline" => format!("fn (acc: {formal}, i: i64) -> {body}"),
+        "direct" => "step".to_owned(),
+        "composed" => format!("fn (acc: {result}, i: i64) -> step(acc, i)"),
+        _ => unreachable!(),
+    };
+    format!(
+        "{declaration}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step{generic}(acc: {formal}, i: i64) -> {result} = {body}\ndef run{generic}(seed: {formal}) -> i64 = {{ _ = {combine}({callback}, seed, range(0i64, {steps}i64))\n {steps}i64 }}\nout = run({seed})\n"
+    )
+}
+
+#[test]
+fn immutable_nominal_aliases_retain_bounded_accumulator_entry_work() {
+    let mut excessive = Vec::new();
+    for collection in ["Chain", "Box"] {
+        for claim in ["3", "n"] {
+            for entry in ["inline", "direct", "composed"] {
+                for combine in ["fold", "scan"] {
+                    for steps in [100, 400] {
+                        let source = immutable_nominal_alias_source(
+                            collection, claim, entry, combine, steps,
+                        );
+                        let checked = checked_surf(&source);
+                        let empty = UnordMap::new();
+                        super::eval::reset_entry_claim_work();
+                        let outcome = evaluate_host_program_with_library_and_types(
+                            &checked,
+                            None,
+                            None,
+                            HostEvaluationInputs {
+                                roots: &empty,
+                                bindings: None,
+                            },
+                            None,
+                            None,
+                        )
+                        .expect("nominal alias callback evaluates");
+                        assert_eq!(
+                            render_value(&outcome.host_bindings["out"]),
+                            steps.to_string()
+                        );
+                        let work = super::eval::entry_claim_work();
+                        eprintln!(
+                            "Eval immutable {collection} aliases {entry} {combine} claim={claim} K={steps}: {work}"
+                        );
+                        let traversal = super::eval::entry_claim_traversal_work();
+                        eprintln!(
+                            "Eval nominal traversal {collection} {entry} {combine} claim={claim} K={steps}: observations={work}, traversal={traversal}, total={}",
+                            work + traversal
+                        );
+                        if work + traversal > 64 * steps as u64 + 100 {
+                            excessive.push(format!(
+                                "{collection} {entry} {combine} {claim} K={steps}: total={}",
+                                work + traversal
+                            ));
+                        }
+                        if work > 64 * steps as u64 + 100 {
+                            excessive.push(format!(
+                                "{collection} {entry} {combine} {claim} K={steps}: {work}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(excessive.is_empty(), "{}", excessive.join("\n"));
+}
+
+#[test]
+fn nominal_traversal_counter_keeps_unproved_equal_value_roots_visible() {
+    for collection in ["Chain", "Box"] {
+        for steps in [100, 400] {
+            let source = immutable_nominal_alias_source(collection, "3", "inline", "fold", steps)
+                .replace("older = old", "older = if i == 0i64 then old else old");
+            let checked = checked_surf(&source);
+            let empty = UnordMap::new();
+            super::eval::reset_entry_claim_work();
+            let outcome = evaluate_host_program_with_library_and_types(
+                &checked,
+                None,
+                None,
+                HostEvaluationInputs {
+                    roots: &empty,
+                    bindings: None,
+                },
+                None,
+                None,
+            )
+            .expect("unproved equal-value root evaluates");
+            assert_eq!(
+                render_value(&outcome.host_bindings["out"]),
+                steps.to_string()
+            );
+            let observations = super::eval::entry_claim_work();
+            let traversal = super::eval::entry_claim_traversal_work();
+            eprintln!(
+                "Eval unproved nominal traversal {collection} K={steps}: observations={observations}, traversal={traversal}"
+            );
+            assert!(
+                observations + traversal >= steps as u64 * steps as u64 / 2,
+                "unproved container traversal must stay visible: {observations}/{traversal}"
+            );
+        }
+    }
+}
+
+#[test]
+fn single_local_aliases_have_bounded_work_and_equal_value_controls_do_not() {
+    for collection in ["List", "Chain", "Box"] {
+        for claim in ["3", "n"] {
+            for steps in [100, 400] {
+                let source = if collection == "List" {
+                    immutable_alias_source(claim, "direct", "fold", steps, "append")
+                } else {
+                    immutable_nominal_alias_source(collection, claim, "direct", "fold", steps)
+                }
+                .replace(" older = old\n", "")
+                .replace("older", "old");
+                for unproved in [false, true] {
+                    let source = if unproved {
+                        source.replace("old = acc", "old = if i == 0i64 then acc else acc")
+                    } else {
+                        source.clone()
+                    };
+                    let checked = checked_surf(&source);
+                    let empty = UnordMap::new();
+                    super::eval::reset_entry_claim_work();
+                    let outcome = evaluate_host_program_with_library_and_types(
+                        &checked,
+                        None,
+                        None,
+                        HostEvaluationInputs {
+                            roots: &empty,
+                            bindings: None,
+                        },
+                        None,
+                        None,
+                    )
+                    .expect("single-alias callback evaluates");
+                    assert_eq!(
+                        render_value(&outcome.host_bindings["out"]),
+                        (if collection == "List" {
+                            steps + 1
+                        } else {
+                            steps
+                        })
+                        .to_string()
+                    );
+                    let observations = super::eval::entry_claim_work();
+                    let traversal = super::eval::entry_claim_traversal_work();
+                    let work = observations + traversal;
+                    eprintln!(
+                        "Eval single alias {collection} claim={claim} K={steps} unproved={unproved}: observations={observations}, traversal={traversal}, total={work}"
+                    );
+                    if unproved {
+                        assert!(
+                            work >= steps as u64 * steps as u64 / 2,
+                            "full equal-value entry walk: {work}"
+                        );
+                    } else {
+                        assert!(
+                            work <= 64 * steps as u64 + 100,
+                            "single original-root alias: {work}"
+                        );
+                    }
                 }
             }
         }
