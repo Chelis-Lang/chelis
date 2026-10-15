@@ -12276,7 +12276,9 @@ impl<'a> HostEmitter<'a> {
             outputs_name.clone(),
             root_count.to_string(),
         ];
-        if !self.external_helpers.contains(&base) {
+        if !self.external_helpers.contains(&base) && result_claims.is_none() {
+            helper_args.push("NULL".to_string());
+        } else if !self.external_helpers.contains(&base) {
             let mut pending = vec![(ty, result_claims.unwrap_or("NULL").to_string())];
             let mut frames = Vec::new();
             while let Some((part, claims)) = pending.pop() {

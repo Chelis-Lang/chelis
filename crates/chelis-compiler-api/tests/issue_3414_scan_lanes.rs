@@ -195,6 +195,29 @@ fn independent_earlier_trap_precedes_transform_result_guard() {
 }
 
 #[test]
+fn differentiated_body_trap_precedes_outer_cotangent_claim() {
+    for (index, expected) in [
+        (0, "numeric trap: domain in reshape at i64"),
+        (99, "numeric trap: domain in gather at i64"),
+    ] {
+        let source = claimed_scan_gradient(5, 3).replace(
+            "= sum(cumsum(x, 0i32), 0i32)",
+            &format!("= {{\n _ = gather(x, to_tensor([{index}i64]), 0i32)\n sum(cumsum(x, 0i32), 0i32)\n}}"),
+        );
+        let error = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: source.clone(),
+            bindings: BTreeMap::new(),
+        })
+        .unwrap_err();
+        assert!(format!("{error:?}").contains(expected), "{error:?}");
+        let generated = ownership_support::emit(&source, "forward_trap_transform_claim");
+        let stderr = ownership_support::run_failure_stderr(&generated, "");
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
+#[test]
 fn named_transform_result_claims_remain_caller_local() {
     for size in [3, 5] {
         let source = format!(

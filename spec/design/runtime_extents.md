@@ -44,6 +44,11 @@ result layout projects frames before invoking the helper; each output's
 kernel signatures retain their ABI. A private helper's observable-only nodes
 do not add returned-value slots or change the projection layout.
 
+Field-level aliases that cross later aggregate construction need a
+producer-lineage plan distinct from whole-result alias selection. The
+transform projection does not establish producer placement for a tensor
+binding wrapped in an aggregate only after intervening effects.
+
 ## Current state and remaining work
 
 The reference implementation state for the merged inventory is `4f3812e2f`.

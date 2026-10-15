@@ -374,6 +374,9 @@ impl<'a> EvalContext<'a> {
         gradient: bool,
         claims: &[DeclaredResultClaim],
     ) -> Result<Vec<chelis_ir::eval::InheritedResultClaim>, String> {
+        if claims.is_empty() {
+            return Ok(Vec::new());
+        }
         use chelis_ir::claim_pattern::ClaimStep;
         let shapes = if gradient && !repacks.is_empty() {
             repacks
