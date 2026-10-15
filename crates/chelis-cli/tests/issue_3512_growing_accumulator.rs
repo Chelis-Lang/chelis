@@ -1741,3 +1741,23 @@ fn lexical_forwarding_saved_roles_survive_later_formal_name_shadows() {
         }
     }
 }
+
+#[test]
+fn lexical_forwarding_bound_call_results_retain_complete_entry_checks() {
+    for seed in [100, 400] {
+        for steps in [100, 400] {
+            let source = forwarding_wrapper_source(seed, steps, 2, false).replace(
+                "step(old1, item1) }",
+                "result = step(old1, item1)\n result }",
+            );
+            let (work, origins) = counted_native(&source);
+            eprintln!(
+                "bound-call-result forwarding residue N={seed} K={steps}: work={work} origins={origins}"
+            );
+            assert!(
+                work >= (seed * steps) as u64,
+                "a non-tail call cannot borrow the tail receipt: {work}"
+            );
+        }
+    }
+}
