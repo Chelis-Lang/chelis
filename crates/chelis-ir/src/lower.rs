@@ -6407,6 +6407,46 @@ const TENSOR_LIST_CTOR: &str = "__chelis_tensor_list";
 // numeric columns. The element template contains one leading-List-axis tensor
 // per leaf; its length is a separate discrete value, including for empty Lists.
 const RUNTIME_COLUMN_LIST_CTOR: &str = "$chelis_runtime_column_list";
+const RUNTIME_PACKED_TENSOR_CTOR: &str = "$chelis_runtime_packed_tensor";
+
+/// A tensor field's rows retain independent shapes. Only its flattened
+/// payload is differentiable; the ordered offsets and extents are discrete.
+fn runtime_packed_tensor_parts(value: &LoweredValue) -> Option<Vec<NodeId>> {
+    let LoweredValue::Adt {
+        ctor,
+        layout,
+        fields,
+        ..
+    } = value
+    else {
+        return None;
+    };
+    if ctor != RUNTIME_PACKED_TENSOR_CTOR || fields.len() < 3 {
+        return None;
+    }
+    let names = layout.field_names()?;
+    if names.len() != fields.len()
+        || names[..3] != ["payload", "starts", "ends"]
+        || names[3..]
+            .iter()
+            .enumerate()
+            .any(|(axis, name)| *name != format!("axis{axis}"))
+    {
+        return None;
+    }
+    fields.iter().map(LoweredValue::as_single_node).collect()
+}
+
+fn contains_runtime_packed_tensor(value: &LoweredValue) -> bool {
+    runtime_packed_tensor_parts(value).is_some()
+        || match value {
+            LoweredValue::Tuple(fields) | LoweredValue::Adt { fields, .. } => {
+                fields.iter().any(contains_runtime_packed_tensor)
+            }
+            _ => false,
+        }
+}
+
 fn runtime_column_list_parts(value: &LoweredValue) -> Option<(NodeId, LoweredValue)> {
     let LoweredValue::Adt {
         ctor,
@@ -6544,6 +6584,18 @@ fn rebuild_recursive_list_like(
             None,
         ),
         LoweredValue::Node(_) => leaves.next().expect("recursive List leaf count mismatch"),
+        LoweredValue::Adt { fields, .. }
+            if cotangent && runtime_packed_tensor_parts(template).is_some() =>
+        {
+            // Metadata has unit cotangent and never becomes a result root.
+            // Consume its slots to keep later structured leaves aligned.
+            let mut rebuilt = fields
+                .iter()
+                .map(|field| rebuild_recursive_list_like(field, leaves, true));
+            let payload = rebuilt.next().expect("packed tensor payload");
+            for _ in rebuilt {}
+            payload
+        }
         LoweredValue::Adt { .. } if runtime_column_list_parts(template).is_some() => {
             let (len, element) = runtime_column_list_parts(template).expect("guarded above");
             let replacement_len = leaves.next().expect("runtime List length leaf missing");
@@ -18655,6 +18707,63 @@ impl<'program> LowerCtx<'program> {
         element: &LoweredValue,
         index: NodeId,
     ) -> Option<LoweredValue> {
+        if let Some(parts) = runtime_packed_tensor_parts(element) {
+            let payload = parts[0];
+            let precision = self.dag.get(payload)?.output_type.precision;
+            let scalar_i64 = TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            };
+            // Metadata owns one private sentinel row, including for an empty
+            // List. It totalizes an inaccessible row without inventing a
+            // primal element or imposing equality between real row shapes.
+            let metadata = parts[1..]
+                .iter()
+                .map(|column| {
+                    self.dag.add_node(
+                        Owner::new(self.decl(), None),
+                        RiscOp::Gather {
+                            axis: 0,
+                            batch_rank: 0,
+                        },
+                        vec![*column, index],
+                        scalar_i64.clone(),
+                        self.current_span_id.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let flat_ty = TensorType {
+                dims: vec![DimInfo::Named("*".into(), None)],
+                precision,
+            };
+            let row = self.dag.add_node(
+                Owner::new(self.decl(), None),
+                RiscOp::Shrink {
+                    bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
+                },
+                vec![payload, metadata[0], metadata[1]],
+                flat_ty,
+                self.current_span_id.clone(),
+            );
+            let extents = &metadata[2..];
+            let row = self.dag.add_node(
+                Owner::new(self.decl(), None),
+                RiscOp::Reshape {
+                    new_shape: (0..extents.len())
+                        .map(|axis| RtDim::Node(axis + 1))
+                        .collect(),
+                },
+                std::iter::once(row)
+                    .chain(extents.iter().copied())
+                    .collect(),
+                TensorType {
+                    dims: vec![DimInfo::Named("*".into(), None); extents.len()],
+                    precision,
+                },
+                self.current_span_id.clone(),
+            );
+            return Some(LoweredValue::Node(row));
+        }
         match element {
             LoweredValue::Node(column) => {
                 let column_ty = self.dag.get(*column)?.output_type.clone();
@@ -19591,13 +19700,18 @@ impl<'program> LowerCtx<'program> {
             })
             .unwrap_or_else(|| state_ty.clone());
         let columns = recursive_list_leaf_nodes(element);
+        let packed = contains_runtime_packed_tensor(element);
         let item_types = columns
             .iter()
             .map(|column| {
                 let column_ty = &self.dag.get(*column)?.output_type;
-                Some(TensorType {
-                    dims: column_ty.dims.get(1..)?.to_vec(),
-                    precision: column_ty.precision,
+                Some(if packed {
+                    column_ty.clone()
+                } else {
+                    TensorType {
+                        dims: column_ty.dims.get(1..)?.to_vec(),
+                        precision: column_ty.precision,
+                    }
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -19632,12 +19746,45 @@ impl<'program> LowerCtx<'program> {
         subctx
             .bindings
             .insert(params[0].clone(), LoweredValue::Node(state_load));
+        let captured = self.seed_subctx_with_declaring_scope(&mut subctx, callback, &params, &[]);
+        let mut index_suffix = 0;
+        let index_name = loop {
+            let candidate = format!("__chelis_recurrence_packed_index_{index_suffix}");
+            if !subctx.interface_loads.contains(&candidate) && !params.contains(&candidate) {
+                break candidate;
+            }
+            index_suffix += 1;
+        };
+        let index_load = packed.then(|| {
+            subctx.interface_loads.insert(index_name.clone());
+            subctx.dag.add_node(
+                subctx.owner(),
+                RiscOp::Load {
+                    name: index_name.as_str().into(),
+                },
+                vec![],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::Int64,
+                },
+                subctx.current_span_id.clone(),
+            )
+        });
         let mut item_load_names = Vec::new();
         let item_loads = item_types
             .into_iter()
             .enumerate()
             .map(|(index, ty)| {
-                let load_name = format!("__chelis_recurrence_item_{index}");
+                let stem = if packed { "packed_capture" } else { "item" };
+                let mut suffix = 0;
+                let load_name = loop {
+                    let candidate = format!("__chelis_recurrence_{stem}_{index}_{suffix}");
+                    if !subctx.interface_loads.contains(&candidate) && !params.contains(&candidate)
+                    {
+                        break candidate;
+                    }
+                    suffix += 1;
+                };
                 subctx.interface_loads.insert(load_name.clone());
                 let load = subctx.dag.add_node(
                     subctx.owner(),
@@ -19653,9 +19800,15 @@ impl<'program> LowerCtx<'program> {
             })
             .collect::<Vec<_>>();
         let mut replacements = item_loads.into_iter();
-        let item_value = rebuild_recursive_list_like(element, &mut replacements, false);
+        let mut item_value = rebuild_recursive_list_like(element, &mut replacements, false);
+        if let Some(index) = index_load {
+            // Visit logical indices, then decode independent row shapes in
+            // the invocation. Full payload captures receive ordinary slice
+            // adjoints, so the existing capture sum returns a flat cotangent
+            // without ever stacking ragged item cotangents.
+            item_value = subctx.gather_runtime_column_element(&item_value, index)?;
+        }
         subctx.bindings.insert(params[1].clone(), item_value);
-        let captured = self.seed_subctx_with_declaring_scope(&mut subctx, callback, &params, &[]);
         let result = subctx
             .lower_resolved_body(callback, &params, body)
             .as_single_node()?;
@@ -19682,14 +19835,32 @@ impl<'program> LowerCtx<'program> {
             .iter()
             .map(|name| find_load(name))
             .collect::<Option<Vec<_>>>()?;
-        let captures = captured
+        let mut captures = captured
             .to_sorted()
             .into_iter()
             .map(|(name, node)| (name.clone(), *node))
             .collect::<Vec<_>>();
-        let inputs = std::iter::once(length)
+        if packed {
+            captures.extend(item_load_names.iter().cloned().zip(columns.iter().copied()));
+        }
+        let source = if packed {
+            let start = self.int64_constant(0);
+            self.dag.add_node(
+                self.owner(),
+                RiscOp::Iota,
+                vec![start, length],
+                TensorType {
+                    dims: vec![DimInfo::Named("*".into(), None)],
+                    precision: Prim::Int64,
+                },
+                self.current_span_id.clone(),
+            )
+        } else {
+            length
+        };
+        let inputs = std::iter::once(source)
             .chain(std::iter::once(state))
-            .chain(columns.iter().copied())
+            .chain(columns.iter().copied().filter(|_| !packed))
             .chain(captures.iter().map(|(_, node)| *node))
             .collect();
         let state_result_ty = callback_dag.get(result)?.output_type.clone();
@@ -19705,6 +19876,7 @@ impl<'program> LowerCtx<'program> {
         let output_ty = if scan {
             let leading = columns
                 .first()
+                .filter(|_| !packed)
                 .and_then(|column| self.dag.get(*column))
                 .and_then(|node| node.output_type.dims.first())
                 .cloned()
@@ -19718,10 +19890,17 @@ impl<'program> LowerCtx<'program> {
         } else {
             state_result_ty
         };
+        let recurrence_source = if packed {
+            crate::dag::RuntimeRecurrenceSource::Tensor {
+                item: find_load(&index_name)?,
+            }
+        } else {
+            crate::dag::RuntimeRecurrenceSource::Columns { items: item_loads }
+        };
         let recurrence = crate::dag::RuntimeRecurrence {
             callback: Box::new(callback_dag),
             state: state_load,
-            source: crate::dag::RuntimeRecurrenceSource::Columns { items: item_loads },
+            source: recurrence_source,
             captures,
             result,
             scan,

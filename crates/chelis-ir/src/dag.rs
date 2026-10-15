@@ -2919,7 +2919,7 @@ impl TrapSeeds<'_> {
     /// Whether `node`'s declared extent rests on a claim checked under its
     /// activation ([`crate::axis_sources::claim_sized_nodes`]: a result
     /// claim, a local ascription, an extent an operation computes or a
-    /// carrier sets, a restamp (chelis#2512), a unit claim, a
+    /// carrier sets, an explicit reshape target, a restamp (chelis#2512), a unit claim, a
     /// [`RiscOp::CheckedUnitAxis`]), whatever its operation's class. Where
     /// its activation holds in no row the claim is not checked, so it checks
     /// nothing and produces zeros of its declared type, each claimed axis

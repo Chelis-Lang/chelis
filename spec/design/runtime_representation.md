@@ -1186,6 +1186,30 @@ empty and visited recurrences, fixed-shape scan, changing-extent fold, and
 numeric fields of runtime List items. A further spelling in either owner is
 classified only by the exact owner/kind identity and its execution contract.
 
+Runtime List ADT gradients represent each tensor-valued field with a private
+`$chelis_runtime_packed_tensor` record. Its tagged one-dimensional payload
+concatenates stored row values; tagged i64 columns record each row's start,
+end, and axis extents. The metadata has one inaccessible zero-length sentinel,
+so clamped invalid selections remain total until their branch-conditional
+public bounds check executes. Empty Lists need no trailing tensor extent,
+and zero-sized rows retain every axis in their metadata. Scalar fields retain
+the leading-axis column representation.
+
+Selection composes Gather of the row metadata, Shrink of the flat payload,
+and Reshape to the recorded extents. Only the payload has a numeric cotangent;
+metadata keeps its discrete role. A recurrence over packed rows visits an
+integer index tensor and captures the full packed carrier, so existing slice
+adjoints and ordered capture accumulation return a flat payload cotangent.
+Host reconstruction rebuilds each public tensor from its original row metadata.
+These private records introduce no public carrier, RISC operation, or ABI.
+An expression-valued ADT argument is evaluated once into an eager host binding;
+reverse-DAG liveness removes unused field projections without removing the
+original argument or its effects. Before that binding, a recursive plan retains
+constructor identities from resolved actual syntax or a checked unique variant.
+The same declaration-ordered field map guides static cotangent reconstruction
+and host projections, preserving known nested sum constructors without choosing
+an unknown runtime tag.
+
 The private C key-callable entries emitted by `append_key_callable_helpers`
 have one exact `load-store-template` final-form owner. The tensor entries read
 and write key or seed storage under [05-OP-69] through [05-OP-72]; they add no

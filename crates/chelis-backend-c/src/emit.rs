@@ -9570,24 +9570,81 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .filter(|(_, dim)| matches!(dim, RtDim::Node(_) | RtDim::InputAxis { .. }))
             .map(|(axis, dim)| (axis, self.checked_bound_c_expr(dim, inputs, a, axis)))
             .collect();
+        let restored_shape_source = chelis_ir::axis_sources::reshape_restored_shape_source(
+            dag.nodes(),
+            dag.get(NodeId(id)).expect("verified reshape"),
+        );
+        let allocation_extents = extents
+            .iter()
+            .map(|(axis, extent)| {
+                let extent = match self.claim_sized_activity(id) {
+                    Some(active) => {
+                        // Reuse the measured target operand, whose lifetime
+                        // the reshape already owns. The provenance query is
+                        // evidence, not a new untracked read of that tensor.
+                        let restored = restored_shape_source
+                            .map(|_| extent.clone())
+                            .unwrap_or_else(|| "0".into());
+                        format!(
+                            "({active} ? ({extent}) : ({}))",
+                            self.inactive_extent(id, *axis, &restored)
+                        )
+                    }
+                    None => extent.clone(),
+                };
+                (*axis, extent)
+            })
+            .collect::<Vec<_>>();
+        let logical = self.deferred_views.is_deferred(NodeId(id))
+            || self.deferred_views.is_deferred(NodeId(a));
+        // The shared view planner excludes activated recipes and activated
+        // payload consumers. Metadata-only auxiliary axes can still be views.
+        debug_assert!(
+            !logical
+                || dag
+                    .get(NodeId(id))
+                    .expect("verified reshape")
+                    .owner
+                    .activation
+                    .is_none()
+        );
         // Read from its target's scalars and its operand's metadata: a
         // claim-sized `reshape` declares them before its branch.
         self.before_inactive_zeros_branch(id, |emitter| {
-            emitter.emit_runtime_dim_sites(id, &extents);
+            emitter.emit_runtime_dim_sites(id, &allocation_extents);
         });
         // spec/04-type-system.md section 4.7: a negative target extent fails
         // the non-negativity guard, a `Domain` trap in `reshape`, rendered as
         // `chelis_abi::failure::negative_target_extent` renders it for eval.
-        for (axis, extent) in &extents {
-            self.line(&format!(
-                "if (({extent}) < 0) {{ fprintf(stderr, \"reshape target extent at axis {axis} \
-                 is negative: %lld\\n\", (long long)({extent})); \
-                 chelis_numeric_trap(\"numeric trap: domain in reshape at i64\"); }}"
-            ));
-            self.emit_static_dim_guard(id, *axis, extent, ty.dims.get(*axis));
-        }
-        if self.deferred_views.is_deferred(NodeId(id)) || self.deferred_views.is_deferred(NodeId(a))
-        {
+        self.before_inactive_zeros_branch(id, |emitter| {
+            let active = emitter.claim_sized_activity(id);
+            if let Some(active) = &active {
+                emitter.line(&format!("if ({active}) {{"));
+                emitter.indent += 1;
+            }
+            for (axis, extent) in &extents {
+                emitter.line(&format!(
+                    "if (({extent}) < 0) {{ fprintf(stderr, \"reshape target extent at axis {axis} \
+                     is negative: %lld\\n\", (long long)({extent})); \
+                     chelis_numeric_trap(\"numeric trap: domain in reshape at i64\"); }}"
+                ));
+                emitter.emit_static_dim_guard(id, *axis, extent, ty.dims.get(*axis));
+            }
+            // The runtime's checked metadata owner validates this exact target
+            // before either allocation or capacity-proven repurpose can occur.
+            if !logical {
+                emitter.line(&format!(
+                    "chelis_tensor_check_reshape(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({})), {});",
+                    Self::ndim(ty),
+                    Self::tagged_shape_literal(ty),
+                ));
+            }
+            if active.is_some() {
+                emitter.indent -= 1;
+                emitter.line("}");
+            }
+        });
+        if logical {
             self.line(&format!(
                 "chelis_metadata_plan *t{id}_metadata = chelis_metadata_plan_reshape(t{a}_metadata, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {});",
                 Self::ndim(ty), Self::tagged_shape_literal(ty)
@@ -9612,13 +9669,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             }
             return;
         }
-        // The runtime's checked metadata owner validates this exact target
-        // before either allocation or capacity-proven repurpose can occur.
-        self.line(&format!(
-            "chelis_tensor_check_reshape(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({})), {});",
-            Self::ndim(ty),
-            Self::tagged_shape_literal(ty),
-        ));
         self.emit_slot_wrapper(id, ty);
         self.line(&format!(
             "if (t{id}_byte_capacity != 0) memcpy(t{id}_data, t{a}_data, (size_t)t{id}_byte_capacity);"

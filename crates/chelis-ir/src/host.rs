@@ -11809,6 +11809,10 @@ fn resolve_scalar_def<'a>(
 #[derive(Clone)]
 enum GradPackPlan {
     Leaf(HostTypeTerm),
+    PackedLeaf {
+        ty: HostTypeTerm,
+        metadata: Vec<HostExpr>,
+    },
     Unit,
     RuntimeList {
         ty: HostTypeTerm,
@@ -11830,9 +11834,27 @@ enum GradPackPlan {
 }
 
 impl GradPackPlan {
+    fn collect_metadata_names(&self, names: &mut UnordSet<String>) {
+        match self {
+            Self::PackedLeaf { metadata, .. } => {
+                for value in metadata {
+                    collect_lowered_host_names(value, names);
+                }
+            }
+            Self::RuntimeList { element, .. } => element.collect_metadata_names(names),
+            Self::List { items, .. } | Self::Tuple { items, .. } | Self::Adt { items, .. } => {
+                for item in items {
+                    item.collect_metadata_names(names);
+                }
+            }
+            Self::Leaf(_) | Self::Unit => {}
+        }
+    }
+
     fn host_type(&self) -> HostTypeTerm {
         match self {
             Self::Leaf(ty)
+            | Self::PackedLeaf { ty, .. }
             | Self::RuntimeList { ty, .. }
             | Self::List { ty, .. }
             | Self::Tuple { ty, .. }
@@ -11843,7 +11865,7 @@ impl GradPackPlan {
 
     fn leaf_count(&self) -> usize {
         match self {
-            Self::Leaf(_) => 1,
+            Self::Leaf(_) | Self::PackedLeaf { .. } => 1,
             Self::RuntimeList { element, .. } => 1 + element.leaf_count(),
             Self::Unit => 0,
             Self::List { items, .. } | Self::Tuple { items, .. } | Self::Adt { items, .. } => {
@@ -11855,6 +11877,10 @@ impl GradPackPlan {
     fn first_tensor_type(&self) -> Option<TensorType> {
         match self {
             Self::Leaf(ty) => tensor_type_from_host_input(ty),
+            Self::PackedLeaf { ty, .. } => tensor_type_from_host_input(ty).map(|mut tensor| {
+                tensor.dims = vec![DimInfo::Named("*".into(), None)];
+                tensor
+            }),
             Self::RuntimeList { element, .. } => element.first_tensor_type(),
             Self::Unit => None,
             Self::List { items, .. } | Self::Tuple { items, .. } | Self::Adt { items, .. } => {
@@ -11866,6 +11892,7 @@ impl GradPackPlan {
     fn needs_host_reconstruction(&self) -> bool {
         match self {
             Self::List { .. }
+            | Self::PackedLeaf { .. }
             | Self::RuntimeList { .. }
             | Self::Tuple { .. }
             | Self::Adt { .. }
@@ -11882,9 +11909,9 @@ fn static_list_spine_items(expr: &Expr) -> Option<Vec<Expr>> {
     Some(items)
 }
 
-/// Resolve only the finite recursive shape of a List actual. A top-level
-/// value carries its resolved Load label; a raw name in lexical scope is a
-/// local value and cannot be replaced by a same-spelled declaration.
+/// Resolve constructor and finite List shape without evaluating an actual.
+/// A top-level value carries its resolved Load label; a raw name in lexical
+/// scope cannot be replaced by a same-spelled declaration.
 fn resolve_list_grad_shape_expr(
     actual: &Expr,
     program: &HostLoweringSession<'_>,
@@ -11943,6 +11970,67 @@ fn resolve_list_grad_shape_expr(
         break;
     }
     Ok(resolved)
+}
+
+/// Read admitted constructor syntax without evaluating its fields. The
+/// field map uses declaration order; host evaluation retains written order.
+fn grad_actual_adt_fields<'a>(
+    ty: &HostTypeTerm,
+    actual: &'a Expr,
+    program: &HostLoweringSession<'_>,
+) -> Option<(String, InstantiatedAdtConstructor, Vec<&'a Expr>)> {
+    let (ctor, supplied): (String, Vec<(Option<String>, &Expr)>) = match stamped_parts(actual)? {
+        (DeepTag::Record, _, kids) => {
+            let ctor = kids.first().and_then(symbol_name)?.to_string();
+            let fields = kids
+                .iter()
+                .skip(1)
+                .map(|field| {
+                    let (DeepTag::Kv, _, kv) = stamped_parts(field)? else {
+                        return None;
+                    };
+                    Some((
+                        Some(kv.first().and_then(symbol_name)?.to_string()),
+                        kv.get(1)?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            (ctor, fields)
+        }
+        (DeepTag::App, _, kids) => {
+            let ctor = kids.first().and_then(direct_var_name)?.to_string();
+            (
+                ctor,
+                kids.iter().skip(1).map(|field| (None, field)).collect(),
+            )
+        }
+        (DeepTag::Var, _, kids) => (kids.first().and_then(symbol_name)?.to_string(), Vec::new()),
+        _ => return None,
+    };
+    let AdtConstructorResolution::Unique(definition) =
+        resolve_adt_constructor_definition_for_type(program, &ctor, ty)
+    else {
+        return None;
+    };
+    let instantiated = definition.instantiate(ty).ok()?;
+    let field_exprs = if supplied.iter().all(|(name, _)| name.is_some()) {
+        instantiated
+            .fields
+            .iter()
+            .map(|field| {
+                supplied
+                    .iter()
+                    .find(|(name, _)| name.as_ref() == field.name.as_ref())
+                    .map(|(_, expr)| *expr)
+            })
+            .collect::<Option<Vec<_>>>()?
+    } else {
+        supplied.iter().map(|(_, expr)| *expr).collect()
+    };
+    if instantiated.fields.len() != field_exprs.len() {
+        return None;
+    }
+    Some((ctor, instantiated, field_exprs))
 }
 
 fn grad_pack_plan(
@@ -12020,60 +12108,7 @@ fn grad_pack_plan(
             })
         }
         HostTypeTerm::Adt(_, _) => {
-            let (ctor, supplied): (String, Vec<(Option<String>, &Expr)>) =
-                match stamped_parts(actual)? {
-                    (DeepTag::Record, _, kids) => {
-                        let ctor = kids.first().and_then(symbol_name)?.to_string();
-                        let fields = kids
-                            .iter()
-                            .skip(1)
-                            .map(|field| {
-                                let (DeepTag::Kv, _, kv) = stamped_parts(field)? else {
-                                    return None;
-                                };
-                                Some((
-                                    Some(kv.first().and_then(symbol_name)?.to_string()),
-                                    kv.get(1)?,
-                                ))
-                            })
-                            .collect::<Option<Vec<_>>>()?;
-                        (ctor, fields)
-                    }
-                    (DeepTag::App, _, kids) => {
-                        let ctor = kids.first().and_then(direct_var_name)?.to_string();
-                        (
-                            ctor,
-                            kids.iter().skip(1).map(|field| (None, field)).collect(),
-                        )
-                    }
-                    (DeepTag::Var, _, kids) => {
-                        (kids.first().and_then(symbol_name)?.to_string(), Vec::new())
-                    }
-                    _ => return None,
-                };
-            let AdtConstructorResolution::Unique(definition) =
-                resolve_adt_constructor_definition_for_type(program, &ctor, ty)
-            else {
-                return None;
-            };
-            let instantiated = definition.instantiate(ty).ok()?;
-            let field_exprs = if supplied.iter().all(|(name, _)| name.is_some()) {
-                instantiated
-                    .fields
-                    .iter()
-                    .map(|field| {
-                        supplied
-                            .iter()
-                            .find(|(name, _)| name.as_ref() == field.name.as_ref())
-                            .map(|(_, expr)| *expr)
-                    })
-                    .collect::<Option<Vec<_>>>()?
-            } else {
-                supplied.iter().map(|(_, expr)| *expr).collect()
-            };
-            if instantiated.fields.len() != field_exprs.len() {
-                return None;
-            }
+            let (ctor, instantiated, field_exprs) = grad_actual_adt_fields(ty, actual, program)?;
             let items = instantiated
                 .fields
                 .iter()
@@ -12087,6 +12122,29 @@ fn grad_pack_plan(
             })
         }
         HostTypeTerm::Tensor(tensor) if tensor.precision.is_float() => {
+            if let Some((DeepTag::Record, _, fields)) = stamped_parts(actual)
+                && fields.first().and_then(symbol_name) == Some("$chelis_runtime_packed_tensor")
+            {
+                let metadata = fields
+                    .iter()
+                    .skip(2)
+                    .map(|field| {
+                        let (_, _, parts) = stamped_parts(field)?;
+                        let name = direct_var_name(parts.get(1)?)?;
+                        Some(HostExpr::new(HostExprKind::Var(
+                            name.into(),
+                            HostTypeTerm::Tensor(TensorType {
+                                dims: vec![DimInfo::Named("*".into(), None)],
+                                precision: chelis_types::types::Prim::Int64,
+                            }),
+                        )))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(GradPackPlan::PackedLeaf {
+                    ty: ty.clone(),
+                    metadata,
+                });
+            }
             Some(GradPackPlan::Leaf(ty.clone()))
         }
         HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)) if precision.is_float() => {
@@ -12096,16 +12154,119 @@ fn grad_pack_plan(
     }
 }
 
-/// Expose the leaves of a runtime, single-constructor ADT to the reverse DAG.
+/// Constructor evidence belongs to the argument's shape, independently of
+/// its eager host value. A static nested sum constructor remains known after
+/// the whole argument is bound once; an unknown sum tag still needs dispatch.
+struct RuntimeGradAdtPlan {
+    ty: HostTypeTerm,
+    kind: RuntimeGradAdtPlanKind,
+}
+
+enum RuntimeGradAdtPlanKind {
+    Leaf,
+    List,
+    Adt {
+        ctor: String,
+        fields: Vec<(String, RuntimeGradAdtPlan)>,
+    },
+}
+
+fn runtime_grad_adt_plan(
+    ty: &HostTypeTerm,
+    actual: Option<&Expr>,
+    span: chelis_deep::Span,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> Result<Option<RuntimeGradAdtPlan>, crate::lower::LowerDiagnostic> {
+    let ty = expand_host_type_aliases(program, ty.clone());
+    let kind = if matches!(ty, HostTypeTerm::List(_)) {
+        RuntimeGradAdtPlanKind::List
+    } else if let HostTypeTerm::Adt(adt_name, _) = &ty {
+        let defs = cached_program_defs(program);
+        let resolved = actual
+            .map(|actual| resolve_list_grad_shape_expr(actual, program, defs.as_ref(), scope))
+            .transpose()?;
+        let known = resolved
+            .as_ref()
+            .and_then(|actual| grad_actual_adt_fields(&ty, actual, program));
+        let (ctor, instantiated, actual_fields) = if let Some((ctor, instantiated, fields)) = known
+        {
+            (
+                ctor,
+                instantiated,
+                fields.into_iter().map(Some).collect::<Vec<_>>(),
+            )
+        } else {
+            let definitions = adt_constructor_definitions(program);
+            // The checked owner disambiguates imported equal terminal names.
+            let mut variants = definitions
+                .iter()
+                .filter(|definition| definition.adt_name == *adt_name)
+                .collect::<Vec<_>>();
+            if variants.is_empty() {
+                variants = definitions
+                    .iter()
+                    .filter(|definition| terminal_name_matches(&definition.adt_name, adt_name))
+                    .collect();
+            }
+            if variants.is_empty() {
+                return Ok(None);
+            }
+            let [definition] = variants.as_slice() else {
+                let unsupported = chelis_types::unsupported::Unsupported::new(
+                    chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                        "runtime ADT gradient for `{adt_name}`"
+                    )),
+                    format!("C gradient cannot select a constructor of runtime ADT `{adt_name}`"),
+                    chelis_types::unsupported::Stage::Lowering,
+                    chelis_types::unimplemented_rejection!(
+                        618,
+                        "runtime ADT constructor selection under a C gradient needs compiled tag dispatch"
+                    ),
+                );
+                return Err(crate::lower::LowerDiagnostic::new(
+                    unsupported.to_string(),
+                    Some(span),
+                    None,
+                )
+                .fatal());
+            };
+            let Ok(instantiated) = definition.instantiate(&ty) else {
+                return Ok(None);
+            };
+            let actual_fields = vec![None; instantiated.fields.len()];
+            (definition.ctor_name.clone(), instantiated, actual_fields)
+        };
+        let mut fields = Vec::with_capacity(instantiated.fields.len());
+        for (field, actual) in instantiated.fields.iter().zip(actual_fields) {
+            let Some(name) = field.name.clone() else {
+                return Ok(None);
+            };
+            let Some(plan) = runtime_grad_adt_plan(&field.ty, actual, span, program, scope)? else {
+                return Ok(None);
+            };
+            fields.push((name, plan));
+        }
+        RuntimeGradAdtPlanKind::Adt { ctor, fields }
+    } else if tensor_type_from_host_input(&ty).is_some() {
+        RuntimeGradAdtPlanKind::Leaf
+    } else {
+        // The existing syntax path owns host-only literal/tuple fields;
+        // decline before adding eager bindings or lowering their values.
+        return Ok(None);
+    };
+    Ok(Some(RuntimeGradAdtPlan { ty, kind }))
+}
+
+/// Expose ADT leaves using constructor evidence planned before evaluation.
 /// The host keeps the nominal value and projects each field once; the DAG sees
-/// a constructor with statically known topology and ordinary typed loads.
-/// This is valid for a fixed model struct even when its field tensors have
-/// runtime extents. A sum type needs runtime tag dispatch and is left to the
-/// host transform refusal until that representation exists.
+/// its known constructor topology and ordinary typed loads. Checked unique
+/// variants and resolved actual syntax provide that evidence even when tensor
+/// fields have runtime extents. An unknown sum tag still needs runtime dispatch.
 struct RuntimeGradAdtOutputs<'a> {
     bindings: &'a mut Vec<HostBinding>,
     leaf_scope: &'a mut UnordMap<String, HostTypeTerm>,
-    unwitnessed_columns: &'a mut Vec<String>,
+    eager_arguments: &'a mut UnordSet<String>,
 }
 
 fn materialize_runtime_grad_adt(
@@ -12114,191 +12275,116 @@ fn materialize_runtime_grad_adt(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     used_names: &mut UnordSet<String>,
+    tensor_helpers: &mut TensorHelperSink,
     outputs: RuntimeGradAdtOutputs<'_>,
 ) -> Result<Option<Expr>, crate::lower::LowerDiagnostic> {
-    let Some(name) = direct_var_name(actual) else {
-        return Ok(None);
-    };
     let ty = expand_host_type_aliases(program, ty.clone());
-    if !matches!(ty, HostTypeTerm::Adt(..)) || !scope.contains_key(name) {
+    if !matches!(ty, HostTypeTerm::Adt(..)) {
         return Ok(None);
     }
-    let value = HostExpr::new(HostExprKind::Var(name.to_string(), ty.clone()));
-    let mut extent_witnesses = BTreeMap::new();
-    collect_runtime_grad_extent_witnesses(&value, &ty, program, &mut extent_witnesses);
+    let Some(plan) = runtime_grad_adt_plan(&ty, Some(actual), actual.span(), program, scope)?
+    else {
+        return Ok(None);
+    };
+    let value = if let Some(name) = direct_var_name(actual).filter(|name| scope.contains_key(*name))
+    {
+        HostExpr::new(HostExprKind::Var(name.to_string(), ty.clone()))
+    } else {
+        let value =
+            lower_host_expr_with_expected(actual, program, scope, tensor_helpers, Some(&ty))?;
+        let mut index = used_names.len();
+        let name = loop {
+            let name = format!("__chelis_grad_actual_{index}");
+            if used_names.insert(name.clone()) {
+                break name;
+            }
+            index += 1;
+        };
+        outputs.bindings.push(HostBinding {
+            name: name.clone(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: ty.clone(),
+            value,
+        });
+        outputs.leaf_scope.insert(name.clone(), ty.clone());
+        // Invocation evaluates every actual, including an unused discrete
+        // argument. Reverse-DAG liveness governs projections, not whether
+        // the original host expression and its effects execute.
+        outputs.eager_arguments.insert(name.clone());
+        HostExpr::new(HostExprKind::Var(name, ty.clone()))
+    };
     let RuntimeGradAdtOutputs {
         bindings,
         leaf_scope,
-        unwitnessed_columns,
+        eager_arguments: _,
     } = outputs;
-    materialize_runtime_grad_adt_value(
+    Ok(materialize_runtime_grad_adt_value(
         value,
-        &ty,
+        &plan,
         actual.span(),
         program,
         used_names,
         bindings,
         leaf_scope,
-        &extent_witnesses,
-        unwitnessed_columns,
-    )
-}
-
-/// Record checked, addressable tensor axes before descending into a model's
-/// fields. A List contributes no witness: it may be empty, and its element
-/// type alone does not supply a runtime extent.
-fn collect_runtime_grad_extent_witnesses(
-    value: &HostExpr,
-    ty: &HostTypeTerm,
-    program: &HostLoweringSession<'_>,
-    witnesses: &mut BTreeMap<String, HostExpr>,
-) {
-    let ty = expand_host_type_aliases(program, ty.clone());
-    if let HostTypeTerm::Adt(name, _) = &ty {
-        let AdtConstructorResolution::Unique(definition) =
-            resolve_adt_constructor_definition_for_type(program, name, &ty)
-        else {
-            return;
-        };
-        let Ok(instantiated) = definition.instantiate(&ty) else {
-            return;
-        };
-        for (index, field) in instantiated.fields.iter().enumerate() {
-            let field_value = HostExpr::new(HostExprKind::AdtFieldAccess {
-                base: Box::new(value.clone()),
-                field_index: index,
-                ty: field.ty.clone(),
-            });
-            collect_runtime_grad_extent_witnesses(&field_value, &field.ty, program, witnesses);
-        }
-    } else if let HostTypeTerm::Tensor(tensor) = &ty {
-        for (axis, dim) in tensor.dims.iter().enumerate() {
-            let DimInfo::Named(name, None) = dim else {
-                continue;
-            };
-            if name.is_empty() || name == "*" {
-                continue;
-            }
-            witnesses.entry(name.clone()).or_insert_with(|| {
-                HostExpr::new(HostExprKind::Builtin {
-                    name: "shape".into(),
-                    args: vec![value.clone(), HostExpr::new(HostExprKind::Int(axis as i64))],
-                    ty: HostTypeTerm::Int64,
-                })
-            });
-        }
-    }
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn materialize_runtime_grad_adt_value(
     value: HostExpr,
-    ty: &HostTypeTerm,
+    plan: &RuntimeGradAdtPlan,
     span: chelis_deep::Span,
     program: &HostLoweringSession<'_>,
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
     leaf_scope: &mut UnordMap<String, HostTypeTerm>,
-    extent_witnesses: &BTreeMap<String, HostExpr>,
-    unwitnessed_columns: &mut Vec<String>,
-) -> Result<Option<Expr>, crate::lower::LowerDiagnostic> {
-    if let HostTypeTerm::List(element_ty) = ty {
-        return Ok(materialize_runtime_grad_list(
-            value,
-            element_ty,
-            span,
-            program,
-            used_names,
-            bindings,
-            leaf_scope,
-            extent_witnesses,
-            unwitnessed_columns,
-        ));
+) -> Option<Expr> {
+    if let RuntimeGradAdtPlanKind::List = &plan.kind {
+        let HostTypeTerm::List(element_ty) = &plan.ty else {
+            unreachable!("List plan retains its checked type")
+        };
+        return materialize_runtime_grad_list(
+            value, element_ty, span, program, used_names, bindings, leaf_scope,
+        );
     }
-    if let HostTypeTerm::Adt(adt_name, _) = ty {
-        let definitions = adt_constructor_definitions(program);
-        // A linked program can import two ADTs with the same terminal name.
-        // The checked type gives the exact owner; use terminal matching only
-        // for an unqualified local type with one unambiguous declaration.
-        let mut variants = definitions
-            .iter()
-            .filter(|definition| definition.adt_name == *adt_name)
-            .collect::<Vec<_>>();
-        if variants.is_empty() {
-            variants = definitions
-                .iter()
-                .filter(|definition| terminal_name_matches(&definition.adt_name, adt_name))
-                .collect();
-        }
-        if variants.is_empty() {
-            return Ok(None);
-        }
-        let [definition] = variants.as_slice() else {
-            let unsupported = chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Construct(format!(
-                    "runtime ADT gradient for `{adt_name}`"
-                )),
-                format!("C gradient cannot select a constructor of runtime ADT `{adt_name}`"),
-                chelis_types::unsupported::Stage::Lowering,
-                chelis_types::unimplemented_rejection!(
-                    618,
-                    "runtime ADT constructor selection under a C gradient needs compiled tag dispatch"
-                ),
-            );
-            return Err(crate::lower::LowerDiagnostic::new(
-                unsupported.to_string(),
-                Some(span),
-                None,
-            )
-            .fatal());
-        };
-        let Some(instantiated) = definition.instantiate(ty).ok() else {
-            return Ok(None);
-        };
-        let mut fields = Vec::with_capacity(instantiated.fields.len() + 1);
-        fields.push(Expr::Atom(Atom::Name(definition.ctor_name.clone()), span));
-        for (index, field) in instantiated.fields.iter().enumerate() {
+    if let RuntimeGradAdtPlanKind::Adt {
+        ctor,
+        fields: plans,
+    } = &plan.kind
+    {
+        let mut fields = Vec::with_capacity(plans.len() + 1);
+        fields.push(Expr::Atom(Atom::Name(ctor.clone()), span));
+        for (index, (name, field_plan)) in plans.iter().enumerate() {
             let field_value = HostExpr::new(HostExprKind::AdtFieldAccess {
                 base: Box::new(value.clone()),
                 field_index: index,
-                ty: field.ty.clone(),
+                ty: field_plan.ty.clone(),
             });
-            let Some(field_expr) = materialize_runtime_grad_adt_value(
+            let field_expr = materialize_runtime_grad_adt_value(
                 field_value,
-                &field.ty,
+                field_plan,
                 span,
                 program,
                 used_names,
                 bindings,
                 leaf_scope,
-                extent_witnesses,
-                unwitnessed_columns,
-            )?
-            else {
-                return Ok(None);
-            };
-            let Some(field_name) = field.name.clone() else {
-                return Ok(None);
-            };
+            )?;
             fields.push(Expr::node(
                 DeepTag::Kv,
                 Metadata::default(),
-                vec![Expr::Atom(Atom::Name(field_name), span), field_expr],
+                vec![Expr::Atom(Atom::Name(name.clone()), span), field_expr],
                 span,
             ));
         }
-        return Ok(Some(Expr::node(
+        return Some(Expr::node(
             DeepTag::Record,
             Metadata::default(),
             fields,
             span,
-        )));
+        ));
     }
-    // A numeric leaf is an ordinary helper input, including discrete leaves
-    // whose cotangent is unit. Other host values have no DAG load carrier.
-    if tensor_type_from_host_input(ty).is_none() {
-        return Ok(None);
-    }
+    // The checked leaf plan includes discrete inputs with unit cotangents.
     let mut index = bindings.len();
     let name = loop {
         let candidate = format!("__chelis_grad_adt_leaf_{index}");
@@ -12311,11 +12397,11 @@ fn materialize_runtime_grad_adt_value(
         name: name.clone(),
         display_name: None,
         display_roots: Vec::new(),
-        ty: ty.clone(),
+        ty: plan.ty.clone(),
         value,
     });
-    leaf_scope.insert(name.clone(), ty.clone());
-    Ok(Some(var_expr_node(&name, span)))
+    leaf_scope.insert(name.clone(), plan.ty.clone());
+    Some(var_expr_node(&name, span))
 }
 
 /// A runtime List enters the tensor DAG as its exact length and one ordered
@@ -12331,8 +12417,6 @@ fn materialize_runtime_grad_list(
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
     leaf_scope: &mut UnordMap<String, HostTypeTerm>,
-    extent_witnesses: &BTreeMap<String, HostExpr>,
-    unwitnessed_columns: &mut Vec<String>,
 ) -> Option<Expr> {
     let fresh = |used_names: &mut UnordSet<String>| {
         let mut index = used_names.len();
@@ -12360,18 +12444,8 @@ fn materialize_runtime_grad_list(
     let item_name = fresh(used_names);
     let item = HostExpr::new(HostExprKind::Var(item_name.clone(), element_ty.clone()));
     let element = materialize_runtime_grad_list_element(
-        element_ty,
-        item,
-        &value,
-        element_ty,
-        &item_name,
-        span,
-        program,
-        used_names,
-        bindings,
+        element_ty, item, &value, element_ty, &item_name, span, program, used_names, bindings,
         leaf_scope,
-        extent_witnesses,
-        unwitnessed_columns,
     )?;
     let field = |name: &str, expr: Expr| {
         Expr::node(
@@ -12405,8 +12479,6 @@ fn materialize_runtime_grad_list_element(
     used_names: &mut UnordSet<String>,
     bindings: &mut Vec<HostBinding>,
     leaf_scope: &mut UnordMap<String, HostTypeTerm>,
-    extent_witnesses: &BTreeMap<String, HostExpr>,
-    unwitnessed_columns: &mut Vec<String>,
 ) -> Option<Expr> {
     let ty = expand_host_type_aliases(program, ty.clone());
     if let HostTypeTerm::Adt(adt_name, _) = &ty {
@@ -12444,8 +12516,6 @@ fn materialize_runtime_grad_list_element(
                 used_names,
                 bindings,
                 leaf_scope,
-                extent_witnesses,
-                unwitnessed_columns,
             )?;
             fields.push(Expr::node(
                 DeepTag::Kv,
@@ -12465,6 +12535,12 @@ fn materialize_runtime_grad_list_element(
         return matches!(ty, HostTypeTerm::Unit)
             .then(|| Expr::node(DeepTag::Tuple, Metadata::default(), vec![], span));
     };
+    if matches!(ty, HostTypeTerm::Tensor(_)) && !leaf_ty.dims.is_empty() {
+        return Some(materialize_runtime_packed_grad_leaf(
+            &ty, item_value, list_value, element_ty, item_name, span, used_names, bindings,
+            leaf_scope,
+        ));
+    }
     if leaf_ty.precision == chelis_types::types::Prim::String {
         return None;
     }
@@ -12513,63 +12589,10 @@ fn materialize_runtime_grad_list_element(
     });
     let mut column_ty = leaf_ty;
     column_ty.dims.insert(0, DimInfo::Named("*".into(), None));
-    let known_empty_shape = column_ty
-        .dims
-        .iter()
-        .skip(1)
-        .map(|dim| match dim {
-            DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => i64::try_from(*value)
-                .ok()
-                .map(|extent| HostExpr::new(HostExprKind::Int(extent))),
-            DimInfo::Named(name, None) => extent_witnesses.get(name).cloned(),
-        })
-        .collect::<Option<Vec<_>>>();
     let host_column_ty = HostTypeTerm::Tensor(column_ty);
-    let packed_column = HostExpr::new(HostExprKind::Builtin {
+    let column_value = HostExpr::new(HostExprKind::Builtin {
         name: "to_tensor".into(),
         args: vec![mapped],
-        ty: host_column_ty.clone(),
-    });
-    let needs_witness = known_empty_shape.is_none();
-    // [05-OP-57]: an empty outer List does not encode its trailing extents.
-    // This private column still has the checked element tensor type, so the
-    // declared trailing literals and checked model tensor axes supply the
-    // shape of its zero rows. Do not invent an extent without a witness.
-    let list_len = HostExpr::new(HostExprKind::Builtin {
-        name: "len".into(),
-        args: vec![list_value.clone()],
-        ty: HostTypeTerm::Int64,
-    });
-    let is_empty = HostExpr::new(HostExprKind::Builtin {
-        name: "eq".into(),
-        args: vec![list_len, HostExpr::new(HostExprKind::Int(0))],
-        ty: HostTypeTerm::Bool,
-    });
-    let empty_column = if let Some(trailing) = known_empty_shape {
-        let shape = HostExpr::new(HostExprKind::List(
-            std::iter::once(HostExpr::new(HostExprKind::Int(0)))
-                .chain(trailing)
-                .collect(),
-            HostTypeTerm::List(Box::new(HostTypeTerm::Int64)),
-        ));
-        HostExpr::new(HostExprKind::Builtin {
-            name: "reshape".into(),
-            args: vec![packed_column.clone(), shape],
-            ty: host_column_ty.clone(),
-        })
-    } else {
-        HostExpr::new(HostExprKind::Builtin {
-            name: "fail".into(),
-            args: vec![HostExpr::new(HostExprKind::String(
-                "C gradient cannot infer trailing extents for an empty List tensor column".into(),
-            ))],
-            ty: host_column_ty.clone(),
-        })
-    };
-    let column_value = HostExpr::new(HostExprKind::If {
-        cond: Box::new(is_empty),
-        then_expr: Box::new(empty_column),
-        else_expr: Box::new(packed_column),
         ty: host_column_ty.clone(),
     });
     let mut index = bindings.len();
@@ -12587,11 +12610,201 @@ fn materialize_runtime_grad_list_element(
         ty: host_column_ty.clone(),
         value: column_value,
     });
-    if needs_witness {
-        unwitnessed_columns.push(column_name.clone());
-    }
     leaf_scope.insert(column_name.clone(), host_column_ty);
     Some(var_expr_node(&column_name, span))
+}
+
+fn grad_host_builtin(name: &str, args: Vec<HostExpr>, ty: HostTypeTerm) -> HostExpr {
+    HostExpr::new(HostExprKind::Builtin {
+        name: name.into(),
+        args,
+        ty,
+    })
+}
+
+fn grad_host_int(value: i64) -> HostExpr {
+    HostExpr::new(HostExprKind::Int(value))
+}
+
+fn grad_host_inline(params: Vec<HostParam>, body: HostExpr, ret_ty: HostTypeTerm) -> HostCallback {
+    HostCallback {
+        stationary_accumulator: None,
+        accumulator_delta: None,
+        accumulator_composition: None,
+        kind: HostCallbackKind::Inline {
+            params,
+            body: Box::new(body),
+        },
+        ret_ty,
+    }
+}
+
+/// Keep a runtime List's tensor field as a flat tagged payload and exact
+/// per-row metadata. Empty Lists carry no invented trailing tensor extent;
+/// zero-sized rows retain every axis in their metadata.
+#[allow(clippy::too_many_arguments)]
+fn materialize_runtime_packed_grad_leaf(
+    ty: &HostTypeTerm,
+    item: HostExpr,
+    list: &HostExpr,
+    element_ty: &HostTypeTerm,
+    item_name: &str,
+    span: chelis_deep::Span,
+    used_names: &mut UnordSet<String>,
+    bindings: &mut Vec<HostBinding>,
+    leaf_scope: &mut UnordMap<String, HostTypeTerm>,
+) -> Expr {
+    let HostTypeTerm::Tensor(tensor) = ty else {
+        unreachable!()
+    };
+    let ints = HostTypeTerm::List(Box::new(HostTypeTerm::Int64));
+    let scalar = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(tensor.precision));
+    let values = HostTypeTerm::List(Box::new(scalar));
+    let flat_ty = HostTypeTerm::Tensor(TensorType {
+        dims: vec![DimInfo::Named("*".into(), None)],
+        precision: tensor.precision,
+    });
+    let int_tensor = HostTypeTerm::Tensor(TensorType {
+        dims: vec![DimInfo::Named("*".into(), None)],
+        precision: chelis_types::types::Prim::Int64,
+    });
+    let param = || HostParam {
+        name: item_name.into(),
+        ty: element_ty.clone(),
+    };
+    let map = |body: HostExpr, ret_ty: HostTypeTerm| {
+        HostExpr::new(HostExprKind::Map {
+            callback: grad_host_inline(vec![param()], body, ret_ty.clone()),
+            list: Box::new(list.clone()),
+            ty: HostTypeTerm::List(Box::new(ret_ty)),
+        })
+    };
+    let mut bind = |value: HostExpr, ty: HostTypeTerm| {
+        let mut index = used_names.len();
+        let name = loop {
+            let name = format!("__chelis_grad_packed_{index}");
+            if used_names.insert(name.clone()) {
+                break name;
+            }
+            index += 1;
+        };
+        bindings.push(HostBinding {
+            name: name.clone(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: ty.clone(),
+            value,
+        });
+        leaf_scope.insert(name.clone(), ty.clone());
+        HostExpr::new(HostExprKind::Var(name, ty))
+    };
+    let size = grad_host_builtin("numel", vec![item.clone()], HostTypeTerm::Int64);
+    let flat = grad_host_builtin(
+        "reshape",
+        vec![
+            item.clone(),
+            HostExpr::new(HostExprKind::List(vec![size.clone()], ints.clone())),
+        ],
+        flat_ty.clone(),
+    );
+    let flattened = HostExpr::new(HostExprKind::FlatMap {
+        callback: grad_host_inline(
+            vec![param()],
+            grad_host_builtin("to_list", vec![flat], values.clone()),
+            values.clone(),
+        ),
+        list: Box::new(list.clone()),
+        ty: values,
+    });
+    let payload = bind(
+        grad_host_builtin("to_tensor", vec![flattened], flat_ty.clone()),
+        flat_ty,
+    );
+    let sizes = map(size, HostTypeTerm::Int64);
+    let acc_name = format!("{item_name}_offset");
+    let size_name = format!("{item_name}_size");
+    let offsets = HostExpr::new(HostExprKind::Scan {
+        callback: grad_host_inline(
+            vec![
+                HostParam {
+                    name: acc_name.clone(),
+                    ty: HostTypeTerm::Int64,
+                },
+                HostParam {
+                    name: size_name.clone(),
+                    ty: HostTypeTerm::Int64,
+                },
+            ],
+            grad_host_builtin(
+                "add",
+                vec![
+                    HostExpr::new(HostExprKind::Var(acc_name, HostTypeTerm::Int64)),
+                    HostExpr::new(HostExprKind::Var(size_name, HostTypeTerm::Int64)),
+                ],
+                HostTypeTerm::Int64,
+            ),
+            HostTypeTerm::Int64,
+        ),
+        init: Box::new(grad_host_int(0)),
+        list: Box::new(sizes),
+        ty: ints.clone(),
+    });
+    let offsets = bind(offsets, ints.clone());
+    let count = grad_host_builtin("len", vec![list.clone()], HostTypeTerm::Int64);
+    let zero = || HostExpr::new(HostExprKind::List(vec![grad_host_int(0)], ints.clone()));
+    let starts = grad_host_builtin(
+        "take",
+        vec![
+            grad_host_builtin("concat", vec![zero(), offsets.clone()], ints.clone()),
+            count,
+        ],
+        ints.clone(),
+    );
+    let metadata = std::iter::once(starts)
+        .chain(std::iter::once(offsets))
+        .chain((0..tensor.dims.len()).map(|axis| {
+            map(
+                grad_host_builtin(
+                    "shape",
+                    vec![item.clone(), grad_host_int(axis as i64)],
+                    HostTypeTerm::Int64,
+                ),
+                HostTypeTerm::Int64,
+            )
+        }))
+        .map(|column| {
+            let padded = grad_host_builtin("append", vec![column, grad_host_int(0)], ints.clone());
+            bind(
+                grad_host_builtin("to_tensor", vec![padded], int_tensor.clone()),
+                int_tensor.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut fields = vec![Expr::Atom(
+        Atom::Name("$chelis_runtime_packed_tensor".into()),
+        span,
+    )];
+    for (index, value) in std::iter::once(payload).chain(metadata).enumerate() {
+        let name = match index {
+            0 => "payload".into(),
+            1 => "starts".into(),
+            2 => "ends".into(),
+            _ => format!("axis{}", index - 3),
+        };
+        let HostExprKind::Var(variable, _) = value.kind else {
+            unreachable!()
+        };
+        fields.push(Expr::node(
+            DeepTag::Kv,
+            Metadata::default(),
+            vec![
+                Expr::Atom(Atom::Name(name), span),
+                var_expr_node(&variable, span),
+            ],
+            span,
+        ));
+    }
+    Expr::node(DeepTag::Record, Metadata::default(), fields, span)
 }
 
 fn tensor_helper_root_expr(
@@ -12618,6 +12831,7 @@ fn tensor_helper_root_expr(
 
 fn pack_grad_roots(plan: &GradPackPlan, roots: &mut impl Iterator<Item = HostExpr>) -> HostExpr {
     match plan {
+        GradPackPlan::PackedLeaf { .. } => unreachable!("packed leaves belong to a runtime List"),
         GradPackPlan::Leaf(ty) => {
             let root = roots.next().expect("gradient root count was checked");
             // A primitive cotangent crosses the existing tensor-to-scalar
@@ -12734,6 +12948,87 @@ fn collect_runtime_grad_columns(
     columns: &mut Vec<(HostExpr, HostTypeTerm)>,
 ) {
     match plan {
+        GradPackPlan::PackedLeaf { ty, metadata } => {
+            let root = roots.next().expect("packed List payload root");
+            let HostTypeTerm::Tensor(tensor) = ty else {
+                unreachable!()
+            };
+            let ints = HostTypeTerm::List(Box::new(HostTypeTerm::Int64));
+            let values = HostTypeTerm::List(Box::new(HostTypeTerm::Scalar(
+                HostPrecisionTerm::Concrete(tensor.precision),
+            )));
+            let index = HostExpr::new(HostExprKind::Var(
+                "__chelis_grad_packed_row".into(),
+                HostTypeTerm::Int64,
+            ));
+            let read = |column: &HostExpr| {
+                grad_host_builtin(
+                    "index",
+                    vec![
+                        grad_host_builtin("to_list", vec![column.clone()], ints.clone()),
+                        index.clone(),
+                    ],
+                    HostTypeTerm::Int64,
+                )
+            };
+            let start = read(&metadata[0]);
+            let end = read(&metadata[1]);
+            let data = grad_host_builtin("to_list", vec![root], values.clone());
+            let data = grad_host_builtin("skip", vec![data, start.clone()], values.clone());
+            let data = grad_host_builtin(
+                "take",
+                vec![
+                    data,
+                    grad_host_builtin("sub", vec![end, start], HostTypeTerm::Int64),
+                ],
+                values,
+            );
+            let flat = grad_host_builtin(
+                "to_tensor",
+                vec![data],
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Named("*".into(), None)],
+                    precision: tensor.precision,
+                }),
+            );
+            let shape = HostExpr::new(HostExprKind::List(
+                metadata.iter().skip(2).map(read).collect(),
+                ints,
+            ));
+            let body = grad_host_builtin("reshape", vec![flat, shape], ty.clone());
+            let count = grad_host_builtin(
+                "sub",
+                vec![
+                    grad_host_builtin(
+                        "shape",
+                        vec![metadata[0].clone(), grad_host_int(0)],
+                        HostTypeTerm::Int64,
+                    ),
+                    grad_host_int(1),
+                ],
+                HostTypeTerm::Int64,
+            );
+            let source = grad_host_builtin(
+                "range",
+                vec![grad_host_int(0), count],
+                HostTypeTerm::List(Box::new(HostTypeTerm::Int64)),
+            );
+            columns.push((
+                HostExpr::new(HostExprKind::Map {
+                    callback: grad_host_inline(
+                        vec![HostParam {
+                            name: "__chelis_grad_packed_row".into(),
+                            ty: HostTypeTerm::Int64,
+                        }],
+                        body,
+                        ty.clone(),
+                    ),
+                    list: Box::new(source),
+                    ty: HostTypeTerm::List(Box::new(ty.clone())),
+                }),
+                ty.clone(),
+            ));
+        }
         GradPackPlan::Leaf(_) => {
             let root = roots.next().expect("runtime List column root");
             let HostTypeTerm::Tensor(tensor) = host_expr_type(&root) else {
@@ -12799,6 +13094,9 @@ fn pack_runtime_grad_element(
     rows: &mut impl Iterator<Item = HostExpr>,
 ) -> HostExpr {
     match plan {
+        GradPackPlan::PackedLeaf { ty, .. } => {
+            force_host_expr_type(rows.next().expect("packed List tensor row"), ty.clone())
+        }
         GradPackPlan::Leaf(ty) => {
             let row = rows.next().expect("runtime List row leaf");
             if matches!(ty, HostTypeTerm::Tensor(_)) {
@@ -12962,7 +13260,7 @@ fn try_lower_general_list_grad_app(
     let mut rewritten_children = kids.to_vec();
     let mut helper_scope = scope.clone();
     let mut leaf_bindings = Vec::new();
-    let mut unwitnessed_columns = Vec::new();
+    let mut eager_arguments = UnordSet::new();
     let mut used_names = UnordSet::new();
     collect_occurring_names(app_expr, &mut used_names);
     // The differentiated def may read a program value whose name does not
@@ -12986,7 +13284,12 @@ fn try_lower_general_list_grad_app(
             .and_then(|name| scope.get(name))
             .filter(|ty| matches!(ty, HostTypeTerm::Adt(..)) && !ty.is_unresolved())
             .cloned();
+        let actual_ty = expr_host_type(actual, program, scope);
         let Some(param_ty) = lexical_actual_ty
+            .or_else(|| {
+                (matches!(actual_ty, HostTypeTerm::Adt(..)) && !actual_ty.is_unresolved())
+                    .then_some(actual_ty)
+            })
             .or_else(|| param_host_type(param))
             .or_else(|| {
                 let actual_ty = expr_host_type(actual, program, scope);
@@ -13013,10 +13316,11 @@ fn try_lower_general_list_grad_app(
             program,
             scope,
             &mut used_names,
+            tensor_helpers,
             RuntimeGradAdtOutputs {
                 bindings: &mut leaf_bindings,
                 leaf_scope: &mut helper_scope,
-                unwitnessed_columns: &mut unwitnessed_columns,
+                eager_arguments: &mut eager_arguments,
             },
         )?;
         if materialized.is_none() {
@@ -13123,29 +13427,12 @@ fn try_lower_general_list_grad_app(
         .into_iter()
         .map(|input| input.name)
         .collect::<UnordSet<_>>();
+    live.extend(eager_arguments.into_sorted());
+    plan.collect_metadata_names(&mut live);
     for binding in leaf_bindings.iter().rev() {
         if live.contains(&binding.name) {
             collect_lowered_host_names(&binding.value, &mut live);
         }
-    }
-    if unwitnessed_columns.iter().any(|name| live.contains(name)) {
-        let unsupported = chelis_types::unsupported::Unsupported::new(
-            chelis_types::unsupported::UnsupportedKind::Construct(
-                "runtime List tensor column without checked trailing extents".into(),
-            ),
-            "C gradient cannot infer trailing extents for a live List tensor column",
-            chelis_types::unsupported::Stage::Lowering,
-            chelis_types::unimplemented_rejection!(
-                3480,
-                "a live runtime List tensor column needs checked trailing extent evidence"
-            ),
-        );
-        return Err(crate::lower::LowerDiagnostic::new(
-            unsupported.to_string(),
-            Some(app_expr.span()),
-            app_expr.span_id().map(str::to_string),
-        )
-        .fatal());
     }
     leaf_bindings.retain(|binding| live.contains(&binding.name));
     let root_tys = lowered
