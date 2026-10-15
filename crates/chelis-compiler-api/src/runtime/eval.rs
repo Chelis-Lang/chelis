@@ -1061,39 +1061,84 @@ fn collect_delta_entry_actuals(
             Recipe::Fresh => collect_nested_entry_actuals(pattern, node, value, path.render(), out),
             Recipe::Inherited => {
                 let prefix = path.render();
-                for witness in delta.checked.as_ref().expect("inherited components have a successful prior entry") {
+                for witness in delta
+                    .checked
+                    .as_ref()
+                    .expect("inherited components have a successful prior entry")
+                {
                     let mut actual = witness.clone();
-                    let suffix = actual.path.strip_prefix(delta.proof.parameter()).expect("same formal owns the prior witness");
+                    let suffix = actual
+                        .path
+                        .strip_prefix(delta.proof.parameter())
+                        .expect("same formal owns the prior witness");
                     actual.path = EntryPathText::new(prefix.clone()).join(suffix).render();
                     out.push(actual);
                     #[cfg(test)]
                     ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
                 }
             }
-            Recipe::Constructor { constructor, fields: recipes } => {
-                let (ClaimNode::Nominal { constructors, .. }, RuntimeValue::Adt { ctor, source_name, fields, .. }) = (pattern.node(node), value) else {
-                    return Err("host runtime: accumulator delta lost its checked constructor".into());
+            Recipe::Constructor {
+                constructor,
+                owner: _,
+                fields: recipes,
+            } => {
+                let (
+                    ClaimNode::Nominal { constructors, .. },
+                    RuntimeValue::Adt {
+                        ctor,
+                        source_name,
+                        fields,
+                        ..
+                    },
+                ) = (pattern.node(node), value)
+                else {
+                    return Err(
+                        "host runtime: accumulator delta lost its checked constructor".into(),
+                    );
                 };
-                let layout = constructors.iter().find(|layout| layout.name == *constructor).ok_or("host runtime: accumulator delta lost its claim constructor")?;
-                if (ctor != &layout.name && ctor != &layout.stored_name) || fields.len() != recipes.len() || layout.fields.len() != recipes.len() {
+                let layout = constructors
+                    .iter()
+                    .find(|layout| layout.name == *constructor)
+                    .ok_or("host runtime: accumulator delta lost its claim constructor")?;
+                if (ctor != &layout.name && ctor != &layout.stored_name)
+                    || fields.len() != recipes.len()
+                    || layout.fields.len() != recipes.len()
+                {
                     return Err("host runtime: accumulator delta changed its construction".into());
                 }
-                for ((field, value), recipe) in layout.fields.iter().zip(fields.iter()).zip(recipes) {
-                    let Some(child) = field.node else { continue; };
+                for ((field, value), recipe) in layout.fields.iter().zip(fields.iter()).zip(recipes)
+                {
+                    let Some(child) = field.node else {
+                        continue;
+                    };
                     let segment = field.name.clone().unwrap_or_default();
-                    let segment = if constructors.len() > 1 { format!(".{source_name}.{segment}") } else { format!(".{segment}") };
+                    let segment = if constructors.len() > 1 {
+                        format!(".{source_name}.{segment}")
+                    } else {
+                        format!(".{segment}")
+                    };
                     visit(delta, recipe, child, value, path.join(&segment), out)?;
                 }
             }
-            Recipe::ListInterval { before, after } => {
-                let (ClaimNode::List(child), RuntimeValue::List(items)) = (pattern.node(node), value) else {
+            Recipe::ListInterval { before, after, .. } => {
+                let (ClaimNode::List(child), RuntimeValue::List(items)) =
+                    (pattern.node(node), value)
+                else {
                     return Err("host runtime: accumulator delta lost its checked List".into());
                 };
                 if items.len() != before + delta.old_list_len + after {
-                    return Err("host runtime: accumulator delta changed its inherited interval".into());
+                    return Err(
+                        "host runtime: accumulator delta changed its inherited interval".into(),
+                    );
                 }
                 for (index, item) in items.iter().take(*before).enumerate() {
-                    collect_nested_entry_actuals(pattern, *child, item, path.join(&format!("[{index}]")).render(), out);
+                    collect_nested_entry_actuals(
+                        pattern,
+                        *child,
+                        item,
+                        path.join(&format!("[{index}]")).render(),
+                        out,
+                    );
                 }
                 // Eligible List intervals contain direct tensors: every prior
                 // first binder witness was at index zero. No diagnostic text
@@ -1106,7 +1151,13 @@ fn collect_delta_entry_actuals(
                     ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
                 }
                 for (index, item) in items.iter().enumerate().skip(before + delta.old_list_len) {
-                    collect_nested_entry_actuals(pattern, *child, item, path.join(&format!("[{index}]")).render(), out);
+                    collect_nested_entry_actuals(
+                        pattern,
+                        *child,
+                        item,
+                        path.join(&format!("[{index}]")).render(),
+                        out,
+                    );
                 }
             }
         }
@@ -1114,10 +1165,23 @@ fn collect_delta_entry_actuals(
     }
     let root = delta.proof.pattern().root().expect("nonempty claim");
     if delta.checked.is_none() {
-        collect_nested_entry_actuals(delta.proof.pattern(), root, value, delta.proof.parameter().to_owned(), out);
+        collect_nested_entry_actuals(
+            delta.proof.pattern(),
+            root,
+            value,
+            delta.proof.parameter().to_owned(),
+            out,
+        );
         Ok(())
     } else {
-        visit(delta, delta.proof.recipe(), root, value, EntryPathText::new(delta.proof.parameter().to_owned()), out)
+        visit(
+            delta,
+            delta.proof.recipe(),
+            root,
+            value,
+            EntryPathText::new(delta.proof.parameter().to_owned()),
+            out,
+        )
     }
 }
 
@@ -1151,7 +1215,10 @@ fn actualize_tensor_entry_parameters(
     nested: Option<EntryClaimPatterns<'_>>,
     mut loop_entry: Option<&mut LoopEntryReceipt>,
 ) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
-    if loop_entry.as_ref().is_some_and(|receipt| receipt.witnesses.is_some()) {
+    if loop_entry
+        .as_ref()
+        .is_some_and(|receipt| receipt.witnesses.is_some())
+    {
         return Ok(Vec::new());
     }
     fn collect(
@@ -1246,7 +1313,11 @@ fn actualize_tensor_entry_parameters(
         if present.is_some_and(|present| !present[index]) {
             continue;
         }
-        if index == 0 && let Some(delta) = loop_entry.as_ref().and_then(|receipt| receipt.delta.as_ref()) {
+        if index == 0
+            && let Some(delta) = loop_entry
+                .as_ref()
+                .and_then(|receipt| receipt.delta.as_ref())
+        {
             collect_delta_entry_actuals(delta, arg, &mut actuals)?;
             continue;
         }
@@ -1292,7 +1363,10 @@ fn actualize_tensor_entry_parameters(
             .collect::<Vec<_>>(),
     )
     .map_err(|error| format!("host runtime: could not actualize entry contract: {error}"))?;
-    if let Some(delta) = loop_entry.as_deref_mut().and_then(|receipt| receipt.delta.as_mut()) {
+    if let Some(delta) = loop_entry
+        .as_deref_mut()
+        .and_then(|receipt| receipt.delta.as_mut())
+    {
         let mut seen = std::collections::BTreeSet::new();
         delta.pending.clear();
         for (actual, ty) in actuals.iter().zip(&types) {
@@ -1300,11 +1374,15 @@ fn actualize_tensor_entry_parameters(
             for dim in &ty.dims {
                 #[cfg(test)]
                 ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
-                if let DimInfo::Named(name, _) = dim && name != "*" {
+                if let DimInfo::Named(name, _) = dim
+                    && name != "*"
+                {
                     retained |= seen.insert(name.clone());
                 }
             }
-            if retained { delta.pending.push(actual.clone()); }
+            if retained {
+                delta.pending.push(actual.clone());
+            }
         }
     }
     let actualized = actuals
@@ -1364,7 +1442,11 @@ impl<'a> EvalContext<'a> {
     }
 
     fn active_builtin_symbol(&self, name: &str) -> bool {
-        !self.bindings.contains_key(name) && !self.tensor_bindings.contains_key(name)
+        self.active_builtin_symbol_in_frame(name, &self.bindings)
+    }
+
+    fn active_builtin_symbol_in_frame(&self, name: &str, frame: &Frame) -> bool {
+        !frame.contains_key(name) && !self.tensor_bindings.contains_key(name)
     }
 
     pub(super) fn resolve_top_level(&mut self, name: &str) -> Result<RuntimeValue, String> {
@@ -3531,25 +3613,40 @@ impl<'a> EvalContext<'a> {
         )
     }
 
-    fn loop_callback_receipt(
-        &self,
-        callback: &RuntimeValue,
-    ) -> Option<LoopEntryReceipt> {
+    fn loop_callback_receipt(&self, callback: &RuntimeValue) -> Option<LoopEntryReceipt> {
         let RuntimeValue::Closure {
             checked_function,
             invocation_contracts,
             def_name: None,
+            env,
             ..
         } = callback
         else {
             return None;
         };
-        if !invocation_contracts.is_empty() { return None; }
-        if chelis_ir::host::stationary_accumulator_proof(checked_function, &self.adt_registry).is_some() {
+        if !invocation_contracts.is_empty() {
+            return None;
+        }
+        if chelis_ir::host::stationary_accumulator_proof(checked_function, &self.adt_registry)
+            .is_some()
+        {
             return Some(LoopEntryReceipt::default());
         }
         let proof = chelis_ir::host::accumulator_delta_proof(checked_function, &self.adt_registry)?;
-        Some(LoopEntryReceipt { witnesses: None, delta: Some(DeltaEntryReceipt { proof, checked: None, pending: Vec::new(), old_list_len: 0 }) })
+        if let Some(operation) = proof.required_list_operation()
+            && !self.active_builtin_symbol_in_frame(operation.symbol(), env)
+        {
+            return None;
+        }
+        Some(LoopEntryReceipt {
+            witnesses: None,
+            delta: Some(DeltaEntryReceipt {
+                proof,
+                checked: None,
+                pending: Vec::new(),
+                old_list_len: 0,
+            }),
+        })
     }
 
     fn apply_loop_callback(
@@ -3837,12 +3934,15 @@ impl<'a> EvalContext<'a> {
                     if let Some(receipt) = loop_entry {
                         if let Some(delta) = &mut receipt.delta {
                             delta.checked = Some(std::mem::take(&mut delta.pending));
-                            delta.old_list_len = match args.first() { Some(RuntimeValue::List(items)) => items.len(), _ => 0 };
+                            delta.old_list_len = match args.first() {
+                                Some(RuntimeValue::List(items)) => items.len(),
+                                _ => 0,
+                            };
                         } else if receipt.witnesses.is_none() {
-                        receipt.witnesses = Some(named_result_witnesses.clone());
-                        #[cfg(test)]
-                        ENTRY_CLAIM_WORK
-                            .with(|v| v.set(v.get() + named_result_witnesses.len() as u64));
+                            receipt.witnesses = Some(named_result_witnesses.clone());
+                            #[cfg(test)]
+                            ENTRY_CLAIM_WORK
+                                .with(|v| v.set(v.get() + named_result_witnesses.len() as u64));
                         }
                     }
                     let caller_precisions = saved_precisions.clone();

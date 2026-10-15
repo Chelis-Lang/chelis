@@ -73,6 +73,15 @@ pub(crate) enum HostAbiType {
     Unit,
 }
 
+impl chelis_ir::host::AccumulatorTypeIdentity for HostAbiType {
+    fn accumulator_nominal_identity(&self) -> Option<&str> {
+        match self {
+            Self::Adt(name, _) => Some(name),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) type HostAbiProgram = HostProgram<HostAbiType>;
 pub(crate) type HostAbiBinding = HostBinding<HostAbiType>;
 pub(crate) type HostAbiFunction = HostFunction<HostAbiType>;

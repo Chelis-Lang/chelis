@@ -447,10 +447,11 @@ fn program_has_nested_claims(program: &HostProgram) -> bool {
         }
     }
     fn callback_expr(callback: &HostCallback) -> bool {
-        callback.accumulator_delta.is_some() || match &callback.kind {
-            HostCallbackKind::Named { .. } => false,
-            HostCallbackKind::Inline { body, .. } => uses(body),
-        }
+        callback.accumulator_delta.is_some()
+            || match &callback.kind {
+                HostCallbackKind::Named { .. } => false,
+                HostCallbackKind::Inline { body, .. } => uses(body),
+            }
     }
     program.functions.iter().any(|function| {
         function.result_claim.is_some()
@@ -5802,11 +5803,15 @@ fn stationary_callback_entry(callback: &HostCallback) -> Option<&HostExpr> {
         return None;
     };
     let parameter = if let Some(proof) = &callback.stationary_accumulator {
-        if !proof.validates_body(body) { return None; }
+        if !proof.validates_body(body) {
+            return None;
+        }
         proof.parameter()
     } else {
         let proof = callback.accumulator_delta.as_ref()?;
-        if !proof.validates_body(body) { return None; }
+        if !proof.validates_body(body) {
+            return None;
+        }
         proof.parameter()
     };
 
@@ -7681,13 +7686,20 @@ impl<'a> HostEmitter<'a> {
         }
         if let Some(proof) = &callback.accumulator_delta {
             for binder in proof.pattern().binders() {
-                if !binders.contains(&binder) { binders.push(binder); }
+                if !binders.contains(&binder) {
+                    binders.push(binder);
+                }
             }
         }
         let old_list_len = callback.accumulator_delta.as_ref().and_then(|proof| {
-            matches!(proof.recipe(), chelis_ir::host::AccumulatorDeltaRecipe::ListInterval { .. }).then(|| {
+            matches!(
+                proof.recipe(),
+                chelis_ir::host::AccumulatorDeltaRecipe::ListInterval { .. }
+            )
+            .then(|| {
                 let name = self.next_temp("delta_prior_length");
-                self.lines.push(format!("{}int64_t {name} = 0;", self.indent));
+                self.lines
+                    .push(format!("{}int64_t {name} = 0;", self.indent));
                 name
             })
         });
@@ -7725,13 +7737,21 @@ impl<'a> HostEmitter<'a> {
             if guard.delta.is_some() {
                 // Each new entry gets fresh binder state. Replay retains prior
                 // witness order, rather than fixing the old binder's value.
-                self.lines.extend(entry_named_state_lines(&guard.binders).into_iter().map(|line| format!("{}{line}", self.indent)));
+                self.lines.extend(
+                    entry_named_state_lines(&guard.binders)
+                        .into_iter()
+                        .map(|line| format!("{}{line}", self.indent)),
+                );
                 self.lines.extend(lines);
                 if let Some((saved, count)) = &guard.states {
-                    self.lines.push(format!("{}for (size_t i = 0; i < {count}; ++i) {saved}[i].seen = 0;", self.indent));
+                    self.lines.push(format!(
+                        "{}for (size_t i = 0; i < {count}; ++i) {saved}[i].seen = 0;",
+                        self.indent
+                    ));
                     self.lines.push(format!("{}for (size_t i = 0; i < {count}; ++i) if (__chelis_entry_named_states[i].seen) {saved}[__chelis_entry_named_states[i].ordinal] = __chelis_entry_named_states[i];", self.indent));
                 }
-                self.lines.push(format!("{}{} = true;", self.indent, guard.checked));
+                self.lines
+                    .push(format!("{}{} = true;", self.indent, guard.checked));
                 return;
             }
             // Keep the invocation's witness variable in its original lexical
@@ -8398,7 +8418,11 @@ impl<'a> HostEmitter<'a> {
                             }
                         }
                     }
-                    let delta_guard = self.stationary_entry.as_ref().filter(|guard| std::ptr::eq(guard.expression, expr)).filter(|guard| guard.delta.is_some());
+                    let delta_guard = self
+                        .stationary_entry
+                        .as_ref()
+                        .filter(|guard| std::ptr::eq(guard.expression, expr))
+                        .filter(|guard| guard.delta.is_some());
                     if let Some(guard) = delta_guard {
                         named_list_binders = guard.binders.clone();
                     }
@@ -8425,22 +8449,55 @@ impl<'a> HostEmitter<'a> {
                     for entry in lists {
                         let temp = self.next_temp("entry_list");
                         self.emit_expr_to_var(&entry.value, &temp, &host_type(&entry.value))?;
-                        if let Some(guard) = self.stationary_entry.as_ref().filter(|guard| std::ptr::eq(guard.expression, expr))
-                            && let Some(proof) = &guard.delta {
-                            let param = HostParam { name: entry.name.clone(), ty: host_type(&entry.value) };
+                        if let Some(guard) = self
+                            .stationary_entry
+                            .as_ref()
+                            .filter(|guard| std::ptr::eq(guard.expression, expr))
+                            && let Some(proof) = &guard.delta
+                        {
+                            let param = HostParam {
+                                name: entry.name.clone(),
+                                ty: host_type(&entry.value),
+                            };
                             if entry.claim.is_none() {
-                                let full_metadata = entry_walk::retained_list_pass(&entry.ty, &temp, &entry.name, false, work.named_list_binders.len()).join(" ");
-                                let fresh_metadata = entry_walk::delta_list_metadata(&param, &temp, proof, guard.old_list_len.as_deref().expect("List prior length"));
-                                work.params[entry.position].metadata.push(format!("if (!{}) {{ {full_metadata} }} else {{ {fresh_metadata} }}", guard.checked));
+                                let full_metadata = entry_walk::retained_list_pass(
+                                    &entry.ty,
+                                    &temp,
+                                    &entry.name,
+                                    false,
+                                    work.named_list_binders.len(),
+                                )
+                                .join(" ");
+                                let fresh_metadata = entry_walk::delta_list_metadata(
+                                    &param,
+                                    &temp,
+                                    proof,
+                                    guard.old_list_len.as_deref().expect("List prior length"),
+                                );
+                                work.params[entry.position].metadata.push(format!(
+                                    "if (!{}) {{ {full_metadata} }} else {{ {fresh_metadata} }}",
+                                    guard.checked
+                                ));
                             }
-                            let step = entry_walk::delta_entry_step(&param, &temp, entry.position, &work.named_list_binders, entry_walk::DeltaWalkContext {
-                                proof,
-                                checked: &guard.checked,
-                                prior_states: guard.states.as_ref().map(|(name, count)| (name.as_str(), *count)),
-                                old_list_len: guard.old_list_len.as_deref(),
-                            })?;
+                            let step = entry_walk::delta_entry_step(
+                                &param,
+                                &temp,
+                                entry.position,
+                                &work.named_list_binders,
+                                entry_walk::DeltaWalkContext {
+                                    proof,
+                                    checked: &guard.checked,
+                                    prior_states: guard
+                                        .states
+                                        .as_ref()
+                                        .map(|(name, count)| (name.as_str(), *count)),
+                                    old_list_len: guard.old_list_len.as_deref(),
+                                },
+                            )?;
                             work.params[entry.position].extents.push(step.clone());
-                            work.params[entry.position].ordered_extents.push(entry_walk::ExtentStep::Walk(step));
+                            work.params[entry.position]
+                                .ordered_extents
+                                .push(entry_walk::ExtentStep::Walk(step));
                             continue;
                         }
                         if let Some(pattern) = &entry.claim {

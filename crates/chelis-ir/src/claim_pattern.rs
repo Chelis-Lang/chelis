@@ -394,16 +394,36 @@ impl Builder<'_> {
         // dimension slot. Normalize that slot before memoization, exactly as
         // substitution does, so the recursive occurrence is the same node.
         // A type-parameter slot keeps its original type argument.
-        let normalized = self.registry.lookup(name).map(|definition| {
-            definition.param_args.iter().zip(args).map(|(parameter, argument)| {
-                if matches!(parameter, NominalArg::Dimension(_)) {
-                    dimension_argument(argument)
-                } else {
-                    argument.clone()
+        let normalized = match self.registry.lookup(name) {
+            Some(definition) => {
+                if definition.param_args.len() != args.len() {
+                    return Err(ClaimPatternError::Malformed(format!(
+                        "nominal `{name}` expects {} arguments, received {}",
+                        definition.param_args.len(),
+                        args.len()
+                    )));
                 }
-            }).collect::<Vec<_>>()
-        });
-        let args = normalized.as_deref().filter(|normalized| normalized.len() == args.len()).unwrap_or(args);
+                Some(
+                    definition
+                        .param_args
+                        .iter()
+                        .zip(args)
+                        .map(|(parameter, argument)| {
+                            if matches!(parameter, NominalArg::Dimension(_)) {
+                                dimension_argument(argument)
+                            } else {
+                                argument.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+            None => None,
+        };
+        let args = match &normalized {
+            Some(arguments) => arguments.as_slice(),
+            None => args,
+        };
         let key = format!(
             "{name}[{}]",
             args.iter().map(canonical).collect::<Vec<_>>().join(",")
@@ -1081,6 +1101,17 @@ mod tests {
     }
 
     #[test]
+    fn nominal_memoization_rejects_malformed_argument_arity() {
+        let registry = registry(BOX);
+        for malformed in ["(t-adt {} Box)", "(t-adt {} Box (d-lit {} 3) (d-lit {} 4))"] {
+            assert!(matches!(
+                ClaimPattern::derive(&ty(malformed), &registry),
+                Err(ClaimPatternError::Malformed(_))
+            ));
+        }
+    }
+
+    #[test]
     fn tuple_option_and_list_positions_keep_their_claims() {
         let registry = registry(BOX);
         let pattern = ClaimPattern::derive(
@@ -1112,9 +1143,15 @@ mod tests {
              type T[n] =\n  | Tip { v: tensor[n, f32] }\n  | Fix { t: T[3] }\n",
         );
         for argument in ["(d-var {} k)", "(t-var {} k)"] {
-            let pattern = ClaimPattern::derive(&ty(&format!("(t-adt {{}} Pair {argument})")), &registry).unwrap();
+            let pattern =
+                ClaimPattern::derive(&ty(&format!("(t-adt {{}} Pair {argument})")), &registry)
+                    .unwrap();
             let root = pattern.root().unwrap();
-            assert_eq!(field(&pattern, root, "Node", 0), root, "dimension-slot spelling must retain exact recursive obligation identity");
+            assert_eq!(
+                field(&pattern, root, "Node", 0),
+                root,
+                "dimension-slot spelling must retain exact recursive obligation identity"
+            );
             assert_eq!(pattern.nodes().len(), 2);
         }
         let pattern = ClaimPattern::derive(&ty("(t-adt {} Pair (d-lit {} 3))"), &registry).unwrap();

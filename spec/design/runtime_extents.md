@@ -2154,9 +2154,18 @@ checked declaration's parameter kind before graph memoization; a type slot
 remains a type slot, and each graph belongs to its one authored claim source.
 The recipe admits nominal constructions with exact inherited fields, and a
 fixed fresh prefix or suffix around a complete `List[tensor[...]]` accumulator.
-It is derived from checked source and validated against the lowered callback;
-shadowed bindings, arbitrary equal-shaped values and unproved result paths
-supply no evidence.
+It is derived from checked source and validated against the lowered callback.
+Nominal constructions retain their exact declaration owner in both views. List
+recipes retain their exact intrinsic operation: Eval resolves it through the
+ordinary builtin-dispatch authority in the closure's captured lexical frame,
+and C validates the lowered builtin identity. A callback-local shadow cannot
+supply the operation. Top-level builtin shadowing remains the checker's
+`BuiltinShadowing` error. Aliases and selected callables require their own
+postcondition evidence and retain full entry validation.
+Shadowed bindings, arbitrary equal-shaped values and unproved result paths
+supply no evidence. The receipt represents fixed-rank, concrete-precision
+extent obligations; polymorphic rank and precision bindings retain complete
+entry checks.
 
 The first invocation checks the complete seed. The next invocation checks
 fresh components in declared depth-first order and replays the inherited
@@ -2175,7 +2184,7 @@ the first witness; inherited witnesses are compared against it rather than
 silently binding the old extent. The entry creates its next receipt only after
 all checks succeed. New components are not checked at callback production:
 later callback effects, the next-entry trap position, invalid final-step
-results and empty inputs retain spec/04 section4.7's schedule. Dependent local
+results and empty inputs retain spec/04 section 4.7's schedule. Dependent local
 and result guards read the current invocation's original lexical witness state.
 
 Other callbacks retain complete validation, including named calls without a
