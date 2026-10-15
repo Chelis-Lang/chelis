@@ -33110,6 +33110,50 @@ mod accumulator_forwarding_wrapper_tests {
             checked.adt_registry(),
         )
     }
+    fn returned_plan(body: &str) -> Option<BoundAccumulatorForwardingPlan> {
+        let source = format!(
+            "def step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, to_tensor([1.0f32, 2.0f32, 3.0f32]))\nout = fold(fn (acc: List[tensor[*, f32]], i: i64) -> {body}, [to_tensor([1.0f32, 2.0f32, 3.0f32])], range(0i64, 2i64))\n"
+        );
+        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
+        bound_accumulator_forwarding_plan(checked.exprs().last().and_then(find_lambda).unwrap())
+    }
+
+    #[test]
+    fn returned_invocation_plan_transports_only_whole_immutable_results() {
+        for body in [
+            "{ old = acc\n item = i\n result = step(old, item)\n result }",
+            "{ result = step(acc, i)\n saved = result\n result = acc\n saved }",
+            "{ result = step(acc, i)\n alias = result\n alias2 = alias\n alias2 }",
+        ] {
+            assert!(returned_plan(body).is_some(), "{body}");
+        }
+        for body in [
+            "{ result = step(acc, i)\n result = acc\n result }",
+            "{ result = step(acc, i)\n if i == 0i64 then result else result }",
+            "{ item = if i == 0i64 then i else i\n result = step(acc, item)\n result }",
+            "{ step = fn (xs: List[tensor[*, f32]], n: i64) -> xs\n result = step(acc, i)\n result }",
+        ] {
+            assert!(returned_plan(body).is_none(), "{body}");
+        }
+    }
+
+    #[test]
+    fn returned_invocation_plan_selects_occurrences_not_expression_equality() {
+        let first = returned_plan("{ result = step(acc, i)\n _ = step(acc, i)\n result }").unwrap();
+        let second = returned_plan("{ _ = step(acc, i)\n result = step(acc, i)\n result }").unwrap();
+        assert_eq!(first.callsite(), second.callsite());
+        assert_ne!(first.occurrence(), second.occurrence());
+        assert_ne!(first.route(), second.route());
+    }
+
+    #[test]
+    fn returned_invocation_is_not_original_accumulator_identity() {
+        assert!(proof("{ result = step(acc, i)\n step(result, i) }").is_none());
+        assert!(returned_plan("{ result = step(acc, i)\n step(result, i) }").is_none());
+    }
+
     #[test]
     fn checked_composition_preserves_sequential_forwarding_roles() {
         for body in [
