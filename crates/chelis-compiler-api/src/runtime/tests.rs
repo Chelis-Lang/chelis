@@ -5187,6 +5187,9 @@ fn named_definition_accumulator_claim_has_independent_compositional_receipts() {
                                     })
                                     .to_string()
                                 );
+                                let source_bytes = super::eval::composition_source_bytes();
+                                eprintln!("Eval composition checked-source comparison bytes N={seed_size} K={steps}: {source_bytes}");
+                                assert!(source_bytes <= 1024 * source.len() as u64 * steps as u64, "{source_bytes}");
                                 let work = super::eval::entry_claim_work();
                                 eprintln!(
                                     "Eval named definition {combine} direct={direct} outer={outer} claim={claim} unproved={unproved} N={seed_size} K={steps}: {work}"

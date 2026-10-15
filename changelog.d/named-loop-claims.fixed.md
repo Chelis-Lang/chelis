@@ -1,0 +1,1 @@
+Direct named fold and scan callbacks, and checked inline callbacks forwarding to them, reuse independently validated accumulator construction evidence. Growing List and Chain entry checks retain separate caller and callee witnesses, effect order, and dependent local and result guards. Unproved callable paths retain complete checks.

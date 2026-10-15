@@ -1210,10 +1210,28 @@ fn collect_delta_entry_actuals(
 }
 
 #[cfg(test)]
-thread_local! { static ENTRY_CLAIM_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+thread_local! {
+    static ENTRY_CLAIM_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static COMPOSITION_SOURCE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Conservative structural-comparison budget, including checked metadata.
+/// Kept separate from runtime observation units: source size is fixed for one
+/// program, whereas accumulator size changes during the measured loop.
+#[cfg(test)]
+fn charge_composition_source_comparison(left: &Expr, right: &Expr) {
+    let bytes = serde_json::to_vec(&(left, right)).expect("checked source serializes").len() as u64;
+    COMPOSITION_SOURCE_BYTES.with(|work| work.set(work.get() + bytes));
+}
+
+#[cfg(test)]
+pub(super) fn composition_source_bytes() -> u64 {
+    COMPOSITION_SOURCE_BYTES.with(std::cell::Cell::get)
+}
 #[cfg(test)]
 pub(super) fn reset_entry_claim_work() {
     ENTRY_CLAIM_WORK.with(|v| v.set(0));
+    COMPOSITION_SOURCE_BYTES.with(|v| v.set(0));
 }
 #[cfg(test)]
 pub(super) fn entry_claim_work() -> u64 {
@@ -2816,6 +2834,8 @@ impl<'a> EvalContext<'a> {
         };
         let composition_index = self.loop_compositions.len().checked_sub(1).filter(|index| {
             let frame = &self.loop_compositions[*index];
+            #[cfg(test)]
+            charge_composition_source_comparison(frame.proof.callsite(), node.expr);
             if frame.entered
                 || frame.inner.is_none()
                 || tagged_expr_children(frame.proof.callsite()) != tagged_expr_children(node.expr)
@@ -2833,6 +2853,8 @@ impl<'a> EvalContext<'a> {
             else {
                 return false;
             };
+            #[cfg(test)]
+            charge_composition_source_comparison(checked_function, &frame.checked_callee);
             def_name.as_ref() == Some(&frame.canonical)
                 && invocation_contracts.is_empty()
                 && tagged_expr_children(checked_function)

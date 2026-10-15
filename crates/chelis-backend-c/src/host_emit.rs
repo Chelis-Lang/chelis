@@ -6075,6 +6075,48 @@ struct FirstSiteFrames {
     list_states: Vec<String>,
 }
 
+/// One lexical activation's local/output witness authority and claim chain.
+/// Retained bodies replace and restore this unit; caller witnesses are never
+/// used to fill missing callee entry state.
+struct RetainedWitnessAuthority {
+    frames: Option<FirstSiteFrames>,
+    claims: Option<String>,
+    on_spine: bool,
+}
+
+impl RetainedWitnessAuthority {
+    fn lower(
+        list_states: Vec<String>,
+        emitter: &mut HostEmitter<'_>,
+        lower: impl FnOnce(&mut HostEmitter<'_>) -> Result<(), Unsupported>,
+    ) -> Result<(), Unsupported> {
+        let caller = Self {
+            frames: emitter.first_site_frames.take(),
+            claims: emitter.result_claims.take(),
+            on_spine: emitter.claim_on_spine,
+        };
+        let parent = caller.claims.as_deref().unwrap_or("NULL").to_owned();
+        let scoped_claims = emitter.next_temp("retained_site_claims");
+        emitter.first_site_frames = Some(FirstSiteFrames {
+            result_dims: None,
+            frames: Vec::new(),
+            list_states,
+        });
+        emitter.result_claims = Some(scoped_claims.clone());
+        let declarations_at = emitter.lines.len();
+        let result = lower(emitter);
+        let frames = emitter.first_site_frames.take().expect("retained witness authority");
+        emitter.first_site_frames = caller.frames;
+        emitter.result_claims = caller.claims;
+        emitter.claim_on_spine = caller.on_spine;
+        result?;
+        let (mut declarations, head) = frames.declare(&emitter.indent, &parent);
+        declarations.push(format!("{}const __chelis_host_result_claim *{scoped_claims} = {head};", emitter.indent));
+        emitter.lines.splice(declarations_at..declarations_at, declarations);
+        Ok(())
+    }
+}
+
 impl FirstSiteFrames {
     fn of(function: &HostFunction, list_states: Vec<String>) -> Self {
         Self {
@@ -8369,8 +8411,23 @@ impl<'a> HostEmitter<'a> {
                         self.local_aliases.remove(&binding.name),
                     ));
                 }
-                self.claim_on_spine = on_result_spine;
-                self.assign_expr(target, body, ty)?;
+                // The retained callee owns an activation-local witness scope.
+                // Caller list states and output-inferred sites cannot stand in
+                // for its independently checked formals or local ascriptions.
+                let mut list_states = Vec::new();
+                for binding in bindings {
+                    if let HostExprKind::SignatureEntry { contract, lists, .. } = &binding.value.kind {
+                        for binder in contract.named_list_binders().iter().cloned().chain(
+                            lists.iter().filter_map(|entry| entry.claim.as_ref()).flat_map(|pattern| pattern.binders())
+                        ) {
+                            if !list_states.contains(&binder) { list_states.push(binder); }
+                        }
+                    }
+                }
+                RetainedWitnessAuthority::lower(list_states, self, |emitter| {
+                    emitter.claim_on_spine = on_result_spine;
+                    emitter.assign_expr(target, body, ty)
+                })?;
                 self.emit_expression_site(site, target)?;
                 self.interface_reload_names
                     .extend(shadowed_interface_globals);

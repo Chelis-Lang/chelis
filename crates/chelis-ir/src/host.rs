@@ -15136,7 +15136,32 @@ struct ActualizedRetainedHostContract {
 #[derive(Default)]
 struct RetainedHostPreparation {
     actuals: Option<Vec<Option<HostExpr>>>,
-    tensor_specialization: Option<crate::lower::TensorCallsiteSpecialization>,
+    body_authority: Option<RetainedBodyLoweringAuthority>,
+}
+
+/// Callee-owned authority starts after caller payload preparation and ends
+/// before the enclosing lowering resumes. All exits restore the caller frame.
+struct RetainedBodyLoweringAuthority {
+    declaration: String,
+    substitutions: Option<UnordMap<String, HostTypeTerm>>,
+    dimensions: Option<UnordMap<String, DimInfo>>,
+    specialization: Option<crate::lower::TensorCallsiteSpecialization>,
+}
+
+impl RetainedBodyLoweringAuthority {
+    fn enter<R>(self, sink: &mut TensorHelperSink, lower: impl FnOnce(&mut TensorHelperSink) -> R) -> R {
+        let _types = self.substitutions.map(ActiveTypeSubstGuard::push);
+        let _dimensions = self.dimensions.map(ActiveDimSubstGuard::push);
+        let caller = sink.declaration_name.replace(self.declaration);
+        let depth = sink.tensor_specializations.len();
+        if let Some(specialization) = self.specialization {
+            sink.tensor_specializations.push(specialization);
+        }
+        let result = lower(sink);
+        sink.tensor_specializations.truncate(depth);
+        sink.declaration_name = caller;
+        result
+    }
 }
 
 /// Recover a tensor actual's caller-scoped axes from its checked stamp.
@@ -15293,6 +15318,19 @@ fn actualize_retained_host_contract(
                     other => other,
                 };
                 dimensions.entry(binder).or_insert(dim);
+            }
+            // A named formal is an independent entry obligation. Its body
+            // reads that entry's witness, even when caller representation
+            // evidence spells a wildcard or a concrete extent. Replacing it
+            // with caller evidence would erase dependent local/result checks.
+            let mut formal_witnesses = UnordMap::new();
+            for (authored, checked) in authored_formals.iter().zip(&checked_formals) {
+                pair_authored_dimensions(authored, checked, &binders, &mut formal_witnesses);
+            }
+            for (binder, dim) in formal_witnesses.into_sorted() {
+                if matches!(&dim, DimInfo::Named(name, _) if name != "*") {
+                    dimensions.insert(binder, dim);
+                }
             }
             dimensions
         })
@@ -16244,10 +16282,6 @@ fn lower_named_retained_host_invocation(
     {
         *entry |= claims.is_some();
     }
-    let _body_substitution =
-        actualize_polymorphic_contract.then(|| ActiveTypeSubstGuard::push(body_substitution));
-    let _body_dimensions =
-        actualize_polymorphic_contract.then(|| ActiveDimSubstGuard::push(body_dimensions));
     lower_retained_host_invocation(
         expr,
         invocation,
@@ -16257,7 +16291,12 @@ fn lower_named_retained_host_invocation(
         tensor_helpers,
         RetainedHostPreparation {
             actuals: prepared_actuals.take(),
-            tensor_specialization: actualize_polymorphic_contract.then_some(tensor_specialization),
+            body_authority: Some(RetainedBodyLoweringAuthority {
+                declaration: canonical.to_owned(),
+                substitutions: actualize_polymorphic_contract.then_some(body_substitution),
+                dimensions: actualize_polymorphic_contract.then_some(body_dimensions),
+                specialization: actualize_polymorphic_contract.then_some(tensor_specialization),
+            }),
         },
     )
     .and_then(|body| {
@@ -16285,7 +16324,7 @@ fn lower_retained_host_invocation(
     preparation: RetainedHostPreparation,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let mut prepared_actuals = preparation.actuals;
-    let tensor_specialization = preparation.tensor_specialization;
+    let body_authority = preparation.body_authority;
     let Expr::Node(call, span) = expr else {
         return Err(host_expr_lowering_error(
             expr,
@@ -16492,22 +16531,19 @@ fn lower_retained_host_invocation(
     let pushed = invocation
         .name
         .is_some_and(|name| push_inlining(name, Some(expr)));
-    if let Some(specialization) = tensor_specialization.clone() {
-        tensor_helpers.tensor_specializations.push(specialization);
-    }
-    let lowered = lower_host_expr_with_expected(
-        &specialized,
-        program,
-        &local_scope,
-        tensor_helpers,
-        expected.as_ref().filter(|ty| !ty.is_unresolved()),
-    );
-    if tensor_specialization.is_some() {
-        tensor_helpers
-            .tensor_specializations
-            .pop()
-            .expect("retained invocation specialization stack");
-    }
+    let lower = |tensor_helpers: &mut TensorHelperSink| {
+        lower_host_expr_with_expected(
+            &specialized,
+            program,
+            &local_scope,
+            tensor_helpers,
+            expected.as_ref().filter(|ty| !ty.is_unresolved()),
+        )
+    };
+    let lowered = match body_authority {
+        Some(authority) => authority.enter(tensor_helpers, lower),
+        None => lower(tensor_helpers),
+    };
     if pushed {
         pop_inlining(invocation.name.expect("named invocation"));
     }
@@ -19234,11 +19270,13 @@ fn lower_host_callback(
             } else {
                 ret_ty
             };
+            let stationary_accumulator = stationary_accumulator_proof(expr, program.adt_registry());
+            let accumulator_delta = composed_delta.or_else(|| {
+                stationary_accumulator.is_none().then(|| accumulator_construction_proof(expr, program.adt_registry())).flatten().map(Arc::new)
+            });
             Ok(Some(HostCallback {
-                stationary_accumulator: stationary_accumulator_proof(expr, program.adt_registry()),
-                accumulator_delta: composed_delta.or_else(|| {
-                    accumulator_delta_proof(expr, program.adt_registry()).map(Arc::new)
-                }),
+                stationary_accumulator,
+                accumulator_delta,
                 accumulator_composition: composition.map(Arc::new),
                 kind: HostCallbackKind::Inline {
                     params,
@@ -32067,6 +32105,14 @@ mod accumulator_delta_type_witness_tests {
             };
             assert!(
                 accumulator_delta_proof(
+                    checked.exprs().iter().find_map(find_fn).unwrap(),
+                    checked.adt_registry()
+                )
+                .is_none(),
+                "{source}"
+            );
+            assert!(
+                accumulator_construction_proof(
                     checked.exprs().iter().find_map(find_fn).unwrap(),
                     checked.adt_registry()
                 )

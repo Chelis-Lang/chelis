@@ -2216,7 +2216,15 @@ through the staged bindings, the exact original obligation and the lowered
 construction over that entry's renamed formal. Each proved boundary owns a
 separate successful-entry flag, witness summary and construction recipe; an
 outer claim cannot authorize the callee's guard or fix its first witnesses.
-Every boundary in the sequence is validated before reuse is enabled. Rank and precision
+Every boundary in the sequence is validated before reuse is enabled.
+Retained-body lowering enters one callee authority scope after caller payload
+preparation: canonical declaration ownership selects local-ascription records,
+checked type and dimension substitutions retain independently claimed formal
+witnesses, and tensor specialization belongs to that same body. C emission
+likewise scopes the callee's entry List states, local/output first-site frames
+and result-claim chain together. Nested retained bodies restore the enclosing
+authority on success and on errors; a missing callee witness cannot borrow a
+caller witness with the same spelling. Rank and precision
 polymorphism, unproved callables and unsupported compositions likewise retain
 their complete checks.
 
