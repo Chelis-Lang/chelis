@@ -90,6 +90,7 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | checked movement chelis_movement_index | `int64_t chelis_movement_index(const chelis_movement_plan *plan, chelis_scalar linear)` |
 | checked movement chelis_movement_term | `int64_t chelis_movement_term(const chelis_movement_plan *plan, chelis_projection_field field, chelis_scalar term)` |
 | checked movement chelis_movement_base | `int64_t chelis_movement_base(const chelis_movement_plan *plan)` |
+| checked movement chelis_movement_check_product | `void chelis_movement_check_product(const chelis_movement_plan *lhs, const chelis_movement_plan *rhs, chelis_product_shape_context context)` |
 | checked movement chelis_movement_check_target | `void chelis_movement_check_target(const chelis_movement_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
 | checked movement chelis_movement_plan_release | `void chelis_movement_plan_release(chelis_movement_plan *plan)` |
 | checked window tensor_window_plan | `chelis_window_plan *chelis_tensor_window_plan(const chelis_tensor *input, chelis_scalar count, const chelis_scalar *window, const chelis_scalar *steps, chelis_window_op operation)` |

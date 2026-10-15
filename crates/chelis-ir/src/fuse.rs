@@ -511,8 +511,9 @@ impl InlinedProduct {
 /// and each expansion have exactly one consumer, are no other node's shape
 /// or claim dependency, and carry no activation, and no `Drop` releases an
 /// expansion's operand before the sum reads it. The expansions and the
-/// product share one type, so the expansions' target checks discharge the
-/// product's operand agreement. An extent claim an intermediate owns stays
+/// product share a rank and dtype. Each lane must check actual operand-shape
+/// agreement at the original product position, before its result claims,
+/// even when the expansions' declared dimension identities differ. An extent claim an intermediate owns stays
 /// the lane's to check at that intermediate's position, from the extents
 /// the expansions' checked plans hold.
 pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
@@ -562,7 +563,8 @@ pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
         let admitted = |view: &DagNode| {
             matches!(view.op, RiscOp::Expand { .. })
                 && private(view)
-                && view.output_type == product.output_type
+                && view.output_type.precision == product.output_type.precision
+                && view.output_type.dims.len() == product.output_type.dims.len()
         };
         if !admitted(lhs) || !admitted(rhs) {
             continue;
@@ -992,6 +994,27 @@ mod tests {
                 "{prim:?}"
             );
         }
+    }
+
+    #[test]
+    fn wildcard_products_require_original_position_agreement_without_storage() {
+        let (mut dag, [_, _, lhs, rhs, product, sum]) = matmul_graph(Prim::F32, |_, _| {});
+        for id in [lhs, rhs, product] {
+            let node = dag.node_mut(id).unwrap();
+            node.output_type.dims = (0..3)
+                .map(|axis| DimInfo::Named(format!("__wild_{}_{}", id.0, axis), None))
+                .collect();
+        }
+        assert_eq!(
+            reduction_inlined_products(&dag),
+            vec![InlinedProduct {
+                sum,
+                product,
+                views: [lhs, rhs],
+            }]
+        );
+        dag.add_root(rhs);
+        assert!(reduction_inlined_products(&dag).is_empty());
     }
 
     #[test]

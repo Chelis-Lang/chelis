@@ -12749,7 +12749,14 @@ fn inlined_matmul_products_match_evaluator_bits_under_sanitizers() {
             .collect()
     };
     let (m, k, n) = (3, 13, 5);
-    for (prim, batch) in [(Prim::F32, None), (Prim::F64, None), (Prim::F32, Some(2))] {
+    for (prim, batch, wildcard) in [
+        (Prim::F32, None, false),
+        (Prim::F64, None, false),
+        (Prim::F32, Some(2), false),
+        (Prim::F32, None, true),
+        (Prim::F64, None, true),
+        (Prim::F32, Some(2), true),
+    ] {
         let lead: Vec<usize> = batch.into_iter().collect();
         let dims = |tail: &[usize]| [lead.as_slice(), tail].concat();
         let ty = |shape: &[usize]| TensorType {
@@ -12792,6 +12799,14 @@ fn inlined_matmul_products_match_evaluator_bits_under_sanitizers() {
             None,
         );
         dag.add_root(sum);
+        if wildcard {
+            for id in [a, b, ea, eb, mul] {
+                let rank = dag.get(id).unwrap().output_type.dims.len();
+                dag.node_mut(id).unwrap().output_type.dims = (0..rank)
+                    .map(|_| DimInfo::Named("*".into(), None))
+                    .collect();
+            }
+        }
         let generated = codegen(&dag, "inlined_matmul").unwrap().c_source;
         assert!(
             !generated.contains(&format!("chelis_alloc({},", b0 + 3)),

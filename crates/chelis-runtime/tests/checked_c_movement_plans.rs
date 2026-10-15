@@ -210,3 +210,65 @@ fn invalid_movement_plan_metadata_fails_with_its_operation_identity() {
         );
     }
 }
+
+#[test]
+fn movement_product_agreement_uses_snapshots_without_payloads() {
+    unsafe {
+        let a = chelis_alloc(2, [2, 3].as_ptr(), CHELIS_DTYPE_F32);
+        let b = chelis_alloc(2, [3, 4].as_ptr(), CHELIS_DTYPE_F32);
+        let lhs = chelis_tensor_expand_plan(a, int(2), int(4), CHELIS_MOVEMENT_INSERT);
+        let rhs = chelis_tensor_expand_plan(b, int(0), int(2), CHELIS_MOVEMENT_INSERT);
+        chelis_tensor_release(a);
+        chelis_tensor_release(b);
+        for context in [CHELIS_PRODUCT_MUL, CHELIS_PRODUCT_MATMUL] {
+            chelis_movement_check_product(lhs, rhs, context);
+        }
+        chelis_movement_plan_release(lhs);
+        chelis_movement_plan_release(rhs);
+    }
+}
+
+#[test]
+fn movement_product_failure_child() {
+    let Ok(case) = env::var("CHELIS_PRODUCT_FAILURE_CHILD") else {
+        return;
+    };
+    unsafe {
+        let a_shape = if case == "empty" { [2, 0] } else { [2, 3] };
+        let b_shape = if case == "empty" { [0, 3] } else { [2, 4] };
+        let a = chelis_alloc(2, a_shape.as_ptr(), CHELIS_DTYPE_F32);
+        let b = chelis_alloc(2, b_shape.as_ptr(), CHELIS_DTYPE_F32);
+        let lhs = chelis_tensor_expand_plan(a, int(2), int(4), CHELIS_MOVEMENT_INSERT);
+        let rhs = chelis_tensor_expand_plan(b, int(0), int(2), CHELIS_MOVEMENT_INSERT);
+        match case.as_str() {
+            "empty" | "mul" => chelis_movement_check_product(lhs, rhs, CHELIS_PRODUCT_MUL),
+            "matmul" => chelis_movement_check_product(lhs, rhs, CHELIS_PRODUCT_MATMUL),
+            "selector" => chelis_movement_check_product(lhs, rhs, 99),
+            "null-left" => chelis_movement_check_product(std::ptr::null(), rhs, CHELIS_PRODUCT_MUL),
+            "null-right" => {
+                chelis_movement_check_product(lhs, std::ptr::null(), CHELIS_PRODUCT_MUL)
+            }
+            _ => panic!("unknown child"),
+        }
+        panic!("invalid agreement returned");
+    }
+}
+
+#[test]
+fn movement_product_failures_preserve_owned_diagnostics() {
+    for (case, expected) in [
+        ("mul", "mul operands disagree at axis 1: lhs [2, 3, 4] has 3, rhs [2, 2, 4] has 2\nnumeric trap: domain in mul at i64"),
+        ("matmul", "matmul shared axis disagrees: lhs [2, 3] has 3 at axis 1, rhs [2, 4] has 2 at axis 0\nnumeric trap: domain in matmul at i64"),
+        ("empty", "mul operands disagree at axis 2: lhs [2, 0, 4] has 4, rhs [2, 0, 3] has 3\nnumeric trap: domain in mul at i64"),
+        ("selector", "numeric trap: domain in movement at i64"),
+        ("null-left", "numeric trap: domain in movement at i64"),
+        ("null-right", "numeric trap: domain in movement at i64"),
+    ] {
+        let output = Command::new(env::current_exe().unwrap())
+            .args(["--exact", "movement_product_failure_child", "--nocapture"])
+            .env("CHELIS_PRODUCT_FAILURE_CHILD", case).output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{case}");
+        assert!(String::from_utf8_lossy(&output.stderr).trim_end().ends_with(expected),
+            "{case}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+}

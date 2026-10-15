@@ -1249,6 +1249,15 @@ impl CEmitter {
                 // here, on its expansions' plan extents, and computes nothing.
                 e.emit_span_comments(node);
                 e.nan_finalization = crate::fp_env::risc_nan_finalization(&node.op);
+                let [lhs, rhs] = [node.inputs[0].0, node.inputs[1].0];
+                let context = if chelis_ir::tier2::is_matmul_product(node, |id| dag.get(id)) {
+                    "CHELIS_PRODUCT_MATMUL"
+                } else {
+                    "CHELIS_PRODUCT_MUL"
+                };
+                e.line(&format!(
+                    "chelis_movement_check_product(t{lhs}_movement, t{rhs}_movement, {context});"
+                ));
                 e.emit_same_shape_result_guards(node);
             } else if let RiscOp::Load { name } = &node.op {
                 let input_idx = *input_slots
@@ -9580,8 +9589,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
 
     /// For a node an inlined product sum does not store, the expansion
     /// whose checked plan holds its extents: the node itself for an
-    /// expansion, the first expansion for the product (both expansions and
-    /// the product share one type).
+    /// expansion, the first expansion for the product after its original
+    /// operand-agreement check.
     fn inlined_view(&self, node: NodeId) -> Option<usize> {
         self.inlined_products.values().find_map(|inlined| {
             if inlined.views.contains(&node) {
