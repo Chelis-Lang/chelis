@@ -446,6 +446,16 @@ fn parity_grad_scalar_extent_claim() {
 }
 
 #[test]
+fn parity_grad_cumsum() {
+    let path = examples_root().join("grad_cumsum.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"g = tensor(shape=[3], data=[3.0, 2.0, 1.0])\nbatched = tensor(shape=[2, 3], data=[3.0, 2.0, 1.0, 3.0, 2.0, 1.0])\nprefixes = tensor(shape=[2, 3], data=[1.0, 3.0, 6.0, 4.0, 9.0, 15.0])\ninteger_out = tensor(shape=[2, 3], data=[127, 128, 127, 2, 5, 9])\n"
+    );
+}
+
+#[test]
 fn parity_grad_fused_zero() {
     drive_parity(&examples_root().join("grad_fused_zero.ch"), true);
 }
