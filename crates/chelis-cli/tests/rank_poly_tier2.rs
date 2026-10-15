@@ -6,8 +6,8 @@
 //!
 //! Soundness boundary (`spec/design/rank_polymorphism.md` §Soundness Boundary,
 //! spec §4.2): against an opaque rank there are no named axes left to catch a
-//! transposition/reshape, so a `..r` body may call only shape-identity
-//! (elementwise) builtins — the Body-Discipline check rejects everything else.
+//! transposition/reshape. Spec/04 §4.5.3 admits name-trackable builtin classes
+//! and checked helper compositions; an opaque row never becomes a rank count.
 //!
 //! Positive/negative parity per CLAUDE.md: every "checks clean" test has a
 //! paired "rejected with the right reason" test.
@@ -778,4 +778,214 @@ fn multi_arg_rank_poly_def_survives_fmt_round_trip() {
     );
     let json = check_json(&formatted);
     assert_clean(&json, "formatted multi-arg rank-poly def still type-checks");
+}
+
+// chelis#3668: body-derived evidence composes across rank-generic declarations.
+
+#[test]
+fn checked_helper_composition_3668_formats_checks_evaluates_and_executes_c() {
+    for (bound, precision) in [("Float", "f32"), ("{f32, f64}", "f64")] {
+        let source = format!(
+            "def negate[r, p: {bound}](x: &tensor[..r, p]) -> tensor[..r, p] = neg(x)\n\
+             def middle[s, q: {bound}](x: &tensor[..s, q]) -> tensor[..s, q] = negate(x)\n\
+             def outer[t, v: {bound}](x: &tensor[..t, v]) -> tensor[..t, v] = middle(x)\n\
+             out0 = outer(scalar_to_tensor(1.0{precision}))\n\
+             out1 = outer(to_tensor([1.0, 2.0, 3.0], {precision}))\n\
+             out2 = outer(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], {precision}))\n\
+             out3 = outer(to_tensor([[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]], {precision}))\n"
+        );
+        let formatted = fmt_stdout(&source);
+        assert_eq!(formatted, fmt_stdout(&formatted), "canonical idempotence");
+        assert_clean(&check_json(&formatted), "checked helper composition");
+        let dir = tempdir().expect("tempdir");
+        let eval = parse_printed_tensors(&eval_stdout(dir.path(), &formatted, "helper_eval"));
+        let native = parse_printed_tensors(&build_compile_run(&formatted, "helper_native"));
+        let expected: &[(&str, &[usize], &[f64])] = &[
+            ("out0", &[], &[-1.0]),
+            ("out1", &[3], &[-1.0, -2.0, -3.0]),
+            ("out2", &[2, 3], &[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]),
+            ("out3", &[2, 1, 3], &[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]),
+        ];
+        for (name, shape, data) in expected {
+            for (label, output) in [("Eval", &eval), ("native C", &native)] {
+                let (_, got_shape, got_data) = output
+                    .iter()
+                    .find(|(got_name, _, _)| got_name == name)
+                    .unwrap_or_else(|| panic!("{label}: missing {name}: {output:?}"));
+                assert_eq!(
+                    got_shape, shape,
+                    "{label}/{precision}/{name}: ordered shape"
+                );
+                assert_eq!(
+                    got_data, data,
+                    "{label}/{precision}/{name}: exact finite values"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_named_helper_composition_3668_keeps_axis_sensitive_values() {
+    let source = "def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+        def wrapped[before, after](x: &tensor[..before, seq, ..after, f32]) -> tensor[..before, ..after, f32] = reduce_seq(x)\n\
+        def concrete(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = wrapped(x)\n\
+        out = concrete(to_tensor([[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]], [[13.0, 14.0, 15.0, 16.0], [17.0, 18.0, 19.0, 20.0], [21.0, 22.0, 23.0, 24.0]]], f32))\n";
+    let formatted = fmt_stdout(source);
+    assert_clean(&check_json(&formatted), "unitary helper anchors");
+    let dir = tempdir().expect("tempdir");
+    for output in [
+        eval_stdout(dir.path(), &formatted, "anchor_eval"),
+        build_compile_run(&formatted, "anchor_native"),
+    ] {
+        let tensors = parse_printed_tensors(&output);
+        let (_, shape, data) = tensors
+            .iter()
+            .find(|(name, _, _)| name == "out")
+            .unwrap_or_else(|| panic!("missing output: {output}"));
+        assert_eq!(shape, &[2, 4]);
+        assert_eq!(data, &[15.0, 18.0, 21.0, 24.0, 51.0, 54.0, 57.0, 60.0]);
+    }
+}
+
+#[test]
+fn checked_helpers_3668_still_reject_ambiguous_anchor_and_dtype_calls() {
+    for (declarations, caller, needle) in [
+        (
+            "def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
+             def wrapped[before, after](x: &tensor[..before, seq, ..after, f32]) -> tensor[..before, ..after, f32] = reduce_seq(x)\n",
+            "def bad(x: &tensor[seq, seq, f32]) -> tensor[seq, f32] = wrapped(x)\n",
+            "seq",
+        ),
+        (
+            "def negate[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = neg(x)\n\
+             def wrapped[s, q: Float](x: &tensor[..s, q]) -> tensor[..s, q] = negate(x)\n",
+            "out = wrapped(to_tensor([1i32, 2i32]))\n",
+            "Float",
+        ),
+    ] {
+        let json = check_json(&format!("{declarations}{caller}"));
+        assert_rejected_with(&json, needle, "helper summaries preserve call obligations");
+    }
+}
+
+fn helper_package_3668() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("rank-helper-composition");
+    fs::create_dir_all(root.join("src")).expect("source directory");
+    fs::write(root.join("reef.toml"), format!(
+        "[package]\nname = \"rank-helper-composition\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"RankCompose\"\n",
+        chelis_compiler_api::COMPILER_VERSION
+    )).expect("manifest");
+    fs::write(root.join("src/helper.ch"),
+        "module RankCompose.Helper\nexport (negate)\ndef negate[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = neg(x)\n"
+    ).expect("helper");
+    fs::write(root.join("src/middle.ch"),
+        "module RankCompose.Middle\nimport RankCompose.Helper\nexport (middle)\ndef middle[s, q: Float](x: &tensor[..s, q]) -> tensor[..s, q] = RankCompose.Helper.negate(x)\n"
+    ).expect("middle");
+    fs::write(root.join("src/main.ch"),
+        "module RankCompose.Main\nimport RankCompose.Middle (middle)\nexport (outer)\ndef outer[t, v: Float](x: &tensor[..t, v]) -> tensor[..t, v] = middle(x)\nout = outer(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], f32))\n"
+    ).expect("main");
+    (dir, root)
+}
+
+fn helper_package_command_3668(root: &Path, args: &[&str]) -> std::process::Output {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("package command runs")
+}
+
+#[test]
+fn imported_checked_helpers_3668_use_declaring_identity_across_two_hops() {
+    let (_dir, root) = helper_package_3668();
+    for name in ["helper", "middle", "main"] {
+        let source = format!("src/{name}.ch");
+        let formatted = helper_package_command_3668(&root, &["fmt", "--inplace", &source]);
+        assert!(
+            formatted.status.success(),
+            "package formatting: {formatted:?}"
+        );
+    }
+    let check = helper_package_command_3668(&root, &["check", "src/main.ch"]);
+    assert!(
+        check.status.success(),
+        "imported checked helpers: {check:?}"
+    );
+    assert_clean(
+        &serde_json::from_slice(&check.stdout).expect("check JSON"),
+        "imported helpers",
+    );
+    let eval = helper_package_command_3668(&root, &["eval", "--file", "src/main.ch"]);
+    assert!(eval.status.success(), "imported helper Eval: {eval:?}");
+    let build = helper_package_command_3668(
+        &root,
+        &[
+            "build",
+            "--emit-c",
+            "src/main.ch",
+            "--target",
+            "c",
+            "--output",
+            "native",
+        ],
+    );
+    assert!(
+        build.status.success(),
+        "imported helper C generation: {build:?}"
+    );
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas: false,
+        },
+    );
+    let output = root.join("native");
+    let binary = output.join("rank_helpers");
+    let link = StdCommand::new(&toolchain.compiler)
+        .current_dir(&output)
+        .arg("-O2")
+        .args(&toolchain.compile_flags)
+        .args(["main.c", "libchelis_runtime.a"])
+        .args(&toolchain.link_flags)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("native link");
+    assert!(link.status.success(), "imported helper link: {link:?}");
+    let native = StdCommand::new(&binary)
+        .output()
+        .expect("execute imported helper binary");
+    assert!(
+        native.status.success(),
+        "imported helper execution: {native:?}"
+    );
+    for bytes in [&eval.stdout, &native.stdout] {
+        let text = std::str::from_utf8(bytes).expect("UTF-8 output");
+        let tensors = parse_printed_tensors(text);
+        assert!(
+            tensors.iter().any(|(_, shape, data)| shape == &[2, 3]
+                && data == &[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]),
+            "exact imported result: {text}"
+        );
+    }
+}
+
+#[test]
+fn imported_helper_name_3668_does_not_authorize_a_shadowing_parameter() {
+    let (_dir, root) = helper_package_3668();
+    fs::write(root.join("src/main.ch"),
+        "module RankCompose.Main\nimport RankCompose.Middle (middle)\nexport (outer)\ndef outer[r, p: Float](middle: &tensor[..r, p] -> tensor[..r, p], x: &tensor[..r, p]) -> tensor[..r, p] = middle(x)\n"
+    ).expect("shadow fixture");
+    let output = helper_package_command_3668(&root, &["check", "src/main.ch"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "shadow must reject: {output:?}"
+    );
+    let json = serde_json::from_slice(&output.stdout).expect("check JSON");
+    assert_rank_rejected(&json, "imported name shadow has no body evidence");
 }

@@ -1723,7 +1723,8 @@ anchored → the anchor's index), mirroring named-axis reduction.
 **Soundness (§4.2).** Order is preserved (shapes stay ordered positional
 sequences — never unordered "rows"); the reduced axis is a retained name; and a
 rank-poly def body is restricted by the §4.2 Body-Discipline check to
-*name-trackable* builtins only. A builtin is name-trackable, and admitted in
+name-trackable operations and checked compositions of them. A builtin is
+name-trackable, and admitted in
 a `..r` body, exactly when it is one of these four kinds:
 
 - *Shape-identity*: it addresses no axis, explicitly or implicitly, and each
@@ -1759,6 +1760,49 @@ non-existent/ambiguous/duplicate axis name, and an implied axis inside a
 spread, so no transposition can slip past. This is what keeps the §4.5.1
 transposition-safety guarantee intact while admitting reductions and
 named-axis expansion at symbolic rank.
+
+**Checked helper composition.** A direct call may also resolve to a checked
+function declaration with body-derived name-preservation evidence. That
+evidence establishes the complete parameter/result row relation by checking
+the whole body under its quantified rank, dimension, and precision binders,
+using the four builtin classes above and other evidenced direct calls. An
+opaque spread denotes its ordered dimensions, never their count; every
+surviving dimension retains its identity and order. Named-axis removal,
+insertion, and ordered-prefix construction retain their existing rules.
+
+The caller instantiates the callee's complete scheme once per application.
+Every argument and result shares that application's substitution, including
+independent rank variables, named anchors, dtype bounds, effects, and ownership
+modes. The row match must be unitary under the rules above. Body evidence
+does not add broadcasting, promotion, currying, rank erasure, a new shape
+equation, or an exemption from an authored input/result claim. A fixed-rank
+helper cannot consume an opaque spread by guessing its rank or its dimensions.
+
+Evidence belongs to the resolved lexical declaration, not its spelling,
+signature, source span, or coincidental builtin name. An import retains its
+declaring owner's evidence. A parameter, block binding, or replacement
+declaration that shadows that owner does not inherit it. A body-less external
+declaration, an unchecked body, or an unresolved call supplies no evidence.
+Local function values, computed callees, and function-taking transforms do
+not acquire this capability from a function type; their application in a
+rank-polymorphic body is rejected unless another controlling rule establishes
+and transports the same body-derived capability.
+
+Evidence has a finite acyclic derivation. A recursive strongly connected
+component containing a rank-polymorphic body is rejected by this discipline,
+including direct self-recursion. A provisional signature, an in-progress
+component, cancellation, or an incomplete analysis never counts as evidence.
+This restriction does not change the recursion rules for functions outside
+this discipline.
+
+A checked library context transports evidence with the declaration and
+library proof that produced it. Monolithic checking, layered checking, and
+accepted cache restoration must agree on the call's admissibility. A
+replacement declaration removes the replaced owner's evidence before its
+body is checked. Missing or mismatched evidence rejects the call; it is never
+reconstructed from a declared function type or treated as a verified empty
+body. Ordinary type, precision, effect, ownership, and runtime claim checks
+remain independently required.
 
 #### 4.5.4 Concat Result Typing
 

@@ -1,5 +1,84 @@
 # Rank Polymorphism (Tier 2: identity + erasure rank variables)
 
+## Checked helper composition
+
+`spec/04-type-system.md` §4.5.3 owns name-preserving composition. The
+historical tier analysis below does not override its named-axis forms or its
+checked helper rule. The implementation proposal for chelis#3668 extends the
+existing body-discipline owner rather than exempting user-defined functions.
+
+The checker establishes a private declaration summary only after successful
+inference and semantic validation of that declaration's complete body. It
+records the canonical declaration owner, complete quantified row relation,
+and the checked direct-call dependencies needed to derive name preservation.
+The ordinary scheme remains the authority for dtype bounds, effects, and
+ownership; the summary adds body evidence, not a second type scheme. A boolean
+attached to a function spelling or a matching return type cannot establish it.
+
+`TopLevelReferenceGraph` already resolves top-level references with lexical
+parameter/block shadowing and supplies dependency-first strongly connected
+components. Extend that owner to expose the per-application resolved target
+needed by body discipline; do not implement another name resolver or walk text.
+Keep body-discipline classification at the existing structural expression
+boundary, using the same lexical resolution. Validate acyclic callees before
+their callers. Reject recursive rank-body components, missing declarations,
+computed targets, and incomplete/cancelled graph analysis without minting a
+summary. A declaration rejected by ordinary body/type/precision/effect or
+ownership validation never becomes an accepted library authority.
+
+The existing per-definition call to `check_rank_body_discipline` runs during
+inference and sees only a user-name set. Move its compositional decision into
+the shared `validate_semantic_program` protocol, where the checked inference
+product, complete declared-type view, and existing reference graph coexist.
+Preserve all existing builtin class checks and procedural named-axis checks;
+changing validation order must not turn their failures into successful
+summaries. Stage summaries privately during one check and publish them only
+across the existing empty-errors/totality boundary. No backend executor or
+numeric carrier changes are required by this proposal.
+
+### Library and cache ownership
+
+Layered checker APIs intentionally do not re-read base bodies.
+`build_compiled_library_context_with_base` checks only the new layer, and
+`check_ir_with_signature_context` receives a `TypeEnv` rather than the base
+`CheckedProgram`. Imported helper evidence therefore cannot be recovered by
+revalidating the current AST alone.
+
+Transport the accepted summaries within the existing private `TypeEnvInner`
+callable-provenance owner. Include their canonical digest in `LibraryProofId`
+and its `matches_checked_program` validation, alongside existing selector
+provenance. Only the successful checker constructor creates summaries; a
+body-less public signature supplies none. Layer construction clones the base
+snapshot, removes replaced owners before resolving the new declarations, and
+adds only accepted new summaries. Checking a snippet never mutates the base.
+The summary's declaration/type ownership must agree with the restored proof
+envelope; missing, stale, or mismatched evidence fails closed. Source-free
+snapshots retain the existing trusted-producer/cache-envelope boundary and do
+not purport to re-prove maliciously edited summaries.
+
+Adding this private payload requires coordinated TypeEnv and compiler-api
+cache invalidation. chelis#3631 also changes the private Metadata carrier and
+checked binding ledger: preserve its occurrence identity when transporting
+ASTs, and allocate the composed format against the actual integration base.
+Independent incompatible layouts must not reuse one encoding number. No
+format number is allocated by this proposal.
+
+### Bounded acceptance oracle
+
+The test-first slice uses existing public checker APIs and CLI test harnesses.
+It covers direct/multi-hop rank helpers, `Float` and `{f32, f64}` bounds,
+unitary named-anchor reduction, monolithic/context/layered/serialized checks,
+replacement and lexical shadowing, body-less declarations, cycles, hidden
+fixed-rank shape rewrites, and precision/effect/row mismatches. CLI positives
+add canonical formatting and actual Eval/C compilation/link/execution at
+ranks zero through three with unequal extents and exact finite values.
+Package fixtures exercise selective and qualified imports through two helper
+hops. The finite oracle does not claim all ranks, dtypes, modules, or call
+graphs have been exhaustively sampled. Existing negative tests stay enabled.
+
+This source-first proposal has no executed qualification; implementation
+follows an observed semantic RED on these fixtures.
+
 **Status:** IDENTITY TIER SHIPPED, INCLUDING BACKEND LOWERING. The identity
 position (`&tensor[..r, p] -> tensor[..r, p]`) is implemented and gated by the
 Body-Discipline check; the chelis#285 prerequisite is fixed and on `main`. The
