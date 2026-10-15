@@ -1,0 +1,1 @@
+Fuse wildcard-shaped C contractions through checked operand-shape agreement and compute canonical matmul reductions across independent output-column lanes, preserving product rounding, reduction order, and traps without rank-3 intermediates.

@@ -12748,141 +12748,181 @@ fn inlined_matmul_products_match_evaluator_bits_under_sanitizers() {
             })
             .collect()
     };
-    let (m, k, n) = (3, 13, 17);
-    for (prim, batch, wildcard) in [
-        (Prim::F32, None, false),
-        (Prim::F64, None, false),
-        (Prim::F32, Some(2), false),
-        (Prim::F32, None, true),
-        (Prim::F64, None, true),
-        (Prim::F32, Some(2), true),
+    for (m, k, n) in [
+        (3, 13, 17),
+        (2, 0, 9),
+        (2, 1, 9),
+        (0, 3, 9),
+        (2, 3, 0),
+        (9, 9, 9),
     ] {
-        let lead: Vec<usize> = batch.into_iter().collect();
-        let dims = |tail: &[usize]| [lead.as_slice(), tail].concat();
-        let ty = |shape: &[usize]| TensorType {
-            dims: shape.iter().copied().map(DimInfo::Lit).collect(),
-            precision: prim,
-        };
-        let b0 = lead.len();
-        let mut dag = Dag::new();
-        let decl = dag.declare("test");
-        let a = dag.add_node(
-            decl,
-            RiscOp::Load { name: "a".into() },
-            vec![],
-            ty(&dims(&[m, k])),
-            None,
-        );
-        let b = dag.add_node(
-            decl,
-            RiscOp::Load { name: "b".into() },
-            vec![],
-            ty(&dims(&[k, n])),
-            None,
-        );
-        let product = ty(&dims(&[m, k, n]));
-        let expand = |axis, size| RiscOp::Expand {
-            axis,
-            size: chelis_ir::dag::RtDim::Lit(size),
-        };
-        let ea = dag.add_node(decl, expand(b0 + 2, n), vec![a], product.clone(), None);
-        let eb = dag.add_node(decl, expand(b0, m), vec![b], product.clone(), None);
-        let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], product, None);
-        let sum = dag.add_node(
-            decl,
-            RiscOp::Sum {
-                axis: b0 + 1,
-                accumulator: prim,
-            },
-            vec![mul],
-            ty(&dims(&[m, n])),
-            None,
-        );
-        dag.add_root(sum);
-        if wildcard {
-            for id in [a, b, ea, eb, mul] {
-                let rank = dag.get(id).unwrap().output_type.dims.len();
-                dag.node_mut(id).unwrap().output_type.dims = (0..rank)
-                    .map(|_| DimInfo::Named("*".into(), None))
-                    .collect();
+        for (prim, batch, wildcard) in [
+            (Prim::F32, None, false),
+            (Prim::F64, None, false),
+            (Prim::F32, Some(2), false),
+            (Prim::F32, None, true),
+            (Prim::F64, None, true),
+            (Prim::F32, Some(2), true),
+            (Prim::Bf16, None, false),
+            (Prim::F16, None, false),
+            (Prim::Bf16, None, true),
+            (Prim::F16, Some(2), true),
+        ] {
+            let acc = if matches!(prim, Prim::F16 | Prim::Bf16) {
+                Prim::F32
+            } else {
+                prim
+            };
+            let lead: Vec<usize> = batch.into_iter().collect();
+            let dims = |tail: &[usize]| [lead.as_slice(), tail].concat();
+            let ty = |shape: &[usize]| TensorType {
+                dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                precision: prim,
+            };
+            let b0 = lead.len();
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let a = dag.add_node(
+                decl,
+                RiscOp::Load { name: "a".into() },
+                vec![],
+                ty(&dims(&[m, k])),
+                None,
+            );
+            let b = dag.add_node(
+                decl,
+                RiscOp::Load { name: "b".into() },
+                vec![],
+                ty(&dims(&[k, n])),
+                None,
+            );
+            let product = ty(&dims(&[m, k, n]));
+            let expand = |axis, size| RiscOp::Expand {
+                axis,
+                size: chelis_ir::dag::RtDim::Lit(size),
+            };
+            let ea = dag.add_node(decl, expand(b0 + 2, n), vec![a], product.clone(), None);
+            let eb = dag.add_node(decl, expand(b0, m), vec![b], product.clone(), None);
+            let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], product, None);
+            let sum = dag.add_node(
+                decl,
+                RiscOp::Sum {
+                    axis: b0 + 1,
+                    accumulator: acc,
+                },
+                vec![mul],
+                TensorType {
+                    precision: acc,
+                    ..ty(&dims(&[m, n]))
+                },
+                None,
+            );
+            dag.add_root(sum);
+            if wildcard {
+                for id in [a, b, ea, eb, mul] {
+                    let rank = dag.get(id).unwrap().output_type.dims.len();
+                    dag.node_mut(id).unwrap().output_type.dims = (0..rank)
+                        .map(|_| DimInfo::Named("*".into(), None))
+                        .collect();
+                }
             }
-        }
-        let generated = codegen(&dag, "inlined_matmul").unwrap().c_source;
-        assert!(
-            !generated.contains(&format!("chelis_alloc({},", b0 + 3)),
-            "{generated}"
-        );
+            let generated = codegen(&dag, "inlined_matmul").unwrap().c_source;
+            assert!(
+                !generated.contains(&format!("chelis_alloc({},", b0 + 3)),
+                "{generated}"
+            );
 
-        let lhs = operand(lead.iter().product::<usize>() * m * k, 1);
-        let rhs = operand(lead.iter().product::<usize>() * k * n, 2);
-        let inputs: UnordMap<String, TensorValue> = [
-            (
-                "a".to_string(),
-                TensorValue::from_vec(dims(&[m, k]), lhs.clone()),
-            ),
-            (
-                "b".to_string(),
-                TensorValue::from_vec(dims(&[k, n]), rhs.clone()),
-            ),
-        ]
-        .into_iter()
-        .collect();
-        let dense = eval_tensor(&dag, &inputs).unwrap();
-        let rooted =
-            chelis_ir::eval::eval_tensor_roots_with(&dag, &[sum], |name| inputs.get(name).cloned())
-                .unwrap();
-        assert_eq!(rooted[&sum].shape, dense[&sum].shape);
-        let bits = |value: &TensorValue| {
-            value
-                .to_f64_lossy_vec()
-                .into_iter()
-                .map(f64::to_bits)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(bits(&rooted[&sum]), bits(&dense[&sum]));
-        let expected = rooted[&sum].to_f64_lossy_vec();
-        let (native, bits, format) = match prim {
-            Prim::F32 => ("float", "uint32_t", "%08x"),
-            _ => ("double", "uint64_t", "%016llx"),
-        };
-        let literal = |values: &[f64]| {
-            values
-                .iter()
-                .map(|value| match prim {
-                    Prim::F32 => format!(
-                        "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
-                        (*value as f32).to_bits()
-                    ),
-                    _ => format!("chelis_f64_from_bits(UINT64_C(0x{:016x}))", value.to_bits()),
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let shape = |shape: Vec<usize>| {
-            shape
-                .iter()
-                .map(usize::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let dtype = if prim == Prim::F32 {
-            "CHELIS_DTYPE_F32"
-        } else {
-            "CHELIS_DTYPE_F64"
-        };
-        let harness = format!(
-            r#"
+            let lhs = operand(lead.iter().product::<usize>() * m * k, 1);
+            let alias = m == k && k == n;
+            let rhs = if alias {
+                lhs.clone()
+            } else {
+                operand(lead.iter().product::<usize>() * k * n, 2)
+            };
+            let inputs: UnordMap<String, TensorValue> = [
+                (
+                    "a".to_string(),
+                    TensorValue::from_vec(dims(&[m, k]), lhs.clone()),
+                ),
+                (
+                    "b".to_string(),
+                    TensorValue::from_vec(dims(&[k, n]), rhs.clone()),
+                ),
+            ]
+            .into_iter()
+            .collect();
+            let dense = eval_tensor(&dag, &inputs).unwrap();
+            let rooted = chelis_ir::eval::eval_tensor_roots_with(&dag, &[sum], |name| {
+                inputs.get(name).cloned()
+            })
+            .unwrap();
+            assert_eq!(rooted[&sum].shape, dense[&sum].shape);
+            let bits = |value: &TensorValue| {
+                value
+                    .to_f64_lossy_vec()
+                    .into_iter()
+                    .map(f64::to_bits)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(bits(&rooted[&sum]), bits(&dense[&sum]));
+            let expected = rooted[&sum].to_f64_lossy_vec();
+            let (native, bits, format) = match acc {
+                Prim::F32 => ("float", "uint32_t", "%08x"),
+                _ => ("double", "uint64_t", "%016llx"),
+            };
+            let input_native = if matches!(prim, Prim::F16 | Prim::Bf16) {
+                "uint16_t"
+            } else {
+                native
+            };
+            let literal = |values: &[f64]| {
+                values
+                    .iter()
+                    .map(|value| match prim {
+                        Prim::F16 => format!(
+                            "UINT16_C(0x{:04x})",
+                            chelis_types::dtype_semantics::f16_from_f64_rne(*value).to_bits()
+                        ),
+                        Prim::Bf16 => format!(
+                            "UINT16_C(0x{:04x})",
+                            chelis_types::dtype_semantics::bf16_from_f64_rne(*value).to_bits()
+                        ),
+                        Prim::F32 => format!(
+                            "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
+                            (*value as f32).to_bits()
+                        ),
+                        _ => format!("chelis_f64_from_bits(UINT64_C(0x{:016x}))", value.to_bits()),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let shape = |shape: Vec<usize>| {
+                shape
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let dtype = match prim {
+                Prim::F32 => "CHELIS_DTYPE_F32",
+                Prim::F64 => "CHELIS_DTYPE_F64",
+                Prim::F16 => "CHELIS_DTYPE_F16",
+                Prim::Bf16 => "CHELIS_DTYPE_BF16",
+                _ => unreachable!(),
+            };
+            let harness = format!(
+                r#"
 #include "chelis_runtime.h"
 #include <stdio.h>
 #include <string.h>
 void inlined_matmul(chelis_tensor **, int, chelis_tensor **, int);
 int main(void) {{
-    {native} a[] = {{ {a} }};
-    {native} b[] = {{ {b} }};
+    {input_native} a[] = {{ {a} }};
+    {input_native} b[] = {{ {b} }};
     int64_t a_shape[] = {{ {a_shape} }}, b_shape[] = {{ {b_shape} }};
     chelis_tensor *inputs[] = {{
         chelis_tensor_entry_borrow({rank}, a_shape, {dtype}, a, sizeof a),
-        chelis_tensor_entry_borrow({rank}, b_shape, {dtype}, b, sizeof b),
+        chelis_tensor_entry_borrow({rank}, b_shape, {dtype}, {b_data}, sizeof b),
     }};
     chelis_tensor *outputs[] = {{ NULL }};
     inlined_matmul(inputs, 2, outputs, 1);
@@ -12895,35 +12935,37 @@ int main(void) {{
     return 0;
 }}
 "#,
-            a = literal(&lhs),
-            b = literal(&rhs),
-            a_shape = shape(dims(&[m, k])),
-            b_shape = shape(dims(&[k, n])),
-            rank = b0 + 2,
-            bits_cast = if prim == Prim::F32 {
-                "unsigned"
-            } else {
-                "unsigned long long"
-            },
-        );
-        let result = checked_indexing_run(&generated, &harness);
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let expected = expected
-            .iter()
-            .map(|value| match prim {
-                Prim::F32 => format!("{:08x}\n", (*value as f32).to_bits()),
-                _ => format!("{:016x}\n", value.to_bits()),
-            })
-            .collect::<String>();
-        assert_eq!(
-            String::from_utf8_lossy(&result.stdout),
-            expected,
-            "{prim:?} {batch:?}"
-        );
+                a = literal(&lhs),
+                b = literal(&rhs),
+                b_data = if alias { "a" } else { "b" },
+                a_shape = shape(dims(&[m, k])),
+                b_shape = shape(dims(&[k, n])),
+                rank = b0 + 2,
+                bits_cast = if acc == Prim::F32 {
+                    "unsigned"
+                } else {
+                    "unsigned long long"
+                },
+            );
+            let result = checked_indexing_run(&generated, &harness);
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let expected = expected
+                .iter()
+                .map(|value| match acc {
+                    Prim::F32 => format!("{:08x}\n", (*value as f32).to_bits()),
+                    _ => format!("{:016x}\n", value.to_bits()),
+                })
+                .collect::<String>();
+            assert_eq!(
+                String::from_utf8_lossy(&result.stdout),
+                expected,
+                "{prim:?} {batch:?}"
+            );
+        }
     }
 }
 

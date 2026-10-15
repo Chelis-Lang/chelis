@@ -7285,6 +7285,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         Self::adjacent_pair_fold_lanes_lines(level, count, None, combine)
     }
 
+    /// Iterations are separate output elements, never a reassociated reduction.
+    /// Lane j accesses only slots congruent to j modulo eight; overlap in an
+    /// in-place pair is within that iteration, never with a different lane.
+    /// Source payloads are immutable and distinct from checked tree scratch.
+    fn independent_lanes_hint() -> &'static str {
+        "#if defined(__clang__)\n#pragma clang loop vectorize(enable)\n#elif defined(__GNUC__)\n#pragma GCC ivdep\n#endif"
+    }
+
     fn adjacent_pair_fold_lanes_lines(
         level: &str,
         count: &str,
@@ -7304,7 +7312,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         );
         let assignment = match lanes {
             Some(lanes) => format!(
-                "for ({index} __pair_lane = 0; __pair_lane < {lanes}; ++__pair_lane) {{ {assignment} }}"
+                "{}\nfor ({index} __pair_lane = 0; __pair_lane < {lanes}; ++__pair_lane) {{ {assignment} }}",
+                Self::independent_lanes_hint()
             ),
             None => assignment,
         };
@@ -7623,6 +7632,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // finalizes by the same widening and canonicalizing narrowing a sum
         // takes.
         if blocked {
+            self.line(Self::independent_lanes_hint());
             self.line(&format!(
                 "for ({index_et} __sum_lane = 0; __sum_lane < {lanes}; ++__sum_lane) {{"
             ));
@@ -7800,6 +7810,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         ));
         self.indent += 1;
         if blocked {
+            if !Self::is_reduced_float(product_ty) {
+                self.line(Self::independent_lanes_hint());
+            }
             self.line(&format!(
                 "for ({index_type} __sum_lane = 0; __sum_lane < __sum_lanes_{id}; ++__sum_lane) {{"
             ));
