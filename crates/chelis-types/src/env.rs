@@ -1666,7 +1666,8 @@ pub(crate) fn closed_key_relation_variables(scheme: &Scheme) -> UnordSet<TypeVar
     for relation in &scheme.constraints {
         if !matches!(
             relation,
-            CollectionConstraint::KeyFromSeed { .. }
+            CollectionConstraint::FloatClassify { .. }
+                | CollectionConstraint::KeyFromSeed { .. }
                 | CollectionConstraint::SplitKey { .. }
                 | CollectionConstraint::SplitKeys { .. }
                 | CollectionConstraint::FoldIn { .. }

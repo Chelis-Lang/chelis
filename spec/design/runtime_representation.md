@@ -1063,6 +1063,46 @@ execution, HIP structural admission, and the ignored real-HIP exact-bit matrix.
 A renamed or additional owner remains unclassified until it independently
 supplies the same final-form authority and execution contract.
 
+Stored-bit classification has exact typed-lane final forms under
+[05-OP-20..22]: `CEmitter::emit_float_classification` owns its
+`backend-element-spelling` and `load-store-template` rows, and
+`append_float_classification_helpers` owns its private scalar/tensor element
+spellings and load/store template. Both read the operand's own IEEE storage width and write Bool
+storage without a floating conversion or a public numeric carrier. The
+closed checked-callable signature selector serves direct and aliased host
+applications as well as borrowed callbacks. A declaration-alias index retains
+closed operation identities under both source names and generated global labels;
+host and numeric lowering consult that identity relation after lexical bindings.
+Host application resolution retains the closed discriminator before selecting
+an execution lane. Direct operations and statically resolved local, global and
+captured aliases enter the same ordered, claim-aware tensor helper pipeline.
+A typed root-operation authority accompanies the original application; numeric
+scope contains operands rather than callable pseudo-inputs. The helper resolves
+its result from the actual producer axes, including runtime movement axes,
+without rewriting a source callee name or consulting a same-spelled shadow.
+Ordinary function signatures cannot establish closed operation identity.
+A runtime join of distinct checked operations retains a canonical set of their
+checked contracts in logical host IR. Conformance preserves each branch's
+operation identity; it cannot relabel an alternative with the first branch's
+descriptor. The private C ABI projection rejects this function value under
+chelis#879. Repeated alternatives collapse to the same closed operation.
+
+Genuine host operands and borrowed callbacks retain `HostBuiltinIdentity` and
+instantiate the same-surface, same-axis Bool relation at their application.
+Enclosing values use the existing direct-call lowering path; concrete type and
+ABI projection do not run a second transitive inference visitor. Known surface,
+precision, rank and extent contradictions remain errors. Authored result and
+local extent claim plans retain their identity and declaration order independently
+of the inferred ABI type. C ABI equality remains exact.
+Key-only helper emission retains
+its separately registered `append_key_callable_helpers` owner and key execution
+controls. The classifier registrations bind to the executed all-width raw-bit
+C matrix and the evaluator/native-C callable, shape, derivative and negative
+matrix. Rename, path and seam-kind controls reject unregistered owners. HIP
+and Metal report the canonical predicate identity through their typed
+unimplemented dispositions; their rejection gates emit no element access.
+These final forms do not extend the foundation or transition debt.
+
 The #1281 exact C reduction cutover adds two more closed
 `backend-element-spelling` owners as final forms:
 `CEmitter::emit_mean_nonempty_guard` and
@@ -1955,6 +1995,16 @@ Hardware-only HIP and Metal execution remains registered separately and cannot
 be counted by these active-test receipts. These amendments do not change the
 Phase 0 foundation, mutation contract, or digest. A passing selection receipt
 still requires actual execution and artifact verification.
+
+The stored-bit classifier amendment retains the two inherited Phase 0 execution
+legs in the Phase 1 manifest: the raw-bit C matrix and malformed-IR controls,
+and the CLI callable, shape, derivative and typed device-rejection controls.
+Their frozen floors bind the exact listed test identities, including runtime
+producer routes and authored result-claim execution. Missing-leg, missing-floor
+and manifest-digest negatives enforce the additive enrollment. Every earlier
+command, identity floor, Python floor, native control and planner mutation is
+retained; only the Phase 1 selection digest changes. The Phase 0 foundation,
+mutation contract and digest remain unchanged.
 
 The host/C consumer audit follows the representation owners and submissions:
 

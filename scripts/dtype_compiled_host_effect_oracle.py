@@ -16,7 +16,9 @@ the compiled-target rejection text, lossy process decoding, and
 dtype-named assertion aliases, and requires each operation's one runtime
 definition to be called by both lanes. The behavioural legs build and run
 exact positive and negative programs on both lanes. The self-test leg
-proves each structural mutation fails the oracle.
+proves each structural mutation fails the oracle. Tensor-scan conversion and stack
+identities are checked inside their lowering branch; state checks are checked
+inside the callback owner. Typed identities elsewhere cannot supply evidence.
 
 Acceptance is exit 0 with the final line
 ``DTYPE COMPILED HOST EFFECT ORACLE: PASS``.
@@ -32,6 +34,11 @@ import shlex
 import subprocess
 import sys
 
+if __package__:
+    from .faithful_observation_phase3_oracle import _matching_rust_brace, rust_code_mask
+else:
+    from faithful_observation_phase3_oracle import _matching_rust_brace, rust_code_mask
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -46,6 +53,7 @@ class SourceContract:
     path: str
     required: tuple[str, ...]
     forbidden: tuple[str, ...] = ()
+    owner: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +80,40 @@ SHARED_DEFINITIONS = (
 )
 
 HOST_EMIT = "crates/chelis-backend-c/src/host_emit.rs"
+TENSOR_SCAN_OWNER = 'if active_compiler_name == Some("tensor_scan") && kids.len() == 4'
+TENSOR_SCAN_CALLBACK_OWNER = "fn checked_tensor_scan_callback("
+
+
+def rust_owner_span(source: str, owner: str) -> tuple[int, int]:
+    """Select one real Rust owner block; comments/literals cannot name an owner."""
+    try:
+        code = rust_code_mask(source)
+        keyword = owner.split()[0]
+        matches = [match for match in re.finditer(re.escape(owner), source)
+                   if code.startswith(keyword, match.start())]
+        if len(matches) != 1:
+            raise OracleFailure(f"tensor_scan owner {owner!r}: expected exactly one code owner")
+        opening = code.find("{", matches[0].end())
+        between = code[matches[0].end():opening] if opening != -1 else ""
+        valid_header = (
+            not between.strip() if owner == TENSOR_SCAN_OWNER else
+            re.fullmatch(r"[^;={}]*\)\s*->\s*HostCallback\s*", between) is not None
+            and re.search(r"\bfn\b", between) is None
+        )
+        if opening == -1 or not valid_header:
+            raise OracleFailure(f"tensor_scan owner {owner!r}: missing body")
+        closing = _matching_rust_brace(code, opening, masked=True)
+        return opening + 1, closing
+    except ValueError as error:
+        raise OracleFailure(f"tensor_scan owner {owner!r}: malformed Rust: {error}") from error
+
+
+def has_rust_expression(source: str, expression: str) -> bool:
+    """Literal spelling and executable tokens must agree at the same offsets."""
+    code = rust_code_mask(source)
+    expected = rust_code_mask(expression)
+    return any(code[match.start():match.end()] == expected
+               for match in re.finditer(re.escape(expression), source))
 
 
 def source_contracts() -> tuple[SourceContract, ...]:
@@ -121,13 +163,24 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "tensor_scan composes the list scan at the state dtype",
             "crates/chelis-ir/src/host.rs",
             (
-                'active_compiler_name == Some("tensor_scan")',
                 'chelis_abi::failure::negative_length_prefix("tensor_scan")',
-                'name: "to_tensor".to_string(),',
-                "name: TENSOR_SCAN_STACK.to_string(),",
+                'name: "to_tensor".into(),',
+                "name: TENSOR_SCAN_STACK.into(),",
                 "checked_tensor_scan_callback(callback, &state_ty, template, next, checked)",
-                "name: TENSOR_SCAN_STATE.to_string(),",
+                "let state_ty = host_expr_type(&init_expr);",
+                "let states_ty = HostTypeTerm::List(Box::new(state_ty.clone()));",
             ),
+            owner=TENSOR_SCAN_OWNER,
+        ),
+        SourceContract(
+            "tensor_scan callback checks the actual state against the initial type",
+            "crates/chelis-ir/src/host.rs",
+            (
+                "name: TENSOR_SCAN_STATE.into(),",
+                "HostExprKind::Var(next.clone(), ret_ty.clone())",
+                "HostExprKind::Var(template.to_string(), state_ty.clone())",
+            ),
+            owner=TENSOR_SCAN_CALLBACK_OWNER,
         ),
         SourceContract(
             "tensor states are checked per application and stack against the initial state",
@@ -162,8 +215,11 @@ def validate_source_contracts(repo_root: Path = REPO_ROOT) -> None:
         if not path.exists():
             raise OracleFailure(f"{contract.name}: missing {contract.path}")
         source = path.read_text()
+        if contract.owner is not None:
+            start, end = rust_owner_span(source, contract.owner)
+            source = source[start:end]
         for required in contract.required:
-            if required not in source:
+            if not (has_rust_expression(source, required) if contract.owner else required in source):
                 raise OracleFailure(f"{contract.name}: missing {required!r} in {contract.path}")
         for forbidden in contract.forbidden:
             if forbidden in source:

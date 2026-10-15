@@ -5052,3 +5052,8 @@ packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
 prefix = "examples/literal_ascriptions.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/float_classification.ch"
+disposition = "packages"
+packages = ["chelis-cli"]

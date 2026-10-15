@@ -2041,7 +2041,13 @@ impl<'a> EvalContext<'a> {
         // type, never from a guessed scalar default.
         if matches!(
             name,
-            "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+            "key_from_seed"
+                | "split_key"
+                | "split_keys"
+                | "fold_in"
+                | "is_nan"
+                | "is_finite"
+                | "is_infinite"
         ) && self.active_builtin_symbol(name)
         {
             // An unannotated checked alias can retain the closed operation
@@ -2059,7 +2065,10 @@ impl<'a> EvalContext<'a> {
                             params.iter().cloned().map(Some).collect(),
                         )
                     });
-            let arity = if matches!(name, "key_from_seed" | "split_key") {
+            let arity = if matches!(
+                name,
+                "key_from_seed" | "split_key" | "is_nan" | "is_finite" | "is_infinite"
+            ) {
                 1
             } else {
                 2
@@ -4354,6 +4363,12 @@ impl<'a> EvalContext<'a> {
             "cos" => float_unop_with_tensor(args, FloatUnOp::Cos),
             "tan" => float_unop_with_tensor(args, FloatUnOp::Tan),
             "atan" => float_unop_with_tensor(args, FloatUnOp::Atan),
+            name if chelis_types::FloatClassify::from_name(name).is_some() => {
+                eval_float_classification(
+                    chelis_types::FloatClassify::from_name(name).expect("classification identity"),
+                    args,
+                )
+            }
             "floor" => numeric_unop(args, Some(IntUnOp::Floor), Some(FloatUnOp::Floor)),
             "ceil" => numeric_unop(args, Some(IntUnOp::Ceil), Some(FloatUnOp::Ceil)),
             // Round-half-to-even (banker's rounding), matching the DAG

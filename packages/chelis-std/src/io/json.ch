@@ -118,7 +118,7 @@ def json_serializable(value: Json) -> bool =
     | JsonArray(items) => fold(fn (acc: bool, item: Json) -> and(acc, json_serializable(item)), true, items)
     | JsonObject(entries) => fold(fn (acc: bool, kv: (string, Json)) -> and(acc, json_serializable(kv.1)), true, canonical_object_entries(entries))
   }
-def finite_f64(x: f64) -> bool = not(or(neq(x, x), or(eq(x, div(1.0f64, 0.0f64)), eq(x, div(-1.0f64, 0.0f64)))))
+def finite_f64(x: f64) -> bool = is_finite(x)
 -- [05-OP-2]'s JsonFloat validity: float-form token text whose correctly
 -- rounded f64 is finite and bit-identical to the stored value. Shortest
 -- round-trip text is injective on finite values, signed zero included

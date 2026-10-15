@@ -50,8 +50,8 @@ def restricted_close[n, p_float: Float](actual: &tensor[n, p_float], expected: &
         String::from_utf8_lossy(&output.stderr)
     );
     let schema: Value = serde_json::from_slice(&output.stdout).expect("schema JSON");
-    // chelis#1654 bumped the public JSON schema to 3 for the obligations.
-    assert_eq!(schema["format_version"], 4);
+    // The public schema carries typed callable provenance in format 5.
+    assert_eq!(schema["format_version"], 5);
     assert_eq!(
         schema["modules"][0]["functions"][0]["type_variable_restrictions"],
         serde_json::json!([{"variable": "t0", "domain": "active_float"}])
@@ -95,7 +95,7 @@ measure = len
     );
     let schema: Value = serde_json::from_slice(&output.stdout).expect("schema JSON");
     let function = &schema["modules"][0]["functions"][0];
-    assert_eq!(schema["format_version"], 4);
+    assert_eq!(schema["format_version"], 5);
     assert_eq!(
         function["collection_obligations"],
         serde_json::json!([{

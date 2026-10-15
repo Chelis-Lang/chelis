@@ -28,6 +28,9 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "floor",
     "ceil",
     "round",
+    "is_nan",
+    "is_finite",
+    "is_infinite",
     "uniform_like",
     "dropout",
     // [05-OP-69]..[05-OP-72]: the random key operations (spec/05 section 2.7).
@@ -1206,6 +1209,36 @@ pub const BUILTINS: &[BuiltinDecl] = &[
             reason: "the polymorphic signature fully determines this builtin type",
         },
         realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "is_nan",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the stored-float predicate relation carries surface, shape and dtype admission",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "is_finite",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the stored-float predicate relation carries surface, shape and dtype admission",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "is_infinite",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the stored-float predicate relation carries surface, shape and dtype admission",
+        },
+        realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
@@ -2684,7 +2717,7 @@ pub fn shape_class(name: &str) -> Option<ShapeClass> {
 pub(crate) fn operand_dtype_family(name: &str) -> Option<TypeVarRestriction> {
     use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric};
     match name {
-        "mean"
+        "is_nan" | "is_finite" | "is_infinite" | "mean"
         | "softmax"
         | "div"
         | "pow"
@@ -3397,6 +3430,33 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("floor", &mut env, &mut vg);
     tensor_unop("ceil", &mut env, &mut vg);
     tensor_unop("round", &mut env, &mut vg);
+    for kind in [
+        crate::FloatClassify::Nan,
+        crate::FloatClassify::Finite,
+        crate::FloatClassify::Infinite,
+    ] {
+        let input = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        env.bind(
+            kind.name().to_string(),
+            Scheme {
+                result_origin: None,
+                constraints: vec![CollectionConstraint::FloatClassify {
+                    kind,
+                    operand: Type::Var(input),
+                    result: Type::Var(output),
+                }],
+                tvars: vec![input, output],
+                tvar_restrictions: operand_value_restrictions(kind.name(), &[input]),
+                dvars: vec![],
+                rvars: vec![],
+                body: Type::Fn(
+                    vec![borrowed(Type::Var(input))],
+                    Box::new(Type::Var(output)),
+                ),
+            },
+        );
+    }
     tensor_with_bounds("uniform_like", &mut env, &mut vg);
 
     // [05-OP-69]..[05-OP-72]: direct calls specialize these checked

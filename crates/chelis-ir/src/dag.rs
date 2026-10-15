@@ -976,6 +976,8 @@ pub enum RiscOp {
     Mod,
     /// Exact signed-width [05-OP-47] operation.
     Bitwise(chelis_types::BitwiseKind),
+    /// [05-OP-20..22]: stored-width IEEE predicate.
+    FloatClassify(chelis_types::FloatClassify),
     /// Identity-preserving comparison with Bool output ([05-OP-36]).
     Compare(ComparisonKind),
     /// Bool-only eager logical operation ([05-OP-26..28]).
@@ -1519,6 +1521,9 @@ pub enum RiscAtomIdentity {
     Erf,
     Erfc,
     Abs,
+    IsNan,
+    IsFinite,
+    IsInfinite,
     Floor,
     Ceil,
     Round,
@@ -1608,6 +1613,9 @@ impl RiscAtomIdentity {
         Self::Erf,
         Self::Erfc,
         Self::Abs,
+        Self::IsNan,
+        Self::IsFinite,
+        Self::IsInfinite,
         Self::Floor,
         Self::Ceil,
         Self::Round,
@@ -1697,6 +1705,9 @@ impl RiscAtomIdentity {
             Self::Erf => "erf",
             Self::Erfc => "erfc",
             Self::Abs => "abs",
+            Self::IsNan => "is_nan",
+            Self::IsFinite => "is_finite",
+            Self::IsInfinite => "is_infinite",
             Self::Floor => "floor",
             Self::Ceil => "ceil",
             Self::Round => "round",
@@ -1823,6 +1834,11 @@ impl RiscOp {
             Self::FloorDiv => Semantic(Id::FloorDiv),
             Self::TruncDiv => Semantic(Id::TruncDiv),
             Self::Mod => Semantic(Id::Mod),
+            Self::FloatClassify(kind) => Semantic(match kind {
+                chelis_types::FloatClassify::Nan => Id::IsNan,
+                chelis_types::FloatClassify::Finite => Id::IsFinite,
+                chelis_types::FloatClassify::Infinite => Id::IsInfinite,
+            }),
             Self::Bitwise(kind) => Semantic(match kind {
                 chelis_types::BitwiseKind::And => Id::BitAnd,
                 chelis_types::BitwiseKind::Or => Id::BitOr,
@@ -2175,7 +2191,7 @@ impl RiscOp {
             // than an output range, and a relaxation that simply passed the
             // fallback's envelope through would silently drop the abort — the
             // exact substitution [05-OP-68] exists to prevent.
-            RiscOp::GuardedFail { .. } => false,
+            RiscOp::FloatClassify(_) | RiscOp::GuardedFail { .. } => false,
 
             // --- Unary elementwise math ---
             // `Exp`, `Log`, `Sqrt` are direct ports of the auto_LiRPA
@@ -2635,7 +2651,8 @@ impl DagNode {
             | RiscOp::ScatterElements { .. }
             | RiscOp::OneHot { .. } => RuntimeCheck::SparseIndex,
             RiscOp::Reshape { .. } | RiscOp::Expand { .. } => RuntimeCheck::Ungated,
-            RiscOp::Compare(_)
+            RiscOp::FloatClassify(_)
+            | RiscOp::Compare(_)
             | RiscOp::Logical(_)
             | RiscOp::Where
             | RiscOp::MaxElem
@@ -3872,6 +3889,7 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         RiscOp::Add
         | RiscOp::Sub
         | RiscOp::Mul
+        | RiscOp::FloatClassify(_)
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where
@@ -5154,6 +5172,9 @@ mod tests {
             RiscOp::FloorDiv,
             RiscOp::TruncDiv,
             RiscOp::Mod,
+            RiscOp::FloatClassify(chelis_types::FloatClassify::Nan),
+            RiscOp::FloatClassify(chelis_types::FloatClassify::Finite),
+            RiscOp::FloatClassify(chelis_types::FloatClassify::Infinite),
             RiscOp::Bitwise(chelis_types::BitwiseKind::And),
             RiscOp::Compare(ComparisonKind::Eq),
             RiscOp::Logical(LogicalKind::And),
@@ -5490,8 +5511,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            74,
-            "one_of_every_risc_op must list all 74 classified samples"
+            77,
+            "one_of_every_risc_op must list all 77 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -5528,7 +5549,7 @@ mod tests {
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 37,
+            excluded, 40,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 

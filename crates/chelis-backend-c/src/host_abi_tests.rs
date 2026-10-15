@@ -13,9 +13,9 @@ use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, Unsu
 #[test]
 fn public_callable_fence_recurses_through_every_host_container() {
     use chelis_ir::host::{HostAdtConstructorLayout, HostAdtField, HostAdtLayout};
-    use chelis_ir::host_type_state::KeyBuiltinCallable;
+    use chelis_ir::host_type_state::CheckedBuiltinCallable;
 
-    let callable = ConcreteHostType::KeyBuiltinCallable(KeyBuiltinCallable::Split);
+    let callable = ConcreteHostType::CheckedBuiltinCallable(CheckedBuiltinCallable::Split);
     let nested = ConcreteHostType::Tuple(vec![ConcreteHostType::Option(Box::new(
         ConcreteHostType::List(Box::new(callable.clone())),
     ))]);
@@ -45,11 +45,11 @@ fn public_callable_fence_recurses_through_every_host_container() {
         nominal,
     ] {
         assert!(
-            crate::host_abi::public_type_contains_key_callable(&ty, &layouts),
+            crate::host_abi::public_type_contains_checked_callable(&ty, &layouts),
             "public type leaked {ty:?}"
         );
     }
-    assert!(!crate::host_abi::public_type_contains_key_callable(
+    assert!(!crate::host_abi::public_type_contains_checked_callable(
         &ConcreteHostType::Tuple(vec![ConcreteHostType::Scalar(Prim::Key)]),
         &layouts,
     ));
@@ -1122,4 +1122,27 @@ fn callback_parameter_shadowing_a_def_is_the_exported_callee() {
     );
     let def = format!("{}__chelis_owned_body", authored_function_symbol("inc"));
     assert!(!calls_c_identifier(&body, &def), "{body}");
+}
+
+#[test]
+fn checked_callable_choice_is_a_logical_value_without_a_c_abi() {
+    use chelis_ir::host_type_state::CheckedBuiltinCallable;
+    let operations =
+        ["is_nan", "is_finite"].map(|name| CheckedBuiltinCallable::from_symbol(name).unwrap());
+    let choice = ConcreteHostType::CheckedCallableChoice(operations.to_vec());
+    let error = HostAbiType::try_from_concrete(&choice).unwrap_err();
+    let identity = error.identity();
+    assert!(matches!(identity.what, UnsupportedKind::HostAbi(_)));
+    assert_eq!(identity.stage, Stage::Codegen("c"));
+    assert_eq!(identity.disposition, RejectionAuthorityKind::Unimplemented);
+    assert_eq!(
+        identity.tracking_issue.map(|issue| issue.number()),
+        Some(879)
+    );
+    for operation in operations {
+        assert!(
+            HostAbiType::try_from_concrete(&ConcreteHostType::CheckedBuiltinCallable(operation))
+                .is_ok()
+        );
+    }
 }

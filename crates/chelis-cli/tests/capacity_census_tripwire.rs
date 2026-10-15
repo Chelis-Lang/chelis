@@ -4775,6 +4775,30 @@ struct SemanticRegistration {
 /// final-authority registry above instead.
 const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
     SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float(FloatClassify::Nan, value: ScalarValue) -> Result<ScalarValue, NumericKernelError>",
+        atom: "[05-OP-20]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float_tensor(FloatClassify::Nan, value: &TensorStorage) -> Result<TensorStorage, NumericKernelError>",
+        atom: "[05-OP-20]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float(FloatClassify::Finite, value: ScalarValue) -> Result<ScalarValue, NumericKernelError>",
+        atom: "[05-OP-21]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float_tensor(FloatClassify::Finite, value: &TensorStorage) -> Result<TensorStorage, NumericKernelError>",
+        atom: "[05-OP-21]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float(FloatClassify::Infinite, value: ScalarValue) -> Result<ScalarValue, NumericKernelError>",
+        atom: "[05-OP-22]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::classify_float_tensor(FloatClassify::Infinite, value: &TensorStorage) -> Result<TensorStorage, NumericKernelError>",
+        atom: "[05-OP-22]",
+    },
+    SemanticRegistration {
         callable: "[compiler-ir-numeric] chelis_ir::dag::RiscOp::ListMapCapture(first: bool, source: tensor[p], invocation: tensor[n, q]) -> tensor[n, p]",
         atom: "[05-OP-55]",
     },

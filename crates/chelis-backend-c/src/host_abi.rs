@@ -20,7 +20,7 @@ use chelis_ir::host::{
     HostCallee, HostCalleeView, HostExpr, HostExprKind, HostFunction, HostMatchArm, HostParam,
     HostPatternBinding, HostProgram, HostTensorHelper,
 };
-use chelis_ir::host_type_state::KeyBuiltinCallable;
+use chelis_ir::host_type_state::CheckedBuiltinCallable;
 use chelis_ir::ownership::{
     HostSiteId, HostSiteKind, VerifiedHostAction, VerifiedHostEmission, VerifiedHostFunctionView,
     VerifiedHostSiteActionKind, VerifiedHostTensorHelperView,
@@ -62,7 +62,7 @@ pub(crate) enum HostAbiType {
     /// A closed, unspecialized operation. Its identity is fixed in the type;
     /// the private C value is an inert witness until a checked call selects
     /// one concrete callback signature.
-    KeyBuiltinCallable(KeyBuiltinCallable),
+    CheckedBuiltinCallable(CheckedBuiltinCallable),
     Adt(String, Vec<HostAbiType>),
     List(Box<HostAbiType>),
     Dict(Box<HostAbiType>, Box<HostAbiType>),
@@ -185,10 +185,10 @@ impl HostAbiType {
                 ));
             }
             ConcreteHostType::Scalar(Prim::Key) => Self::Key,
-            ConcreteHostType::Function(_, _) => {
+            ConcreteHostType::Function(_, _) | ConcreteHostType::CheckedCallableChoice(_) => {
                 return Err(unsupported_function_value(ty, "C host ABI value selection"));
             }
-            ConcreteHostType::KeyBuiltinCallable(op) => Self::KeyBuiltinCallable(*op),
+            ConcreteHostType::CheckedBuiltinCallable(op) => Self::CheckedBuiltinCallable(*op),
             ConcreteHostType::Adt(name, args) => Self::Adt(
                 name.clone(),
                 args.iter()
@@ -244,7 +244,7 @@ impl HostAbiType {
             Self::String => Some("chelis_string"),
             Self::Key => Some("chelis_key"),
             Self::Callback(_, _) => None,
-            Self::KeyBuiltinCallable(_) => Some("chelis_key_callable"),
+            Self::CheckedBuiltinCallable(_) => Some("chelis_checked_callable"),
             Self::Adt(_, _) => Some("chelis_adt*"),
             Self::List(_) => Some("chelis_list*"),
             Self::Dict(_, _) => Some("chelis_dict*"),
@@ -277,7 +277,7 @@ impl HostAbiType {
             | Self::Key
             | Self::Unit
             | Self::Callback(_, _) => None,
-            Self::KeyBuiltinCallable(_) => None,
+            Self::CheckedBuiltinCallable(_) => None,
             Self::String => Some("(chelis_string){ NULL }"),
             Self::Adt(_, _)
             | Self::List(_)
@@ -554,7 +554,7 @@ fn project_function(
     // exporting it inside a tuple, option, collection or ADT would publish
     // an inert value and lose the operation selected by the checker.
     if function.origin() == chelis_ir::host::HostFunctionOrigin::Authored
-        && public_type_contains_key_callable(function.ret_ty(), adt_layouts)
+        && public_type_contains_checked_callable(function.ret_ty(), adt_layouts)
     {
         return Err(unsupported_function_value(
             function.ret_ty(),
@@ -563,7 +563,7 @@ fn project_function(
     }
     if function.origin() == chelis_ir::host::HostFunctionOrigin::Authored {
         for param in function.params() {
-            if public_type_contains_key_callable(&param.ty, adt_layouts) {
+            if public_type_contains_checked_callable(&param.ty, adt_layouts) {
                 return Err(unsupported_function_value(
                     &param.ty,
                     "C host public function parameter",
@@ -611,7 +611,7 @@ fn project_function(
 /// Trace both structural children and nominal fields reachable from a
 /// published type. Local values may use the private carrier; only an
 /// authored function declaration crosses this boundary.
-pub(crate) fn public_type_contains_key_callable(
+pub(crate) fn public_type_contains_checked_callable(
     ty: &ConcreteHostType,
     layouts: &[chelis_ir::host::HostAdtLayout<ConcreteHostType>],
 ) -> bool {
@@ -621,7 +621,8 @@ pub(crate) fn public_type_contains_key_callable(
         visited: &mut UnordSet<String>,
     ) -> bool {
         match ty {
-            ConcreteHostType::KeyBuiltinCallable(_) => true,
+            ConcreteHostType::CheckedBuiltinCallable(_)
+            | ConcreteHostType::CheckedCallableChoice(_) => true,
             ConcreteHostType::Function(params, ret) => {
                 params.iter().any(|param| contains(param, layouts, visited))
                     || contains(ret, layouts, visited)
@@ -1091,10 +1092,10 @@ fn project_callback_argument(
             "C host callback argument selection",
         ));
     };
-    if let ConcreteHostType::KeyBuiltinCallable(op) = actual {
+    if let ConcreteHostType::CheckedBuiltinCallable(op) = actual {
         return Ok(HostAbiExpr {
             kind: HostAbiExprKind::Builtin {
-                name: op.symbol().to_string(),
+                name: op.into(),
                 args: Vec::new(),
                 ty: HostAbiType::try_callback_signature(expected)?,
             },

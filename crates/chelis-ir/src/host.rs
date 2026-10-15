@@ -29,8 +29,9 @@ use chelis_vocab::EffectKind;
 use crate::LoadStoreName;
 use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_type_state::{
-    ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
-    HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, KeyBuiltinCallable, decode_host_type,
+    CheckedBuiltinCallable, ConcreteHostType, HostBuiltinIdentity, HostInferenceVar,
+    HostPrecisionTerm, HostShapeSlot, HostShapeTerm, HostTensorTypeTerm, HostTypeDecodeError,
+    HostTypeTerm, decode_host_type,
 };
 use crate::lower::top_level_lowering_map;
 
@@ -469,6 +470,7 @@ struct DefLaneFacts {
     call_graph: RefCell<Option<Arc<CallGraph>>>,
     /// Program-wide: every top-level definition body by name.
     program_defs: RefCell<Option<Arc<BTreeMap<String, Expr>>>>,
+    checked_builtin_callables: RefCell<Option<Arc<BTreeMap<String, CheckedBuiltinCallable>>>>,
     /// Program-wide: the checker's effect row per definition.
     def_effect_rows: RefCell<Option<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>>,
     /// Program-wide: the subexpression lowering context kernel lowering reads.
@@ -491,6 +493,7 @@ struct DefLaneFacts {
 struct SharedProgramFacts {
     call_graph: OnceLock<Arc<CallGraph>>,
     program_defs: OnceLock<Arc<BTreeMap<String, Expr>>>,
+    checked_builtin_callables: OnceLock<Arc<BTreeMap<String, CheckedBuiltinCallable>>>,
     def_effect_rows: OnceLock<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>,
     dropout_reaching_defs: OnceLock<Arc<UnordSet<String>>>,
     tensor_helper_def_summaries: OnceLock<Arc<BTreeMap<String, TensorHelperDefSummary>>>,
@@ -2183,7 +2186,7 @@ pub enum HostExprKind<T = HostTypeTerm> {
         ty: T,
     },
     Builtin {
-        name: String,
+        name: HostBuiltinIdentity,
         args: Vec<HostExpr<T>>,
         ty: T,
     },
@@ -5830,6 +5833,7 @@ fn lower_def_body_kernel(
                 &context,
                 Some(&expected),
                 true,
+                None,
             )
         } else {
             crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
@@ -5967,6 +5971,7 @@ fn lower_kernel_dag(
             &context,
             declaring_params.is_some().then_some(expected),
             declaring_params.is_some(),
+            None,
         )?
     } else {
         crate::lower::try_lower_subexpr_program_with_ordered_inputs(
@@ -6301,7 +6306,7 @@ fn try_lower_tensor_helper_call(
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
 ) -> Option<HostExpr> {
-    try_lower_tensor_helper_call_inner(expr, program, scope, tensor_helpers, expected, None)
+    try_lower_tensor_helper_call_inner(expr, program, scope, tensor_helpers, expected, None, None)
 }
 
 fn try_lower_tensor_helper_call_with_context(
@@ -6319,6 +6324,7 @@ fn try_lower_tensor_helper_call_with_context(
         tensor_helpers,
         expected,
         Some(lowering_context),
+        None,
     )
 }
 
@@ -6329,6 +6335,7 @@ fn try_lower_tensor_helper_call_inner(
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
+    root_operation: Option<CheckedBuiltinCallable>,
 ) -> Option<HostExpr> {
     if let Some((DeepTag::Var, _, kids)) = stamped_parts(expr)
         && let Some(name) = kids.first().and_then(symbol_name)
@@ -6369,6 +6376,7 @@ fn try_lower_tensor_helper_call_inner(
         &expected,
         tensor_helpers.collect_trace,
         specialized_context.as_ref().or(lowering_context),
+        root_operation,
     ) else {
         record_host_work(|profile| profile.tensor_helper_fallbacks += 1);
         return None;
@@ -6891,6 +6899,7 @@ fn lower_tensor_helper_dag(
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
     context: &crate::lower::SubexprLoweringContext,
+    root_operation: Option<CheckedBuiltinCallable>,
 ) -> Option<crate::Dag> {
     lower_tensor_helper_with(expr, program, || {
         let dag = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
@@ -6899,6 +6908,7 @@ fn lower_tensor_helper_dag(
             context,
             None,
             false,
+            root_operation,
         )?;
         remap_tensor_helper_dim_symbols(&dag, scope, expected)
     })
@@ -6917,6 +6927,7 @@ fn lower_tensor_helper_product(
     expected: &TensorType,
     collect_trace: bool,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
+    root_operation: Option<CheckedBuiltinCallable>,
 ) -> Option<LoweredTensorHelper> {
     #[cfg(not(feature = "lowering-trace"))]
     let _ = collect_trace;
@@ -6935,7 +6946,12 @@ fn lower_tensor_helper_product(
             let scoped = collect_tensor_scope(program, scope, Some(expr)).into_sorted();
             let (dag, trace) =
                 crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
-                    expr, scoped, &context, None, false,
+                    expr,
+                    scoped,
+                    &context,
+                    None,
+                    false,
+                    root_operation,
                 )?;
             let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected)?;
             let mut trace = trace;
@@ -6946,7 +6962,7 @@ fn lower_tensor_helper_product(
             })
         });
     }
-    lower_tensor_helper_dag(expr, program, scope, expected, &context).map(|dag| {
+    lower_tensor_helper_dag(expr, program, scope, expected, &context, root_operation).map(|dag| {
         LoweredTensorHelper {
             dag,
             #[cfg(feature = "lowering-trace")]
@@ -8512,7 +8528,7 @@ fn lower_host_expr_kind(
                 && precision != lexical_precision
             {
                 HostExpr::new(HostExprKind::Builtin {
-                    name: "cast".to_string(),
+                    name: "cast".into(),
                     args: vec![value],
                     ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)),
                 })
@@ -8533,15 +8549,23 @@ fn lower_host_expr_kind(
             // operation identity in host IR so a later alias or shadow
             // cannot change what it calls. The backend materializes the
             // corresponding capture-free function pointer from this node.
-            if let Some(op) = KeyBuiltinCallable::from_symbol(&name)
-                && !scope.contains_key(&name)
-                && program.def_named(&name).is_none()
+            if !scope.contains_key(&name)
+                && let Some(op) = cached_checked_builtin_callables(program)
+                    .get(&name)
+                    .copied()
+                    .or_else(|| {
+                        program
+                            .def_named(&name)
+                            .is_none()
+                            .then(|| CheckedBuiltinCallable::from_symbol(&name))
+                            .flatten()
+                    })
             {
                 return Ok(HostExpr::new(HostExprKind::Builtin {
-                    name,
+                    name: op.into(),
                     args: Vec::new(),
                     ty: if ty.is_unresolved() {
-                        HostTypeTerm::KeyBuiltinCallable(op)
+                        HostTypeTerm::CheckedBuiltinCallable(op)
                     } else {
                         ty
                     },
@@ -8618,7 +8642,12 @@ fn lower_host_expr_kind(
                 expected_ty,
             )?;
             let explicit_ty = expr_host_type(expr, program, scope);
-            let ty = if explicit_ty.is_unresolved() {
+            let ty = if let Some(joined) = HostTypeTerm::checked_callable_join([
+                host_expr_type(&then_expr),
+                host_expr_type(&else_expr),
+            ]) {
+                joined
+            } else if explicit_ty.is_unresolved() {
                 let then_ty = host_expr_type(&then_expr);
                 if then_ty.is_unresolved() {
                     host_expr_type(&else_expr)
@@ -8902,7 +8931,7 @@ fn lower_host_expr_kind(
             let mut value = lower_host_expr(operand, program, scope, tensor_helpers)?;
             if binder_float_literal_keeps_f32_source(operand, &ty) {
                 value = HostExpr::new(HostExprKind::Builtin {
-                    name: "cast".to_string(),
+                    name: "cast".into(),
                     args: vec![value],
                     ty: HostTypeTerm::Float32,
                 });
@@ -8919,7 +8948,7 @@ fn lower_host_expr_kind(
                 }
             };
             HostExpr::new(HostExprKind::Builtin {
-                name,
+                name: name.into(),
                 args: vec![value],
                 ty,
             })
@@ -9000,7 +9029,7 @@ fn lower_host_expr_kind(
                 explicit
             };
             HostExpr::new(HostExprKind::Builtin {
-                name: "copy".to_string(),
+                name: "copy".into(),
                 args: vec![inner],
                 ty,
             })
@@ -10135,7 +10164,11 @@ fn lower_match_host_expr(
         )?);
     }
     let explicit = expr_host_type(match_expr, program, scope);
-    let result_ty = if explicit.is_unresolved() {
+    let result_ty = if let Some(joined) =
+        HostTypeTerm::checked_callable_join(arms.iter().map(|arm| host_expr_type(&arm.body)))
+    {
+        joined
+    } else if explicit.is_unresolved() {
         arms.iter()
             .map(|arm| host_expr_type(&arm.body))
             .find(|ty| !ty.is_unresolved())
@@ -10165,7 +10198,7 @@ fn lower_match_host_expr(
     ));
     let no_arm_selected = || {
         HostExpr::new(HostExprKind::Builtin {
-            name: "fail".to_string(),
+            name: "fail".into(),
             args: vec![HostExpr::new(HostExprKind::String(
                 "non-exhaustive runtime match".to_string(),
             ))],
@@ -11206,7 +11239,7 @@ fn compile_host_pattern(
         } => let_binding(lowered_name.clone(), ty.clone(), value, success),
         HostPatternPlan::Literal(literal) => if_matches(
             HostExpr::new(HostExprKind::Builtin {
-                name: "eq".to_string(),
+                name: "eq".into(),
                 args: vec![value, literal.clone()],
                 ty: HostTypeTerm::Bool,
             }),
@@ -11225,10 +11258,10 @@ fn compile_host_pattern(
         }
         HostPatternPlan::ListNil => if_matches(
             HostExpr::new(HostExprKind::Builtin {
-                name: "eq".to_string(),
+                name: "eq".into(),
                 args: vec![
                     HostExpr::new(HostExprKind::Builtin {
-                        name: "len".to_string(),
+                        name: "len".into(),
                         args: vec![value],
                         ty: HostTypeTerm::Int64,
                     }),
@@ -11269,7 +11302,7 @@ fn compile_host_pattern(
                     display_roots: Vec::new(),
                     ty: element_ty.clone(),
                     value: HostExpr::new(HostExprKind::Builtin {
-                        name: "index".to_string(),
+                        name: "index".into(),
                         args: vec![value.clone(), HostExpr::new(HostExprKind::Int(0))],
                         ty: element_ty.clone(),
                     }),
@@ -11285,7 +11318,7 @@ fn compile_host_pattern(
                         // The tail is [05-OP-54]'s List slice, `skip`.
                         // `drop` is [05-OP-67]'s one-argument linearity
                         // consume and would bind the tail to unit.
-                        name: "skip".to_string(),
+                        name: "skip".into(),
                         args: vec![value.clone(), HostExpr::new(HostExprKind::Int(1))],
                         ty: list_ty.clone(),
                     }),
@@ -11302,10 +11335,10 @@ fn compile_host_pattern(
             };
             if_matches(
                 HostExpr::new(HostExprKind::Builtin {
-                    name: "neq".to_string(),
+                    name: "neq".into(),
                     args: vec![
                         HostExpr::new(HostExprKind::Builtin {
-                            name: "len".to_string(),
+                            name: "len".into(),
                             args: vec![value],
                             ty: HostTypeTerm::Int64,
                         }),
@@ -11323,7 +11356,7 @@ fn compile_host_pattern(
                 body = compile_host_pattern(
                     item,
                     HostExpr::new(HostExprKind::Builtin {
-                        name: "tuple-get".to_string(),
+                        name: "tuple-get".into(),
                         args: vec![
                             value.clone(),
                             HostExpr::new(HostExprKind::Int(index as i64)),
@@ -11387,7 +11420,7 @@ fn host_literal_expr(expr: &Expr, expected_ty: &HostTypeTerm) -> Option<HostExpr
             // A pattern's raw f64 atom denotes a literal at the scrutinee's
             // width ([04-PAT-1]), just like a checked expression literal.
             Some(HostExpr::new(HostExprKind::Builtin {
-                name: "cast".to_string(),
+                name: "cast".into(),
                 args: vec![HostExpr::new(HostExprKind::Float(*value))],
                 ty: expected_ty.clone(),
             }))
@@ -11691,7 +11724,7 @@ fn lower_tuple_get_host_expr(
         explicit_ty
     };
     Ok(HostExpr::new(HostExprKind::Builtin {
-        name: "tuple-get".to_string(),
+        name: "tuple-get".into(),
         args,
         ty,
     }))
@@ -12566,7 +12599,7 @@ fn tensor_helper_root_expr(
         return force_host_expr_type(binding(), HostTypeTerm::Tensor(root_tys[index].clone()));
     }
     HostExpr::new(HostExprKind::Builtin {
-        name: "tuple-get".to_string(),
+        name: "tuple-get".into(),
         args: vec![binding(), HostExpr::new(HostExprKind::Int(index as i64))],
         ty: HostTypeTerm::Tensor(root_tys[index].clone()),
     })
@@ -12580,7 +12613,7 @@ fn pack_grad_roots(plan: &GradPackPlan, roots: &mut impl Iterator<Item = HostExp
             // boundary. Rank-zero tensor cotangents keep their tensor identity.
             if matches!(ty, HostTypeTerm::Scalar(_)) {
                 HostExpr::new(HostExprKind::Builtin {
-                    name: "tensor_to_scalar".to_string(),
+                    name: "tensor_to_scalar".into(),
                     args: vec![root],
                     ty: ty.clone(),
                 })
@@ -13165,12 +13198,12 @@ fn try_lower_general_list_grad_app(
                     })
                 });
                 let value = HostExpr::new(HostExprKind::Builtin {
-                    name: "tensor_to_scalar".to_string(),
+                    name: "tensor_to_scalar".into(),
                     args: vec![value],
                     ty: HostTypeTerm::Int64,
                 });
                 let cond = HostExpr::new(HostExprKind::Builtin {
-                    name: "lt".to_string(),
+                    name: "lt".into(),
                     args: vec![value.clone(), HostExpr::new(HostExprKind::Int(0))],
                     ty: HostTypeTerm::Bool,
                 });
@@ -13187,13 +13220,13 @@ fn try_lower_general_list_grad_app(
                 // The shared rendering's prefix, then the value: every lane
                 // reports the same text ([05-OP-54]).
                 let message = HostExpr::new(HostExprKind::Builtin {
-                    name: "string_concat".to_string(),
+                    name: "string_concat".into(),
                     args: vec![
                         HostExpr::new(HostExprKind::String(
                             chelis_abi::failure::list_argument_negative_prefix(operation, argument),
                         )),
                         HostExpr::new(HostExprKind::Builtin {
-                            name: "to_string".to_string(),
+                            name: "to_string".into(),
                             args: vec![value],
                             ty: HostTypeTerm::String,
                         }),
@@ -13203,7 +13236,7 @@ fn try_lower_general_list_grad_app(
                 body = HostExpr::new(HostExprKind::If {
                     cond: Box::new(cond),
                     then_expr: Box::new(HostExpr::new(HostExprKind::Builtin {
-                        name: "fail".to_string(),
+                        name: "fail".into(),
                         args: vec![message],
                         ty: result_ty.clone(),
                     })),
@@ -13234,37 +13267,37 @@ fn try_lower_general_list_grad_app(
                     })
                 });
                 let index = HostExpr::new(HostExprKind::Builtin {
-                    name: "tensor_to_scalar".to_string(),
+                    name: "tensor_to_scalar".into(),
                     args: vec![index],
                     ty: HostTypeTerm::Int64,
                 });
                 let len = HostExpr::new(HostExprKind::Builtin {
-                    name: "tensor_to_scalar".to_string(),
+                    name: "tensor_to_scalar".into(),
                     args: vec![len],
                     ty: HostTypeTerm::Int64,
                 });
                 let message = HostExpr::new(HostExprKind::Builtin {
-                    name: "string_concat".to_string(),
+                    name: "string_concat".into(),
                     args: vec![
                         HostExpr::new(HostExprKind::String(
                             chelis_abi::failure::LIST_INDEX_PREFIX.to_string(),
                         )),
                         HostExpr::new(HostExprKind::Builtin {
-                            name: "string_concat".to_string(),
+                            name: "string_concat".into(),
                             args: vec![
                                 HostExpr::new(HostExprKind::Builtin {
-                                    name: "to_string".to_string(),
+                                    name: "to_string".into(),
                                     args: vec![index.clone()],
                                     ty: HostTypeTerm::String,
                                 }),
                                 HostExpr::new(HostExprKind::Builtin {
-                                    name: "string_concat".to_string(),
+                                    name: "string_concat".into(),
                                     args: vec![
                                         HostExpr::new(HostExprKind::String(
                                             chelis_abi::failure::LIST_INDEX_LEN_INFIX.to_string(),
                                         )),
                                         HostExpr::new(HostExprKind::Builtin {
-                                            name: "to_string".to_string(),
+                                            name: "to_string".into(),
                                             args: vec![len.clone()],
                                             ty: HostTypeTerm::String,
                                         }),
@@ -13278,7 +13311,7 @@ fn try_lower_general_list_grad_app(
                     ty: HostTypeTerm::String,
                 });
                 let cond = HostExpr::new(HostExprKind::Builtin {
-                    name: "gte".to_string(),
+                    name: "gte".into(),
                     args: vec![index, len],
                     ty: HostTypeTerm::Bool,
                 });
@@ -13295,7 +13328,7 @@ fn try_lower_general_list_grad_app(
                 body = HostExpr::new(HostExprKind::If {
                     cond: Box::new(cond),
                     then_expr: Box::new(HostExpr::new(HostExprKind::Builtin {
-                        name: "fail".to_string(),
+                        name: "fail".into(),
                         args: vec![message],
                         ty: result_ty.clone(),
                     })),
@@ -13426,14 +13459,14 @@ fn accumulated_einsum(
         let operand_ty = at_accumulator(host_expr_type(operand));
         let value = std::mem::replace(operand, HostExpr::new(HostExprKind::Unit));
         *operand = HostExpr::new(HostExprKind::Builtin {
-            name: "cast".to_string(),
+            name: "cast".into(),
             args: vec![value],
             ty: operand_ty,
         });
     }
     let contracted_ty = at_accumulator(ty.clone());
     let contracted = HostExpr::new(HostExprKind::Builtin {
-        name: "einsum".to_string(),
+        name: "einsum".into(),
         args,
         ty: contracted_ty.clone(),
     });
@@ -13441,7 +13474,7 @@ fn accumulated_einsum(
         contracted
     } else {
         HostExpr::new(HostExprKind::Builtin {
-            name: "cast".to_string(),
+            name: "cast".into(),
             args: vec![contracted],
             ty,
         })
@@ -13505,8 +13538,23 @@ fn lower_app_host_expr(
             }
         })
         .to_string();
-    match callee::resolve(name, scope) {
-        HostAppCallee::Lexical(callee) => lower_lexical_host_call(
+    let has_definition = program.def_named(&name).is_some();
+    match callee::resolve_application(
+        name,
+        scope,
+        &cached_checked_builtin_callables(program),
+        has_definition,
+    ) {
+        callee::ResolvedHostApplication::Closed(operation) => lower_closed_host_application(
+            app_expr,
+            list,
+            operation,
+            program,
+            scope,
+            tensor_helpers,
+            expected_ty,
+        ),
+        callee::ResolvedHostApplication::Lexical(callee) => lower_lexical_host_call(
             app_expr,
             list,
             callee,
@@ -13515,7 +13563,7 @@ fn lower_app_host_expr(
             tensor_helpers,
             expected_ty,
         ),
-        HostAppCallee::Program(callee) => lower_program_host_app(
+        callee::ResolvedHostApplication::Program(callee) => lower_program_host_app(
             app_expr,
             list,
             callee,
@@ -13525,6 +13573,76 @@ fn lower_app_host_expr(
             expected_ty,
         ),
     }
+}
+
+/// Closed identity is fixed before lane selection. Tensor applications enter
+/// the same claim-aware helper owner as direct operations; only actual host
+/// operands/callbacks retain the host operation and its exact result relation.
+fn lower_closed_host_application(
+    app_expr: &Expr,
+    list: &Node,
+    operation: CheckedBuiltinCallable,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+    expected_ty: Option<&HostTypeTerm>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let checked_ty = expr_host_type(app_expr, program, scope);
+    let expected = expected_ty
+        .filter(|_| checked_ty.is_unresolved())
+        .cloned()
+        .unwrap_or(checked_ty);
+    if let CheckedBuiltinCallable::FloatClassify(_) = operation
+        && let HostTypeTerm::Tensor(tensor_ty) = &expected
+        && !should_keep_tensor_expr_in_host_lane(app_expr)
+    {
+        let (helper, helper_scope, bindings) = hoist_host_lane_tensor_bindings(
+            app_expr,
+            program,
+            scope,
+            None,
+            tensor_helpers,
+            HoistedOperands::HostLane,
+        )?;
+        if let Some(value) = try_lower_tensor_helper_call_inner(
+            helper.as_ref(),
+            program,
+            helper_scope.as_ref(),
+            tensor_helpers,
+            tensor_ty.clone(),
+            None,
+            Some(operation),
+        ) {
+            if bindings.is_empty() {
+                return Ok(value);
+            }
+            let ty = host_expr_type(&value);
+            return Ok(HostExpr::new(HostExprKind::Let {
+                bindings,
+                body: Box::new(value),
+                ty,
+            }));
+        }
+    }
+    let args = list.children_slice()[1..]
+        .iter()
+        .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ty = match operation {
+        CheckedBuiltinCallable::FloatClassify(kind) => CheckedApplicationRelation(kind)
+            .instantiate(&args, &expected)
+            .map_err(|error| host_expr_lowering_error(app_expr, error.to_string()))?,
+        _ if expected.is_unresolved() => infer_builtin_host_type(operation.symbol(), &args)
+            .ok_or_else(|| {
+                host_expr_lowering_error(app_expr, "checked builtin has no concrete result type")
+            })?,
+        _ => expected,
+    };
+    Ok(HostExpr::new(HostExprKind::Builtin {
+        name: operation.into(),
+        args,
+        ty,
+    }))
 }
 
 /// A call through a lexical binding: the operation or function value the
@@ -13549,25 +13667,20 @@ fn lower_lexical_host_call(
         .iter()
         .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
         .collect::<Result<Vec<_>, _>>()?;
-    if let HostTypeTerm::KeyBuiltinCallable(op) = binding {
-        // This identity came from the resolved value's producer, including
-        // aliases and tuple projections. The application metadata selects
-        // its concrete result; the alias's spelling selects nothing.
-        let ty = if explicit_ty.is_unresolved() {
-            infer_builtin_host_type(op.symbol(), &args).ok_or_else(|| {
-                host_expr_lowering_error(app_expr, "checked key call has no concrete result type")
-            })?
-        } else {
-            explicit_ty
-        };
-        return Ok(HostExpr::new(HostExprKind::Builtin {
-            name: op.symbol().to_string(),
-            args,
-            ty,
-        }));
-    }
     let (param_tys, ret_ty) = host_fn_signature(binding)
         .or_else(|| kids.first().and_then(expr_fn_type))
+        .or_else(|| {
+            // The checked application has instantiated the logical choice,
+            // while its alternatives remain unspecialized operations. Keep
+            // the actual typed payload for the unsupported callable marker;
+            // this is not a guessed signature or a static operation choice.
+            matches!(binding, HostTypeTerm::CheckedCallableChoice(_)).then(|| {
+                (
+                    args.iter().map(host_expr_type).collect(),
+                    explicit_ty.clone(),
+                )
+            })
+        })
         .ok_or_else(|| {
             host_expr_lowering_error(
                 app_expr,
@@ -13582,7 +13695,14 @@ fn lower_lexical_host_call(
         explicit_ty
     };
     Ok(HostExpr::new(HostExprKind::Call {
-        callee: lexical.callee(),
+        // A computed checked callable is logically valid, but has no static
+        // operation identity. Preserve the existing target-boundary marker;
+        // neither ownership nor codegen may reinterpret it as a direct call.
+        callee: if matches!(binding, HostTypeTerm::CheckedCallableChoice(_)) {
+            HostCallee::unresolved_callable()
+        } else {
+            lexical.callee()
+        },
         args,
         arg_tys: param_tys,
         ty,
@@ -13647,7 +13767,7 @@ fn lower_program_host_app(
     {
         let entries = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
         return Ok(HostExpr::new(HostExprKind::Builtin {
-            name: "__json_canonical_object_entries".to_string(),
+            name: "__json_canonical_object_entries".into(),
             args: vec![entries],
             ty: explicit_ty,
         }));
@@ -13771,7 +13891,7 @@ fn lower_program_host_app(
     if active_compiler_name == Some("Some") && kids.len() == 2 && ctor_definition.is_none() {
         let arg = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
         return Ok(HostExpr::new(HostExprKind::Builtin {
-            name,
+            name: name.into(),
             args: vec![arg.clone()],
             ty: if !explicit_ty.is_unresolved() {
                 explicit_ty
@@ -13895,13 +14015,13 @@ fn lower_program_host_app(
         // every lane reports the same text (spec/04-type-system.md section
         // 4.7's non-negativity guard).
         let context = HostExpr::new(HostExprKind::Builtin {
-            name: "string_concat".to_string(),
+            name: "string_concat".into(),
             args: vec![
                 HostExpr::new(HostExprKind::String(
                     chelis_abi::failure::negative_length_prefix("tensor_scan"),
                 )),
                 HostExpr::new(HostExprKind::Builtin {
-                    name: "to_string".to_string(),
+                    name: "to_string".into(),
                     args: vec![length()],
                     ty: HostTypeTerm::String,
                 }),
@@ -13909,9 +14029,9 @@ fn lower_program_host_app(
             ty: HostTypeTerm::String,
         });
         let negative_length = HostExpr::new(HostExprKind::Builtin {
-            name: "fail".to_string(),
+            name: "fail".into(),
             args: vec![HostExpr::new(HostExprKind::Builtin {
-                name: "string_concat".to_string(),
+                name: "string_concat".into(),
                 args: vec![
                     context,
                     HostExpr::new(HostExprKind::String(format!(
@@ -13925,13 +14045,13 @@ fn lower_program_host_app(
         });
         let indices = HostExpr::new(HostExprKind::If {
             cond: Box::new(HostExpr::new(HostExprKind::Builtin {
-                name: "lt".to_string(),
+                name: "lt".into(),
                 args: vec![length(), HostExpr::new(HostExprKind::Int(0))],
                 ty: HostTypeTerm::Bool,
             })),
             then_expr: Box::new(negative_length),
             else_expr: Box::new(HostExpr::new(HostExprKind::Builtin {
-                name: "range".to_string(),
+                name: "range".into(),
                 args: vec![HostExpr::new(HostExprKind::Int(0)), length()],
                 ty: index_list_ty.clone(),
             })),
@@ -13978,7 +14098,7 @@ fn lower_program_host_app(
                 template_name.clone(),
                 state_ty.clone(),
                 HostExpr::new(HostExprKind::Builtin {
-                    name: "copy".to_string(),
+                    name: "copy".into(),
                     args: vec![HostExpr::new(HostExprKind::Var(
                         init_name,
                         state_ty.clone(),
@@ -13987,7 +14107,7 @@ fn lower_program_host_app(
                 }),
             ));
             HostExpr::new(HostExprKind::Builtin {
-                name: TENSOR_SCAN_STACK.to_string(),
+                name: TENSOR_SCAN_STACK.into(),
                 args: vec![
                     states,
                     HostExpr::new(HostExprKind::Var(template_name, state_ty)),
@@ -13996,7 +14116,7 @@ fn lower_program_host_app(
             })
         } else {
             HostExpr::new(HostExprKind::Builtin {
-                name: "to_tensor".to_string(),
+                name: "to_tensor".into(),
                 args: vec![states],
                 ty: ty.clone(),
             })
@@ -14455,7 +14575,11 @@ fn lower_program_host_app(
     } else {
         args
     };
-    Ok(HostExpr::new(HostExprKind::Builtin { name, args, ty }))
+    Ok(HostExpr::new(HostExprKind::Builtin {
+        name: name.into(),
+        args,
+        ty,
+    }))
 }
 
 fn host_expr_contains_local_call<T>(expr: &HostExpr<T>) -> bool {
@@ -14885,7 +15009,7 @@ fn retain_nested_result_claim(
                         display_roots: Vec::new(),
                         ty: HostTypeTerm::Int64,
                         value: HostExpr::new(HostExprKind::Builtin {
-                            name: "shape".to_string(),
+                            name: "shape".into(),
                             args: vec![
                                 HostExpr::new(HostExprKind::Var(prepared, prepared_ty)),
                                 HostExpr::new(HostExprKind::Int(axis as i64)),
@@ -15745,7 +15869,7 @@ fn host_type_syntax(ty: &HostTypeTerm, span: chelis_deep::Span) -> Option<Expr> 
         }
         // This closed operation has no single Deep function type until a
         // checked application selects its scalar or tensor alternative.
-        HostTypeTerm::KeyBuiltinCallable(_) => None,
+        HostTypeTerm::CheckedBuiltinCallable(_) | HostTypeTerm::CheckedCallableChoice(_) => None,
         HostTypeTerm::Adt(name, args) => Some(host_adt_syntax(
             name,
             args.iter()
@@ -16722,9 +16846,17 @@ fn write_canonical_host_type_key(ty: &HostTypeTerm, out: &mut String) {
             out.push_str(")->");
             write_canonical_host_type_key(ret, out);
         }
-        HostTypeTerm::KeyBuiltinCallable(op) => {
-            out.push_str("key-builtin:");
+        HostTypeTerm::CheckedBuiltinCallable(op) => {
+            out.push_str("checked-builtin:");
             out.push_str(op.symbol());
+        }
+        HostTypeTerm::CheckedCallableChoice(ops) => {
+            out.push_str("checked-choice[");
+            for op in ops {
+                out.push_str(op.symbol());
+                out.push(',');
+            }
+            out.push(']');
         }
         HostTypeTerm::Adt(name, args) => {
             out.push_str("adt:");
@@ -18753,7 +18885,7 @@ fn checked_tensor_scan_callback(
         value,
     };
     let check = HostExpr::new(HostExprKind::Builtin {
-        name: TENSOR_SCAN_STATE.to_string(),
+        name: TENSOR_SCAN_STATE.into(),
         args: vec![
             HostExpr::new(HostExprKind::Var(next.clone(), ret_ty.clone())),
             HostExpr::new(HostExprKind::Var(template.to_string(), state_ty.clone())),
@@ -19390,6 +19522,7 @@ fn actualize_tensor_helper_types(
                 | crate::dag::RiscOp::Abs
                 | crate::dag::RiscOp::Floor
                 | crate::dag::RiscOp::Ceil
+                | crate::dag::RiscOp::FloatClassify(_)
                 | crate::dag::RiscOp::Round
                 | crate::dag::RiscOp::Recip
                 | crate::dag::RiscOp::UniformLike
@@ -20139,6 +20272,22 @@ fn expr_contains_vmap_grad(expr: &Expr) -> bool {
         }
         Expr::Atom(_, _) | Expr::Map(_, _) => false,
     }
+}
+
+fn cached_checked_builtin_callables(
+    program: &HostLoweringSession<'_>,
+) -> Arc<BTreeMap<String, CheckedBuiltinCallable>> {
+    program_fact(
+        &program.facts.checked_builtin_callables,
+        program
+            .shared
+            .map(|shared| &shared.checked_builtin_callables),
+        || {
+            Arc::new(crate::lower::checked_builtin_callable_bindings(
+                &cached_program_defs(program),
+            ))
+        },
+    )
 }
 
 fn cached_program_defs(program: &HostLoweringSession<'_>) -> Arc<BTreeMap<String, Expr>> {
@@ -22211,6 +22360,18 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
 /// parameter types beneath `len(...)` or a fold seed beneath a callback, still
 /// reaches a bare `None` or `[]` whose type only that context fixes.
 fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
+    // A join's alternatives are distinct checked contracts. Context may
+    // specialize data, but must never retag one operation as another.
+    if matches!(ty, HostTypeTerm::CheckedCallableChoice(_)) {
+        let own = host_expr_type(&expr);
+        if matches!(
+            own,
+            HostTypeTerm::CheckedBuiltinCallable(_) | HostTypeTerm::CheckedCallableChoice(_)
+        ) && own != ty
+        {
+            return force_host_expr_type(expr, own);
+        }
+    }
     let HostExpr {
         kind,
         span_id,
@@ -22267,6 +22428,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             let args = conform_builtin_arguments(&name, args, &ty);
             HostExprKind::Builtin { name, args, ty }
         }
+
         HostExprKind::AdtConstruct { ctor, fields, .. } => HostExprKind::AdtConstruct {
             ctor,
             fields: conform_host_subexprs(fields),
@@ -22523,10 +22685,99 @@ fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> Hos
     HostCallback { kind, ret_ty }
 }
 
-/// Materialize checked context into every host-program root before term
-/// resolution. This is the sole expectation/refinement boundary named by
-/// loud_unsupported.md C6.3; codegen therefore receives one resolved tree
-/// and has no authority to pick a type when annotations disagree.
+/// A checked application's result relation is retained by its typed
+/// operation identity, not reconstructed from an alias or a result snapshot.
+/// Keys retain their distinct existing result rules. This application owner
+/// instantiates [05-OP-20..22]'s relation only for genuine host operands; static
+/// numeric applications use the same DAG producer owner as direct calls.
+struct CheckedApplicationRelation(chelis_types::FloatClassify);
+
+impl CheckedApplicationRelation {
+    fn instantiate(
+        &self,
+        args: &[HostExpr],
+        expected: &HostTypeTerm,
+    ) -> Result<HostTypeTerm, crate::HostTypeResolutionError> {
+        let invalid = |detail: &str| crate::HostTypeResolutionError::InvalidCheckedApplication {
+            operation: self.0.name().into(),
+            detail: detail.into(),
+        };
+        let [input] = args else {
+            return Err(invalid("requires exactly one operand"));
+        };
+        let actual = match host_expr_type(input) {
+            HostTypeTerm::Tensor(input) if input.precision.is_float() => {
+                HostTypeTerm::Tensor(TensorType {
+                    dims: input.dims,
+                    precision: chelis_types::types::Prim::Bool,
+                })
+            }
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(p)) if p.is_float() => {
+                HostTypeTerm::Bool
+            }
+            _ => return Err(invalid("requires an actual float scalar or tensor")),
+        };
+        validate_checked_result_requirement(expected, &actual, self.0.name())?;
+        Ok(actual)
+    }
+}
+
+/// Metadata may be coarse; it cannot contradict a known actual. Authored
+/// runtime requirements remain in their existing claim carriers. Validation
+/// neither rewrites nor reorders those requirements.
+fn validate_checked_result_requirement(
+    expected: &HostTypeTerm,
+    actual: &HostTypeTerm,
+    operation: &str,
+) -> Result<(), crate::HostTypeResolutionError> {
+    let valid = match (expected, actual) {
+        (HostTypeTerm::Tensor(expected), HostTypeTerm::Tensor(actual)) => {
+            expected.precision == actual.precision
+                && expected.dims.len() == actual.dims.len()
+                && expected
+                    .dims
+                    .iter()
+                    .zip(&actual.dims)
+                    .all(|(expected, actual)| {
+                        let known = |dim: &DimInfo| match dim {
+                            DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => Some(*n),
+                            _ => None,
+                        };
+                        !matches!((known(expected), known(actual)), (Some(a), Some(b)) if a != b)
+                    })
+        }
+        (HostTypeTerm::Tuple(left), HostTypeTerm::Tuple(right))
+        | (HostTypeTerm::Adt(_, left), HostTypeTerm::Adt(_, right)) => {
+            let same_constructor = match (expected, actual) {
+                (HostTypeTerm::Adt(a, _), HostTypeTerm::Adt(b, _)) => a == b,
+                _ => true,
+            };
+            same_constructor
+                && left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(a, b)| validate_checked_result_requirement(a, b, operation).is_ok())
+        }
+        (HostTypeTerm::List(a), HostTypeTerm::List(b))
+        | (HostTypeTerm::Option(a), HostTypeTerm::Option(b)) => {
+            validate_checked_result_requirement(a, b, operation).is_ok()
+        }
+        _ => expected == actual || expected.is_unresolved(),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(crate::HostTypeResolutionError::InvalidCheckedApplication {
+            operation: operation.into(),
+            detail: format!("checked result {expected:?} contradicts actual result {actual:?}"),
+        })
+    }
+}
+
+/// Materialize checked context into host-program roots. Closed applications
+/// have already selected their producer-derived execution route; concrete
+/// resolution projects that tree without a second inference/repair visitor.
 fn conform_host_program_types(program: &mut HostProgram) {
     for binding in &mut program.globals {
         binding.value = force_host_expr_type(binding.value.clone(), binding.ty.clone());
@@ -22718,6 +22969,48 @@ fn infer_builtin_host_type_from_arg_tys(
     let is_dict = |ty: &HostTypeTerm| matches!(ty, HostTypeTerm::Dict(_, _));
 
     match name {
+        "where" => {
+            let [condition, left, right] = arg_tys else {
+                return Err(invalid_builtin_inference(
+                    name,
+                    arg_tys,
+                    "requires condition and two data operands",
+                ));
+            };
+            if let (
+                HostTypeTerm::Tensor(condition),
+                HostTypeTerm::Tensor(left),
+                HostTypeTerm::Tensor(right),
+            ) = (condition, left, right)
+            {
+                let left_ty = HostTypeTerm::Tensor(left.clone());
+                let right_ty = HostTypeTerm::Tensor(right.clone());
+                let condition_shape = HostTypeTerm::Tensor(TensorType {
+                    dims: condition.dims.clone(),
+                    precision: left.precision,
+                });
+                if condition.precision != Prim::Bool
+                    || validate_checked_result_requirement(&left_ty, &right_ty, name).is_err()
+                    || validate_checked_result_requirement(&left_ty, &condition_shape, name)
+                        .is_err()
+                {
+                    return Err(invalid_builtin_inference(
+                        name,
+                        arg_tys,
+                        "requires a Bool condition and data operands of the same precision and shape",
+                    ));
+                }
+                return Ok(Some(left_ty));
+            }
+            if arg_tys.iter().any(HostTypeTerm::is_unresolved) {
+                return Ok(Some(left.clone()));
+            }
+            return Err(invalid_builtin_inference(
+                name,
+                arg_tys,
+                "requires three tensors",
+            ));
+        }
         "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" | "count"
         | "argmax_reduce" | "argmin_reduce" | "reshape" | "expand" | "insert" | "pad"
         | "shrink" | "stride" | "permute" | "split" | "sort" | "tensor_to_scalar" | "to_list" => {
@@ -22996,6 +23289,13 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(tensor_ty.clone())),
             _ => Some(fresh_host_inference()),
         },
+        "is_nan" | "is_finite" | "is_infinite" => Some(match tensor_arg {
+            Some(input) => HostTypeTerm::Tensor(TensorType {
+                dims: input.dims,
+                precision: Prim::Bool,
+            }),
+            None => HostTypeTerm::Bool,
+        }),
         "and" | "or" | "not" | "string_contains" | "string_starts_with" | "string_ends_with" => {
             Some(HostTypeTerm::Bool)
         }
@@ -23032,8 +23332,8 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             ))),
             _ => Some(fresh_host_inference()),
         },
-        "scatter" | "scatter_replace" | "scatter_elements" | "where" | "cumsum" | "diagonal"
-        | "trace" | "clamp" => arg_tys.first().cloned(),
+        "scatter" | "scatter_replace" | "scatter_elements" | "cumsum" | "diagonal" | "trace"
+        | "clamp" => arg_tys.first().cloned(),
         "sort" => match arg_tys.first() {
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tuple(vec![
                 HostTypeTerm::Tensor(tensor_ty.clone()),
@@ -24597,8 +24897,318 @@ fn solve_host_type_vars(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_callable_join_preserves_branch_identity_through_conformance() {
+        let nan = CheckedBuiltinCallable::from_symbol("is_nan").unwrap();
+        let finite = CheckedBuiltinCallable::from_symbol("is_finite").unwrap();
+        let ty = |op| HostTypeTerm::CheckedBuiltinCallable(op);
+        let joined = HostTypeTerm::checked_callable_join([ty(nan), ty(finite)]).unwrap();
+        assert_eq!(
+            joined,
+            HostTypeTerm::checked_callable_join([ty(finite), ty(nan)]).unwrap()
+        );
+        assert_eq!(
+            joined,
+            HostTypeTerm::checked_callable_join([joined.clone(), ty(nan)]).unwrap()
+        );
+        assert_eq!(
+            HostTypeTerm::checked_callable_join([ty(nan), ty(nan)]),
+            Some(ty(nan))
+        );
+        assert!(HostTypeTerm::checked_callable_join([ty(nan), HostTypeTerm::Bool]).is_none());
+        let branch = |op: CheckedBuiltinCallable| {
+            HostExpr::new(HostExprKind::Builtin {
+                name: op.into(),
+                args: Vec::new(),
+                ty: ty(op),
+            })
+        };
+        let expr = force_host_expr_type(
+            HostExpr::new(HostExprKind::If {
+                cond: Box::new(HostExpr::new(HostExprKind::Bool(false))),
+                then_expr: Box::new(branch(nan)),
+                else_expr: Box::new(branch(finite)),
+                ty: joined.clone(),
+            }),
+            joined.clone(),
+        );
+        let HostExprKind::If {
+            then_expr,
+            else_expr,
+            ty: actual,
+            ..
+        } = expr.kind
+        else {
+            panic!("if")
+        };
+        assert_eq!(actual, joined);
+        assert_eq!(host_expr_type(&then_expr), ty(nan));
+        assert_eq!(host_expr_type(&else_expr), ty(finite));
+        assert!(matches!(
+            joined.into_concrete(),
+            Ok(ConcreteHostType::CheckedCallableChoice(_))
+        ));
+    }
+
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
+
+    #[test]
+    fn predicate_host_application_owns_actual_surface_and_axes() {
+        for kind in [
+            chelis_types::FloatClassify::Nan,
+            chelis_types::FloatClassify::Finite,
+            chelis_types::FloatClassify::Infinite,
+        ] {
+            for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+                let axes = vec![
+                    DimInfo::Named("batch".into(), None),
+                    DimInfo::Named("_rt_producer_axis".into(), None),
+                ];
+                let input = HostExpr::new(HostExprKind::Var(
+                    "input".into(),
+                    HostTypeTerm::Tensor(TensorType {
+                        dims: axes.clone(),
+                        precision,
+                    }),
+                ));
+                let coarse = HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Named("*".into(), None); 2],
+                    precision: Prim::Bool,
+                });
+                let actual = CheckedApplicationRelation(kind)
+                    .instantiate(&[input], &coarse)
+                    .unwrap();
+                assert_eq!(
+                    actual,
+                    HostTypeTerm::Tensor(TensorType {
+                        dims: axes,
+                        precision: Prim::Bool
+                    })
+                );
+                let scalar = HostExpr::new(HostExprKind::Var(
+                    "input".into(),
+                    HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)),
+                ));
+                assert_eq!(
+                    CheckedApplicationRelation(kind)
+                        .instantiate(&[scalar], &HostTypeTerm::Bool)
+                        .unwrap(),
+                    HostTypeTerm::Bool
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn predicate_shape_conformance_keeps_known_conflicts_for_rejection() {
+        for kind in [
+            chelis_types::FloatClassify::Nan,
+            chelis_types::FloatClassify::Finite,
+            chelis_types::FloatClassify::Infinite,
+        ] {
+            for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+                let input_ty = HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision,
+                });
+                let wrong = HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(3)],
+                    precision: Prim::Bool,
+                });
+                let value = force_host_expr_type(
+                    HostExpr::new(HostExprKind::Builtin {
+                        name: CheckedBuiltinCallable::FloatClassify(kind).into(),
+                        args: vec![HostExpr::new(HostExprKind::Var(
+                            "x".into(),
+                            input_ty.clone(),
+                        ))],
+                        ty: wrong.clone(),
+                    }),
+                    wrong.clone(),
+                );
+                let HostExprKind::Builtin { args, ty, .. } = value.kind else {
+                    panic!("closed operation must retain identity");
+                };
+                assert_eq!(host_expr_type(&args[0]), input_ty);
+                assert_eq!(ty, wrong);
+                assert!(
+                    CheckedApplicationRelation(kind)
+                        .instantiate(&args, &ty)
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn predicate_host_relation_rejects_wrong_family_surface_precision_rank_and_enclosing_extent() {
+        for kind in [
+            chelis_types::FloatClassify::Nan,
+            chelis_types::FloatClassify::Finite,
+            chelis_types::FloatClassify::Infinite,
+        ] {
+            let relation = CheckedApplicationRelation(kind);
+            let input = HostExpr::new(HostExprKind::Var(
+                "x".into(),
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: Prim::F32,
+                }),
+            ));
+            for wrong in [
+                HostTypeTerm::Bool,
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: Prim::F32,
+                }),
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![],
+                    precision: Prim::Bool,
+                }),
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(3)],
+                    precision: Prim::Bool,
+                }),
+            ] {
+                assert!(
+                    relation
+                        .instantiate(std::slice::from_ref(&input), &wrong)
+                        .is_err()
+                );
+            }
+            for precision in [Prim::Int32, Prim::Bool] {
+                let input = HostExpr::new(HostExprKind::Var(
+                    "x".into(),
+                    HostTypeTerm::Tensor(TensorType {
+                        dims: vec![DimInfo::Lit(2)],
+                        precision,
+                    }),
+                ));
+                assert!(
+                    relation
+                        .instantiate(&[input], &fresh_host_inference())
+                        .is_err()
+                );
+            }
+            assert!(relation.instantiate(&[], &HostTypeTerm::Bool).is_err());
+            assert!(
+                relation
+                    .instantiate(&[input.clone(), input], &HostTypeTerm::Bool)
+                    .is_err()
+            );
+            let actual = HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::Bool,
+            });
+            let stale = HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::Bool,
+            });
+            for (expected, actual) in [
+                (
+                    HostTypeTerm::List(Box::new(stale.clone())),
+                    HostTypeTerm::List(Box::new(actual.clone())),
+                ),
+                (
+                    HostTypeTerm::Option(Box::new(stale.clone())),
+                    HostTypeTerm::Option(Box::new(actual.clone())),
+                ),
+                (
+                    HostTypeTerm::Tuple(vec![stale]),
+                    HostTypeTerm::Tuple(vec![actual]),
+                ),
+            ] {
+                assert!(
+                    validate_checked_result_requirement(&expected, &actual, kind.name()).is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refined_predicate_condition_cannot_change_where_data_precision() {
+        for precision in [
+            Prim::F16,
+            Prim::Bf16,
+            Prim::F32,
+            Prim::F64,
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::Bool,
+        ] {
+            let dims = vec![DimInfo::Named("_rt_data".into(), None)];
+            let data = HostTypeTerm::Tensor(TensorType {
+                dims: dims.clone(),
+                precision,
+            });
+            let condition = HostTypeTerm::Tensor(TensorType {
+                dims,
+                precision: Prim::Bool,
+            });
+            assert_eq!(
+                infer_builtin_host_type_from_arg_tys(
+                    "where",
+                    &[condition.clone(), data.clone(), data.clone()]
+                )
+                .unwrap(),
+                Some(data.clone())
+            );
+            for wrong in [
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![],
+                    precision,
+                }),
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: if precision == Prim::Bool {
+                        Prim::F32
+                    } else {
+                        Prim::Bool
+                    },
+                }),
+            ] {
+                assert!(
+                    infer_builtin_host_type_from_arg_tys(
+                        "where",
+                        &[condition.clone(), data.clone(), wrong]
+                    )
+                    .is_err()
+                );
+            }
+            let data = HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision,
+            });
+            let wrong_extent = HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision,
+            });
+            assert!(
+                infer_builtin_host_type_from_arg_tys(
+                    "where",
+                    &[condition.clone(), data, wrong_extent]
+                )
+                .is_err()
+            );
+            let bad_condition = HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Named("_rt_data".into(), None)],
+                precision: Prim::Int32,
+            });
+            let data = HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Named("_rt_data".into(), None)],
+                precision,
+            });
+            assert!(
+                infer_builtin_host_type_from_arg_tys("where", &[bad_condition, data.clone(), data])
+                    .is_err()
+            );
+            assert!(infer_builtin_host_type_from_arg_tys("where", &[condition]).is_err());
+        }
+    }
 
     #[test]
     fn inferred_type_holes_are_not_authored_binders() {
@@ -27212,7 +27822,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         ));
         for index in [1, -1, 2] {
             let index_expr = HostExpr::new(HostExprKind::Builtin {
-                name: "cast".to_string(),
+                name: "cast".into(),
                 args: vec![HostExpr::new(HostExprKind::Int(index))],
                 ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32)),
             });
@@ -27239,7 +27849,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         };
         let axis_arg = HostExpr {
             kind: HostExprKind::Builtin {
-                name: "cast".to_string(),
+                name: "cast".into(),
                 args: vec![HostExpr {
                     kind: HostExprKind::Int(0),
                     span_id: None,
@@ -27588,7 +28198,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         };
         let session = HostLoweringSession::new(&checked);
         let context = cached_subexpr_lowering_context(&session);
-        let dag = lower_tensor_helper_dag(body, &session, &scope, &expected, &context)
+        let dag = lower_tensor_helper_dag(body, &session, &scope, &expected, &context, None)
             .expect("helper dag");
         let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
         assert_eq!(root.op, RiscOp::Exp, "{:?}", dag.nodes());

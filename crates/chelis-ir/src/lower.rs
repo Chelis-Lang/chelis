@@ -2212,6 +2212,7 @@ pub fn try_lower_subexpr_program_with_context_and_controls(
             context,
             None,
             SubexprLoweringOptions {
+                root_operation: None,
                 include_list_controls: true,
                 // The scope is the ambient bindings this subexpression captured.
                 authored_signature: false,
@@ -2260,6 +2261,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
         context,
         result_claim,
         SubexprLoweringOptions {
+            root_operation: None,
             include_list_controls: false,
             authored_signature,
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
@@ -2275,6 +2277,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     authored_signature: bool,
+    root_operation: Option<crate::host_type_state::CheckedBuiltinCallable>,
 ) -> Result<Dag, LowerDiagnostic> {
     try_lower_subexpr_program_with_ordered_inputs_impl(
         expr,
@@ -2282,6 +2285,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
         context,
         result_claim,
         SubexprLoweringOptions {
+            root_operation,
             include_list_controls: false,
             authored_signature,
             literal_result_claim_ownership: LiteralResultClaimOwnership::AuthoredTensorHelper,
@@ -2306,6 +2310,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
         context,
         result_claim,
         SubexprLoweringOptions {
+            root_operation: None,
             include_list_controls: false,
             authored_signature,
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
@@ -2322,6 +2327,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     authored_signature: bool,
+    root_operation: Option<crate::host_type_state::CheckedBuiltinCallable>,
 ) -> Result<(Dag, crate::lowering_trace::HelperLoweringTrace), LowerDiagnostic> {
     let collector = crate::lowering_trace::Collector::new_helper();
     let dag = try_lower_subexpr_program_with_ordered_inputs_impl(
@@ -2330,6 +2336,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
         context,
         result_claim,
         SubexprLoweringOptions {
+            root_operation,
             include_list_controls: false,
             authored_signature,
             literal_result_claim_ownership: LiteralResultClaimOwnership::AuthoredTensorHelper,
@@ -2493,6 +2500,9 @@ pub(crate) fn try_lower_staged_host_region(
 /// signature someone wrote. Neither is recoverable from the expression, and
 /// passing them as bare positional booleans made the call sites unreadable.
 struct SubexprLoweringOptions {
+    /// Positive checked callee evidence for this root application only. The
+    /// scope contains numeric operands, never callable pseudo-inputs.
+    root_operation: Option<crate::host_type_state::CheckedBuiltinCallable>,
     include_list_controls: bool,
     /// See [`LowerCtx::signature_is_authored`].
     authored_signature: bool,
@@ -2515,6 +2525,7 @@ fn lower_subexpr_program_inner_impl(
     options: SubexprLoweringOptions,
 ) -> (Dag, usize, Vec<RuntimeListCheckDescriptor>) {
     let SubexprLoweringOptions {
+        root_operation,
         include_list_controls,
         authored_signature,
         literal_result_claim_ownership,
@@ -2577,7 +2588,12 @@ fn lower_subexpr_program_inner_impl(
     ctx.bindings.clear_witnesses();
     ctx.prepare_local_ascription_tokens(expr, None);
     ctx.declaration_root_claim = authored_signature;
-    let value = ctx.lower_expr_with_claim(expr, result_claim, authored_signature);
+    let value = ctx.lower_expr_with_claim_and_operation(
+        expr,
+        result_claim,
+        authored_signature,
+        root_operation,
+    );
     ctx.validate_local_ascription_token_ownership();
     // chelis#1374/#1376: an exported kernel carries its own declared result
     // claim. Without this the obligation existed only on the inlining paths,
@@ -4895,6 +4911,9 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "floor"
                         | "ceil"
                         | "round"
+                        | "is_nan"
+                        | "is_finite"
+                        | "is_infinite"
                         | "relu"
                         | "sigmoid"
                         | "tanh"
@@ -4945,6 +4964,11 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
 /// the emit-main path or the host tuple-ABI still gets a chance to
 /// materialize the runtime literal.
 fn def_body_requires_host_runtime(body: &Expr) -> bool {
+    if callable_ref_name(body).is_some_and(|name| {
+        crate::host_type_state::CheckedBuiltinCallable::from_symbol(&name).is_some()
+    }) {
+        return true;
+    }
     let exempt = fn_body_qualifies_for_to_tensor_exemption(body);
     expr_requires_host_runtime_with_ctx(body, exempt)
 }
@@ -5316,6 +5340,62 @@ impl<'a> TerminalIndex<'a> {
     }
 }
 
+/// Closed builtin producers reached through declaration aliases. Record the
+/// generated global label when its declaration is resolved, rather than
+/// reconstructing operation identity from an encoded spelling at a call site.
+/// A function body or computed callable is not a capture-free builtin producer.
+pub(crate) fn checked_builtin_callable_bindings(
+    declarations: &BTreeMap<String, Expr>,
+) -> BTreeMap<String, crate::host_type_state::CheckedBuiltinCallable> {
+    let mut bindings = BTreeMap::new();
+    for (name, body) in declarations {
+        let mut expr = body;
+        let mut visited = UnordSet::new();
+        let operation = loop {
+            let Some(reference) = callable_ref_name(expr) else {
+                break None;
+            };
+            if !visited.insert(reference.clone()) {
+                break None;
+            }
+            if let Some(body) = declarations.get(&reference) {
+                expr = body;
+            } else {
+                break crate::host_type_state::CheckedBuiltinCallable::from_symbol(&reference);
+            }
+        };
+        if let Some(operation) = operation {
+            bindings.insert(name.clone(), operation);
+            bindings.insert(
+                LoadStoreName::top_level(name).as_str().to_string(),
+                operation,
+            );
+        }
+    }
+    bindings
+}
+
+/// Resolve only the closed predicate callable identities through declaration
+/// aliases. A callable carrier is host data; applying its static identity to
+/// a tensor does not depend on materializing that carrier as a DAG value.
+fn float_predicate_callable<'a>(
+    mut expr: &'a Expr,
+    declarations: &'a BTreeMap<String, Expr>,
+) -> Option<chelis_types::FloatClassify> {
+    let mut visited = UnordSet::new();
+    loop {
+        let name = callable_ref_name(expr)?;
+        if !visited.insert(name.clone()) {
+            return None;
+        }
+        if let Some(body) = declarations.get(&name) {
+            expr = body;
+        } else {
+            return chelis_types::FloatClassify::from_name(&name);
+        }
+    }
+}
+
 fn def_is_lowered(
     name: &str,
     top_level_defs: &BTreeMap<String, Expr>,
@@ -5334,6 +5414,9 @@ fn def_is_lowered(
     }
 
     let lowered = top_level_defs.get(name).is_some_and(|body| {
+        if float_predicate_callable(body, top_level_defs).is_some() {
+            return false;
+        }
         // A declaration of function type can bind a computed function value,
         // not only a function literal. Its initializer needs the same callable
         // identity as a lexical binding; a projected closure is host-served.
@@ -5481,6 +5564,16 @@ fn expr_depends_on_nonlowerable_name(
         {
             return true;
         }
+        // A checked predicate alias keeps the application's selected
+        // scalar surface on the host, just like its direct builtin spelling.
+        if tag == DeepTag::App
+            && let Some(callee) = kids.first()
+            && callable_ref_name(callee).is_some_and(|name| !bound_names.names.contains(&name))
+            && float_predicate_callable(callee, top_level_defs).is_some()
+            && expr_type_metadata(expr).is_some_and(type_is_scalar_primitive)
+        {
+            return true;
+        }
         // A precision/rank-polymorphic def has no standalone DAG, but a
         // checked call can bind it. Inspect the body and actual arguments
         // instead of inheriting the declaration's standalone exclusion.
@@ -5528,6 +5621,9 @@ fn expr_depends_on_nonlowerable_name(
             && !bound_names.names.contains(name)
             && top_level_defs.contains_key(name)
         {
+            if float_predicate_callable(expr, top_level_defs).is_some() {
+                return false;
+            }
             return !def_is_lowered(name, top_level_defs, types, type_env, cache, visiting);
         }
         if tag == DeepTag::Fn {
@@ -7411,10 +7507,10 @@ impl ResolvedFunction {
 #[derive(Clone)]
 enum CallableExpr {
     Plain(ResolvedFunction),
-    /// Resolved key operation carried through a checked value binding. The
+    /// Closed operation carried through a checked value binding. The
     /// original operation identity is captured when the value is formed;
     /// an alias's spelling never selects the lowered primitive.
-    KeyBuiltin(String),
+    CheckedBuiltin(crate::host_type_state::CheckedBuiltinCallable),
     Vmap {
         fn_expr: ResolvedFunction,
         axis: usize,
@@ -8424,6 +8520,7 @@ struct LowerCtx<'program> {
     local_callables: UnordMap<String, CallableExpr>,
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
+    checked_builtin_callables: BTreeMap<String, crate::host_type_state::CheckedBuiltinCallable>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
     /// The checked program's declared constructor field orders, which
     /// record construction stores its slots in (chelis#3230). Empty when
@@ -8605,6 +8702,8 @@ impl<'program> LowerCtx<'program> {
         program_signatures: impl Into<Arc<BTreeMap<String, Expr>>>,
         linearity: LinearityInfo,
     ) -> Self {
+        let program_defs = program_defs.into();
+        let checked_builtin_callables = checked_builtin_callable_bindings(&program_defs);
         Self {
             host_program: None,
             host_sources: Vec::new(),
@@ -8637,7 +8736,8 @@ impl<'program> LowerCtx<'program> {
             invocation_witnesses: Vec::new(),
             local_callables: UnordMap::new(),
             program_types: program_types.into(),
-            program_defs: program_defs.into(),
+            program_defs,
+            checked_builtin_callables,
             program_signatures: program_signatures.into(),
             constructor_layouts: Arc::default(),
             random_path_condition: None,
@@ -9437,7 +9537,7 @@ impl<'program> LowerCtx<'program> {
         };
         match callable {
             CallableExpr::Plain(fn_expr) => CallableExpr::Plain(function(fn_expr)),
-            CallableExpr::KeyBuiltin(name) => CallableExpr::KeyBuiltin(name.clone()),
+            CallableExpr::CheckedBuiltin(operation) => CallableExpr::CheckedBuiltin(*operation),
             CallableExpr::Vmap { fn_expr, axis } => CallableExpr::Vmap {
                 fn_expr: function(fn_expr),
                 axis: *axis,
@@ -10662,7 +10762,7 @@ impl<'program> LowerCtx<'program> {
     /// producer, so a host consumer can read the projected value.
     fn stage_key_builtin_tuple_item(&mut self, expr: &Expr, name: &str) -> Option<LoweredValue> {
         use crate::host::staged::{HostSource, HostValueId, StageValue};
-        use crate::host_type_state::{HostTypeTerm, KeyBuiltinCallable};
+        use crate::host_type_state::{CheckedBuiltinCallable, HostTypeTerm};
         let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
             return None;
         };
@@ -10672,8 +10772,8 @@ impl<'program> LowerCtx<'program> {
         {
             return None;
         }
-        let op = KeyBuiltinCallable::from_symbol(name)?;
-        let ty = HostTypeTerm::KeyBuiltinCallable(op);
+        let op = CheckedBuiltinCallable::from_symbol(name)?;
+        let ty = HostTypeTerm::CheckedBuiltinCallable(op);
         let id = HostValueId(self.next_host_value);
         self.next_host_value += 1;
         if self.host_program.is_some() {
@@ -10700,7 +10800,7 @@ impl<'program> LowerCtx<'program> {
         let referenced = kids.first().and_then(symbol_name)?;
         if let Some(value) = self.bindings.get(referenced)
             && let LoweredValue::Host {
-                ty: crate::host_type_state::HostTypeTerm::KeyBuiltinCallable(op),
+                ty: crate::host_type_state::HostTypeTerm::CheckedBuiltinCallable(op),
                 ..
             } = value
             && op.symbol() == name
@@ -10721,6 +10821,16 @@ impl<'program> LowerCtx<'program> {
         expr: &Expr,
         claim: Option<&TensorType>,
         authored_result_claim: bool,
+    ) -> LoweredValue {
+        self.lower_expr_with_claim_and_operation(expr, claim, authored_result_claim, None)
+    }
+
+    fn lower_expr_with_claim_and_operation(
+        &mut self,
+        expr: &Expr,
+        claim: Option<&TensorType>,
+        authored_result_claim: bool,
+        operation: Option<crate::host_type_state::CheckedBuiltinCallable>,
     ) -> LoweredValue {
         // Resolve in the declaring activation, BEFORE a nested helper can
         // install its own same-spelled binders. A function expression resolves
@@ -10761,7 +10871,7 @@ impl<'program> LowerCtx<'program> {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut result = self.lower_expr_unclaimed(expr, claim.filter(|_| function));
+        let mut result = self.lower_expr_unclaimed(expr, claim.filter(|_| function), operation);
         let start = self.invocation_witnesses.len();
         for (axis, label, required, literal) in requirements {
             if let Some(mut id) = result.as_single_node() {
@@ -11082,8 +11192,15 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    fn lower_expr_unclaimed(&mut self, expr: &Expr, claim: Option<&TensorType>) -> LoweredValue {
-        if let Some(value) = self.stage_host_value(expr, false) {
+    fn lower_expr_unclaimed(
+        &mut self,
+        expr: &Expr,
+        claim: Option<&TensorType>,
+        operation: Option<crate::host_type_state::CheckedBuiltinCallable>,
+    ) -> LoweredValue {
+        if operation.is_none()
+            && let Some(value) = self.stage_host_value(expr, false)
+        {
             return value;
         }
         let host_ty = self
@@ -11108,8 +11225,32 @@ impl<'program> LowerCtx<'program> {
                 Some(expr.span()),
                 self.current_span_id.clone(),
             ),
-            Expr::MetaExpr(meta_expr, _) => self.lower_expr_unclaimed(&meta_expr.expr, claim),
-            Expr::Node(node, span) => self.lower_node(node, *span, claim),
+            Expr::MetaExpr(meta_expr, _) => {
+                self.lower_expr_unclaimed(&meta_expr.expr, claim, operation)
+            }
+            Expr::Node(node, span) => match operation {
+                Some(operation) if node.tag() == DeepTag::App => {
+                    let (_, args) = node.children_slice().split_first().unwrap_or_else(|| {
+                        raise_malformed_deep(
+                            "checked application has no callee",
+                            Some(*span),
+                            self.current_span_id.clone(),
+                        )
+                    });
+                    self.lower_checked_builtin_app(
+                        operation,
+                        args,
+                        &self.type_from_meta(node.meta()),
+                        *span,
+                    )
+                }
+                Some(_) => raise_malformed_deep(
+                    "checked root authority requires an application",
+                    Some(*span),
+                    self.current_span_id.clone(),
+                ),
+                None => self.lower_node(node, *span, claim),
+            },
             Expr::BareList(_, _) | Expr::UnknownForm(_) => raise_malformed_deep(
                 "a transitional Expr variant in expression position",
                 Some(expr.span()),
@@ -11617,8 +11758,8 @@ impl<'program> LowerCtx<'program> {
                         // expressions can then capture aliases through the
                         // same typed host carrier as other lexical values.
                         let value = self.stage_host_value(&bind_kids[i + 1], false).or_else(|| {
-                            if let CallableExpr::KeyBuiltin(operation) = &callable {
-                                self.key_builtin_alias_value(&bind_kids[i + 1], operation)
+                            if let CallableExpr::CheckedBuiltin(operation) = &callable {
+                                self.key_builtin_alias_value(&bind_kids[i + 1], operation.symbol())
                             } else {
                                 None
                             }
@@ -12447,6 +12588,7 @@ impl<'program> LowerCtx<'program> {
             && let Some(Expr::Atom(Atom::Name(func_name), _)) = func_kids.first()
             && !self.bindings.contains_key(func_name)
             && !self.program_defs.contains_key(func_name)
+            && !self.checked_builtin_callables.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
             && !self.fn_typed_params.contains(func_name)
         {
@@ -12655,6 +12797,27 @@ impl<'program> LowerCtx<'program> {
         )
     }
 
+    fn lower_checked_builtin_app(
+        &mut self,
+        operation: crate::host_type_state::CheckedBuiltinCallable,
+        args: &[Expr],
+        ty: &TensorType,
+        app_span: Span,
+    ) -> LoweredValue {
+        if operation == crate::host_type_state::CheckedBuiltinCallable::Split {
+            if args.len() != 1 {
+                raise_lowering_error(
+                    "checked split_key callable has wrong arity",
+                    Some(app_span),
+                    self.current_span_id.clone(),
+                );
+            }
+            self.lower_split_key(&args[0])
+        } else {
+            LoweredValue::Node(self.lower_builtin_app(operation.symbol(), args, ty, app_span, None))
+        }
+    }
+
     fn try_lower_callable_app(
         &mut self,
         func: &Expr,
@@ -12691,18 +12854,9 @@ impl<'program> LowerCtx<'program> {
                 checked_result_names,
                 inlining_name,
             )),
-            CallableExpr::KeyBuiltin(name) => Some(if name == "split_key" {
-                if args.len() != 1 {
-                    raise_lowering_error(
-                        "checked split_key callable has wrong arity",
-                        Some(app_span),
-                        self.current_span_id.clone(),
-                    );
-                }
-                self.lower_split_key(&args[0])
-            } else {
-                LoweredValue::Node(self.lower_builtin_app(&name, args, ty, app_span, None))
-            }),
+            CallableExpr::CheckedBuiltin(operation) => {
+                Some(self.lower_checked_builtin_app(operation, args, ty, app_span))
+            }
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
             }
@@ -12850,11 +13004,11 @@ impl<'program> LowerCtx<'program> {
                 }
                 if !declaration
                     && let Some(LoweredValue::Host {
-                        ty: crate::host_type_state::HostTypeTerm::KeyBuiltinCallable(op),
+                        ty: crate::host_type_state::HostTypeTerm::CheckedBuiltinCallable(op),
                         ..
                     }) = self.bindings.get(&name)
                 {
-                    return Some(CallableExpr::KeyBuiltin(op.symbol().to_string()));
+                    return Some(CallableExpr::CheckedBuiltin(*op));
                 }
                 // The innermost binding of the name wins (chelis#1949): a
                 // function-typed parameter is a callable, and a local value
@@ -12874,6 +13028,9 @@ impl<'program> LowerCtx<'program> {
                 {
                     return None;
                 }
+                if let Some(operation) = self.checked_builtin_callables.get(&name) {
+                    return Some(CallableExpr::CheckedBuiltin(*operation));
+                }
                 if let Some(body) = self.program_defs.get(&name) {
                     let mut callable = self.resolve_callable_expr_inner(body, visited, true)?;
                     if let CallableExpr::Plain(function) = &mut callable {
@@ -12888,13 +13045,8 @@ impl<'program> LowerCtx<'program> {
                     }
                     return Some(callable);
                 }
-                if matches!(
-                    name.as_str(),
-                    "key_from_seed" | "split_key" | "split_keys" | "fold_in"
-                ) {
-                    return Some(CallableExpr::KeyBuiltin(name));
-                }
-                None
+                crate::host_type_state::CheckedBuiltinCallable::from_symbol(&name)
+                    .map(CallableExpr::CheckedBuiltin)
             }
             DeepTag::Vmap => {
                 // chelis#524: distinguish the documented `vmap` contract
@@ -12951,7 +13103,7 @@ impl<'program> LowerCtx<'program> {
                         }
                         // `vmap(parameter)` is G2 territory.
                         CallableExpr::Parameter { .. } => None,
-                        CallableExpr::KeyBuiltin(_) => None,
+                        CallableExpr::CheckedBuiltin(_) => None,
                     })
             }
             DeepTag::Grad => self
@@ -15945,6 +16097,28 @@ impl<'program> LowerCtx<'program> {
                 } else {
                     self.attach_reuse_hint(node, app_span, &[x])
                 }
+            }
+            name if args.len() == 1 && chelis_types::FloatClassify::from_name(name).is_some() => {
+                let kind =
+                    chelis_types::FloatClassify::from_name(name).expect("classification identity");
+                let x = self.lower_expr_node(&args[0], "float classification input");
+                let result_ty = TensorType {
+                    dims: self
+                        .dag
+                        .get(x)
+                        .expect("classification input node")
+                        .output_type
+                        .dims
+                        .clone(),
+                    precision: Prim::Bool,
+                };
+                self.dag.add_node(
+                    self.owner(),
+                    RiscOp::FloatClassify(kind),
+                    vec![x],
+                    result_ty,
+                    self.current_span_id.clone(),
+                )
             }
             "floor" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "floor input");
@@ -23902,8 +24076,9 @@ impl<'program> LowerCtx<'program> {
         LoweredValue::Tuple(
             kids.iter()
                 .map(|expr| {
-                    if let Some(CallableExpr::KeyBuiltin(name)) = self.resolve_callable_expr(expr)
-                        && let Some(staged) = self.key_builtin_alias_value(expr, &name)
+                    if let Some(CallableExpr::CheckedBuiltin(name)) =
+                        self.resolve_callable_expr(expr)
+                        && let Some(staged) = self.key_builtin_alias_value(expr, name.symbol())
                     {
                         staged
                     } else {
@@ -26145,6 +26320,67 @@ mod tests {
                 .unwrap_err()
                 .contains("invalid")
         );
+    }
+
+    #[test]
+    fn checked_root_authority_preserves_actual_axes_without_callable_numeric_inputs() {
+        use crate::host_type_state::CheckedBuiltinCallable;
+        let context = prepare_subexpr_lowering_context(
+            &BTreeMap::new(),
+            Arc::new(BTreeMap::new()),
+            Arc::new(BTreeMap::new()),
+        );
+        for kind in [
+            chelis_types::FloatClassify::Nan,
+            chelis_types::FloatClassify::Finite,
+            chelis_types::FloatClassify::Infinite,
+        ] {
+            for precision in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+                let expr = chelis_deep::parser::parse_str("(app {type: (t-tensor {} (d-name {} *) (d-name {} *) (t-prim {} bool))} (var {} f) (var {} x))").unwrap().remove(0);
+                let axes = vec![
+                    DimInfo::Named("batch".into(), None),
+                    DimInfo::Named("_rt_actual_axis".into(), None),
+                ];
+                let input = TensorType {
+                    dims: axes.clone(),
+                    precision,
+                };
+                let dag = try_lower_tensor_helper_program_with_ordered_inputs(
+                    &expr,
+                    vec![("x".into(), input.clone())],
+                    &context,
+                    None,
+                    false,
+                    Some(CheckedBuiltinCallable::FloatClassify(kind)),
+                )
+                .unwrap();
+                let root = dag.get(dag.roots()[0]).unwrap();
+                assert!(matches!(root.op, RiscOp::FloatClassify(actual) if actual == kind));
+                assert_eq!(
+                    root.output_type,
+                    TensorType {
+                        dims: axes,
+                        precision: Prim::Bool
+                    }
+                );
+                assert_eq!(dag.get(root.inputs[0]).unwrap().output_type, input);
+                assert!(dag.nodes().iter().all(
+                    |node| !matches!(&node.op, RiscOp::Load { name } if name.as_str() == "f")
+                ));
+                assert!(
+                    try_lower_tensor_helper_program_with_ordered_inputs(
+                        &expr,
+                        vec![("x".into(), input)],
+                        &context,
+                        None,
+                        false,
+                        None
+                    )
+                    .is_err(),
+                    "an unresolved callable signature cannot invent closed identity"
+                );
+            }
+        }
     }
 
     #[test]

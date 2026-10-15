@@ -489,6 +489,26 @@ impl HipEmitter {
     ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
         let dag = storage_plan.emission();
         Self::reject_integer_abs(dag)?;
+
+        if let Some((node, kind)) = dag.nodes().iter().find_map(|node| match node.op {
+            RiscOp::FloatClassify(kind) => Some((node, kind)),
+            _ => None,
+        }) {
+            return Err(Unsupported::new(
+                UnsupportedKind::Op(kind.name().into()),
+                format!(
+                    "stored-width {} ({}) at hip DAG node {}",
+                    kind.name(),
+                    kind.atom(),
+                    node.id.0
+                ),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    965,
+                    "stored-width classification has no hip kernel; use the C target"
+                ),
+            ));
+        }
         Self::validate_count_nodes(dag)?;
         Self::reject_key_results(dag)?;
         // Device input ownership proves its admitted strides, not a row-major
@@ -1520,6 +1540,7 @@ impl HipEmitter {
             Self::elem_kind(&n.output_type)
         };
         Ok(match op {
+            RiscOp::FloatClassify(_) => None,
             RiscOp::RuntimeRecurrence(_) | RiscOp::RuntimeRecurrenceAdjoint { .. } => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op("runtime recurrence".into()),
@@ -2033,6 +2054,9 @@ impl HipEmitter {
                     take_gate(),
                 )
             }
+            RiscOp::FloatClassify(_) => {
+                unreachable!("classification rejected before HIP kernel emission")
+            }
             RiscOp::Compare(kind) => {
                 let precision = operand_prec();
                 let (lhs, rhs) = Self::comparison_value_expressions(precision);
@@ -2445,6 +2469,7 @@ impl HipEmitter {
                 .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
+            RiscOp::FloatClassify(_) => unreachable!("classification rejected before HIP emission"),
             RiscOp::RuntimeRecurrence(_) | RiscOp::RuntimeRecurrenceAdjoint { .. } => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op("runtime recurrence".into()),
@@ -5409,6 +5434,7 @@ impl HipEmitter {
             | RiscOp::TruncDiv
             | RiscOp::Mod
             | RiscOp::Bitwise(_)
+            | RiscOp::FloatClassify(_)
             | RiscOp::Compare(_)
             | RiscOp::Logical(_)
             | RiscOp::Where

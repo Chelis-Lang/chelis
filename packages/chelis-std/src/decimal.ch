@@ -283,7 +283,7 @@ def dec_pow2_f64(exponent: i64) -> f64 = {
   power = fold(fn (acc: f64, step: (i64, f64)) -> if (size |> bitand(step.0) |> eq(0i64)) then acc else mul(acc, step.1), 1.0f64, dec_two_powers())
   if lt(exponent, 0i64) then div(1.0f64, power) else power
 }
-def dec_is_finite(value: f64) -> bool = value |> sub(value) |> eq(0.0f64)
+def dec_is_finite(value: f64) -> bool = is_finite(value)
 -- The magnitude of any i64, the minimum included, read through its negation.
 def dec_i64_magnitude(value: i64) -> List[i64] = {
   down = if gt(value, 0i64) then neg(value) else value

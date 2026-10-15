@@ -212,6 +212,15 @@ const CONTRACTS: &[(&str, Contract)] = &[
             "sum(sum(insert(x, 1i32, 3i64), 1i32), 0i32)",
         ),
     ),
+    (
+        "is_finite",
+        NoFloatAdjoint(Marker::DifferentiationContractOf),
+    ),
+    (
+        "is_infinite",
+        NoFloatAdjoint(Marker::DifferentiationContractOf),
+    ),
+    ("is_nan", NoFloatAdjoint(Marker::ZeroCotangent)),
     ("key_from_seed", NoFloatAdjoint(Marker::ReceivesNoCotangent)),
     (
         "layer_norm",
@@ -536,6 +545,9 @@ fn atom_text(spec: &str, atom: &str) -> String {
         let Some(body) = line.strip_prefix('>') else {
             break;
         };
+        if !block.is_empty() && body.trim_start().starts_with("**[") {
+            break;
+        }
         block.push(body.trim());
     }
     assert!(!block.is_empty(), "spec/05 has no `{head}` atom");
@@ -764,7 +776,8 @@ fn every_numeric_identity_is_classified_against_its_atom() {
 /// Why classifying `name` (governed by `atom`) as having no float adjoint,
 /// with `marker`, is not supported by the atom, or `None` when it is.
 ///
-/// 1. A sentence of the atom contains the marker's exact spelling.
+/// 1. A sentence of the atom contains the marker's exact spelling, or the
+///    closed differentiation-inheritance spelling in [`differentiation_reference`].
 /// 2. That sentence designates the identity: it names it, the atom governs
 ///    no other surface identity, or it contains the identity's reviewed
 ///    [`FAMILY_DESIGNATED`] noun.
@@ -793,7 +806,11 @@ fn classification_error(
     let text = atom_text(spec, atom);
     let statements: Vec<&str> = sentences(&text)
         .into_iter()
-        .filter(|sentence| sentence.contains(marker.spelling()))
+        .filter(|sentence| {
+            sentence.contains(marker.spelling())
+                || matches!(marker, Marker::DifferentiationContractOf)
+                    && differentiation_reference(sentence).is_some()
+        })
         .collect();
     if statements.is_empty() {
         return Some(format!(
@@ -821,24 +838,51 @@ fn classification_error(
         ));
     }
     if let Marker::DifferentiationContractOf = marker {
-        let referenced = designating.iter().find_map(|sentence| {
-            let rest = sentence.split_once(marker.spelling())?.1;
-            Some(rest.split_once(']')?.0.to_string())
-        })?;
-        let adjoint = registry.iter().find(|(other, other_atom)| {
-            *other_atom == referenced
-                && matches!(
-                    CONTRACTS.iter().find(|(n, _)| n == other),
-                    Some((_, Adjoint(..)))
-                )
-        });
-        if let Some((other, _)) = adjoint {
+        let Some(referenced) = designating
+            .iter()
+            .find_map(|sentence| differentiation_reference(sentence))
+        else {
             return Some(format!(
-                "`{name}` adopts [{referenced}]'s differentiation contract, which states a float adjoint for `{other}`"
+                "`{name}` has no complete differentiation-contract reference"
             ));
+        };
+        let inherited: Vec<_> = registry
+            .iter()
+            .filter(|(other, other_atom)| {
+                other_atom == referenced && other.starts_with(|c: char| c.is_ascii_lowercase())
+            })
+            .collect();
+        if inherited.is_empty() {
+            return Some(format!(
+                "`{name}` references [{referenced}] without a classified surface identity"
+            ));
+        }
+        for (other, _) in inherited {
+            if !matches!(
+                CONTRACTS.iter().find(|(n, _)| n == other),
+                Some((_, NoFloatAdjoint(_)))
+            ) {
+                return Some(format!(
+                    "`{name}` adopts [{referenced}]'s differentiation contract, which does not classify `{other}` without a float adjoint"
+                ));
+            }
         }
     }
     None
+}
+
+/// The two exact inheritance forms used by the governing atoms. A list that
+/// omits differentiation, a nearby reference, or an incomplete reference cannot
+/// establish an inherited differentiation contract.
+fn differentiation_reference(sentence: &str) -> Option<&str> {
+    [
+        "differentiation contract of [",
+        "signature, dtype, shape, no-conversion, accumulator, differentiation, and rejection contract of [",
+    ].iter().find_map(|spelling| {
+        let rest = sentence.split_once(spelling)?.1;
+        let atom = rest.split_once(']')?.0;
+        (!atom.is_empty()).then_some(atom)
+    })
 }
 
 /// Negative control: no float-adjoint identity may be reclassified with any
@@ -951,6 +995,72 @@ fn recorded_gaps_still_fail_exactly_as_recorded() {
             assert!(
                 stderr.contains(diagnostic) && !stderr.contains(FALLBACK),
                 "`{name}` fails differently at {dtype}: {stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn inherited_classifier_differentiation_requires_its_exact_contract() {
+    let spec =
+        std::fs::read_to_string(repo_root().join("spec/05-risc-primitives.md")).expect("spec/05");
+    let registry = registry_rows();
+    for (name, atom) in [("is_finite", "05-OP-21"), ("is_infinite", "05-OP-22")] {
+        assert!(
+            classification_error(
+                &spec,
+                &registry,
+                name,
+                atom,
+                Marker::DifferentiationContractOf
+            )
+            .is_none()
+        );
+        let start = spec.find(&format!("> **[{atom}]**")).expect("owning atom");
+        let (before, owner_and_after) = spec.split_at(start);
+        for replacement in [
+            "accumulator, and rejection contract of",
+            "accumulator, differentiation_like, and rejection contract of",
+        ] {
+            let mutated = format!(
+                "{before}{}",
+                owner_and_after.replacen(
+                    "accumulator, differentiation, and rejection contract of",
+                    replacement,
+                    1
+                )
+            );
+            assert_ne!(mutated, spec);
+            assert!(
+                classification_error(
+                    &mutated,
+                    &registry,
+                    name,
+                    atom,
+                    Marker::DifferentiationContractOf
+                )
+                .is_some()
+            );
+        }
+        for target in ["05-OP-40", "05-OP-99999"] {
+            let mutated = format!(
+                "{before}{}",
+                owner_and_after.replacen(
+                    "[05-OP-20]. It returns",
+                    &format!("[{target}]. It returns"),
+                    1
+                )
+            );
+            assert_ne!(mutated, spec);
+            assert!(
+                classification_error(
+                    &mutated,
+                    &registry,
+                    name,
+                    atom,
+                    Marker::DifferentiationContractOf
+                )
+                .is_some()
             );
         }
     }

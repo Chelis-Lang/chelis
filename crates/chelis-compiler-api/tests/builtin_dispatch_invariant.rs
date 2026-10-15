@@ -24,7 +24,7 @@ use chelis_unord::UnordSet;
 use std::fs;
 use std::path::PathBuf;
 
-use chelis_types::BUILTIN_NAMES;
+use chelis_types::{BUILTIN_NAMES, FloatClassify};
 
 /// Builtins that legitimately do not need a host-runtime arm. Document
 /// the reason per the closed vocabulary above.
@@ -35,73 +35,84 @@ fn runtime_source_path() -> PathBuf {
     manifest.join("src").join("runtime").join("eval.rs")
 }
 
-/// Extract every dispatch arm name from the `eval_builtin` match
-/// statement. We scan the runtime source between the function signature
-/// and the next `fn` definition (or end of file — `eval_builtin` is
-/// currently the last item in `runtime/eval.rs`) for `"name" =>`
-/// patterns.
-fn extracted_dispatched_names() -> UnordSet<String> {
-    let source = fs::read_to_string(runtime_source_path())
-        .expect("runtime/eval.rs must be readable from CARGO_MANIFEST_DIR/src");
-    let start = source
-        .find("fn eval_builtin")
-        .expect("runtime/eval.rs must contain fn eval_builtin");
-    let after_start = start + "fn eval_builtin".len();
-    let end = [
-        "\nfn ",
-        "\npub fn ",
-        "\npub(super) fn ",
-        "\npub(crate) fn ",
-        "\n    fn ",
-        "\n    pub fn ",
-        "\n    pub(super) fn ",
-        "\n    pub(crate) fn ",
-    ]
-    .iter()
-    .filter_map(|marker| source[after_start..].find(marker))
-    .min()
-    .map(|offset| after_start + offset)
-    .unwrap_or(source.len());
-    let body = &source[start..end];
+/// Read the final `match name` owned by `eval_builtin`, rather than text in
+/// comments, nested helpers, or unrelated functions. Literal arms and the closed
+/// typed classifier family are the two dispatch forms admitted by this oracle.
+fn dispatched_names_in_source(source: &str) -> UnordSet<String> {
+    let file = syn::parse_file(source).expect("host-runtime source must parse");
+    let functions: Vec<_> = file
+        .items
+        .iter()
+        .filter_map(|item| {
+            let syn::Item::Impl(implementation) = item else {
+                return None;
+            };
+            Some(implementation.items.iter().filter_map(|item| {
+                let syn::ImplItem::Fn(function) = item else {
+                    return None;
+                };
+                (function.sig.ident == "eval_builtin").then_some(&function.block)
+            }))
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        functions.len(),
+        1,
+        "exactly one eval_builtin owner is required"
+    );
+    let Some(syn::Stmt::Expr(syn::Expr::Match(dispatch), None)) = functions[0].stmts.last() else {
+        panic!("eval_builtin must return its dispatch match");
+    };
+    assert_eq!(
+        *dispatch.expr,
+        syn::parse_quote!(name),
+        "dispatch must select the builtin name"
+    );
 
+    let classifier: syn::Arm = syn::parse_str(CLASSIFIER_ARM).expect("reviewed classifier arm");
     let mut out = UnordSet::new();
-    for line in body.lines() {
-        let trimmed = line.trim_start();
-        // Match `"name" =>` at the start of a (possibly-indented) line.
-        // Names are ASCII letters/digits/underscores; we don't need to
-        // unify multi-byte UTF-8 here.
-        if let Some(rest) = trimmed.strip_prefix('"')
-            && let Some(end_q) = rest.find('"')
-        {
-            let name = &rest[..end_q];
-            let mut after = rest[end_q + 1..].trim_start();
-            // An or-pattern arm, `"expand" | "insert" => {`, dispatches every
-            // name in it. Walk the alternatives so a shared arm is not read as
-            // no arm at all for any of them.
-            let mut names = vec![name.to_string()];
-            while let Some(tail) = after.strip_prefix('|') {
-                let tail = tail.trim_start();
-                let Some(rest_alt) = tail.strip_prefix('"') else {
-                    break;
-                };
-                let Some(end_alt) = rest_alt.find('"') else {
-                    break;
-                };
-                names.push(rest_alt[..end_alt].to_string());
-                after = rest_alt[end_alt + 1..].trim_start();
-            }
-            if after.starts_with("=>")
-                && names
-                    .iter()
-                    .all(|n| n.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
-            {
-                for n in names {
-                    out.insert(n);
+    for arm in &dispatch.arms {
+        if arm == &classifier {
+            // Membership comes from the same canonical resolver as production,
+            // not a second spelling inventory or a runtime allowlist.
+            for name in BUILTIN_NAMES {
+                if let Some(operation) = FloatClassify::from_name(name) {
+                    assert_eq!(
+                        operation.name(),
+                        *name,
+                        "classifier identity must round-trip"
+                    );
+                    out.insert((*name).to_string());
                 }
             }
+        } else if arm.guard.is_none() {
+            literal_pattern_names(&arm.pat, &mut out);
         }
     }
     out
+}
+
+fn literal_pattern_names(pattern: &syn::Pat, out: &mut UnordSet<String>) {
+    match pattern {
+        syn::Pat::Lit(literal) => {
+            if let syn::Lit::Str(name) = &literal.lit {
+                out.insert(name.value());
+            }
+        }
+        syn::Pat::Or(alternatives) => {
+            for pattern in &alternatives.cases {
+                literal_pattern_names(pattern, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extracted_dispatched_names() -> UnordSet<String> {
+    let source = fs::read_to_string(runtime_source_path())
+        .expect("runtime/eval.rs must be readable from CARGO_MANIFEST_DIR/src");
+    dispatched_names_in_source(&source)
 }
 
 #[test]
@@ -167,4 +178,126 @@ fn allowlist_entries_are_in_builtin_names() {
         "the following allowlist entries are not in BUILTIN_NAMES (likely \
          the name was removed without updating the allowlist): {stale:?}"
     );
+}
+
+fn classifier_fixture(arm: &str) -> String {
+    format!(
+        "impl Runtime {{ fn eval_builtin() {{ match name {{ {arm} _ => unreachable!(), }} }} }}"
+    )
+}
+
+const CLASSIFIER_ARM: &str = r#"
+name if chelis_types::FloatClassify::from_name(name).is_some() => {
+    eval_float_classification(
+        chelis_types::FloatClassify::from_name(name).expect("classification identity"),
+        args,
+    )
+}
+"#;
+
+fn assert_classifiers_present(source: &str, expected: bool) {
+    let names = dispatched_names_in_source(source);
+    for operation in [
+        FloatClassify::Nan,
+        FloatClassify::Finite,
+        FloatClassify::Infinite,
+    ] {
+        assert_eq!(
+            names.contains(operation.name()),
+            expected,
+            "{}",
+            operation.name()
+        );
+    }
+}
+
+#[test]
+fn closed_classifier_arm_covers_its_canonical_names() {
+    assert_classifiers_present(&classifier_fixture(CLASSIFIER_ARM), true);
+}
+
+#[test]
+fn absent_or_erased_classifier_handler_does_not_count() {
+    assert_classifiers_present(&classifier_fixture(""), false);
+    let erased = CLASSIFIER_ARM.replace(
+        "eval_float_classification(\n        chelis_types::FloatClassify::from_name(name).expect(\"classification identity\"),\n        args,\n    )",
+        "unreachable!()",
+    );
+    assert_ne!(erased, CLASSIFIER_ARM);
+    assert_classifiers_present(&classifier_fixture(&erased), false);
+}
+
+#[test]
+fn wrong_classifier_guard_identity_or_arguments_do_not_count() {
+    for (old, new) in [
+        (".is_some()", ".is_none()"),
+        ("name if", "other_name if"),
+        ("from_name(name).expect", "from_name(\"is_nan\").expect"),
+        (
+            ".expect(\"classification identity\")",
+            ".unwrap_or(chelis_types::FloatClassify::Nan)",
+        ),
+        ("        args,", "        other_args,"),
+        ("eval_float_classification(", "different_handler("),
+    ] {
+        let changed = CLASSIFIER_ARM.replace(old, new);
+        assert_ne!(changed, CLASSIFIER_ARM);
+        assert_classifiers_present(&classifier_fixture(&changed), false);
+    }
+}
+
+#[test]
+fn classifier_evidence_outside_the_dispatch_arm_does_not_count() {
+    let outside = format!(
+        "{} impl Other {{ fn another() {{ match name {{ {CLASSIFIER_ARM} _ => unreachable!(), }} }} }}",
+        classifier_fixture("")
+    );
+    assert_classifiers_present(&outside, false);
+    let comment = format!("/* {CLASSIFIER_ARM} */");
+    assert_classifiers_present(&classifier_fixture(&comment), false);
+    let closure = CLASSIFIER_ARM
+        .replace(
+            "    eval_float_classification(",
+            "    let unused = || eval_float_classification(",
+        )
+        .replace("\n    )\n}", "\n    ); unreachable!()\n}");
+    assert_ne!(closure, CLASSIFIER_ARM);
+    assert_classifiers_present(&classifier_fixture(&closure), false);
+}
+
+#[test]
+fn literal_dispatch_reads_only_actual_unguarded_match_patterns() {
+    let source = classifier_fixture(
+        r#""expand" | "insert" => handler(args), "wrong" if false => unreachable!(), /* "comment" => unused, */ "elsewhere" => { let _s = "\"literal\" => unused"; other(args) },"#,
+    );
+    let names = dispatched_names_in_source(&source);
+    assert!(names.contains("expand"));
+    assert!(names.contains("insert"));
+    assert!(names.contains("elsewhere"));
+    assert!(!names.contains("wrong"));
+    assert!(!names.contains("comment"));
+    assert!(!names.contains("literal"));
+}
+
+#[test]
+fn removing_or_erasing_the_production_classifier_arm_is_detected() {
+    let source = fs::read_to_string(runtime_source_path()).expect("host-runtime source");
+    let actual_arm = CLASSIFIER_ARM
+        .trim()
+        .lines()
+        .map(|line| format!("            {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        source.matches(&actual_arm).count(),
+        1,
+        "exact production arm required"
+    );
+    assert_classifiers_present(&source, true);
+    let removed = source.replacen(&actual_arm, "", 1);
+    assert_classifiers_present(&removed, false);
+    let erased_arm = actual_arm.replace("eval_float_classification(", "different_handler(");
+    assert_ne!(erased_arm, actual_arm);
+    let erased = source.replacen(&actual_arm, &erased_arm, 1);
+    assert_classifiers_present(&erased, false);
 }

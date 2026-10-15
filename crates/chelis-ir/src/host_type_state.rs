@@ -20,20 +20,24 @@ use chelis_types::types::Prim;
 
 use crate::dag::{DimInfo, TensorType};
 
-/// A checked, unspecialized key operation carried as a host value. The
+/// A checked, unspecialized builtin operation carried as a host value. The
 /// operation identity belongs to the value's type until a checked call or a
 /// concrete callback formal selects one of its scalar/tensor signatures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyBuiltinCallable {
+pub enum CheckedBuiltinCallable {
+    FloatClassify(chelis_types::FloatClassify),
     FromSeed,
     Split,
     SplitMany,
     FoldIn,
 }
 
-impl KeyBuiltinCallable {
+impl CheckedBuiltinCallable {
     pub fn from_symbol(name: &str) -> Option<Self> {
         match name {
+            "is_nan" => Some(Self::FloatClassify(chelis_types::FloatClassify::Nan)),
+            "is_finite" => Some(Self::FloatClassify(chelis_types::FloatClassify::Finite)),
+            "is_infinite" => Some(Self::FloatClassify(chelis_types::FloatClassify::Infinite)),
             "key_from_seed" => Some(Self::FromSeed),
             "split_key" => Some(Self::Split),
             "split_keys" => Some(Self::SplitMany),
@@ -44,11 +48,91 @@ impl KeyBuiltinCallable {
 
     pub fn symbol(self) -> &'static str {
         match self {
+            Self::FloatClassify(kind) => kind.name(),
             Self::FromSeed => "key_from_seed",
             Self::Split => "split_key",
             Self::SplitMany => "split_keys",
             Self::FoldIn => "fold_in",
         }
+    }
+}
+
+/// A builtin identity fixed at host-IR ingress. Closed checked operations
+/// retain their discriminator through rewriting and type resolution; ordinary
+/// builtin names keep their existing behavior. The private representation
+/// prevents constructing a string-only spelling of a checked operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBuiltinIdentity(HostBuiltinIdentityKind);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostBuiltinIdentityKind {
+    Ordinary(String),
+    Checked(CheckedBuiltinCallable),
+}
+
+impl HostBuiltinIdentity {
+    pub fn as_str(&self) -> &str {
+        match &self.0 {
+            HostBuiltinIdentityKind::Ordinary(name) => name,
+            HostBuiltinIdentityKind::Checked(operation) => operation.symbol(),
+        }
+    }
+
+    pub fn checked_operation(&self) -> Option<CheckedBuiltinCallable> {
+        match self.0 {
+            HostBuiltinIdentityKind::Checked(operation) => Some(operation),
+            HostBuiltinIdentityKind::Ordinary(_) => None,
+        }
+    }
+}
+
+impl From<CheckedBuiltinCallable> for HostBuiltinIdentity {
+    fn from(operation: CheckedBuiltinCallable) -> Self {
+        Self(HostBuiltinIdentityKind::Checked(operation))
+    }
+}
+
+impl From<String> for HostBuiltinIdentity {
+    fn from(name: String) -> Self {
+        match CheckedBuiltinCallable::from_symbol(&name) {
+            Some(operation) => operation.into(),
+            None => Self(HostBuiltinIdentityKind::Ordinary(name)),
+        }
+    }
+}
+
+impl From<&str> for HostBuiltinIdentity {
+    fn from(name: &str) -> Self {
+        name.to_owned().into()
+    }
+}
+
+impl std::ops::Deref for HostBuiltinIdentity {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for HostBuiltinIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<str> for HostBuiltinIdentity {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+impl PartialEq<&str> for HostBuiltinIdentity {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+impl PartialEq<String> for HostBuiltinIdentity {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
     }
 }
 
@@ -61,7 +145,10 @@ impl KeyBuiltinCallable {
 pub enum HostTypeTerm {
     Scalar(HostPrecisionTerm),
     Fn(Vec<HostTypeTerm>, Box<HostTypeTerm>),
-    KeyBuiltinCallable(KeyBuiltinCallable),
+    CheckedBuiltinCallable(CheckedBuiltinCallable),
+    /// A runtime choice of checked operations, not one statically fixed
+    /// operation. Each alternative retains its complete checked contract.
+    CheckedCallableChoice(Vec<CheckedBuiltinCallable>),
     Adt(String, Vec<HostTypeTerm>),
     List(Box<HostTypeTerm>),
     Dict(Box<HostTypeTerm>, Box<HostTypeTerm>),
@@ -128,7 +215,10 @@ pub struct HostInferenceVar(pub u32);
 pub enum ConcreteHostType {
     Scalar(Prim),
     Function(Vec<ConcreteHostType>, Box<ConcreteHostType>),
-    KeyBuiltinCallable(KeyBuiltinCallable),
+    CheckedBuiltinCallable(CheckedBuiltinCallable),
+    /// A runtime choice of checked operations, not one statically fixed
+    /// operation. Each alternative retains its complete checked contract.
+    CheckedCallableChoice(Vec<CheckedBuiltinCallable>),
     Adt(String, Vec<ConcreteHostType>),
     List(Box<ConcreteHostType>),
     Dict(Box<ConcreteHostType>, Box<ConcreteHostType>),
@@ -142,6 +232,10 @@ pub enum ConcreteHostType {
 /// Why a logical type term could not be made concrete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostTypeResolutionError {
+    InvalidCheckedApplication {
+        operation: String,
+        detail: String,
+    },
     UnresolvedTypeVariable {
         name: String,
     },
@@ -165,6 +259,9 @@ pub enum HostTypeResolutionError {
 impl fmt::Display for HostTypeResolutionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidCheckedApplication { operation, detail } => {
+                write!(f, "invalid checked application {operation}: {detail}")
+            }
             Self::UnresolvedTypeVariable { name } => {
                 write!(f, "unresolved host type variable `{name}`")
             }
@@ -217,6 +314,27 @@ impl fmt::Display for HostTypeDecodeError {
 impl std::error::Error for HostTypeDecodeError {}
 
 impl HostTypeTerm {
+    /// Join only closed checked callable contracts. Branch order and nesting
+    /// cannot select an identity: canonical alternatives are sorted and unique.
+    pub(crate) fn checked_callable_join(types: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut operations = Vec::new();
+        for ty in types {
+            match ty {
+                Self::CheckedBuiltinCallable(op) => operations.push(op),
+                Self::CheckedCallableChoice(ops) => operations.extend(ops),
+                Self::Never => {}
+                _ => return None,
+            }
+        }
+        operations.sort_by_key(|op| op.symbol());
+        operations.dedup();
+        match operations.as_slice() {
+            [] => None,
+            [op] => Some(Self::CheckedBuiltinCallable(*op)),
+            _ => Some(Self::CheckedCallableChoice(operations)),
+        }
+    }
+
     // Compatibility spellings for the scalar variants while the host lowerer
     // migrates from its former coarse enum.  They are exact logical
     // precisions, not defaults: i32 and i64 no longer collapse at the
@@ -246,7 +364,8 @@ impl HostTypeTerm {
             Self::List(inner) | Self::Option(inner) => inner.is_unresolved(),
             Self::Dict(key, value) => key.is_unresolved() || value.is_unresolved(),
             Self::Scalar(HostPrecisionTerm::Concrete(_))
-            | Self::KeyBuiltinCallable(_)
+            | Self::CheckedBuiltinCallable(_)
+            | Self::CheckedCallableChoice(_)
             | Self::Tensor(_)
             | Self::MappedFile
             | Self::Unit => false,
@@ -270,7 +389,8 @@ impl HostTypeTerm {
                     .collect::<Result<Vec<_>, _>>()?,
                 Box::new(ret.into_concrete()?),
             )),
-            Self::KeyBuiltinCallable(op) => Ok(ConcreteHostType::KeyBuiltinCallable(op)),
+            Self::CheckedBuiltinCallable(op) => Ok(ConcreteHostType::CheckedBuiltinCallable(op)),
+            Self::CheckedCallableChoice(ops) => Ok(ConcreteHostType::CheckedCallableChoice(ops)),
             Self::Adt(name, args) => Ok(ConcreteHostType::Adt(
                 name,
                 args.into_iter()

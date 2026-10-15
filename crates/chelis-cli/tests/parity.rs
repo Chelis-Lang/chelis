@@ -385,6 +385,11 @@ fn drive_parity(path: &Path, expect_executable: bool) {
 // example needs its per-file test, with no second filename list to update.
 
 #[test]
+fn parity_float_classification() {
+    drive_parity(&examples_root().join("float_classification.ch"), true);
+}
+
+#[test]
 fn parity_generic_value_roots() {
     drive_parity(&examples_root().join("generic_value_roots.ch"), true);
 }

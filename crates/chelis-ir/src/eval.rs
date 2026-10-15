@@ -4580,6 +4580,12 @@ where
             RiscOp::Erf => unary_elementwise(ElementwiseUnOp::Erf, &values[&node.inputs[0]])?,
             RiscOp::Erfc => unary_elementwise(ElementwiseUnOp::Erfc, &values[&node.inputs[0]])?,
             RiscOp::Abs => unary_elementwise(ElementwiseUnOp::Abs, &values[&node.inputs[0]])?,
+            RiscOp::FloatClassify(kind) => {
+                let input = &values[&node.inputs[0]];
+                let storage = chelis_types::classify_float_tensor(*kind, input.storage())
+                    .map_err(|e| e.to_string())?;
+                TensorValue::from_storage(input.shape.clone(), storage)
+            }
             RiscOp::Floor => unary_elementwise(ElementwiseUnOp::Floor, &values[&node.inputs[0]])?,
             RiscOp::Ceil => unary_elementwise(ElementwiseUnOp::Ceil, &values[&node.inputs[0]])?,
             // Round-half-to-even (banker's rounding), matching the C

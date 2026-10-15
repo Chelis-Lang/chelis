@@ -300,6 +300,26 @@ pub(crate) fn emit_verified_dag(
     func_name: &str,
 ) -> Result<EmitResult, Unsupported> {
     let dag = plan.dag();
+    if let Some((node, kind)) = dag.nodes().iter().find_map(|node| match node.op {
+        RiscOp::FloatClassify(kind) => Some((node, kind)),
+        _ => None,
+    }) {
+        return Err(Unsupported::new(
+            UnsupportedKind::Op(kind.name().into()),
+            format!(
+                "stored-width {} ({}) at metal DAG node {}",
+                kind.name(),
+                kind.atom(),
+                node.id.0
+            ),
+            Stage::Codegen("metal"),
+            chelis_types::unimplemented_rejection!(
+                965,
+                "stored-width classification has no metal kernel; use the C target"
+            ),
+        ));
+    }
+
     if dag
         .nodes()
         .iter()
@@ -1041,9 +1061,11 @@ impl<'plan> Emitter<'plan> {
             RiscOp::Add | RiscOp::Mul | RiscOp::ReluAdjoint => self.emit_binary(dag, node),
             RiscOp::Bitwise(kind) => self.emit_bitwise(node, *kind),
 
-            RiscOp::Compare(_) | RiscOp::Logical(_) | RiscOp::Where => Err(format!(
-                "Metal direct nonnumeric node {id} reached emission after the #2266 typed capability rejection"
-            )),
+            RiscOp::FloatClassify(_) | RiscOp::Compare(_) | RiscOp::Logical(_) | RiscOp::Where => {
+                Err(format!(
+                    "Metal direct nonnumeric node {id} reached emission after the #2266 typed capability rejection"
+                ))
+            }
 
             RiscOp::GuardedFail { .. } => Err(format!(
                 "Metal guarded abort node {id} reached emission after the chelis#2360 typed capability rejection"

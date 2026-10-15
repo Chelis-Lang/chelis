@@ -259,7 +259,7 @@ pub(crate) enum ApplyKind {
     /// A source-bound provider admitted by the checker and host lowerer.
     NativeProviderCall,
     /// The indirect callee owner was produced by this closed key operation.
-    KeyBuiltinCall(crate::host_type_state::KeyBuiltinCallable),
+    CheckedBuiltinCall(crate::host_type_state::CheckedBuiltinCallable),
     DirectCall {
         callee: UnitId,
     },

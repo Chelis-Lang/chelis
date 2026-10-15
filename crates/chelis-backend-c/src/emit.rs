@@ -2224,6 +2224,9 @@ impl CEmitter {
                 self.emit_integer_abs(id, &node.inputs, &node.output_type)
             }
             RiscOp::Abs => self.emit_unary_func(id, "fabsf", &node.inputs, &node.output_type),
+            RiscOp::FloatClassify(kind) => {
+                self.emit_float_classification(id, *kind, &node.inputs, &node.output_type, dag)
+            }
             RiscOp::Floor => self.emit_unary_func(id, "floorf", &node.inputs, &node.output_type),
             RiscOp::Ceil => self.emit_unary_func(id, "ceilf", &node.inputs, &node.output_type),
             // `rintf` rounds to nearest with the current rounding mode,
@@ -4933,6 +4936,51 @@ impl CEmitter {
         self.line(&format!("__out_{id}[i] = {recip};"));
         self.indent -= 1;
         self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_float_classification(
+        &mut self,
+        id: usize,
+        kind: chelis_types::FloatClassify,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+    ) {
+        let a = inputs[0].0;
+        let prim = dag
+            .get(inputs[0])
+            .expect("classification input")
+            .output_type
+            .precision;
+        let (width, exponent, fraction) = match prim {
+            Prim::F16 => (2, "0x7c00", "0x03ff"),
+            Prim::Bf16 => (2, "0x7f80", "0x007f"),
+            Prim::F32 => (4, "0x7f800000", "0x007fffff"),
+            Prim::F64 => (8, "0x7ff0000000000000", "0x000fffffffffffff"),
+            _ => unreachable!("verified float classification"),
+        };
+        self.emit_elementwise_index_steps(id, inputs, ty);
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!("for (int64_t i = 0; i < t{id}_size; ++i) {{"));
+        self.indent += 1;
+        self.line(&format!("int64_t idx = i * t{id}_input{a}_step;"));
+        self.line(&format!(
+            "uint{}_t bits; memcpy(&bits, (const uint8_t*)t{a}_data + idx * {width}, {width});",
+            width * 8
+        ));
+        let special = format!("(bits & UINT64_C({exponent})) == UINT64_C({exponent})");
+        let expression = match kind {
+            chelis_types::FloatClassify::Nan => {
+                format!("({special}) && (bits & UINT64_C({fraction})) != 0")
+            }
+            chelis_types::FloatClassify::Finite => format!("!({special})"),
+            chelis_types::FloatClassify::Infinite => {
+                format!("({special}) && (bits & UINT64_C({fraction})) == 0")
+            }
+        };
+        self.line(&format!("((uint8_t*)t{id}_data)[i] = ({expression});"));
         self.indent -= 1;
         self.line("}");
     }

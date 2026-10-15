@@ -299,6 +299,7 @@ fn vectorize_axis0_impl(
             | RiscOp::TruncDiv
             | RiscOp::Mod
             | RiscOp::Bitwise(_)
+            | RiscOp::FloatClassify(_)
             | RiscOp::Compare(_)
             | RiscOp::Logical(_)
             | RiscOp::Where

@@ -7210,7 +7210,7 @@ fn host_binary_program(builtin: &str, lhs: Vec<usize>, rhs: Vec<usize>) -> HostP
     let lhs_ty = host_tensor(lhs);
     let rhs_ty = host_tensor(rhs);
     let body = HostExpr::new(HostExprKind::Builtin {
-        name: builtin.to_string(),
+        name: builtin.into(),
         args: vec![
             HostExpr::new(HostExprKind::Var(
                 "a".to_string(),
@@ -8269,7 +8269,7 @@ fn direct_extrema_adjoints_copy_exact_gradient_bits_for_ties_and_nan_selection()
 
 fn host_scalar_relu_program(ty: HostType) -> HostProgram {
     let body = HostExpr::new(HostExprKind::Builtin {
-        name: "relu".to_string(),
+        name: "relu".into(),
         args: vec![HostExpr::new(HostExprKind::Var(
             "x".to_string(),
             ty.clone(),
@@ -10327,7 +10327,7 @@ fn host_diagonal_program(operand: Vec<usize>, declared: usize) -> HostProgram {
     };
     let axis = |value: i64| HostExpr::new(HostExprKind::Int(value));
     let body = HostExpr::new(HostExprKind::Builtin {
-        name: "diagonal".to_string(),
+        name: "diagonal".into(),
         args: vec![
             HostExpr::new(HostExprKind::Var(
                 "a".to_string(),

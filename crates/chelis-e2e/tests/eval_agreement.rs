@@ -254,6 +254,7 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::TruncDiv
         | RiscOp::Mod
         | RiscOp::Bitwise(_)
+        | RiscOp::FloatClassify(_)
         | RiscOp::Compare(_)
         | RiscOp::Logical(_)
         | RiscOp::Where
