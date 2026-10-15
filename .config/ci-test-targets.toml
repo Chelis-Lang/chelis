@@ -2208,6 +2208,15 @@ packages = ["chelis-cli"]
 # script-unit selection discovers every named test module; production oracles
 # with stronger standing jobs retain those jobs as their owners below.
 [[path_rule]]
+prefix = "scripts/test_builtin_atom_registry.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR script-unit executes the builtin identity governance and semantic-clause deletion controls"
+tracking_issue = "chelis#1294"
+
+[[path_rule]]
 prefix = "scripts/builtin_atom_semantic_contracts.py"
 disposition = "owner"
 workflow = "ci.yml"

@@ -286,6 +286,9 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::FoldIn
         | RiscOp::SplitN { .. }
         | RiscOp::KeySelect
+        // [05-OP-33]: first-leaf ordered prefixes and decreasing suffixes
+        // finalize at the specified dtype; no tolerance is granted.
+        | RiscOp::Cumsum { .. }
         | RiscOp::Sum { .. }
         | RiscOp::Count { .. }
         // [05-OP-54]: runtime range materializes exact signed i64 elements.
@@ -400,6 +403,20 @@ fn assert_expected(label: &str, actual: &str, expected: &str) {
 fn agreement_operation_identity_is_derived_from_ir() {
     let cases = [
         (RiscOp::Add, AgreementOp::Exact),
+        (
+            RiscOp::Cumsum {
+                axis: 0,
+                direction: chelis_ir::dag::ScanDirection::Increasing,
+            },
+            AgreementOp::Exact,
+        ),
+        (
+            RiscOp::Cumsum {
+                axis: 0,
+                direction: chelis_ir::dag::ScanDirection::Decreasing,
+            },
+            AgreementOp::Exact,
+        ),
         // [05-OP-54]: i64 range elements agree bit for bit across lanes.
         (RiscOp::Iota, AgreementOp::Exact),
         (RiscOp::Exp, AgreementOp::Exact),
@@ -419,6 +436,59 @@ fn agreement_operation_identity_is_derived_from_ir() {
         assert_eq!(agreement_op_for_risc(&risc), expected);
     }
     record_phase3_receipt("operation-identity-canary", "closed exhaustive IR mapping");
+}
+
+#[test]
+fn agreement_cumsum_requires_exact_prefix_and_suffix_observations() {
+    use chelis_ir::dag::ScanDirection;
+    for direction in [ScanDirection::Increasing, ScanDirection::Decreasing] {
+        let mut dag = Dag::new();
+        let owner = dag.declare("scan agreement");
+        let ty = vec_ty(1, Prim::F32);
+        let input = dag.add_node(
+            owner,
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let scan = RiscOp::Cumsum { axis: 0, direction };
+        let prefix = dag.add_node(owner, scan.clone(), vec![input], ty, None);
+        // This harness renders scalar roots. Reshape the sole stored scan
+        // value without arithmetic so the compiled scan still executes.
+        dag.add_node(
+            owner,
+            RiscOp::Reshape { new_shape: vec![] },
+            vec![prefix],
+            scalar_f32(),
+            None,
+        );
+        let actual = assert_agrees(&dag, "scan_agreement", "OP33 one-leaf scan");
+        assert_expected("OP33 first input is first prefix/suffix", &actual, "1.0");
+        let wrong = format_element(
+            Prim::F32,
+            ElementRef::F32(f32::from_bits(1.0_f32.to_bits() + 1)),
+        );
+        let error = compare_rendered_elements(
+            agreement_op_for_risc(&scan),
+            Prim::F32,
+            ArithmeticWidthStatus::StoredAtArithmeticWidth,
+            &actual,
+            &wrong,
+        )
+        .expect_err("OP33 grants no one-ULP prefix/suffix tolerance");
+        assert!(
+            matches!(
+                error,
+                AgreementError::UlpExceeded {
+                    distance_ulps: 1,
+                    max_ulps: 0,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
 }
 
 #[test]
