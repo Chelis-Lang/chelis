@@ -43,9 +43,13 @@ prefer to unpack a compiler yourself, each release archive
 holds `bin/chelis`, the runtime archive in `lib/`, and its headers in
 `include/`. Keep those three together.
 
-The runtime archive is built against glibc. On a musl distribution such as
-Alpine, `chelis check`, `eval`, `test` and `prove` work, but `chelis build`
-refuses to link with the system C compiler.
+`chelis build` links your program with the runtime archive and with the C
+library of your system. So the archive must match that C library. The static
+and glibc 2.31 builds carry a glibc archive. On a musl distribution such as
+Alpine, `chelisup` installs the musl build instead
+(`chelis-vX.Y.Z-linux-x86_64-musl.tar.gz`), which carries a musl archive. Each
+build refuses to link with a compiler for the other C library. `chelis check`,
+`eval`, `test` and `prove` work with every build.
 
 ## Manage versions
 
