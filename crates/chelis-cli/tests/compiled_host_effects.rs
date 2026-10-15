@@ -1169,3 +1169,26 @@ fn agreeing_or_runtime_operand_lengths_are_not_refuted_at_build() {
         );
     }
 }
+
+/// Wildcard contraction helpers execute every active float representation,
+/// preserving operand-width multiplication and explicit accumulator rules.
+#[test]
+fn wildcard_matmul_agrees_at_every_float_dtype() {
+    for (dtype, accumulator) in [
+        ("f32", "f32"),
+        ("f64", "f64"),
+        ("bf16", "f32"),
+        ("f16", "f32"),
+        ("f32", "f64"),
+        ("bf16", "f64"),
+        ("f16", "f64"),
+    ] {
+        let result = dtype;
+        let source = format!(
+            "def mm(a: tensor[*, *, {dtype}], b: tensor[*, *, {dtype}]) -> tensor[*, *, {result}] = matmul(a, b, accumulator={accumulator})\n\
+             def main() -> tensor[*, *, {result}] = mm(cast(to_tensor([[100000000.0f32, 1.0f32, -100000000.0f32, 1.0f32, 0.5f32]]), {dtype}), cast(to_tensor([[1.0f32, -0.0f32], [1.0f32, 1.0f32], [1.0f32, 0.0f32], [-1.0f32, 3.0f32], [0.33333334f32, -7.0f32]]), {dtype}))\n"
+        );
+        let run = parity::assert_lanes_agree(&source, &format!("wildcard_{dtype}_{accumulator}"));
+        assert_eq!(run.status, Some(0), "{run:?}");
+    }
+}

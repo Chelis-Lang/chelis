@@ -1441,7 +1441,11 @@ fn validate_generated_pragmas(source: &str) -> Result<(), GeneratedHeaderError> 
         // would run workers in whatever state they last had.
         let allowed_openmp = matches!(payload, "omp parallel" | "omp for" | "omp for simd")
             || (payload.starts_with("omp for reduction(") && payload.ends_with(')'));
+        // Independent output lanes do not change exports, worker state, or
+        // floating-point evaluation order. Admit only these exact loop hints.
+        let independent_lanes = matches!(payload, "clang loop vectorize(enable)" | "GCC ivdep");
         if !allowed_openmp
+            && !independent_lanes
             && !["clang diagnostic ", "GCC diagnostic "]
                 .into_iter()
                 .any(|prefix| payload.starts_with(prefix))
@@ -2433,6 +2437,33 @@ mod tests {
             assert!(
                 seal_generated_artifact("demo", &source, &header).is_err(),
                 "preprocessing must not add an external definition outside the sealed export set"
+            );
+        }
+    }
+
+    #[test]
+    fn independent_lane_hints_preserve_the_sealed_artifact_contract() {
+        let (header, export) = raw_export(
+            "alpha",
+            "chelis_fn_616c706861",
+            "int chelis_fn_616c706861(int x);",
+            "int chelis_fn_616c706861(int x) { return x + 1; }",
+        );
+        for hint in ["clang loop vectorize(enable)", "GCC ivdep"] {
+            assert!(
+                seal_generated_artifact("demo", &format!("#pragma {hint}\n{export}"), &header)
+                    .is_ok()
+            );
+        }
+        for hint in [
+            "clang loop vectorize(enable) distribute(enable)",
+            "GCC ivdep external_alias",
+            "clang fp reassociate(on)",
+            "GCC optimize(\"fast-math\")",
+        ] {
+            assert!(
+                seal_generated_artifact("demo", &format!("#pragma {hint}\n{export}"), &header)
+                    .is_err()
             );
         }
     }

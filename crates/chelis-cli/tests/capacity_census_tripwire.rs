@@ -179,6 +179,13 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
         "chelis_runtime.h: typedef enum { CHELIS_SPARSE_GATHER = 0 , CHELIS_SPARSE_ADD = 1 , CHELIS_SPARSE_REPLACE = 2 , CHELIS_SPARSE_ELEMENTS = 3 } chelis_sparse_op",
         &[],
     ),
+    // Product shape contexts select a diagnostic, carrying no numeric payload.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_PRODUCT_MUL = 0 , CHELIS_PRODUCT_MATMUL = 1 } chelis_product_shape_context",
+        &[],
+    ),
     // Closed movement operation/side identities contain no numeric payload.
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
@@ -4132,6 +4139,16 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         ),
         atom: "[05-OP-33]",
         authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_movement_check_product ( const chelis_movement_plan * lhs , const chelis_movement_plan * rhs , chelis_product_shape_context context ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_movement_check_product` requires the two plans' complete result shapes",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(

@@ -219,10 +219,21 @@ fn matmul_dag(prim: Prim, [m, k, n]: [usize; 3], observe_product: bool) -> Dag {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: prim,
+            accumulator: if matches!(prim, Prim::F16 | Prim::Bf16) {
+                Prim::F32
+            } else {
+                prim
+            },
         },
         vec![mul],
-        t(prim, vec![m, n]),
+        t(
+            if matches!(prim, Prim::F16 | Prim::Bf16) {
+                Prim::F32
+            } else {
+                prim
+            },
+            vec![m, n],
+        ),
         None,
     );
     dag.add_root(sum);
@@ -262,4 +273,50 @@ fn an_observed_matmul_product_is_still_stored() {
         .c_source;
     assert_eq!(c.matches("chelis_alloc(3,").count(), 3, "{c}");
     assert!(!c.contains("chelis_shape_reduction_plan("), "{c}");
+}
+
+/// Wildcards require agreement from checked plan extents at the original Mul.
+#[test]
+fn wildcard_products_keep_agreement_without_rank_three_storage() {
+    let mut dag = matmul_dag(Prim::F32, [4, 6, 3], false);
+    let products: Vec<_> = dag
+        .nodes()
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.op,
+                RiscOp::Load { .. } | RiscOp::Expand { .. } | RiscOp::Mul
+            )
+        })
+        .map(|node| node.id)
+        .collect();
+    for id in products {
+        dag.node_mut(id).unwrap().output_type.dims =
+            (0..dag.get(id).unwrap().output_type.dims.len())
+                .map(|_| DimInfo::Named("*".into(), None))
+                .collect();
+    }
+    let c = codegen_with_options(&dag, "wildcard_product", CodegenOptions::default())
+        .unwrap()
+        .c_source;
+    assert!(!c.contains("chelis_alloc(3,"), "{c}");
+    assert!(c.contains("chelis_movement_check_product("), "{c}");
+    assert!(
+        c.find("chelis_movement_check_product(").unwrap()
+            < c.find("chelis_shape_reduction_plan(").unwrap()
+    );
+}
+
+/// Output-column blocks share one canonical tree shape, with independent lanes.
+#[test]
+fn column_blocks_keep_bounded_tree_scratch() {
+    for prim in [Prim::F32, Prim::F64, Prim::Bf16, Prim::F16] {
+        let dag = matmul_dag(prim, [256, 2304, 196], false);
+        let c = codegen_with_options(&dag, "column_blocks", CodegenOptions::default())
+            .unwrap()
+            .c_source;
+        assert!(c.contains("__sum_lanes_"), "{prim:?}: {c}");
+        assert!(c.contains("__pair_lane"), "{prim:?}: {c}");
+        assert!(!c.contains("chelis_alloc(3,"), "{prim:?}: {c}");
+    }
 }

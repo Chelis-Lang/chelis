@@ -29,6 +29,54 @@ struct Counts {
     total_alloc_bytes: usize,
 }
 
+fn reduction_scratch_allocations(source: &str) -> usize {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(position, line)| {
+            let Some(rest) = line.trim().strip_prefix("chelis_tensor *__sum_scratch_") else {
+                return false;
+            };
+            let Some((id, allocation)) = rest.split_once(" = ") else {
+                return false;
+            };
+            if id.parse::<usize>().is_err() {
+                return false;
+            }
+            ["F32", "F64", "F16", "BF16"].iter().any(|dtype| {
+                allocation == format!("chelis_alloc(1, &__sum_n_{id}, CHELIS_DTYPE_{dtype});")
+                    || (allocation
+                        == format!("chelis_alloc(2, __sum_shape_{id}, CHELIS_DTYPE_{dtype});")
+                        && source.lines().take(*position).any(|shape| {
+                            shape.trim()
+                                == format!("int64_t __sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};")
+                        }))
+            })
+        })
+        .count()
+}
+
+#[test]
+fn scratch_recognition_requires_the_exact_scalar_or_column_domain() {
+    let scalar = "chelis_tensor *__sum_scratch_5 = chelis_alloc(1, &__sum_n_5, CHELIS_DTYPE_F32);";
+    let column = "int64_t __sum_shape_5[2] = { __sum_n_5, 8 };\nchelis_tensor *__sum_scratch_5 = chelis_alloc(2, __sum_shape_5, CHELIS_DTYPE_F32);";
+    assert_eq!(reduction_scratch_allocations(scalar), 1);
+    assert_eq!(reduction_scratch_allocations(column), 1);
+    for invalid in [
+        scalar.replace("chelis_alloc(", "malloc("),
+        scalar.replace("&__sum_n_5", "&unknown"),
+        column.replace(", 8 }", ", 9 }"),
+        column.replace("[2]", "[3]"),
+        column.replace("chelis_alloc(2,", "chelis_alloc(1,"),
+        column.replace("__sum_shape_5[2]", "__sum_shape_6[2]"),
+        column.replace("CHELIS_DTYPE_F32", "CHELIS_DTYPE_UNKNOWN"),
+        column.lines().last().unwrap().to_owned(),
+        column.lines().rev().collect::<Vec<_>>().join("\n"),
+    ] {
+        assert_eq!(reduction_scratch_allocations(&invalid), 0, "{invalid}");
+    }
+}
+
 fn build_and_count(source: &str, name: &str) -> Counts {
     let dir = tempdir().expect("tempdir");
     let src_path = dir.path().join(format!("{name}.ch"));
@@ -54,13 +102,7 @@ fn build_and_count(source: &str, name: &str) -> Counts {
     let c = fs::read_to_string(&c_path).expect("read generated c");
     let blas = c.matches("cblas_sgemm").count() + c.matches("chelis_blas_matmul").count();
     let allocs = c.matches("chelis_alloc(").count();
-    let reduction_scratch_allocs = c
-        .lines()
-        .filter(|line| {
-            line.contains("chelis_tensor *__sum_scratch_")
-                && line.contains("= chelis_alloc(1, &__sum_n_")
-        })
-        .count();
+    let reduction_scratch_allocs = reduction_scratch_allocations(&c);
     let fused = c.matches("omp for simd").count();
     let user_helper_defs = c
         .matches(&format!(
@@ -163,7 +205,8 @@ fn inline_matmul_forms_preserve_primitive_arithmetic_and_storage() {
         // inside its canonical tree (chelis#3370), so neither expansion nor
         // their product is stored: the reduced [8,4] output is the only
         // literal-shape submission, and the second allocation site owns the
-        // per-output 16-element scratch via its checked dynamic leaf count.
+        // [16,8] column scratch via its checked dynamic leaf count, with
+        // unused lanes in the four-column tail excluded from arithmetic.
         assert_eq!(counts.allocs, 2);
         assert_eq!(counts.reduction_scratch_allocs, 1);
         assert_eq!(counts.total_alloc_bytes, 8 * 4 * 4);

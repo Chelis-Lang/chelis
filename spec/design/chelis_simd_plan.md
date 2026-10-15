@@ -340,3 +340,20 @@ SIMD improvements apply only to the C backend's CPU path. The HIP backend uses G
 - Medium tensors: depends on the operation and the hardware
 
 The C backend with good SIMD support is the right execution path for the finance use case (Shoals) where tensor sizes are moderate (portfolios of hundreds to thousands of instruments, not ImageNet-scale batches) and latency matters more than throughput.
+
+### Canonical contraction lanes
+
+A contraction with matmul's expansion geometry groups up to eight adjacent
+output columns. Each column
+retains its own operand-width products and canonical adjacent-pair reduction
+tree; vectorization combines independent columns, never reduction positions.
+Tree scratch has shape `[reduction, 8]`, with complete checked metadata and
+row-local tails. Clang uses the exact `clang loop vectorize(enable)` hint and
+GCC uses `GCC ivdep` on proven independent lane loops. These hints do not alter
+the floating-point environment or permit reassociation. Reduced-float product
+leaves retain their scalar conversion helpers; their accumulator tree still
+uses independent lanes. Other contraction geometries retain scalar trees.
+Lane j reads and writes only scratch offsets congruent to j modulo eight;
+any overlap during an in-place pair belongs to that same lane. Source payloads
+are immutable and separate from scratch. The hints apply only to column loops,
+never to reduction or pair traversal.

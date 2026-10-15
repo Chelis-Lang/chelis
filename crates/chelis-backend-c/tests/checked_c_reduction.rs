@@ -51,12 +51,62 @@ fn validate(source: &str) -> Result<(), String> {
             return Err(format!("emit_node: missing checked dispatch {required}"));
         }
     }
-    let scratch = method(source, "emit_sum_level");
+    let wrapper = method(source, "emit_sum_level");
+    if !wrapper.contains("self.emit_sum_level_lanes(id, axis_size, precision, false);")
+        || ["malloc(", "sizeof(", "chelis_alloc("]
+            .iter()
+            .any(|raw| wrapper.contains(raw))
+    {
+        return Err("unchecked Sum scratch delegation".into());
+    }
+    let scratch = method(source, "emit_sum_level_lanes");
+    for required in [
+        "__sum_n_{id} = {axis_size};",
+        "if blocked {",
+        "__sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};",
+        "chelis_alloc(2, __sum_shape_{id}, {dtype})",
+        "} else {",
+        "chelis_alloc(1, &__sum_n_{id}, {dtype})",
+        "chelis_tensor_begin_write(__sum_scratch_{id})",
+        "chelis_tensor_write_view(__sum_guard_{id}).data",
+    ] {
+        if scratch.matches(required).count() != 1 {
+            return Err(format!("unchecked Sum scratch: {required}"));
+        }
+    }
     if scratch.contains("malloc(")
         || scratch.contains("sizeof(")
-        || !scratch.contains("chelis_alloc(")
+        || scratch.matches("chelis_alloc(").count() != 2
     {
-        return Err("unchecked Sum scratch".into());
+        return Err("unchecked Sum scratch owner".into());
+    }
+    let ordered = [
+        "__sum_n_{id} = {axis_size};",
+        "if blocked {",
+        "__sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};",
+        "chelis_alloc(2, __sum_shape_{id}, {dtype})",
+        "} else {",
+        "chelis_alloc(1, &__sum_n_{id}, {dtype})",
+        "chelis_tensor_begin_write(__sum_scratch_{id})",
+        "chelis_tensor_write_view(__sum_guard_{id}).data",
+    ]
+    .map(|token| scratch.find(token).unwrap());
+    if !ordered.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err("Sum scratch domain/allocation/write order".into());
+    }
+    let inlined = method(source, "emit_inlined_product_sum");
+    let check = inlined
+        .find("self.emit_reduction_plan(")
+        .ok_or("missing inlined Sum plan")?;
+    let output = inlined
+        .find("self.emit_slot_wrapper(")
+        .ok_or("missing inlined Sum output")?;
+    let leaves = inlined
+        .find("self.emit_sum_level_lanes(")
+        .ok_or("missing inlined Sum scratch")?;
+    if check >= output || output >= leaves || !inlined.contains("ty, \"CHELIS_REDUCE_SUM\", true)")
+    {
+        return Err("inlined Sum unchecked scratch domain".into());
     }
     let plan = method(source, "emit_reduction_plan");
     for required in [
@@ -134,4 +184,59 @@ fn bypassing_each_consumer_and_scratch_owner_is_rejected() {
         validate(&source.replace("chelis_alloc(1, &__sum_n_{id}", "malloc(1, &__sum_n_{id}"))
             .is_err()
     );
+    let wrapper = method(source, "emit_sum_level");
+    assert!(
+        validate(&source.replace(
+            wrapper,
+            &wrapper.replace(
+                "self.emit_sum_level_lanes(id, axis_size, precision, false);",
+                "self.emit_sum_level_lanes(id, axis_size, precision, true);",
+            )
+        ))
+        .is_err(),
+        "scalar scratch must delegate to one lane"
+    );
+    let scratch = method(source, "emit_sum_level_lanes");
+    for original in [
+        "__sum_n_{id} = {axis_size};",
+        "if blocked {",
+        "__sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};",
+        "chelis_alloc(2, __sum_shape_{id}, {dtype})",
+        "chelis_alloc(1, &__sum_n_{id}, {dtype})",
+        "chelis_tensor_begin_write(__sum_scratch_{id})",
+        "chelis_tensor_write_view(__sum_guard_{id}).data",
+    ] {
+        assert!(
+            validate(&source.replace(scratch, &scratch.replace(original, "removed("))).is_err(),
+            "scratch owner: {original}"
+        );
+    }
+    let reversed = scratch
+        .replace(
+            "__sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};",
+            "__domain_placeholder__",
+        )
+        .replace(
+            "chelis_alloc(2, __sum_shape_{id}, {dtype})",
+            "__sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};",
+        )
+        .replace(
+            "__domain_placeholder__",
+            "chelis_alloc(2, __sum_shape_{id}, {dtype})",
+        );
+    assert!(
+        validate(&source.replace(scratch, &reversed)).is_err(),
+        "domain must precede vector allocation"
+    );
+    let inlined = method(source, "emit_inlined_product_sum");
+    for original in [
+        "self.emit_reduction_plan(",
+        "self.emit_sum_level_lanes(",
+        "ty, \"CHELIS_REDUCE_SUM\", true)",
+    ] {
+        assert!(
+            validate(&source.replace(inlined, &inlined.replace(original, "removed("))).is_err(),
+            "inlined scratch: {original}"
+        );
+    }
 }

@@ -408,6 +408,8 @@ int64_t chelis_movement_count(const chelis_movement_plan *plan);
 int64_t chelis_movement_index(const chelis_movement_plan *plan, chelis_scalar linear);
 int64_t chelis_movement_term(const chelis_movement_plan *plan, chelis_projection_field field, chelis_scalar term);
 int64_t chelis_movement_base(const chelis_movement_plan *plan);
+typedef enum { CHELIS_PRODUCT_MUL = 0, CHELIS_PRODUCT_MATMUL = 1 } chelis_product_shape_context;
+void chelis_movement_check_product(const chelis_movement_plan *lhs, const chelis_movement_plan *rhs, chelis_product_shape_context context);
 void chelis_movement_check_target(const chelis_movement_plan *plan, chelis_scalar rank, const chelis_scalar *shape);
 void chelis_movement_plan_release(chelis_movement_plan *plan);
 typedef struct chelis_window_plan chelis_window_plan;

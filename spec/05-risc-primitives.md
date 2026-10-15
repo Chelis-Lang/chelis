@@ -2677,6 +2677,14 @@ exact ADT identity by [05-OP-34].
 > other side's index range. An empty domain's terms have divisor one and scale
 > zero, and its base is zero. `chelis_movement_check_target` requires a complete
 > tagged result rank and shape to match the plan before allocation or reuse.
+>
+> `chelis_movement_check_product` requires the two plans' complete result shapes
+> to agree before a product's result claims or payload evaluation. Its closed
+> `chelis_product_shape_context` selects `MUL` or `MATMUL`: disagreement uses
+> the canonical elementwise `mul` diagnostic or the decomposed matmul diagnostic
+> naming the operands as written, respectively. This check reads only immutable
+> metadata and remains valid after source release. An invalid context or null
+> plan traps `Domain` in `movement` at i64.
 > `chelis_movement_plan_release` consumes the live plan exactly once. The plan
 > retains no tensor payload or ownership, remains valid during source writes and
 > after source release or repurpose, and admits concurrent observations while live.

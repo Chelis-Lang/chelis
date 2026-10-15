@@ -3312,6 +3312,36 @@ pub unsafe extern "C" fn chelis_movement_term(
 pub unsafe extern "C" fn chelis_movement_base(plan: *const chelis_movement_plan) -> i64 {
     movement_plan(plan).metadata.projection().base()
 }
+#[allow(non_camel_case_types)]
+pub type chelis_product_shape_context = c_int;
+pub const CHELIS_PRODUCT_MUL: chelis_product_shape_context = 0;
+pub const CHELIS_PRODUCT_MATMUL: chelis_product_shape_context = 1;
+
+/// [05-OP-33] product agreement from immutable checked movement metadata.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_check_product(
+    lhs: *const chelis_movement_plan,
+    rhs: *const chelis_movement_plan,
+    context: chelis_product_shape_context,
+) {
+    if !matches!(context, CHELIS_PRODUCT_MUL | CHELIS_PRODUCT_MATMUL) {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "invalid product shape context".into(),
+            )),
+            "movement",
+        );
+    }
+    let lhs = movement_plan(lhs).metadata.result().shape();
+    let rhs = movement_plan(rhs).metadata.result().shape();
+    if lhs != rhs {
+        let message = match context {
+            CHELIS_PRODUCT_MATMUL => chelis_abi::failure::matmul_product_disagreement(lhs, rhs),
+            _ => chelis_abi::failure::operand_shape_disagreement("mul", lhs, rhs),
+        };
+        runtime_fail!("{message}");
+    }
+}
 #[no_mangle]
 pub unsafe extern "C" fn chelis_movement_check_target(
     plan: *const chelis_movement_plan,
