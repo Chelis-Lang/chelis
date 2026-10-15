@@ -8741,11 +8741,11 @@ fn lower_host_expr_kind(
                     value,
                 });
             }
-            if let Some(target) = forwarding.as_mut() {
-                if let Some(position) = target.plan.advance(target.position, DeepTag::Block, 1) {
-                    target.position = position;
-                    tensor_helpers.forwarding = forwarding;
-                }
+            if let Some(target) = forwarding.as_mut()
+                && let Some(position) = target.plan.advance(target.position, DeepTag::Block, 1)
+            {
+                target.position = position;
+                tensor_helpers.forwarding = forwarding;
             }
             let body = lower_host_expr(last, program, scope, tensor_helpers)?;
             let body_ty = host_expr_type(&body);
@@ -32213,14 +32213,12 @@ impl AccumulatorIdentities {
 /// Whole immutable-variable identity is shared by construction and
 /// forwarding proofs; metadata never creates a new binding occurrence.
 fn accumulator_identity_variable(mut expr: &Expr) -> Option<&str> {
-    loop {
+    #[cfg(test)]
+    charge_accumulator_identity_work(1);
+    while let Expr::MetaExpr(meta, _) = expr {
         #[cfg(test)]
         charge_accumulator_identity_work(1);
-        if let Expr::MetaExpr(meta, _) = expr {
-            expr = &meta.expr;
-        } else {
-            break;
-        }
+        expr = &meta.expr;
     }
     let node = as_node(expr).filter(|node| node.tag() == DeepTag::Var)?;
     node.children_slice().first().and_then(symbol_name)
