@@ -1,0 +1,1 @@
+Reclaim compiled-host producer origins and projected claim frames after their construction and loop lifetimes, while preserving returned views, shared origins, independent claims and producer diagnostics.

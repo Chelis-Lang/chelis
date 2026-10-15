@@ -227,7 +227,7 @@ fn fixed_live_box_origins_and_projected_frames_do_not_accumulate_iterations() {
     let mut all_measurements = Vec::new();
     for claimed in [false, true] {
         for fresh in [false, true] {
-            let measurements = [100, 400, 1600].map(|steps| {
+            let measurements = [100, 400, 1600, 6400].map(|steps| {
                 let name = format!("box-claimed{claimed}-fresh{fresh}-k{steps}");
                 live_metadata(&name, &fixed_box_source(claimed, fresh, steps))
             });
@@ -340,19 +340,26 @@ fn tensor_tuple_and_nested_nominal_construction_stays_bounded() {
             "shape(value(value(b)), 0i32)",
         ),
     ] {
-        let measured = [0, 100, 400, 1600].map(|steps| {
+        for claimed in [false, true] {
+            let ty = if claimed {
+                ty.to_owned()
+            } else {
+                ty.replace("tensor[3, f32]", "tensor[*, f32]")
+            };
+            let measured = [0, 100, 400, 1600].map(|steps| {
             let source = format!("type Box[T] =\n | Box {{ v: T }}\ndef value[T](b: Box[T]) -> T = match b with {{ | Box {{ v }} => v }}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef run() -> i64 = {{\n b = fold(fn (acc: {ty}, i: i64) -> {body}, {seed}, range(0i64, {steps}i64))\n {result}\n}}\nout = run()\n");
-            live_metadata_with_sanitizers(&format!("{kind}-k{steps}"), &source, steps == 1600)
+            live_metadata_with_sanitizers(&format!("{kind}-claimed{claimed}-k{steps}"), &source, steps == 1600)
         });
-        for later in &measured[2..] {
-            assert!(
-                later.peak_origin <= measured[1].peak_origin + 1024,
-                "{kind}: {measured:?}"
-            );
-            assert!(
-                later.peak_claim <= measured[1].peak_claim + 1024,
-                "{kind}: {measured:?}"
-            );
+            for later in &measured[2..] {
+                assert!(
+                    later.peak_origin <= measured[1].peak_origin + 1024,
+                    "{kind}: {measured:?}"
+                );
+                assert!(
+                    later.peak_claim <= measured[1].peak_claim + 1024,
+                    "{kind}: {measured:?}"
+                );
+            }
         }
     }
 }
@@ -391,6 +398,44 @@ fn retired_loop_metadata_preserves_empty_next_entry_and_final_invalid_schedule()
                 }
             }
         }
+    }
+}
+
+#[test]
+fn distinct_logical_owners_keep_shared_origin_edges_after_one_payload_drops() {
+    let source = "type Box[T] =\n | Box { v: T }\ndef value[T](b: Box[T]) -> T = match b with { | Box { v } => v }\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef aliases(seed: Box[tensor[3, f32]]) -> (Box[tensor[3, f32]], Box[tensor[3, f32]]) = (seed, seed)\ndef run(size: i64) -> i64 = {\n pair = aliases(Box { v: produce(size) })\n a = pair.0\n b = pair.1\n _ = drop(a)\n shape(value(b), 0i32)\n}\nout = run(3i64)\n";
+    live_metadata_with_sanitizers("shared-logical-owners", source, true);
+    for native in [false, true] {
+        let (success, output) = result_claims::run(
+            &source.replace("out = run(3i64)", "out = run(5i64)"),
+            native,
+        );
+        assert!(!success, "{output}");
+        assert!(
+            output.contains("numeric trap: domain in load at i64"),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn initial_list_size_and_completed_iterations_have_separate_storage_bounds() {
+    for seed_length in [10, 100] {
+        let seed = std::iter::repeat_n("produce(3i64)", seed_length)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let measured = [100, 400].map(|steps| {
+            let source = format!("def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef run() -> i64 = {{\n b = fold(fn (acc: List[tensor[3, f32]], i: i64) -> [produce(3i64), produce(3i64), produce(3i64)], [{seed}], range(0i64, {steps}i64))\n len(b)\n}}\nout = run()\n");
+            live_metadata(&format!("initial-n{seed_length}-k{steps}"), &source)
+        });
+        assert_eq!(
+            measured[0].peak_origin, measured[1].peak_origin,
+            "{measured:?}"
+        );
+        assert_eq!(
+            measured[0].peak_claim, measured[1].peak_claim,
+            "{measured:?}"
+        );
     }
 }
 
