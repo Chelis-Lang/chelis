@@ -3825,22 +3825,32 @@ enum WireShapeResolution {
 }
 // Context-free shape recipes, never replacements for DAG nodes or claims.
 // Each alias retains its exact edge count, so a bounded traversal cannot gain
-// fuel by jumping an anonymous identical-input Add chain.
+// fuel by jumping an anonymous identical-input Add or Where chain.
 struct WireOriginPlans {
     aliases: Vec<Vec<Option<(u64, usize)>>>,
     shape_sources: Vec<BTreeMap<u64, usize>>,
+    semantic_aliases: BTreeMap<(u64, usize), (u64, usize)>,
 }
 impl WireOriginPlans {
     fn new(nodes: &[WireDagNode]) -> Self {
         let mut aliases: Vec<Vec<Option<(u64, usize)>>> = Vec::with_capacity(nodes.len());
         let mut shape_sources = Vec::with_capacity(nodes.len());
+        let mut semantic_aliases = BTreeMap::<(u64, usize), (u64, usize)>::new();
         for node in nodes {
             wire_ingress_work!(alias_plan_steps);
             let mut axes = vec![None; node.output_type.dims.len()];
-            if matches!(node.op, WireRiscOp::Add)
-                && node.inputs.len() == 2
-                && node.inputs[0] == node.inputs[1]
-                && let Some(source) = wire_node_by_id(nodes, node.inputs[0])
+            let source = match &node.op {
+                WireRiscOp::Add if node.inputs.len() == 2 && node.inputs[0] == node.inputs[1] => {
+                    Some(node.inputs[0])
+                }
+                WireRiscOp::Where {}
+                    if node.inputs.len() == 3 && node.inputs[1] == node.inputs[2] =>
+                {
+                    Some(node.inputs[1])
+                }
+                _ => None,
+            };
+            if let Some(source) = source.and_then(|source| wire_node_by_id(nodes, source))
                 && source.id < node.id
                 && source.output_type.precision == node.output_type.precision
                 && source.output_type.dims.len() == node.output_type.dims.len()
@@ -3851,6 +3861,21 @@ impl WireOriginPlans {
                         let (representative, hops) =
                             aliases[source.id as usize][axis].unwrap_or((source.id, 0));
                         axes[axis] = Some((representative, hops + 1));
+                        // Where's dimension search considers shape dependencies
+                        // before branches. Jump only when every alternative is
+                        // the same branch, including the empty-dependency case.
+                        if matches!(node.op, WireRiscOp::Where { .. })
+                            && node.shape_deps.iter().all(|dependency| {
+                                wire_ingress_work!(dependency_steps);
+                                *dependency == source.id
+                            })
+                        {
+                            let (representative, hops) = semantic_aliases
+                                .get(&(source.id, axis))
+                                .copied()
+                                .unwrap_or((source.id, 0));
+                            semantic_aliases.insert((node.id, axis), (representative, hops + 1));
+                        }
                     }
                 }
             }
@@ -3865,6 +3890,7 @@ impl WireOriginPlans {
         Self {
             aliases,
             shape_sources,
+            semantic_aliases,
         }
     }
     fn sources(&self, node: u64, relevant: &[u64]) -> Vec<u64> {
@@ -4580,30 +4606,39 @@ fn wire_semantic_node_dim_grouped<'a>(
             origins.semantic.borrow_mut().insert(current, Some(id));
             continue;
         }
-        let mut children = origins.plans.sources(node.id, relevant);
-        if matches!(node.op, WireRiscOp::Where { .. }) {
-            children.extend(node.inputs.iter().skip(1).copied());
-        }
-        children.retain(|source| {
-            wire_node_by_id(nodes, *source).is_some_and(|source| {
-                source.id < id && source.output_type.dims.len() == node.output_type.dims.len()
-            })
-        });
+        let children = if let Some((representative, hops)) =
+            origins.plans.semantic_aliases.get(&(id, axis))
+        {
+            if !finish {
+                wire_ingress_work!(alias_jumps);
+            }
+            vec![key(*representative, remaining.saturating_sub(*hops))]
+        } else {
+            let mut children = origins.plans.sources(node.id, relevant);
+            if matches!(node.op, WireRiscOp::Where { .. }) {
+                children.extend(node.inputs.iter().skip(1).copied());
+            }
+            children.retain(|source| {
+                wire_node_by_id(nodes, *source).is_some_and(|source| {
+                    source.id < id && source.output_type.dims.len() == node.output_type.dims.len()
+                })
+            });
+            children
+                .into_iter()
+                .map(|source| key(source, remaining - 1))
+                .collect()
+        };
         if finish {
-            let result = children.iter().find_map(|source| {
-                origins
-                    .semantic
-                    .borrow()
-                    .get(&key(*source, remaining - 1))
-                    .copied()
-                    .flatten()
+            let result = children.iter().find_map(|child| {
+                wire_ingress_work!(semantic_probes);
+                origins.semantic.borrow().get(child).copied().flatten()
             });
             wire_ingress_work!(semantic_entries);
             origins.semantic.borrow_mut().insert(current, result);
         } else {
             pending.push((current, true));
             for child in children.into_iter().rev() {
-                pending.push((key(child, remaining - 1), false));
+                pending.push((child, false));
             }
         }
     }
@@ -6418,6 +6453,41 @@ mod tests {
     }
 
     #[test]
+    fn where_aliases_retain_own_dimensions_and_competing_alternatives() {
+        let mut nodes = shared_where_dimension_diamond(3);
+        nodes[0].output_type.dims[0] = WireDimInfo::Named {
+            name: "rows".into(),
+            size: None,
+        };
+        nodes[2].output_type.dims[0] = WireDimInfo::Named {
+            name: "own".into(),
+            size: None,
+        };
+        let origins = WireIngressOrigins::new(&nodes);
+        assert!(
+            matches!(wire_semantic_node_dim_grouped(&nodes, &nodes[3], 0, &[], &origins), Some(WireDimInfo::Named { name, .. }) if name == "own")
+        );
+        nodes[2].output_type.dims[0] = WireDimInfo::Lit {
+            size: NonnegativeExtent::new(7).unwrap(),
+        };
+        let origins = WireIngressOrigins::new(&nodes);
+        assert!(
+            matches!(wire_semantic_node_dim_grouped(&nodes, &nodes[3], 0, &[], &origins), Some(WireDimInfo::Lit { size }) if size.get() == 7)
+        );
+        nodes[3].shape_deps = vec![0, 2];
+        let origins = WireIngressOrigins::new(&nodes);
+        assert!(
+            matches!(wire_semantic_node_dim_grouped(&nodes, &nodes[3], 0, &[0, 2], &origins), Some(WireDimInfo::Named { name, .. }) if name == "rows")
+        );
+        assert!(
+            matches!(wire_semantic_node_dim_grouped(&nodes, &nodes[3], 0, &[2], &origins), Some(WireDimInfo::Lit { size }) if size.get() == 7)
+        );
+        assert!(
+            matches!(wire_semantic_node_dim_grouped(&nodes, &nodes[3], 0, &[0, 2], &origins), Some(WireDimInfo::Named { name, .. }) if name == "rows")
+        );
+    }
+
+    #[test]
     fn grouped_semantic_dimension_resolution_preserves_order_and_small_stack() {
         let mut nodes = shared_where_dimension_diamond(5_000);
         nodes[0].output_type.dims[0] = WireDimInfo::Named {
@@ -6551,7 +6621,7 @@ mod tests {
 
     #[test]
     fn public_where_and_logical_prefix_work_includes_semantic_dimensions() {
-        for logical in [false, true] {
+        for (logical, dependent) in [(false, false), (false, true), (true, false)] {
             for n in [32, 64, 128] {
                 let mut dag = contextual_prefix_comparisons(0, 0);
                 dag.nodes[0].output_type.precision = "bool".into();
@@ -6578,6 +6648,8 @@ mod tests {
                     };
                     if logical {
                         node.shape_deps = vec![0];
+                    } else if dependent {
+                        node.shape_deps = vec![previous];
                     }
                     node.op = if logical {
                         WireRiscOp::Logical {
@@ -6594,9 +6666,20 @@ mod tests {
                 WIRE_INGRESS_WORK.with(|work| work.set(Some(WireIngressWork::default())));
                 WireDag::from_validated_json(&json).unwrap();
                 let work = WIRE_INGRESS_WORK.with(|work| work.replace(None).unwrap());
-                eprintln!("public prefix logical={logical} n={n}: {work:?}");
+                eprintln!("public prefix logical={logical} dependent={dependent} n={n}: {work:?}");
                 assert!(work.semantic_visits < n * 30, "{work:?}");
                 assert!(work.axis_expansions < n * 30, "{work:?}");
+                assert!(work.axis_queries < n * 40, "{work:?}");
+                assert!(work.semantic_probes < n * 24, "{work:?}");
+                assert!(work.node_lookups < n * 16, "{work:?}");
+                assert!(work.context_items < n * 64, "{work:?}");
+                assert!(work.source_index_probes < n * 32, "{work:?}");
+                assert!(
+                    work.key_comparisons < n * 64 * n.ilog2() as usize,
+                    "{work:?}"
+                );
+                assert_eq!(work.validation_node_visits, dag.nodes.len() * 2);
+
                 let last = dag.nodes.last_mut().unwrap();
                 if logical {
                     last.output_type.precision = "f32".into();

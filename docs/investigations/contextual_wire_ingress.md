@@ -14,9 +14,11 @@ wins. The witness epoch derives from the original unfiltered maximum source ID.
 Witness observations retain their separate input-agreement mode, and equality
 requiring a witness still requires an edge even when origins are identical.
 
-Anonymous identical-input Add axes have precomputed representatives with exact
+Anonymous identical-input Add axes and identical-branch Where axes have precomputed representatives with exact
 edge distances. Fixed and named output dimensions stop aliasing; validation and
-semantic-dimension questions still refer to the original nodes. An ordered
+semantic-dimension questions still refer to the original nodes. Where dimensions
+can jump only when every shape dependency names the same identical branch, so
+no competing ordered alternative is erased. An ordered
 first-position index intersects relevant sources with each node's dependencies,
 preserving failed alternatives and dependency order without a full list scan.
 
@@ -49,7 +51,9 @@ every instruction in JSON parsing or domain validation.
 
 For 16/32/64 alternating A/B comparisons over equally deep shared prefixes,
 axis expansions are 37/69/133 with exactly two groups. For 32/64/128 Where
-prefixes, semantic visits are 291/579/1155; Logical prefixes use 195/387/771.
+prefixes, semantic visits are 259/515/1027; with dependencies naming the identical
+branch and 32/64/128 authorities, they are 414/830/1662. Logical prefixes use
+195/387/771.
 Dictionary key comparisons grow with ordered-map operations rather than forming
 a strict linear bound on every machine instruction.
 
@@ -67,7 +71,9 @@ Issue #3231 remains open for that context-count dependence.
 ## Matched source control
 
 A debug control uses the same benchmark harness against main `2e56e9026` and the
-grouped resolver. Five samples alternate parent/candidate execution order for
+grouped resolver `293d0087f`. These source-control receipts precede the
+identical-branch Where refinement, which leaves these Add-only fixture paths
+unchanged apart from an empty immutable plan map. Five samples alternate parent/candidate execution order for
 each fixture class. The median user-plus-system CPU for each direct test process
 (including lengths 32/64/128, fixture construction, rejection checks and startup)
 is 100.8/35.2 ms for repeated authority, 136.6/36.9 ms for A/B alternation,
