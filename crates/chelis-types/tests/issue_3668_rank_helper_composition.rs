@@ -115,7 +115,7 @@ fn declared_precision_bounds_are_not_body_evidence_exemptions() {
 #[test]
 fn effectful_body_can_have_row_evidence_without_erasing_its_declared_effects() {
     both(
-        "def noisy[r](x: &tensor[..r, f32]) -> tensor[..r, f32] ! {IO} = { print(\"called\")\n neg(x) }\n\
+        "def noisy[r](x: &tensor[..r, f32]) -> tensor[..r, f32] ! {IO} = { shown = print(\"called\")\n neg(x) }\n\
          def outer[s](x: &tensor[..s, f32]) -> tensor[..s, f32] ! {IO} = noisy(x)\n",
         true,
     );
@@ -123,14 +123,18 @@ fn effectful_body_can_have_row_evidence_without_erasing_its_declared_effects() {
 
 #[test]
 fn builtin_spelling_is_neither_evidence_nor_an_automatic_rejection() {
+    // Package linking preserves the source spelling as a qualified declaration
+    // identity. An unqualified top-level `relu` is independently forbidden by
+    // spec/04 §8.6 and cannot test rank-body evidence.
+    let _linked = install_linked_program_guard();
     both(
-        "def relu[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = neg(x)\n\
-         def outer[s, q: Float](x: &tensor[..s, q]) -> tensor[..s, q] = relu(x)\n",
+        "def pkg__library__Math__relu[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = neg(x)\n\
+         def outer[s, q: Float](x: &tensor[..s, q]) -> tensor[..s, q] = pkg__library__Math__relu(x)\n",
         true,
     );
     both(
-        "def relu[a, b](x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1i32, 0i32)\n\
-         def outer[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n",
+        "def pkg__library__Math__relu[a, b](x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1i32, 0i32)\n\
+         def outer[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = pkg__library__Math__relu(x)\n",
         false,
     );
 }
