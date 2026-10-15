@@ -141,6 +141,24 @@ fn assert_rank_rejected(json: &Value, label: &str) {
     );
 }
 
+/// These fixtures fail ordinary authored-rank rigidity before a complete
+/// polymorphic body exists for the compositional evidence pass.
+fn assert_rank_narrowing_rejected(json: &Value, label: &str) {
+    let errors = json["errors"].as_array().expect("errors array");
+    assert!(
+        errors.iter().any(|error| {
+            error["kind"].as_str() == Some("DimensionMismatch")
+                && error["message"].as_str().is_some_and(|message| {
+                    message.contains("declared rank parameter `r`")
+                        && message.contains("was narrowed to concrete shape")
+                        && message.contains("[04-INF-6]")
+                })
+        }),
+        "{label}: expected authored-rank rigidity rejection, got {errors:?}"
+    );
+    assert!(json["score"].as_f64().is_some_and(|score| score < 1.0));
+}
+
 // ── Positives: one rank-poly def, callable across ranks ─────────────────
 
 /// The headline: a single identity-position `..r` def checks clean and is
@@ -290,7 +308,7 @@ fn reshape_in_rank_poly_body_rejected() {
     let json = check_json(
         "def bad[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = reshape(x, [2i64, 3i64])\n",
     );
-    assert_body_discipline_rejected(&json, "reshape", "reshape in ..r body");
+    assert_rank_narrowing_rejected(&json, "reshape in ..r body");
 }
 
 // ── Negatives: the non-`app` bypass routes (transforms / computed callees) ──
@@ -307,7 +325,7 @@ fn vmap_transform_in_rank_poly_body_rejected() {
         "def inner[a, b](x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)\n\
          def evil[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = x |> vmap(inner)\n",
     );
-    assert_rank_rejected(&json, "vmap transform in ..r body");
+    assert_rank_narrowing_rejected(&json, "vmap transform in ..r body");
 }
 
 /// `grad(loss)(x)` routes through a transform node and a computed callee — rejected.
@@ -317,17 +335,18 @@ fn grad_transform_in_rank_poly_body_rejected() {
         "def loss[a](x: &tensor[a, f32]) -> tensor[f32] = sum(x, cast(0, i32))\n\
          def evil[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = grad(loss)(x)\n",
     );
-    assert_rank_rejected(&json, "grad transform in ..r body");
+    assert_rank_narrowing_rejected(&json, "grad transform in ..r body");
 }
 
-/// A direct call to a user-defined function (not proven rank-safe) is rejected.
+/// A helper with a checked identity body still has a fixed-rank signature;
+/// calling it cannot narrow an authored opaque row to rank one.
 #[test]
-fn user_fn_call_in_rank_poly_body_rejected() {
+fn fixed_rank_helper_cannot_narrow_an_opaque_row() {
     let json = check_json(
         "def helper[a](x: &tensor[a, f32]) -> tensor[a, f32] = relu(x)\n\
          def evil[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = helper(x)\n",
     );
-    assert_rank_rejected(&json, "user-fn call in ..r body");
+    assert_rank_narrowing_rejected(&json, "fixed-rank helper in ..r body");
 }
 
 // ── Tier-3 supersedes the old parse boundary ────────────────────────────
@@ -351,17 +370,27 @@ fn concrete_rank_activation_still_clean() {
     assert_clean(&json, "concrete-rank activation control");
 }
 
-/// Name-collision bypass (red-team #1): a user `def` that SHADOWS an Identity
-/// builtin name (`relu`) and transposes must still be rejected inside a `..r`
-/// body — the discipline check resolves the callee against the user defs, not
-/// just the builtin-name table.
+/// Unqualified top-level intrinsic names cannot be rebound. Qualified
+/// package declarations and lexical shadowing have separate composition tests.
 #[test]
 fn shadowing_builtin_name_in_rank_poly_body_rejected() {
     let json = check_json(
         "def relu[a, b](x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)\n\
          def evil[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n",
     );
-    assert_rank_rejected(&json, "user `relu` shadowing the builtin in a ..r body");
+    assert_rejected_with(
+        &json,
+        "shadows the builtin function `relu`",
+        "top-level intrinsic shadow",
+    );
+    assert!(
+        json["errors"]
+            .as_array()
+            .expect("errors array")
+            .iter()
+            .any(|error| { error["kind"].as_str() == Some("BuiltinShadowing") })
+    );
+    assert_rank_narrowing_rejected(&json, "fixed-rank shadow in ..r body");
 }
 
 // ── Backend lowering: call-site rank monomorphization ───────────────────
