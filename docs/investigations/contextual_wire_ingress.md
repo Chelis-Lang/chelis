@@ -65,7 +65,7 @@ This mechanism bounds retained contextual memo memory and shares work across
 interleaved equivalent authorities. It does **not** prove universal whole-ingress
 linear work. With 16/32/64 genuinely distinct choices over the anonymous identical-input Add
 prefix, axis expansions are 65/129/257. Other context-dependent graph forms can require another traversal for each
-distinct authority. Witness prefixes with unsupported strict observations retain
+distinct authority. Witness prefixes with opaque contextual observations retain
 the contextual edge reconstruction and connectivity fallback described below.
 Issue #3231 remains open for that context-count dependence.
 
@@ -194,3 +194,48 @@ its contextual fallback remains a residual. The control temporarily substitutes
 only the exact main schema source in the exclusive author tree, retains the same
 allocation harness and all assertions, and restores the candidate source bytes
 before focused validation. Neither measurement is a timing-speedup claim.
+
+## Conditional observation plans
+
+Conditional witness endpoints use shared plans for one ordered Const choice layer
+whose candidates resolve independently under full-fuel strict observation.
+Existing exact-hop aliases transfer these plans without changing fixed dimensions,
+input-agreement mode or candidate order. Other observations remain opaque and
+retain the original contextual fallback.
+
+Eligible original claim slots map to canonical unordered plan pairs stamped with
+the earliest declaring witness. Source postings select active plans in an exact
+shape-authority group. An ephemeral overlay combines those conditional edges with
+the historical strict partition at the original unfiltered cutoff. Conditional
+pairs are enumerated by the smaller of the active pair budget and eligible active
+incidence count; this avoids both rescanning an always-active anchor's degree and
+quadratic pair enumeration for dense active plans with sparse edges. Self edges
+remain actual evidence. Negative answers require a complete eligible prefix;
+opaque observations preserve fallback, including metadata-dependent agreement.
+
+Construction, ordered candidates, source postings, map comparisons, pair probes,
+incidence visits, strict-component walks and overlay queries are counted separately.
+Retained plans and edge indexes are shared; only the current authority's overlay
+is retained. This is a bounded conditional-observation mechanism, not a universal
+whole-ingress linearity or peak-memory reduction claim. Metadata proof reentry
+remains an uninvestigated question outside this mechanism.
+
+With W witness observations, E original claim slots, P compiled observation
+states, D explicit ordered candidate records, R sufficient strict states and V
+strict origins, retained setup storage is O(W + E + P + D + R + V). Strict
+resolution work T and map comparisons remain separately counted. For each group,
+C relevant keys select S source postings and K active conditional plans. The
+additional overlay work includes C + S + K, prefix-count searches, the smaller of
+K(K+1)/2 and eligible conditional incidence count, active conditional-to-strict
+incidences, historical strict-root walks and equality queries, with ordered-map
+comparison factors. Only one overlay survives per group. Dense postings, many
+conditional-to-strict edges and opaque fallback can still require repeated work;
+this bound is not automatically linear in graph nodes.
+
+The conditional oracle compares every small cutoff in both directions, ordered
+alternatives, opaque candidates, fixed dimensions, mixed source precision, self
+edges and duplicate claims with the independent original helper. Public JSON
+controls cover changing and alternating authorities, unrelated-origin rejection,
+malformed references and an earlier shape error followed by a later non-shape
+error. A dense-active/sparse-edge control forces incidence enumeration; a long
+shared-choice control requires aliases to share candidate and posting storage.

@@ -3627,6 +3627,21 @@ struct WireIngressWork {
     witness_parent_steps: usize,
     witness_index_answers: usize,
     witness_fallbacks: usize,
+    conditional_plan_states: usize,
+    conditional_candidates: usize,
+    conditional_postings: usize,
+    conditional_pair_probes: usize,
+    conditional_incidence_steps: usize,
+    conditional_overlays: usize,
+    conditional_edges: usize,
+    conditional_queries: usize,
+    conditional_parent_steps: usize,
+    conditional_selection_steps: usize,
+    conditional_prefix_probes: usize,
+    conditional_observation_queries: usize,
+    conditional_observation_entries: usize,
+    conditional_plan_queries: usize,
+    conditional_pair_entries: usize,
 }
 #[cfg(test)]
 thread_local! {
@@ -3734,11 +3749,17 @@ fn wire_witnessed_origin_equal(
             .copied()
             .max()
             .unwrap_or_else(|| u64::try_from(nodes.len()).unwrap_or(u64::MAX));
-        if let Some(answer) =
-            index
-                .borrow_mut()
-                .query(nodes, left, right, cutoff, require_witness, cache)
-        {
+        if let Some(answer) = index.borrow_mut().query(
+            nodes,
+            WireWitnessQuestion {
+                left,
+                right,
+                cutoff,
+                required: require_witness,
+                sources: relevant_shape_sources,
+            },
+            cache,
+        ) {
             wire_ingress_work!(witness_index_answers);
             return answer;
         }
@@ -3772,6 +3793,15 @@ type WireStrictObservationMemo = std::cell::RefCell<
     BTreeMap<WireWitnessKey<(u64, usize, bool)>, Option<WireSemanticAxisOrigin>>,
 >;
 
+#[derive(Clone, Copy)]
+struct WireWitnessQuestion<'a> {
+    left: WireSemanticAxisOrigin,
+    right: WireSemanticAxisOrigin,
+    cutoff: u64,
+    required: bool,
+    sources: &'a [u64],
+}
+
 #[derive(Default)]
 struct WireWitnessIndex {
     next: usize,
@@ -3784,6 +3814,7 @@ struct WireWitnessIndex {
     // Before this declaring ID every eligible edge has independent endpoints.
     // An incomplete later prefix can prove positives, never negatives.
     incomplete_from: Option<u64>,
+    conditional: WireConditionalPlans,
 }
 impl WireWitnessIndex {
     fn observe(
@@ -3894,6 +3925,9 @@ impl WireWitnessIndex {
                     self.edge(a, b, node.id);
                 } else {
                     self.incomplete_from.get_or_insert(node.id);
+                    let a = self.conditional.observe(nodes, node.id, &strict);
+                    let b = self.conditional.observe(nodes, *requirement, &strict);
+                    self.conditional.edge(a, b, node.id);
                 }
             }
         }
@@ -3901,12 +3935,16 @@ impl WireWitnessIndex {
     fn query(
         &mut self,
         nodes: &[WireDagNode],
-        left: WireSemanticAxisOrigin,
-        right: WireSemanticAxisOrigin,
-        cutoff: u64,
-        required: bool,
+        question: WireWitnessQuestion<'_>,
         cache: &WireAxisOriginCache,
     ) -> Option<bool> {
+        let WireWitnessQuestion {
+            left,
+            right,
+            cutoff,
+            required,
+            ..
+        } = question;
         self.advance(nodes, cutoff, cache);
         let proof = match (
             self.origins.get(&WireWitnessKey(left)),
@@ -3919,8 +3957,418 @@ impl WireWitnessIndex {
         if proof || self.incomplete_from.is_none_or(|first| cutoff <= first) {
             Some(proof)
         } else {
-            None
+            self.conditional.query(nodes, self, question, cache)
         }
+    }
+}
+
+// Plans do not resolve contextual metadata. A strict failure is not a proof of
+// absence: selected unsupported alternatives and unsupported transfers are opaque.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum WireConditionalPlan {
+    Independent(WireSemanticAxisOrigin),
+    Choice(usize),
+    Absent,
+    Opaque,
+}
+type WireConditionalPosting = (usize, usize, Option<WireSemanticAxisOrigin>);
+#[derive(Default)]
+struct WireConditionalPlans {
+    states: BTreeMap<WireWitnessKey<(u64, usize, bool)>, usize>,
+    observations: BTreeMap<WireWitnessKey<u64>, usize>,
+    intern: BTreeMap<WireWitnessKey<WireConditionalPlan>, usize>,
+    plans: Vec<WireConditionalPlan>,
+    // Cons keys are fixed width: aliases and repeated long alternatives never
+    // compare or copy an entire plan when interning it.
+    cons: BTreeMap<WireWitnessKey<(u64, Option<WireSemanticAxisOrigin>, usize)>, usize>,
+    cells: Vec<(u64, Option<WireSemanticAxisOrigin>, usize)>,
+    postings: BTreeMap<WireWitnessKey<u64>, Vec<WireConditionalPosting>>,
+    pairs: BTreeMap<WireWitnessKey<(usize, usize)>, u64>,
+    adjacency: BTreeMap<WireWitnessKey<usize>, Vec<(u64, usize)>>,
+    strict_edges: BTreeMap<WireWitnessKey<usize>, Vec<(u64, WireSemanticAxisOrigin)>>,
+    incident: BTreeMap<WireWitnessKey<usize>, u64>,
+    opaque_from: Option<u64>,
+}
+impl WireConditionalPlans {
+    fn intern(&mut self, plan: WireConditionalPlan) -> usize {
+        if let Some(id) = self.intern.get(&WireWitnessKey(plan)) {
+            return *id;
+        }
+        let id = self.plans.len();
+        self.plans.push(plan);
+        self.intern.insert(WireWitnessKey(plan), id);
+        if let WireConditionalPlan::Choice(mut cell) = plan {
+            let mut position = 0;
+            while cell != usize::MAX {
+                wire_ingress_work!(conditional_candidates);
+                let (gate, outcome, tail) = self.cells[cell];
+                self.postings
+                    .entry(WireWitnessKey(gate))
+                    .or_default()
+                    .push((id, position, outcome));
+                cell = tail;
+                position += 1;
+            }
+        }
+        id
+    }
+    fn compile(
+        &mut self,
+        nodes: &[WireDagNode],
+        id: u64,
+        axis: usize,
+        mode: bool,
+        strict: &WireAxisOriginCache,
+    ) -> usize {
+        wire_ingress_work!(conditional_plan_queries);
+        let key = WireWitnessKey((id, axis, mode));
+        if let Some(plan) = self.states.get(&key) {
+            return *plan;
+        }
+        wire_ingress_work!(conditional_plan_states);
+        let Some(node) = wire_node_by_id(nodes, id) else {
+            return self.intern(WireConditionalPlan::Absent);
+        };
+        let plan = if let Some(origin) =
+            wire_axis_origin_cached(nodes, node, axis, nodes.len(), &[], mode, strict)
+        {
+            self.intern(WireConditionalPlan::Independent(origin))
+        } else if node.output_type.dims.get(axis).is_none() {
+            self.intern(WireConditionalPlan::Absent)
+        } else if let Some((representative, _)) = strict
+            .plans
+            .as_ref()
+            .and_then(|p| p.aliases.get(id as usize)?.get(axis))
+            .copied()
+            .flatten()
+        {
+            // The existing alias proof preserves axis, agreement and exact hops.
+            // Full graph fuel is sufficient at every backward state.
+            self.compile(nodes, representative, axis, mode, strict)
+        } else if matches!(
+            node.op,
+            WireRiscOp::Const { .. } | WireRiscOp::ConstTensor { .. }
+        ) {
+            let mut head = usize::MAX;
+            for source in node.shape_deps.iter().rev() {
+                wire_ingress_work!(conditional_candidates);
+                let Some(candidate) = wire_node_by_id(nodes, *source) else {
+                    continue;
+                };
+                if candidate.id >= id
+                    || candidate.output_type.dims.len() != node.output_type.dims.len()
+                {
+                    continue;
+                }
+                let origin =
+                    wire_axis_origin_cached(nodes, candidate, axis, nodes.len(), &[], mode, strict);
+                // None is opaque, never silently skipped: contextual resolution
+                // might succeed and must precede a later independent candidate.
+                let cell = (*source, origin, head);
+                head = if let Some(existing) = self.cons.get(&WireWitnessKey(cell)) {
+                    *existing
+                } else {
+                    let next = self.cells.len();
+                    self.cells.push(cell);
+                    self.cons.insert(WireWitnessKey(cell), next);
+                    next
+                };
+            }
+            if head == usize::MAX {
+                self.intern(WireConditionalPlan::Absent)
+            } else {
+                self.intern(WireConditionalPlan::Choice(head))
+            }
+        } else {
+            self.intern(WireConditionalPlan::Opaque)
+        };
+        self.states.insert(key, plan);
+        plan
+    }
+    fn observe(&mut self, nodes: &[WireDagNode], id: u64, strict: &WireAxisOriginCache) -> usize {
+        wire_ingress_work!(conditional_observation_queries);
+        if let Some(plan) = self.observations.get(&WireWitnessKey(id)) {
+            return *plan;
+        }
+        let observation = wire_node_by_id(nodes, id).and_then(|w| {
+            let WireRiscOp::ExtentWitness {
+                axis: WireRtAxis::Lit { value },
+                ..
+            } = &w.op
+            else {
+                return None;
+            };
+            Some((*w.inputs.first()?, usize::try_from(*value).ok()?))
+        });
+        let plan = match observation {
+            Some((source, axis)) => self.compile(nodes, source, axis, false, strict),
+            None => self.intern(WireConditionalPlan::Absent),
+        };
+        wire_ingress_work!(conditional_observation_entries);
+        self.observations.insert(WireWitnessKey(id), plan);
+        plan
+    }
+    fn edge(&mut self, a: usize, b: usize, stamp: u64) {
+        use WireConditionalPlan::*;
+        match (self.plans[a], self.plans[b]) {
+            (Absent, _) | (_, Absent) => return,
+            (Opaque, _) | (_, Opaque) => {
+                self.opaque_from.get_or_insert(stamp);
+                return;
+            }
+            _ => {}
+        }
+        let pair = if a <= b { (a, b) } else { (b, a) };
+        if self.pairs.contains_key(&WireWitnessKey(pair)) {
+            return;
+        }
+        wire_ingress_work!(conditional_pair_entries);
+        self.pairs.insert(WireWitnessKey(pair), stamp);
+        for id in [a, b] {
+            self.incident.entry(WireWitnessKey(id)).or_insert(stamp);
+        }
+        match (self.plans[a], self.plans[b]) {
+            (Choice(_), Choice(_)) => {
+                self.adjacency
+                    .entry(WireWitnessKey(a))
+                    .or_default()
+                    .push((stamp, b));
+                if a != b {
+                    self.adjacency
+                        .entry(WireWitnessKey(b))
+                        .or_default()
+                        .push((stamp, a));
+                }
+            }
+            (Choice(_), Independent(origin)) => self
+                .strict_edges
+                .entry(WireWitnessKey(a))
+                .or_default()
+                .push((stamp, origin)),
+            (Independent(origin), Choice(_)) => self
+                .strict_edges
+                .entry(WireWitnessKey(b))
+                .or_default()
+                .push((stamp, origin)),
+            _ => {}
+        }
+    }
+    fn query(
+        &self,
+        nodes: &[WireDagNode],
+        base: &WireWitnessIndex,
+        question: WireWitnessQuestion<'_>,
+        cache: &WireAxisOriginCache,
+    ) -> Option<bool> {
+        let WireWitnessQuestion {
+            left,
+            right,
+            cutoff,
+            required,
+            sources,
+        } = question;
+        let mut authority = Vec::new();
+        for source in sources {
+            wire_ingress_work!(conditional_postings);
+            if self.postings.contains_key(&WireWitnessKey(*source)) {
+                authority.push(*source);
+            }
+        }
+        authority.sort_unstable_by(|a, b| {
+            wire_ingress_work!(witness_key_comparisons);
+            a.cmp(b)
+        });
+        authority.dedup();
+        // A witness epoch, not a filtered source maximum. Different cutoffs
+        // inside the same epoch describe exactly the same historical graph.
+        let epoch = cache.witnesses.as_ref().map_or(0, |ws| {
+            ws.partition_point(|i| {
+                wire_ingress_work!(conditional_prefix_probes);
+                nodes[*i].id < cutoff
+            })
+        });
+        let mut held = cache.conditional_overlay.as_ref()?.borrow_mut();
+        if held.as_ref().is_none_or(|o| {
+            !wire_shape_key_cmp(&o.authority, &authority).is_eq() || o.epoch != epoch
+        }) {
+            wire_ingress_work!(conditional_overlays);
+            let mut overlay = WireConditionalOverlay {
+                authority,
+                epoch,
+                ..Default::default()
+            };
+            let mut selected =
+                BTreeMap::<WireWitnessKey<usize>, (usize, Option<WireSemanticAxisOrigin>)>::new();
+            for source in &overlay.authority {
+                if let Some(postings) = self.postings.get(&WireWitnessKey(*source)) {
+                    for (id, position, outcome) in postings {
+                        wire_ingress_work!(conditional_postings);
+                        let entry = selected
+                            .entry(WireWitnessKey(*id))
+                            .or_insert((*position, *outcome));
+                        if position < &entry.0 {
+                            *entry = (*position, *outcome);
+                        }
+                    }
+                }
+            }
+            overlay.complete = self.opaque_from.is_none_or(|stamp| stamp >= cutoff);
+            let mut active = BTreeMap::new();
+            for (id, (_, outcome)) in selected {
+                wire_ingress_work!(conditional_selection_steps);
+                if let Some(origin) = outcome {
+                    active.insert(id, origin);
+                } else if self.incident.get(&id).is_some_and(|stamp| *stamp < cutoff) {
+                    overlay.complete = false;
+                }
+            }
+            let mut degree = 0usize;
+            for id in active.keys() {
+                wire_ingress_work!(conditional_selection_steps);
+                if let Some(adj) = self.adjacency.get(id) {
+                    degree = degree.saturating_add(adj.partition_point(|(stamp, _)| {
+                        wire_ingress_work!(conditional_prefix_probes);
+                        *stamp < cutoff
+                    }));
+                }
+            }
+            let k = active.len();
+            let budget = k
+                .checked_mul(k.saturating_add(1))
+                .map(|n| n / 2)
+                .unwrap_or(usize::MAX);
+            if budget <= degree {
+                for (a, oa) in &active {
+                    for (b, ob) in active.range(*a..) {
+                        wire_ingress_work!(conditional_pair_probes);
+                        if self
+                            .pairs
+                            .get(&WireWitnessKey((a.0, b.0)))
+                            .is_some_and(|stamp| *stamp < cutoff)
+                        {
+                            overlay.edge(base, *oa, *ob, cutoff);
+                        }
+                    }
+                }
+            } else {
+                for (a, oa) in &active {
+                    if let Some(adj) = self.adjacency.get(a) {
+                        for (_, b) in adj.iter().take_while(|(stamp, _)| {
+                            wire_ingress_work!(conditional_prefix_probes);
+                            *stamp < cutoff
+                        }) {
+                            wire_ingress_work!(conditional_incidence_steps);
+                            if a.0 <= *b
+                                && let Some(ob) = active.get(&WireWitnessKey(*b))
+                            {
+                                overlay.edge(base, *oa, *ob, cutoff);
+                            }
+                        }
+                    }
+                }
+            }
+            for (id, origin) in active {
+                wire_ingress_work!(conditional_selection_steps);
+                if let Some(edges) = self.strict_edges.get(&id) {
+                    for (_, other) in edges.iter().take_while(|(stamp, _)| {
+                        wire_ingress_work!(conditional_prefix_probes);
+                        *stamp < cutoff
+                    }) {
+                        wire_ingress_work!(conditional_incidence_steps);
+                        overlay.edge(base, origin, *other, cutoff);
+                    }
+                }
+            }
+            *held = Some(overlay);
+        }
+        let overlay = held.as_ref()?;
+        if !overlay.complete {
+            return None;
+        }
+        wire_ingress_work!(conditional_queries);
+        let a = overlay.vertex(base, left, cutoff);
+        let b = overlay.vertex(base, right, cutoff);
+        let proof = match (
+            overlay.ids.get(&WireWitnessKey(a)),
+            overlay.ids.get(&WireWitnessKey(b)),
+        ) {
+            (Some(a), Some(b)) => overlay.find(*a) == overlay.find(*b),
+            _ => false,
+        };
+        // Every retained local vertex is incident to an actual edge. The strict
+        // index has already answered any proof requiring only strict edges.
+        Some(proof || (a == b && !required))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum WireConditionalVertex {
+    Strict(usize),
+    Fresh(WireSemanticAxisOrigin),
+}
+#[derive(Default)]
+struct WireConditionalOverlay {
+    authority: Vec<u64>,
+    epoch: usize,
+    complete: bool,
+    ids: BTreeMap<WireWitnessKey<WireConditionalVertex>, usize>,
+    parents: Vec<usize>,
+    sizes: Vec<usize>,
+}
+impl WireConditionalOverlay {
+    fn vertex(
+        &self,
+        base: &WireWitnessIndex,
+        origin: WireSemanticAxisOrigin,
+        cutoff: u64,
+    ) -> WireConditionalVertex {
+        base.origins
+            .get(&WireWitnessKey(origin))
+            .map_or(WireConditionalVertex::Fresh(origin), |id| {
+                WireConditionalVertex::Strict(base.find(*id, cutoff))
+            })
+    }
+    fn find(&self, mut id: usize) -> usize {
+        loop {
+            wire_ingress_work!(conditional_parent_steps);
+            if self.parents[id] == id {
+                return id;
+            }
+            id = self.parents[id];
+        }
+    }
+    fn intern(&mut self, v: WireConditionalVertex) -> usize {
+        if let Some(id) = self.ids.get(&WireWitnessKey(v)) {
+            return *id;
+        }
+        let id = self.parents.len();
+        self.parents.push(id);
+        self.sizes.push(1);
+        self.ids.insert(WireWitnessKey(v), id);
+        id
+    }
+    fn edge(
+        &mut self,
+        base: &WireWitnessIndex,
+        a: WireSemanticAxisOrigin,
+        b: WireSemanticAxisOrigin,
+        cutoff: u64,
+    ) {
+        wire_ingress_work!(conditional_edges);
+        let a = self.vertex(base, a, cutoff);
+        let b = self.vertex(base, b, cutoff);
+        let a = self.intern(a);
+        let b = self.intern(b);
+        let mut a = self.find(a);
+        let mut b = self.find(b);
+        if a == b {
+            return;
+        }
+        if self.sizes[a] > self.sizes[b] {
+            std::mem::swap(&mut a, &mut b);
+        }
+        self.parents[a] = b;
+        self.sizes[b] += self.sizes[a];
     }
 }
 
@@ -4040,6 +4488,7 @@ struct WireAxisOriginCache {
     plans: Option<std::rc::Rc<WireOriginPlans>>,
     witness_index: Option<std::rc::Rc<std::cell::RefCell<WireWitnessIndex>>>,
     strict_observations: Option<std::rc::Rc<WireStrictObservationMemo>>,
+    conditional_overlay: Option<std::rc::Rc<std::cell::RefCell<Option<WireConditionalOverlay>>>>,
 }
 
 // Context membership is observed only by Const/ConstTensor axis resolution.
@@ -4198,6 +4647,7 @@ struct WireIngressOrigins {
     plans: std::rc::Rc<WireOriginPlans>,
     semantic: std::cell::RefCell<BTreeMap<(u64, usize, usize), Option<u64>>>,
     semantic_authority: std::cell::RefCell<Option<WireShapeAuthority>>,
+    conditional_overlay: std::rc::Rc<std::cell::RefCell<Option<WireConditionalOverlay>>>,
 }
 impl WireIngressOrigins {
     fn new(nodes: &[WireDagNode]) -> Self {
@@ -4236,6 +4686,7 @@ impl WireIngressOrigins {
             plans: std::rc::Rc::new(WireOriginPlans::new(nodes)),
             semantic: Default::default(),
             semantic_authority: Default::default(),
+            conditional_overlay: Default::default(),
         }
     }
     fn discover(nodes: &[WireDagNode]) -> Self {
@@ -4302,6 +4753,7 @@ impl WireIngressOrigins {
                 plans: self.plans.clone(),
                 semantic: Default::default(),
                 semantic_authority: Default::default(),
+                conditional_overlay: Default::default(),
             };
             for question in questions {
                 let answer = wire_node_shape_equal(
@@ -4326,6 +4778,7 @@ impl WireIngressOrigins {
             plans: self.plans.clone(),
             semantic: Default::default(),
             semantic_authority: Default::default(),
+            conditional_overlay: Default::default(),
         }
     }
     fn comparison(&self, nodes: &[WireDagNode], relevant: &[u64]) -> WireAxisOriginCache {
@@ -4342,6 +4795,7 @@ impl WireIngressOrigins {
             witnesses: Some(self.witnesses.clone()),
             witness_index: Some(self.witness_index.clone()),
             strict_observations: None,
+            conditional_overlay: Some(self.conditional_overlay.clone()),
             plans: Some(self.plans.clone()),
             strict: false,
         }
@@ -6729,6 +7183,271 @@ mod tests {
         );
     }
 
+    // spec/10: contextual ordered sources and original witness cutoff are
+    // independent authorities. A warm successful group cannot admit another.
+    #[test]
+    fn conditional_witness_star_uses_sparse_authority_edges() {
+        for n in [16, 32, 64] {
+            let mut nodes = contextual_witness_nodes(false, false);
+            nodes.truncate(1);
+            let template = nodes[0].clone();
+            for id in 1..n {
+                let mut load = template.clone();
+                load.id = id;
+                nodes.push(load);
+            }
+            let mut observations = Vec::new();
+            for source in 0..n {
+                let mut constant = template.clone();
+                constant.id = nodes.len() as u64;
+                constant.op = WireRiscOp::Const {
+                    value: chelis_types::scalar_from_f64(
+                        "conditional observation",
+                        chelis_types::types::Prim::F32,
+                        0.0,
+                    )
+                    .unwrap(),
+                };
+                constant.shape_deps = vec![source];
+                observations.push(constant.id);
+                nodes.push(constant);
+            }
+            let anchor = append_test_witness(&mut nodes, observations[0], &[]);
+            for source in observations.iter().skip(1) {
+                append_test_witness(&mut nodes, *source, &[anchor]);
+            }
+            let origins = WireIngressOrigins::new(&nodes);
+            let a = WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 };
+            WIRE_INGRESS_WORK.with(|work| work.set(Some(WireIngressWork::default())));
+            for source in 1..n {
+                for selected in [source, (source + 1) % n, source] {
+                    let sources = vec![0, selected, nodes.len() as u64];
+                    let b = WireSemanticAxisOrigin::ExternalAxis {
+                        load: source,
+                        axis: 0,
+                    };
+                    let cache = origins.comparison(&nodes, &sources);
+                    assert_eq!(
+                        wire_witnessed_origin_equal(&nodes, a, b, &sources, false, &cache),
+                        selected == source
+                    );
+                }
+            }
+            let work = WIRE_INGRESS_WORK.with(|work| work.replace(None).unwrap());
+            eprintln!("conditional star n={n}: {work:?}");
+            assert_eq!(
+                work.witness_fallbacks, 0,
+                "bounded singleton plans must be complete: {work:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn conditional_observation_all_cutoffs_orders_and_opaque_match_original() {
+        for variant in 0..5 {
+            let mut nodes = shared_axis_diamond(0);
+            let mut other = nodes[0].clone();
+            other.id = 1;
+            nodes.push(other);
+            let mut constant = nodes[0].clone();
+            constant.id = 2;
+            constant.op = WireRiscOp::Const {
+                value: chelis_types::scalar_from_f64("conditional differential", Prim::F32, 0.0)
+                    .unwrap(),
+            };
+            constant.shape_deps = if variant == 0 {
+                vec![1, 0, 1]
+            } else {
+                vec![0, 1]
+            };
+            nodes.push(constant.clone());
+            // An unsupported candidate ahead of a strict success MUST remain
+            // opaque, including when the original contextual candidate fails.
+            if variant == 1 {
+                constant.id = 3;
+                constant.shape_deps = vec![2, 0];
+                nodes.push(constant);
+            } else if variant == 2 {
+                let mut alias = nodes[2].clone();
+                alias.id = 3;
+                alias.op = WireRiscOp::Add;
+                alias.inputs = vec![2, 2];
+                alias.shape_deps.clear();
+                nodes.push(alias);
+            } else if variant == 3 {
+                nodes[2].output_type.dims[0] = WireDimInfo::Lit {
+                    size: NonnegativeExtent::new(7).unwrap(),
+                };
+            } else if variant == 4 {
+                // Const source choice does not impose an extra precision check.
+                nodes[0].output_type.precision = "f64".into();
+            }
+            let observed = nodes.last().unwrap().id;
+            let anchor = append_test_witness(&mut nodes, 0, &[]);
+            let next = append_test_witness(&mut nodes, observed, &[anchor]);
+            append_test_witness(&mut nodes, observed, &[anchor, next, next]);
+            let origins = WireIngressOrigins::new(&nodes);
+            for cutoff in (0..nodes.len() + 2).rev().chain(0..nodes.len() + 2) {
+                for subset in 0..8 {
+                    let mut sources = (0..3)
+                        .filter(|i| subset & (1 << i) != 0)
+                        .collect::<Vec<u64>>();
+                    if subset != 0 {
+                        sources.push(cutoff as u64);
+                    }
+                    let cache = origins.comparison(&nodes, &sources);
+                    for a in [
+                        WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 },
+                        WireSemanticAxisOrigin::ExternalAxis { load: 1, axis: 0 },
+                        WireSemanticAxisOrigin::Literal(7),
+                    ] {
+                        for b in [
+                            WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 },
+                            WireSemanticAxisOrigin::ExternalAxis { load: 1, axis: 0 },
+                            WireSemanticAxisOrigin::Literal(7),
+                        ] {
+                            for required in [false, true] {
+                                assert_eq!(
+                                    wire_witnessed_origin_equal(
+                                        &nodes, a, b, &sources, required, &cache
+                                    ),
+                                    wire_witnessed_origin_equal_original(
+                                        &nodes,
+                                        a,
+                                        b,
+                                        &sources,
+                                        required,
+                                        &WireAxisOriginCache::default()
+                                    ),
+                                    "variant={variant} cutoff={cutoff} sources={sources:?} required={required}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_dense_active_sparse_edges_choose_incidence() {
+        for n in [16, 32, 64] {
+            let mut nodes = shared_axis_diamond(0);
+            nodes[0].output_type.dims = vec![nodes[0].output_type.dims[0].clone(); n];
+            let mut constant = nodes[0].clone();
+            constant.id = 1;
+            constant.op = WireRiscOp::Const {
+                value: chelis_types::scalar_from_f64("dense active", Prim::F32, 0.0).unwrap(),
+            };
+            constant.shape_deps = vec![0];
+            nodes.push(constant);
+            let mut previous = None;
+            for axis in 0..n {
+                let id =
+                    append_test_witness(&mut nodes, 1, &previous.into_iter().collect::<Vec<_>>());
+                if let WireRiscOp::ExtentWitness { axis: stored, .. } = &mut nodes[id as usize].op {
+                    *stored = WireRtAxis::Lit { value: axis as i32 };
+                }
+                previous = Some(id);
+            }
+            let origins = WireIngressOrigins::new(&nodes);
+            let sources = [0, nodes.len() as u64];
+            let cache = origins.comparison(&nodes, &sources);
+            WIRE_INGRESS_WORK.with(|w| w.set(Some(WireIngressWork::default())));
+            let a = WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 };
+            let b = WireSemanticAxisOrigin::ExternalAxis {
+                load: 0,
+                axis: n - 1,
+            };
+            assert!(wire_witnessed_origin_equal(
+                &nodes, a, b, &sources, false, &cache
+            ));
+            let work = WIRE_INGRESS_WORK.with(|w| w.replace(None).unwrap());
+            eprintln!("dense active sparse n={n}: {work:?}");
+            assert_eq!(work.conditional_pair_probes, 0, "{work:?}");
+            assert_eq!(work.conditional_incidence_steps, 2 * (n - 1), "{work:?}");
+            let missing = origins.comparison(&nodes, &[nodes.len() as u64]);
+            assert!(!wire_witnessed_origin_equal(
+                &nodes,
+                a,
+                b,
+                &[nodes.len() as u64],
+                false,
+                &missing
+            ));
+            assert!(wire_witnessed_origin_equal_original(
+                &nodes,
+                a,
+                b,
+                &sources,
+                false,
+                &WireAxisOriginCache::default()
+            ));
+        }
+    }
+
+    #[test]
+    fn conditional_long_choice_aliases_share_plan_storage() {
+        let n = 128;
+        let mut nodes = shared_axis_diamond(0);
+        for id in 1..n {
+            let mut load = nodes[0].clone();
+            load.id = id;
+            nodes.push(load);
+        }
+        let mut constant = nodes[0].clone();
+        constant.id = n;
+        constant.op = WireRiscOp::Const {
+            value: chelis_types::scalar_from_f64("shared choice", Prim::F32, 0.0).unwrap(),
+        };
+        constant.shape_deps = (0..n).collect();
+        nodes.push(constant);
+        let mut observations = vec![n];
+        for _ in 0..n {
+            let mut alias = nodes[0].clone();
+            alias.id = nodes.len() as u64;
+            alias.op = WireRiscOp::Add;
+            alias.inputs = vec![alias.id - 1; 2];
+            observations.push(alias.id);
+            nodes.push(alias);
+        }
+        let anchor = append_test_witness(&mut nodes, observations[0], &[]);
+        for source in observations.iter().skip(1) {
+            append_test_witness(&mut nodes, *source, &[anchor]);
+        }
+        let origins = WireIngressOrigins::new(&nodes);
+        let sources = [0, nodes.len() as u64];
+        let cache = origins.comparison(&nodes, &sources);
+        let a = WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 };
+        assert!(wire_witnessed_origin_equal(
+            &nodes, a, a, &sources, true, &cache
+        ));
+        let index = origins.witness_index.borrow();
+        assert_eq!(index.conditional.cells.len(), n as usize);
+        assert_eq!(
+            index
+                .conditional
+                .postings
+                .values()
+                .map(Vec::len)
+                .sum::<usize>(),
+            n as usize
+        );
+        assert_eq!(
+            index.conditional.pairs.len(),
+            1,
+            "all aliases preserve the same self edge"
+        );
+        assert!(wire_witnessed_origin_equal_original(
+            &nodes,
+            a,
+            a,
+            &sources,
+            true,
+            &WireAxisOriginCache::default()
+        ));
+    }
+
     #[test]
     fn strict_witness_metadata_agreement_does_not_assume_outer_false_is_independent() {
         let mut nodes = contextual_witness_nodes(false, true);
@@ -7505,6 +8224,167 @@ mod tests {
                 let last = dag.nodes.last_mut().unwrap();
                 last.inputs[1] = u64::MAX;
                 assert!(dag.validate_wire_contract().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn public_conditional_observations_report_all_work_and_diagnostics() {
+        for (alternating, witnesses) in [(true, true), (false, true)] {
+            for n in [16, 32, 64] {
+                let mut dag = contextual_prefix_comparisons(0, 1);
+                let load = dag.nodes[0].clone();
+                let constant = dag.nodes[1].clone();
+                let compare = dag.nodes[2].clone();
+                dag.nodes.clear();
+                let choices = if alternating { 2 } else { n };
+                for id in 0..choices {
+                    let mut node = load.clone();
+                    node.id = id;
+                    node.op = WireRiscOp::Load {
+                        name: format!("x{id}"),
+                    };
+                    dag.nodes.push(node);
+                }
+                let mut observations = Vec::new();
+                for source in 0..choices {
+                    let mut observed = constant.clone();
+                    observed.id = dag.nodes.len() as u64;
+                    observed.shape_deps = vec![source];
+                    observations.push(observed.id);
+                    dag.nodes.push(observed);
+                }
+                let mut node = constant;
+                node.id = dag.nodes.len() as u64;
+                node.shape_deps = (0..choices).collect();
+                dag.nodes.push(node);
+                for _ in 0..n {
+                    let mut node = load.clone();
+                    node.id = dag.nodes.len() as u64;
+                    node.op = WireRiscOp::Add;
+                    node.inputs = vec![node.id - 1, node.id - 1];
+                    dag.nodes.push(node);
+                }
+                let prefix = dag.nodes.last().unwrap().id;
+                let mut first_witness = None;
+                for i in 0..n {
+                    let source = if alternating { i % 2 } else { i };
+                    if witnesses {
+                        let mut witness = contextual_witness_nodes(false, false).remove(2);
+                        witness.id = dag.nodes.len() as u64;
+                        witness.inputs = vec![observations[source as usize]];
+                        if let Some(first) = first_witness {
+                            witness.inputs.push(first);
+                            if let WireRiscOp::ExtentWitness { claims, .. } = &mut witness.op {
+                                *claims = vec![WireExtentClaim {
+                                    claim: "n".into(),
+                                    requirement_declares: true,
+                                }];
+                            }
+                        }
+                        first_witness.get_or_insert(witness.id);
+                        dag.nodes.push(witness);
+                    }
+                    let mut node = compare.clone();
+                    node.id = dag.nodes.len() as u64;
+                    node.inputs = vec![prefix, source];
+                    node.shape_deps = vec![prefix];
+                    dag.nodes.push(node);
+                    if witnesses {
+                        let mut node = compare.clone();
+                        node.id = dag.nodes.len() as u64;
+                        node.inputs = vec![0, source];
+                        node.shape_deps = vec![0];
+                        dag.nodes.push(node);
+                    }
+                }
+                dag.roots = vec![dag.nodes.last().unwrap().id];
+                let json = serde_json::json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "declarations":dag.declarations, "nodes":dag.nodes, "roots":dag.roots}).to_string();
+                WIRE_INGRESS_WORK.with(|work| work.set(Some(WireIngressWork::default())));
+                WireDag::from_validated_json(&json).unwrap();
+                let work = WIRE_INGRESS_WORK.with(|work| work.replace(None).unwrap());
+                eprintln!(
+                    "authority work alternating={alternating} witnesses={witnesses} n={n}: {work:?}"
+                );
+                if alternating {
+                    assert_eq!(work.authority_groups, 2 * n as usize);
+                    assert!(work.axis_expansions < n as usize * 12, "{work:?}");
+                }
+                if !alternating && !witnesses {
+                    assert!(work.axis_expansions < n as usize * 12, "{work:?}");
+                    assert!(work.dependency_steps < n as usize * 20, "{work:?}");
+                }
+                if witnesses {
+                    assert_eq!(work.witness_index_edges, 0, "{work:?}");
+                    assert_eq!(work.witness_observation_entries, n as usize, "{work:?}");
+                    assert_eq!(work.witness_interned_origins, 0, "{work:?}");
+                    assert_eq!(
+                        work.witness_fallbacks, 0,
+                        "one-layer conditional graph is complete: {work:?}"
+                    );
+                }
+                if witnesses {
+                    assert!(
+                        work.witness_edges + work.witness_index_edges <= n as usize * 4,
+                        "witness edges rebuilt per question: {work:?}"
+                    );
+                    assert!(
+                        work.connectivity_steps + work.witness_parent_steps <= n as usize * 64,
+                        "witness connectivity rescanned per question: {work:?}"
+                    );
+                    assert!(work.witness_strict_expansions <= n as usize * 2, "{work:?}");
+                    assert!(work.witness_key_comparisons <= n as usize * 512, "{work:?}");
+                }
+                assert!(work.conditional_pair_probes <= n as usize * 4, "{work:?}");
+                assert!(
+                    work.conditional_incidence_steps <= n as usize * 4,
+                    "{work:?}"
+                );
+                assert!(original_public_witness_result(&json).is_ok());
+                let mut rejected = dag.clone();
+                let mut unrelated = load.clone();
+                unrelated.id = rejected.nodes.len() as u64;
+                unrelated.op = WireRiscOp::Load {
+                    name: "unrelated".into(),
+                };
+                rejected.nodes.push(unrelated.clone());
+                let mut mismatch = compare.clone();
+                mismatch.id = rejected.nodes.len() as u64;
+                mismatch.inputs = vec![0, unrelated.id];
+                mismatch.shape_deps = vec![0];
+                rejected.nodes.push(mismatch.clone());
+                rejected.roots = vec![mismatch.id];
+                let rejected_json = public_witness_json(&rejected);
+                let error = WireDag::from_validated_json(&rejected_json)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("requires two same-shape"), "{error}");
+                assert_eq!(
+                    error,
+                    original_public_witness_result(&rejected_json).unwrap_err()
+                );
+                // A later non-shape failure cannot preempt that shape failure.
+                mismatch.id = rejected.nodes.len() as u64;
+                mismatch.output_type.precision = "int64".into();
+                rejected.nodes.push(mismatch);
+                let rejected_json = public_witness_json(&rejected);
+                assert_eq!(
+                    WireDag::from_validated_json(&rejected_json)
+                        .unwrap_err()
+                        .to_string(),
+                    error
+                );
+                assert_eq!(
+                    original_public_witness_result(&rejected_json).unwrap_err(),
+                    error
+                );
+                let last = dag.nodes.last_mut().unwrap();
+                last.inputs[1] = u64::MAX;
+                let bad = public_witness_json(&dag);
+                assert_eq!(
+                    WireDag::from_validated_json(&bad).unwrap_err().to_string(),
+                    original_public_witness_result(&bad).unwrap_err()
+                );
             }
         }
     }
