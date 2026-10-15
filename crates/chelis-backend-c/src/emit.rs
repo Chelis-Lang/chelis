@@ -7282,11 +7282,32 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         count: &str,
         combine: impl Fn(&str, &str) -> String,
     ) -> Vec<(usize, String)> {
+        Self::adjacent_pair_fold_lanes_lines(level, count, None, combine)
+    }
+
+    fn adjacent_pair_fold_lanes_lines(
+        level: &str,
+        count: &str,
+        lanes: Option<&str>,
+        combine: impl Fn(&str, &str) -> String,
+    ) -> Vec<(usize, String)> {
         let index = Self::index_c_type();
-        let sum = combine(
-            &format!("{level}[__pair_left]"),
-            &format!("{level}[__pair_right]"),
+        let slot = |position: &str| match lanes {
+            Some(_) => format!("{level}[({position}) * 8 + __pair_lane]"),
+            None => format!("{level}[{position}]"),
+        };
+        let sum = combine(&slot("__pair_left"), &slot("__pair_right"));
+        let assignment = format!(
+            "{} = (__pair_right < {count}) ? {sum} : {};",
+            slot("__pair"),
+            slot("__pair_left")
         );
+        let assignment = match lanes {
+            Some(lanes) => format!(
+                "for ({index} __pair_lane = 0; __pair_lane < {lanes}; ++__pair_lane) {{ {assignment} }}"
+            ),
+            None => assignment,
+        };
         vec![
             (0, format!("while ({count} > 1) {{")),
             (
@@ -7299,12 +7320,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             ),
             (2, format!("{index} __pair_left = 2 * __pair;")),
             (2, format!("{index} __pair_right = __pair_left + 1;")),
-            (
-                2,
-                format!(
-                    "{level}[__pair] = (__pair_right < {count}) ? {sum} : {level}[__pair_left];"
-                ),
-            ),
+            (2, assignment),
             (1, "}".into()),
             (1, format!("{count} = __pair_next;")),
             (0, "}".into()),
@@ -7509,6 +7525,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// Allocate the leaves of [05-OP-30]'s adjacent-pair tree. An empty
     /// slice has no leaves: its identity is introduced only at the final store.
     fn emit_sum_level(&mut self, id: usize, axis_size: &str, precision: Prim) {
+        self.emit_sum_level_lanes(id, axis_size, precision, false);
+    }
+
+    fn emit_sum_level_lanes(&mut self, id: usize, axis_size: &str, precision: Prim, blocked: bool) {
         let et = Self::elem_type(&TensorType {
             dims: vec![],
             precision,
@@ -7522,9 +7542,18 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             dims: vec![],
             precision,
         });
-        self.line(&format!(
-            "chelis_tensor *__sum_scratch_{id} = chelis_alloc(1, &__sum_n_{id}, {dtype});"
-        ));
+        if blocked {
+            self.line(&format!(
+                "{index_et} __sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};"
+            ));
+            self.line(&format!(
+                "chelis_tensor *__sum_scratch_{id} = chelis_alloc(2, __sum_shape_{id}, {dtype});"
+            ));
+        } else {
+            self.line(&format!(
+                "chelis_tensor *__sum_scratch_{id} = chelis_alloc(1, &__sum_n_{id}, {dtype});"
+            ));
+        }
         self.line(&format!(
             "chelis_tensor_write *__sum_guard_{id} = chelis_tensor_begin_write(__sum_scratch_{id});"
         ));
@@ -7541,6 +7570,16 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     }
 
     fn emit_sum_fold_with(&mut self, id: usize, precision: Prim, carried: CarriedLeaf) {
+        self.emit_sum_fold_lanes_with(id, precision, carried, false);
+    }
+
+    fn emit_sum_fold_lanes_with(
+        &mut self,
+        id: usize,
+        precision: Prim,
+        carried: CarriedLeaf,
+        blocked: bool,
+    ) {
         if carried == CarriedLeaf::Unchanged {
             self.line(&format!("const int t{id}_carried = __sum_n_{id} == 1;"));
         }
@@ -7553,9 +7592,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             precision: Prim::Int64,
         });
         let zero = Self::scalar_zero_literal(precision);
-        let fold = Self::adjacent_pair_fold_lines(
+        let lanes = format!("__sum_lanes_{id}");
+        let fold = Self::adjacent_pair_fold_lanes_lines(
             &format!("__sum_level_{id}"),
             &format!("__sum_n_{id}"),
+            blocked.then_some(lanes.as_str()),
             |left, right| {
                 if matches!(precision, Prim::F16 | Prim::Bf16) {
                     let load = Self::reduced_to_f32_fn(precision);
@@ -7581,7 +7622,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // one-element group) has had no addition, so at f16 and bf16 it
         // finalizes by the same widening and canonicalizing narrowing a sum
         // takes.
-        let total = format!("__sum_n_{id} ? __sum_level_{id}[0] : {zero}");
+        if blocked {
+            self.line(&format!(
+                "for ({index_et} __sum_lane = 0; __sum_lane < {lanes}; ++__sum_lane) {{"
+            ));
+            self.indent += 1;
+        }
+        let first = if blocked { "__sum_lane" } else { "0" };
+        let total = format!("__sum_n_{id} ? __sum_level_{id}[{first}] : {zero}");
         let total = if matches!(precision, Prim::F16 | Prim::Bf16) {
             format!(
                 "{}({}({total}))",
@@ -7602,7 +7650,16 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             CarriedLeaf::Finalized => total,
             CarriedLeaf::Unchanged => format!("t{id}_carried ? __sum_level_{id}[0] : {total}"),
         };
-        self.line(&format!("(({et}*)t{id}_data)[outer] = {total};"));
+        let output = if blocked {
+            "outer + __sum_lane"
+        } else {
+            "outer"
+        };
+        self.line(&format!("(({et}*)t{id}_data)[{output}] = {total};"));
+        if blocked {
+            self.indent -= 1;
+            self.line("}");
+        }
         self.line(&format!("chelis_tensor_end_write(__sum_guard_{id});"));
         self.line(&format!("chelis_tensor_release(__sum_scratch_{id});"));
     }
@@ -7689,6 +7746,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .views
             .map(|view| dag.get(view).expect("verified expansion").inputs[0].0);
         let rank = product_ty.dims.len();
+        let blocked = rank >= 3
+            && axis == rank - 2
+            && matches!(dag.get(inlined.views[0]).unwrap().op, RiscOp::Expand { axis, .. } if axis == rank - 1)
+            && matches!(dag.get(inlined.views[1]).unwrap().op, RiscOp::Expand { axis, .. } if axis == rank - 3);
         let index_type = Self::elem_type(&TensorType {
             dims: vec![],
             precision: Prim::Int64,
@@ -7697,12 +7758,32 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let operand_et = Self::elem_type(product_ty);
         self.emit_reduction_plan(id, None, product_ty, &[axis], ty, "CHELIS_REDUCE_SUM", true);
         self.emit_slot_wrapper(id, ty);
-        self.open_element_loop(
-            id,
-            "outer",
-            &format!("t{id}_size"),
-            Some("#pragma omp parallel for"),
-        );
+        if blocked {
+            self.line(&format!(
+                "{index_type} __sum_columns_{id} = t{lhs}_extent{};",
+                rank - 1
+            ));
+            self.line(&format!("{index_type} __sum_blocks_{id} = __sum_columns_{id} / 8 + (__sum_columns_{id} % 8 != 0);"));
+            self.line(&format!("{index_type} __sum_groups_{id} = __sum_columns_{id} ? (t{id}_size / __sum_columns_{id}) * __sum_blocks_{id} : 0;"));
+            self.open_element_loop(
+                id,
+                "__sum_group",
+                &format!("__sum_groups_{id}"),
+                Some("#pragma omp parallel for"),
+            );
+            self.line(&format!("{index_type} outer = (__sum_group / __sum_blocks_{id}) * __sum_columns_{id} + (__sum_group % __sum_blocks_{id}) * 8;"));
+            self.line(&format!(
+                "{index_type} __sum_lanes_{id} = __sum_columns_{id} - outer % __sum_columns_{id};"
+            ));
+            self.line(&format!("if (__sum_lanes_{id} > 8) __sum_lanes_{id} = 8;"));
+        } else {
+            self.open_element_loop(
+                id,
+                "outer",
+                &format!("t{id}_size"),
+                Some("#pragma omp parallel for"),
+            );
+        }
         // The result coordinates are the product's without the summed axis,
         // in row-major order; together they place both operands' first leaf.
         self.line(&format!("{index_type} __rest = outer;"));
@@ -7713,14 +7794,25 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 "{{ const {index_type} __c = __rest % t{lhs}_extent{d}; __rest /= t{lhs}_extent{d}; __lhs_{id} += __c * t{lhs}_scale{d}; __rhs_{id} += __c * t{rhs}_scale{d}; }}"
             ));
         }
-        self.emit_sum_level(id, &format!("t{id}_leaf_count"), ty.precision);
+        self.emit_sum_level_lanes(id, &format!("t{id}_leaf_count"), ty.precision, blocked);
         self.line(&format!(
             "for ({index_type} __reduce_i = 0; __reduce_i < __sum_n_{id}; __reduce_i++) {{"
         ));
         self.indent += 1;
+        if blocked {
+            self.line(&format!(
+                "for ({index_type} __sum_lane = 0; __sum_lane < __sum_lanes_{id}; ++__sum_lane) {{"
+            ));
+            self.indent += 1;
+        }
         let read = |source: usize, side: &str, view: usize| {
+            let lane = if blocked && side == "rhs" {
+                " + __sum_lane"
+            } else {
+                ""
+            };
             format!(
-                "((const {operand_et}*)t{source}_data)[__{side}_{id} + __reduce_i * t{view}_scale{axis}]"
+                "((const {operand_et}*)t{source}_data)[__{side}_{id} + __reduce_i * t{view}_scale{axis}{lane}]"
             )
         };
         let (lhs_read, rhs_read) = (read(lhs_source, "lhs", lhs), read(rhs_source, "rhs", rhs));
@@ -7737,12 +7829,19 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 product_ty,
             )
         };
-        self.line(&format!(
-            "__sum_level_{id}[__reduce_i] = ({acc_et})({leaf});"
-        ));
+        let slot = if blocked {
+            "__reduce_i * 8 + __sum_lane"
+        } else {
+            "__reduce_i"
+        };
+        self.line(&format!("__sum_level_{id}[{slot}] = ({acc_et})({leaf});"));
+        if blocked {
+            self.indent -= 1;
+            self.line("}");
+        }
         self.indent -= 1;
         self.line("}");
-        self.emit_sum_fold(id, ty.precision);
+        self.emit_sum_fold_lanes_with(id, ty.precision, CarriedLeaf::Finalized, blocked);
         self.close_element_loop();
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
         for view in [lhs, rhs] {

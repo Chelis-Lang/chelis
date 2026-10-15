@@ -12748,7 +12748,7 @@ fn inlined_matmul_products_match_evaluator_bits_under_sanitizers() {
             })
             .collect()
     };
-    let (m, k, n) = (3, 13, 5);
+    let (m, k, n) = (3, 13, 17);
     for (prim, batch, wildcard) in [
         (Prim::F32, None, false),
         (Prim::F64, None, false),

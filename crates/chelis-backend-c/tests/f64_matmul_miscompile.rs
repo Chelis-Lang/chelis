@@ -219,10 +219,21 @@ fn matmul_dag(prim: Prim, [m, k, n]: [usize; 3], observe_product: bool) -> Dag {
         decl,
         RiscOp::Sum {
             axis: 1,
-            accumulator: prim,
+            accumulator: if matches!(prim, Prim::F16 | Prim::Bf16) {
+                Prim::F32
+            } else {
+                prim
+            },
         },
         vec![mul],
-        t(prim, vec![m, n]),
+        t(
+            if matches!(prim, Prim::F16 | Prim::Bf16) {
+                Prim::F32
+            } else {
+                prim
+            },
+            vec![m, n],
+        ),
         None,
     );
     dag.add_root(sum);
@@ -294,4 +305,18 @@ fn wildcard_products_keep_agreement_without_rank_three_storage() {
         c.find("chelis_movement_check_product(").unwrap()
             < c.find("chelis_shape_reduction_plan(").unwrap()
     );
+}
+
+/// Output-column blocks share one canonical tree shape, with independent lanes.
+#[test]
+fn column_blocks_keep_bounded_tree_scratch() {
+    for prim in [Prim::F32, Prim::F64, Prim::Bf16, Prim::F16] {
+        let dag = matmul_dag(prim, [256, 2304, 196], false);
+        let c = codegen_with_options(&dag, "column_blocks", CodegenOptions::default())
+            .unwrap()
+            .c_source;
+        assert!(c.contains("__sum_lanes_"), "{prim:?}: {c}");
+        assert!(c.contains("__pair_lane"), "{prim:?}: {c}");
+        assert!(!c.contains("chelis_alloc(3,"), "{prim:?}: {c}");
+    }
 }
