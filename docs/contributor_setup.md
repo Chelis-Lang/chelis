@@ -174,6 +174,10 @@ revision; never mix an archive or header from another derivation. A failed
 Nix-wrapper installation leaves its previous stable GC root and selected
 toolchain untouched.
 
+On Linux, `nix flake check` also checks that the `chelis` executable carries a
+GNU build id. The compiler identifies its own build by that id. Without it,
+each `chelis` process computes SHA-256 over the whole executable.
+
 A run of `nix-packages.yml` on `main` or on a release tag pushes to the
 `chelis-lang` Cachix cache. It pushes the `chelis`, `chelis-runtime`, and
 `chelisup` outputs, the cvc5 tree, and the Rust crate builds. `flake.nix` names

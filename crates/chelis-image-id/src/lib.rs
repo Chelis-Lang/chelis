@@ -96,6 +96,8 @@ pub enum ImageId {
     /// ELF `NT_GNU_BUILD_ID` depends on the link being driven with
     /// `--build-id`, which most toolchains default to but none guarantee, so
     /// this fallback carries real weight on Linux in a way it does not on macOS.
+    /// The `chelis` executable asks the linker for a build id in the build
+    /// script of `chelis-cli` (chelis#3659).
     ContentDigest([u8; 32]),
 }
 
