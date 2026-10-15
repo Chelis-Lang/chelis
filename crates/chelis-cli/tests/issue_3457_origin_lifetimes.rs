@@ -440,6 +440,68 @@ fn initial_list_size_and_completed_iterations_have_separate_storage_bounds() {
 }
 
 #[test]
+fn metadata_identifiers_cannot_shadow_authored_parameters_or_sidecars() {
+    for (case, names) in [
+        ("suffix", vec!["x", "x_root"]),
+        (
+            "reserved",
+            vec![
+                "x",
+                "x_root",
+                "__origin_scope_0",
+                "__chelis_function_origin_scope",
+                "__chelis_global_origin_root_0",
+                "__chelis_global_origin_scope_0",
+                "__chelis_global_origin_function_scope",
+                "__chelis_host_result_origin_root",
+                "__chelis_host_result_origin_scope",
+                "__chelis_host_result_origin_assign",
+                "__chelis_host_result_origin_scope_enter",
+                "__chelis_host_result_origin_scope_leave",
+                "__chelis_global_origin_root",
+                "__chelis_global_origin_scope",
+                "__chelis_global_origin_assign",
+            ],
+        ),
+    ] {
+        let parameters = names
+            .iter()
+            .map(|name| format!("{name}: Box[tensor[3, f32]]"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let arguments = names
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                if i == 1 {
+                    "Box { v: produce(size) }"
+                } else {
+                    "Box { v: produce(3i64) }"
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(
+            "type Box[T] =\n | Box {{ v: T }}\ndef value[T](b: Box[T]) -> T = match b with {{ | Box {{ v }} => v }}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef both({parameters}) -> i64 = shape(value(x_root), 0i32)\ndef run(size: i64) -> i64 = both({arguments})\nout = run(3i64)\n"
+        );
+        let (success, output) = result_claims::run(&source, false);
+        assert!(success && output.contains("out = 3"), "{output}");
+        live_metadata_with_sanitizers(&format!("identifiers-{case}"), &source, true);
+        for native in [false, true] {
+            let (success, output) = result_claims::run(
+                &source.replace("out = run(3i64)", "out = run(5i64)"),
+                native,
+            );
+            assert!(!success, "{output}");
+            assert!(
+                output.contains("numeric trap: domain in load at i64"),
+                "{output}"
+            );
+        }
+    }
+}
+
+#[test]
 fn reconstruction_keeps_independent_claim_failure_and_effect_order() {
     // Negative counterpart: a result claim on a freshly produced component
     // remains an insert trap before the later effect, including after reuse.
