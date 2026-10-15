@@ -249,7 +249,7 @@ static chelis_value __probe_index(const chelis_list *x, int64_t slot) {
         .filter_map(|line| line.strip_prefix("__memory__="))
         .next_back()
         .expect("origin allocation bytes");
-    eprintln!("native invocation origin bytes retained until teardown: {memory}");
+    eprintln!("native invocation cumulative allocated origin bytes: {memory}");
     let (entry, origin) = counts.split_once(',').unwrap();
     (entry.parse().unwrap(), origin.parse().unwrap())
 }
@@ -1535,4 +1535,158 @@ fn forwarding_wrapper(source: &str, unproved: bool) -> String {
             "-> {{ old = {root}\n older = old\n item = i\n item2 = item\n step(older, item2) }}"
         ),
     )
+}
+
+#[test]
+fn lexical_forwarding_example_preserves_the_independent_callee_claim() {
+    let source = include_str!("../../../examples/forwarded_accumulator_entry.ch");
+    let negative = source
+        .replacen("acc: List[tensor[3, f32]]", "acc: List[tensor[5, f32]]", 1)
+        .replacen(
+            "[1.0f32, 2.0f32, 3.0f32]",
+            "[1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32]",
+            1,
+        );
+    for native in [false, true] {
+        let (success, output) = result_claims::run(source, native);
+        assert!(success && output.contains("out = 5"), "{output}");
+        let (success, output) = result_claims::run(&negative, native);
+        assert!(!success, "{output}");
+        assert!(
+            output.contains("numeric trap: domain in load at i64"),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn lexical_forwarding_stationary_named_entries_keep_seed_work_bounded() {
+    for seed in [100, 400] {
+        for steps in [100, 400] {
+            for hops in [1, 2] {
+                for unproved in [false, true] {
+                    let source = forwarding_wrapper_source(seed, steps, hops, unproved)
+                        .replace("append(acc, produce(3i64))", "acc");
+                    let (work, origins) = counted_native(&source);
+                    eprintln!(
+                        "stationary forwarding C N={seed} K={steps} L={hops} unproved={unproved}: work={work} origins={origins}"
+                    );
+                    if unproved {
+                        assert!(work >= (seed * steps) as u64, "{work}");
+                    } else {
+                        assert!(work <= 96 * (seed + steps) as u64 + 100, "{work}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_nominal_initial_size_and_steps_have_separate_entry_bounds() {
+    for collection in ["Chain", "Box"] {
+        for seed in [100, 400] {
+            for steps in [100, 400] {
+                let source =
+                    immutable_nominal_alias_source(collection, "3", "composed", "fold", steps);
+                let (base, construction) = if collection == "Chain" {
+                    ("End { v }", "Link { v, next: acc }")
+                } else {
+                    ("Base { v }", "Wrap { inner: acc }")
+                };
+                let builder = format!(
+                    "def make_seed[T](v: T, count: i64) -> {collection}[T] = fold(fn (acc: {collection}[T], i: i64) -> {construction}, {base}, range(0i64, count))\n"
+                );
+                let source = source.replace("out = run(", &format!("{builder}out = run("));
+                let original = if collection == "Chain" {
+                    "End { v: produce(3i64) }"
+                } else {
+                    "Base { v: produce(3i64) }"
+                };
+                let source = source.replace(
+                    &format!("out = run({original})"),
+                    &format!("out = run(make_seed(produce(3i64), {seed}i64))"),
+                );
+                for unproved in [false, true] {
+                    let source = forwarding_wrapper(&source, unproved);
+                    let (work, origins) = counted_native(&source);
+                    eprintln!(
+                        "nominal initial-size forwarding {collection} N={seed} K={steps} unproved={unproved}: work={work} origins={origins}"
+                    );
+                    if unproved {
+                        assert!(work >= (seed * steps) as u64, "{work}");
+                    } else {
+                        assert!(work <= 96 * (seed + steps) as u64 + 200, "{work}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_does_not_discharge_an_earlier_identical_call_entry() {
+    for seed in [100, 400] {
+        for steps in [100, 400] {
+            let source = forwarding_wrapper_source(seed, steps, 2, false).replace(
+                "step(old1, item1) }",
+                "_ = step(old1, item1)\n step(old1, item1) }",
+            );
+            let (work, origins) = counted_native(&source);
+            eprintln!(
+                "independent earlier forwarding call N={seed} K={steps}: work={work} origins={origins}"
+            );
+            assert!(
+                work >= (seed * steps) as u64,
+                "independent entry was skipped: {work}"
+            );
+        }
+    }
+}
+
+#[test]
+fn lexical_forwarding_keeps_independent_wrapper_local_claims_in_order() {
+    for native in [false, true] {
+        for combine in ["fold", "scan"] {
+            for steps in [0, 1, 2] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("size");
+                std::fs::write(&path, "xxxxx").unwrap();
+                let source = format!(
+                    "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\nsize = string_len(read_file(\"{}\"))\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{ _ = print(\"body\")\n append(acc, produce(size)) }}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = {{ _ = {combine}(fn (acc: List[tensor[*, f32]], i: i64) -> {{ _ = print(\"prefix\")\n old: List[tensor[3, f32]] = acc\n _ = print(\"local\")\n item = i\n step(old, item) }}, seed, range(0i64, {steps}i64))\n 42i64 }}\nout = run([produce(3i64)])\n",
+                    path.display()
+                );
+                let unproved = source.replace(
+                    "old: List[tensor[3, f32]] = acc",
+                    "old: List[tensor[3, f32]] = if i == 0i64 then acc else acc",
+                );
+                let actual = result_claims::run(&source, native);
+                let baseline = result_claims::run(&unproved, native);
+                assert_eq!(actual, baseline, "{source}");
+                let (success, output) = actual;
+                assert_eq!(success, steps < 2, "{output}");
+                assert_eq!(
+                    output.lines().filter(|line| *line == "prefix").count(),
+                    steps,
+                    "{output}"
+                );
+                assert_eq!(
+                    output.lines().filter(|line| *line == "local").count(),
+                    steps.min(1),
+                    "{output}"
+                );
+                assert_eq!(
+                    output.lines().filter(|line| *line == "body").count(),
+                    steps.min(1),
+                    "{output}"
+                );
+                if !success {
+                    assert!(
+                        output.contains("numeric trap: domain in load at i64"),
+                        "{output}"
+                    );
+                }
+            }
+        }
+    }
 }

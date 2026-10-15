@@ -8208,7 +8208,9 @@ fn lower_host_expr_with_expected(
     let _preflight_guard = TensorHelperPreflightGuard::begin_if_uncovered(expr, program);
     let _profile_guard = enter_host_expr_profile();
     let target = tensor_helpers.forwarding.as_ref().is_some_and(|target| {
-        target.plan.is_target(target.position) && expr.tag() == Some(DeepTag::App)
+        !target.retained
+            && target.plan.is_target(target.position)
+            && expr.tag() == Some(DeepTag::App)
     });
     let mut result = if target {
         let mut target = tensor_helpers
@@ -32962,5 +32964,22 @@ mod accumulator_forwarding_wrapper_tests {
         ] {
             assert!(proof(body).is_none(), "{body}");
         }
+    }
+
+    #[test]
+    fn forwarding_path_selects_only_the_tail_occurrence() {
+        let proof =
+            proof("{ old = acc\n item = i\n _ = step(old, item)\n step(old, item) }").unwrap();
+        let plan = proof.forwarding();
+        assert!(
+            !plan.is_target(0),
+            "the initializer is not the selected call"
+        );
+        assert!(plan.advance(0, DeepTag::App, 1).is_none());
+        let mut position = 0;
+        while !plan.is_target(position) {
+            position = plan.advance(position, DeepTag::Let, 1).unwrap();
+        }
+        assert!(plan.advance(position, DeepTag::Let, 1).is_none());
     }
 }

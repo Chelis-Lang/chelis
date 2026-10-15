@@ -5633,6 +5633,10 @@ fn lexical_forwarding_wrappers_have_bounded_complete_eval_entry_work() {
                         "forwarding wrapper Eval N={seed} K={steps} L={hops} unproved={unproved}: observations={observations} traversal={traversal} route={route} source_bytes={source_bytes}"
                     );
                     assert!(
+                        source_bytes <= 1024 * source.len() as u64 * steps as u64,
+                        "source_bytes={source_bytes}"
+                    );
+                    assert!(
                         route <= (4 * hops + 8) as u64 * steps as u64,
                         "route={route}"
                     );
