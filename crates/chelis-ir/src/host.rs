@@ -32553,6 +32553,10 @@ pub fn bound_accumulator_forwarding_plan(
         callback_node = &meta.expr;
     }
     let node = as_node(callback_node).filter(|node| node.tag() == DeepTag::Fn)?;
+    let (types, _) = expr_fn_type(callback)?;
+    if types.len() != 2 || !matches!(types[1], HostTypeTerm::Scalar(_) | HostTypeTerm::Unit) {
+        return None;
+    }
     let params = as_node(node.children_slice().first()?)?;
     let [acc, item] = params.children_slice() else {
         return None;
