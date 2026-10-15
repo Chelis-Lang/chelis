@@ -7707,8 +7707,11 @@ impl<'a> HostEmitter<'a> {
             )
             .then(|| {
                 let name = self.next_temp("delta_prior_length");
+                let index_type = HostAbiType::Int64
+                    .c_type_name()
+                    .expect("i64 is a resolved C host ABI type");
                 self.lines
-                    .push(format!("{}int64_t {name} = 0;", self.indent));
+                    .push(format!("{}{index_type} {name} = 0;", self.indent));
                 name
             })
         });

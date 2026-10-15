@@ -1156,8 +1156,11 @@ pub(super) fn delta_list_metadata(
     else {
         unreachable!("List interval");
     };
+    let index_type = HostAbiType::Int64
+        .c_type_name()
+        .expect("i64 is a resolved C host ABI type");
     let mut lines = vec![format!(
-        "for (int64_t delta_metadata_index = 0; delta_metadata_index < chelis_list_len({value}); ++delta_metadata_index) {{"
+        "for ({index_type} delta_metadata_index = 0; delta_metadata_index < chelis_list_len({value}); ++delta_metadata_index) {{"
     )];
     // Jump the inherited interval in constant work, rather than testing every
     // inherited element against a range predicate.
@@ -1414,7 +1417,10 @@ fn emit_delta_recipe(
                     ));
                     replay(lines, &inherited, false);
                 }
-                lines.push(format!("for (int64_t fresh_{id}_{part} = {start}; fresh_{id}_{part} < {end}; ++fresh_{id}_{part}) {{"));
+                let index_type = HostAbiType::Int64
+                    .c_type_name()
+                    .expect("i64 is a resolved C host ABI type");
+                lines.push(format!("for ({index_type} fresh_{id}_{part} = {start}; fresh_{id}_{part} < {end}; ++fresh_{id}_{part}) {{"));
                 let fresh_value = format!("delta_fresh_value_{id}_{part}");
                 let fresh_path = format!("delta_fresh_path_{id}_{part}");
                 lines.push(format!(
