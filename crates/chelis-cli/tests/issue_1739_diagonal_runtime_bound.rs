@@ -1141,6 +1141,74 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
     found
 }
 
+/// A producer check counts as a result guard only when unchanged copies carry
+/// that exact value to the return slot. Ambiguous/reassigned locals fail closed.
+fn guard_target_is_returned(source: &str, function: &str, target: &str) -> bool {
+    fn identifier(text: &str) -> bool {
+        !text.is_empty() && text.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    }
+    let mut enclosing = None;
+    let mut assignments = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+    for line in source.lines() {
+        if line.contains("__chelis_owned_body(") && line.trim_end().ends_with('{') {
+            let head = line.split("__chelis_owned_body(").next().unwrap();
+            enclosing = Some(source_name_for_c_symbol(
+                head.rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap(),
+            ));
+        } else if line == "}" {
+            enclosing = None;
+        } else if enclosing.as_deref() == Some(function)
+            && let Some((lhs, rhs)) = line.trim().split_once(" = ")
+            && identifier(lhs)
+            && let Some(rhs) = rhs.strip_suffix(';')
+        {
+            assignments.entry(lhs).or_default().push(rhs);
+        }
+    }
+    let mut value = "__result";
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        let Some([source]) = assignments.get(value).map(Vec::as_slice) else {
+            return false;
+        };
+        if value == target {
+            return true;
+        }
+        if !seen.insert(value) || !identifier(source) {
+            return false;
+        }
+        value = source;
+    }
+}
+
+#[test]
+fn result_guard_census_follows_values_and_rejects_wrong_or_ambiguous_producers() {
+    let body = "void f__chelis_owned_body() {\n temporary_81 = produce();\n alias_93 = temporary_81;\n __result = alias_93;\n}\n";
+    assert!(guard_target_is_returned(body, "f", "temporary_81"));
+    assert!(guard_target_is_returned(
+        &body.replace("81", "205").replace("93", "406"),
+        "f",
+        "temporary_205"
+    ));
+    assert!(!guard_target_is_returned(body, "other", "temporary_81"));
+    for changed in [
+        body.replace("__result = alias_93;", "__result = other;"),
+        body.replace(
+            "alias_93 = temporary_81;",
+            "alias_93 = transform(temporary_81);",
+        ),
+        body.replace(
+            "alias_93 = temporary_81;",
+            "alias_93 = temporary_81;\n alias_93 = other;",
+        ),
+        body.replace("alias_93 = temporary_81;", "alias_93 = __result;"),
+    ] {
+        assert!(!guard_target_is_returned(&changed, "f", "temporary_81"));
+    }
+}
+
 /// Every emitted signature-entry guard, as `(enclosing function, claim)`.
 /// Named comparisons retain their binder label; literals retain the input,
 /// axis and expected extent. Rank/null metadata checks are separate and do not
@@ -1946,7 +2014,19 @@ fn no_shipped_example_gains_a_host_lane_guard() {
             continue;
         }
         let source = emit_c(path, &out);
-        let guards = emitted_guards(&source);
+        let guards: Vec<_> = emitted_guards(&source)
+            .into_iter()
+            .map(|(function, target, axis, required)| {
+                let target = if target != "__result"
+                    && guard_target_is_returned(&source, &function, &target)
+                {
+                    "__result".to_owned()
+                } else {
+                    target
+                };
+                (function, target, axis, required)
+            })
+            .collect();
         for (function, target, axis, required) in &guards {
             census.push(format!(
                 "{stem}: {function} guards {target} axis {axis} claiming {required}"
@@ -1986,10 +2066,10 @@ fn no_shipped_example_gains_a_host_lane_guard() {
             "grad_cumsum: integer_prefixes guards __result axis 0 claiming time",
             "grad_host_selectors: pick guards __result axis 0 claiming n",
             "grad_runtime_basis: basis guards __result axis 0 claiming n",
-            "keyed_state_wrapper: main guards __let_19 axis 0 claiming 2",
-            "keyed_state_wrapper: main guards __let_19 axis 1 claiming 1",
-            "keyed_state_wrapper: main guards __let_19 axis 2 claiming 1",
-            "keyed_state_wrapper: main guards __let_19 axis 3 claiming 1",
+            "keyed_state_wrapper: main guards __result axis 0 claiming 2",
+            "keyed_state_wrapper: main guards __result axis 1 claiming 1",
+            "keyed_state_wrapper: main guards __result axis 2 claiming 1",
+            "keyed_state_wrapper: main guards __result axis 3 claiming 1",
             "list_shared_extent: main guards __result axis 0 claiming 2",
             "staged_adt_control: main guards __result axis 0 claiming 2",
             "staged_adt_control: main guards __result axis 1 claiming 1",

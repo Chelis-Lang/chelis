@@ -2771,9 +2771,9 @@ fn append_private_host_context_args(args: &mut Vec<String>, entry_receipt: &str)
 
 fn append_invocation_origin_context(out: &mut Vec<String>, guarded: bool) {
     let fields = if guarded {
-        "NULL, NULL, NULL, 0, 0, 0"
+        "NULL, NULL, NULL, NULL, 0, 0, 0"
     } else {
-        "NULL, NULL, NULL"
+        "NULL, NULL, NULL, NULL"
     };
     out.push(format!(
         "    __chelis_host_result_origin_arena __chelis_origin_arena_storage = {{ {fields} }};"
@@ -3496,7 +3496,10 @@ typedef struct __chelis_host_result_claim_block {
 
 typedef struct __chelis_host_result_origin {
     struct __chelis_host_result_origin *allocation_next;
+    struct __chelis_host_result_origin **allocation_previous;
     struct __chelis_host_result_origin *leaf_next;
+    size_t references;
+    const struct __chelis_host_result_origin *backing_owner;
     const char *op;
     const char *trap;
     int64_t child_count;
@@ -3507,16 +3510,97 @@ typedef struct __chelis_host_result_origin {
     const struct __chelis_host_result_origin *children[];
 } __chelis_host_result_origin;
 
+typedef struct __chelis_global_origin_root {
+    struct __chelis_global_origin_root *previous;
+    const __chelis_host_result_origin **slot;
+} __chelis_global_origin_root;
+
 typedef struct __chelis_host_result_origin_arena {
     __chelis_host_result_origin *head;
     __chelis_host_result_origin *leaf_head;
     __chelis_host_result_claim_block *claim_head;
+    __chelis_global_origin_root *root_head;
 #ifdef __CHELIS_HOST_STACK_GUARD
     uintptr_t stack_low;
     uintptr_t stack_high;
     size_t recursive_depth;
 #endif
 } __chelis_host_result_origin_arena;
+
+typedef struct __chelis_global_origin_scope {
+    __chelis_global_origin_root *roots;
+    __chelis_host_result_claim_block *claims;
+} __chelis_global_origin_scope;
+
+static void __chelis_global_origin_retain(const __chelis_host_result_origin *origin) {
+    if (origin != NULL) {
+        __chelis_host_result_origin *node = (__chelis_host_result_origin *)origin;
+        if (node->references == SIZE_MAX) abort();
+        ++node->references;
+    }
+}
+
+/* Detach a zero-reference node in constant work, then use its former arena
+   link as an iterative retirement queue. Shared children are enqueued only
+   when their last edge/root disappears. */
+static void __chelis_global_origin_retire(const __chelis_host_result_origin *origin, __chelis_host_result_origin **pending) {
+    if (origin == NULL) return;
+    __chelis_host_result_origin *node = (__chelis_host_result_origin *)origin;
+    if (node->references == 0) abort();
+    if (--node->references != 0) return;
+    *node->allocation_previous = node->allocation_next;
+    if (node->allocation_next != NULL) node->allocation_next->allocation_previous = node->allocation_previous;
+    node->allocation_next = *pending;
+    *pending = node;
+}
+
+static void __chelis_global_origin_release(const __chelis_host_result_origin *origin) {
+    __chelis_host_result_origin *pending = NULL;
+    __chelis_global_origin_retire(origin, &pending);
+    while (pending != NULL) {
+        __chelis_host_result_origin *node = pending;
+        pending = node->allocation_next;
+        if (node->backing_owner != NULL) {
+            __chelis_global_origin_retire(node->backing_owner, &pending);
+        } else if (node->child_count > 0) {
+            for (int64_t i = 0; i < node->child_count; ++i) {
+                __chelis_global_origin_retire(node->children[i], &pending);
+            }
+        }
+        free(node);
+    }
+}
+
+static void __chelis_global_origin_assign(const __chelis_host_result_origin **slot, const __chelis_host_result_origin *origin) {
+    __chelis_global_origin_retain(origin);
+    const __chelis_host_result_origin *previous = *slot;
+    *slot = origin;
+    __chelis_global_origin_release(previous);
+}
+
+static void __chelis_global_origin_root_enter(__chelis_host_result_origin_arena *arena, __chelis_global_origin_root *root, const __chelis_host_result_origin **slot) {
+    root->previous = arena->root_head;
+    root->slot = slot;
+    arena->root_head = root;
+    __chelis_global_origin_retain(*slot);
+}
+
+static __chelis_global_origin_scope __chelis_global_origin_scope_enter(__chelis_host_result_origin_arena *arena) {
+    return (__chelis_global_origin_scope){ arena->root_head, arena->claim_head };
+}
+
+static void __chelis_global_origin_scope_leave(__chelis_host_result_origin_arena *arena, __chelis_global_origin_scope scope) {
+    while (arena->root_head != scope.roots) {
+        __chelis_global_origin_root *root = arena->root_head;
+        arena->root_head = root->previous;
+        __chelis_global_origin_assign(root->slot, NULL);
+    }
+    while (arena->claim_head != scope.claims) {
+        __chelis_host_result_claim_block *block = arena->claim_head;
+        arena->claim_head = block->next;
+        free(block);
+    }
+}
 
 /* Private proof of one complete, successful entry contract. Only a verified
    direct call may forward it. The state bytes belong to the caller's stack
@@ -3528,9 +3612,13 @@ typedef struct __chelis_entry_receipt {
 } __chelis_entry_receipt;
 
 static void __chelis_host_result_origin_arena_destroy(__chelis_host_result_origin_arena *arena) {
+    __chelis_global_origin_scope_leave(arena, (__chelis_global_origin_scope){ NULL, NULL });
     __chelis_host_result_origin *node = arena->head;
     while (node != NULL) {
         __chelis_host_result_origin *next = node->allocation_next;
+        /* All value/construction roots have retired. Only the invocation's
+           finite producer-leaf cache may still own an allocation. */
+        if (node->child_count != -1 || node->references != 1) abort();
         free(node);
         node = next;
     }
@@ -3557,7 +3645,11 @@ static __chelis_host_result_origin *__chelis_host_result_origin_alloc(__chelis_h
         abort();
     }
     node->allocation_next = arena->head;
+    node->allocation_previous = &arena->head;
+    if (arena->head != NULL) arena->head->allocation_previous = &node->allocation_next;
     node->leaf_next = NULL;
+    node->references = 0;
+    node->backing_owner = NULL;
     node->op = NULL;
     node->trap = NULL;
     node->child_count = child_count;
@@ -3577,6 +3669,7 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_leaf(__che
     node->child_count = -1;
     node->leaf_next = arena->leaf_head;
     arena->leaf_head = node;
+    __chelis_global_origin_retain(node);
     return node;
 }
 
@@ -3605,7 +3698,10 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_aggregate(
     }
     if (!any) return NULL;
     __chelis_host_result_origin *node = __chelis_host_result_origin_alloc(arena, child_count);
-    for (int64_t i = 0; i < child_count; ++i) node->children[i] = children[i];
+    for (int64_t i = 0; i < child_count; ++i) {
+        node->children[i] = children[i];
+        __chelis_global_origin_retain(children[i]);
+    }
     node->child_view = node->children;
     return node;
 }
@@ -3635,6 +3731,8 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_list_suffi
     __chelis_host_result_origin *suffix = __chelis_host_result_origin_alloc(arena, 0);
     suffix->child_count = origin->child_count - count;
     suffix->child_view = origin->child_view + count;
+    suffix->backing_owner = origin->backing_owner != NULL ? origin->backing_owner : origin;
+    __chelis_global_origin_retain(suffix->backing_owner);
     return suffix;
 }
 
@@ -3651,6 +3749,8 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_list_prefi
     __chelis_host_result_origin *prefix = __chelis_host_result_origin_alloc(arena, 0);
     prefix->child_count = count;
     prefix->child_view = origin->child_view;
+    prefix->backing_owner = origin->backing_owner != NULL ? origin->backing_owner : origin;
+    __chelis_global_origin_retain(prefix->backing_owner);
     return prefix;
 }
 
@@ -4979,6 +5079,7 @@ fn emit_function(
     emitter.entry_projection = entry::helper_coverage_with_verified(function, verified_helpers);
     emitter.external_helpers = external_helpers.clone();
     emitter.interface_reload_names = captured_globals.iter().cloned().collect();
+    emitter.lines.push("    __chelis_global_origin_scope __chelis_global_origin_function_scope = __chelis_global_origin_scope_enter(__chelis_origin_arena);".to_string());
     for param in &function.params {
         emitter.interface_reload_names.remove(&param.name);
         emitter.declare_result_origin(&param.name, &param.ty, Some("load"));
@@ -5151,11 +5252,12 @@ fn emit_function(
         })?;
     emitter.emit_terminal_site(terminal, Some("__result"))?;
     emitter.lines.push(format!(
-        "{}if ({PRIVATE_RESULT_ORIGIN_RETURN_SLOT} != NULL) *{PRIVATE_RESULT_ORIGIN_RETURN_SLOT} = {};",
+        "{}if ({PRIVATE_RESULT_ORIGIN_RETURN_SLOT} != NULL) __chelis_global_origin_assign({PRIVATE_RESULT_ORIGIN_RETURN_SLOT}, {});",
         emitter.indent,
         result_origin_name("__result")
     ));
     emitter.finish_expression_sites()?;
+    emitter.end_result_origin_scope("__chelis_global_origin_function_scope");
     if emitter.tail_loop_used {
         let plan = emitter.tail_loop.as_ref().ok_or_else(|| {
             invalid_abi_shape(
@@ -5401,10 +5503,12 @@ fn emit_main(
         emitter.lines.push(format!(
             "    const __chelis_host_result_origin *{binding_origin} = {value_origin};"
         ));
+        emitter.register_result_origin_root(&binding_origin);
         emitter.lines.push(format!(
             "    const __chelis_host_result_origin *{} = {binding_origin};",
             result_origin_name(global_label.as_str())
         ));
+        emitter.register_result_origin_root(&result_origin_name(global_label.as_str()));
     }
     let root_sites = ownership_sites
         .iter()
@@ -6710,6 +6814,38 @@ impl<'a> HostEmitter<'a> {
             "{}const __chelis_host_result_origin *{origin} = {initializer};",
             self.indent
         ));
+        self.register_result_origin_root(&origin);
+    }
+
+    fn register_result_origin_root(&mut self, origin: &str) {
+        // The value-sidecar namespace admits authored suffixes such as
+        // `x_root`. Root records instead occupy the existing compiler-only
+        // namespace, and retain the injective sidecar name as their suffix.
+        let root = format!("__chelis_global_origin_root_{origin}");
+        self.lines.push(format!(
+            "{}__chelis_global_origin_root {root};",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}__chelis_global_origin_root_enter(__chelis_origin_arena, &{root}, &{origin});",
+            self.indent
+        ));
+    }
+
+    fn begin_result_origin_scope(&mut self) -> String {
+        let scope = self.next_temp("chelis_global_origin_scope");
+        self.lines.push(format!(
+            "{}__chelis_global_origin_scope {scope} = __chelis_global_origin_scope_enter(__chelis_origin_arena);",
+            self.indent
+        ));
+        scope
+    }
+
+    fn end_result_origin_scope(&mut self, scope: &str) {
+        self.lines.push(format!(
+            "{}__chelis_global_origin_scope_leave(__chelis_origin_arena, {scope});",
+            self.indent
+        ));
     }
 
     /// The origin of a value that entered from outside the expression: a
@@ -6727,14 +6863,19 @@ impl<'a> HostEmitter<'a> {
     fn assign_interface_result_origin(&mut self, target: &str, ty: &HostType) {
         let origin = result_origin_name(target);
         let initializer = Self::interface_result_origin_expr(ty);
-        self.lines
-            .push(format!("{}{origin} = {initializer};", self.indent));
+        self.lines.push(format!(
+            "{}__chelis_global_origin_assign(&{origin}, {initializer});",
+            self.indent
+        ));
     }
 
     fn assign_aggregate_result_origin(&mut self, target: &str, children: &[String]) {
         let origin = result_origin_name(target);
         if children.is_empty() {
-            self.lines.push(format!("{}{origin} = NULL;", self.indent));
+            self.lines.push(format!(
+                "{}__chelis_global_origin_assign(&{origin}, NULL);",
+                self.indent
+            ));
             return;
         }
         let child_array = self.next_temp("result_origin_children");
@@ -6749,7 +6890,7 @@ impl<'a> HostEmitter<'a> {
                 .join(", ")
         ));
         self.lines.push(format!(
-            "{}{origin} = __chelis_host_result_origin_aggregate(__chelis_origin_arena, {}, {child_array});",
+            "{}__chelis_global_origin_assign(&{origin}, __chelis_host_result_origin_aggregate(__chelis_origin_arena, {}, {child_array}));",
             self.indent,
             children.len()
         ));
@@ -7758,6 +7899,7 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{}{{", self.indent));
         let nested_indent = format!("{}    ", self.indent);
         let previous_indent = std::mem::replace(&mut self.indent, nested_indent);
+        let origin_scope = self.begin_result_origin_scope();
         loop {
             let HostExprKind::Let {
                 bindings,
@@ -7786,7 +7928,7 @@ impl<'a> HostEmitter<'a> {
                 self.lines
                     .push(format!("{}{} = {};", self.indent, alias, temp));
                 self.lines.push(format!(
-                    "{}{} = {};",
+                    "{}__chelis_global_origin_assign(&{}, {});",
                     self.indent,
                     result_origin_name(&alias),
                     result_origin_name(&temp)
@@ -7822,6 +7964,7 @@ impl<'a> HostEmitter<'a> {
                 }
             }
         }
+        self.end_result_origin_scope(&origin_scope);
         self.indent = previous_indent;
         self.lines.push(format!("{}}}", self.indent));
         Ok(())
@@ -7983,9 +8126,11 @@ impl<'a> HostEmitter<'a> {
         // chelis#1771. Taken here rather than read, so exactly one expression
         // per forwarding step is on the result spine: a nested argument or a
         // sibling binding cannot inherit the flag.
+        let origin_scope = self.begin_result_origin_scope();
         let on_result_spine = std::mem::take(&mut self.claim_on_spine);
         let site = self.next_expression_site()?;
         self.assign_expr_at_site(target, expr, ty, &site, on_result_spine)?;
+        self.end_result_origin_scope(&origin_scope);
         Ok(())
     }
 
@@ -8118,8 +8263,10 @@ impl<'a> HostEmitter<'a> {
                     let target_origin = result_origin_name(target);
                     if self.interface_reload_names.contains(name) {
                         let load = Self::interface_result_origin_expr(ty);
-                        self.lines
-                            .push(format!("{}{target_origin} = {load};", self.indent));
+                        self.lines.push(format!(
+                            "{}__chelis_global_origin_assign(&{target_origin}, {load});",
+                            self.indent
+                        ));
                     } else {
                         // `result_origin_name` performs C escaping itself.
                         // A local alias is already a compiler C name; an
@@ -8129,7 +8276,7 @@ impl<'a> HostEmitter<'a> {
                             .get(name)
                             .map_or(name.as_str(), String::as_str);
                         self.lines.push(format!(
-                            "{}{target_origin} = {};",
+                            "{}__chelis_global_origin_assign(&{target_origin}, {});",
                             self.indent,
                             result_origin_name(source_origin)
                         ));
@@ -8222,20 +8369,24 @@ impl<'a> HostEmitter<'a> {
                     .push(format!("{}if ({cond_var}) {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
+                let origin_scope = self.begin_result_origin_scope();
                 self.emit_edge_terminals(site.id, &then_edge)?;
                 self.emit_region_entry_terminals(site, then_edge.target(), then_block)?;
                 self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, then_expr, ty)?;
                 self.emit_expression_block_actions(site, then_block, target)?;
+                self.end_result_origin_scope(&origin_scope);
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
+                let origin_scope = self.begin_result_origin_scope();
                 self.emit_edge_terminals(site.id, &else_edge)?;
                 self.emit_region_entry_terminals(site, else_edge.target(), else_block)?;
                 self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, else_expr, ty)?;
                 self.emit_expression_block_actions(site, else_block, target)?;
+                self.end_result_origin_scope(&origin_scope);
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
                 return Ok(());
@@ -8275,6 +8426,7 @@ impl<'a> HostEmitter<'a> {
                 ));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
+                let origin_scope = self.begin_result_origin_scope();
                 self.emit_edge_terminals(site.id, &some_edge)?;
                 let inner_ty = option_inner_type(&option_ty)?;
                 let boxed_inner = self.next_temp("option_value");
@@ -8313,7 +8465,7 @@ impl<'a> HostEmitter<'a> {
                 }
                 self.declare_result_origin(bind_name, &inner_ty, None);
                 self.lines.push(format!(
-                    "{}{} = __chelis_host_result_origin_child({}, 0);",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_child({}, 0));",
                     self.indent,
                     result_origin_name(bind_name),
                     result_origin_name(&option_var)
@@ -8338,15 +8490,18 @@ impl<'a> HostEmitter<'a> {
                 if let Some(alias) = shadowed_alias {
                     self.local_aliases.insert(bind_name.clone(), alias);
                 }
+                self.end_result_origin_scope(&origin_scope);
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
+                let origin_scope = self.begin_result_origin_scope();
                 self.emit_edge_terminals(site.id, &none_edge)?;
                 self.emit_region_entry_terminals(site, none_edge.target(), arm_blocks.1)?;
                 self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, none_expr, ty)?;
                 self.emit_expression_block_actions(site, arm_blocks.1, target)?;
+                self.end_result_origin_scope(&origin_scope);
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
                 return Ok(());
@@ -8385,6 +8540,7 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!("{}{{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
+                let origin_scope = self.begin_result_origin_scope();
                 let mut shadowed_interface_globals = Vec::new();
                 let mut shadowed_aliases = Vec::new();
                 for binding in bindings {
@@ -8406,7 +8562,7 @@ impl<'a> HostEmitter<'a> {
                         temp
                     ));
                     self.lines.push(format!(
-                        "{}{} = {};",
+                        "{}__chelis_global_origin_assign(&{}, {});",
                         self.indent,
                         result_origin_name(&binding.name),
                         result_origin_name(&temp)
@@ -8452,6 +8608,7 @@ impl<'a> HostEmitter<'a> {
                         self.local_aliases.insert(name, alias);
                     }
                 }
+                self.end_result_origin_scope(&origin_scope);
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
                 return Ok(());
@@ -8811,7 +8968,7 @@ impl<'a> HostEmitter<'a> {
         }
         let origin = result_origin_name(target);
         self.lines.push(format!(
-            "{}{origin} = __chelis_host_result_origin_uniform(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\");",
+            "{}__chelis_global_origin_assign(&{origin}, __chelis_host_result_origin_uniform(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\"));",
             self.indent
         ));
     }
@@ -8823,7 +8980,7 @@ impl<'a> HostEmitter<'a> {
         let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
         let origin = result_origin_name(target);
         self.lines.push(format!(
-            "{}{origin} = __chelis_host_result_origin_leaf(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\");",
+            "{}__chelis_global_origin_assign(&{origin}, __chelis_host_result_origin_leaf(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\"));",
             self.indent
         ));
     }
@@ -9713,7 +9870,7 @@ impl<'a> HostEmitter<'a> {
                 ));
                 self.assign_unboxed_value(target, ty, &value_var)?;
                 self.lines.push(format!(
-                    "{}{} = __chelis_host_result_origin_child({}, {});",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
                     self.indent,
                     result_origin_name(target),
                     result_origin_name(&arg_vars[0].0),
@@ -9729,7 +9886,7 @@ impl<'a> HostEmitter<'a> {
                 ));
                 self.assign_unboxed_value(target, ty, &value_var)?;
                 self.lines.push(format!(
-                    "{}{} = __chelis_host_result_origin_child({}, {});",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
                     self.indent,
                     result_origin_name(target),
                     result_origin_name(&arg_vars[0].0),
@@ -9898,7 +10055,7 @@ impl<'a> HostEmitter<'a> {
             "take" => {
                 // A selection: the prefix keeps each element's producer.
                 self.lines.push(format!(
-                    "{}{} = __chelis_host_result_origin_list_prefix(__chelis_origin_arena, {}, {});",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_list_prefix(__chelis_origin_arena, {}, {}));",
                     self.indent,
                     result_origin_name(target),
                     result_origin_name(&arg_vars[0].0),
@@ -9928,7 +10085,7 @@ impl<'a> HostEmitter<'a> {
                 // Build the immutable metadata view before the consuming
                 // entry point can release or advance the source payload.
                 self.lines.push(format!(
-                    "{}{} = __chelis_host_result_origin_list_suffix(__chelis_origin_arena, {}, {});",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_list_suffix(__chelis_origin_arena, {}, {}));",
                     self.indent,
                     result_origin_name(target),
                     result_origin_name(&arg_vars[0].0),
@@ -12177,6 +12334,7 @@ impl<'a> HostEmitter<'a> {
                     self.indent,
                     result_origin_name(&child)
                 ));
+                self.register_result_origin_root(&result_origin_name(&child));
                 self.assign_tensor_result_origins(&child, part, producers, next);
                 children.push(child);
             }
@@ -12886,6 +13044,7 @@ impl<'a> HostEmitter<'a> {
                     self.indent
                 ));
             }
+            self.end_result_origin_scope("__chelis_global_origin_function_scope");
             self.lines
                 .push(format!("{}goto __chelis_tail_loop_entry;", self.indent));
             self.tail_loop_used = true;
@@ -13041,7 +13200,7 @@ impl<'a> HostEmitter<'a> {
         ));
         self.assign_unboxed_value(target, ty, &value_var)?;
         self.lines.push(format!(
-            "{}{} = __chelis_host_result_origin_child({}, {});",
+            "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
             self.indent,
             result_origin_name(target),
             result_origin_name(&base_var),
@@ -13116,6 +13275,7 @@ impl<'a> HostEmitter<'a> {
             ));
             let nested_indent = format!("{}    ", self.indent);
             let previous = std::mem::replace(&mut self.indent, nested_indent);
+            let origin_scope = self.begin_result_origin_scope();
             self.emit_edge_terminals(site.id, &arm_edges[index])?;
             // chelis#1222: one binder scope per arm. Each arm's pattern
             // bindings shadow any enclosing name they reuse, and their keys
@@ -13139,7 +13299,7 @@ impl<'a> HostEmitter<'a> {
                 self.assign_unboxed_value(&binding.name, &binding.ty, &field_var)?;
                 self.declare_result_origin(&binding.name, &binding.ty, None);
                 self.lines.push(format!(
-                    "{}{} = __chelis_host_result_origin_child({}, {});",
+                    "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_child({}, {}));",
                     self.indent,
                     result_origin_name(&binding.name),
                     result_origin_name(&scrutinee_var),
@@ -13170,12 +13330,14 @@ impl<'a> HostEmitter<'a> {
                     self.local_aliases.insert(name, alias);
                 }
             }
+            self.end_result_origin_scope(&origin_scope);
             self.indent = previous;
             self.lines.push(format!("{}}}", self.indent));
         }
         self.lines.push(format!("{}else {{", self.indent));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        let origin_scope = self.begin_result_origin_scope();
         if let Some(default_expr) = default_expr {
             self.emit_edge_terminals(site.id, &arm_edges[arms.len()])?;
             self.emit_region_entry_terminals(
@@ -13193,6 +13355,7 @@ impl<'a> HostEmitter<'a> {
             ));
             self.lines.push(format!("{}exit(1);", self.indent));
         }
+        self.end_result_origin_scope(&origin_scope);
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.lines
@@ -13360,6 +13523,7 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        let origin_scope = self.begin_result_origin_scope();
         self.emit_edge_terminals(site.id, &body_edge)?;
         let item_value = self.next_temp("map_item_value");
         self.lines.push(format!(
@@ -13401,6 +13565,7 @@ impl<'a> HostEmitter<'a> {
                 Ok(())
             },
         )?;
+        self.end_result_origin_scope(&origin_scope);
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -13438,6 +13603,7 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        let origin_scope = self.begin_result_origin_scope();
         self.emit_edge_terminals(site.id, &body_edge)?;
         let item_value = self.next_temp("filter_item_value");
         self.lines.push(format!(
@@ -13484,6 +13650,7 @@ impl<'a> HostEmitter<'a> {
                 Ok(())
             },
         )?;
+        self.end_result_origin_scope(&origin_scope);
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -13523,6 +13690,7 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        let origin_scope = self.begin_result_origin_scope();
         let params = callback_params(callback);
         let acc_arg = self.next_temp("fold_acc");
         self.lines.push(format!(
@@ -13537,6 +13705,7 @@ impl<'a> HostEmitter<'a> {
             result_origin_name(&acc_arg),
             result_origin_name(target)
         ));
+        self.register_result_origin_root(&result_origin_name(&acc_arg));
         let [body_acc] = body_edge.params() else {
             return Err(invalid_abi_shape(
                 format!(
@@ -13601,6 +13770,7 @@ impl<'a> HostEmitter<'a> {
         )?;
         self.stationary_entry = outer_stationary_entry;
         self.emit_expression_block_actions(site, body_block, target)?;
+        self.end_result_origin_scope(&origin_scope);
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -13674,6 +13844,7 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        let origin_scope = self.begin_result_origin_scope();
         let params = callback_params(callback);
         let acc_arg = self.next_temp("scan_acc_arg");
         self.lines.push(format!(
@@ -13689,6 +13860,7 @@ impl<'a> HostEmitter<'a> {
             result_origin_name(&acc_arg),
             result_origin_name(&acc_var)
         ));
+        self.register_result_origin_root(&result_origin_name(&acc_arg));
         self.owner_vars.insert(body_state.id(), acc_arg.clone());
         self.owner_vars.insert(body_output.id(), target.to_string());
         self.owner_vars.insert(exit_state.id(), acc_var.clone());
@@ -13746,6 +13918,7 @@ impl<'a> HostEmitter<'a> {
                 Ok(())
             },
         )?;
+        self.end_result_origin_scope(&origin_scope);
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -13824,6 +13997,7 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        let origin_scope = self.begin_result_origin_scope();
         self.emit_edge_terminals(site.id, &body_edge)?;
         let item_value = self.next_temp("partition_item_value");
         self.lines.push(format!(
@@ -13868,6 +14042,7 @@ impl<'a> HostEmitter<'a> {
                 Ok(())
             },
         )?;
+        self.end_result_origin_scope(&origin_scope);
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -13928,6 +14103,7 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        let origin_scope = self.begin_result_origin_scope();
         self.emit_edge_terminals(site.id, &body_edge)?;
         let item_value = self.next_temp("flat_map_item_value");
         self.lines.push(format!(
@@ -13968,6 +14144,7 @@ impl<'a> HostEmitter<'a> {
                 Ok(())
             },
         )?;
+        self.end_result_origin_scope(&origin_scope);
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -14035,6 +14212,7 @@ impl<'a> HostEmitter<'a> {
                         result_origin_name(&param.name),
                         result_origin_name(arg_var)
                     ));
+                    self.register_result_origin_root(&result_origin_name(&param.name));
                     if self.interface_reload_names.remove(&param.name) {
                         shadowed_interface_globals.push(param.name.clone());
                     }

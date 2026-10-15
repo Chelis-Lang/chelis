@@ -699,13 +699,32 @@ transport and selected-value provenance compose as one continuation slice:
 private invocation-local claim scopes retain an authored literal result
 contract when supported higher-order host specialization inlines away that
 declaration boundary. Eval keeps recursive producer metadata beside lexical
-frame values. Generated C uses an invocation-owned immutable origin tree for
+frame values. Generated C uses an invocation-local immutable origin graph for
 supported tuple, list, record, option and ADT construction and projection;
 aliases, branches, pattern bindings and private returns transport the selected
 child. True aggregate ingress and cached/global loads reconstruct fresh `load`
 trees in the current invocation. No origin pointer enters the public ABI or
 outlives its invocation. A missing origin required by a transparent projection
 fails closed instead of guessing the projection operation.
+
+Private origin nodes own references to their aggregate children. A prefix or
+suffix view owns its flattened backing allocation, so dropping the source view
+cannot invalidate its child array. Generated origin slots retain before
+replacing their prior reference. Construction, loop-iteration and private-call
+scopes retire their temporary slots; a private return retains its origin in the
+caller's slot before retiring the callee's scope. Interned producer leaves are
+owned by the invocation. Reclamation processes zero-reference nodes iteratively,
+visiting each retired edge once rather than tracing the surviving result.
+The storage bound includes reachable value origins, active construction/call
+roots and the finite producer-leaf set, rather than completed loop history.
+
+Projected and joined claim frames have a separate construction lifetime.
+Nested scopes record the prior allocation head and retire only newer blocks
+after all checks that consume those frames. Caller frames precede the callee's
+mark and survive its return. Witness arrays and result-claim chains remain
+within their owning activation; no result origin or public value owns a claim
+frame. These reclamation boundaries do not move guards, effects or producer
+attribution from spec/04 section 4.7's original schedule.
 
 Concrete precision/rank-polymorphic callback invocations actualize the checked
 parameter and authored result contracts from the call site. Rank spreads are

@@ -322,6 +322,41 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
 /// The field index of every `chelis_adt_get_field` read in an emitted body,
 /// in order. Reading the index rather than a whole call keeps the row off the
 /// emitter's temporary numbering, which says nothing about field layout.
+fn authored_field_reads<'a>(body: &'a str, parameter: &str) -> Vec<&'a str> {
+    body.match_indices("chelis_adt_get_field(")
+        .map(|(start, _)| {
+            let tail = &body[start + "chelis_adt_get_field(".len()..];
+            let (base, rest) = tail.split_once(", ").expect("field base");
+            let (index, _) = rest.split_once(')').expect("field index");
+            let mut value = base;
+            let mut seen = std::collections::BTreeSet::new();
+            while value != parameter {
+                assert!(seen.insert(value), "cyclic field alias: {body}");
+                let prefix = format!("{value} = ");
+                let sources: Vec<_> = body
+                    .lines()
+                    .filter_map(|line| line.trim().strip_prefix(&prefix)?.strip_suffix(';'))
+                    .collect();
+                assert_eq!(sources.len(), 1, "unique field producer: {body}");
+                value = sources[0];
+            }
+            index
+        })
+        .collect()
+}
+
+#[test]
+fn field_read_oracle_rejects_wrong_parameter_and_changed_alias() {
+    let source = "base_71 = w;\n value = chelis_adt_get_field(base_71, 1);";
+    assert_eq!(authored_field_reads(source, "w"), ["1"]);
+    for changed in [
+        source.replace("base_71 = w;", "base_71 = other;"),
+        source.replace("base_71 = w;", "base_71 = base_71;"),
+    ] {
+        assert!(std::panic::catch_unwind(|| authored_field_reads(&changed, "w")).is_err());
+    }
+}
+
 fn adt_field_reads(body: &str) -> Vec<&str> {
     body.match_indices("chelis_adt_get_field(")
         .map(|(start, _)| {
@@ -631,7 +666,7 @@ fn field_access_resolves_the_authored_packages_declaration() {
         "field access must resolve against the authored declaration"
     );
     assert!(
-        body.contains("chelis_adt_get_field(__adt_base_0, 1)"),
+        authored_field_reads(body, "w") == ["1"],
         "`amount` is field 1 in the authored declaration; emitted body was:\n{body}"
     );
 }
@@ -738,7 +773,7 @@ fn module_qualified_constructors_in_one_package_keep_their_own_field_order() {
     // `amount` is field 0 in Alpha and field 1 in Beta.
     let alpha = function_body(source, "float pkg__demo__Demo__Alpha__value(chelis_adt* w)");
     assert!(
-        alpha.contains("chelis_adt_get_field(__adt_base_0, 0)"),
+        authored_field_reads(alpha, "w") == ["0"],
         "`amount` is field 0 in Demo.Alpha; emitted body was:\n{alpha}"
     );
     let beta = function_body(source, "float pkg__demo__Demo__Beta__value(chelis_adt* w)");
