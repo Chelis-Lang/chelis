@@ -7783,8 +7783,8 @@ impl<'a> HostEmitter<'a> {
                 return Vec::new();
             };
             let mut proofs = Vec::new();
-            if composition.outer().has_extent_claim() {
-                proofs.push(std::sync::Arc::new(composition.outer().clone()));
+            if let Some(outer) = composition.outer().filter(|proof| proof.has_extent_claim()) {
+                proofs.push(std::sync::Arc::new(outer.clone()));
             }
             proofs.push(std::sync::Arc::new(composition.inner().clone()));
             let Some(entries) = retained_accumulator_entries(params, body, &proofs) else {

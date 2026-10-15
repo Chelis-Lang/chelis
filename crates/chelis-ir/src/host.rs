@@ -31561,7 +31561,7 @@ pub fn accumulator_construction_proof(
 pub struct AccumulatorCompositionProof {
     callee_name: String,
     callsite: Expr,
-    outer: AccumulatorDeltaProof,
+    outer: Option<AccumulatorDeltaProof>,
     inner: AccumulatorDeltaProof,
 }
 
@@ -31572,8 +31572,8 @@ impl AccumulatorCompositionProof {
     pub fn callsite(&self) -> &Expr {
         &self.callsite
     }
-    pub fn outer(&self) -> &AccumulatorDeltaProof {
-        &self.outer
+    pub fn outer(&self) -> Option<&AccumulatorDeltaProof> {
+        self.outer.as_ref()
     }
     pub fn inner(&self) -> &AccumulatorDeltaProof {
         &self.inner
@@ -31617,8 +31617,25 @@ pub fn accumulator_composition_proof(
         return None;
     }
     let authored = param_declared_type_expr(acc)?;
-    let mut outer = accumulator_construction_proof_impl(callee, registry, Some(&authored), true)?;
-    outer.parameter = parameter;
+    let outer = match accumulator_construction_proof_impl(callee, registry, Some(&authored), true) {
+        Some(mut proof) => {
+            proof.parameter = parameter;
+            Some(proof)
+        }
+        None => {
+            // A wildcard nominal formal owns no observations. Its callee
+            // still needs independent evidence; do not introduce admission
+            // of fields the original outer entry did not observe.
+            let claims = crate::claim_pattern::ClaimPattern::derive(&authored, registry).ok()?;
+            let admission =
+                crate::claim_pattern::ClaimPattern::derive_admission(&authored, registry).ok()?;
+            if !claims.is_empty() || admission.is_empty() || admission.nodes().iter().any(|node|
+                matches!(node, crate::claim_pattern::ClaimNode::Tensor(tensor) if tensor.rank.is_none() || !matches!(decode_host_type(&tensor.ty), Ok(HostTypeTerm::Tensor(_))))) {
+                return None;
+            }
+            None
+        }
+    };
     Some(AccumulatorCompositionProof {
         callee_name: variable(function)?,
         callsite: body.clone(),

@@ -3690,6 +3690,7 @@ impl<'a> EvalContext<'a> {
         let RuntimeValue::Closure {
             checked_function,
             invocation_contracts,
+            def_name,
             env,
             ..
         } = callback
@@ -3699,8 +3700,9 @@ impl<'a> EvalContext<'a> {
         if !invocation_contracts.is_empty() {
             return None;
         }
-        if chelis_ir::host::stationary_accumulator_proof(checked_function, &self.adt_registry)
-            .is_some()
+        if def_name.is_none()
+            && chelis_ir::host::stationary_accumulator_proof(checked_function, &self.adt_registry)
+                .is_some()
         {
             return Some(LoopEntryReceipt::default());
         }
@@ -3727,7 +3729,11 @@ impl<'a> EvalContext<'a> {
                 &callee,
                 &self.adt_registry,
             )?;
-            let mut outer = LoopEntryReceipt::delta(composition.outer().clone());
+            let mut outer = composition
+                .outer()
+                .cloned()
+                .map(LoopEntryReceipt::delta)
+                .unwrap_or_default();
             outer.composition = Some(LoopCompositionReceipt {
                 canonical,
                 checked_callee: callee,

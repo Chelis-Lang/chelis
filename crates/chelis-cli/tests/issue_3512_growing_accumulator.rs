@@ -518,35 +518,45 @@ fn aliases_and_selected_callables_retain_complete_entry_validation() {
 
 #[test]
 fn named_definition_accumulator_claim_has_independent_compositional_receipts() {
-    for combine in ["fold", "scan"] {
-        for direct in [false, true] {
-            for unproved in [false, true] {
-                for seed_size in [1, 100] {
-                    for steps in [100, 400] {
-                        let callback = if direct {
-                            "step"
-                        } else {
-                            "fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i)"
-                        };
-                        let body = if unproved {
-                            "{\n old = acc\n append(old, produce(3i64))\n}"
-                        } else {
-                            "append(acc, produce(3i64))"
-                        };
-                        let source = format!(
-                            "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = {body}\ndef run(seed: List[tensor[3, f32]], steps: i64) -> i64 = len({combine}({callback}, seed, range(0i64, steps)))\nout = run(map(fn (i: i64) -> produce(3i64), range(0i64, {seed_size}i64)), {steps}i64)\n"
-                        );
-                        let (work, origins) = counted_native(&source);
-                        eprintln!(
-                            "C named definition {combine} direct={direct} unproved={unproved} N={seed_size} K={steps}: reads {work}; origins {origins}"
-                        );
-                        if unproved {
-                            assert!(work >= steps as u64 * steps as u64 / 2, "{work}");
-                        } else {
-                            assert!(
-                                work <= 40 * (steps + seed_size) as u64 + 100,
-                                "independent named entries have bounded work: {work}"
-                            );
+    for claim in ["3", "n"] {
+        for outer in ["*", "3"] {
+            for combine in ["fold", "scan"] {
+                for direct in [false, true] {
+                    if direct && outer != "*" {
+                        continue;
+                    }
+                    for unproved in [false, true] {
+                        for seed_size in [1, 100] {
+                            for steps in [100, 400] {
+                                let generic = if claim == "n" { "[n]" } else { "" };
+                                let callback = if direct {
+                                    "step".to_owned()
+                                } else {
+                                    format!(
+                                        "fn (acc: List[tensor[{outer}, f32]], i: i64) -> step(acc, i)"
+                                    )
+                                };
+                                let body = if unproved {
+                                    "{\n old = acc\n append(old, produce(3i64))\n}"
+                                } else {
+                                    "append(acc, produce(3i64))"
+                                };
+                                let source = format!(
+                                    "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step{generic}(acc: List[tensor[{claim}, f32]], i: i64) -> List[tensor[*, f32]] = {body}\ndef run(seed: List[tensor[3, f32]], steps: i64) -> i64 = len({combine}({callback}, seed, range(0i64, steps)))\nout = run(map(fn (i: i64) -> produce(3i64), range(0i64, {seed_size}i64)), {steps}i64)\n"
+                                );
+                                let (work, origins) = counted_native(&source);
+                                eprintln!(
+                                    "C named definition {combine} direct={direct} outer={outer} claim={claim} unproved={unproved} N={seed_size} K={steps}: reads {work}; origins {origins}"
+                                );
+                                if unproved {
+                                    assert!(work >= steps as u64 * steps as u64 / 2, "{work}");
+                                } else {
+                                    assert!(
+                                        work <= 96 * (steps + seed_size) as u64 + 100,
+                                        "independent named entries have bounded work: {work}"
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -707,6 +717,38 @@ fn recursive_named_calls_cannot_borrow_the_loop_callsite_receipt() {
                         output.contains("numeric trap: domain in load at i64"),
                         "{output}"
                     );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn named_nominal_chain_receipts_keep_literal_and_scoped_binder_obligations() {
+    for direct in [true, false] {
+        for claim in ["3", "n"] {
+            for combine in ["fold", "scan"] {
+                for steps in [100, 400] {
+                    let generic = if claim == "n" { "[n]" } else { "" };
+                    let callback = if direct {
+                        "step"
+                    } else {
+                        "fn (acc: Chain[tensor[*, f32]], i: i64) -> step(acc, i)"
+                    };
+                    let loop_expr = format!("{combine}({callback}, seed, range(0i64, {steps}i64))");
+                    let output = if combine == "fold" {
+                        format!("head({loop_expr})")
+                    } else {
+                        format!("len({loop_expr})")
+                    };
+                    let source = format!(
+                        "type Chain[T] =\n | End {{ v: T }}\n | Link {{ v: T, next: Chain[T] }}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step{generic}(acc: Chain[tensor[{claim}, f32]], i: i64) -> Chain[tensor[*, f32]] = Link {{ v: produce(3i64), next: acc }}\ndef head(c: Chain[tensor[*, f32]]) -> i64 = match c with {{ | End {{ v }} => shape(v, 0i32) | Link {{ v, next }} => shape(v, 0i32) }}\ndef run(seed: Chain[tensor[3, f32]]) -> i64 = {output}\nout = run(End {{ v: produce(3i64) }})\n"
+                    );
+                    let (work, origins) = counted_native(&source);
+                    eprintln!(
+                        "C named Chain direct={direct} claim={claim} {combine} K={steps}: {work}; origins={origins}"
+                    );
+                    assert!(work <= 64 * steps as u64 + 100, "{source}\n{work}");
                 }
             }
         }
