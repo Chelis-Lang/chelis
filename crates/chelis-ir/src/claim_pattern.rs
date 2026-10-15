@@ -69,7 +69,7 @@ pub struct ClaimAxis {
 }
 
 /// A tensor position with at least one obligation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClaimTensor {
     /// The authored tensor type after nominal substitution.
     pub ty: Expr,
@@ -80,13 +80,13 @@ pub struct ClaimTensor {
     pub axes: Vec<ClaimAxis>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClaimField {
     pub name: Option<String>,
     pub node: Option<ClaimNodeId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClaimConstructor {
     /// The constructor's identity in the checked program.
     pub name: String,
@@ -97,7 +97,7 @@ pub struct ClaimConstructor {
     pub fields: Vec<ClaimField>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ClaimNode {
     Tensor(ClaimTensor),
     /// Every component by position; `None` owes nothing.
@@ -115,7 +115,7 @@ pub enum ClaimNode {
 }
 
 /// The obligations of one authored type, as a finite graph.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ClaimPattern {
     nodes: Vec<ClaimNode>,
     root: Option<ClaimNodeId>,

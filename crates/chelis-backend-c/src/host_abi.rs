@@ -20,7 +20,7 @@ use chelis_ir::host::{
     HostCallee, HostCalleeView, HostExpr, HostExprKind, HostFunction, HostMatchArm, HostParam,
     HostPatternBinding, HostProgram, HostTensorHelper,
 };
-use chelis_ir::host_type_state::CheckedBuiltinCallable;
+use chelis_ir::host_type_state::{CheckedBuiltinCallable, HostTypeTerm};
 use chelis_ir::ownership::{
     HostSiteId, HostSiteKind, VerifiedHostAction, VerifiedHostEmission, VerifiedHostFunctionView,
     VerifiedHostSiteActionKind, VerifiedHostTensorHelperView,
@@ -79,6 +79,14 @@ impl chelis_ir::host::AccumulatorTypeIdentity for HostAbiType {
             Self::Adt(name, _) => Some(name),
             _ => None,
         }
+    }
+    fn accumulator_type_matches(&self, expected: &HostTypeTerm) -> bool {
+        expected
+            .clone()
+            .into_concrete()
+            .ok()
+            .and_then(|expected| Self::try_from_concrete(&expected).ok())
+            .is_some_and(|expected| self == &expected)
     }
 }
 

@@ -5839,6 +5839,15 @@ fn stationary_callback_entry(callback: &HostCallback) -> Option<&HostExpr> {
     {
         return None;
     }
+    if let Some(proof) = &callback.accumulator_delta {
+        let same_obligation = match &lists[0].claim {
+            Some(pattern) => proof.validates_pattern(pattern),
+            None => proof.validates_formal_type(&lists[0].ty),
+        };
+        if !same_obligation {
+            return None;
+        }
+    }
     Some(entry)
 }
 
@@ -5864,7 +5873,7 @@ struct StationaryEntryGuard {
     checked: String,
     states: Option<(String, usize)>,
     binders: Vec<String>,
-    delta: Option<chelis_ir::host::AccumulatorDeltaProof>,
+    delta: Option<std::sync::Arc<chelis_ir::host::AccumulatorDeltaProof>>,
     old_list_len: Option<String>,
 }
 

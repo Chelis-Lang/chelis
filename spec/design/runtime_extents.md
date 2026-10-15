@@ -2155,6 +2155,8 @@ remains a type slot, and each graph belongs to its one authored claim source.
 The recipe admits nominal constructions with exact inherited fields, and a
 fixed fresh prefix or suffix around a complete `List[tensor[...]]` accumulator.
 It is derived from checked source and validated against the lowered callback.
+The immutable proof is shared across projections. The lowered entry retains
+the original authored direct List type or the identical nested claim graph.
 Nominal constructions retain their exact declaration owner in both views. List
 recipes retain their exact intrinsic operation: Eval resolves it through the
 ordinary builtin-dispatch authority in the closure's captured lexical frame,

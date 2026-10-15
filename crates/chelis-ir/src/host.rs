@@ -1913,7 +1913,7 @@ pub struct HostCallback<T = HostTypeTerm> {
     /// Checked source proves an unchanged immutable accumulator with no
     /// second-formal entry obligation (runtime_extents.md C6.6).
     pub stationary_accumulator: Option<StationaryAccumulatorProof>,
-    pub accumulator_delta: Option<AccumulatorDeltaProof>,
+    pub accumulator_delta: Option<Arc<AccumulatorDeltaProof>>,
     pub kind: HostCallbackKind<T>,
     pub ret_ty: T,
 }
@@ -19198,7 +19198,8 @@ fn lower_host_callback(
             };
             Ok(Some(HostCallback {
                 stationary_accumulator: stationary_accumulator_proof(expr, program.adt_registry()),
-                accumulator_delta: accumulator_delta_proof(expr, program.adt_registry()),
+                accumulator_delta: accumulator_delta_proof(expr, program.adt_registry())
+                    .map(Arc::new),
                 kind: HostCallbackKind::Inline {
                     params,
                     body: Box::new(body),
@@ -31245,6 +31246,7 @@ mod match_arm_substitution_tests {
 /// dimensions do not participate in construction identity.
 pub trait AccumulatorTypeIdentity {
     fn accumulator_nominal_identity(&self) -> Option<&str>;
+    fn accumulator_type_matches(&self, expected: &HostTypeTerm) -> bool;
 }
 impl AccumulatorTypeIdentity for HostTypeTerm {
     fn accumulator_nominal_identity(&self) -> Option<&str> {
@@ -31253,6 +31255,9 @@ impl AccumulatorTypeIdentity for HostTypeTerm {
             _ => None,
         }
     }
+    fn accumulator_type_matches(&self, expected: &HostTypeTerm) -> bool {
+        self == expected
+    }
 }
 impl AccumulatorTypeIdentity for ConcreteHostType {
     fn accumulator_nominal_identity(&self) -> Option<&str> {
@@ -31260,6 +31265,12 @@ impl AccumulatorTypeIdentity for ConcreteHostType {
             Self::Adt(name, _) => Some(name),
             _ => None,
         }
+    }
+    fn accumulator_type_matches(&self, expected: &HostTypeTerm) -> bool {
+        expected
+            .clone()
+            .into_concrete()
+            .is_ok_and(|expected| self == &expected)
     }
 }
 
@@ -31299,11 +31310,18 @@ pub enum AccumulatorDeltaRecipe {
 #[derive(Debug, Clone)]
 pub struct AccumulatorDeltaProof {
     parameter: String,
+    formal_type: HostTypeTerm,
     pattern: Arc<crate::claim_pattern::ClaimPattern>,
     recipe: AccumulatorDeltaRecipe,
 }
 
 impl AccumulatorDeltaProof {
+    pub fn validates_formal_type<T: AccumulatorTypeIdentity>(&self, ty: &T) -> bool {
+        ty.accumulator_type_matches(&self.formal_type)
+    }
+    pub fn validates_pattern(&self, pattern: &crate::claim_pattern::ClaimPattern) -> bool {
+        self.pattern.as_ref() == pattern
+    }
     pub fn parameter(&self) -> &str {
         &self.parameter
     }
@@ -31573,6 +31591,7 @@ pub fn accumulator_delta_proof(
     (reused && !matches!(recipe, AccumulatorDeltaRecipe::Inherited)).then_some(
         AccumulatorDeltaProof {
             parameter,
+            formal_type: decode_host_type(&authored).ok()?,
             pattern: Arc::new(pattern),
             recipe,
         },
@@ -31605,6 +31624,33 @@ mod accumulator_delta_tests {
             checked.exprs().iter().find_map(find_fn).unwrap(),
             checked.adt_registry(),
         )
+    }
+
+    #[test]
+    fn delta_proof_rejects_a_transplanted_formal_obligation() {
+        let proof = proof("append(acc, to_tensor([1.0f32, 2.0f32, 3.0f32]))").unwrap();
+        assert!(proof.validates_formal_type(&proof.formal_type));
+        let mut changed = proof.formal_type.clone();
+        let HostTypeTerm::List(element) = &mut changed else {
+            panic!("List proof");
+        };
+        let HostTypeTerm::Tensor(tensor) = element.as_mut() else {
+            panic!("tensor element");
+        };
+        tensor.dims[0] = DimInfo::Lit(5);
+        assert!(!proof.validates_formal_type(&changed));
+        assert!(!proof.validates_formal_type(&HostTypeTerm::Unit));
+        assert!(proof.validates_pattern(proof.pattern()));
+        let changed = chelis_deep::parser::parse_str(
+            "(t-adt {} List (t-tensor {} (d-lit {} 5) (t-prim {} f32)))",
+        )
+        .unwrap();
+        let changed = crate::claim_pattern::ClaimPattern::derive(
+            &changed[0],
+            &chelis_types::adt::AdtRegistry::default(),
+        )
+        .unwrap();
+        assert!(!proof.validates_pattern(&changed));
     }
 
     #[test]
