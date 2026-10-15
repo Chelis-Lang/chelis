@@ -3690,37 +3690,83 @@ impl CEmitter {
         self.emit_slot_allocation_if_needed(id, ty);
     }
 
-    /// One logical element, preserving each recipe's own product rounding.
-    /// Shared numeric recipes are dense boundaries in the shared plan, so
-    /// recursively spelling this expression cannot expand a numeric diamond.
+    /// Explicit postorder frames preserve left-before-right reads and each
+    /// product's own storage-width finalization without recursive C expressions.
     fn deferred_read(&mut self, node: NodeId, index: &str, dag: VerifiedDagView<'_>) -> String {
-        let id = node.0;
-        let producer = dag.get(node).expect("verified recipe source");
-        if !self.deferred_views.is_deferred(node) {
-            let et = Self::elem_type(&producer.output_type);
-            return if self.deferred_views.base_last_read(node).is_some() {
-                format!("t{id}_deferred_data[{index}]")
-            } else {
-                format!("((const {et}*)t{id}_data)[{index}]")
-            };
+        enum Frame {
+            Read(NodeId, String),
+            Product(NodeId),
         }
-        match &producer.op {
-            RiscOp::Reshape { .. } => self.deferred_read(producer.inputs[0], index, dag),
-            RiscOp::Expand { .. } | RiscOp::Permute { .. } => {
-                let mut offset = format!("t{id}_base");
-                for axis in 0..producer.output_type.dims.len() {
-                    offset.push_str(&format!(
-                        " + ((({index}) / t{id}_divisor{axis}) % t{id}_extent{axis}) * t{id}_scale{axis}"
-                    ));
+        let mut pending = vec![Frame::Read(node, index.into())];
+        let mut values = Vec::new();
+        while let Some(frame) = pending.pop() {
+            match frame {
+                Frame::Read(node, index) => {
+                    let id = node.0;
+                    let producer = dag.get(node).expect("verified recipe source");
+                    if !self.deferred_views.is_deferred(node) {
+                        let et = Self::elem_type(&producer.output_type);
+                        values.push(if self.deferred_views.base_last_read(node).is_some() {
+                            format!("t{id}_deferred_data[{index}]")
+                        } else {
+                            format!("((const {et}*)t{id}_data)[{index}]")
+                        });
+                        continue;
+                    }
+                    match &producer.op {
+                        RiscOp::Reshape { .. } => {
+                            pending.push(Frame::Read(producer.inputs[0], index))
+                        }
+                        RiscOp::Expand { .. } | RiscOp::Permute { .. } => {
+                            let mut offset = format!("t{id}_base");
+                            for axis in 0..producer.output_type.dims.len() {
+                                offset.push_str(&format!(" + ((({index}) / t{id}_divisor{axis}) % t{id}_extent{axis}) * t{id}_scale{axis}"));
+                            }
+                            let cursor = format!("__view_index_{}", self.deferred_cursor);
+                            self.deferred_cursor += 1;
+                            let index_type = Self::index_c_type();
+                            self.line(&format!("const {index_type} {cursor} = {offset};"));
+                            pending.push(Frame::Read(producer.inputs[0], cursor));
+                        }
+                        RiscOp::Mul => {
+                            pending.push(Frame::Product(node));
+                            pending.push(Frame::Read(producer.inputs[1], index.clone()));
+                            pending.push(Frame::Read(producer.inputs[0], index));
+                        }
+                        _ => {
+                            unreachable!("shared planner admits only movement and product recipes")
+                        }
+                    }
                 }
-                let cursor = format!("__view_index_{}", self.deferred_cursor);
-                self.deferred_cursor += 1;
-                let index_type = Self::prim_elem_type(Prim::Int64);
-                self.line(&format!("const {index_type} {cursor} = {offset};"));
-                self.deferred_read(producer.inputs[0], &cursor, dag)
+                Frame::Product(node) => {
+                    let rhs = values.pop().expect("right product leaf");
+                    let lhs = values.pop().expect("left product leaf");
+                    let ty = &dag.get(node).expect("verified product").output_type;
+                    let expression = Self::finalized_product_expression(ty, &lhs, &rhs);
+                    let cursor = format!("__view_value_{}", self.deferred_cursor);
+                    self.deferred_cursor += 1;
+                    let et = Self::elem_type(ty);
+                    self.line(&format!("const {et} {cursor} = {expression};"));
+                    values.push(cursor);
+                }
             }
-            RiscOp::Mul => self.deferred_product_expression(producer, index, dag),
-            _ => unreachable!("shared planner admits only movement and product recipes"),
+        }
+        let value = values.pop().expect("one deferred read result");
+        assert!(values.is_empty());
+        value
+    }
+
+    fn finalized_product_expression(ty: &TensorType, lhs: &str, rhs: &str) -> String {
+        if Self::is_reduced_float(ty) {
+            let load = Self::reduced_to_f32_fn(ty.precision);
+            let store = Self::f32_to_reduced_fn(ty.precision);
+            format!("{store}({load}({lhs}) * {load}({rhs}))")
+        } else {
+            finalize_elem(
+                crate::fp_env::risc_nan_finalization(&RiscOp::Mul),
+                format!("({lhs}) * ({rhs})"),
+                ty,
+            )
         }
     }
 
@@ -3732,17 +3778,7 @@ impl CEmitter {
     ) -> String {
         let lhs = self.deferred_read(node.inputs[0], index, dag);
         let rhs = self.deferred_read(node.inputs[1], index, dag);
-        if Self::is_reduced_float(&node.output_type) {
-            let load = Self::reduced_to_f32_fn(node.output_type.precision);
-            let store = Self::f32_to_reduced_fn(node.output_type.precision);
-            format!("{store}({load}({lhs}) * {load}({rhs}))")
-        } else {
-            finalize_elem(
-                crate::fp_env::risc_nan_finalization(&RiscOp::Mul),
-                format!("({lhs}) * ({rhs})"),
-                &node.output_type,
-            )
-        }
+        Self::finalized_product_expression(&node.output_type, &lhs, &rhs)
     }
 
     fn emit_deferred_product_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
@@ -6487,7 +6523,7 @@ impl CEmitter {
         let word = Self::prim_elem_type(Prim::Key);
         let index = Self::prim_elem_type(Prim::Int64);
         let last = node.output_type.dims.len() - 1;
-        let extent = self.bound_c_expr(count, &node.inputs, key.0, last);
+        let extent = self.checked_bound_c_expr(count, &node.inputs, key.0, last);
         let trap = NumericTrap::Domain {
             op: "split_keys",
             prim: Prim::Int64,
@@ -9532,7 +9568,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .iter()
             .enumerate()
             .filter(|(_, dim)| matches!(dim, RtDim::Node(_) | RtDim::InputAxis { .. }))
-            .map(|(axis, dim)| (axis, self.bound_c_expr(dim, inputs, a, axis)))
+            .map(|(axis, dim)| (axis, self.checked_bound_c_expr(dim, inputs, a, axis)))
             .collect();
         // Read from its target's scalars and its operand's metadata: a
         // claim-sized `reshape` declares them before its branch.
@@ -9642,7 +9678,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
-        let extent = self.bound_c_expr(size, inputs, a, axis);
+        let extent = self.checked_bound_c_expr(size, inputs, a, axis);
         let kind = dag.expansion_kind(NodeId(id));
         let op = kind.primitive_name();
         self.emit_negative_bound_guard(
@@ -9719,10 +9755,37 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// checked runtime extent; `Node(i)` reads the rank-0 integer bound
     /// scalar `t{inputs[i]}->data[0]` with its declared element type, cast to
     /// `int` for use as a C index.
-    fn bound_c_expr(&self, bound: &RtDim, inputs: &[NodeId], a: usize, axis: usize) -> String {
+    fn checked_bound_c_expr(
+        &self,
+        bound: &RtDim,
+        inputs: &[NodeId],
+        a: usize,
+        axis: usize,
+    ) -> String {
+        Self::bound_c_expr(bound, inputs, a, axis, |source, source_axis| {
+            if let Some(rank) = self.deferred_ranks.get(&source.0) {
+                let normalized = if source_axis < 0 {
+                    (*rank as i32 + source_axis) as usize
+                } else {
+                    source_axis as usize
+                };
+                self.tensor_extent(source, normalized)
+            } else {
+                format!("chelis_tensor_shape(t{}, {source_axis})", source.0)
+            }
+        })
+    }
+
+    fn bound_c_expr(
+        bound: &RtDim,
+        inputs: &[NodeId],
+        a: usize,
+        axis: usize,
+        extent: impl Fn(NodeId, i32) -> String,
+    ) -> String {
         match bound {
             RtDim::Lit(n) => n.to_string(),
-            RtDim::ToEnd => self.tensor_extent(NodeId(a), axis),
+            RtDim::ToEnd => extent(NodeId(a), axis as i32),
             RtDim::Node(i) => {
                 let n = inputs[*i].0;
                 format!("((int64_t*)t{n}_data)[0]")
@@ -9730,22 +9793,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             RtDim::InputAxis {
                 tensor,
                 axis: RtAxis::Lit(source_axis),
-            } => {
-                let source = inputs[*tensor].0;
-                if let Some(rank) = self.deferred_ranks.get(&source) {
-                    let normalized = if *source_axis < 0 {
-                        (*rank as i32 + source_axis) as usize
-                    } else {
-                        *source_axis as usize
-                    };
-                    self.tensor_extent(NodeId(source), normalized)
-                } else {
-                    format!("chelis_tensor_shape(t{source}, {source_axis})")
-                }
-            }
-            // A symbolic dim (reshape targets only; verify rejects it in
-            // movement bounds) is a declared C variable, exactly as
-            // `emit_dim_info` renders a runtime-bound named dimension.
+            } => extent(inputs[*tensor], *source_axis),
             RtDim::Sym(name) => extent_read(name),
         }
     }
@@ -10067,7 +10115,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 {
                     return (axis, self.tensor_extent(*source, source_axis as usize));
                 }
-                (axis, self.bound_c_expr(&carrier, inputs, operand, axis))
+                (
+                    axis,
+                    self.checked_bound_c_expr(&carrier, inputs, operand, axis),
+                )
             })
             .collect()
     }
@@ -10457,12 +10508,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let before = padding
             .iter()
             .enumerate()
-            .map(|(axis, (n, _))| self.bound_c_expr(n, inputs, a, axis))
+            .map(|(axis, (n, _))| self.checked_bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         let after = padding
             .iter()
             .enumerate()
-            .map(|(axis, (_, n))| self.bound_c_expr(n, inputs, a, axis))
+            .map(|(axis, (_, n))| self.checked_bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         for (axis, (low, high)) in padding.iter().enumerate() {
             let prefix = chelis_abi::failure::negative_movement_bound_prefix("pad", axis);
@@ -10548,12 +10599,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let start = bounds
             .iter()
             .enumerate()
-            .map(|(axis, (n, _))| self.bound_c_expr(n, inputs, a, axis))
+            .map(|(axis, (n, _))| self.checked_bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         let end = bounds
             .iter()
             .enumerate()
-            .map(|(axis, (_, n))| self.bound_c_expr(n, inputs, a, axis))
+            .map(|(axis, (_, n))| self.checked_bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         for (axis, (low, high)) in bounds.iter().enumerate() {
             let prefix = chelis_abi::failure::negative_movement_bound_prefix("shrink", axis);
@@ -10591,7 +10642,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let steps = strides
             .iter()
             .enumerate()
-            .map(|(axis, n)| self.bound_c_expr(n, inputs, a, axis))
+            .map(|(axis, n)| self.checked_bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         self.emit_affine_bounds(&format!("t{id}_steps"), &steps);
         self.emit_affine_plan(id, a, ty, "stride", &format!("t{id}_steps, NULL"));
@@ -11014,7 +11065,9 @@ mod tests {
         );
         // A symbolic reshape bound.
         assert_eq!(
-            CEmitter::bound_c_expr(&RtDim::Sym("n".into()), &[], 0, 0),
+            CEmitter::bound_c_expr(&RtDim::Sym("n".into()), &[], 0, 0, |_, _| panic!(
+                "a symbolic reshape bound reads no tensor extent"
+            )),
             extent_read("n")
         );
         // A claim's binder, as a local guard's operand and as the extent an

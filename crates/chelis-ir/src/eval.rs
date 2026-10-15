@@ -78,6 +78,7 @@ thread_local! {
 
 #[derive(Debug)]
 enum TensorViewKind {
+    Retired,
     Reshape {
         source: TensorValue,
     },
@@ -107,58 +108,180 @@ enum TensorViewKind {
     },
 }
 
+// Common shallow recipes stay on the stack; deeper recipes spill into owned
+// frames rather than consuming the Rust call stack or changing materialization.
+struct ViewFrames<T> {
+    inline: [Option<T>; 16],
+    len: usize,
+    spill: Vec<T>,
+}
+impl<T> ViewFrames<T> {
+    fn new() -> Self {
+        Self {
+            inline: std::array::from_fn(|_| None),
+            len: 0,
+            spill: Vec::new(),
+        }
+    }
+    fn push(&mut self, value: T) {
+        if self.len < self.inline.len() {
+            self.inline[self.len] = Some(value);
+            self.len += 1;
+        } else {
+            self.spill.push(value);
+        }
+    }
+    fn pop(&mut self) -> Option<T> {
+        if let Some(value) = self.spill.pop() {
+            return Some(value);
+        }
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        self.inline[self.len].take()
+    }
+}
+
+impl Drop for TensorView {
+    fn drop(&mut self) {
+        fn children(kind: TensorViewKind, pending: &mut ViewFrames<TensorValue>) {
+            match kind {
+                TensorViewKind::Reshape { source }
+                | TensorViewKind::Permute { source, .. }
+                | TensorViewKind::Expand { source, .. } => pending.push(source),
+                TensorViewKind::Product { lhs, rhs }
+                | TensorViewKind::CartesianAdd { lhs, rhs, .. } => {
+                    pending.push(rhs);
+                    pending.push(lhs);
+                }
+                TensorViewKind::Gather { source, indices } => {
+                    pending.push(indices);
+                    pending.push(source);
+                }
+                TensorViewKind::Retired => {}
+            }
+        }
+        let mut pending = ViewFrames::new();
+        children(
+            std::mem::replace(&mut self.kind, TensorViewKind::Retired),
+            &mut pending,
+        );
+        while let Some(value) = pending.pop() {
+            if let EvalStorage::View(view) = value.storage
+                && let Some(mut owned) = Arc::into_inner(view)
+            {
+                children(
+                    std::mem::replace(&mut owned.kind, TensorViewKind::Retired),
+                    &mut pending,
+                );
+                // `owned` now has no recursive edges. Its empty Drop and
+                // independently cached payload finish before the next frame.
+            }
+        }
+    }
+}
+
 impl TensorView {
     fn scalar_at(&self, index: usize) -> chelis_types::ScalarValue {
-        assert!(index < self.len);
-        if let Some(storage) = self.materialized.get() {
-            return storage.scalar_at(index);
+        enum Frame<'a> {
+            View(&'a TensorView, usize),
+            Value(&'a TensorValue, usize),
+            Product,
+            Add,
+            Gather(&'a TensorValue),
         }
-        #[cfg(test)]
-        VIEW_VISITS.with(|visits| {
-            let (recipes, numeric) = visits.get();
-            visits.set((
-                recipes + 1,
-                numeric + usize::from(matches!(self.kind, TensorViewKind::Product { .. })),
-            ));
-        });
-        #[cfg(test)]
-        if matches!(self.kind, TensorViewKind::Product { .. }) {
-            PRODUCT_CELL_VISITS.with(|count| count.set(count.get() + 1));
-        }
-        match &self.kind {
-            TensorViewKind::Reshape { source } => source.scalar_at(index),
-            TensorViewKind::Permute {
-                source,
-                shape,
-                steps,
-            } => source.scalar_at(movement_offset(index, shape, steps)),
-            TensorViewKind::Expand {
-                source,
-                inner,
-                block,
-                source_block,
-            } => source.scalar_at(index / block * source_block + index % inner),
-            TensorViewKind::CartesianAdd { lhs, rhs, .. } => {
-                chelis_types::dtype_semantics::int_binop(
-                    IntBinOp::Add,
-                    lhs.scalar_at(index),
-                    rhs.scalar_at(index),
-                )
-                .expect("Cartesian extrema established total integer addition")
+        let mut pending = ViewFrames::new();
+        let mut values = ViewFrames::new();
+        pending.push(Frame::View(self, index));
+        while let Some(frame) = pending.pop() {
+            match frame {
+                Frame::Value(value, index) => match &value.storage {
+                    EvalStorage::Dense(storage) => values.push(storage.scalar_at(index)),
+                    EvalStorage::View(view) => pending.push(Frame::View(view, index)),
+                },
+                Frame::View(view, index) => {
+                    assert!(index < view.len);
+                    if let Some(storage) = view.materialized.get() {
+                        values.push(storage.scalar_at(index));
+                        continue;
+                    }
+                    #[cfg(test)]
+                    VIEW_VISITS.with(|visits| {
+                        let (recipes, numeric) = visits.get();
+                        visits.set((
+                            recipes + 1,
+                            numeric
+                                + usize::from(matches!(view.kind, TensorViewKind::Product { .. })),
+                        ));
+                    });
+                    #[cfg(test)]
+                    if matches!(view.kind, TensorViewKind::Product { .. }) {
+                        PRODUCT_CELL_VISITS.with(|count| count.set(count.get() + 1));
+                    }
+                    match &view.kind {
+                        TensorViewKind::Reshape { source } => {
+                            pending.push(Frame::Value(source, index))
+                        }
+                        TensorViewKind::Permute {
+                            source,
+                            shape,
+                            steps,
+                        } => {
+                            pending.push(Frame::Value(source, movement_offset(index, shape, steps)))
+                        }
+                        TensorViewKind::Expand {
+                            source,
+                            inner,
+                            block,
+                            source_block,
+                        } => pending.push(Frame::Value(
+                            source,
+                            index / block * source_block + index % inner,
+                        )),
+                        TensorViewKind::Product { lhs, rhs }
+                        | TensorViewKind::CartesianAdd { lhs, rhs, .. } => {
+                            pending.push(if matches!(view.kind, TensorViewKind::Product { .. }) {
+                                Frame::Product
+                            } else {
+                                Frame::Add
+                            });
+                            pending.push(Frame::Value(rhs, index));
+                            pending.push(Frame::Value(lhs, index));
+                        }
+                        TensorViewKind::Gather { source, indices } => {
+                            pending.push(Frame::Gather(source));
+                            pending.push(Frame::Value(indices, index));
+                        }
+                        TensorViewKind::Retired => unreachable!("retired view has no readers"),
+                    }
+                }
+                Frame::Product | Frame::Add => {
+                    let rhs = values.pop().expect("right scalar");
+                    let lhs = values.pop().expect("left scalar");
+                    let value = if matches!(frame, Frame::Product) {
+                        chelis_types::dtype_semantics::float_binop(FloatBinOp::Mul, lhs, rhs)
+                            .expect("a validated same-dtype float product is total")
+                    } else {
+                        chelis_types::dtype_semantics::int_binop(IntBinOp::Add, lhs, rhs)
+                            .expect("Cartesian extrema established total integer addition")
+                    };
+                    values.push(value);
+                }
+                Frame::Gather(source) => {
+                    let index = values
+                        .pop()
+                        .expect("gather index")
+                        .as_i64_exact()
+                        .expect("integer Cartesian indices")
+                        as usize;
+                    pending.push(Frame::Value(source, index));
+                }
             }
-            TensorViewKind::Gather { source, indices } => source.scalar_at(
-                indices
-                    .scalar_at(index)
-                    .as_i64_exact()
-                    .expect("integer Cartesian indices") as usize,
-            ),
-            TensorViewKind::Product { lhs, rhs } => chelis_types::dtype_semantics::float_binop(
-                FloatBinOp::Mul,
-                lhs.scalar_at(index),
-                rhs.scalar_at(index),
-            )
-            .expect("a validated same-dtype float product is total"),
         }
+        let value = values.pop().expect("one recipe result");
+        assert!(values.pop().is_none());
+        value
     }
 }
 
@@ -6861,6 +6984,84 @@ mod tests {
                 vec![if numeric_source { 0.8125 } else { 1.625 }; 15]
             );
         }
+    }
+
+    #[test]
+    fn deep_recipe_frames_visit_each_single_use_node_once() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                for numeric in [false, true] {
+                    let depth = 4096;
+                    let mut dag = Dag::new();
+                    let owner = dag.declare("test");
+                    let vector = TensorType {
+                        dims: vec![DimInfo::Lit(1)],
+                        precision: Prim::F32,
+                    };
+                    let source = dag.add_node(
+                        owner,
+                        RiscOp::Load { name: "a".into() },
+                        vec![],
+                        vector.clone(),
+                        None,
+                    );
+                    let mut value = source;
+                    for index in 0..depth {
+                        let op = if numeric {
+                            RiscOp::Mul
+                        } else if index % 2 == 0 {
+                            RiscOp::Permute { axes: vec![0] }
+                        } else {
+                            RiscOp::Reshape {
+                                new_shape: vec![RtDim::Lit(1)],
+                            }
+                        };
+                        value = dag.add_node(
+                            owner,
+                            op,
+                            if numeric {
+                                vec![value, source]
+                            } else {
+                                vec![value]
+                            },
+                            vector.clone(),
+                            None,
+                        );
+                    }
+                    let sum = dag.add_node(
+                        owner,
+                        RiscOp::Sum {
+                            axis: 0,
+                            accumulator: Prim::F32,
+                        },
+                        vec![value],
+                        TensorType::scalar_f32(),
+                        None,
+                    );
+                    dag.add_root(sum);
+                    let input = TensorValue::from_vec(vec![1], vec![0.999]);
+                    let dense =
+                        eval_tensor(&dag, &[("a".into(), input.clone())].into_iter().collect())
+                            .unwrap();
+                    VIEW_VISITS.with(|count| count.set((0, 0)));
+                    PRODUCT_CELL_VISITS.with(|count| count.set(0));
+                    let rooted =
+                        eval_tensor_roots_with(&dag, &[sum], |_| Some(input.clone())).unwrap();
+                    assert_eq!(rooted[&sum].storage(), dense[&sum].storage());
+                    assert_eq!(
+                        VIEW_VISITS.with(std::cell::Cell::get),
+                        (depth, if numeric { depth } else { 0 })
+                    );
+                    assert_eq!(
+                        PRODUCT_CELL_VISITS.with(std::cell::Cell::get),
+                        if numeric { depth } else { 0 }
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

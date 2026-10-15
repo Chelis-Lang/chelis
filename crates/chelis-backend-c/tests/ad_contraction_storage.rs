@@ -134,7 +134,8 @@ fn literal(data: &[u8]) -> String {
         data.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
     }
 }
-fn execute(cases: Vec<(Dag, Vec<NodeId>, UnordMap<String, TensorValue>, usize)>) {
+type ExecutableCase = (Dag, Vec<NodeId>, UnordMap<String, TensorValue>, usize);
+fn execute(cases: Vec<ExecutableCase>) {
     let probe = common::probe_dir("ad_contraction_storage");
     let dir = probe.path();
     let staged = chelis_runtime_bundle::stage(dir).unwrap();
@@ -928,6 +929,192 @@ fn shape_reads_deferred_metadata_with_an_exact_integer_result() {
             .into_iter()
             .collect(),
             8 * count.max(1),
+        ));
+    }
+    execute(cases);
+}
+
+#[test]
+fn deep_movement_child() {
+    let Ok(mode) = std::env::var("CHELIS_AD_DEEP_MODE") else {
+        return;
+    };
+    let depth: usize = std::env::var("CHELIS_AD_DEEP_DEPTH")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let stack: usize = std::env::var("CHELIS_AD_DEEP_STACK")
+        .unwrap()
+        .parse()
+        .unwrap();
+    std::thread::Builder::new()
+        .stack_size(stack)
+        .spawn(move || {
+            let count = usize::from(!mode.ends_with("drop"));
+            let numeric = mode.starts_with("mul");
+            let mut dag = Dag::new();
+            let owner = dag.declare("test");
+            let vector = ty(&[count], Prim::F32);
+            let source = dag.add_node(
+                owner,
+                RiscOp::Load { name: "a".into() },
+                vec![],
+                vector.clone(),
+                None,
+            );
+            let mut value = source;
+            for index in 0..depth {
+                let op = if numeric {
+                    RiscOp::Mul
+                } else if index % 2 == 0 {
+                    RiscOp::Permute { axes: vec![0] }
+                } else {
+                    RiscOp::Reshape {
+                        new_shape: vec![chelis_ir::dag::RtDim::Lit(count)],
+                    }
+                };
+                let inputs = if numeric {
+                    vec![value, source]
+                } else {
+                    vec![value]
+                };
+                value = dag.add_node(owner, op, inputs, vector.clone(), None);
+            }
+            let sum = dag.add_node(
+                owner,
+                RiscOp::Sum {
+                    axis: 0,
+                    accumulator: Prim::F32,
+                },
+                vec![value],
+                ty(&[], Prim::F32),
+                None,
+            );
+            dag.add_root(sum);
+            if mode.ends_with("emit") || mode.ends_with("compiler") {
+                let code = support::codegen(&dag, "deep").unwrap();
+                assert!(code.c_source.contains("__carry_level_"));
+                assert_eq!(
+                    code.c_source.matches("const float __view_value_").count(),
+                    if numeric { depth } else { 0 },
+                    "one typed temporary per product"
+                );
+                let probe = common::probe_dir("deep_contraction_syntax");
+                let _staged = chelis_runtime_bundle::stage(probe.path()).unwrap();
+                let source = probe.path().join("kernel.c");
+                fs::write(&source, code.c_source).unwrap();
+                let compiled = Command::new("clang")
+                    .args(["-fsyntax-only", "-fbracket-depth=64", "-I"])
+                    .arg(probe.path())
+                    .arg(source)
+                    .output()
+                    .unwrap();
+                assert!(
+                    compiled.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&compiled.stderr)
+                );
+            } else {
+                let input = TensorValue::from_vec(vec![count], vec![0.999; count]);
+                let dense = eval_tensor(&dag, &[("a".into(), input.clone())].into_iter().collect())
+                    .unwrap();
+                let result =
+                    chelis_ir::eval::eval_tensor_roots_with(&dag, &[sum], |_| Some(input.clone()))
+                        .unwrap();
+                assert_eq!(bytes(result[&sum].storage()), bytes(dense[&sum].storage()));
+                drop(result);
+                drop(dense);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+#[test]
+fn deep_movement_reads_retirement_and_c_emission_use_bounded_stack() {
+    let mut failures = Vec::new();
+    let mut cases = Vec::new();
+    for mode in [
+        "eval-read",
+        "eval-drop",
+        "emit",
+        "mul-eval-read",
+        "mul-eval-drop",
+        "mul-emit",
+    ] {
+        for depth in [8, 4096] {
+            cases.push((mode, depth, 256 * 1024));
+        }
+    }
+    cases.push(("mul-compiler", 128, 2 * 1024 * 1024));
+    for (mode, depth, stack) in cases {
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "deep_movement_child", "--nocapture"])
+            .env("CHELIS_AD_DEEP_MODE", mode)
+            .env("CHELIS_AD_DEEP_DEPTH", depth.to_string())
+            .env("CHELIS_AD_DEEP_STACK", stack.to_string())
+            .output()
+            .unwrap();
+        if !result.status.success() {
+            failures.push(format!(
+                "{mode} depth={depth} stack={stack}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn single_use_product_chains_finalize_each_native_width() {
+    let mut cases = Vec::new();
+    for (precision, acc) in [
+        (Prim::F16, Prim::F32),
+        (Prim::F16, Prim::F64),
+        (Prim::Bf16, Prim::F32),
+        (Prim::Bf16, Prim::F64),
+        (Prim::F32, Prim::F32),
+        (Prim::F32, Prim::F64),
+        (Prim::F64, Prim::F64),
+    ] {
+        let mut dag = Dag::new();
+        let owner = dag.declare("test");
+        let vector = ty(&[1], precision);
+        let source = dag.add_node(
+            owner,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            vector.clone(),
+            None,
+        );
+        let mut value = source;
+        for _ in 0..33 {
+            value = dag.add_node(
+                owner,
+                RiscOp::Mul,
+                vec![value, source],
+                vector.clone(),
+                None,
+            );
+        }
+        let sum = dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: acc,
+            },
+            vec![value],
+            ty(&[], acc),
+            None,
+        );
+        dag.add_root(sum);
+        cases.push((
+            dag,
+            vec![sum],
+            [("a".into(), TensorValue::from_vec(vec![1], vec![0.999]))]
+                .into_iter()
+                .collect(),
+            8,
         ));
     }
     execute(cases);
