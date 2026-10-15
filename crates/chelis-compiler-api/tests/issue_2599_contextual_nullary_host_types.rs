@@ -19,8 +19,8 @@
 //! the same roots. Every case runs before the test reports, so one failing
 //! shape cannot hide another.
 //!
-//! The negative corpus mirrors each positive shape with a bare `None` whose
-//! type nothing fixes. The checker accepts those programs and the evaluator
+//! The negative corpus retains bare `None` values whose stored types remain
+//! unresolved. The checker accepts those programs and the evaluator
 //! runs them, but no host type exists, so compilation must still fail with the
 //! typed host-resolution diagnostic rather than choose a type.
 
@@ -158,7 +158,14 @@ const POSITIVE: &[Case] = &[
     },
 ];
 
-/// Each shape above with a `None` whose type nothing determines.
+// [04-ADT-1] gives dimension-only nominal arguments a parametric C value
+// layout. Empty collections supply no numeric extent witness.
+const DIMENSION_ONLY_EMPTY_ACCUMULATOR: Case = Case {
+    name: "empty_accumulator_dimension_generic_adt_unfixed",
+    source: "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\ndef repl[n](xs: List[Col[n]], acc: List[Col[n]]) -> List[Col[n]] =\n  if eq(len(xs), 0i64) then acc\n  else {\n    hp = index(xs, 0i64)\n    repl(skip(xs, 1i64), append(acc, hp))\n  }\na = len(repl([], []))\n",
+};
+
+/// Bare `None` values whose stored types remain unresolved.
 const AMBIGUOUS: &[Case] = &[
     Case {
         name: "root_none",
@@ -179,13 +186,6 @@ const AMBIGUOUS: &[Case] = &[
     Case {
         name: "fold_callback_len_of_none",
         source: "def case(flag: bool) -> i64 =\n  fold(fn (acc: i64, x: i64) -> add(acc, len([None])), 0i64, [1i64, 2i64])\na = case(true)\n",
-    },
-    // chelis#3153 negative parity: both arguments are empty, so nothing fixes
-    // the dimension of `Col[n]`. The checker accepts it and the evaluator runs
-    // it, but no host type exists, so the fix must NOT invent one.
-    Case {
-        name: "empty_accumulator_dimension_generic_adt_unfixed",
-        source: "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\ndef repl[n](xs: List[Col[n]], acc: List[Col[n]]) -> List[Col[n]] =\n  if eq(len(xs), 0i64) then acc\n  else {\n    hp = index(xs, 0i64)\n    repl(skip(xs, 1i64), append(acc, hp))\n  }\na = len(repl([], []))\n",
     },
 ];
 
@@ -306,4 +306,15 @@ fn a_nullary_value_no_context_fixes_is_still_rejected() {
         AMBIGUOUS.len(),
         failures.join("\n\n")
     );
+}
+
+/// A known ADT has a value layout even when its dimension has no numeric witness.
+#[test]
+fn dimension_only_empty_accumulator_has_eval_native_ownership_parity() {
+    let case = &DIMENSION_ONLY_EMPTY_ACCUMULATOR;
+    assert_eq!(evaluated(case.source), "a = 0\n");
+    let generated = ownership_support::emit(case.source, case.name);
+    let (summary, stdout) = ownership_support::run_program(&generated);
+    ownership_support::balanced(&summary);
+    assert_eq!(stdout, "a = 0\n");
 }
