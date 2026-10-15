@@ -195,7 +195,6 @@ fn sweep_recursive_collection_contracts(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    user_def_names: &UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
     declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
 ) {
@@ -290,7 +289,6 @@ fn sweep_recursive_collection_contracts(
                 None,
                 Some(recursion::RecursiveExpected::Published(expected)),
                 true,
-                user_def_names,
                 declared_signatures,
                 declaration_diagnostic_owner,
             ) {
@@ -486,7 +484,6 @@ pub(super) fn infer_program_with_product_in_session(
     // Second pass: infer def bodies. Same module-descent rationale as the
     // declaration pass — without it, the entire HM checker is a no-op on
     // module-wrapped programs.
-    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
     let external_input_types = collect_literal_external_input_types(&items);
@@ -630,7 +627,6 @@ pub(super) fn infer_program_with_product_in_session(
                     .get(&declaration_index)
                     .map(recursion::RecursiveExpected::Provisional),
                 cyclic,
-                &user_def_names,
                 &declared_signatures,
                 declaration_diagnostic_owner,
             ) {
@@ -701,7 +697,6 @@ pub(super) fn infer_program_with_product_in_session(
                     &mut subst,
                     &adt_reg,
                     errors,
-                    &user_def_names,
                     &declared_signatures,
                     &declaration_diagnostic_owners,
                 );
@@ -1550,7 +1545,6 @@ pub(super) fn infer_ir_program_with_state(
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
         .unwrap_or(false);
-    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
     // PP9 uses the same two bounded prebind capabilities at both entries:
@@ -1705,7 +1699,6 @@ pub(super) fn infer_ir_program_with_state(
                     .get(&declaration_index)
                     .map(recursion::RecursiveExpected::Provisional),
                 cyclic,
-                &user_def_names,
                 &declared_signatures,
                 declaration_diagnostic_owner,
             ) {
@@ -1779,7 +1772,6 @@ pub(super) fn infer_ir_program_with_state(
                     &mut state.subst,
                     &state.adt_reg,
                     errors,
-                    &user_def_names,
                     &declared_signatures,
                     &declaration_diagnostic_owners,
                 );

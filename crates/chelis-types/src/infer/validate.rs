@@ -87,6 +87,13 @@ pub(super) fn validate_semantic_program(
             errors,
         );
     }
+    validate_rank_bodies(
+        exprs,
+        type_env,
+        top_level_references,
+        &RankBodyContext::default(),
+        errors,
+    );
 }
 
 /// Yield each top-level declaration, flattening through a `(module {} name ...)`
