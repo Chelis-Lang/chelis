@@ -57,6 +57,15 @@ fn node(id: usize, op: Value, inputs: Vec<usize>, deps: Vec<usize>, precision: &
     json!({"id":id,"declaration":0,"activation":null,"shape_deps":deps,"span_id":null,"merged_spans":[],"inputs":inputs,"op":op,"output_type":{"dims":[{"kind":"named","name":"*","size":null}],"precision":precision}})
 }
 fn payload(n: usize, changing: bool, witnesses: bool, alternating: bool) -> String {
+    payload_observations(n, changing, witnesses, alternating, false)
+}
+fn payload_observations(
+    n: usize,
+    changing: bool,
+    witnesses: bool,
+    alternating: bool,
+    contextual_observations: bool,
+) -> String {
     let loads = if alternating {
         2
     } else if changing {
@@ -75,6 +84,13 @@ fn payload(n: usize, changing: bool, witnesses: bool, alternating: bool) -> Stri
             )
         })
         .collect::<Vec<_>>();
+    let observations = (0..loads).map(|source| {
+        if contextual_observations {
+            let id=nodes.len();
+            nodes.push(node(id,json!({"kind":"const","value":scalar_from_f64("contextual witness observation",Prim::F32,0.0).unwrap()}),vec![],vec![source],"f32"));
+            id
+        } else { source }
+    }).collect::<Vec<_>>();
     nodes.push(node(nodes.len(),json!({"kind":"const","value":scalar_from_f64("contextual ingress fixture",Prim::F32,0.0).unwrap()}),vec![],(0..loads).collect(),"f32"));
     for _ in 0..n {
         let id = nodes.len();
@@ -103,7 +119,7 @@ fn payload(n: usize, changing: bool, witnesses: bool, alternating: bool) -> Stri
             } else {
                 vec![]
             };
-            let mut inputs = vec![source];
+            let mut inputs = vec![observations[source]];
             if let Some(first) = first_witness {
                 inputs.push(first);
             }
@@ -145,11 +161,20 @@ fn payload(n: usize, changing: bool, witnesses: bool, alternating: bool) -> Stri
     json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":nodes,"roots":roots}).to_string()
 }
 fn measure_contextual_case(changing: bool, witnesses: bool, alternating: bool) {
+    measure_observation_case(changing, witnesses, alternating, false)
+}
+fn measure_observation_case(
+    changing: bool,
+    witnesses: bool,
+    alternating: bool,
+    contextual_observations: bool,
+) {
     let _measurement = MEASUREMENT
         .lock()
         .expect("exclusive allocation measurement");
     for n in [32, 64, 128] {
-        let json = payload(n, changing, witnesses, alternating);
+        let json =
+            payload_observations(n, changing, witnesses, alternating, contextual_observations);
         let before = LIVE.load(Relaxed);
         PEAK.store(before, Relaxed);
         BYTES.store(0, Relaxed);
@@ -164,7 +189,7 @@ fn measure_contextual_case(changing: bool, witnesses: bool, alternating: bool) {
         let peak = PEAK.load(Relaxed).saturating_sub(before);
         let decoded = decoded.expect("full public contextual graph validates");
         eprintln!(
-            "contextual ingress changing={changing} witnesses={witnesses} alternating={alternating} n={n} nodes={} bytes={} allocated={allocated} allocation_calls={calls} peak_heap_delta={peak} wall={wall:?}",
+            "contextual ingress changing={changing} witnesses={witnesses} alternating={alternating} contextual_observations={contextual_observations} n={n} nodes={} bytes={} allocated={allocated} allocation_calls={calls} peak_heap_delta={peak} wall={wall:?}",
             decoded.nodes.len(),
             json.len()
         );
@@ -172,7 +197,7 @@ fn measure_contextual_case(changing: bool, witnesses: bool, alternating: bool) {
             peak <= decoded.nodes.len() * 2048 + 64 * 1024,
             "context authority must not retain every prefix memo: {peak}"
         );
-        if !witnesses {
+        if !contextual_observations && (!witnesses || changing) {
             assert!(
                 allocated <= decoded.nodes.len() * 4096 + 64 * 1024,
                 "repeated contextual ingress allocates expanded prefix paths: {allocated}"
@@ -199,6 +224,10 @@ fn contextual_distinct_authority_allocation() {
 #[test]
 fn contextual_distinct_witness_authority_allocation() {
     measure_contextual_case(true, true, false);
+}
+#[test]
+fn contextual_witness_observation_fallback_allocation() {
+    measure_observation_case(true, true, false, true);
 }
 
 #[test]
