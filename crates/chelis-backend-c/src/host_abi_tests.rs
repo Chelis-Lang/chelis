@@ -754,8 +754,43 @@ fn nested_option_match_releases_the_scrutinee_on_both_selected_arms() {
     // `None` fails, the ordered planner tests `Some(flag)` on its own, and
     // that test's `None` exit is the no-arm-selected failure ([04-PAT-2],
     // chelis#2445).
+    let owner = choose
+        .lines()
+        .filter_map(|line| {
+            let (target, call) = line.trim().split_once(" = chelis_option_some(")?;
+            call.ends_with(");").then_some(target)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(owner.len(), 1, "{choose}");
+    let owner = owner[0];
+    let options: Vec<_> = choose
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("chelis_option* ")?
+                .strip_suffix(';')
+        })
+        .collect();
+    assert!(options.contains(&owner), "{choose}");
+    let matched: Vec<_> = choose
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("if (chelis_option_is_some(")?
+                .strip_suffix(")) {")
+        })
+        .collect();
+    assert_eq!(matched.len(), 2, "{choose}");
+    for scrutinee in matched {
+        assert!(
+            alias_reaches(choose, scrutinee, owner, &options),
+            "{choose}"
+        );
+    }
     assert_eq!(
-        choose.matches("chelis_option_release(__let_0);").count(),
+        choose
+            .matches(&format!("chelis_option_release({owner});"))
+            .count(),
         3,
         "each path out of the match must release the borrowed scrutinee after its final use:\n{choose}"
     );
@@ -975,6 +1010,127 @@ fn calls_c_identifier(body: &str, name: &str) -> bool {
     })
 }
 
+// These helpers recognize the emitter's declaration/assignment grammar, not
+// temporary ordinals. Missing, ambiguous or cyclic bindings fail closed.
+fn declared_c_role<'a>(body: &'a str, c_type: &str, role: &str) -> &'a str {
+    let names: Vec<_> = body
+        .lines()
+        .filter_map(|line| {
+            let tail = line.trim().strip_prefix(c_type)?.strip_prefix(' ')?;
+            let declaration = tail.strip_suffix(';')?;
+            let name = declaration
+                .split_once(" = ")
+                .map_or(declaration, |(name, _)| name);
+            (name.starts_with(role) && c_identifier(name)).then_some(name)
+        })
+        .collect();
+    assert_eq!(
+        names.len(),
+        1,
+        "expected one declared {c_type} {role}:\n{body}"
+    );
+    names[0]
+}
+
+fn c_identifier(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+fn function_pointer_names(body: &str) -> Vec<&str> {
+    body.lines()
+        .filter_map(|line| {
+            let (_, tail) = line.trim().split_once(" (*")?;
+            let (name, _) = tail.split_once(")(")?;
+            c_identifier(name).then_some(name)
+        })
+        .collect()
+}
+
+fn lexical_function_aliases(body: &str) -> Vec<&str> {
+    function_pointer_names(body)
+        .into_iter()
+        .filter(|name| name.starts_with("__let_binding_"))
+        .collect()
+}
+
+fn assignment_value<'a>(body: &'a str, target: &str) -> Option<&'a str> {
+    let prefix = format!("{target} = ");
+    let values: Vec<_> = body
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(&prefix)?.strip_suffix(';'))
+        .collect();
+    (values.len() == 1).then(|| values[0])
+}
+
+fn alias_reaches(body: &str, alias: &str, root: &str, declarations: &[&str]) -> bool {
+    let mut current = alias;
+    let mut seen = std::collections::BTreeSet::new();
+    while current != root {
+        if !declarations.contains(&current) || !seen.insert(current) {
+            return false;
+        }
+        let Some(next) = assignment_value(body, current).filter(|name| c_identifier(name)) else {
+            return false;
+        };
+        current = next;
+    }
+    true
+}
+
+fn assigned_call(body: &str, target: &str, callee: &str, arguments: &[&str]) -> bool {
+    let expected = format!("{target} = {callee}({});", arguments.join(", "));
+    body.lines().any(|line| line.trim() == expected)
+}
+
+#[test]
+fn emitted_binding_oracle_rejects_broken_edges_and_calls() {
+    let body = "chelis_key (*__let_71)(int64_t);\nchelis_key (*__let_binding_84)(int64_t);\n__let_71 = builtin;\n__let_binding_84 = __let_71;\nresult = __let_binding_84(arg, arena, NULL, claims, &origin);";
+    let aliases = lexical_function_aliases(body);
+    assert_eq!(aliases, ["__let_binding_84"]);
+    assert!(alias_reaches(
+        body,
+        aliases[0],
+        "builtin",
+        &function_pointer_names(body)
+    ));
+    assert!(assigned_call(
+        body,
+        "result",
+        aliases[0],
+        &["arg", "arena", "NULL", "claims", "&origin"]
+    ));
+    for changed in [
+        body.replace("__let_71 = builtin;", "__let_71 = wrong;"),
+        body.replace("__let_71 = builtin;", "__let_71 = __let_binding_84;"),
+        body.replace("chelis_key (*__let_71)(int64_t);", ""),
+    ] {
+        assert!(!alias_reaches(
+            &changed,
+            aliases[0],
+            "builtin",
+            &function_pointer_names(&changed)
+        ));
+    }
+    for changed in [
+        body.replace("result = __let_binding_84(", "result = private_body("),
+        body.replace(
+            "arg, arena, NULL, claims, &origin",
+            "arg, arena, NULL, NULL, &origin",
+        ),
+        body.replace(
+            "arg, arena, NULL, claims, &origin",
+            "arg, arena, NULL, claims, &wrong",
+        ),
+    ] {
+        assert!(!assigned_call(
+            &changed,
+            "result",
+            aliases[0],
+            &["arg", "arena", "NULL", "claims", "&origin"]
+        ));
+    }
+}
+
 /// chelis#3440: a flattened let spine declares each binding under a
 /// generated C alias, so a call through a typed key-builtin alias must name
 /// that alias. The source spelling is undeclared in C, and gcc 13 accepts
@@ -990,9 +1146,29 @@ fn typed_key_alias_chain_calls_the_declared_let_alias() {
          out = chain()\n",
         "chain",
     );
+    let aliases = lexical_function_aliases(&body);
+    assert_eq!(aliases.len(), 2, "{body}");
     assert!(
-        body.contains(" (*__let_binding_1)(")
-            && body.contains("__result = __let_binding_1(__call_arg0_2);"),
+        alias_reaches(
+            &body,
+            aliases[1],
+            aliases[0],
+            &function_pointer_names(&body)
+        ),
+        "{body}"
+    );
+    assert!(
+        alias_reaches(
+            &body,
+            aliases[0],
+            "__chelis_checked_callable_seed_scalar",
+            &function_pointer_names(&body)
+        ),
+        "{body}"
+    );
+    let argument = declared_c_role(&body, "int64_t", "__call_arg0_");
+    assert!(
+        assigned_call(&body, "__result", aliases[1], &[argument]),
         "the call must go through the second binding's declared alias:\n{body}"
     );
     for alias in ["first", "second"] {
@@ -1015,8 +1191,21 @@ fn named_loop_callbacks_call_the_declared_let_alias() {
          out = mapped()\n",
         "mapped",
     );
+    let aliases = lexical_function_aliases(&mapped);
+    assert_eq!(aliases.len(), 1, "{mapped}");
     assert!(
-        mapped.contains("__map_result_9 = __let_binding_0(__map_item_10);"),
+        alias_reaches(
+            &mapped,
+            aliases[0],
+            "__chelis_checked_callable_seed_scalar",
+            &function_pointer_names(&mapped)
+        ),
+        "{mapped}"
+    );
+    let result = declared_c_role(&mapped, "chelis_key", "__map_result_");
+    let item = declared_c_role(&mapped, "int64_t", "__map_item_");
+    assert!(
+        assigned_call(&mapped, result, aliases[0], &[item]),
         "map must call the declared alias:\n{mapped}"
     );
     assert!(!calls_c_identifier(&mapped, "seed"), "{mapped}");
@@ -1028,8 +1217,21 @@ fn named_loop_callbacks_call_the_declared_let_alias() {
          out = folded()\n",
         "folded",
     );
+    let aliases = lexical_function_aliases(&folded);
+    assert_eq!(aliases.len(), 1, "{folded}");
     assert!(
-        folded.contains("__result = __let_binding_0(__fold_acc_8, __fold_item_10);"),
+        alias_reaches(
+            &folded,
+            aliases[0],
+            "__chelis_checked_callable_fold_scalar",
+            &function_pointer_names(&folded)
+        ),
+        "{folded}"
+    );
+    let acc = declared_c_role(&folded, "chelis_key", "__fold_acc_");
+    let item = declared_c_role(&folded, "int64_t", "__fold_item_");
+    assert!(
+        assigned_call(&folded, "__result", aliases[0], &[acc, item]),
         "fold must call the declared alias:\n{folded}"
     );
     assert!(!calls_c_identifier(&folded, "mix"), "{folded}");
@@ -1049,8 +1251,21 @@ fn key_alias_shadowing_a_def_calls_the_alias() {
          out = shadow_call()\n",
         "shadow_call",
     );
+    let aliases = lexical_function_aliases(&call);
+    assert_eq!(aliases.len(), 1, "{call}");
     assert!(
-        call.contains("__result = __let_binding_0(__call_arg0_1, __call_arg1_3);"),
+        alias_reaches(
+            &call,
+            aliases[0],
+            "__chelis_checked_callable_fold_scalar",
+            &function_pointer_names(&call)
+        ),
+        "{call}"
+    );
+    let arg0 = declared_c_role(&call, "chelis_key", "__call_arg0_");
+    let arg1 = declared_c_role(&call, "int64_t", "__call_arg1_");
+    assert!(
+        assigned_call(&call, "__result", aliases[0], &[arg0, arg1]),
         "the call must go through the alias:\n{call}"
     );
     let def = format!("{}__chelis_owned_body", authored_function_symbol("mix"));
@@ -1064,8 +1279,21 @@ fn key_alias_shadowing_a_def_calls_the_alias() {
          out = shadow_map()\n",
         "shadow_map",
     );
+    let aliases = lexical_function_aliases(&mapped);
+    assert_eq!(aliases.len(), 1, "{mapped}");
     assert!(
-        mapped.contains("__map_result_9 = __let_binding_0(__map_item_10);"),
+        alias_reaches(
+            &mapped,
+            aliases[0],
+            "__chelis_checked_callable_seed_scalar",
+            &function_pointer_names(&mapped)
+        ),
+        "{mapped}"
+    );
+    let result = declared_c_role(&mapped, "chelis_key", "__map_result_");
+    let item = declared_c_role(&mapped, "int64_t", "__map_item_");
+    assert!(
+        assigned_call(&mapped, result, aliases[0], &[item]),
         "map must call the alias:\n{mapped}"
     );
     let def = format!("{}__chelis_owned_body", authored_function_symbol("seed"));
@@ -1084,10 +1312,20 @@ fn unshadowed_def_callees_call_the_private_body() {
          out = direct()\n",
         "direct",
     );
+    let argument = declared_c_role(&direct, "int64_t", "__call_arg0_");
     assert!(
-        direct.contains(&format!(
-            "__result = {def}(__call_arg0_0, __chelis_origin_arena, NULL, __chelis_result_claims, &__chelis_result_origin___result);"
-        )),
+        assigned_call(
+            &direct,
+            "__result",
+            &def,
+            &[
+                argument,
+                "__chelis_origin_arena",
+                "NULL",
+                "__chelis_result_claims",
+                "&__chelis_result_origin___result"
+            ]
+        ),
         "{direct}"
     );
     let mapped = emitted_owned_body(
@@ -1096,10 +1334,16 @@ fn unshadowed_def_callees_call_the_private_body() {
          out = mapped()\n",
         "mapped",
     );
+    let result = declared_c_role(&mapped, "chelis_key", "__map_result_");
+    let item = declared_c_role(&mapped, "int64_t", "__map_item_");
+    let origin = format!("&__chelis_result_origin_{result}");
     assert!(
-        mapped.contains(&format!(
-            "__map_result_8 = {def}(__map_item_9, __chelis_origin_arena, NULL, NULL, &__chelis_result_origin___map_result_8);"
-        )),
+        assigned_call(
+            &mapped,
+            result,
+            &def,
+            &[item, "__chelis_origin_arena", "NULL", "NULL", &origin]
+        ),
         "{mapped}"
     );
 }
@@ -1116,8 +1360,10 @@ fn callback_parameter_shadowing_a_def_is_the_exported_callee() {
          out = apply_all(twice, [1i64, 2i64])\n",
         "apply_all",
     );
+    let result = declared_c_role(&body, "int64_t", "__map_result_");
+    let item = declared_c_role(&body, "int64_t", "__map_item_");
     assert!(
-        body.contains("__map_result_3 = inc(__map_item_4);"),
+        assigned_call(&body, result, "inc", &[item]),
         "the callback must be the parameter:\n{body}"
     );
     let def = format!("{}__chelis_owned_body", authored_function_symbol("inc"));
