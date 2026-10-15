@@ -1015,6 +1015,7 @@ fn check_callable_invocation_contract(
     Ok(actualized)
 }
 
+#[derive(Clone)]
 struct EntryActual {
     checked: Expr,
     authored: Expr,
@@ -1027,8 +1028,161 @@ struct EntryActual {
 /// guarantees that this loop returns the identical accumulator and has a
 /// scalar item, so no other formal can change its witness bindings.
 #[derive(Default)]
-struct StationaryEntryReceipt {
+struct LoopEntryReceipt {
     witnesses: Option<Vec<(String, NamedResultSource, usize)>>,
+    delta: Option<DeltaEntryReceipt>,
+}
+
+struct DeltaEntryReceipt {
+    proof: chelis_ir::host::AccumulatorDeltaProof,
+    checked: Option<Vec<EntryActual>>,
+    pending: Vec<EntryActual>,
+    old_list_len: usize,
+}
+
+fn collect_delta_entry_actuals(
+    delta: &DeltaEntryReceipt,
+    value: &RuntimeValue,
+    out: &mut Vec<EntryActual>,
+) -> Result<(), String> {
+    use chelis_ir::host::AccumulatorDeltaRecipe as Recipe;
+    fn visit(
+        delta: &DeltaEntryReceipt,
+        recipe: &Recipe,
+        node: ClaimNodeId,
+        value: &RuntimeValue,
+        path: EntryPathText,
+        out: &mut Vec<EntryActual>,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
+        let pattern = delta.proof.pattern();
+        match recipe {
+            Recipe::Fresh => collect_nested_entry_actuals(pattern, node, value, path.render(), out),
+            Recipe::Inherited => {
+                let prefix = path.render();
+                for witness in delta
+                    .checked
+                    .as_ref()
+                    .expect("inherited components have a successful prior entry")
+                {
+                    let mut actual = witness.clone();
+                    let suffix = actual
+                        .path
+                        .strip_prefix(delta.proof.parameter())
+                        .expect("same formal owns the prior witness");
+                    actual.path = EntryPathText::new(prefix.clone()).join(suffix).render();
+                    out.push(actual);
+                    #[cfg(test)]
+                    ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
+                }
+            }
+            Recipe::Constructor {
+                constructor,
+                owner: _,
+                fields: recipes,
+            } => {
+                let (
+                    ClaimNode::Nominal { constructors, .. },
+                    RuntimeValue::Adt {
+                        ctor,
+                        source_name,
+                        fields,
+                        ..
+                    },
+                ) = (pattern.node(node), value)
+                else {
+                    return Err(
+                        "host runtime: accumulator delta lost its checked constructor".into(),
+                    );
+                };
+                let layout = constructors
+                    .iter()
+                    .find(|layout| layout.name == *constructor)
+                    .ok_or("host runtime: accumulator delta lost its claim constructor")?;
+                if (ctor != &layout.name && ctor != &layout.stored_name)
+                    || fields.len() != recipes.len()
+                    || layout.fields.len() != recipes.len()
+                {
+                    return Err("host runtime: accumulator delta changed its construction".into());
+                }
+                for ((field, value), recipe) in layout.fields.iter().zip(fields.iter()).zip(recipes)
+                {
+                    let Some(child) = field.node else {
+                        continue;
+                    };
+                    let segment = field.name.clone().unwrap_or_default();
+                    let segment = if constructors.len() > 1 {
+                        format!(".{source_name}.{segment}")
+                    } else {
+                        format!(".{segment}")
+                    };
+                    visit(delta, recipe, child, value, path.join(&segment), out)?;
+                }
+            }
+            Recipe::ListInterval { before, after, .. } => {
+                let (ClaimNode::List(child), RuntimeValue::List(items)) =
+                    (pattern.node(node), value)
+                else {
+                    return Err("host runtime: accumulator delta lost its checked List".into());
+                };
+                if items.len() != before + delta.old_list_len + after {
+                    return Err(
+                        "host runtime: accumulator delta changed its inherited interval".into(),
+                    );
+                }
+                for (index, item) in items.iter().take(*before).enumerate() {
+                    collect_nested_entry_actuals(
+                        pattern,
+                        *child,
+                        item,
+                        path.join(&format!("[{index}]")).render(),
+                        out,
+                    );
+                }
+                // Eligible List intervals contain direct tensors: every prior
+                // first binder witness was at index zero. No diagnostic text
+                // is parsed to recover a component identity or index.
+                for witness in delta.checked.as_ref().expect("prior entry succeeded") {
+                    let mut actual = witness.clone();
+                    actual.path = path.join(&format!("[{before}]")).render();
+                    out.push(actual);
+                    #[cfg(test)]
+                    ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
+                }
+                for (index, item) in items.iter().enumerate().skip(before + delta.old_list_len) {
+                    collect_nested_entry_actuals(
+                        pattern,
+                        *child,
+                        item,
+                        path.join(&format!("[{index}]")).render(),
+                        out,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+    let root = delta.proof.pattern().root().expect("nonempty claim");
+    if delta.checked.is_none() {
+        collect_nested_entry_actuals(
+            delta.proof.pattern(),
+            root,
+            value,
+            delta.proof.parameter().to_owned(),
+            out,
+        );
+        Ok(())
+    } else {
+        visit(
+            delta,
+            delta.proof.recipe(),
+            root,
+            value,
+            EntryPathText::new(delta.proof.parameter().to_owned()),
+            out,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1059,9 +1213,12 @@ fn actualize_tensor_entry_parameters(
     session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
     present: Option<&[bool]>,
     nested: Option<EntryClaimPatterns<'_>>,
-    stationary_entry: Option<&StationaryEntryReceipt>,
+    loop_entry: Option<&mut LoopEntryReceipt>,
 ) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
-    if stationary_entry.is_some_and(|receipt| receipt.witnesses.is_some()) {
+    if loop_entry
+        .as_ref()
+        .is_some_and(|receipt| receipt.witnesses.is_some())
+    {
         return Ok(Vec::new());
     }
     fn collect(
@@ -1156,6 +1313,14 @@ fn actualize_tensor_entry_parameters(
         if present.is_some_and(|present| !present[index]) {
             continue;
         }
+        if index == 0
+            && let Some(delta) = loop_entry
+                .as_ref()
+                .and_then(|receipt| receipt.delta.as_ref())
+        {
+            collect_delta_entry_actuals(delta, arg, &mut actuals)?;
+            continue;
+        }
         collect(
             formal.pattern(),
             checked_params
@@ -1198,6 +1363,25 @@ fn actualize_tensor_entry_parameters(
             .collect::<Vec<_>>(),
     )
     .map_err(|error| format!("host runtime: could not actualize entry contract: {error}"))?;
+    if let Some(delta) = loop_entry.and_then(|receipt| receipt.delta.as_mut()) {
+        let mut seen = std::collections::BTreeSet::new();
+        delta.pending.clear();
+        for (actual, ty) in actuals.iter().zip(&types) {
+            let mut retained = false;
+            for dim in &ty.dims {
+                #[cfg(test)]
+                ENTRY_CLAIM_WORK.with(|v| v.set(v.get() + 1));
+                if let DimInfo::Named(name, _) = dim
+                    && name != "*"
+                {
+                    retained |= seen.insert(name.clone());
+                }
+            }
+            if retained {
+                delta.pending.push(actual.clone());
+            }
+        }
+    }
     let actualized = actuals
         .into_iter()
         .zip(types)
@@ -1255,7 +1439,11 @@ impl<'a> EvalContext<'a> {
     }
 
     fn active_builtin_symbol(&self, name: &str) -> bool {
-        !self.bindings.contains_key(name) && !self.tensor_bindings.contains_key(name)
+        self.active_builtin_symbol_in_frame(name, &self.bindings)
+    }
+
+    fn active_builtin_symbol_in_frame(&self, name: &str, frame: &Frame) -> bool {
+        !frame.contains_key(name) && !self.tensor_bindings.contains_key(name)
     }
 
     pub(super) fn resolve_top_level(&mut self, name: &str) -> Result<RuntimeValue, String> {
@@ -3422,23 +3610,40 @@ impl<'a> EvalContext<'a> {
         )
     }
 
-    fn stationary_callback_receipt(
-        &self,
-        callback: &RuntimeValue,
-    ) -> Option<StationaryEntryReceipt> {
+    fn loop_callback_receipt(&self, callback: &RuntimeValue) -> Option<LoopEntryReceipt> {
         let RuntimeValue::Closure {
             checked_function,
             invocation_contracts,
             def_name: None,
+            env,
             ..
         } = callback
         else {
             return None;
         };
-        (invocation_contracts.is_empty()
-            && chelis_ir::host::stationary_accumulator_proof(checked_function, &self.adt_registry)
-                .is_some())
-        .then(StationaryEntryReceipt::default)
+        if !invocation_contracts.is_empty() {
+            return None;
+        }
+        if chelis_ir::host::stationary_accumulator_proof(checked_function, &self.adt_registry)
+            .is_some()
+        {
+            return Some(LoopEntryReceipt::default());
+        }
+        let proof = chelis_ir::host::accumulator_delta_proof(checked_function, &self.adt_registry)?;
+        if let Some(operation) = proof.required_list_operation()
+            && !self.active_builtin_symbol_in_frame(operation.symbol(), env)
+        {
+            return None;
+        }
+        Some(LoopEntryReceipt {
+            witnesses: None,
+            delta: Some(DeltaEntryReceipt {
+                proof,
+                checked: None,
+                pending: Vec::new(),
+                old_list_len: 0,
+            }),
+        })
     }
 
     fn apply_loop_callback(
@@ -3447,7 +3652,7 @@ impl<'a> EvalContext<'a> {
         args: Vec<RuntimeValue>,
         arg_types: &[Option<Expr>],
         result_type: Option<&Expr>,
-        receipt: Option<&mut StationaryEntryReceipt>,
+        receipt: Option<&mut LoopEntryReceipt>,
     ) -> Result<RuntimeValue, String> {
         let Some(receipt) = receipt else {
             return self.apply_resolved_callable_with_arg_types(
@@ -3576,7 +3781,7 @@ impl<'a> EvalContext<'a> {
         result_type_expr: Option<&Expr>,
         inherited_claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
-        stationary_entry: Option<&mut StationaryEntryReceipt>,
+        mut loop_entry: Option<&mut LoopEntryReceipt>,
     ) -> Result<RuntimeValue, String> {
         // A caller's first-site axes resolve in the caller's activation,
         // whose sites have all run by the time its callee produces the
@@ -3657,7 +3862,7 @@ impl<'a> EvalContext<'a> {
                     // unbound textual runtime name (chelis#1382).
                     let mut dimension_bindings: UnordMap<String, usize> = UnordMap::new();
                     let mut named_result_witnesses: Vec<(String, NamedResultSource, usize)> =
-                        stationary_entry
+                        loop_entry
                             .as_ref()
                             .and_then(|receipt| receipt.witnesses.clone())
                             .unwrap_or_default();
@@ -3682,7 +3887,7 @@ impl<'a> EvalContext<'a> {
                             registry: &self.adt_registry,
                             cache: &self.claim_patterns,
                         }),
-                        stationary_entry.as_deref(),
+                        loop_entry.as_deref_mut(),
                     )?;
                     let mut entry_inputs = Vec::with_capacity(actualized_entries.len());
                     let mut entry_shapes: Vec<Vec<usize>> =
@@ -3723,13 +3928,19 @@ impl<'a> EvalContext<'a> {
                         &entry_plan,
                         &entry_shapes.iter().map(Vec::as_slice).collect::<Vec<_>>(),
                     )?;
-                    if let Some(receipt) = stationary_entry
-                        && receipt.witnesses.is_none()
-                    {
-                        receipt.witnesses = Some(named_result_witnesses.clone());
-                        #[cfg(test)]
-                        ENTRY_CLAIM_WORK
-                            .with(|v| v.set(v.get() + named_result_witnesses.len() as u64));
+                    if let Some(receipt) = loop_entry {
+                        if let Some(delta) = &mut receipt.delta {
+                            delta.checked = Some(std::mem::take(&mut delta.pending));
+                            delta.old_list_len = match args.first() {
+                                Some(RuntimeValue::List(items)) => items.len(),
+                                _ => 0,
+                            };
+                        } else if receipt.witnesses.is_none() {
+                            receipt.witnesses = Some(named_result_witnesses.clone());
+                            #[cfg(test)]
+                            ENTRY_CLAIM_WORK
+                                .with(|v| v.set(v.get() + named_result_witnesses.len() as u64));
+                        }
                     }
                     let caller_precisions = saved_precisions.clone();
                     let mut call_precisions = UnordMap::new();
@@ -4802,7 +5013,7 @@ impl<'a> EvalContext<'a> {
                         .and_then(checked_list_element)
                         .cloned(),
                 ];
-                let mut receipt = self.stationary_callback_receipt(&callback);
+                let mut receipt = self.loop_callback_receipt(&callback);
                 for item in items {
                     acc = self.apply_loop_callback(
                         callback.clone(),
@@ -4834,7 +5045,7 @@ impl<'a> EvalContext<'a> {
                 ];
                 let callback_result_type = result_type_expr.and_then(checked_list_element);
                 let mut out = Vec::with_capacity(items.len());
-                let mut receipt = self.stationary_callback_receipt(&callback);
+                let mut receipt = self.loop_callback_receipt(&callback);
                 for item in items {
                     acc = self.apply_loop_callback(
                         callback.clone(),

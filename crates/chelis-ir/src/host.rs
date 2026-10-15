@@ -1913,6 +1913,7 @@ pub struct HostCallback<T = HostTypeTerm> {
     /// Checked source proves an unchanged immutable accumulator with no
     /// second-formal entry obligation (runtime_extents.md C6.6).
     pub stationary_accumulator: Option<StationaryAccumulatorProof>,
+    pub accumulator_delta: Option<Arc<AccumulatorDeltaProof>>,
     pub kind: HostCallbackKind<T>,
     pub ret_ty: T,
 }
@@ -2510,6 +2511,7 @@ fn resolve_host_callback(
     };
     Ok(ConcreteHostCallback {
         stationary_accumulator: callback.stationary_accumulator,
+        accumulator_delta: callback.accumulator_delta,
         kind,
         ret_ty: callback.ret_ty.into_concrete()?,
     })
@@ -12490,6 +12492,7 @@ fn materialize_runtime_grad_list_element(
     let mapped = HostExpr::new(HostExprKind::Map {
         callback: HostCallback {
             stationary_accumulator: None,
+            accumulator_delta: None,
             kind: HostCallbackKind::Inline {
                 params: vec![HostParam {
                     name: item_name.into(),
@@ -12682,6 +12685,7 @@ fn pack_grad_roots(plan: &GradPackPlan, roots: &mut impl Iterator<Item = HostExp
             HostExpr::new(HostExprKind::Map {
                 callback: HostCallback {
                     stationary_accumulator: None,
+                    accumulator_delta: None,
                     kind: HostCallbackKind::Inline {
                         params: vec![HostParam {
                             name: "__chelis_grad_list_row".into(),
@@ -18870,6 +18874,7 @@ fn checked_tensor_scan_callback(
         kind,
         ret_ty,
         stationary_accumulator: _,
+        accumulator_delta: _,
     } = callback;
     let (params, body) = match kind {
         HostCallbackKind::Inline { params, body } => (params, *body),
@@ -18912,6 +18917,7 @@ fn checked_tensor_scan_callback(
     });
     HostCallback {
         stationary_accumulator: None,
+        accumulator_delta: None,
         kind: HostCallbackKind::Inline {
             params,
             body: Box::new(body),
@@ -19192,6 +19198,8 @@ fn lower_host_callback(
             };
             Ok(Some(HostCallback {
                 stationary_accumulator: stationary_accumulator_proof(expr, program.adt_registry()),
+                accumulator_delta: accumulator_delta_proof(expr, program.adt_registry())
+                    .map(Arc::new),
                 kind: HostCallbackKind::Inline {
                     params,
                     body: Box::new(body),
@@ -19264,6 +19272,7 @@ fn named_host_callback(
 ) -> HostCallback {
     HostCallback {
         stationary_accumulator: None,
+        accumulator_delta: None,
         kind: HostCallbackKind::Named {
             params: positional_host_params(param_tys, &callee),
             callee,
@@ -22804,6 +22813,7 @@ fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> Hos
         kind,
         ret_ty,
         stationary_accumulator,
+        accumulator_delta,
     } = callback;
     let ret_ty = if ret_ty.is_unresolved() && !expected.is_unresolved() {
         expected.clone()
@@ -22821,6 +22831,7 @@ fn conform_host_callback(callback: HostCallback, expected: &HostTypeTerm) -> Hos
         kind,
         ret_ty,
         stationary_accumulator,
+        accumulator_delta,
     }
 }
 
@@ -30393,6 +30404,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     fn a_fold_conforms_its_seed_and_callback_body() {
         let callback = HostCallback {
             stationary_accumulator: None,
+            accumulator_delta: None,
             kind: HostCallbackKind::Inline {
                 params: vec![
                     HostParam {
@@ -30750,6 +30762,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             HostExpr::new(HostExprKind::Map {
                 callback: HostCallback {
                     stationary_accumulator: None,
+                    accumulator_delta: None,
                     kind: HostCallbackKind::Named {
                         callee: HostCallee::test_local(function),
                         params: vec![HostParam {
@@ -31225,5 +31238,587 @@ mod match_arm_substitution_tests {
              (arm {} (pat-tuple {} (pat-var {} x) (pat-var {} k)) () \
                (app {} (var {} add) (var {} x) (var {} k))))";
         assert_eq!(substituted(source, &[("x", "(var {} k)")]), flat(source));
+    }
+}
+
+/// Exact nominal declaration identity of a checked host type. Backends
+/// implement this view for their projected type carrier; runtime addresses and
+/// dimensions do not participate in construction identity.
+pub trait AccumulatorTypeIdentity {
+    fn accumulator_nominal_identity(&self) -> Option<&str>;
+    fn accumulator_type_matches(&self, expected: &HostTypeTerm) -> bool;
+}
+impl AccumulatorTypeIdentity for HostTypeTerm {
+    fn accumulator_nominal_identity(&self) -> Option<&str> {
+        match self {
+            Self::Adt(name, _) => Some(name),
+            _ => None,
+        }
+    }
+    fn accumulator_type_matches(&self, expected: &HostTypeTerm) -> bool {
+        self == expected
+    }
+}
+impl AccumulatorTypeIdentity for ConcreteHostType {
+    fn accumulator_nominal_identity(&self) -> Option<&str> {
+        match self {
+            Self::Adt(name, _) => Some(name),
+            _ => None,
+        }
+    }
+    fn accumulator_type_matches(&self, expected: &HostTypeTerm) -> bool {
+        expected
+            .clone()
+            .into_concrete()
+            .is_ok_and(|expected| self == &expected)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccumulatorListOperation {
+    Append,
+    Concat,
+}
+impl AccumulatorListOperation {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Append => "append",
+            Self::Concat => "concat",
+        }
+    }
+}
+
+/// Ordered structural evidence for components inherited from a callback's
+/// original accumulator. Fresh components retain the ordinary next-entry walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccumulatorDeltaRecipe {
+    Fresh,
+    Inherited,
+    Constructor {
+        owner: String,
+        constructor: String,
+        fields: Vec<AccumulatorDeltaRecipe>,
+    },
+    /// A fixed fresh prefix/suffix surrounds the complete inherited List.
+    ListInterval {
+        operation: AccumulatorListOperation,
+        before: usize,
+        after: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct AccumulatorDeltaProof {
+    parameter: String,
+    formal_type: HostTypeTerm,
+    pattern: Arc<crate::claim_pattern::ClaimPattern>,
+    recipe: AccumulatorDeltaRecipe,
+}
+
+impl AccumulatorDeltaProof {
+    pub fn validates_formal_type<T: AccumulatorTypeIdentity>(&self, ty: &T) -> bool {
+        ty.accumulator_type_matches(&self.formal_type)
+    }
+    pub fn validates_pattern(&self, pattern: &crate::claim_pattern::ClaimPattern) -> bool {
+        self.pattern.as_ref() == pattern
+    }
+    pub fn parameter(&self) -> &str {
+        &self.parameter
+    }
+    pub fn pattern(&self) -> &crate::claim_pattern::ClaimPattern {
+        &self.pattern
+    }
+    pub fn recipe(&self) -> &AccumulatorDeltaRecipe {
+        &self.recipe
+    }
+    /// A List recipe requires this exact builtin after lexical resolution.
+    /// C validates its lowered Builtin identity; Eval uses its ordinary
+    /// builtin-dispatch authority in the closure's captured frame.
+    pub fn required_list_operation(&self) -> Option<AccumulatorListOperation> {
+        match self.recipe {
+            AccumulatorDeltaRecipe::ListInterval { operation, .. } => Some(operation),
+            _ => None,
+        }
+    }
+
+    /// Transport never turns this proof into an unchecked backend opt-out.
+    pub fn validates_body<T: AccumulatorTypeIdentity>(&self, body: &HostExpr<T>) -> bool {
+        fn variable<T>(expr: &HostExpr<T>, parameter: &str) -> bool {
+            matches!(&expr.kind, HostExprKind::Var(name, _) if name == parameter)
+        }
+        fn validate<T: AccumulatorTypeIdentity>(
+            expr: &HostExpr<T>,
+            parameter: &str,
+            recipe: &AccumulatorDeltaRecipe,
+        ) -> bool {
+            match &expr.kind {
+                HostExprKind::Let { bindings, body, .. }
+                | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+                    bindings.iter().all(|binding| binding.name != parameter)
+                        && validate(body, parameter, recipe)
+                }
+                HostExprKind::ResultClaimScope { body, .. } => validate(body, parameter, recipe),
+                HostExprKind::ExtentSites { value, .. } => validate(value, parameter, recipe),
+                _ => match recipe {
+                    AccumulatorDeltaRecipe::Fresh => true,
+                    AccumulatorDeltaRecipe::Inherited => variable(expr, parameter),
+                    AccumulatorDeltaRecipe::Constructor {
+                        owner,
+                        constructor,
+                        fields,
+                    } => {
+                        matches!(&expr.kind, HostExprKind::AdtConstruct { ctor, fields: actuals, ty }
+                            if ty.accumulator_nominal_identity() == Some(owner.as_str()) && ctor == constructor && actuals.len() == fields.len()
+                                && actuals.iter().zip(fields).all(|(actual, recipe)| validate(actual, parameter, recipe)))
+                    }
+                    AccumulatorDeltaRecipe::ListInterval {
+                        operation,
+                        before,
+                        after,
+                    } => {
+                        let HostExprKind::Builtin { name, args, .. } = &expr.kind else {
+                            return false;
+                        };
+                        if name.as_str() != operation.symbol() {
+                            return false;
+                        }
+                        match (name.as_str(), args.as_slice(), *before, *after) {
+                            ("append", [old, _], 0, 1) => variable(old, parameter),
+                            ("concat", [old, fresh], 0, after) => {
+                                variable(old, parameter)
+                                    && matches!(&fresh.kind, HostExprKind::List(items, _) if items.len() == after)
+                            }
+                            ("concat", [fresh, old], before, 0) => {
+                                variable(old, parameter)
+                                    && matches!(&fresh.kind, HostExprKind::List(items, _) if items.len() == before)
+                            }
+                            _ => false,
+                        }
+                    }
+                },
+            }
+        }
+        validate(body, &self.parameter, &self.recipe)
+    }
+}
+
+/// Derive reuse evidence from the authored checked formal and construction,
+/// never from runtime storage identity, equal extents, or inferred result types.
+pub fn accumulator_delta_proof(
+    expr: &Expr,
+    registry: &chelis_types::adt::AdtRegistry,
+) -> Option<AccumulatorDeltaProof> {
+    use crate::claim_pattern::{ClaimNode, ClaimNodeId, ClaimPattern};
+    fn variable(expr: &Expr, name: &str) -> bool {
+        let expr = if let Expr::MetaExpr(meta, _) = expr {
+            &meta.expr
+        } else {
+            expr
+        };
+        as_node(expr).is_some_and(|node| {
+            node.tag() == DeepTag::Var
+                && node.children_slice().first().and_then(symbol_name) == Some(name)
+        })
+    }
+    fn recipe(
+        expr: &Expr,
+        parameter: &str,
+        pattern: &ClaimPattern,
+        position: ClaimNodeId,
+        root: ClaimNodeId,
+    ) -> Option<(AccumulatorDeltaRecipe, bool)> {
+        if let Expr::MetaExpr(meta, _) = expr {
+            return recipe(&meta.expr, parameter, pattern, position, root);
+        }
+        let node = as_node(expr)?;
+        let children = node.children_slice();
+        if variable(expr, parameter) {
+            return (position == root).then_some((AccumulatorDeltaRecipe::Inherited, true));
+        }
+        match node.tag() {
+            DeepTag::Block => recipe(children.last()?, parameter, pattern, position, root),
+            DeepTag::Let => {
+                let bindings = children.first().and_then(as_node)?;
+                let (pairs, remainder) = bindings.children_slice().as_chunks::<2>();
+                if bindings.tag() != DeepTag::Bind || !remainder.is_empty() {
+                    return None;
+                }
+                let mut names = UnordSet::new();
+                for pair in pairs {
+                    collect_binder_names(&pair[0], &mut names);
+                }
+                if names.contains(parameter) {
+                    return None;
+                }
+                let derived = recipe(children.get(1)?, parameter, pattern, position, root)?;
+                if let AccumulatorDeltaRecipe::ListInterval { operation, .. } = &derived.0
+                    && names.contains(operation.symbol())
+                {
+                    return None;
+                }
+                Some(derived)
+            }
+            DeepTag::Record => {
+                let ClaimNode::Nominal {
+                    name: owner,
+                    constructors,
+                } = pattern.node(position)
+                else {
+                    return Some((AccumulatorDeltaRecipe::Fresh, false));
+                };
+                if !matches!(expr_type(expr), Some(HostTypeTerm::Adt(name, _)) if name == *owner) {
+                    return None;
+                }
+                let name = children.first().and_then(symbol_name)?;
+                let constructor = constructors
+                    .iter()
+                    .find(|constructor| constructor.name == name)?;
+                let mut fields = Vec::with_capacity(constructor.fields.len());
+                let mut reused = false;
+                for field in &constructor.fields {
+                    let Some(child) = field.node else {
+                        fields.push(AccumulatorDeltaRecipe::Fresh);
+                        continue;
+                    };
+                    let source = children.iter().skip(1).find_map(|expr| {
+                        let kv = as_node(expr)?;
+                        (kv.tag() == DeepTag::Kv
+                            && kv.children_slice().first().and_then(symbol_name)
+                                == field.name.as_deref())
+                        .then(|| kv.children_slice().get(1))
+                        .flatten()
+                    })?;
+                    let (part, inherits) = recipe(source, parameter, pattern, child, root)?;
+                    reused |= inherits;
+                    fields.push(part);
+                }
+                Some((
+                    AccumulatorDeltaRecipe::Constructor {
+                        owner: owner.clone(),
+                        constructor: name.to_owned(),
+                        fields,
+                    },
+                    reused,
+                ))
+            }
+            DeepTag::App
+                if position == root
+                    && matches!(pattern.node(root), ClaimNode::List(child) if matches!(pattern.node(*child), ClaimNode::Tensor(_))) =>
+            {
+                let callee = children.first().and_then(as_node)?;
+                if callee.tag() != DeepTag::Var {
+                    return Some((AccumulatorDeltaRecipe::Fresh, false));
+                }
+                let name = callee.children_slice().first().and_then(symbol_name)?;
+                fn length(expr: &Expr) -> Option<usize> {
+                    if let Expr::MetaExpr(meta, _) = expr {
+                        return length(&meta.expr);
+                    }
+                    let mut spine = ConsSpine::with_metadata_wrappers(expr);
+                    let length = spine.by_ref().count();
+                    spine.require_nil().ok()?;
+                    Some(length)
+                }
+                let result = match (name, &children[1..]) {
+                    ("append", [old, _]) if variable(old, parameter) => Some((0, 1)),
+                    ("concat", [old, fresh]) if variable(old, parameter) => {
+                        length(fresh).map(|after| (0, after))
+                    }
+                    ("concat", [fresh, old]) if variable(old, parameter) => {
+                        length(fresh).map(|before| (before, 0))
+                    }
+                    _ => None,
+                };
+                Some(
+                    result.map_or((AccumulatorDeltaRecipe::Fresh, false), |(before, after)| {
+                        (
+                            AccumulatorDeltaRecipe::ListInterval {
+                                operation: if name == "append" {
+                                    AccumulatorListOperation::Append
+                                } else {
+                                    AccumulatorListOperation::Concat
+                                },
+                                before,
+                                after,
+                            },
+                            true,
+                        )
+                    }),
+                )
+            }
+            _ => Some((AccumulatorDeltaRecipe::Fresh, false)),
+        }
+    }
+    if let Expr::MetaExpr(meta, _) = expr {
+        return accumulator_delta_proof(&meta.expr, registry);
+    }
+    let node = as_node(expr).filter(|node| node.tag() == DeepTag::Fn)?;
+    let params = node
+        .children_slice()
+        .first()
+        .and_then(as_node)
+        .filter(|node| node.tag() == DeepTag::Params)?;
+    let [acc, _] = params.children_slice() else {
+        return None;
+    };
+    let (types, result_type) = expr_fn_type(expr)?;
+    if types.len() != 2
+        || types[0] != result_type
+        || !matches!(types[1], HostTypeTerm::Scalar(_) | HostTypeTerm::Unit)
+    {
+        return None;
+    }
+    let authored = param_declared_type_expr(acc)?;
+    let pattern = ClaimPattern::derive(&authored, registry).ok()?;
+    // The receipt represents extent witnesses, not polymorphic rank or
+    // precision bindings. Preserve full admission while those extra binding
+    // kinds have no receipt representation.
+    if pattern.nodes().iter().any(|node| {
+        matches!(node, ClaimNode::Tensor(tensor) if tensor.rank.is_none()
+            || !matches!(decode_host_type(&tensor.ty), Ok(HostTypeTerm::Tensor(_))))
+    }) {
+        return None;
+    }
+    let root = pattern.nested_root()?;
+    let parameter = param_name(acc)?;
+    let (recipe, reused) = recipe(
+        node.children_slice().get(1)?,
+        &parameter,
+        &pattern,
+        root,
+        root,
+    )?;
+    (reused && !matches!(recipe, AccumulatorDeltaRecipe::Inherited)).then_some(
+        AccumulatorDeltaProof {
+            parameter,
+            formal_type: decode_host_type(&authored).ok()?,
+            pattern: Arc::new(pattern),
+            recipe,
+        },
+    )
+}
+
+#[cfg(test)]
+mod accumulator_delta_tests {
+    use super::*;
+
+    fn find_fn(expr: &Expr) -> Option<&Expr> {
+        if let Expr::MetaExpr(meta, _) = expr {
+            return find_fn(&meta.expr);
+        }
+        let node = as_node(expr)?;
+        if node.tag() == DeepTag::Fn {
+            return Some(expr);
+        }
+        node.children_slice().iter().find_map(find_fn)
+    }
+
+    fn proof(body: &str) -> Option<AccumulatorDeltaProof> {
+        let source = format!(
+            "out = fold(fn (acc: List[tensor[3, f32]], i: i64) -> {body}, [to_tensor([1.0f32, 2.0f32, 3.0f32])], range(0i64, 2i64))\n"
+        );
+        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
+        accumulator_delta_proof(
+            checked.exprs().iter().find_map(find_fn).unwrap(),
+            checked.adt_registry(),
+        )
+    }
+
+    #[test]
+    fn delta_proof_rejects_a_transplanted_formal_obligation() {
+        let proof = proof("append(acc, to_tensor([1.0f32, 2.0f32, 3.0f32]))").unwrap();
+        assert!(proof.validates_formal_type(&proof.formal_type));
+        let mut changed = proof.formal_type.clone();
+        let HostTypeTerm::List(element) = &mut changed else {
+            panic!("List proof");
+        };
+        let HostTypeTerm::Tensor(tensor) = element.as_mut() else {
+            panic!("tensor element");
+        };
+        tensor.dims[0] = DimInfo::Lit(5);
+        assert!(!proof.validates_formal_type(&changed));
+        assert!(!proof.validates_formal_type(&HostTypeTerm::Unit));
+        assert!(proof.validates_pattern(proof.pattern()));
+        let changed = chelis_deep::parser::parse_str(
+            "(t-adt {} List (t-tensor {} (d-lit {} 5) (t-prim {} f32)))",
+        )
+        .unwrap();
+        let changed = crate::claim_pattern::ClaimPattern::derive(
+            &changed[0],
+            &chelis_types::adt::AdtRegistry::default(),
+        )
+        .unwrap();
+        assert!(!proof.validates_pattern(&changed));
+    }
+
+    #[test]
+    fn delta_proof_admits_only_structural_original_components() {
+        for body in [
+            "append(acc, to_tensor([1.0f32, 2.0f32, 3.0f32]))",
+            "concat([to_tensor([1.0f32, 2.0f32, 3.0f32])], acc)",
+        ] {
+            let proof = proof(body).expect("structurally inherited List interval");
+            assert_eq!(proof.parameter(), "acc");
+            let changed = HostExpr::new(HostExprKind::Var("acc".into(), HostTypeTerm::Unit));
+            assert!(
+                !proof.validates_body(&changed),
+                "changed callback cannot reuse a construction proof"
+            );
+        }
+        for body in [
+            "[to_tensor([1.0f32, 2.0f32, 3.0f32])]",
+            "{ acc = [to_tensor([1.0f32, 2.0f32, 3.0f32])]\n append(acc, to_tensor([1.0f32, 2.0f32, 3.0f32])) }",
+            "if i == 0i64 then acc else append(acc, to_tensor([1.0f32, 2.0f32, 3.0f32]))",
+            "{ append = fn (xs: List[tensor[3, f32]], x: tensor[3, f32]) -> xs\n append(acc, to_tensor([1.0f32, 2.0f32, 3.0f32])) }",
+        ] {
+            assert!(
+                proof(body).is_none(),
+                "unproved result path must retain full entry walk"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod accumulator_delta_nominal_tests {
+    use super::*;
+    #[test]
+    fn recursive_delta_reuses_only_the_identical_root_obligation() {
+        fn find_fn(expr: &Expr) -> Option<&Expr> {
+            if let Expr::MetaExpr(meta, _) = expr {
+                return find_fn(&meta.expr);
+            }
+            let node = as_node(expr)?;
+            if node.tag() == DeepTag::Fn {
+                return Some(expr);
+            }
+            node.children_slice().iter().find_map(find_fn)
+        }
+        let source = "type Chain[n] =\n | End { v: tensor[n, f32] }\n | Link { v: tensor[n, f32], next: Chain[n] }\nout = fold(fn (acc: Chain[3], i: i64) -> Link { v: to_tensor([1.0f32, 2.0f32, 3.0f32]), next: acc }, End { v: to_tensor([1.0f32, 2.0f32, 3.0f32]) }, range(0i64, 2i64))\n";
+        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
+        let proof = accumulator_delta_proof(
+            checked.exprs().iter().find_map(find_fn).unwrap(),
+            checked.adt_registry(),
+        )
+        .expect("recursive nominal component has identical obligation");
+        assert!(
+            matches!(proof.recipe(), AccumulatorDeltaRecipe::Constructor { fields, .. } if fields == &[AccumulatorDeltaRecipe::Fresh, AccumulatorDeltaRecipe::Inherited])
+        );
+        let field = |name: &str| HostExpr::new(HostExprKind::Var(name.into(), HostTypeTerm::Unit));
+        let body = |tail: &str| {
+            HostExpr::new(HostExprKind::AdtConstruct {
+                ctor: "Link".into(),
+                fields: vec![field("new_tensor"), field(tail)],
+                ty: HostTypeTerm::Adt("Chain".into(), Vec::new()),
+            })
+        };
+        assert!(proof.validates_body(&body("acc")));
+        assert!(
+            !proof.validates_body(&body("other")),
+            "same type/shape is insufficient evidence"
+        );
+        let mut other = body("acc");
+        if let HostExprKind::AdtConstruct { ty, .. } = &mut other.kind {
+            *ty = HostTypeTerm::Adt("Other".into(), Vec::new());
+        }
+        assert!(
+            !proof.validates_body(&other),
+            "another nominal owner cannot reuse the constructor spelling"
+        );
+    }
+}
+
+#[cfg(test)]
+mod accumulator_delta_identity_tests {
+    use super::*;
+    #[test]
+    fn equal_constructor_spelling_in_another_nominal_is_not_component_evidence() {
+        fn find_fn(expr: &Expr) -> Option<&Expr> {
+            if let Expr::MetaExpr(meta, _) = expr {
+                return find_fn(&meta.expr);
+            }
+            let node = as_node(expr)?;
+            if node.tag() == DeepTag::Fn {
+                return Some(expr);
+            }
+            node.children_slice().iter().find_map(find_fn)
+        }
+        let source = "type Chain[n] =\n | End { v: tensor[n, f32] }\n | Link { v: tensor[n, f32], next: Chain[n] }\ntype Other[n] =\n | Link { v: tensor[n, f32], next: Chain[n] }\ndef wrong(acc: Chain[3], i: i64) -> Other[3] = Link { v: to_tensor([1.0f32, 2.0f32, 3.0f32]), next: acc }\n";
+        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
+        assert!(
+            accumulator_delta_proof(
+                checked.exprs().iter().find_map(find_fn).unwrap(),
+                checked.adt_registry()
+            )
+            .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod accumulator_delta_type_witness_tests {
+    use super::*;
+    #[test]
+    fn unrepresented_rank_and_precision_witnesses_retain_full_entry_checks() {
+        fn find_fn(expr: &Expr) -> Option<&Expr> {
+            if let Expr::MetaExpr(meta, _) = expr {
+                return find_fn(&meta.expr);
+            }
+            let node = as_node(expr)?;
+            if node.tag() == DeepTag::Fn
+                && node
+                    .children_slice()
+                    .first()
+                    .and_then(as_node)
+                    .is_some_and(|params| {
+                        params
+                            .children_slice()
+                            .first()
+                            .and_then(param_name)
+                            .as_deref()
+                            == Some("acc")
+                    })
+            {
+                return Some(expr);
+            }
+            node.children_slice().iter().find_map(find_fn)
+        }
+        for (binders, element) in [
+            ("n, p: Float", "tensor[n, p]"),
+            ("s, n", "tensor[..s, n, f32]"),
+        ] {
+            let source = format!(
+                "def run[{binders}](seed: List[{element}], steps: i64) -> i64 = len(fold(fn (acc: List[{element}], i: i64) -> append(acc, index(seed, 0i64)), seed, range(0i64, steps)))\n"
+            );
+            let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+            let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+            let checked = match chelis_types::check_ir_program(&deep) {
+                Ok(checked) => checked,
+                Err(errors) if element.contains("..") => {
+                    assert!(
+                        errors
+                            .errors
+                            .iter()
+                            .any(|error| error.message.contains("rank-polymorphic"))
+                    );
+                    continue;
+                }
+                Err(errors) => panic!("{errors:?}"),
+            };
+            assert!(
+                accumulator_delta_proof(
+                    checked.exprs().iter().find_map(find_fn).unwrap(),
+                    checked.adt_registry()
+                )
+                .is_none(),
+                "{source}"
+            );
+        }
     }
 }

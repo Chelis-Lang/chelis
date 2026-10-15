@@ -5068,3 +5068,137 @@ out = run()
         }
     }
 }
+
+#[test]
+fn growing_accumulator_claim_work_is_bounded_by_new_components() {
+    for collection in ["chain", "list"] {
+        for claim in ["3", "n"] {
+            for scan in [false, true] {
+                for steps in [100, 400] {
+                    let combine = if scan { "scan" } else { "fold" };
+                    let source = if collection == "chain" {
+                        format!(
+                            "type Chain[n] =\n | End {{ v: tensor[n, f32] }}\n | Link {{ v: tensor[n, f32], next: Chain[n] }}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef run[n](steps: i64) -> i64 = {{\n _ = {combine}(fn (acc: Chain[{claim}], i: i64) -> Link {{ v: produce(3i64), next: acc }}, End {{ v: produce(3i64) }}, range(0i64, steps))\n steps\n}}\nout = run({steps}i64)\n"
+                        )
+                    } else {
+                        let generic = if claim == "n" { "[n]" } else { "" };
+                        format!(
+                            "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef run{generic}(seed: List[tensor[{claim}, f32]], steps: i64) -> i64 = len({combine}(fn (acc: List[tensor[{claim}, f32]], i: i64) -> append(acc, produce(3i64)), seed, range(0i64, steps)))\nout = run([produce(3i64)], {steps}i64)\n"
+                        )
+                    };
+                    for unproved in [false, true] {
+                        let source = if unproved {
+                            source
+                                .replace("next: acc", "next: if eq(i, 0i64) then acc else acc")
+                                .replace("append(acc,", "append(if eq(i, 0i64) then acc else acc,")
+                        } else {
+                            source.clone()
+                        };
+                        let checked = checked_surf(&source);
+                        let empty = UnordMap::new();
+                        let inputs = HostEvaluationInputs {
+                            roots: &empty,
+                            bindings: None,
+                        };
+                        super::eval::reset_entry_claim_work();
+                        let outcome = evaluate_host_program_with_library_and_types(
+                            &checked, None, None, inputs, None, None,
+                        )
+                        .expect("growing loop evaluates");
+                        let work = super::eval::entry_claim_work();
+                        let expected = if collection == "chain" || scan {
+                            steps
+                        } else {
+                            steps + 1
+                        };
+                        assert_eq!(
+                            render_value(&outcome.host_bindings["out"]),
+                            expected.to_string()
+                        );
+                        eprintln!(
+                            "growing {collection} {combine} claim={claim} K={steps} unproved={unproved}: {work}"
+                        );
+                        if unproved {
+                            assert!(
+                                work >= steps as u64 * steps as u64,
+                                "counterfactual must retain complete accumulator entry walks: {work}"
+                            );
+                        } else {
+                            assert!(
+                                work <= 40 * steps as u64 + 40,
+                                "claim work must be bounded by initial and fresh components: {work}\n{source}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn named_definition_accumulator_claim_retains_full_entry_work() {
+    for combine in ["fold", "scan"] {
+        for steps in [100, 400] {
+            let source = format!(
+                "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, produce(3i64))\ndef run(seed: List[tensor[3, f32]], steps: i64) -> i64 = len({combine}(fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i), seed, range(0i64, steps)))\nout = run([produce(3i64)], {steps}i64)\n"
+            );
+            let checked = checked_surf(&source);
+            let empty = UnordMap::new();
+            let inputs = HostEvaluationInputs {
+                roots: &empty,
+                bindings: None,
+            };
+            super::eval::reset_entry_claim_work();
+            let outcome = evaluate_host_program_with_library_and_types(
+                &checked, None, None, inputs, None, None,
+            )
+            .expect("named callback evaluates");
+            assert_eq!(
+                render_value(&outcome.host_bindings["out"]),
+                (if combine == "scan" { steps } else { steps + 1 }).to_string()
+            );
+            let work = super::eval::entry_claim_work();
+            eprintln!("Eval named definition {combine} K={steps}: {work}");
+            assert!(work >= steps as u64 * steps as u64, "{work}");
+        }
+    }
+}
+
+#[test]
+fn original_linked_chain_witness_keeps_final_claims_and_linear_entry_work() {
+    for formal in ["n", "unclaimed"] {
+        for steps in [100, 400] {
+            let source = format!(
+                "type Chain[n] =\n | End {{ v: tensor[n, f32] }}\n | Link {{ v: tensor[n, f32], next: Chain[n] }}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef grow[n](size: i64, k: i64) -> Chain[n] = fold(fn (acc: Chain[{formal}], i: i64) -> Link {{ v: produce(size), next: acc }}, End {{ v: produce(size) }}, range(0i64, k))\ndef head_width[n](c: Chain[n]) -> i64 = match c with {{ | End {{ v }} => shape(v, 0i32) | Link {{ v, next }} => shape(v, 0i32) }}\nout = head_width(grow(3i64, {steps}i64))\n"
+            );
+            let source = if formal == "unclaimed" {
+                source
+                    .replace("type Chain[n]", "type Chain[T]")
+                    .replace("v: tensor[n, f32]", "v: T")
+                    .replace("next: Chain[n]", "next: Chain[T]")
+                    .replace("Chain[unclaimed]", "Chain[tensor[*, f32]]")
+                    .replace("Chain[n]", "Chain[tensor[*, f32]]")
+                    .replace("def grow[n]", "def grow")
+                    .replace("def head_width[n]", "def head_width")
+            } else {
+                source
+            };
+            let checked = checked_surf(&source);
+            let empty = UnordMap::new();
+            let inputs = HostEvaluationInputs {
+                roots: &empty,
+                bindings: None,
+            };
+            super::eval::reset_entry_claim_work();
+            let outcome = evaluate_host_program_with_library_and_types(
+                &checked, None, None, inputs, None, None,
+            )
+            .expect("original Chain witness evaluates");
+            assert_eq!(render_value(&outcome.host_bindings["out"]), "3");
+            let work = super::eval::entry_claim_work();
+            eprintln!("original Chain formal={formal} K={steps}: {work} entry work units");
+            assert!(work <= 40 * steps as u64 + 40, "{work}");
+        }
+    }
+}

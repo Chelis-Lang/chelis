@@ -69,7 +69,7 @@ pub struct ClaimAxis {
 }
 
 /// A tensor position with at least one obligation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClaimTensor {
     /// The authored tensor type after nominal substitution.
     pub ty: Expr,
@@ -80,13 +80,13 @@ pub struct ClaimTensor {
     pub axes: Vec<ClaimAxis>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClaimField {
     pub name: Option<String>,
     pub node: Option<ClaimNodeId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClaimConstructor {
     /// The constructor's identity in the checked program.
     pub name: String,
@@ -97,7 +97,7 @@ pub struct ClaimConstructor {
     pub fields: Vec<ClaimField>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ClaimNode {
     Tensor(ClaimTensor),
     /// Every component by position; `None` owes nothing.
@@ -115,7 +115,7 @@ pub enum ClaimNode {
 }
 
 /// The obligations of one authored type, as a finite graph.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ClaimPattern {
     nodes: Vec<ClaimNode>,
     root: Option<ClaimNodeId>,
@@ -390,6 +390,40 @@ impl Builder<'_> {
         name: &str,
         args: &[Expr],
     ) -> Result<Option<ClaimNodeId>, ClaimPatternError> {
+        // Surf uses a type-variable spelling for a name in a nominal
+        // dimension slot. Normalize that slot before memoization, exactly as
+        // substitution does, so the recursive occurrence is the same node.
+        // A type-parameter slot keeps its original type argument.
+        let normalized = match self.registry.lookup(name) {
+            Some(definition) => {
+                if definition.param_args.len() != args.len() {
+                    return Err(ClaimPatternError::Malformed(format!(
+                        "nominal `{name}` expects {} arguments, received {}",
+                        definition.param_args.len(),
+                        args.len()
+                    )));
+                }
+                Some(
+                    definition
+                        .param_args
+                        .iter()
+                        .zip(args)
+                        .map(|(parameter, argument)| {
+                            if matches!(parameter, NominalArg::Dimension(_)) {
+                                dimension_argument(argument)
+                            } else {
+                                argument.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+            None => None,
+        };
+        let args = match &normalized {
+            Some(arguments) => arguments.as_slice(),
+            None => args,
+        };
         let key = format!(
             "{name}[{}]",
             args.iter().map(canonical).collect::<Vec<_>>().join(",")
@@ -1067,6 +1101,17 @@ mod tests {
     }
 
     #[test]
+    fn nominal_memoization_rejects_malformed_argument_arity() {
+        let registry = registry(BOX);
+        for malformed in ["(t-adt {} Box)", "(t-adt {} Box (d-lit {} 3) (d-lit {} 4))"] {
+            assert!(matches!(
+                ClaimPattern::derive(&ty(malformed), &registry),
+                Err(ClaimPatternError::Malformed(_))
+            ));
+        }
+    }
+
+    #[test]
     fn tuple_option_and_list_positions_keep_their_claims() {
         let registry = registry(BOX);
         let pattern = ClaimPattern::derive(
@@ -1097,6 +1142,18 @@ mod tests {
             "type Pair[n] =\n  | Leaf { v: tensor[n, f32] }\n  | Node { l: Pair[n], r: Pair[n] }\n\
              type T[n] =\n  | Tip { v: tensor[n, f32] }\n  | Fix { t: T[3] }\n",
         );
+        for argument in ["(d-var {} k)", "(t-var {} k)"] {
+            let pattern =
+                ClaimPattern::derive(&ty(&format!("(t-adt {{}} Pair {argument})")), &registry)
+                    .unwrap();
+            let root = pattern.root().unwrap();
+            assert_eq!(
+                field(&pattern, root, "Node", 0),
+                root,
+                "dimension-slot spelling must retain exact recursive obligation identity"
+            );
+            assert_eq!(pattern.nodes().len(), 2);
+        }
         let pattern = ClaimPattern::derive(&ty("(t-adt {} Pair (d-lit {} 3))"), &registry).unwrap();
         let root = pattern.root().unwrap();
         assert_eq!(field(&pattern, root, "Node", 0), root);

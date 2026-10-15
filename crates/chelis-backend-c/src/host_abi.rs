@@ -20,7 +20,7 @@ use chelis_ir::host::{
     HostCallee, HostCalleeView, HostExpr, HostExprKind, HostFunction, HostMatchArm, HostParam,
     HostPatternBinding, HostProgram, HostTensorHelper,
 };
-use chelis_ir::host_type_state::CheckedBuiltinCallable;
+use chelis_ir::host_type_state::{CheckedBuiltinCallable, HostTypeTerm};
 use chelis_ir::ownership::{
     HostSiteId, HostSiteKind, VerifiedHostAction, VerifiedHostEmission, VerifiedHostFunctionView,
     VerifiedHostSiteActionKind, VerifiedHostTensorHelperView,
@@ -71,6 +71,23 @@ pub(crate) enum HostAbiType {
     Option(Box<HostAbiType>),
     MappedFile,
     Unit,
+}
+
+impl chelis_ir::host::AccumulatorTypeIdentity for HostAbiType {
+    fn accumulator_nominal_identity(&self) -> Option<&str> {
+        match self {
+            Self::Adt(name, _) => Some(name),
+            _ => None,
+        }
+    }
+    fn accumulator_type_matches(&self, expected: &HostTypeTerm) -> bool {
+        expected
+            .clone()
+            .into_concrete()
+            .ok()
+            .and_then(|expected| Self::try_from_concrete(&expected).ok())
+            .is_some_and(|expected| self == &expected)
+    }
 }
 
 pub(crate) type HostAbiProgram = HostProgram<HostAbiType>;
@@ -707,6 +724,7 @@ fn project_callback(
     };
     Ok(HostAbiCallback {
         stationary_accumulator: callback.stationary_accumulator,
+        accumulator_delta: callback.accumulator_delta,
         kind,
         ret_ty: HostAbiType::try_from_concrete(&callback.ret_ty)?,
     })
