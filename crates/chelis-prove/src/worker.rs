@@ -249,6 +249,16 @@ mod imp {
         Timeout,
         Unknown,
         Error(String),
+        /// chelis#3635. The witness crosses as a JSON STRING for the same
+        /// reason the disproved model does: bincode cannot deserialize a
+        /// `serde_json::Value`. A variant of its own, because collapsing it
+        /// onto `Error` here would silently discard the witness on exactly the
+        /// path a production host takes -- `chelis` enables isolation, so every
+        /// CLI solve crosses this wire.
+        DomainDisproved {
+            reason: String,
+            witness: String,
+        },
     }
 
     impl WireResult {
@@ -261,6 +271,10 @@ mod imp {
                 TierBResult::Timeout => WireResult::Timeout,
                 TierBResult::Unknown => WireResult::Unknown,
                 TierBResult::Error(s) => WireResult::Error(s),
+                TierBResult::DomainDisproved { reason, witness } => WireResult::DomainDisproved {
+                    reason,
+                    witness: serde_json::to_string(&witness).unwrap_or_else(|_| "null".into()),
+                },
             }
         }
 
@@ -273,6 +287,13 @@ mod imp {
                 WireResult::Timeout => TierBResult::Timeout,
                 WireResult::Unknown => TierBResult::Unknown,
                 WireResult::Error(s) => TierBResult::Error(s),
+                // A witness that does not survive the wire reads as absent, and
+                // the consumer's binder lookup then declines -- the same
+                // fail-closed answer an unconfirmed witness gets.
+                WireResult::DomainDisproved { reason, witness } => TierBResult::DomainDisproved {
+                    reason,
+                    witness: serde_json::from_str(&witness).unwrap_or(serde_json::Value::Null),
+                },
             }
         }
     }
@@ -656,6 +677,23 @@ mod imp {
             let mut model = serde_json::Map::new();
             model.insert("x".to_string(), serde_json::Value::String("3".to_string()));
             let original = TierBResult::Disproved(serde_json::Value::Object(model));
+            let wire = WireResult::from_tier_b(original.clone());
+            let bytes = bincode::serialize(&wire).expect("serialize");
+            let back: WireResult = bincode::deserialize(&bytes).expect("deserialize");
+            assert_eq!(back.into_tier_b(), original);
+        }
+
+        /// chelis#3635: the domain witness must survive the isolation wire.
+        /// `chelis` enables isolation, so every CLI solve crosses it -- a
+        /// variant that dropped the witness here would leave the production
+        /// path reporting the pre-chelis#3635 `unsupported` while every
+        /// in-process test passed.
+        #[test]
+        fn wire_result_domain_disproved_roundtrips_its_witness() {
+            let original = TierBResult::DomainDisproved {
+                reason: "the domain obligation is false".to_string(),
+                witness: serde_json::json!({"x": -0.5, "n": -3, "b": true}),
+            };
             let wire = WireResult::from_tier_b(original.clone());
             let bytes = bincode::serialize(&wire).expect("serialize");
             let back: WireResult = bincode::deserialize(&bytes).expect("deserialize");

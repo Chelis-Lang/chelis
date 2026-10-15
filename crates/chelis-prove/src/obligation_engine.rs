@@ -673,7 +673,13 @@ fn run_one(
                         );
                     }
                 }
-                TierBResult::Error(reason) => {
+                // chelis#3635: a derived obligation's Tier C is a
+                // constructor-probe lane over a producer's arguments, not an
+                // evaluation of typed property binders, so there is no host
+                // lane here to confirm a domain witness at. This keeps the
+                // pre-chelis#3635 handling and the same reason; wiring the
+                // obligation lane is tracked on that issue.
+                TierBResult::Error(reason) | TierBResult::DomainDisproved { reason, .. } => {
                     // The obligation did not lower to a valid SMT term (a
                     // wrong-arity intrinsic, RT5-F1; a transcendental cvc5 has
                     // no kind for, chelis#434). Surface it as Unsupported with

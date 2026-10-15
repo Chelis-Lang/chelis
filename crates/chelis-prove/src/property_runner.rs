@@ -1781,6 +1781,11 @@ fn induction_result_status(result: &crate::tier_b::TierBResult) -> String {
         TierBResult::Timeout => "timeout",
         TierBResult::Unknown => "unknown",
         TierBResult::Error(_) => "error",
+        // An induction obligation carries the same `sqrt` domain phase as any
+        // other Tier B goal. The witness falsifies the DOMAIN obligation, not
+        // the base or step case, so it is not a counterexample to either and
+        // the case is recorded as undecided (chelis#3635).
+        TierBResult::DomainDisproved { .. } => "domain_disproved",
     }
     .to_string()
 }
@@ -1791,7 +1796,9 @@ fn induction_terminal_reason(case: &str, result: &crate::tier_b::TierBResult) ->
         TierBResult::Disproved(_) => None,
         TierBResult::Timeout => Some(format!("induction {case} obligation timed out")),
         TierBResult::Unknown => Some(format!("induction {case} obligation was unknown")),
-        TierBResult::Error(reason) => Some(format!("induction {case} obligation error: {reason}")),
+        TierBResult::Error(reason) | TierBResult::DomainDisproved { reason, .. } => {
+            Some(format!("induction {case} obligation error: {reason}"))
+        }
         TierBResult::Proved => None,
     }
 }
@@ -2786,6 +2793,43 @@ fn try_surf_tier_b(
                 None
             }
         }
+        // chelis#3635: the solver has shown the `sqrt` domain obligation FALSE
+        // and handed over the model that falsifies it. Confirm it on the host
+        // lane; a confirmed witness is a definite machine-arithmetic failure
+        // (no `base_discharge`, so the badge is `failed`, not a reals-hedged
+        // one), and an unconfirmed one reports exactly what it reported before
+        // this lane existed.
+        crate::tier_b::TierBResult::DomainDisproved { reason, witness } => {
+            match confirm_surf_domain_witness(decls, property, &witness) {
+                DomainWitness::Confirmed(counterexample) => Some(PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Failed,
+                    PropertyTier::Smt,
+                    0,
+                    seed,
+                    Some(counterexample),
+                    Some(DOMAIN_WITNESS_REASON.to_string()),
+                    false,
+                    Vec::new(),
+                )),
+                DomainWitness::Declined(declined) if options.tier == "smt-only" => {
+                    Some(PropertyOutcome::new(
+                        property.name.clone(),
+                        PropertyStatus::Unsupported,
+                        PropertyTier::Smt,
+                        0,
+                        seed,
+                        None,
+                        Some(format!(
+                            "property does not lower to the SMT tier: {reason}; {declined}"
+                        )),
+                        false,
+                        Vec::new(),
+                    ))
+                }
+                DomainWitness::Declined(_) => None,
+            }
+        }
     }
 }
 
@@ -3460,6 +3504,197 @@ fn prove_surf_property_fuzz(
         ),
     )
     .with_sampling(sampling_method, attempts, accepted)
+}
+
+/// The `reason` recorded beside a host-lane-confirmed domain counterexample.
+///
+/// It states only what was checked. A false domain obligation is the
+/// PROVENANCE of the input -- it is why the solver produced this point -- while
+/// the two verified facts are that the property's own preconditions admit the
+/// rounded value and that the body is false there. The rounding can move a
+/// value back into the `sqrt` domain, so the reason does not claim the argument
+/// is still negative at the reported point (chelis#3635).
+const DOMAIN_WITNESS_REASON: &str = "a false `sqrt` domain obligation located this input: the property's own preconditions \
+     admit it and the property body is false there in machine arithmetic (chelis#3635)";
+
+/// What a [`crate::tier_b::TierBResult::DomainDisproved`] witness established
+/// once evaluated concretely.
+enum DomainWitness {
+    /// The witness is a concrete machine input that every precondition admits
+    /// and at which the property body evaluates to `false`. Carries the
+    /// counterexample in the same shape a Tier C failure reports.
+    Confirmed(serde_json::Value),
+    /// Nothing was established. Carries why, for the unchanged `unsupported`
+    /// reason the caller then reports.
+    Declined(String),
+}
+
+/// Confirm a solver domain witness on the HOST LANE, the only authority the
+/// witness has (chelis#3635).
+///
+/// The domain obligation is proved from a WEAKENING of the property's
+/// preconditions -- only its total, sqrt-free conjuncts -- and is decided over
+/// the reals. A model that falsifies it is therefore evidence of where to look,
+/// not a counterexample: it may violate a precondition the evidence set dropped,
+/// and its exact rational is not a machine value. So the witness is rounded once
+/// to each binder's declared width and run through exactly the evaluation a Tier
+/// C sample gets: every precondition must hold at it, and the body must be
+/// false. The reported failure rests on that concrete evaluation alone, which is
+/// why an unconfirmed witness can only decline.
+fn confirm_surf_domain_witness(
+    decls: &[Decl],
+    property: &Property,
+    witness: &serde_json::Value,
+) -> DomainWitness {
+    let sample = match witness_sample(&property.params, witness) {
+        Ok(sample) => sample,
+        Err(reason) => return DomainWitness::Declined(reason),
+    };
+    let roots = match chelis_surf::desugar::desugar_program(decls) {
+        Ok(program) => SampleRoots::for_program(&program),
+        Err(reason) => return DomainWitness::Declined(format!("witness desugar failed: {reason}")),
+    };
+    let library = match chelis_compiler_api::build_declaration_context(decls) {
+        Ok(library) => library,
+        Err(err) => return DomainWitness::Declined(compiler_error_message(err)),
+    };
+    resolve_domain_witness(
+        sample,
+        |sample, precondition| eval_surf_sample(&library, property, &roots, sample, precondition),
+        property.preconditions.len(),
+    )
+}
+
+/// The Deep-lane counterpart of [`confirm_surf_domain_witness`]. Same contract,
+/// same single authority: the concrete evaluation.
+fn confirm_deep_domain_witness(
+    exprs: &[DeepExpr],
+    property: &DeepProperty,
+    witness: &serde_json::Value,
+) -> DomainWitness {
+    let sample = match witness_sample(&property.params, witness) {
+        Ok(sample) => sample,
+        Err(reason) => return DomainWitness::Declined(reason),
+    };
+    let roots = SampleRoots::for_program(exprs);
+    resolve_domain_witness(
+        sample,
+        |sample, precondition| eval_deep_sample(exprs, property, &roots, sample, precondition),
+        property.preconditions.len(),
+    )
+}
+
+/// The shared verdict both lanes derive from one concrete evaluation of the
+/// witness: admitted by every guard, and the body false there.
+fn resolve_domain_witness(
+    sample: Sample,
+    mut eval: impl FnMut(&Sample, bool) -> Result<bool, String>,
+    precondition_count: usize,
+) -> DomainWitness {
+    if precondition_count > 0 {
+        match eval(&sample, true) {
+            Ok(true) => {}
+            Ok(false) => {
+                return DomainWitness::Declined(
+                    "the solver's domain witness does not satisfy the property's own \
+                     preconditions at its declared machine precision"
+                        .to_string(),
+                );
+            }
+            Err(err) => {
+                return DomainWitness::Declined(format!(
+                    "the solver's domain witness could not be evaluated: {err}"
+                ));
+            }
+        }
+    }
+    match eval(&sample, false) {
+        Ok(false) => DomainWitness::Confirmed(counterexample_json(&sample)),
+        Ok(true) => DomainWitness::Declined(
+            "the property body holds at the solver's domain witness in machine arithmetic"
+                .to_string(),
+        ),
+        Err(err) => DomainWitness::Declined(format!(
+            "the solver's domain witness could not be evaluated: {err}"
+        )),
+    }
+}
+
+/// Turn a [`crate::tier_b::TierBResult::DomainDisproved`] witness into a
+/// [`Sample`] at the binders' DECLARED widths.
+///
+/// Every parameter must have a witness value of its declared shape. A missing
+/// binder, an unreadable value, an integer outside its width, or a float that
+/// is not finite once rounded to the declared width is an error rather than a
+/// substitution: the point of the host-lane confirmation is that the evaluated
+/// input is exactly the one reported, so there is nothing to gain from
+/// evaluating a repaired one.
+fn witness_sample(params: &[Param], witness: &serde_json::Value) -> Result<Sample, String> {
+    let bindings = witness
+        .as_object()
+        .ok_or_else(|| "the solver's domain witness is not a binding map".to_string())?;
+    let mut values = Vec::with_capacity(params.len());
+    for param in params {
+        let ty = param
+            .ty
+            .as_ref()
+            .ok_or_else(|| format!("{} is missing an explicit type", param.name))?;
+        let value = bindings.get(&param.name).ok_or_else(|| {
+            format!(
+                "the solver's domain witness carries no value for `{}`",
+                param.name
+            )
+        })?;
+        values.push(witness_value(&param.name, ty, value)?);
+    }
+    Ok(Sample { values })
+}
+
+fn witness_value(
+    name: &str,
+    ty: &TypeExpr,
+    value: &serde_json::Value,
+) -> Result<SampleValue, String> {
+    match ty {
+        TypeExpr::Named(type_name, _) if type_name == "bool" => value
+            .as_bool()
+            .map(|value| bool_sample(name, value))
+            .ok_or_else(|| format!("`{name}`'s domain witness is not a bool")),
+        TypeExpr::Named(type_name, _) if crate::opaque::is_int_width(type_name) => {
+            let raw = value
+                .as_i64()
+                .ok_or_else(|| format!("`{name}`'s domain witness is not an integer"))?;
+            let (lo, hi) = crate::opaque::int_sample_bounds(type_name)
+                .expect("is_int_width implies int_sample_bounds");
+            if raw < lo || raw > hi {
+                // `int_sample` clamps; a clamped witness is a DIFFERENT input
+                // from the one the solver exhibited, so decline instead.
+                return Err(format!(
+                    "`{name}`'s domain witness {raw} is not representable at {type_name}"
+                ));
+            }
+            Ok(int_sample(name, type_name, raw))
+        }
+        TypeExpr::Named(type_name, _) if type_name == "f32" || type_name == "f64" => {
+            let raw = value
+                .as_f64()
+                .ok_or_else(|| format!("`{name}`'s domain witness is not a number"))?;
+            let sample = directed_float_sample(name, type_name, raw);
+            let rounded = sample
+                .json
+                .as_f64()
+                .ok_or_else(|| format!("`{name}`'s rounded domain witness is not a number"))?;
+            if !rounded.is_finite() {
+                return Err(format!(
+                    "`{name}`'s domain witness is not finite at {type_name}"
+                ));
+            }
+            Ok(sample)
+        }
+        _ => Err(format!(
+            "`{name}`'s declared type is outside the domain-witness fragment"
+        )),
+    }
 }
 
 fn unsupported(name: &str, seed: u64, reason: String) -> PropertyOutcome {
@@ -4887,6 +5122,38 @@ fn try_deep_tier_b(
                 ))
             } else {
                 None
+            }
+        }
+        // chelis#3635, Deep lane. Same contract as the Surf lane above.
+        crate::tier_b::TierBResult::DomainDisproved { reason, witness } => {
+            match confirm_deep_domain_witness(exprs, property, &witness) {
+                DomainWitness::Confirmed(counterexample) => Some(PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Failed,
+                    PropertyTier::Smt,
+                    0,
+                    seed,
+                    Some(counterexample),
+                    Some(DOMAIN_WITNESS_REASON.to_string()),
+                    false,
+                    Vec::new(),
+                )),
+                DomainWitness::Declined(declined) if options.tier == "smt-only" => {
+                    Some(PropertyOutcome::new(
+                        property.name.clone(),
+                        PropertyStatus::Unsupported,
+                        PropertyTier::Smt,
+                        0,
+                        seed,
+                        None,
+                        Some(format!(
+                            "property does not lower to the SMT tier: {reason}; {declined}"
+                        )),
+                        false,
+                        Vec::new(),
+                    ))
+                }
+                DomainWitness::Declined(_) => None,
             }
         }
     }

@@ -7,7 +7,11 @@ repository.workspace = true
 description = "Three-tier property verification: type check → SMT (cvc5) → fuzz"
 
 [features]
-smt = ["cvc5-rs", "num-rational"]
+# `num-traits` adds no crate to the build: num-rational depends on it
+# unconditionally. The feature only makes `ToPrimitive` nameable, which the
+# chelis#3635 witness projection needs to read an exact model rational back
+# as one rounded machine scalar.
+smt = ["cvc5-rs", "num-rational", "dep:num-traits"]
 clarabel-provider = ["chelis-compiler-api/clarabel-provider"]
 # WI-12 Z3 NRA engine (WS-5): a second SMT DischargeEngine over the SAME
 # GoalShape::Smt the cvc5 engine fits, backed by Z3's nonlinear-real-arithmetic

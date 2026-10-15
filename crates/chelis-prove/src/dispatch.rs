@@ -178,7 +178,13 @@ pub fn dispatch_property(
                     }
                     // Fall through to Tier C
                 }
-                TierBResult::Error(reason) => {
+                // chelis#3635: this dispatcher verifies a property SOURCE
+                // STRING and has no typed-binder host lane to confirm a domain
+                // witness at, so it keeps the pre-chelis#3635 handling of a
+                // false domain obligation and reports the same reason. The
+                // witness is confirmed only by `property_runner`'s Surf and
+                // Deep lanes.
+                TierBResult::Error(reason) | TierBResult::DomainDisproved { reason, .. } => {
                     // The property did not lower to a valid SMT term
                     // (RT5-F1). In smt-only this is rejected; otherwise
                     // fall through to Tier C.

@@ -4098,3 +4098,91 @@ def text(x: i32) -> string = "pkg__names__app__Demo__Main__text"
         "(text(x) == \"pkg__names__app__Demo__Main__text\")"
     );
 }
+
+// chelis#3635: a `sqrt` domain obligation the solver decides FALSE is reported
+// as a property FAILURE with its host-lane-confirmed counterexample, where it
+// was reported `unsupported` with no counterexample at all.
+#[cfg(feature = "smt")]
+#[test]
+fn false_sqrt_domain_obligation_fails_with_a_machine_counterexample() {
+    let dir = write_prop(
+        r#"
+def k(x: f64) -> f64 = sqrt(x)
+
+@property k_nonneg forall(x: f64) where x > -1.0f64, x < 2.0f64:
+  (k(x) >= 0.0f64)
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let record = &props[0];
+    assert_eq!(record["status"], "failed", "{record}");
+    assert_eq!(record["proof_tier"], "smt", "{record}");
+    // The counterexample is a concrete machine value the host lane evaluated,
+    // so the badge is a DEFINITE failure and the record discloses no
+    // real-arithmetic caveat -- including in the legacy `arith_model` mirror,
+    // which follows the `real_arithmetic` qualifier rather than the tier.
+    assert_eq!(record["composite_verdict"], "failed", "{record}");
+    assert_eq!(record["qualifiers"], serde_json::json!([]), "{record}");
+    assert!(
+        record.get("arith_model").is_none(),
+        "a machine-confirmed failure must not mirror a real-arithmetic model: {record}"
+    );
+    let x = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("the counterexample carries a numeric `x`: {record}"));
+    assert!(x < 0.0, "{record}");
+    assert!((-1.0..2.0).contains(&x), "{record}");
+}
+
+// The paired positive control for the `arith_model` rule above: a genuine
+// over-the-reals SMT disproof still mirrors `real_arithmetic`, so the narrowed
+// rule did not simply delete the field (chelis#3635).
+#[cfg(feature = "smt")]
+#[test]
+fn an_over_the_reals_smt_disproof_still_mirrors_its_arith_model() {
+    let dir = write_prop(
+        r#"
+def twice(x: f64) -> f64 = x * 2.0f64
+
+@property twice_big forall(x: f64) where x > 0.0f64, x < 1.0f64:
+  (twice(x) > 10.0f64)
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let record = &props[0];
+    assert_eq!(record["status"], "failed", "{record}");
+    assert_eq!(
+        record["composite_verdict"], "disproved_modulo_real_arithmetic",
+        "{record}"
+    );
+    assert_eq!(
+        record["qualifiers"],
+        serde_json::json!(["real_arithmetic"]),
+        "{record}"
+    );
+    assert_eq!(record["arith_model"], "real", "{record}");
+}
