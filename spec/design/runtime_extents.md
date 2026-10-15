@@ -18,6 +18,55 @@ legality; `spec/10-serialization.md` controls the public wire contract.
 This document selects an implementation of those rules. It changes no
 language rule and does not relax the numbered specs to match a baseline.
 
+### Host transform result obligations
+
+A host application of `grad` or `vmap` transports its caller's declared-result
+obligations into the tensor evaluator. The transform's value-root layout is
+the authority for projecting aggregate claims: gradient repacking uses the
+selected arguments' tensor, scalar, tuple, List and nominal layout; ordinary
+root packing uses its ordered tensor roots. Scalar cotangents do not acquire
+tensor-axis claims.
+
+Each projected tensor obligation identifies its value root. The existing
+`result_extent_sites` plan maps that root's output axes to their primitive
+producers, and the evaluator installs the invocation-local guards in the
+same producer schedule as ordinary helper result claims. Observable roots
+remain executable, but are not mistaken for returned values. This avoids a
+post-execution aggregate check that could allow later effects or traps to
+precede a result guard. Claim sources and first-site activation witnesses
+remain scoped to the caller; differentiated callee claims and cotangent
+geometry do not discharge them.
+
+Host-owned C tensor helpers receive an ordered array of projected result
+claim frames, one per tensor output. The host call's checked scalar/tensor/tuple
+result layout projects frames before invoking the helper; each output's
+`result_extent_sites` supplies its producer schedule independently. Public
+kernel signatures retain their ABI. A private helper's observable-only nodes
+do not add returned-value slots or change the projection layout.
+
+Field-level aliases that cross later aggregate construction need a
+producer-lineage plan distinct from whole-result alias selection. The
+transform projection does not establish producer placement for a tensor
+binding wrapped in an aggregate only after intervening effects.
+
+Runtime List controls in a transformed tensor region execute in that region's
+single producer traversal. Each logical selector records a private ordinary
+`Copy` anchor after its arguments are prepared and before its private numeric
+implementation. Its typed check retains the original count/index, length and
+activation sources. AD retains those references and the anchor through
+separate Copy roots; after pruning and splicing, the retained roots' exact
+inputs recover the original sources. DCE and consuming-fanout normalization
+remap every control reference explicitly.
+
+The evaluator checks each active control once after its anchor and before any
+later node's producer guards or arithmetic. An inactive control reads only its
+activation. Canonical List failures remain distinct from tensor-evaluator
+failures, preserving their diagnostic rendering. Control roots are not value
+roots. This adds work and retained metadata proportional to the number of
+runtime checks, plus their stable ordering, and does not expand a scan by its
+element count or execute its body twice. The representation uses existing
+typed values and Copy operations; it changes no primitive or Wire vocabulary.
+
 ## Current state and remaining work
 
 The reference implementation state for the merged inventory is `4f3812e2f`.

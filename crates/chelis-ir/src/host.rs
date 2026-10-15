@@ -13446,10 +13446,10 @@ fn try_lower_general_list_grad_app(
         .iter()
         .map(|check| match check {
             crate::lower::RuntimeListCheckDescriptor::NonNegative { guarded, .. } => {
-                1 + usize::from(*guarded)
+                2 + usize::from(*guarded)
             }
             crate::lower::RuntimeListCheckDescriptor::IndexBounds { guarded } => {
-                2 + usize::from(*guarded)
+                3 + usize::from(*guarded)
             }
         })
         .sum::<usize>();
@@ -13483,7 +13483,7 @@ fn try_lower_general_list_grad_app(
                 argument,
                 guarded,
             } => {
-                control_offset -= 1 + usize::from(*guarded);
+                control_offset -= 2 + usize::from(*guarded);
                 let value =
                     tensor_helper_root_expr(&binding_name, &binding_ty, &root_tys, control_offset);
                 let activation = guarded.then(|| {
@@ -13546,7 +13546,7 @@ fn try_lower_general_list_grad_app(
                 });
             }
             crate::lower::RuntimeListCheckDescriptor::IndexBounds { guarded } => {
-                control_offset -= 2 + usize::from(*guarded);
+                control_offset -= 3 + usize::from(*guarded);
                 let index =
                     tensor_helper_root_expr(&binding_name, &binding_ty, &root_tys, control_offset);
                 let len = tensor_helper_root_expr(

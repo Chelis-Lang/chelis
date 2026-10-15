@@ -2206,25 +2206,27 @@ pub fn try_lower_subexpr_program_with_context_and_controls(
 ) -> Result<LoweredSubexprWithControls, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     catch_lowering(|| {
-        let (dag, value_root_count, list_checks) = lower_subexpr_program_inner_impl(
-            expr,
-            scoped_tensor_types.into_sorted(),
-            context,
-            None,
-            SubexprLoweringOptions {
-                root_operation: None,
-                include_list_controls: true,
-                // The scope is the ambient bindings this subexpression captured.
-                authored_signature: false,
-                literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
-                #[cfg(feature = "lowering-trace")]
-                trace: None,
-            },
-        );
+        let (dag, value_root_count, list_checks, ordered_list_checks) =
+            lower_subexpr_program_inner_impl(
+                expr,
+                scoped_tensor_types.into_sorted(),
+                context,
+                None,
+                SubexprLoweringOptions {
+                    root_operation: None,
+                    include_list_controls: true,
+                    // The scope is the ambient bindings this subexpression captured.
+                    authored_signature: false,
+                    literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
+                    #[cfg(feature = "lowering-trace")]
+                    trace: None,
+                },
+            );
         LoweredSubexprWithControls {
             dag,
             value_root_count,
             list_checks,
+            ordered_list_checks,
         }
     })
 }
@@ -2356,7 +2358,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     // As above, a failed attempt owns and discards its complete collector.
     catch_lowering(std::panic::AssertUnwindSafe(|| {
-        let (dag, _, _) =
+        let (dag, _, _, _) =
             lower_subexpr_program_inner_impl(expr, scoped_bindings, context, result_claim, options);
         dag
     }))
@@ -2523,7 +2525,12 @@ fn lower_subexpr_program_inner_impl(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     options: SubexprLoweringOptions,
-) -> (Dag, usize, Vec<RuntimeListCheckDescriptor>) {
+) -> (
+    Dag,
+    usize,
+    Vec<RuntimeListCheckDescriptor>,
+    Vec<RuntimeListCheck>,
+) {
     let SubexprLoweringOptions {
         root_operation,
         include_list_controls,
@@ -2645,15 +2652,19 @@ fn lower_subexpr_program_inner_impl(
     }
     let value_root_count = ctx.dag.roots().len();
     let mut list_checks = Vec::new();
+    let mut ordered_list_checks = Vec::new();
     if include_list_controls {
         let checks = std::mem::take(&mut ctx.runtime_list_checks);
         for check in checks {
+            let anchor = check.anchor();
+            ordered_list_checks.push(check.clone());
             let (descriptor, values): (RuntimeListCheckDescriptor, Vec<NodeId>) = match check {
                 RuntimeListCheck::NonNegative {
                     operation,
                     argument,
                     value,
                     activation,
+                    anchor: _,
                 } => (
                     RuntimeListCheckDescriptor::NonNegative {
                         operation,
@@ -2666,6 +2677,7 @@ fn lower_subexpr_program_inner_impl(
                     index,
                     len,
                     activation,
+                    anchor: _,
                 } => (
                     RuntimeListCheckDescriptor::IndexBounds {
                         guarded: activation.is_some(),
@@ -2676,7 +2688,7 @@ fn lower_subexpr_program_inner_impl(
                         .collect(),
                 ),
             };
-            for value in values {
+            for value in values.into_iter().chain(std::iter::once(anchor)) {
                 let output_type = ctx
                     .dag
                     .get(value)
@@ -2715,7 +2727,16 @@ fn lower_subexpr_program_inner_impl(
             &copy_remap,
         );
     }
-    (after_drops, value_root_count, list_checks)
+    let ordered_list_checks = ordered_list_checks
+        .into_iter()
+        .map(|check| check.map_nodes(|old| copy_remap[&dce_remap[&old]]))
+        .collect();
+    (
+        after_drops,
+        value_root_count,
+        list_checks,
+        ordered_list_checks,
+    )
 }
 
 pub fn remap_tensor_dim_symbols(
@@ -7920,18 +7941,65 @@ fn tensor_bearing_tuple(ty: &crate::host_type_state::HostTypeTerm) -> bool {
 const RUNTIME_LIST_VIEW_CTOR: &str = "__chelis_runtime_list_view";
 
 #[derive(Clone)]
-enum RuntimeListCheck {
+pub(crate) enum RuntimeListCheck {
     NonNegative {
         operation: &'static str,
         argument: &'static str,
         value: NodeId,
         activation: Option<NodeId>,
+        anchor: NodeId,
     },
     IndexBounds {
         index: NodeId,
         len: NodeId,
         activation: Option<NodeId>,
+        anchor: NodeId,
     },
+}
+
+impl RuntimeListCheck {
+    pub(crate) fn anchor(&self) -> NodeId {
+        match self {
+            Self::NonNegative { anchor, .. } | Self::IndexBounds { anchor, .. } => *anchor,
+        }
+    }
+
+    // This visitation order is also the retained Copy-root order across AD.
+    fn map_nodes(self, mut map: impl FnMut(NodeId) -> NodeId) -> Self {
+        match self {
+            Self::NonNegative {
+                operation,
+                argument,
+                value,
+                activation,
+                anchor,
+            } => Self::NonNegative {
+                operation,
+                argument,
+                value: map(value),
+                activation: activation.map(&mut map),
+                anchor: map(anchor),
+            },
+            Self::IndexBounds {
+                index,
+                len,
+                activation,
+                anchor,
+            } => Self::IndexBounds {
+                index: map(index),
+                len: map(len),
+                activation: activation.map(&mut map),
+                anchor: map(anchor),
+            },
+        }
+    }
+}
+
+/// Tensor failures and canonical List failures have distinct diagnostic owners.
+#[derive(Debug)]
+pub enum LoweredSubexprEvalError {
+    Tensor(String),
+    List(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7951,6 +8019,7 @@ pub struct LoweredSubexprWithControls {
     pub(crate) dag: Dag,
     pub(crate) value_root_count: usize,
     pub(crate) list_checks: Vec<RuntimeListCheckDescriptor>,
+    ordered_list_checks: Vec<RuntimeListCheck>,
 }
 
 impl LoweredSubexprWithControls {
@@ -7962,6 +8031,32 @@ impl LoweredSubexprWithControls {
     /// The value roots, before any appended List controls.
     pub fn value_roots(&self) -> &[NodeId] {
         &self.dag.roots()[..self.value_root_count]
+    }
+
+    /// Execute once, checking runtime List controls at their original source
+    /// boundaries before later producers and invocation-local result guards.
+    pub fn evaluate_with_result_claims<F>(
+        &self,
+        claims: &[crate::eval::InheritedResultClaim],
+        load: F,
+    ) -> Result<UnordMap<NodeId, crate::eval::TensorValue>, LoweredSubexprEvalError>
+    where
+        F: FnMut(&str) -> Option<crate::eval::TensorValue>,
+    {
+        let (result, list_failure) = crate::eval::eval_tensor_roots_exact_with_ordered_list_checks(
+            &self.dag,
+            self.dag.roots(),
+            claims,
+            &self.ordered_list_checks,
+            load,
+        );
+        result.map_err(|error| {
+            if list_failure {
+                LoweredSubexprEvalError::List(error)
+            } else {
+                LoweredSubexprEvalError::Tensor(error)
+            }
+        })
     }
 
     /// Render the first active runtime List failure in source order.
@@ -8037,6 +8132,8 @@ impl LoweredSubexprWithControls {
                     }
                 }
             }
+            // The anchor is retained as a control root, never a value leaf.
+            offset += 1;
         }
         debug_assert_eq!(offset, roots.len());
         Ok(())
@@ -13697,28 +13794,7 @@ impl<'program> LowerCtx<'program> {
                 subctx.dag.add_root(retained);
                 retained
             };
-            retained_checks.push(match check {
-                RuntimeListCheck::NonNegative {
-                    operation,
-                    argument,
-                    value,
-                    activation,
-                } => RuntimeListCheck::NonNegative {
-                    operation,
-                    argument,
-                    value: retain(value),
-                    activation: activation.map(&mut retain),
-                },
-                RuntimeListCheck::IndexBounds {
-                    index,
-                    len,
-                    activation,
-                } => RuntimeListCheck::IndexBounds {
-                    index: retain(index),
-                    len: retain(len),
-                    activation: activation.map(&mut retain),
-                },
-            });
+            retained_checks.push(check.map_nodes(&mut retain));
         }
         subctx.dag.add_root(output);
         // Issue #197: route through grad_dag_checked so a
@@ -13820,38 +13896,17 @@ impl<'program> LowerCtx<'program> {
         let after_splice = subctx.trace.as_ref().map(|_| self.dag.clone());
         let mut control_roots = grad_result.dag.roots().iter().copied();
         for check in retained_checks {
-            self.runtime_list_checks.push(match check {
-                RuntimeListCheck::NonNegative {
-                    operation,
-                    argument,
-                    value: _,
-                    activation,
-                } => RuntimeListCheck::NonNegative {
-                    operation,
-                    argument,
-                    value: remap[&control_roots
-                        .next()
-                        .expect("retained List check root must survive AD")],
-                    activation: activation.map(|_| {
-                        remap[&control_roots
-                            .next()
-                            .expect("retained List activation root must survive AD")]
-                    }),
-                },
-                RuntimeListCheck::IndexBounds { activation, .. } => RuntimeListCheck::IndexBounds {
-                    index: remap[&control_roots
-                        .next()
-                        .expect("retained List index root must survive AD")],
-                    len: remap[&control_roots
-                        .next()
-                        .expect("retained List length root must survive AD")],
-                    activation: activation.map(|_| {
-                        remap[&control_roots
-                            .next()
-                            .expect("retained List activation root must survive AD")]
-                    }),
-                },
-            });
+            self.runtime_list_checks.push(check.map_nodes(|_| {
+                let retained = remap[&control_roots
+                    .next()
+                    .expect("retained List check root must survive AD")];
+                let node = self.dag.get(retained).expect("spliced retained List root");
+                assert!(
+                    matches!(node.op, RiscOp::Copy),
+                    "retained List root must remain its exact Copy"
+                );
+                node.inputs[0]
+            }));
         }
         // Per-wrt gradient node (post-splice). Any output-reachable unresolved
         // callable result returned above, so a `None` entry here is proven to
@@ -19086,6 +19141,22 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    fn runtime_list_control_anchor(&mut self, value: NodeId) -> NodeId {
+        let ty = self
+            .dag
+            .get(value)
+            .expect("checked List control source")
+            .output_type
+            .clone();
+        self.dag.add_node(
+            self.owner(),
+            RiscOp::Copy,
+            vec![value],
+            ty,
+            self.current_span_id.clone(),
+        )
+    }
+
     fn try_lower_staged_list_selection(
         &mut self,
         name: &str,
@@ -19099,18 +19170,21 @@ impl<'program> LowerCtx<'program> {
                 return None;
             }
             let count = self.lower_expr(count_arg).as_single_node()?;
+            let anchor = self.runtime_list_control_anchor(count);
             self.runtime_list_checks
                 .push(RuntimeListCheck::NonNegative {
                     operation: "index",
                     argument: "index",
                     value: count,
                     activation: self.branch_path_condition,
+                    anchor,
                 });
             self.runtime_list_checks
                 .push(RuntimeListCheck::IndexBounds {
                     index: count,
                     len,
                     activation: self.branch_path_condition,
+                    anchor,
                 });
             let zero = self.int64_constant(0);
             let int_ty = TensorType {
@@ -19163,6 +19237,7 @@ impl<'program> LowerCtx<'program> {
 
         let count = self.lower_expr(count_arg).as_single_node()?;
         let (offset, len, items) = self.staged_list_parts(&list)?;
+        let anchor = self.runtime_list_control_anchor(count);
         let argument = if name == "index" { "index" } else { "count" };
         self.runtime_list_checks
             .push(RuntimeListCheck::NonNegative {
@@ -19175,6 +19250,7 @@ impl<'program> LowerCtx<'program> {
                 argument,
                 value: count,
                 activation: self.branch_path_condition,
+                anchor,
             });
         if name == "index" {
             self.runtime_list_checks
@@ -19182,6 +19258,7 @@ impl<'program> LowerCtx<'program> {
                     index: count,
                     len,
                     activation: self.branch_path_condition,
+                    anchor,
                 });
             if items.is_empty() {
                 // An executed selection on an empty List fails its bounds
