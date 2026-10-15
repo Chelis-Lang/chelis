@@ -32770,3 +32770,39 @@ mod accumulator_delta_type_witness_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod accumulator_forwarding_wrapper_tests {
+    use super::*;
+    fn find_lambda(expr: &Expr) -> Option<&Expr> {
+        if let Expr::MetaExpr(meta, _) = expr { return find_lambda(&meta.expr); }
+        let node = as_node(expr)?;
+        if node.tag() == DeepTag::Fn { return Some(expr); }
+        node.children_slice().iter().find_map(find_lambda)
+    }
+    fn proof(body: &str) -> Option<AccumulatorCompositionProof> {
+        let source = format!("def step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, to_tensor([1.0f32, 2.0f32, 3.0f32]))\nout = fold(fn (acc: List[tensor[*, f32]], i: i64) -> {body}, [to_tensor([1.0f32, 2.0f32, 3.0f32])], range(0i64, 2i64))\n");
+        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
+        let session = HostLoweringSession::new(&checked);
+        let (_, callee) = session.def_named("step").unwrap();
+        accumulator_composition_proof(checked.exprs().last().and_then(find_lambda).unwrap(), callee, checked.adt_registry())
+    }
+    #[test]
+    fn checked_composition_preserves_sequential_forwarding_roles() {
+        for body in ["step(acc, i)", "{ old = acc\n item = i\n step(old, item) }",
+            "{ old = acc\n old = old\n older = old\n item = i\n item2 = item\n step(older, item2) }"] {
+            assert!(proof(body).is_some(), "{body}");
+        }
+    }
+    #[test]
+    fn checked_composition_rejects_changed_roles_and_lexical_callees() {
+        for body in ["{ old = if i == 0i64 then acc else acc\n step(old, i) }",
+            "{ item = if i == 0i64 then i else i\n step(acc, item) }",
+            "{ step = fn (xs: List[tensor[*, f32]], n: i64) -> xs\n step(acc, i) }",
+            "{ old = acc\n old = []\n step(old, i) }"] {
+            assert!(proof(body).is_none(), "{body}");
+        }
+    }
+}

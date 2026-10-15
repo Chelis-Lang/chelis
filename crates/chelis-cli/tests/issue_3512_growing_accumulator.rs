@@ -1295,3 +1295,53 @@ fn single_local_aliases_have_bounded_work_and_equal_value_controls_do_not() {
         }
     }
 }
+
+fn forwarding_wrapper_source(seed_size: usize, steps: usize, hops: usize, unproved: bool) -> String {
+    let first = if unproved { "if i == 0i64 then acc else acc" } else { "acc" };
+    let mut bindings = format!("old0 = {first}\n item0 = i\n");
+    for hop in 1..hops {
+        bindings.push_str(&format!("old{hop} = old{}\n item{hop} = item{}\n", hop-1, hop-1));
+    }
+    format!("def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, produce(3i64))\ndef run(seed: List[tensor[3, f32]]) -> i64 = len(fold(fn (acc: List[tensor[*, f32]], i: i64) -> {{ {bindings} step(old{}, item{}) }}, seed, range(0i64, {steps}i64)))\nout = run(map(fn (i: i64) -> produce(3i64), range(0i64, {seed_size}i64)))\n", hops-1, hops-1)
+}
+
+#[test]
+fn lexical_forwarding_wrappers_have_bounded_native_entry_work() {
+    let mut excessive = Vec::new();
+    for hops in [1, 2] {
+        for seed in [100, 400] {
+            for steps in [100, 400] {
+                for unproved in [false, true] {
+                    let source = forwarding_wrapper_source(seed, steps, hops, unproved);
+                    let (work, origins) = counted_native(&source);
+                    eprintln!("forwarding wrapper C N={seed} K={steps} L={hops} unproved={unproved}: work={work} origins={origins}");
+                    if unproved { assert!(work >= (seed * steps) as u64, "{work}"); }
+                    else if work > 96 * (seed + steps) as u64 + 100 {
+                        excessive.push(format!("N={seed} K={steps} L={hops}: {work}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(excessive.is_empty(), "{}", excessive.join("\n"));
+}
+
+#[test]
+fn lexical_forwarding_preserves_weak_strong_entry_and_final_invalid_effects() {
+    for native in [false, true] {
+        for outer in ["*", "3"] {
+            for steps in [0, 1, 2] {
+                let dir = tempfile::tempdir().unwrap();
+                let size_path = dir.path().join("size");
+                std::fs::write(&size_path, "xxxxx").unwrap();
+                let source = format!("def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\nsize = string_len(read_file(\"{}\"))\ndef step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{ _ = print(\"body\")\n append(acc, produce(size)) }}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = {{ _ = fold(fn (acc: List[tensor[{outer}, f32]], i: i64) -> {{ old = acc\n item = i\n _ = print(\"wrapper\")\n step(old, item) }}, seed, range(0i64, {steps}i64))\n 42i64 }}\nout = run([produce(3i64)])\n", size_path.display());
+                let (success, output) = result_claims::run(&source, native);
+                assert_eq!(success, steps < 2, "{source}\n{output}");
+                let wrappers = if steps < 2 { steps } else if outer == "*" { 2 } else { 1 };
+                assert_eq!(output.lines().filter(|line| *line == "wrapper").count(), wrappers, "{output}");
+                assert_eq!(output.lines().filter(|line| *line == "body").count(), usize::from(steps > 0), "{output}");
+                if !success { assert!(output.contains("numeric trap: domain in load at i64"), "{output}"); }
+            }
+        }
+    }
+}

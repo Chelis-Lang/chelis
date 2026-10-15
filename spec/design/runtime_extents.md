@@ -2259,6 +2259,27 @@ caller witness with the same spelling. Rank and precision
 polymorphism, unproved callables and unsupported compositions likewise retain
 their complete checks.
 
+Checked forwarding wrappers retain an exact final application occurrence beneath
+sequential immutable `Let`, metadata and block-tail nodes. A private shared
+forwarding plan records the original accumulator/item roles, lexical binding
+occurrences and selected call path; it does not infer identity from equal values
+or a callee spelling. Initializers resolve before their binders enter scope;
+shadowing invalidates the affected role. Alias analysis processes each binding
+once without cloning the complete environment at every nested Let.
+
+Ordinary wrapper evaluation/lowering retains effects, independent local claims,
+result scopes and producer provenance. Only the selected continuation may arm
+the independently checked callee receipt. An earlier identical application,
+recursive call or unrelated activation cannot consume it. C retains precisely
+that application inside the original wrappers, preparing actuals in caller
+scope before entering the grouped callee lowering/witness authority. Both lanes
+validate the exact callee, original obligations and staged forwarding edges.
+An unproved wrapper, lexical callee shadow or changed accumulator/item retains
+complete checks. Selected callables and rank/precision polymorphism remain
+outside this forwarding representation. Additional independent claims retain
+their complete checks and may dominate total work even when one entry boundary
+has a construction receipt.
+
 ## Part II: remaining delivery sequence
 
 Each row below is an owner of concrete work, not a claim that a PR exists.
