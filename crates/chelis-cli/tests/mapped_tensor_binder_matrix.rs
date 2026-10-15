@@ -374,17 +374,91 @@ fn review_witnesses_agree_in_both_lanes() {
     );
 }
 
-/// A binder no context fixes stays unfixed, whatever evidence the result
-/// offers. The issue_2599 shapes run in eval and must be refused by C host
-/// lowering as unresolved ([05-UNS-1]); a result-only dtype binder fixed by
-/// the result while a dimension binder stays unfixed is refused the same
-/// way; and a result-only dtype binder with no context at all is a checker
-/// error, so both lanes refuse it.
+/// [04-ADT-1] erases dimension-only parameters from the value representation,
+/// while [04-ADT-3..4] preserve their logical kind and identity. Empty Lists
+/// need no numeric extent; a fixed result dtype supplies only its own binder.
+#[test]
+fn dimension_only_nominal_binders_keep_parametric_value_layouts() {
+    let dir = tempdir().expect("tempdir");
+    let path = payload(&dir);
+    const COL: &str = "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\n";
+    let cases = vec![
+        (
+            "recursive_generic_adt_dimension_unfixed",
+            format!(
+                "{COL}def repl[n](xs: List[Col[n]], acc: List[Col[n]]) -> List[Col[n]] =\n  if eq(len(xs), 0i64) then acc\n  else {{\n    hp = index(xs, 0i64)\n    repl(skip(xs, 1i64), append(acc, hp))\n  }}\na = len(repl([], []))\n"
+            ),
+            "a = 0\n",
+        ),
+        (
+            "result_dtype_fixed_dimension_unfixed",
+            format!(
+                "{COL}def repl[n, p: Float](m: MappedFile, xs: List[Col[n]], acc: List[Col[n]]) -> tensor[*, p] =\n  if eq(len(xs), 0i64) then mmap_tensor(m, 0i64, add(len(acc), 1i64), p)\n  else {{\n    hp = index(xs, 0i64)\n    repl(m, skip(xs, 1i64), append(acc, hp))\n  }}\n{}",
+                main_reading(&path, "f32] = repl(m, [], [])")
+            ),
+            "tensor(shape=[1], data=[1.5])\nrun = ()\n",
+        ),
+        (
+            "nonempty_matching_nominal_dimensions",
+            format!(
+                "{COL}{REPL}a = repl([FCol(to_tensor([1.0, 2.0], f32))], [FCol(to_tensor([3.0, 4.0], f32))])\nb = repl([FCol(to_tensor([1.0, 2.0, 3.0], f32))], [])\n"
+            ),
+            "a = [FCol(tensor(shape=[2], data=[3.0, 4.0])), FCol(tensor(shape=[2], data=[1.0, 2.0]))]\nb = [FCol(tensor(shape=[3], data=[1.0, 2.0, 3.0]))]\n",
+        ),
+        (
+            "runtime_matching_nominal_dimensions",
+            format!("{COL}{REPL}{MAKE}a = len(repl([make(2i64)], [make(2i64)]))\n"),
+            "a = 2\n",
+        ),
+    ];
+    for (name, source, expected) in cases {
+        let output = verdict(&dir, name, &source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(output, expected, "{name}");
+    }
+}
+
+const REPL: &str = "def repl[n](xs: List[Col[n]], acc: List[Col[n]]) -> List[Col[n]] =\n  if eq(len(xs), 0i64) then acc\n  else {\n    hp = index(xs, 0i64)\n    repl(skip(xs, 1i64), append(acc, hp))\n  }\n";
+const MAKE: &str =
+    "def make[n](k: i64) -> Col[n] = FCol(insert(scalar_to_tensor(1.0f32), 0i32, k))\n";
+
+/// Unequal nominal dimensions remain an error: statically established literals
+/// fail checking, and runtime witnesses retain the entry claim under §4.7.
+#[test]
+fn nonempty_nominal_dimension_witnesses_stay_checked() {
+    let dir = tempdir().expect("tempdir");
+    const COL: &str = "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\n";
+    let literal = format!(
+        "{COL}{REPL}a = len(repl([FCol(to_tensor([1.0, 2.0], f32))], [FCol(to_tensor([3.0, 4.0, 5.0], f32))]))\n"
+    );
+    for result in [
+        eval(&dir, "literal_mismatched_nominal_dimensions", &literal),
+        compiled(&dir, "literal_mismatched_nominal_dimensions", &literal),
+    ] {
+        let error = result.expect_err("unequal literal nominal dimensions must fail");
+        assert!(error.contains("DimensionMismatch"), "{error}");
+    }
+    let dynamic = format!("{COL}{REPL}{MAKE}a = len(repl([make(2i64)], [make(3i64)]))\n");
+    for result in [
+        eval(&dir, "runtime_mismatched_nominal_dimensions", &dynamic),
+        compiled(&dir, "runtime_mismatched_nominal_dimensions", &dynamic),
+    ] {
+        let error = result.expect_err("unequal runtime nominal witnesses must trap");
+        assert!(
+            error.contains("extent `n`: xs[0].FCol.0 axis 0 = 2, acc[0].FCol.0 axis 0 = 3")
+                && error.contains("numeric trap: domain in load at i64"),
+            "{error}"
+        );
+    }
+}
+
+/// Unresolved stored types and precisions retain their failure boundary.
+/// The issue_2599 shapes run in eval and C refuses their unresolved value
+/// layouts ([05-UNS-1]); a result-only dtype binder with no context is a
+/// checker error in both lanes. Dimension-only metadata is tested separately.
 #[test]
 fn unfixed_binders_stay_rejected() {
     let dir = tempdir().expect("tempdir");
     let path = payload(&dir);
-    const COL: &str = "type Col[n] =\n  | FCol(tensor[n, f32])\n  | BCol(tensor[n, bool])\n";
     let eval_runs_c_refuses: Vec<(&str, String)> = vec![
         ("root_none", "a = None\n".to_string()),
         (
@@ -402,19 +476,6 @@ fn unfixed_binders_stay_rejected() {
         (
             "fold_callback_len_of_none",
             "def case(flag: bool) -> i64 =\n  fold(fn (acc: i64, x: i64) -> add(acc, len([None])), 0i64, [1i64, 2i64])\na = case(true)\n".to_string(),
-        ),
-        (
-            "recursive_generic_adt_dimension_unfixed",
-            format!(
-                "{COL}def repl[n](xs: List[Col[n]], acc: List[Col[n]]) -> List[Col[n]] =\n  if eq(len(xs), 0i64) then acc\n  else {{\n    hp = index(xs, 0i64)\n    repl(skip(xs, 1i64), append(acc, hp))\n  }}\na = len(repl([], []))\n"
-            ),
-        ),
-        (
-            "result_dtype_fixed_dimension_unfixed",
-            format!(
-                "{COL}def repl[n, p: Float](m: MappedFile, xs: List[Col[n]], acc: List[Col[n]]) -> tensor[*, p] =\n  if eq(len(xs), 0i64) then mmap_tensor(m, 0i64, add(len(acc), 1i64), p)\n  else {{\n    hp = index(xs, 0i64)\n    repl(m, skip(xs, 1i64), append(acc, hp))\n  }}\n{}",
-                main_reading(&path, "f32] = repl(m, [], [])")
-            ),
         ),
     ];
     let mut failures = Vec::new();

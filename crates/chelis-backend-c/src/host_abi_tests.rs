@@ -6,7 +6,7 @@
 //! position-restricted constructor and have no standalone/opaque C spelling.
 
 use crate::host_abi::HostAbiType;
-use chelis_ir::{ConcreteHostType, TensorType};
+use chelis_ir::{ConcreteHostType, DimInfo, TensorType};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
 
@@ -60,6 +60,60 @@ fn abi_conversion_accepts_only_resolved_logical_types() {
     let conversion: fn(&ConcreteHostType) -> Result<HostAbiType, Unsupported> =
         HostAbiType::try_from_concrete;
     let _ = conversion;
+}
+
+/// spec/04 §4.7: nominal extent obligations do not select a C value layout.
+/// Comparing layouts must neither discard logical identity nor accept a
+/// different nominal/type-argument structure.
+#[test]
+fn nominal_dimension_layout_comparison_preserves_logical_identity() {
+    let nominal = |dim| {
+        HostAbiType::List(Box::new(HostAbiType::Adt(
+            "Box".into(),
+            vec![HostAbiType::Dimension(chelis_ir::HostShapeSlot::Dim(dim))],
+        )))
+    };
+    let named = nominal(DimInfo::Named("callee".into(), None));
+    for dim in [
+        DimInfo::Named("caller".into(), None),
+        DimInfo::Named("*".into(), None),
+        DimInfo::Lit(3),
+        DimInfo::Lit(5),
+    ] {
+        let actual = nominal(dim);
+        assert_ne!(named, actual, "logical claims remain distinct");
+        assert!(named.same_value_layout(&actual));
+        assert!(actual.same_value_layout(&named));
+    }
+    for other in [
+        HostAbiType::List(Box::new(HostAbiType::Adt("Other".into(), vec![]))),
+        HostAbiType::List(Box::new(HostAbiType::Adt("Box".into(), vec![]))),
+        HostAbiType::List(Box::new(HostAbiType::Adt(
+            "Box".into(),
+            vec![HostAbiType::Unit],
+        ))),
+        HostAbiType::Option(Box::new(HostAbiType::Adt("Box".into(), vec![]))),
+    ] {
+        assert!(!named.same_value_layout(&other));
+        assert!(!other.same_value_layout(&named));
+    }
+    assert!(!HostAbiType::Float32.same_value_layout(&HostAbiType::Float64));
+    assert!(
+        !HostAbiType::Adt("Box".into(), vec![HostAbiType::Float32])
+            .same_value_layout(&HostAbiType::Adt("Box".into(), vec![HostAbiType::Float64]))
+    );
+    let different_claim = chelis_ir::HostTypeTerm::List(Box::new(chelis_ir::HostTypeTerm::Adt(
+        "Box".into(),
+        vec![chelis_ir::HostTypeTerm::Dimension(
+            chelis_ir::HostShapeSlot::Dim(DimInfo::Lit(3)),
+        )],
+    )));
+    assert!(
+        !chelis_ir::host::AccumulatorTypeIdentity::accumulator_type_matches(
+            &named,
+            &different_claim,
+        )
+    );
 }
 
 #[test]

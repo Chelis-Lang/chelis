@@ -150,6 +150,8 @@ pub enum HostTypeTerm {
     /// operation. Each alternative retains its complete checked contract.
     CheckedCallableChoice(Vec<CheckedBuiltinCallable>),
     Adt(String, Vec<HostTypeTerm>),
+    /// A nominal dimension argument; it constrains fields but carries no value.
+    Dimension(HostShapeSlot),
     List(Box<HostTypeTerm>),
     Dict(Box<HostTypeTerm>, Box<HostTypeTerm>),
     Tuple(Vec<HostTypeTerm>),
@@ -220,6 +222,7 @@ pub enum ConcreteHostType {
     /// operation. Each alternative retains its complete checked contract.
     CheckedCallableChoice(Vec<CheckedBuiltinCallable>),
     Adt(String, Vec<ConcreteHostType>),
+    Dimension(HostShapeSlot),
     List(Box<ConcreteHostType>),
     Dict(Box<ConcreteHostType>, Box<ConcreteHostType>),
     Tuple(Vec<ConcreteHostType>),
@@ -367,6 +370,7 @@ impl HostTypeTerm {
             | Self::CheckedBuiltinCallable(_)
             | Self::CheckedCallableChoice(_)
             | Self::Tensor(_)
+            | Self::Dimension(_)
             | Self::MappedFile
             | Self::Unit => false,
         }
@@ -409,6 +413,7 @@ impl HostTypeTerm {
                     .collect::<Result<Vec<_>, _>>()?,
             )),
             Self::Tensor(tensor) => Ok(ConcreteHostType::Tensor(tensor)),
+            Self::Dimension(dim) => Ok(ConcreteHostType::Dimension(dim)),
             Self::PolymorphicTensor(HostTensorTypeTerm { precision, shape }) => {
                 let precision = match precision {
                     HostPrecisionTerm::Concrete(precision) => precision,
@@ -683,11 +688,9 @@ fn decode_adt_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeErro
                 tag,
                 DeepTag::DName | DeepTag::DVar | DeepTag::DLit | DeepTag::DRank
             ) {
-                // Nominal dimensions constrain checking but have no host value
-                // representation. Preserve their nominal argument slot with
-                // the existing private layout witness so constructor arity
-                // remains aligned while the value itself is erased.
-                Ok(HostTypeTerm::Unit)
+                // Preserve the exact argument until field instantiation and
+                // backend layout matching; dimensions have no runtime value.
+                decode_shape_slot(argument).map(HostTypeTerm::Dimension)
             } else {
                 decode_host_type(argument)
             }

@@ -29,7 +29,7 @@ use chelis_types::types::Prim;
 use chelis_types::unsupported::{RejectionAuthority, Stage, Unsupported, UnsupportedKind};
 use chelis_unord::UnordSet;
 
-/// A host value whose complete logical type has an implemented C ABI.
+/// A host value's C ABI or a nominal argument retained for layout identity.
 ///
 /// Kept crate-private so callers cannot manufacture a purportedly-resolved
 /// ABI value.  Construction is exclusively through [`Self::try_from_concrete`].
@@ -64,6 +64,8 @@ pub(crate) enum HostAbiType {
     /// one concrete callback signature.
     CheckedBuiltinCallable(CheckedBuiltinCallable),
     Adt(String, Vec<HostAbiType>),
+    /// A nominal dimension constrains fields and has no C value representation.
+    Dimension(chelis_ir::HostShapeSlot),
     List(Box<HostAbiType>),
     Dict(Box<HostAbiType>, Box<HostAbiType>),
     Tuple(Vec<HostAbiType>),
@@ -87,6 +89,39 @@ impl chelis_ir::host::AccumulatorTypeIdentity for HostAbiType {
             .ok()
             .and_then(|expected| Self::try_from_concrete(&expected).ok())
             .is_some_and(|expected| self == &expected)
+    }
+}
+
+impl HostAbiType {
+    /// Check the assignment ABI without equating nominal dimension claims.
+    /// Dimension arguments remain exact metadata in this type, but have no
+    /// C value slot. Entry/result guards, not layout comparison, enforce them.
+    /// All value-bearing type arguments retain their existing exact checks.
+    pub(crate) fn same_value_layout(&self, other: &Self) -> bool {
+        let same_items = |left: &[Self], right: &[Self]| {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| left.same_value_layout(right))
+        };
+        match (self, other) {
+            (Self::Dimension(_), Self::Dimension(_)) => true,
+            (Self::Adt(left, left_args), Self::Adt(right, right_args)) => {
+                left == right && same_items(left_args, right_args)
+            }
+            (Self::Tuple(left), Self::Tuple(right)) => same_items(left, right),
+            (Self::List(left), Self::List(right)) | (Self::Option(left), Self::Option(right)) => {
+                left.same_value_layout(right)
+            }
+            (Self::Dict(left_key, left_value), Self::Dict(right_key, right_value)) => {
+                left_key.same_value_layout(right_key) && left_value.same_value_layout(right_value)
+            }
+            (Self::Callback(left_args, left_ret), Self::Callback(right_args, right_ret)) => {
+                same_items(left_args, right_args) && left_ret.same_value_layout(right_ret)
+            }
+            _ => self == other,
+        }
     }
 }
 
@@ -240,6 +275,7 @@ impl HostAbiType {
             }
             ConcreteHostType::MappedFile => Self::MappedFile,
             ConcreteHostType::Unit => Self::Unit,
+            ConcreteHostType::Dimension(dim) => Self::Dimension(dim.clone()),
         })
     }
 
@@ -260,7 +296,7 @@ impl HostAbiType {
             Self::Bool => Some("bool"),
             Self::String => Some("chelis_string"),
             Self::Key => Some("chelis_key"),
-            Self::Callback(_, _) => None,
+            Self::Callback(_, _) | Self::Dimension(_) => None,
             Self::CheckedBuiltinCallable(_) => Some("chelis_checked_callable"),
             Self::Adt(_, _) => Some("chelis_adt*"),
             Self::List(_) => Some("chelis_list*"),
@@ -293,6 +329,7 @@ impl HostAbiType {
             // A `chelis_key` is its 64 bits by value and owns no heap handle.
             | Self::Key
             | Self::Unit
+            | Self::Dimension(_)
             | Self::Callback(_, _) => None,
             Self::CheckedBuiltinCallable(_) => None,
             Self::String => Some("(chelis_string){ NULL }"),
@@ -674,7 +711,8 @@ pub(crate) fn public_type_contains_checked_callable(
             ConcreteHostType::Scalar(_)
             | ConcreteHostType::Tensor(_)
             | ConcreteHostType::MappedFile
-            | ConcreteHostType::Unit => false,
+            | ConcreteHostType::Unit
+            | ConcreteHostType::Dimension(_) => false,
         }
     }
     contains(ty, layouts, &mut UnordSet::new())

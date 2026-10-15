@@ -241,3 +241,130 @@ fn runtime_sum_type_grad_needs_compiled_tag_dispatch() {
     assert!(stderr.contains("runtime ADT `Choice`"), "{stderr}");
     assert!(stderr.contains("#618"), "{stderr}");
 }
+
+// spec/06 §2.1: disconnected cotangents retain each leaf's actual ordered
+// shape; an ADT declaration's formal dimension does not join its instances.
+#[test]
+fn nested_adt_nominal_dimensions_preserve_each_disconnected_leaf() {
+    for source in [
+        r#"type Leaf[n] =
+  | Leaf { value: tensor[n, f32] }
+type Pair =
+  | Pair { first: Leaf[2], second: Leaf[3] }
+def zero(p: &Pair) -> f32 = 0.0f32
+def step(p: Pair) -> Pair = grad(zero)(p)
+p = Pair { first: Leaf { value: to_tensor([1.0f32, 2.0f32]) }, second: Leaf { value: to_tensor([3.0f32, 4.0f32, 5.0f32]) } }
+out = step(p)
+"#,
+        r#"type Leaf[n] =
+  | Leaf { value: tensor[n, f32] }
+type Pair[a, b] =
+  | Pair { first: Leaf[a], second: Leaf[b] }
+def zero[a, b](p: &Pair[a, b]) -> f32 = 0.0f32
+def step[a, b](p: Pair[a, b]) -> Pair[a, b] = grad(zero)(p)
+p = Pair { first: Leaf { value: to_tensor([1.0f32, 2.0f32]) }, second: Leaf { value: to_tensor([3.0f32, 4.0f32, 5.0f32]) } }
+out = step(p)
+"#,
+    ] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested_dimensions.ch");
+        write_file(&path, source);
+        let eval = Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["eval", "--file", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            eval.status.success(),
+            "{}",
+            String::from_utf8_lossy(&eval.stderr)
+        );
+        let expected = String::from_utf8(eval.stdout).unwrap();
+        assert!(
+            expected.contains("shape=[2], data=[0.0, 0.0]"),
+            "{expected}"
+        );
+        assert!(
+            expected.contains("shape=[3], data=[0.0, 0.0, 0.0]"),
+            "{expected}"
+        );
+        if gcc_available() {
+            assert_eq!(build_and_run(source, "nested_dimensions"), expected);
+        }
+    }
+}
+
+#[test]
+fn repeated_nominal_dimension_still_rejects_contradictory_field_shapes() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("contradictory_dimensions.ch");
+    write_file(
+        &path,
+        r#"type Leaf[n] =
+  | Leaf { value: tensor[n, f32] }
+type Pair[n] =
+  | Pair { first: Leaf[n], second: Leaf[n] }
+def zero[n](p: &Pair[n]) -> f32 = 0.0f32
+def step[n](p: Pair[n]) -> Pair[n] = grad(zero)(p)
+p = Pair { first: Leaf { value: to_tensor([1.0f32, 2.0f32]) }, second: Leaf { value: to_tensor([3.0f32, 4.0f32, 5.0f32]) } }
+out = step(p)
+"#,
+    );
+    for command in ["check", "eval", "build"] {
+        let mut invocation = Command::cargo_bin("chelis").unwrap();
+        invocation.arg(command);
+        if command == "eval" {
+            invocation.arg("--file");
+        }
+        let output = invocation.arg(&path).output().unwrap();
+        assert!(!output.status.success());
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(diagnostics.contains("dimension mismatch"), "{diagnostics}");
+    }
+}
+
+#[test]
+fn nested_adt_nominal_dimensions_preserve_nonzero_field_cotangents() {
+    let source = r#"type Leaf[n] =
+  | Leaf { value: tensor[n, f32] }
+type Pair =
+  | Pair { first: Leaf[2], second: Leaf[3] }
+def loss(p: &Pair) -> f32 = {
+  a = tensor_to_scalar(sum(mul(p.first.value, p.first.value), 0i32))
+  b = tensor_to_scalar(sum(mul(p.second.value, p.second.value), 0i32))
+  add(a, b)
+}
+def step(p: Pair) -> Pair = grad(loss)(p)
+p = Pair { first: Leaf { value: to_tensor([1.0f32, 2.0f32]) }, second: Leaf { value: to_tensor([3.0f32, 4.0f32, 5.0f32]) } }
+out = step(p)
+"#;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("nonzero_dimensions.ch");
+    write_file(&path, source);
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        eval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let expected = String::from_utf8(eval.stdout).unwrap();
+    assert!(
+        expected.contains("shape=[2], data=[2.0, 4.0]"),
+        "{expected}"
+    );
+    assert!(
+        expected.contains("shape=[3], data=[6.0, 8.0, 10.0]"),
+        "{expected}"
+    );
+    if gcc_available() {
+        assert_eq!(build_and_run(source, "nonzero_dimensions"), expected);
+    }
+}

@@ -405,7 +405,7 @@ fn parity_grad_disconnected() {
     drive_parity(&path, true);
     assert_eq!(
         run_eval(&path),
-        b"out = tensor(shape=[2, 3], data=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0])\ninferred_zero = tensor(shape=[2], data=[0.0, 0.0])\n"
+        b"out = tensor(shape=[2, 3], data=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0])\ninferred_zero = tensor(shape=[2], data=[0.0, 0.0])\nnested_zero = Pair(Leaf(tensor(shape=[2], data=[0.0, 0.0])), Leaf(tensor(shape=[3], data=[0.0, 0.0, 0.0])))\n"
     );
 }
 
