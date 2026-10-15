@@ -303,7 +303,7 @@ impl<'a> EvalContext<'a> {
             }
             let placeholder = format!("__chelis_xform_arg_{index}");
             let (tensor_value, mut tensor_type) =
-                runtime_value_to_dag_input_lossy(value, fn_expr, index)?;
+                runtime_value_to_dag_input(value, fn_expr, index)?;
             if let (Some((callee_fn, Some(axis))), RuntimeValue::Tensor(tensor)) =
                 (&vmap_formals, value)
                 && let Some(formal) = param_type_expr_at(callee_fn, index)
@@ -1227,7 +1227,7 @@ fn stage_grad_list_value(
             let current_leaf = *leaf_index;
             *leaf_index += 1;
             let (tensor_value, tensor_type) =
-                runtime_value_to_dag_input_lossy(value, None, current_leaf)?;
+                runtime_value_to_dag_input(value, None, current_leaf)?;
             let placeholder =
                 format!("__chelis_xform_arg_{argument_index}_list_leaf_{current_leaf}");
             placeholder_tensors.insert(placeholder.clone(), tensor_value);
@@ -1375,7 +1375,7 @@ impl FrameCaptures<'_> {
         let bound = match value {
             RuntimeValue::Tensor(_) | RuntimeValue::Scalar(_) if !matches!(value, RuntimeValue::Scalar(payload) if payload.dtype().is_integer()) =>
             {
-                let Ok((tensor, ty)) = runtime_value_to_dag_input_lossy(value, None, 0) else {
+                let Ok((tensor, ty)) = runtime_value_to_dag_input(value, None, 0) else {
                     return Ok(None);
                 };
                 let placeholder = self.fresh_name();
@@ -1496,13 +1496,11 @@ fn make_list_construction_expr(elements: Vec<Expr>, span: Span) -> Expr {
     tail
 }
 
-/// Bucket 1 helper: lossily convert a host-runtime argument into the legacy
-/// f64-backed `(TensorValue, TensorType)` pair the IR DAG can consume. Scalar
-/// args (Int/Float/Bool) are wrapped as rank-0 tensors with the precision
-/// pulled from the inner fn's parameter type metadata when available, or
-/// from the runtime value as a fallback. Exact transform ingress remains
-/// chelis#688 / #729 Phase 2 work.
-pub(super) fn runtime_value_to_dag_input_lossy(
+/// Convert a host-runtime argument into the IR DAG input carrier. Numeric
+/// scalars retain their tagged storage at their own dtype; declared parameter
+/// metadata supplies the load precision when available. Integer primals stay
+/// exact even when their cotangents are unit (spec/06 section 2.7).
+pub(super) fn runtime_value_to_dag_input(
     value: &RuntimeValue,
     fn_expr: Option<&Expr>,
     index: usize,
@@ -1558,7 +1556,10 @@ pub(super) fn runtime_value_to_dag_input_lossy(
                 .and_then(|e| param_precision_at(e, index))
                 .unwrap_or(payload.dtype());
             Ok((
-                IrTensorValue::scalar(payload.as_i64() as f64),
+                IrTensorValue::from_storage(
+                    vec![],
+                    chelis_types::tensor_from_scalars(payload.dtype(), &[payload.value()]),
+                ),
                 TensorType {
                     dims: vec![],
                     precision,
@@ -2036,6 +2037,32 @@ pub(super) fn find_reachable_host_only_builtin_call(
 #[cfg(test)]
 mod scalar_gradient_tests {
     use super::*;
+
+    #[test]
+    fn integer_transform_ingress_preserves_storage_and_exact_values() {
+        for prim in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+            let values: &[i64] = if prim == Prim::Int64 {
+                &[9_007_199_254_740_993, i64::MIN, i64::MAX]
+            } else {
+                &[-1, 0, 1]
+            };
+            for &value in values {
+                let runtime = RuntimeValue::scalar_like_int(prim, value).unwrap();
+                let (tensor, ty) = runtime_value_to_dag_input(&runtime, None, 0).unwrap();
+                assert_eq!(ty.precision, prim);
+                assert!(tensor.shape.is_empty());
+                assert_eq!(tensor.storage().prim(), prim);
+                assert_eq!(tensor.storage().scalar_at(0).as_i64_exact(), Some(value));
+            }
+        }
+    }
+
+    #[test]
+    fn transform_ingress_rejects_nonnumeric_leaves() {
+        for value in [RuntimeValue::Unit, RuntimeValue::String("selector".into())] {
+            assert!(runtime_value_to_dag_input(&value, None, 0).is_err());
+        }
+    }
 
     #[test]
     fn scalar_repacking_preserves_declared_dtype_and_signed_zero() {
