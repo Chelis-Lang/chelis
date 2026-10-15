@@ -31519,7 +31519,7 @@ pub fn accumulator_delta_proof(
                     spine.require_nil().ok()?;
                     Some(length)
                 }
-                let result = match (name, children.get(1..).unwrap_or_default()) {
+                let result = match (name, &children[1..]) {
                     ("append", [old, _]) if variable(old, parameter) => Some((0, 1)),
                     ("concat", [old, fresh]) if variable(old, parameter) => {
                         length(fresh).map(|after| (0, after))
