@@ -32708,6 +32708,92 @@ pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForward
     })
 }
 
+/// Independently validate a lowered callback's whole returned-value link.
+/// A source marker selects one immutable IR occurrence; it does not validate
+/// its callee recipe, signature or staged arguments. Consumers retain those
+/// separate checks before enabling any entry reuse.
+pub fn returned_accumulator_invocation<'a, T>(
+    body: &'a HostExpr<T>,
+    plan: &AccumulatorForwardingPlan,
+) -> Option<&'a HostExpr<T>> {
+    if !plan.is_returned_invocation() {
+        return None;
+    }
+    struct LetState<'a, T> {
+        bindings: &'a [HostBinding<T>],
+        ordinal: usize,
+        body: &'a HostExpr<T>,
+        undo: Vec<(String, Option<Option<bool>>)>,
+    }
+    enum Task<'a, T> {
+        Value(&'a HostExpr<T>),
+        Next(LetState<'a, T>),
+        Bind(LetState<'a, T>),
+        Restore(Vec<(String, Option<Option<bool>>)>),
+    }
+    let mut roles = AccumulatorIdentities::new(std::iter::empty::<(String, bool)>());
+    let mut tasks = vec![Task::Value(body)];
+    let mut result = None;
+    let mut selected = None;
+    let mut occurrences = 0;
+    while let Some(task) = tasks.pop() {
+        #[cfg(test)]
+        charge_accumulator_identity_work(1);
+        match task {
+            Task::Next(state) => {
+                if let Some(binding) = state.bindings.get(state.ordinal) {
+                    tasks.push(Task::Bind(state));
+                    tasks.push(Task::Value(&binding.value));
+                } else {
+                    tasks.push(Task::Restore(state.undo));
+                    tasks.push(Task::Value(state.body));
+                }
+            }
+            Task::Bind(mut state) => {
+                let binding = &state.bindings[state.ordinal];
+                let previous = roles.bind(&binding.name, result);
+                state.undo.push((binding.name.clone(), previous));
+                state.ordinal += 1;
+                tasks.push(Task::Next(state));
+            }
+            Task::Restore(undo) => {
+                for (name, previous) in undo.into_iter().rev() {
+                    roles.restore(&name, previous);
+                }
+            }
+            Task::Value(value) => {
+                result = None;
+                match &value.kind {
+                    HostExprKind::RetainedInvocation { forwarding, .. }
+                        if forwarding.as_deref() == Some(plan) =>
+                    {
+                        occurrences += 1;
+                        selected = Some(value);
+                        result = Some(true);
+                    }
+                    HostExprKind::Var(name, _) => result = roles.role(name),
+                    HostExprKind::Let { bindings, body, .. } => {
+                        tasks.push(Task::Next(LetState {
+                            bindings,
+                            ordinal: 0,
+                            body,
+                            undo: Vec::new(),
+                        }));
+                    }
+                    HostExprKind::ResultClaimScope { body, .. }
+                    | HostExprKind::ExtentSites { value: body, .. }
+                    | HostExprKind::FormalIngress { value: body, .. } => {
+                        tasks.push(Task::Value(body));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let selected = selected?;
+    (result == Some(true) && occurrences == 1).then_some(selected)
+}
+
 impl AccumulatorCompositionProof {
     pub fn callee_name(&self) -> &str {
         &self.callee_name

@@ -5908,7 +5908,7 @@ fn stationary_callback_entry(callback: &HostCallback) -> Option<&HostExpr> {
     };
     if let Some(proof) = &callback.accumulator_delta
         && let Some(entries) =
-            retained_accumulator_entries(params, body, std::slice::from_ref(proof))
+            retained_accumulator_entries(params, body, std::slice::from_ref(proof), None)
     {
         return entries.first().map(|(entry, _)| *entry);
     }
@@ -5969,6 +5969,7 @@ fn retained_accumulator_entries<'a>(
     params: &[HostParam],
     body: &'a HostExpr,
     proofs: &[std::sync::Arc<chelis_ir::host::AccumulatorDeltaProof>],
+    forwarding: Option<&chelis_ir::host::AccumulatorForwardingPlan>,
 ) -> Option<
     Vec<(
         &'a HostExpr,
@@ -5988,10 +5989,25 @@ fn retained_accumulator_entries<'a>(
         std::collections::BTreeMap<String, String>,
         String,
     );
+    fn selected_root(value: &HostExpr, plan: &chelis_ir::host::AccumulatorForwardingPlan) -> bool {
+        let mut value = value;
+        loop {
+            match &value.kind {
+                HostExprKind::RetainedInvocation { forwarding, .. } => {
+                    return forwarding.as_deref() == Some(plan);
+                }
+                HostExprKind::ResultClaimScope { body, .. }
+                | HostExprKind::ExtentSites { value: body, .. }
+                | HostExprKind::FormalIngress { value: body, .. } => value = body,
+                _ => return false,
+            }
+        }
+    }
     fn collect<'a>(
         value: &'a HostExpr,
         aliases: &mut std::collections::BTreeMap<String, String>,
         out: &mut Vec<Candidate<'a>>,
+        selected: Option<&chelis_ir::host::AccumulatorForwardingPlan>,
     ) -> Option<()> {
         match &value.kind {
             HostExprKind::Let { bindings, body, .. }
@@ -6017,6 +6033,14 @@ fn retained_accumulator_entries<'a>(
                         };
                         out.push((&binding.value, body, aliases.clone(), item.to_owned()));
                     } else {
+                        if let Some(plan) =
+                            selected.filter(|plan| selected_root(&binding.value, plan))
+                        {
+                            // Exactly one selected region owns a snapshot; never
+                            // clone the environment for each lexical binding.
+                            let mut invocation_aliases = aliases.clone();
+                            collect(&binding.value, &mut invocation_aliases, out, Some(plan))?;
+                        }
                         let source = variable(&binding.value)
                             .and_then(|name| aliases.get(name))
                             .cloned();
@@ -6029,10 +6053,10 @@ fn retained_accumulator_entries<'a>(
                         }
                     }
                 }
-                collect(body, aliases, out)
+                collect(body, aliases, out, selected)
             }
-            HostExprKind::ResultClaimScope { body, .. } => collect(body, aliases, out),
-            HostExprKind::ExtentSites { value, .. } => collect(value, aliases, out),
+            HostExprKind::ResultClaimScope { body, .. } => collect(body, aliases, out, selected),
+            HostExprKind::ExtentSites { value, .. } => collect(value, aliases, out, selected),
             _ => Some(()),
         }
     }
@@ -6043,8 +6067,12 @@ fn retained_accumulator_entries<'a>(
         (acc.name.clone(), acc.name.clone()),
         (item.name.clone(), item.name.clone()),
     ]);
+    let selected = forwarding.filter(|plan| plan.is_returned_invocation());
+    if let Some(plan) = selected {
+        chelis_ir::host::returned_accumulator_invocation(body, plan)?;
+    }
     let mut candidates = Vec::new();
-    collect(body, &mut aliases, &mut candidates)?;
+    collect(body, &mut aliases, &mut candidates, selected)?;
     if candidates.len() != proofs.len() {
         return None;
     }
@@ -6077,7 +6105,17 @@ fn retained_accumulator_entries<'a>(
                 && aliases.get(&item_alias) == Some(&item.name)
                 && aliases.get(name).is_some_and(|source| source == &acc.name)
                 && same_obligation
-                && proof.validates_body_as(tail, name))
+                && (proof.validates_body_as(tail, name)
+                    || selected.is_some_and(|plan| {
+                        // The selected callee entry is validated independently
+                        // by another candidate below. The outer postcondition
+                        // transports only its identical construction recipe.
+                        proofs
+                            .last()
+                            .is_some_and(|inner| inner.recipe() == proof.recipe())
+                            && chelis_ir::host::returned_accumulator_invocation(tail, plan)
+                                .is_some()
+                    })))
             .then(|| (value, proof.clone()))
         })
         .collect()
@@ -8002,7 +8040,9 @@ impl<'a> HostEmitter<'a> {
                 proofs.push(std::sync::Arc::new(outer.clone()));
             }
             proofs.push(std::sync::Arc::new(composition.inner().clone()));
-            let Some(entries) = retained_accumulator_entries(params, body, &proofs) else {
+            let Some(entries) =
+                retained_accumulator_entries(params, body, &proofs, Some(composition.forwarding()))
+            else {
                 return Vec::new();
             };
             return entries
@@ -17122,7 +17162,10 @@ mod forwarding_entry_identity_tests {
         let HostCallbackKind::Inline { params, body } = &callback.kind else {
             panic!("inline callback");
         };
-        assert!(retained_accumulator_entries(params, body, &proofs).is_some());
+        assert!(
+            retained_accumulator_entries(params, body, &proofs, Some(composition.forwarding()))
+                .is_some()
+        );
         fn mutate(expr: &mut HostExpr, target: &str) -> bool {
             match &mut expr.kind {
                 HostExprKind::Let { bindings, body, .. }
@@ -17147,7 +17190,13 @@ mod forwarding_entry_identity_tests {
             let mut changed = body.clone();
             assert!(mutate(&mut changed, target));
             assert!(
-                retained_accumulator_entries(params, &changed, &proofs).is_none(),
+                retained_accumulator_entries(
+                    params,
+                    &changed,
+                    &proofs,
+                    Some(composition.forwarding())
+                )
+                .is_none(),
                 "changed original item: {target}"
             );
         }
