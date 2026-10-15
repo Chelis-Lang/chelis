@@ -7282,7 +7282,7 @@ mod tests {
 
     #[test]
     fn conditional_observation_all_cutoffs_orders_and_opaque_match_original() {
-        for variant in 0..6 {
+        for variant in 0..8 {
             let mut nodes = shared_axis_diamond(0);
             let mut other = nodes[0].clone();
             other.id = 1;
@@ -7326,6 +7326,16 @@ mod tests {
                 nodes[2].op = WireRiscOp::ConstTensor {
                     data: chelis_types::tensor_from_scalars(Prim::F32, std::slice::from_ref(value)),
                 };
+            }
+            if variant >= 6 {
+                let mut scan = nodes[0].clone();
+                scan.id = nodes.len() as u64;
+                scan.op = WireRiscOp::Cumsum {
+                    axis: 0,
+                    direction: WireScanDirection::Increasing,
+                };
+                scan.inputs = vec![if variant == 6 { 2 } else { 0 }];
+                nodes.push(scan);
             }
             let observed = nodes.last().unwrap().id;
             let anchor = append_test_witness(&mut nodes, 0, &[]);
@@ -7409,6 +7419,60 @@ mod tests {
 
     // Explicit residual, not a linear-work oracle: repeated epochs can expose
     // a growing active conditional-to-strict adjacency. Charge every incidence.
+    #[test]
+    fn public_cumsum_witness_strict_and_opaque_transfers_match_original() {
+        for contextual in [false, true] {
+            let mut dag = contextual_prefix_comparisons(0, 1);
+            let mut constant = dag.nodes[1].clone();
+            let mut compare = dag.nodes[2].clone();
+            dag.nodes = contextual_witness_nodes(false, false);
+            dag.nodes.truncate(2);
+            constant.id = 2;
+            constant.shape_deps = vec![1];
+            dag.nodes.push(constant);
+            let mut scan = dag.nodes[0].clone();
+            scan.id = 3;
+            scan.op = WireRiscOp::Cumsum {
+                axis: 0,
+                direction: WireScanDirection::Increasing,
+            };
+            scan.inputs = vec![if contextual { 2 } else { 1 }];
+            dag.nodes.push(scan);
+            let anchor = append_test_witness(&mut dag.nodes, 0, &[]);
+            append_test_witness(&mut dag.nodes, 3, &[anchor]);
+            compare.id = dag.nodes.len() as u64;
+            compare.inputs = vec![0, 1];
+            compare.shape_deps = vec![0];
+            dag.roots = vec![compare.id];
+            dag.nodes.push(compare);
+            let json = public_witness_json(&dag);
+            WIRE_INGRESS_WORK.with(|work| work.set(Some(WireIngressWork::default())));
+            WireDag::from_validated_json(&json).unwrap();
+            let work = WIRE_INGRESS_WORK.with(|work| work.replace(None).unwrap());
+            if contextual {
+                assert!(
+                    work.witness_fallbacks > 0,
+                    "opaque scan retains fallback: {work:?}"
+                );
+            } else {
+                assert_eq!(
+                    work.witness_fallbacks, 0,
+                    "independent scan retains strict proof: {work:?}"
+                );
+            }
+            assert!(original_public_witness_result(&json).is_ok());
+            if contextual {
+                dag.nodes[2].shape_deps.clear();
+            } else {
+                dag.nodes[3].inputs = vec![0];
+            }
+            let bad = public_witness_json(&dag);
+            let error = WireDag::from_validated_json(&bad).unwrap_err().to_string();
+            assert!(error.contains("requires two same-shape"), "{error}");
+            assert_eq!(error, original_public_witness_result(&bad).unwrap_err());
+        }
+    }
+
     #[test]
     fn public_conditional_strict_incidence_residual_is_counted() {
         for n in [16, 32, 64] {
