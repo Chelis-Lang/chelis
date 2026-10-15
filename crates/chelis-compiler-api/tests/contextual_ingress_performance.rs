@@ -52,8 +52,14 @@ static ALLOCATOR: AllocationWork = AllocationWork;
 fn node(id: usize, op: Value, inputs: Vec<usize>, deps: Vec<usize>, precision: &str) -> Value {
     json!({"id":id,"declaration":0,"activation":null,"shape_deps":deps,"span_id":null,"merged_spans":[],"inputs":inputs,"op":op,"output_type":{"dims":[{"kind":"named","name":"*","size":null}],"precision":precision}})
 }
-fn payload(n: usize, changing: bool, witnesses: bool) -> String {
-    let loads = if changing { n } else { 1 };
+fn payload(n: usize, changing: bool, witnesses: bool, alternating: bool) -> String {
+    let loads = if alternating {
+        2
+    } else if changing {
+        n
+    } else {
+        1
+    };
     let mut nodes = (0..loads)
         .map(|id| {
             node(
@@ -80,7 +86,13 @@ fn payload(n: usize, changing: bool, witnesses: bool) -> String {
     let mut first_witness = None;
     let mut roots = Vec::new();
     for i in 0..n {
-        let source = if changing { i } else { 0 };
+        let source = if alternating {
+            i % 2
+        } else if changing {
+            i
+        } else {
+            0
+        };
         if witnesses {
             let claims = if first_witness.is_some() {
                 vec![json!({"claim":"n","requirement_declares":true})]
@@ -112,14 +124,32 @@ fn payload(n: usize, changing: bool, witnesses: bool) -> String {
             "bool",
         ));
         roots.push(id);
+        if witnesses {
+            // Force actual witness connectivity, rather than merely changing
+            // the cutoff while both contextual origins already agree.
+            let id = nodes.len();
+            nodes.push(node(
+                id,
+                json!({"kind":"compare","comparison":"eq"}),
+                vec![0, source],
+                vec![0],
+                "bool",
+            ));
+            roots.push(id);
+        }
     }
     json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":nodes,"roots":roots}).to_string()
 }
 #[test]
 fn contextual_public_ingress_allocation_and_context_scaling() {
-    for (changing, witnesses) in [(false, false), (true, false), (true, true)] {
+    for (changing, witnesses, alternating) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (false, false, true),
+    ] {
         for n in [32, 64, 128] {
-            let json = payload(n, changing, witnesses);
+            let json = payload(n, changing, witnesses, alternating);
             let before = LIVE.load(Relaxed);
             PEAK.store(before, Relaxed);
             BYTES.store(0, Relaxed);
@@ -134,15 +164,19 @@ fn contextual_public_ingress_allocation_and_context_scaling() {
             let peak = PEAK.load(Relaxed).saturating_sub(before);
             let decoded = decoded.expect("full public contextual graph validates");
             eprintln!(
-                "contextual ingress changing={changing} witnesses={witnesses} n={n} nodes={} bytes={} allocated={allocated} allocation_calls={calls} peak_heap_delta={peak} wall={wall:?}",
+                "contextual ingress changing={changing} witnesses={witnesses} alternating={alternating} n={n} nodes={} bytes={} allocated={allocated} allocation_calls={calls} peak_heap_delta={peak} wall={wall:?}",
                 decoded.nodes.len(),
                 json.len()
             );
-            assert!(peak <= decoded.nodes.len() * 2048 + 64 * 1024,
-                "context authority must not retain every prefix memo: {peak}");
+            assert!(
+                peak <= decoded.nodes.len() * 2048 + 64 * 1024,
+                "context authority must not retain every prefix memo: {peak}"
+            );
             if !changing && !witnesses {
-                assert!(allocated <= decoded.nodes.len() * 4096 + 64 * 1024,
-                    "repeated contextual ingress allocates expanded prefix paths: {allocated}");
+                assert!(
+                    allocated <= decoded.nodes.len() * 4096 + 64 * 1024,
+                    "repeated contextual ingress allocates expanded prefix paths: {allocated}"
+                );
             }
             let mut bad: Value = serde_json::from_str(&json).unwrap();
             bad["nodes"].as_array_mut().unwrap().last_mut().unwrap()["inputs"][1] = json!(u64::MAX);

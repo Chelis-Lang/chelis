@@ -2583,7 +2583,19 @@ impl WireDag {
     pub fn validate_wire_contract(&self) -> Result<(), WireDagContractError> {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
         dag_domains::validate(self)?;
-        let origins = WireIngressOrigins::new(&self.nodes);
+        let discovery = WireIngressOrigins::discover(&self.nodes);
+        // Discovery never admits a graph or reports a contract error. It records
+        // the questions reachable before the first non-shape error; replay below
+        // consumes their exact answers and retains the original diagnostic order.
+        let _deferred_error = self.validate_wire_contract_with_origins(&discovery);
+        let answers = discovery.resolve(&self.nodes);
+        self.validate_wire_contract_with_origins(&answers)
+    }
+
+    fn validate_wire_contract_with_origins(
+        &self,
+        origins: &WireIngressOrigins,
+    ) -> Result<(), WireDagContractError> {
         for (index, node) in self.nodes.iter().enumerate() {
             match &node.op {
                 WireRiscOp::Load { name } => {
@@ -2636,14 +2648,9 @@ impl WireDag {
                     let rhs = inputs[1];
                     let shape_participants = [lhs.id, rhs.id, node.id];
                     let same_shape =
-                        wire_node_shape_equal(&self.nodes, lhs, rhs, &shape_participants, &origins);
-                    let output_shape = wire_node_shape_equal(
-                        &self.nodes,
-                        lhs,
-                        node,
-                        &shape_participants,
-                        &origins,
-                    );
+                        wire_node_shape_equal(&self.nodes, lhs, rhs, &shape_participants, origins);
+                    let output_shape =
+                        wire_node_shape_equal(&self.nodes, lhs, node, &shape_participants, origins);
                     let ordered = matches!(
                         comparison,
                         WireComparisonKind::CmpLt
@@ -2703,7 +2710,7 @@ impl WireDag {
                                 input,
                                 node,
                                 &shape_participants,
-                                &origins,
+                                origins,
                             )
                     });
                     if inputs.len() != expected
@@ -2749,21 +2756,21 @@ impl WireDag {
                             then_value,
                             else_value,
                             &shape_participants,
-                            &origins,
+                            origins,
                         )
                         || !wire_node_tensor_type_equal(
                             &self.nodes,
                             then_value,
                             node,
                             &shape_participants,
-                            &origins,
+                            origins,
                         )
                         || !wire_node_shape_equal(
                             &self.nodes,
                             condition,
                             then_value,
                             &shape_participants,
-                            &origins,
+                            origins,
                         )
                         || !branch_precision.is_some_and(|prim| prim.is_data_element_dtype())
                     {
@@ -3545,6 +3552,12 @@ struct WireIngressWork {
     connectivity_steps: usize,
     context_items: usize,
     cache_entries: usize,
+    semantic_entries: usize,
+    semantic_probes: usize,
+    shape_questions: usize,
+    shape_answers: usize,
+    authority_groups: usize,
+    key_comparisons: usize,
 }
 #[cfg(test)]
 thread_local! {
@@ -3726,7 +3739,7 @@ thread_local! {
 
 // Strict answers use neither contextual shape sources nor witness equivalence.
 // Their successful origins can be shared across the whole ingress. Contextual
-// answers, including failure, stay scoped to a single shape comparison.
+// answers, including failure, stay scoped to one grouped exact authority.
 type WireOriginMemo =
     std::cell::RefCell<BTreeMap<(u64, usize, bool), Option<WireSemanticAxisOrigin>>>;
 #[derive(Default)]
@@ -3743,26 +3756,88 @@ struct WireAxisOriginCache {
 // key derived from the original, unfiltered relevant-source cutoff.
 type WireContextOriginMemo =
     std::cell::RefCell<BTreeMap<(u64, usize, bool, usize), Option<WireSemanticAxisOrigin>>>;
+#[derive(Clone, PartialEq, Eq)]
+struct WireShapeQuestion {
+    left: u64,
+    right: u64,
+    sources: Vec<u64>,
+}
+#[derive(PartialEq, Eq)]
+struct WireShapeAuthority(Vec<u64>, usize);
+fn wire_shape_key_cmp(left: &[u64], right: &[u64]) -> std::cmp::Ordering {
+    for (left, right) in left.iter().zip(right) {
+        wire_ingress_work!(key_comparisons);
+        let order = left.cmp(right);
+        if !order.is_eq() {
+            return order;
+        }
+    }
+    wire_ingress_work!(key_comparisons);
+    left.len().cmp(&right.len())
+}
+impl Ord for WireShapeAuthority {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        wire_shape_key_cmp(&self.0, &other.0).then_with(|| {
+            wire_ingress_work!(key_comparisons);
+            self.1.cmp(&other.1)
+        })
+    }
+}
+impl PartialOrd for WireShapeAuthority {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for WireShapeQuestion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        wire_ingress_work!(key_comparisons);
+        self.left
+            .cmp(&other.left)
+            .then_with(|| {
+                wire_ingress_work!(key_comparisons);
+                self.right.cmp(&other.right)
+            })
+            .then_with(|| wire_shape_key_cmp(&self.sources, &other.sources))
+    }
+}
+impl PartialOrd for WireShapeQuestion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+enum WireShapeResolution {
+    Direct,
+    Discover(std::cell::RefCell<BTreeMap<WireShapeQuestion, ()>>),
+    Answers(BTreeMap<WireShapeQuestion, bool>),
+}
 struct WireIngressOrigins {
     stable: std::rc::Rc<WireOriginMemo>,
-    contextual: std::cell::RefCell<BTreeMap<(Vec<u64>, usize), std::rc::Rc<WireContextOriginMemo>>>,
-    source_members: Vec<bool>,
+    contextual:
+        std::cell::RefCell<BTreeMap<WireShapeAuthority, std::rc::Rc<WireContextOriginMemo>>>,
+    source_members: std::rc::Rc<Vec<bool>>,
+    semantic_members: std::rc::Rc<Vec<bool>>,
     witnesses: std::rc::Rc<Vec<usize>>,
+    resolution: WireShapeResolution,
+    semantic: std::cell::RefCell<BTreeMap<(u64, usize, usize), Option<u64>>>,
+    semantic_authority: std::cell::RefCell<Option<WireShapeAuthority>>,
 }
 impl WireIngressOrigins {
     fn new(nodes: &[WireDagNode]) -> Self {
         let mut source_members = vec![false; nodes.len()];
+        let mut semantic_members = vec![false; nodes.len()];
         let mut witnesses = Vec::new();
         for (index, node) in nodes.iter().enumerate() {
             wire_ingress_work!(context_items);
-            if matches!(
-                node.op,
-                WireRiscOp::Const { .. } | WireRiscOp::ConstTensor { .. }
-            ) {
-                for source in &node.shape_deps {
-                    wire_ingress_work!(dependency_steps);
-                    if let Ok(source) = usize::try_from(*source)
-                        && let Some(member) = source_members.get_mut(source)
+            for source in &node.shape_deps {
+                wire_ingress_work!(dependency_steps);
+                if let Ok(source) = usize::try_from(*source) {
+                    if let Some(member) = semantic_members.get_mut(source) {
+                        *member = true;
+                    }
+                    if matches!(
+                        node.op,
+                        WireRiscOp::Const { .. } | WireRiscOp::ConstTensor { .. }
+                    ) && let Some(member) = source_members.get_mut(source)
                     {
                         *member = true;
                     }
@@ -3775,11 +3850,28 @@ impl WireIngressOrigins {
         Self {
             stable: Default::default(),
             contextual: Default::default(),
-            source_members,
+            source_members: std::rc::Rc::new(source_members),
+            semantic_members: std::rc::Rc::new(semantic_members),
             witnesses: std::rc::Rc::new(witnesses),
+            resolution: WireShapeResolution::Direct,
+            semantic: Default::default(),
+            semantic_authority: Default::default(),
         }
     }
-    fn comparison(&self, nodes: &[WireDagNode], relevant: &[u64]) -> WireAxisOriginCache {
+    fn discover(nodes: &[WireDagNode]) -> Self {
+        Self {
+            resolution: WireShapeResolution::Discover(Default::default()),
+            ..Self::new(nodes)
+        }
+    }
+    fn authority(
+        &self,
+        nodes: &[WireDagNode],
+        relevant: &[u64],
+        members: &[bool],
+    ) -> WireShapeAuthority {
+        // The cutoff observes the original unfiltered sources, including sources
+        // which no shape-dependent node reads.
         let cutoff = relevant
             .iter()
             .copied()
@@ -3796,17 +3888,68 @@ impl WireIngressOrigins {
                 wire_ingress_work!(context_items);
                 usize::try_from(*source)
                     .ok()
-                    .and_then(|id| self.source_members.get(id))
+                    .and_then(|id| members.get(id))
                     .copied()
                     == Some(true)
             })
             .collect::<Vec<_>>();
         sources.sort_unstable();
         sources.dedup();
+        WireShapeAuthority(sources, epoch)
+    }
+    fn resolve(&self, nodes: &[WireDagNode]) -> Self {
+        let WireShapeResolution::Discover(questions) = &self.resolution else {
+            unreachable!("only discovery produces grouped shape answers");
+        };
+        let mut groups = BTreeMap::<WireShapeAuthority, Vec<WireShapeQuestion>>::new();
+        for question in questions.borrow().keys() {
+            let authority = self.authority(nodes, &question.sources, &self.semantic_members);
+            groups.entry(authority).or_default().push(question.clone());
+        }
+        let mut answers = BTreeMap::new();
+        for questions in groups.into_values() {
+            wire_ingress_work!(authority_groups);
+            // One memo per exact authority, shared across interleaved questions.
+            // Drop it before the next group; retain only the final booleans.
+            let group = Self {
+                stable: self.stable.clone(),
+                contextual: Default::default(),
+                source_members: self.source_members.clone(),
+                semantic_members: self.semantic_members.clone(),
+                witnesses: self.witnesses.clone(),
+                resolution: WireShapeResolution::Direct,
+                semantic: Default::default(),
+                semantic_authority: Default::default(),
+            };
+            for question in questions {
+                let answer = wire_node_shape_equal(
+                    nodes,
+                    &nodes[question.left as usize],
+                    &nodes[question.right as usize],
+                    &question.sources,
+                    &group,
+                );
+                wire_ingress_work!(shape_answers);
+                answers.insert(question, answer);
+            }
+        }
+        Self {
+            stable: self.stable.clone(),
+            contextual: Default::default(),
+            source_members: self.source_members.clone(),
+            semantic_members: self.semantic_members.clone(),
+            witnesses: self.witnesses.clone(),
+            resolution: WireShapeResolution::Answers(answers),
+            semantic: Default::default(),
+            semantic_authority: Default::default(),
+        }
+    }
+    fn comparison(&self, nodes: &[WireDagNode], relevant: &[u64]) -> WireAxisOriginCache {
+        let authority = self.authority(nodes, relevant, &self.source_members);
         let contextual = self
             .contextual
             .borrow_mut()
-            .entry((sources, epoch))
+            .entry(authority)
             .or_default()
             .clone();
         WireAxisOriginCache {
@@ -4233,6 +4376,7 @@ fn wire_semantic_axis_origin(
     wire_axis_origin_cached(nodes, node, axis, fuel, relevant_shape_sources, true, cache)
 }
 
+#[cfg(test)]
 fn wire_semantic_node_dim<'a>(
     nodes: &'a [WireDagNode],
     node: &'a WireDagNode,
@@ -4294,6 +4438,82 @@ fn wire_semantic_node_dim<'a>(
     None
 }
 
+// Every dependency membership read here is covered by the group's ALL-node
+// authority, rather than the narrower Const-only axis-origin authority.
+fn wire_semantic_node_dim_grouped<'a>(
+    nodes: &'a [WireDagNode],
+    node: &WireDagNode,
+    axis: usize,
+    relevant: &[u64],
+    origins: &WireIngressOrigins,
+) -> Option<&'a WireDimInfo> {
+    let authority = origins.authority(nodes, relevant, &origins.semantic_members);
+    if origins.semantic_authority.borrow().as_ref() != Some(&authority) {
+        origins.semantic.borrow_mut().clear();
+        *origins.semantic_authority.borrow_mut() = Some(authority);
+    }
+    let key = |id: u64, fuel: usize| (id, axis, fuel.min(id as usize + 1));
+    let initial = key(node.id, nodes.len());
+    let mut pending = vec![(initial, false)];
+    while let Some((current @ (id, _, remaining), finish)) = pending.pop() {
+        wire_ingress_work!(semantic_visits);
+        wire_ingress_work!(semantic_probes);
+        if origins.semantic.borrow().contains_key(&current) {
+            continue;
+        }
+        let node = wire_node_by_id(nodes, id)?;
+        let Some(dim) = node.output_type.dims.get(axis).filter(|_| remaining != 0) else {
+            wire_ingress_work!(semantic_entries);
+            origins.semantic.borrow_mut().insert(current, None);
+            continue;
+        };
+        if !wire_dim_is_anonymous(dim) {
+            wire_ingress_work!(semantic_entries);
+            origins.semantic.borrow_mut().insert(current, Some(id));
+            continue;
+        }
+        let mut children = Vec::new();
+        for source in &node.shape_deps {
+            wire_ingress_work!(dependency_steps);
+            if wire_relevant_source(relevant, source) {
+                children.push(*source);
+            }
+        }
+        if matches!(node.op, WireRiscOp::Where { .. }) {
+            children.extend(node.inputs.iter().skip(1).copied());
+        }
+        children.retain(|source| {
+            wire_node_by_id(nodes, *source).is_some_and(|source| {
+                source.id < id && source.output_type.dims.len() == node.output_type.dims.len()
+            })
+        });
+        if finish {
+            let result = children.iter().find_map(|source| {
+                origins
+                    .semantic
+                    .borrow()
+                    .get(&key(*source, remaining - 1))
+                    .copied()
+                    .flatten()
+            });
+            wire_ingress_work!(semantic_entries);
+            origins.semantic.borrow_mut().insert(current, result);
+        } else {
+            pending.push((current, true));
+            for child in children.into_iter().rev() {
+                pending.push((key(child, remaining - 1), false));
+            }
+        }
+    }
+    origins
+        .semantic
+        .borrow()
+        .get(&initial)
+        .copied()
+        .flatten()
+        .and_then(|id| nodes.get(id as usize)?.output_type.dims.get(axis))
+}
+
 fn wire_node_shape_equal(
     nodes: &[WireDagNode],
     left: &WireDagNode,
@@ -4301,6 +4521,24 @@ fn wire_node_shape_equal(
     relevant_shape_sources: &[u64],
     origins: &WireIngressOrigins,
 ) -> bool {
+    let question = || WireShapeQuestion {
+        left: left.id,
+        right: right.id,
+        sources: relevant_shape_sources.to_vec(),
+    };
+    match &origins.resolution {
+        WireShapeResolution::Discover(questions) => {
+            wire_ingress_work!(shape_questions);
+            questions.borrow_mut().insert(question(), ());
+            return true;
+        }
+        WireShapeResolution::Answers(answers) => {
+            return *answers
+                .get(&question())
+                .expect("replay shape question was discovered");
+        }
+        WireShapeResolution::Direct => {}
+    }
     let cache = origins.comparison(nodes, relevant_shape_sources);
     left.output_type.dims.len() == right.output_type.dims.len()
         && (0..left.output_type.dims.len()).all(|axis| {
@@ -4322,15 +4560,21 @@ fn wire_node_shape_equal(
                     &strict,
                 ))
                 .is_some_and(|(left, right)| left == right)
-                || wire_semantic_node_dim(nodes, left, axis, nodes.len(), relevant_shape_sources)
-                    .zip(wire_semantic_node_dim(
-                        nodes,
-                        right,
-                        axis,
-                        nodes.len(),
-                        relevant_shape_sources,
-                    ))
-                    .is_some_and(|(left, right)| wire_semantic_dim_info_equal(left, right))
+                || wire_semantic_node_dim_grouped(
+                    nodes,
+                    left,
+                    axis,
+                    relevant_shape_sources,
+                    origins,
+                )
+                .zip(wire_semantic_node_dim_grouped(
+                    nodes,
+                    right,
+                    axis,
+                    relevant_shape_sources,
+                    origins,
+                ))
+                .is_some_and(|(left, right)| wire_semantic_dim_info_equal(left, right))
                 || wire_semantic_axis_origin(
                     nodes,
                     left,
@@ -5919,6 +6163,7 @@ mod tests {
         add.inputs = vec![0, 1];
         add.shape_deps = vec![1, 0];
         nodes.push(add);
+        let origins = WireIngressOrigins::new(&nodes);
         for (sources, expected) in [
             (vec![0], Some("rows")),
             (vec![1], Some("cols")),
@@ -5927,6 +6172,11 @@ mod tests {
             (vec![0], Some("rows")),
         ] {
             let dim = wire_semantic_node_dim(&nodes, &nodes[2], 0, nodes.len(), &sources);
+            let grouped = wire_semantic_node_dim_grouped(&nodes, &nodes[2], 0, &sources, &origins);
+            assert_eq!(
+                serde_json::to_value(dim).unwrap(),
+                serde_json::to_value(grouped).unwrap()
+            );
             assert_eq!(
                 dim.and_then(|dim| match dim {
                     WireDimInfo::Named { name, .. } => Some(name.as_str()),
@@ -5973,6 +6223,181 @@ mod tests {
             error.to_string().contains("requires two same-shape"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn public_interleaved_and_changing_authorities_report_all_work() {
+        for (alternating, witnesses) in [(true, false), (false, false), (false, true)] {
+            for n in [16, 32, 64] {
+                let mut dag = contextual_prefix_comparisons(0, 1);
+                let load = dag.nodes[0].clone();
+                let constant = dag.nodes[1].clone();
+                let compare = dag.nodes[2].clone();
+                dag.nodes.clear();
+                let choices = if alternating { 2 } else { n };
+                for id in 0..choices {
+                    let mut node = load.clone();
+                    node.id = id;
+                    node.op = WireRiscOp::Load {
+                        name: format!("x{id}"),
+                    };
+                    dag.nodes.push(node);
+                }
+                let mut node = constant;
+                node.id = choices;
+                node.shape_deps = (0..choices).collect();
+                dag.nodes.push(node);
+                for _ in 0..n {
+                    let mut node = load.clone();
+                    node.id = dag.nodes.len() as u64;
+                    node.op = WireRiscOp::Add;
+                    node.inputs = vec![node.id - 1, node.id - 1];
+                    dag.nodes.push(node);
+                }
+                let prefix = dag.nodes.last().unwrap().id;
+                let mut first_witness = None;
+                for i in 0..n {
+                    let source = if alternating { i % 2 } else { i };
+                    if witnesses {
+                        let mut witness = contextual_witness_nodes(false, false).remove(2);
+                        witness.id = dag.nodes.len() as u64;
+                        witness.inputs = vec![source];
+                        if let Some(first) = first_witness {
+                            witness.inputs.push(first);
+                            if let WireRiscOp::ExtentWitness { claims, .. } = &mut witness.op {
+                                *claims = vec![WireExtentClaim {
+                                    claim: "n".into(),
+                                    requirement_declares: true,
+                                }];
+                            }
+                        }
+                        first_witness.get_or_insert(witness.id);
+                        dag.nodes.push(witness);
+                    }
+                    let mut node = compare.clone();
+                    node.id = dag.nodes.len() as u64;
+                    node.inputs = vec![prefix, source];
+                    node.shape_deps = vec![prefix];
+                    dag.nodes.push(node);
+                    if witnesses {
+                        let mut node = compare.clone();
+                        node.id = dag.nodes.len() as u64;
+                        node.inputs = vec![0, source];
+                        node.shape_deps = vec![0];
+                        dag.nodes.push(node);
+                    }
+                }
+                dag.roots = vec![dag.nodes.last().unwrap().id];
+                let json = serde_json::json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "declarations":dag.declarations, "nodes":dag.nodes, "roots":dag.roots}).to_string();
+                WIRE_INGRESS_WORK.with(|work| work.set(Some(WireIngressWork::default())));
+                WireDag::from_validated_json(&json).unwrap();
+                let work = WIRE_INGRESS_WORK.with(|work| work.replace(None).unwrap());
+                eprintln!(
+                    "authority work alternating={alternating} witnesses={witnesses} n={n}: {work:?}"
+                );
+                if alternating {
+                    assert_eq!(work.authority_groups, 2);
+                    assert!(work.axis_expansions < n as usize * 12, "{work:?}");
+                }
+                if witnesses {
+                    assert!(
+                        work.witness_edges > 0 && work.connectivity_steps > 0,
+                        "{work:?}"
+                    );
+                }
+                let last = dag.nodes.last_mut().unwrap();
+                last.inputs[1] = u64::MAX;
+                assert!(dag.validate_wire_contract().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn public_where_and_logical_prefix_work_includes_semantic_dimensions() {
+        for logical in [false, true] {
+            for n in [32, 64, 128] {
+                let mut dag = contextual_prefix_comparisons(0, 0);
+                dag.nodes[0].output_type.precision = "bool".into();
+                if logical {
+                    dag.nodes[1].output_type.precision = "bool".into();
+                    dag.nodes[1].op = WireRiscOp::Const {
+                        value: chelis_types::scalar_from_i64(
+                            "contextual bool fixture",
+                            Prim::Bool,
+                            1,
+                        )
+                        .unwrap(),
+                    };
+                }
+                let mut previous = 1;
+                for _ in 0..n {
+                    let mut node = dag.nodes[0].clone();
+                    node.id = dag.nodes.len() as u64;
+                    node.output_type.precision = dag.nodes[1].output_type.precision.clone();
+                    node.inputs = if logical {
+                        vec![previous, 0]
+                    } else {
+                        vec![0, previous, previous]
+                    };
+                    if logical {
+                        node.shape_deps = vec![0];
+                    }
+                    node.op = if logical {
+                        WireRiscOp::Logical {
+                            logical: WireLogicalKind::And,
+                        }
+                    } else {
+                        WireRiscOp::Where {}
+                    };
+                    previous = node.id;
+                    dag.nodes.push(node);
+                }
+                dag.roots = vec![previous];
+                let json = serde_json::json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "declarations":dag.declarations, "nodes":dag.nodes, "roots":dag.roots}).to_string();
+                WIRE_INGRESS_WORK.with(|work| work.set(Some(WireIngressWork::default())));
+                WireDag::from_validated_json(&json).unwrap();
+                let work = WIRE_INGRESS_WORK.with(|work| work.replace(None).unwrap());
+                eprintln!("public prefix logical={logical} n={n}: {work:?}");
+                assert!(work.semantic_visits < n * 30, "{work:?}");
+                assert!(work.axis_expansions < n * 30, "{work:?}");
+                let last = dag.nodes.last_mut().unwrap();
+                if logical {
+                    last.output_type.precision = "f32".into();
+                } else {
+                    last.inputs[0] = 1;
+                }
+                let bad = serde_json::json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "declarations":dag.declarations, "nodes":dag.nodes, "roots":dag.roots}).to_string();
+                assert!(WireDag::from_validated_json(&bad).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_shape_discovery_preserves_first_contract_error() {
+        let mut dag = contextual_prefix_comparisons(4, 4);
+        let compare = dag
+            .nodes
+            .iter()
+            .position(|node| matches!(node.op, WireRiscOp::Compare { .. }))
+            .unwrap();
+        dag.nodes[compare].output_type.dims.clear();
+        let mut bad_load = dag.nodes[0].clone();
+        bad_load.id = dag.nodes.len() as u64;
+        bad_load.op = WireRiscOp::Load { name: "".into() };
+        dag.nodes.push(bad_load);
+        let error = dag.validate_wire_contract().unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("Compare node {}", dag.nodes[compare].id)),
+            "{error}"
+        );
+        // The converse ordering must retain the earlier non-shape error.
+        dag.nodes[0].op = WireRiscOp::Load { name: "".into() };
+        let error = dag.validate_wire_contract().unwrap_err().to_string();
+        assert!(error.contains("Load node 0"), "{error}");
+        // Domain validation remains prior to discovery, including invalid references.
+        dag.nodes[compare].inputs[0] = u64::MAX;
+        let error = dag.validate_wire_contract().unwrap_err().to_string();
+        assert!(!error.contains("Load node 0"), "{error}");
     }
 
     #[test]

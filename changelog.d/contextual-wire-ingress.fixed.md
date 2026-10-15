@@ -1,0 +1,1 @@
+Reuse contextual WireDag shape answers across interleaved equivalent source contexts while retaining one temporary memo per authority. Preserve validation order and bound memo retention for changing contexts; distinct source choices and witness epochs can still require repeated traversal.
