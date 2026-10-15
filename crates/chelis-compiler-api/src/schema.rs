@@ -7387,6 +7387,63 @@ mod tests {
     }
 
     #[test]
+    fn large_conditional_overlay_runs_on_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                let n = 4096;
+                let mut nodes = shared_axis_diamond(0);
+                for id in 1..n {
+                    let mut node = nodes[0].clone();
+                    node.id = id;
+                    nodes.push(node);
+                }
+                for source in 0..n {
+                    let mut node = nodes[0].clone();
+                    node.id = nodes.len() as u64;
+                    node.op = WireRiscOp::Const {
+                        value: chelis_types::scalar_from_f64("large conditional", Prim::F32, 0.0)
+                            .unwrap(),
+                    };
+                    node.shape_deps = vec![source];
+                    nodes.push(node);
+                }
+                let mut previous = None;
+                for source in n..2 * n {
+                    previous = Some(append_test_witness(
+                        &mut nodes,
+                        source,
+                        &previous.into_iter().collect::<Vec<_>>(),
+                    ));
+                }
+                let origins = WireIngressOrigins::new(&nodes);
+                let mut sources = (0..n).collect::<Vec<_>>();
+                sources.push(nodes.len() as u64);
+                let cache = origins.comparison(&nodes, &sources);
+                let a = WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 };
+                let b = WireSemanticAxisOrigin::ExternalAxis {
+                    load: n - 1,
+                    axis: 0,
+                };
+                assert!(wire_witnessed_origin_equal(
+                    &nodes, a, b, &sources, false, &cache
+                ));
+                assert_eq!(
+                    origins.witness_index.borrow().conditional.pairs.len(),
+                    n as usize - 1
+                );
+                sources.remove(n as usize - 1);
+                let cache = origins.comparison(&nodes, &sources);
+                assert!(!wire_witnessed_origin_equal(
+                    &nodes, a, b, &sources, false, &cache
+                ));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn conditional_long_choice_aliases_share_plan_storage() {
         let n = 128;
         let mut nodes = shared_axis_diamond(0);

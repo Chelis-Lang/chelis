@@ -176,12 +176,12 @@ The same public allocation harness compares exact `b0f01b650` with the index:
 The retained index raises peak heap in this bounded family. The allocation owner
 keeps its existing peak bound and extends its allocation bound to this strict
 witness family; both new work/allocation assertions reject the main control.
-A separate contextual-observation fixture retains fallback and its existing peak
-bound without claiming linear allocation. Raw receipts belong to the author
+The strict-only contextual-observation control retains fallback and its existing
+peak bound without claiming linear allocation. Raw receipts belong to the author
 report. No wall-clock ratio is claimed on the shared host.
 
 The contextual-observation fallback fixture uses the identical harness against
-main and the index, with each observed Const carrying its own Load dependency:
+main and the strict-only index, with each observed Const carrying its own Load dependency:
 
 | Comparisons | Main/index allocated bytes | Main/index peak bytes |
 | --- | --- | --- |
@@ -189,8 +189,9 @@ main and the index, with each observed Const carrying its own Load dependency:
 | 64 | 1,950,772 / 1,972,404 | 394,278 / 403,814 |
 | 128 | 5,127,060 / 5,171,396 | 786,518 / 806,470 |
 
-Index setup adds allocation and retained state in this unsupported family;
-its contextual fallback remains a residual. The control temporarily substitutes
+Strict-only index setup adds allocation and retained state in this family.
+Conditional plans below address its one-layer source choices; opaque contextual
+observations retain fallback. The control temporarily substitutes
 only the exact main schema source in the exclusive author tree, retains the same
 allocation harness and all assertions, and restores the candidate source bytes
 before focused validation. Neither measurement is a timing-speedup claim.
@@ -224,11 +225,12 @@ With W witness observations, E original claim slots, P compiled observation
 states, D explicit ordered candidate records, R sufficient strict states and V
 strict origins, retained setup storage is O(W + E + P + D + R + V). Strict
 resolution work T and map comparisons remain separately counted. For each group,
-C relevant keys select S source postings and K active conditional plans. The
-additional overlay work includes C + S + K, prefix-count searches, the smaller of
+C relevant keys select S source postings and K active conditional plans. Overlay construction includes S + K, prefix-count searches, the smaller of
 K(K+1)/2 and eligible conditional incidence count, active conditional-to-strict
 incidences, historical strict-root walks and equality queries, with ordered-map
-comparison factors. Only one overlay survives per group. Dense postings, many
+comparison factors. Each equality query also projects, sorts and compares its
+relevant-source key: charge its full key length and sorting comparisons for every
+query, even when the overlay is reused. Only one overlay survives per group. Dense postings, many
 conditional-to-strict edges and opaque fallback can still require repeated work;
 this bound is not automatically linear in graph nodes.
 
@@ -239,3 +241,38 @@ controls cover changing and alternating authorities, unrelated-origin rejection,
 malformed references and an earlier shape error followed by a later non-shape
 error. A dense-active/sparse-edge control forces incidence enumeration; a long
 shared-choice control requires aliases to share candidate and posting storage.
+
+The exact `43cd1becdfb` control and conditional plans use the same public fixture
+builder. The control adds only a test-only work reporter to the parent schema.
+For 16/32/64 distinct singleton source choices, the control scans
+480/1,984/8,064 witness nodes and expands 279/815/2,655 axis states. Conditional
+plans scan no fallback witnesses and expand 128/256/512 axis states. At 64 they
+compile 64 plans, visit 128 candidate records, select 504 source/query postings,
+probe 186 pairs and two incidences, and construct 63 overlay edges. Strict setup
+accounts separately for 64 successful and 64 failed states. Semantic visits remain
+1,016. Ordered-map comparisons can increase: at 64 the new maps make 22,424
+comparisons versus 2,900 in the strict-only control; shape/authority comparisons
+are 24,532 versus 24,343. This is a structural witness-scan claim, not a CPU ratio.
+The alternating control scans 256/1,024/4,096 witness nodes; conditional plans
+retain zero fallback and bounded pair/incidence work in that family too.
+
+| Comparisons | Strict-only/conditional allocated bytes | Strict-only/conditional allocation calls | Strict-only/conditional peak bytes |
+| --- | --- | --- | --- |
+| 32 | 836,412 / 725,332 | 7,704 / 5,424 | 202,326 / 220,566 |
+| 64 | 1,972,404 / 1,456,148 | 19,672 / 10,842 | 403,814 / 440,662 |
+| 128 | 5,171,396 / 2,918,924 | 56,412 / 21,673 | 806,470 / 879,606 |
+
+The existing allocation bound now covers conditional observations and rejects
+the exact parent at 64. For the full 128 control receipt only its parent guard
+disposition is used; fixture construction, peak bounds and malformed rejection
+remain unchanged. Both source files are restored byte-for-byte before candidate
+validation. Retained peak increases; no peak-reduction or shared-host timing claim
+is made. The dense-active/sparse-edge control takes 30/62/126 incidences and no
+pair probes at 16/32/64 active plans. A 4,096-plan chain validates and rejects a
+missing source on a 512 KiB worker stack.
+
+The remaining opaque/contextual fallback can still cause polynomial repeated
+prefix work. No remaining exponential expanded-path acceptance witness is
+established by these probes. Arbitrary nested metadata proof reentry and universal
+whole-ingress bounds remain unknown; this mechanism makes no termination or
+acceptance claim for that separate question. Issue #3231 remains open.
