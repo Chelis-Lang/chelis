@@ -968,7 +968,8 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// Main separately used V39 for #2419's Iota and ordered List DAG layout.
 /// V40 combines both payloads without accepting either V39 encoding.
 // Deep 0.20 (#3130) removes Pipe and SurfPipeStage from serialized syntax.
-const CACHE_FORMAT_VERSION: u32 = 41;
+// Rank-body evidence changes the mandatory TypeEnv and library-proof payload.
+const CACHE_FORMAT_VERSION: u32 = 43;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///

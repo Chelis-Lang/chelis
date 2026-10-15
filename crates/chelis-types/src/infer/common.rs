@@ -1590,16 +1590,6 @@ fn install_exact_op35_dependency_contracts(
     }
 }
 
-/// Extract the callee name from an `app`'s first child when it is `(var {} name)`.
-pub(super) fn app_var_name(callee: &deep::Expr) -> Option<&str> {
-    // chelis#1107 amendment: carrier-preserving read.
-    let (tag, _, kids) = stamped_parts(callee)?;
-    if tag != DeepTag::Var {
-        return None;
-    }
-    kids.first().and_then(symbol_name)
-}
-
 // ── Top-level inference (second pass) ────────────────────────────
 
 /// A recursive group member's inferred type, held until the whole group is

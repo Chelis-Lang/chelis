@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_the_ordered_list_operations_and_result_origins() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 42);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 44);
     }
 
     #[test]

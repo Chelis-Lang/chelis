@@ -65,6 +65,7 @@ pub(super) struct TopLevelReferenceGraph {
     pub(super) item_references: Vec<Vec<TopLevelReference>>,
     pub(super) complete: bool,
     pub(super) applications: UnordMap<usize, ResolvedApplication>,
+    pub(super) external_references: Vec<BTreeMap<String, TopLevelReferenceKind>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,6 +164,7 @@ impl TopLevelReferenceGraph {
         let mut graph = Self {
             definition_vertex_by_item: vec![None; items.len()],
             item_references: vec![Vec::new(); items.len()],
+            external_references: vec![BTreeMap::new(); items.len()],
             complete: true,
             ..Self::default()
         };
@@ -221,13 +223,16 @@ impl TopLevelReferenceGraph {
             }
             let mut references = BTreeSet::new();
             let mut bound = Vec::new();
+            let mut external_references = BTreeMap::new();
             collect_top_level_references(
                 expr,
                 &graph.vertex_by_name,
                 &mut bound,
                 &mut references,
                 &mut graph.applications,
+                &mut external_references,
             );
+            graph.external_references[item_index] = external_references;
 
             // [04-INF-4]: the literal self-reference of an explicitly typed
             // external input is its declaration spelling, not an eager edge.
@@ -734,6 +739,7 @@ fn collect_top_level_references(
     bound: &mut Vec<UnordSet<String>>,
     references: &mut BTreeSet<TopLevelReference>,
     applications: &mut UnordMap<usize, ResolvedApplication>,
+    external_references: &mut BTreeMap<String, TopLevelReferenceKind>,
 ) {
     stack_guard!("collect_top_level_references", expr);
     match expr {
@@ -746,6 +752,7 @@ fn collect_top_level_references(
                     bound,
                     references,
                     applications,
+                    external_references,
                 );
             });
         }
@@ -757,6 +764,7 @@ fn collect_top_level_references(
             bound,
             references,
             applications,
+            external_references,
         ),
         deep::Expr::Node(node, _) => match node.tag() {
             DeepTag::App => {
@@ -771,6 +779,9 @@ fn collect_top_level_references(
                     },
                     None => ResolvedApplication::Computed,
                 };
+                if let ResolvedApplication::Unshadowed(name) = &target {
+                    external_references.insert(name.clone(), TopLevelReferenceKind::Apply);
+                }
                 applications.insert(expr_key(expr), target);
                 if let Some(callee) = kids.first().and_then(var_name_expr)
                     && vertex_by_name.contains_key(callee)
@@ -787,6 +798,7 @@ fn collect_top_level_references(
                         bound,
                         references,
                         applications,
+                        external_references,
                     );
                 }
                 for argument in kids.iter().skip(1) {
@@ -796,6 +808,7 @@ fn collect_top_level_references(
                         bound,
                         references,
                         applications,
+                        external_references,
                     );
                 }
             }
@@ -808,6 +821,12 @@ fn collect_top_level_references(
                         target: vertex_by_name[name],
                         kind: TopLevelReferenceKind::Read,
                     });
+                } else if let Some(name) = node.children_slice().first().and_then(symbol_name)
+                    && !is_bound_name(name, bound)
+                {
+                    external_references
+                        .entry(name.to_string())
+                        .or_insert(TopLevelReferenceKind::Read);
                 }
             }
             DeepTag::Fn => {
@@ -827,6 +846,7 @@ fn collect_top_level_references(
                         bound,
                         references,
                         applications,
+                        external_references,
                     );
                     bound.pop();
                 }
@@ -849,6 +869,7 @@ fn collect_top_level_references(
                             bound,
                             references,
                             applications,
+                            external_references,
                         );
                         if let Some(name) = symbol_name(&bind_kids[index]) {
                             bound
@@ -865,6 +886,7 @@ fn collect_top_level_references(
                     bound,
                     references,
                     applications,
+                    external_references,
                 );
                 bound.pop();
             }
@@ -877,6 +899,7 @@ fn collect_top_level_references(
                         bound,
                         references,
                         applications,
+                        external_references,
                     );
                 }
                 for arm in kids.iter().skip(1) {
@@ -887,6 +910,7 @@ fn collect_top_level_references(
                             bound,
                             references,
                             applications,
+                            external_references,
                         );
                         continue;
                     };
@@ -905,6 +929,7 @@ fn collect_top_level_references(
                             bound,
                             references,
                             applications,
+                            external_references,
                         );
                     }
                     bound.pop();
@@ -918,6 +943,7 @@ fn collect_top_level_references(
                         bound,
                         references,
                         applications,
+                        external_references,
                     );
                 }
             }
@@ -930,6 +956,7 @@ fn collect_top_level_references(
                     bound,
                     references,
                     applications,
+                    external_references,
                 );
             }
         }
@@ -941,6 +968,7 @@ fn collect_top_level_references(
                     bound,
                     references,
                     applications,
+                    external_references,
                 );
             }
         }

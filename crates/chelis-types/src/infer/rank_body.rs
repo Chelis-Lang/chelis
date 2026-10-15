@@ -4,9 +4,164 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct RankDependency {
+    owner: [u8; 32],
+    needs_body: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct RankBodyEvidence {
+    owner: [u8; 32],
+    signature: [u8; 32],
+    component_owner: String,
+    dependencies: BTreeMap<String, RankDependency>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RankBodyContext {
-    declarations: BTreeMap<String, [u8; 32]>,
+    owners: BTreeMap<String, [u8; 32]>,
+    declarations: BTreeMap<String, RankBodyEvidence>,
+}
+
+fn syntax_digest(exprs: &[deep::Expr]) -> [u8; 32] {
+    Sha256::digest(chelis_deep::printer::print_canonical_flat(exprs).as_bytes()).into()
+}
+
+impl RankBodyContext {
+    fn replace_owners(&mut self, exprs: &[deep::Expr]) -> BTreeSet<String> {
+        let mut groups = BTreeMap::<String, Vec<deep::Expr>>::new();
+        for expr in top_level_decl_items(exprs) {
+            if let Some(name) = top_level_decl_name(expr) {
+                groups
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(expr.clone());
+            }
+        }
+        for (name, items) in &groups {
+            self.owners.insert(name.clone(), syntax_digest(items));
+        }
+        groups.into_keys().collect()
+    }
+
+    fn invalid_dependencies(&self, name: &str, evidence: &RankBodyEvidence) -> bool {
+        self.owners.get(name) != Some(&evidence.owner)
+            || !self.declarations.contains_key(&evidence.component_owner)
+            || evidence.dependencies.iter().any(|(target, dependency)| {
+                self.owners.get(target) != Some(&dependency.owner)
+                    || (dependency.needs_body && !self.declarations.contains_key(target))
+            })
+    }
+
+    /// Invalidate requiring callers and whole jointly checked SCCs through a
+    /// reverse index, without repeatedly rescanning a dependency chain.
+    fn invalidate_changed_dependencies(&mut self) {
+        let mut reverse = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut groups = BTreeMap::<String, Vec<String>>::new();
+        let mut pending = BTreeSet::new();
+        for (name, evidence) in &self.declarations {
+            groups
+                .entry(evidence.component_owner.clone())
+                .or_default()
+                .push(name.clone());
+            if self.invalid_dependencies(name, evidence) {
+                pending.insert(name.clone());
+            }
+            for (target, dependency) in &evidence.dependencies {
+                if dependency.needs_body {
+                    reverse
+                        .entry(target.clone())
+                        .or_default()
+                        .insert(name.clone());
+                }
+            }
+        }
+        while let Some(name) = pending.pop_first() {
+            let Some(evidence) = self.declarations.remove(&name) else {
+                continue;
+            };
+            if let Some(members) = groups.remove(&evidence.component_owner) {
+                pending.extend(members);
+            }
+            if let Some(callers) = reverse.remove(&name) {
+                pending.extend(callers);
+            }
+        }
+    }
+
+    pub(crate) fn bind_checked_declarations(
+        &mut self,
+        exprs: &[deep::Expr],
+        types: &BTreeMap<String, deep::Expr>,
+    ) -> Result<(), String> {
+        let replaced = self.replace_owners(exprs);
+        for name in &replaced {
+            let Some(evidence) = self.declarations.get_mut(name) else {
+                continue;
+            };
+            let ty = types.get(name).ok_or_else(|| {
+                format!("rank body evidence for `{name}` has no checked type owner")
+            })?;
+            evidence.owner = self.owners[name];
+            evidence.signature = syntax_digest(std::slice::from_ref(ty));
+            for (target, dependency) in &mut evidence.dependencies {
+                dependency.owner = *self.owners.get(target).ok_or_else(|| {
+                    format!("rank body dependency `{target}` has no declaration owner")
+                })?;
+            }
+        }
+        self.invalidate_changed_dependencies();
+        self.validate(types)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.owners.is_empty() && self.declarations.is_empty()
+    }
+
+    pub(crate) fn validate(&self, types: &BTreeMap<String, deep::Expr>) -> Result<(), String> {
+        for (name, evidence) in &self.declarations {
+            if self.invalid_dependencies(name, evidence)
+                || types
+                    .get(name)
+                    .map(|ty| syntax_digest(std::slice::from_ref(ty)))
+                    != Some(evidence.signature)
+            {
+                return Err(format!(
+                    "rank body evidence for `{name}` disagrees with its declaration, type, component, or dependency owner"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        fn name(hasher: &mut Sha256, name: &str) {
+            hasher.update((name.len() as u64).to_le_bytes());
+            hasher.update(name.as_bytes());
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"chelis-rank-body-evidence-v1");
+        hasher.update((self.owners.len() as u64).to_le_bytes());
+        for (key, owner) in &self.owners {
+            name(&mut hasher, key);
+            hasher.update(owner);
+        }
+        hasher.update((self.declarations.len() as u64).to_le_bytes());
+        for (key, evidence) in &self.declarations {
+            name(&mut hasher, key);
+            hasher.update(evidence.owner);
+            hasher.update(evidence.signature);
+            name(&mut hasher, &evidence.component_owner);
+            hasher.update((evidence.dependencies.len() as u64).to_le_bytes());
+            for (target, dependency) in &evidence.dependencies {
+                name(&mut hasher, target);
+                hasher.update(dependency.owner);
+                hasher.update([u8::from(dependency.needs_body)]);
+            }
+        }
+        hasher.finalize().into()
+    }
 }
 
 fn rank_body_error(def_name: &str, message: String) -> CheckError {
@@ -48,6 +203,9 @@ fn check_body(
                 format!("may not call `{}`: checked name-preserving body evidence is unavailable", graph.definition(*vertex).name),
             )),
             Some(ResolvedApplication::Unshadowed(name)) if context.declarations.contains_key(name) => {}
+            Some(ResolvedApplication::Unshadowed(name)) if context.owners.contains_key(name) => errors.push(rank_body_error(
+                def_name, format!("may not call `{name}`: checked name-preserving body evidence is unavailable"),
+            )),
             Some(ResolvedApplication::Unshadowed(name)) => match builtins::shape_class(name) {
                 Some(builtins::ShapeClass::Identity | builtins::ShapeClass::NameTracked
                     | builtins::ShapeClass::OrderedPrefix | builtins::ShapeClass::Inert) => {}
@@ -90,24 +248,22 @@ pub(super) fn validate_rank_bodies(
 ) -> RankBodyContext {
     let items = top_level_decl_items(exprs);
     let mut context = base.clone();
-    for expr in &items {
-        if let Some(name) = top_level_decl_name(expr) {
-            context.declarations.remove(name);
-        }
-    }
-    let components = graph.inference_components();
+    context.replace_owners(exprs);
+    context.invalidate_changed_dependencies();
+    let components = &product.function_inference_plan;
     if !components.complete {
         return context;
     }
     let cancel = crate::cancel::current_cancel_token();
     let mut accepted = BTreeSet::new();
-    for component in components.components {
+    for component in &components.components {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
             break;
         }
         let mut candidate = BTreeSet::new();
-        for index in &component.members {
-            if let Some(vertex) = graph.definition_vertex_by_item[*index]
+        for member in &component.members {
+            let index = member.item_index;
+            if let Some(vertex) = graph.definition_vertex_by_item[index]
                 && graph.definition(vertex).kind == TopLevelDefinitionKind::Function
             {
                 candidate.insert(vertex);
@@ -115,12 +271,13 @@ pub(super) fn validate_rank_bodies(
         }
         let mut checked = Vec::new();
         let mut component_valid = true;
-        for index in &component.members {
-            let Some(vertex) = graph.definition_vertex_by_item[*index] else {
+        for member in &component.members {
+            let index = member.item_index;
+            let Some(vertex) = graph.definition_vertex_by_item[index] else {
                 continue;
             };
             let definition = graph.definition(vertex);
-            let Some((DeepTag::Def, _, def_kids)) = stamped_parts(items[*index]) else {
+            let Some((DeepTag::Def, _, def_kids)) = stamped_parts(items[index]) else {
                 continue;
             };
             let Some((DeepTag::Fn, _, fn_kids)) = def_kids.get(1).and_then(stamped_parts) else {
@@ -142,22 +299,55 @@ pub(super) fn validate_rank_bodies(
                 &mut failures,
             );
             component_valid &= failures.is_empty();
-            checked.push((vertex, *index, failures));
+            checked.push((vertex, index, failures));
         }
+        let component_owner = component
+            .members
+            .iter()
+            .map(|member| member.name.as_str())
+            .min()
+            .expect("component has members");
         for (vertex, index, failures) in checked {
             let name = &graph.definition(vertex).name;
             let (_, _, def_kids) = stamped_parts(items[index]).expect("checked definition");
-            let required = product
+            let signature = product
                 .owner_type(&def_kids[1], "rank-body function", errors)
-                .is_some_and(|ty| type_contains_rank(&ty))
-                && !is_exact_op35_wrapper(name);
-            if component_valid {
+                .map(|ty| (type_contains_rank(&ty), type_to_deep_expr(&ty)));
+            let required =
+                signature.as_ref().is_some_and(|(rank, _)| *rank) && !is_exact_op35_wrapper(name);
+            if component_valid && let Some((_, signature)) = signature {
                 accepted.insert(vertex);
-                let canonical =
-                    chelis_deep::printer::print_canonical_flat(std::slice::from_ref(items[index]));
-                context
-                    .declarations
-                    .insert(name.clone(), Sha256::digest(canonical.as_bytes()).into());
+                let mut dependencies = BTreeMap::new();
+                for reference in &graph.item_references[index] {
+                    let target = &graph.definition(reference.target).name;
+                    dependencies.insert(
+                        target.clone(),
+                        RankDependency {
+                            owner: context.owners[target],
+                            needs_body: reference.kind == TopLevelReferenceKind::Apply,
+                        },
+                    );
+                }
+                for (target, kind) in &graph.external_references[index] {
+                    if let Some(owner) = context.owners.get(target) {
+                        dependencies.insert(
+                            target.clone(),
+                            RankDependency {
+                                owner: *owner,
+                                needs_body: *kind == TopLevelReferenceKind::Apply,
+                            },
+                        );
+                    }
+                }
+                context.declarations.insert(
+                    name.clone(),
+                    RankBodyEvidence {
+                        owner: context.owners[name],
+                        signature: syntax_digest(std::slice::from_ref(&signature)),
+                        component_owner: component_owner.to_string(),
+                        dependencies,
+                    },
+                );
             } else if required {
                 if failures.is_empty() {
                     errors.push(rank_body_error(name, "has no body evidence: a member of its recursive component is not name-trackable".to_string()));

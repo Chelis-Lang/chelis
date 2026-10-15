@@ -135,6 +135,7 @@ mod operand_deferral;
 mod program;
 mod program_schedule;
 mod rank_body;
+pub(crate) use rank_body::RankBodyContext;
 pub(crate) mod recursion;
 mod representable_extent;
 mod rigid;
