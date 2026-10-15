@@ -85,6 +85,10 @@ The style gate runs first. An unformatted file fails before type checking,
 with `score` 0 and one error whose message says to run
 `chelis fmt --inplace FILE`.
 
+A named Surf library module can have an empty member list. `chelis check`
+validates its module identity and imports inside and outside Reef.
+Source with no declarations remains an input error.
+
 `chelis check DIRECTORY` checks every `.ch` and `.dp` file under it and prints
 one JSON object with a `files` array of per-file reports and an `errors`
 array for failures that belong to no single file. Any failure makes it exit
