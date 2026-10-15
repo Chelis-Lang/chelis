@@ -69,6 +69,141 @@ fn direct_and_multi_hop_helpers_preserve_complete_parametric_rows() {
     }
 }
 
+fn invalid_function_metadata(ty: &str) -> Vec<Expr> {
+    chelis_deep::parser::parse_str(&format!(
+        "(def {{}} invalid (fn {{type: {ty}}} (params {{}} x) (var {{}} x)))"
+    ))
+    .expect("authored metadata fixture parses")
+}
+
+fn rejected_without_rank_stamp_cascade<T: std::fmt::Debug>(
+    result: Result<T, InferResult>,
+    label: &str,
+) -> Vec<String> {
+    let errors = result.expect_err(label).errors;
+    assert!(
+        !errors.is_empty(),
+        "{label}: rejection must retain its owner"
+    );
+    assert!(
+        errors
+            .iter()
+            .all(|error| !error.message.contains("annotation owner-stamp invariant")),
+        "{label}: failed inference cannot require rank-body stamps: {errors:?}"
+    );
+    errors.into_iter().map(|error| error.message).collect()
+}
+
+#[test]
+fn invalid_authored_function_metadata_keeps_its_diagnostic_owners() {
+    for ty in [
+        "(t-fn {} (t-prim {} madeup) (t-prim {} madeup))",
+        "(t-fn {} (t-prim {} f32))",
+    ] {
+        let program = invalid_function_metadata(ty);
+        let ir = rejected_without_rank_stamp_cascade(check_ir_program(&program), ty);
+        let typed = rejected_without_rank_stamp_cascade(check_typed_program(&program), ty);
+        assert_eq!(typed, ir, "both ingresses preserve owning diagnostics");
+        if ty.contains("madeup") {
+            assert_eq!(ir.len(), 1, "repeated unknown type has one owner: {ir:?}");
+            assert!(ir[0].contains("`madeup`"));
+        }
+    }
+    let mut program =
+        invalid_function_metadata("(t-fn {} (t-prim {} first_unknown) (t-prim {} second_unknown))");
+    program.extend(parse(LIBRARY));
+    let messages =
+        rejected_without_rank_stamp_cascade(check_ir_program(&program), "distinct annotations");
+    assert_eq!(
+        messages.len(),
+        2,
+        "distinct user errors remain visible: {messages:?}"
+    );
+    assert!(messages[0].contains("`first_unknown`"));
+    assert!(messages[1].contains("`second_unknown`"));
+}
+
+#[test]
+fn rejected_partial_inference_publishes_no_library_or_replacement_context() {
+    let (base, _) = build_compiled_library_context(&parse(LIBRARY)).expect("valid base");
+    let base_bytes = serde_json::to_vec(&base).expect("base serializes");
+    let mut invalid = invalid_function_metadata("(t-fn {} (t-prim {} madeup) (t-prim {} madeup))");
+    invalid.extend(parse(&format!("{LIBRARY}{WRAPPER}")));
+    // Every construction API returns an error, never a partially checked
+    // context containing the independently valid wrapper.
+    rejected_without_rank_stamp_cascade(
+        chelis_types::build_type_env_from_library(&invalid),
+        "standalone TypeEnv construction",
+    );
+    rejected_without_rank_stamp_cascade(
+        build_compiled_library_context(&invalid),
+        "standalone compiled context construction",
+    );
+    rejected_without_rank_stamp_cascade(
+        build_compiled_library_context_with_base(&base, &invalid),
+        "layered context construction",
+    );
+    rejected_without_rank_stamp_cascade(check_ir_with_context(&base, &invalid), "layered check");
+    assert_eq!(
+        serde_json::to_vec(&base).unwrap(),
+        base_bytes,
+        "rejection cannot mutate the base"
+    );
+    clean(
+        check_ir_with_context(&base, &parse(WRAPPER)),
+        "base evidence remains usable",
+    );
+}
+
+#[test]
+fn successful_inference_still_checks_rank_bodies_after_an_independent_rejection() {
+    both(&format!("{LIBRARY}{WRAPPER}"), true);
+    let unsafe_body = parse(
+        "def unsafe_helper[r](callee: &tensor[..r, f32] -> tensor[..r, f32], x: &tensor[..r, f32]) -> tensor[..r, f32] = callee(x)\n",
+    );
+    let errors = check_ir_program(&unsafe_body)
+        .expect_err("rank-body rejection remains required")
+        .errors;
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("rank-polymorphic")
+                && error.message.contains("callee")),
+        "successful inference must still enforce the body rule: {errors:?}"
+    );
+    let mut mixed = invalid_function_metadata("(t-fn {} (t-prim {} madeup) (t-prim {} madeup))");
+    mixed.extend(parse(&format!("{LIBRARY}{WRAPPER}")));
+    mixed.extend(unsafe_body);
+    for messages in [
+        rejected_without_rank_stamp_cascade(check_ir_program(&mixed), "mixed IR check"),
+        rejected_without_rank_stamp_cascade(check_typed_program(&mixed), "mixed typed check"),
+        rejected_without_rank_stamp_cascade(
+            chelis_types::build_type_env_from_library(&mixed),
+            "mixed TypeEnv construction",
+        ),
+        rejected_without_rank_stamp_cascade(
+            build_compiled_library_context(&mixed),
+            "mixed compiled context construction",
+        ),
+    ] {
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.contains("`madeup`"))
+                .count(),
+            1,
+            "mixed program retains the unknown annotation owner: {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("rank-polymorphic") && message.contains("callee")),
+            "an independent type error cannot suppress body-discipline diagnostics: {messages:?}"
+        );
+    }
+    both(&format!("{LIBRARY}{WRAPPER}"), true);
+}
+
 #[test]
 fn named_axis_helper_composes_under_the_same_unitary_anchors() {
     both(

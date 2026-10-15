@@ -244,6 +244,7 @@ pub(super) fn validate_rank_bodies(
     product: &InferenceProduct,
     graph: &TopLevelReferenceGraph,
     base: &RankBodyContext,
+    inference_succeeded: bool,
     errors: &mut DiagnosticSink<'_>,
 ) -> RankBodyContext {
     let items = top_level_decl_items(exprs);
@@ -252,7 +253,11 @@ pub(super) fn validate_rank_bodies(
     context.invalidate_changed_dependencies();
     let components = &product.function_inference_plan;
     if !components.complete {
-        return context;
+        return if inference_succeeded {
+            context
+        } else {
+            base.clone()
+        };
     }
     let cancel = crate::cancel::current_cancel_token();
     let mut accepted = BTreeSet::new();
@@ -310,13 +315,25 @@ pub(super) fn validate_rank_bodies(
         for (vertex, index, failures) in checked {
             let name = &graph.definition(vertex).name;
             let (_, _, def_kids) = stamped_parts(items[index]).expect("checked definition");
-            let signature = product
-                .owner_type(&def_kids[1], "rank-body function", errors)
-                .map(|ty| (type_contains_rank(&ty), type_to_deep_expr(&ty)));
+            let signature = if inference_succeeded {
+                product.owner_type(&def_kids[1], "rank-body function", errors)
+            } else {
+                // A rejected declaration may intentionally have no stamp.
+                // Existing stamps still own independent body diagnostics;
+                // absence supplies neither a replacement type nor evidence.
+                product
+                    .owner_types
+                    .get(&expr_key(&def_kids[1]))
+                    .map(|owner| owner.ty().clone())
+            };
             let required =
-                signature.as_ref().is_some_and(|(rank, _)| *rank) && !is_exact_op35_wrapper(name);
-            if component_valid && let Some((_, signature)) = signature {
+                signature.as_ref().is_some_and(type_contains_rank) && !is_exact_op35_wrapper(name);
+            if component_valid && let Some(signature) = signature {
                 accepted.insert(vertex);
+                if !inference_succeeded {
+                    continue;
+                }
+                let signature = type_to_deep_expr(&signature);
                 let mut dependencies = BTreeMap::new();
                 for reference in &graph.item_references[index] {
                     let target = &graph.definition(reference.target).name;
@@ -359,5 +376,9 @@ pub(super) fn validate_rank_bodies(
             }
         }
     }
-    context
+    if inference_succeeded {
+        context
+    } else {
+        base.clone()
+    }
 }

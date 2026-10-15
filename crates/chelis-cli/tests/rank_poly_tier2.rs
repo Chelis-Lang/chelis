@@ -12,6 +12,8 @@
 //! Positive/negative parity per CLAUDE.md: every "checks clean" test has a
 //! paired "rejected with the right reason" test.
 
+mod common;
+
 use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
@@ -981,25 +983,10 @@ fn imported_checked_helpers_3668_use_declaring_identity_across_two_hops() {
         build.status.success(),
         "imported helper C generation: {build:?}"
     );
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
-        chelis_backend_c::toolchain::CodegenRequirements {
-            wants_openmp: true,
-            needs_blas: false,
-        },
-    );
     let output = root.join("native");
     let binary = output.join("rank_helpers");
-    let link = StdCommand::new(&toolchain.compiler)
-        .current_dir(&output)
-        .arg("-O2")
-        .args(&toolchain.compile_flags)
-        .args(["main.c", "libchelis_runtime.a"])
-        .args(&toolchain.link_flags)
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .expect("native link");
-    assert!(link.status.success(), "imported helper link: {link:?}");
+    let link = common::link_generated(&output, "main.c", "rank_helpers");
+    assert!(link.success(), "imported helper link: {link:?}");
     let native = StdCommand::new(&binary)
         .output()
         .expect("execute imported helper binary");
