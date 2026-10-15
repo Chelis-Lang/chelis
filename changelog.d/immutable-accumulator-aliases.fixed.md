@@ -1,0 +1,1 @@
+Fold and scan construction receipts retain the original accumulator identity through immutable local aliases and alias chains within checked construction bodies, avoiding repeated full extent checks while preserving independent claims and callback effects.

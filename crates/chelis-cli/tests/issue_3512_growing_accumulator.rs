@@ -15,9 +15,11 @@ def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32
 def run[n](size: i64, steps: i64) -> i64 ! {{ IO }} = {{
   _ = fold(fn (acc: Chain[{claim}], i: i64) -> {{
   _ = print("before")
+  old = acc
+  older = old
   v = produce(size)
   _ = print("after")
-  Link {{ v, next: acc }}
+  Link {{ v, next: older }}
 }}, End {{ v: produce(3i64) }}, range(0i64, steps))
   42i64
 }}
@@ -74,9 +76,9 @@ fn growing_chain_entry_preserves_effects_and_final_iteration() {
 
 fn list_source(path: &str, steps: usize, claim: &str, prepend: bool, scan: bool) -> String {
     let step = if prepend {
-        "concat([v], acc)"
+        "concat([v], older)"
     } else {
-        "append(acc, v)"
+        "append(older, v)"
     };
     let combinator = if scan { "scan" } else { "fold" };
     let generic = if claim == "n" { "[n]" } else { "" };
@@ -84,6 +86,8 @@ fn list_source(path: &str, steps: usize, claim: &str, prepend: bool, scan: bool)
         r#"def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)
 def run{generic}(seed: List[tensor[{claim}, f32]], size: i64, steps: i64) -> i64 ! {{ IO }} = len({combinator}(fn (acc: List[tensor[{claim}, f32]], i: i64) -> {{
   _ = print("before")
+  old = acc
+  older = old
   v = produce(size)
   _ = print("after")
   {step}
@@ -545,7 +549,7 @@ fn named_definition_accumulator_claim_has_independent_compositional_receipts() {
                                     )
                                 };
                                 let body = if unproved {
-                                    "{\n old = acc\n append(old, produce(3i64))\n}"
+                                    "{\n old = if i == 0i64 then acc else acc\n append(old, produce(3i64))\n}"
                                 } else {
                                     "append(acc, produce(3i64))"
                                 };
@@ -652,15 +656,19 @@ fn preceding_independent_callback_entry_has_its_own_bounded_receipt() {
 fn named_prepend_keeps_new_first_witness_and_independent_result_claim() {
     for native in [false, true] {
         for combine in ["fold", "scan"] {
-            for unproved in [false, true] {
+            for aliased in [false, true] {
                 for result_claim in [false, true] {
                     for steps in [0, 1, 2] {
                         let result = if result_claim { "3" } else { "*" };
                         let dir = tempfile::tempdir().unwrap();
                         let path = dir.path().join("size");
                         std::fs::write(&path, "xxxxx").unwrap();
-                        let prefix = if unproved { " old = acc\n" } else { "" };
-                        let inherited = if unproved { "old" } else { "acc" };
+                        let prefix = if aliased {
+                            " old = acc\n older = old\n _ = print(\"alias\")\n"
+                        } else {
+                            ""
+                        };
+                        let inherited = if aliased { "older" } else { "acc" };
                         let source = format!(
                             "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\nsize = string_len(read_file(\"{}\"))\ndef step[n](acc: List[tensor[n, f32]], i: i64) -> List[tensor[{result}, f32]] ! {{ IO }} = {{\n _ = print(\"body\")\n {prefix} concat([produce(size)], {inherited})\n}}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = {{\n _ = {combine}(fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i), seed, range(0i64, {steps}i64))\n 42i64\n}}\nout = run([produce(3i64)])\n",
                             path.display()
@@ -671,6 +679,11 @@ fn named_prepend_keeps_new_first_witness_and_independent_result_claim() {
                         assert_eq!(
                             output.lines().filter(|line| *line == "body").count(),
                             usize::from(steps > 0),
+                            "{output}"
+                        );
+                        assert_eq!(
+                            output.lines().filter(|line| *line == "alias").count(),
+                            usize::from(aliased && steps > 0),
                             "{output}"
                         );
                         if failed {
@@ -859,7 +872,7 @@ fn named_entry_receipts_restore_the_callee_witness_for_local_claims() {
                     let path = dir.path().join("size");
                     std::fs::write(&path, "xxxxx").unwrap();
                     let source = format!(
-                        "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef independent[m](seed: List[tensor[m, f32]], size: i64) -> i64 = {{\n v: tensor[m, f32] = produce(size)\n len(seed)\n}}\ndef step[m](acc: List[tensor[m, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{\n _ = print(\"before\")\n _ = independent([produce(5i64)], 5i64)\n size = string_len(read_file(\"{}\"))\n v: tensor[m, f32] = produce(if i == 0i64 then 3i64 else size)\n _ = print(\"after\")\n append(acc, v)\n}}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = {{\n _ = {combine}(fn (acc: List[tensor[{outer}, f32]], i: i64) -> step(acc, i), seed, range(0i64, {steps}i64))\n 42i64\n}}\nout = run([produce(3i64)])\n",
+                        "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef independent[m](seed: List[tensor[m, f32]], size: i64) -> i64 = {{\n v: tensor[m, f32] = produce(size)\n len(seed)\n}}\ndef step[m](acc: List[tensor[m, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {{\n _ = print(\"before\")\n _ = independent([produce(5i64)], 5i64)\n size = string_len(read_file(\"{}\"))\n v: tensor[m, f32] = produce(if i == 0i64 then 3i64 else size)\n _ = print(\"after\")\n old = acc\n older = old\n append(older, v)\n}}\ndef run(seed: List[tensor[3, f32]]) -> i64 ! {{ IO }} = {{\n _ = {combine}(fn (acc: List[tensor[{outer}, f32]], i: i64) -> step(acc, i), seed, range(0i64, {steps}i64))\n 42i64\n}}\nout = run([produce(3i64)])\n",
                         path.display()
                     );
                     let counterfactual =
@@ -1073,6 +1086,203 @@ fn empty_list_seeds_bind_the_first_observed_named_witness_at_its_entry() {
                         } else {
                             assert!(output.contains(&format!("out = {steps}")), "{output}");
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn immutable_alias_source(
+    claim: &str,
+    entry: &str,
+    combine: &str,
+    steps: usize,
+    operation: &str,
+) -> String {
+    let generic = if claim == "n" { "[n]" } else { "" };
+    let construction = match operation {
+        "append" => "append(older, produce(3i64))",
+        "prefix" => "concat([produce(3i64)], older)",
+        "suffix" => "concat(older, [produce(3i64)])",
+        _ => unreachable!(),
+    };
+    let body = format!("{{ old = acc\n older = old\n {construction} }}");
+    let callback = match entry {
+        "inline" => format!("fn (acc: List[tensor[{claim}, f32]], i: i64) -> {body}"),
+        "direct" => "step".to_owned(),
+        "composed" => "fn (acc: List[tensor[*, f32]], i: i64) -> step(acc, i)".to_owned(),
+        _ => unreachable!(),
+    };
+    format!(
+        "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step{generic}(acc: List[tensor[{claim}, f32]], i: i64) -> List[tensor[*, f32]] = {body}\ndef run{generic}(seed: List[tensor[{claim}, f32]]) -> i64 = len({combine}({callback}, seed, range(0i64, {steps}i64)))\nout = run([produce(3i64)])\n"
+    )
+}
+
+#[test]
+fn immutable_local_aliases_retain_bounded_accumulator_entry_work() {
+    let mut excessive = Vec::new();
+    for operation in ["append", "prefix", "suffix"] {
+        for claim in ["3", "n"] {
+            for entry in ["inline", "direct", "composed"] {
+                for combine in ["fold", "scan"] {
+                    for steps in [100, 400] {
+                        let source =
+                            immutable_alias_source(claim, entry, combine, steps, operation);
+                        let (work, origins) = counted_native(&source);
+                        eprintln!(
+                            "C immutable aliases {operation} {entry} {combine} claim={claim} K={steps}: {work}; origins={origins}"
+                        );
+                        if work > 64 * steps as u64 + 100 {
+                            excessive.push(format!(
+                                "{operation} {entry} {combine} {claim} K={steps}: {work}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(excessive.is_empty(), "{}", excessive.join("\n"));
+}
+
+fn immutable_nominal_alias_source(
+    collection: &str,
+    claim: &str,
+    entry: &str,
+    combine: &str,
+    steps: usize,
+) -> String {
+    let generic = if claim == "n" { "[n]" } else { "" };
+    let (declaration, seed, construction) = if collection == "Chain" {
+        (
+            "type Chain[T] =\n | End { v: T }\n | Link { v: T, next: Chain[T] }",
+            "End { v: produce(3i64) }",
+            "Link { v: produce(3i64), next: older }",
+        )
+    } else {
+        (
+            "type Box[T] =\n | Base { v: T }\n | Wrap { inner: Box[T] }",
+            "Base { v: produce(3i64) }",
+            "Wrap { inner: older }",
+        )
+    };
+    let formal = format!("{collection}[tensor[{claim}, f32]]");
+    let result = format!("{collection}[tensor[*, f32]]");
+    let body = format!("{{ old = acc\n older = old\n {construction} }}");
+    let callback = match entry {
+        "inline" => format!("fn (acc: {formal}, i: i64) -> {body}"),
+        "direct" => "step".to_owned(),
+        "composed" => format!("fn (acc: {result}, i: i64) -> step(acc, i)"),
+        _ => unreachable!(),
+    };
+    format!(
+        "{declaration}\ndef produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step{generic}(acc: {formal}, i: i64) -> {result} = {body}\ndef run{generic}(seed: {formal}) -> i64 = {{ _ = {combine}({callback}, seed, range(0i64, {steps}i64))\n {steps}i64 }}\nout = run({seed})\n"
+    )
+}
+
+#[test]
+fn immutable_nominal_aliases_retain_bounded_accumulator_entry_work() {
+    let mut excessive = Vec::new();
+    for collection in ["Chain", "Box"] {
+        for claim in ["3", "n"] {
+            for entry in ["inline", "direct", "composed"] {
+                for combine in ["fold", "scan"] {
+                    for steps in [100, 400] {
+                        let source = immutable_nominal_alias_source(
+                            collection, claim, entry, combine, steps,
+                        );
+                        let (work, origins) = counted_native(&source);
+                        eprintln!(
+                            "C immutable {collection} aliases {entry} {combine} claim={claim} K={steps}: {work}; origins={origins}"
+                        );
+                        if work > 64 * steps as u64 + 100 {
+                            excessive.push(format!(
+                                "{collection} {entry} {combine} {claim} K={steps}: {work}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(excessive.is_empty(), "{}", excessive.join("\n"));
+}
+
+#[test]
+fn immutable_alias_entries_check_seed_before_bound_effects() {
+    for native in [false, true] {
+        for claim in ["3", "n"] {
+            for direct in [false, true] {
+                for steps in [0, 1, 2] {
+                    for size in [3, 5] {
+                        let dir = tempfile::tempdir().unwrap();
+                        let path = dir.path().join("size");
+                        std::fs::write(&path, "x".repeat(size)).unwrap();
+                        let generic = if claim == "n" { "[n]" } else { "" };
+                        let body = "{ old = acc\n _ = print(\"alias\")\n older = old\n append(older, produce(3i64)) }";
+                        let callback = if direct {
+                            "step".to_owned()
+                        } else {
+                            format!("fn (acc: List[tensor[{claim}, f32]], i: i64) -> {body}")
+                        };
+                        let source = format!(
+                            "def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)\ndef step{generic}(acc: List[tensor[{claim}, f32]], i: i64) -> List[tensor[*, f32]] ! {{ IO }} = {body}\ndef run{generic}(seed: List[tensor[*, f32]]) -> i64 ! {{ IO }} = {{ _ = fold({callback}, seed, range(0i64, {steps}i64))\n 42i64 }}\nout = run([produce(3i64), produce(string_len(read_file(\"{}\")))])\n",
+                            path.display()
+                        );
+                        let (success, output) = result_claims::run(&source, native);
+                        let bad = size == 5 && steps > 0;
+                        assert_eq!(success, !bad, "{source}\n{output}");
+                        assert_eq!(
+                            output.lines().filter(|line| *line == "alias").count(),
+                            if bad { 0 } else { steps },
+                            "{output}"
+                        );
+                        if bad {
+                            assert!(
+                                output.contains("numeric trap: domain in load at i64"),
+                                "{output}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn single_local_aliases_have_bounded_work_and_equal_value_controls_do_not() {
+    for collection in ["List", "Chain", "Box"] {
+        for claim in ["3", "n"] {
+            for steps in [100, 400] {
+                let source = if collection == "List" {
+                    immutable_alias_source(claim, "direct", "fold", steps, "append")
+                } else {
+                    immutable_nominal_alias_source(collection, claim, "direct", "fold", steps)
+                }
+                .replace(" older = old\n", "")
+                .replace("older", "old");
+                for unproved in [false, true] {
+                    let source = if unproved {
+                        source.replace("old = acc", "old = if i == 0i64 then acc else acc")
+                    } else {
+                        source.clone()
+                    };
+                    let (work, origins) = counted_native(&source);
+                    eprintln!(
+                        "C single alias {collection} claim={claim} K={steps} unproved={unproved}: {work}; origins={origins}"
+                    );
+                    if unproved {
+                        assert!(
+                            work >= steps as u64 * steps as u64 / 2,
+                            "full equal-value entry walk: {work}"
+                        );
+                    } else {
+                        assert!(
+                            work <= 64 * steps as u64 + 100,
+                            "single original-root alias: {work}"
+                        );
                     }
                 }
             }
