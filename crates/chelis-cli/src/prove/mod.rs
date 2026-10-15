@@ -3125,7 +3125,12 @@ fn property_location_text(path: &Path, name: &str, options: &ProveOptions<'_>) -
 fn sibling_spans_path(path: &Path) -> Option<PathBuf> {
     let stem = path.file_stem()?.to_str()?;
     let candidate = path.with_file_name(format!("{stem}.spans.json"));
-    candidate.exists().then_some(candidate)
+    match fs::symlink_metadata(&candidate) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        // A present symlink or metadata failure must reach manifest validation.
+        // Path::exists follows links and would silently discard a dangling one.
+        _ => Some(candidate),
+    }
 }
 
 #[derive(Debug, Clone)]

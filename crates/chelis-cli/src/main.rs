@@ -385,7 +385,7 @@ enum Command {
         /// Emit newline-delimited JSON records instead of plain text
         #[clap(long)]
         json: bool,
-        /// Override bridge span manifest for a single `.dp` input
+        /// Override source span manifest for a single `.ch` or `.dp` input
         #[clap(long)]
         spans: Option<PathBuf>,
         /// Verification tier: auto (type check, then induction for a property that calls a recursive function, otherwise SMT, then sampling), fuzz-only, smt-only, induction-only, beacon-only

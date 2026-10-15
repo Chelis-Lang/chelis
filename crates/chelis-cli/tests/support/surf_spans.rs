@@ -253,3 +253,28 @@ fn surf_spans_directory_preflight_rejects_bad_manifest_before_green_record() {
     assert_eq!(out.status.code(), Some(3), "{out:?}");
     assert!(out.stdout.is_empty(), "{out:?}");
 }
+
+#[cfg(unix)]
+#[test]
+fn surf_spans_sibling_discovery_distinguishes_absent_valid_and_dangling_links() {
+    let dir = fixture();
+    let sidecar = dir.path().join("properties.spans.json");
+    let actual = dir.path().join("actual.spans.json");
+    std::fs::rename(&sidecar, &actual).unwrap();
+    let absent = run(dir.path(), &["--json"]);
+    assert_eq!(absent.status.code(), Some(1), "{absent:?}");
+    assert!(!String::from_utf8_lossy(&absent.stdout).contains("\"requirement\""));
+    std::os::unix::fs::symlink("actual.spans.json", &sidecar).unwrap();
+    let valid = run(dir.path(), &["--json"]);
+    assert_eq!(valid.status.code(), Some(1), "{valid:?}");
+    assert!(String::from_utf8_lossy(&valid.stdout).contains("\"id\":\"BOUND-001\""));
+    std::fs::remove_file(&actual).unwrap();
+    for args in [
+        vec!["--json"],
+        vec!["--json", "--spans", sidecar.to_str().unwrap()],
+    ] {
+        let invalid = run(dir.path(), &args);
+        assert_eq!(invalid.status.code(), Some(3), "{invalid:?}");
+        assert!(invalid.stdout.is_empty(), "{invalid:?}");
+    }
+}
