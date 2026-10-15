@@ -66,11 +66,18 @@ fn window_projection_and_submission_bypass_controls_fail() {
         assert!(!checked(&SOURCE.replace(token, "REMOVED(")), "{token}");
     }
     // A per-element runtime index call is rejected even beside the projection.
-    let per_element = SOURCE.replacen(
-        "self.projection_index(id, \"outer\", \"leaf\")",
-        "chelis_window_index(), self.projection_index(id, \"outer\", \"leaf\")",
-        1,
-    );
-    assert_ne!(per_element, SOURCE);
-    assert!(!checked(&per_element));
+    let anchor = "self.projection_index(id, \"outer\", \"leaf\")";
+    for owner in ["emit_reduce_window", "emit_reduce_window_grad"] {
+        let body = method(SOURCE, owner);
+        assert_eq!(SOURCE.matches(body).count(), 1, "unique owner {owner}");
+        assert!(body.contains(anchor), "projection in {owner}");
+        for (position, _) in body.match_indices(anchor) {
+            let mut mutated = body.to_owned();
+            mutated.replace_range(position..position + anchor.len(),
+                "format!(\"chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, leaf))\")");
+            let per_element = SOURCE.replacen(body, &mutated, 1);
+            assert_ne!(per_element, SOURCE);
+            assert!(!checked(&per_element), "{owner} projection at {position}");
+        }
+    }
 }

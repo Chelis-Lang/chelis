@@ -18,14 +18,16 @@
 //! its canonical sum (chelis#3370), so no dense product intermediate is stored.
 //!
 //! The inspected ownership plan produces 74 tensors: 23 physical owned
-//! allocations, 27 descriptor repurposes, and the 24 expansions and products
-//! of the eight inlined contractions, which take no storage. The physical
+//! allocations, 25 descriptor repurposes, the 24 expansions and products
+//! of eight inlined contractions, and two private squared inputs of
+//! layer-normalization reductions. The latter two classes take no storage. The physical
 //! tensor buffers occupy `1028 + 15384 * seq + 12 * seq^2` bytes. This measures the retained
 //! tensor storage only: inputs, runtime metadata, and temporary reduction-tree
 //! scratch are outside the polynomial. It is not a whole-process peak estimate.
 //! Any future optimization must preserve the decided arithmetic and update
 //! these measurements from its emitted ownership plan.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::process::Command;
 
@@ -51,6 +53,58 @@ fn is_owned_tensor_release(line: &str) -> bool {
         return false;
     };
     !name_suffix.is_empty() && name_suffix.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Account for this fixture’s private product nodes through checked metadata and
+/// reduction reads, rather than mistaking their omitted payloads for reuse.
+fn checked_storage_conservation(source: &str) -> Result<usize, &'static str> {
+    let mut private = BTreeSet::new();
+    for line in source
+        .lines()
+        .filter(|line| line.contains("_metadata = chelis_metadata_product_plan("))
+    {
+        let id = line
+            .trim()
+            .strip_prefix("chelis_metadata_plan *t")
+            .and_then(|tail| tail.split_once("_metadata = chelis_metadata_product_plan("))
+            .and_then(|(id, _)| id.parse::<usize>().ok())
+            .ok_or("unrecognized private product declaration")?;
+        if !private.insert(id) {
+            return Err("duplicate private product");
+        }
+        if source.contains(&format!("chelis_tensor *t{id} = ")) {
+            return Err("private product also owns a tensor");
+        }
+        if !source.lines().any(|line| {
+            line.contains("chelis_shape_reduction_plan(")
+                && line.contains(&format!("chelis_metadata_plan_shape(t{id}_metadata)"))
+        }) {
+            return Err("private product lacks its checked reduction read");
+        }
+        if source
+            .matches(&format!("chelis_metadata_plan_release(t{id}_metadata);"))
+            .count()
+            != 1
+        {
+            return Err("private product metadata must retire once");
+        }
+    }
+    if private.len() != source.matches("chelis_metadata_product_plan(").count() {
+        return Err("unrecognized product metadata call");
+    }
+    let owned = source
+        .lines()
+        .filter(|line| is_owned_tensor_allocation(line))
+        .count();
+    let repurposed = source.matches("chelis_tensor_repurpose(").count();
+    let native = source
+        .lines()
+        .filter(|line| line.contains(" __lhs_") && line.contains("_base;"))
+        .count();
+    if owned + repurposed + 3 * native + private.len() != 74 {
+        return Err("produced tensor conservation");
+    }
+    Ok(private.len())
 }
 
 /// Parse physical owned `tN = chelis_alloc(...)` calls and compute a polynomial
@@ -212,8 +266,8 @@ fn transformer_block_traceability_state_is_locked() {
     );
     // These counts and the polynomial below were read from the emitted
     // `transformer_block.c` by this test's own tallies after chelis#3370:
-    // eight `__lhs_` placements, 23 `tN = chelis_alloc` lines and 27
-    // `chelis_tensor_repurpose(` calls.
+    // eight `__lhs_` placements, 23 `tN = chelis_alloc` lines, 25
+    // `chelis_tensor_repurpose(` calls and two metadata-only square products.
     assert_eq!(
         inlined_products, 8,
         "expected all eight contractions to compute their products inside \
@@ -226,17 +280,59 @@ fn transformer_block_traceability_state_is_locked() {
          {owned_allocations}"
     );
     assert_eq!(
-        storage_repurposes, 27,
-        "expected the verified Phase 3 plan to repurpose exactly 27 physical \
+        storage_repurposes, 25,
+        "expected the verified Phase 3 plan to repurpose exactly 25 physical \
          slots for the remaining stored tensors; got {storage_repurposes}"
     );
+    let private_products = checked_storage_conservation(&source).expect("checked storage census");
     assert_eq!(
-        owned_allocations + storage_repurposes + 3 * inlined_products,
+        private_products, 2,
+        "both layer-normalization squares stay private"
+    );
+    assert_eq!(
+        owned_allocations + storage_repurposes + 3 * inlined_products + private_products,
         74,
         "every transformer result must be accounted for by a fresh physical \
          allocation, a proof-authorized descriptor repurpose, or one of an \
-         inlined contraction's two expansions and product"
+         inlined contraction's two expansions and product, or a checked private product"
     );
+    let declaration = source
+        .lines()
+        .find(|line| line.contains("_metadata = chelis_metadata_product_plan("))
+        .unwrap();
+    let id = declaration
+        .trim()
+        .strip_prefix("chelis_metadata_plan *t")
+        .unwrap()
+        .split_once("_metadata")
+        .unwrap()
+        .0;
+    for changed in [
+        source.replacen(declaration, "", 1),
+        source.replacen(declaration, &format!("{declaration}\n{declaration}"), 1),
+        source.replacen(
+            declaration,
+            &format!(
+                "{declaration}\nchelis_tensor *t{id} = chelis_alloc(0, NULL, CHELIS_DTYPE_F32);"
+            ),
+            1,
+        ),
+        source.replace(
+            &format!("chelis_metadata_plan_shape(t{id}_metadata)"),
+            "REMOVED_SHAPE",
+        ),
+        source.replace(
+            &format!("chelis_metadata_plan_release(t{id}_metadata);"),
+            "REMOVED_RELEASE",
+        ),
+        source.replacen("chelis_tensor_repurpose(", "REMOVED_REPURPOSE(", 1),
+    ] {
+        assert_ne!(changed, source);
+        assert!(
+            checked_storage_conservation(&changed).is_err(),
+            "invalid storage census accepted"
+        );
+    }
     assert_eq!(
         (slot_allocations, legacy_view_allocations),
         (0, 0),
