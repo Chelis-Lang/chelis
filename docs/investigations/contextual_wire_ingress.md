@@ -101,7 +101,6 @@ committed owner retains every bound. Both schema and harness bytes are restored
 before normal validation. Shape-first, binding-first and domain-first controls
 produce identical full diagnostics against both implementations.
 
-
 ## Strict-observation witness prefixes
 
 A lazy index is shared across ingress authority groups. It examines original
@@ -206,9 +205,9 @@ retain the original contextual fallback.
 
 Eligible original claim slots map to canonical unordered plan pairs stamped with
 the earliest declaring witness. Source postings select active plans in an exact
-shape-authority group. An ephemeral overlay combines those conditional edges with
-the historical strict partition at the original unfiltered cutoff. Conditional
-pairs are enumerated by the smaller of the active pair budget and eligible active
+shape-authority group. Direct queries combine those conditional edges with the
+historical strict partition in an ephemeral overlay at the original unfiltered
+cutoff. Conditional pairs are enumerated by the smaller of the active pair budget and eligible active
 incidence count; this avoids both rescanning an always-active anchor's degree and
 quadratic pair enumeration for dense active plans with sparse edges. Self edges
 remain actual evidence. Negative answers require a complete eligible prefix;
@@ -224,8 +223,8 @@ remains an uninvestigated question outside this mechanism.
 With W witness observations, E original claim slots, P compiled observation
 states, D explicit ordered candidate records, R sufficient strict states and V
 strict origins, retained setup storage is O(W + E + P + D + R + V). Strict
-resolution work T and map comparisons remain separately counted. For each group,
-C relevant keys select S source postings and K active conditional plans. Overlay construction includes S + K, prefix-count searches, the smaller of
+resolution work T and map comparisons remain separately counted. For each direct
+query authority group, C relevant keys select S source postings and K active conditional plans. Overlay construction includes S + K, prefix-count searches, the smaller of
 K(K+1)/2 and eligible conditional incidence count, active conditional-to-strict
 incidences, historical strict-root walks and equality queries, with ordered-map
 comparison factors. Each equality query also projects, sorts and compares its
@@ -272,19 +271,54 @@ pair probes at 16/32/64 active plans. A 4,096-plan chain validates and rejects a
 missing source on a 512 KiB worker stack.
 
 The public `public_conditional_strict_incidence_residual_is_counted` control
-makes the active conditional-to-strict term A_g explicit. One Const depending on
-Load0 is observed by successive witnesses, each linked to another strict Load
-anchor, followed by Compare(Load0, Load_j). At 16/32/64 choices the encoded graph
-has 63/127/255 nodes, but changing epochs construct 120/496/2,016 conditional-to-
-strict incidences and overlay edges. It has no original fallback. Clearing the
-Const's source dependency preserves the original exact shape rejection. This
-is an executable polynomial repeated-work residual inside #3231; the conditional
-pair strategy does not close it. Allocation/peak for this residual is not measured
-by the singleton allocation owner. A separate resolved-assignment/prefix-sharing
-mechanism would require its own authority, cutoff, completeness and memory proof.
+observes one Const depending on Load0 through successive witnesses linked to
+strict Load anchors, followed by Compare(Load0, Load_j). Its 16/32/64 cases encode
+63/127/255 nodes. Stable-membership replay visits 15/31/63 conditional-to-strict
+incidences and genuine edges, with zero fallback; the unchanged baseline visits
+120/496/2,016. Clearing the Const source dependency retains the original exact
+shape rejection. Selection, event preparation/replay and complete counted work
+have separate assertions; this is a bounded family oracle, not ingress closure.
 
 The remaining opaque/contextual fallback can also cause polynomial repeated
 prefix work. No remaining exponential expanded-path acceptance witness is
 established by these probes. Arbitrary nested metadata proof reentry and universal
 whole-ingress bounds remain unknown; this mechanism makes no termination or
 acceptance claim for that separate question. Issue #3231 remains open.
+
+## Stable-membership ordered prefix replay
+
+Supported one-layer conditional choices have a constant ordered assignment when
+all original relevant-source vectors project to the same semantic membership.
+Discovery groups these questions for scheduling without their epoch, orders them
+by original unfiltered cutoff, and retains the original epoch in every semantic
+and axis answer cache. Ordered validation still replays the original questions.
+Only one bucket's sparse selected assignment and connectivity state is retained.
+
+Connectivity uses stable raw origins. Timestamped successful strict unions and
+selected conditional edges replay once in declaring order; every edge remains
+strictly earlier than the original cutoff. Historical component roots are never
+persistent vertex keys. Genuine endpoint incidence, including self and redundant
+edges, is separate from synthetic strict forest links. An opaque eligible edge
+or selected opaque observation prevents a negative proof and preserves fallback.
+Unexpected membership, missing witness authority, cold and descending queries
+retain the existing resolver. No semantic answer crosses an epoch boundary.
+
+The stable-membership conditional-to-strict fixture has one active choice and
+n-1 edges. Its incidence visits are n-1 instead of repeated triangular prefixes;
+ordered maps and event/question ordering bound this family by O(n log n) work
+and O(n) storage. Count source projection, key comparisons, postings, sparse
+selection, strict preparation, event ordering, DSU walks, queries and fallback
+separately. With G distinct memberships and V strict origins, strict preparation
+requires O(G V) origin/forest visits plus ordered-map costs. Dense postings,
+distinct assignments, opaque fallback and large query keys remain input-sensitive. Equal assignments across different membership
+vectors are not interned. Allocation totals and peak heap require matched
+measurements and need not improve together. Metadata proof reentry remains
+uninvestigated. This mechanism does not establish whole-ingress linearity.
+
+The matched stable-membership allocation owner at 32/64/128 uses the same public
+JSON and measurement window for both derivations. Total allocated bytes change
+476,009/1,061,929/2,560,745 to 395,673/803,681/1,610,457; peak heap increases
+114,733/226,405/448,701 to 118,645/235,373/466,477. Other allocation owners retain
+their bounds but pay small grouping bookkeeping increases. These measurements
+support neither a peak reduction nor a shared-host CPU ratio. Single-epoch buckets
+retain the existing overlay because they have no repeated prefix to amortize.

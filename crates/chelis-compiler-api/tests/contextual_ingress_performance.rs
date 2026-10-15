@@ -280,3 +280,109 @@ fn public_ingress_preserves_exact_first_diagnostics() {
         "WireDag contract error: input references must resolve to earlier nodes in the owning DAG"
     );
 }
+
+// spec/10: the selected source remains Load0 while each original cutoff adds
+// one genuine conditional-to-strict claim edge. All construction is outside
+// the measured validation window, just as in the other allocation owners.
+fn stable_membership_payload(n: usize) -> (String, usize) {
+    let mut nodes = (0..n)
+        .map(|id| {
+            node(
+                id,
+                json!({"kind":"load","name":format!("x{id}")}),
+                vec![],
+                vec![],
+                "f32",
+            )
+        })
+        .collect::<Vec<_>>();
+    let conditional = nodes.len();
+    nodes.push(node(
+        conditional,
+        json!({"kind":"const","value":
+        scalar_from_f64("stable membership", Prim::F32, 0.0).unwrap()}),
+        vec![],
+        vec![0],
+        "f32",
+    ));
+    let mut anchors = Vec::new();
+    for source in 0..n {
+        let id = nodes.len();
+        let mut witness = node(
+            id,
+            json!({"kind":"extent_witness","site":"caller",
+            "parameter":format!("x{source}"),"axis":{"axis":"lit","value":0},
+            "requirements":[],"claims":[]}),
+            vec![source],
+            vec![],
+            "int64",
+        );
+        witness["output_type"]["dims"] = json!([]);
+        nodes.push(witness);
+        anchors.push(id);
+    }
+    for (source, anchor) in anchors.iter().enumerate().skip(1) {
+        let id = nodes.len();
+        let mut witness = node(
+            id,
+            json!({"kind":"extent_witness","site":"caller",
+            "parameter":"conditional","axis":{"axis":"lit","value":0},
+            "requirements":[],"claims":[{"claim":"n","requirement_declares":true}]}),
+            vec![conditional, *anchor],
+            vec![],
+            "int64",
+        );
+        witness["output_type"]["dims"] = json!([]);
+        nodes.push(witness);
+        let id = nodes.len();
+        nodes.push(node(
+            id,
+            json!({"kind":"compare","comparison":"eq"}),
+            vec![0, source],
+            vec![0],
+            "bool",
+        ));
+    }
+    let root = nodes.len() - 1;
+    (
+        json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],
+        "nodes":nodes,"roots":[root]})
+        .to_string(),
+        conditional,
+    )
+}
+
+#[test]
+fn stable_membership_prefix_allocation() {
+    let _measurement = MEASUREMENT
+        .lock()
+        .expect("exclusive allocation measurement");
+    for n in [32, 64, 128] {
+        let (json, conditional) = stable_membership_payload(n);
+        let before = LIVE.load(Relaxed);
+        PEAK.store(before, Relaxed);
+        BYTES.store(0, Relaxed);
+        CALLS.store(0, Relaxed);
+        ENABLED.store(true, Relaxed);
+        let start = Instant::now();
+        let decoded = WireDag::from_validated_json(&json);
+        let wall = start.elapsed();
+        ENABLED.store(false, Relaxed);
+        let allocated = BYTES.load(Relaxed);
+        let calls = CALLS.load(Relaxed);
+        let peak = PEAK.load(Relaxed).saturating_sub(before);
+        let decoded = decoded.expect("stable membership graph validates");
+        eprintln!(
+            "stable membership n={n} nodes={} bytes={} allocated={allocated} allocation_calls={calls} peak_heap_delta={peak} wall={wall:?}",
+            decoded.nodes.len(),
+            json.len()
+        );
+        assert!(
+            peak <= decoded.nodes.len() * 4096 + 64 * 1024,
+            "one bucket must not retain every prefix overlay: {peak}"
+        );
+        let mut bad: Value = serde_json::from_str(&json).unwrap();
+        bad["nodes"][conditional]["shape_deps"] = json!([]);
+        assert!(WireDag::from_validated_json(&bad.to_string()).is_err());
+    }
+}

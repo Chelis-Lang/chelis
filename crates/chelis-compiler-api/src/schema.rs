@@ -3642,6 +3642,140 @@ struct WireIngressWork {
     conditional_observation_entries: usize,
     conditional_plan_queries: usize,
     conditional_pair_entries: usize,
+    prefix_buckets: usize,
+    prefix_strict_preparation: usize,
+    prefix_event_records: usize,
+    prefix_event_comparisons: usize,
+    prefix_event_visits: usize,
+    prefix_question_comparisons: usize,
+    prefix_authority_items: usize,
+}
+#[cfg(test)]
+impl WireIngressWork {
+    fn total(self) -> usize {
+        let Self {
+            axis_queries,
+            axis_expansions,
+            semantic_visits,
+            node_lookups,
+            node_scan_steps,
+            dependency_steps,
+            source_membership_steps,
+            witness_node_steps,
+            witness_edges,
+            connectivity_steps,
+            context_items,
+            cache_entries,
+            validation_node_visits,
+            connectivity_seen_steps,
+            semantic_entries,
+            semantic_probes,
+            shape_questions,
+            shape_answers,
+            authority_groups,
+            key_comparisons,
+            alias_plan_steps,
+            alias_jumps,
+            source_index_probes,
+            witness_queries,
+            witness_index_nodes,
+            witness_edge_slots,
+            witness_index_edges,
+            witness_observation_queries,
+            witness_observation_entries,
+            witness_interned_origins,
+            witness_strict_queries,
+            witness_strict_expansions,
+            witness_strict_successes,
+            witness_strict_failures,
+            witness_key_comparisons,
+            witness_parent_steps,
+            witness_index_answers,
+            witness_fallbacks,
+            conditional_plan_states,
+            conditional_candidates,
+            conditional_postings,
+            conditional_pair_probes,
+            conditional_incidence_steps,
+            conditional_overlays,
+            conditional_edges,
+            conditional_queries,
+            conditional_parent_steps,
+            conditional_selection_steps,
+            conditional_prefix_probes,
+            conditional_observation_queries,
+            conditional_observation_entries,
+            conditional_plan_queries,
+            conditional_pair_entries,
+            prefix_buckets,
+            prefix_strict_preparation,
+            prefix_event_records,
+            prefix_event_comparisons,
+            prefix_event_visits,
+            prefix_question_comparisons,
+            prefix_authority_items,
+        } = self;
+        axis_queries
+            + axis_expansions
+            + semantic_visits
+            + node_lookups
+            + node_scan_steps
+            + dependency_steps
+            + source_membership_steps
+            + witness_node_steps
+            + witness_edges
+            + connectivity_steps
+            + context_items
+            + cache_entries
+            + validation_node_visits
+            + connectivity_seen_steps
+            + semantic_entries
+            + semantic_probes
+            + shape_questions
+            + shape_answers
+            + authority_groups
+            + key_comparisons
+            + alias_plan_steps
+            + alias_jumps
+            + source_index_probes
+            + witness_queries
+            + witness_index_nodes
+            + witness_edge_slots
+            + witness_index_edges
+            + witness_observation_queries
+            + witness_observation_entries
+            + witness_interned_origins
+            + witness_strict_queries
+            + witness_strict_expansions
+            + witness_strict_successes
+            + witness_strict_failures
+            + witness_key_comparisons
+            + witness_parent_steps
+            + witness_index_answers
+            + witness_fallbacks
+            + conditional_plan_states
+            + conditional_candidates
+            + conditional_postings
+            + conditional_pair_probes
+            + conditional_incidence_steps
+            + conditional_overlays
+            + conditional_edges
+            + conditional_queries
+            + conditional_parent_steps
+            + conditional_selection_steps
+            + conditional_prefix_probes
+            + conditional_observation_queries
+            + conditional_observation_entries
+            + conditional_plan_queries
+            + conditional_pair_entries
+            + prefix_buckets
+            + prefix_strict_preparation
+            + prefix_event_records
+            + prefix_event_comparisons
+            + prefix_event_visits
+            + prefix_question_comparisons
+            + prefix_authority_items
+    }
 }
 #[cfg(test)]
 thread_local! {
@@ -4170,6 +4304,11 @@ impl WireConditionalPlans {
             required,
             sources,
         } = question;
+        if let Some(prefix) = &cache.witness_prefix
+            && let Some(answer) = prefix.borrow_mut().query(question)
+        {
+            return answer;
+        }
         let mut authority = Vec::new();
         for source in sources {
             wire_ingress_work!(conditional_postings);
@@ -4313,6 +4452,252 @@ impl WireConditionalPlans {
         // Every retained local vertex is incident to an actual edge. The strict
         // index has already answered any proof requiring only strict edges.
         Some(proof || (a == b && !required))
+    }
+}
+
+// A scheduling bucket, not a semantic-answer authority. Selected one-layer
+// choices depend only on exact membership. All edges keep original timestamps.
+struct WireWitnessPrefix {
+    authority: Vec<u64>,
+    members: std::rc::Rc<Vec<bool>>,
+    maximum: u64,
+    cutoff: u64,
+    incomplete_from: Option<u64>,
+    ids: BTreeMap<WireWitnessKey<WireSemanticAxisOrigin>, usize>,
+    parents: Vec<usize>,
+    sizes: Vec<usize>,
+    incident: Vec<u64>,
+    events: Vec<(u64, usize, usize, bool)>,
+    next: usize,
+}
+impl WireWitnessPrefix {
+    fn new(
+        base: &WireWitnessIndex,
+        authority: Vec<u64>,
+        members: std::rc::Rc<Vec<bool>>,
+        maximum: u64,
+    ) -> Self {
+        wire_ingress_work!(prefix_buckets);
+        let mut prefix = Self {
+            authority,
+            members,
+            maximum,
+            cutoff: 0,
+            incomplete_from: base.conditional.opaque_from,
+            ids: BTreeMap::new(),
+            parents: Vec::new(),
+            sizes: Vec::new(),
+            incident: Vec::new(),
+            events: Vec::new(),
+            next: 0,
+        };
+        // Include all strict origins once per bucket. No historical root is a
+        // vertex identity, and a forest link does not constitute self evidence.
+        for (origin, id) in &base.origins {
+            wire_ingress_work!(prefix_strict_preparation);
+            prefix.ids.insert(*origin, *id);
+        }
+        for (id, (parent, stamp)) in base.parents.iter().enumerate() {
+            wire_ingress_work!(prefix_strict_preparation);
+            prefix.parents.push(id);
+            prefix.sizes.push(1);
+            prefix.incident.push(base.incident[id]);
+            if *parent != id && *stamp < maximum {
+                prefix.events.push((*stamp, id, *parent, false));
+                wire_ingress_work!(prefix_event_records);
+            }
+        }
+        let plans = &base.conditional;
+        let mut selected =
+            BTreeMap::<WireWitnessKey<usize>, (usize, Option<WireSemanticAxisOrigin>)>::new();
+        for source in &prefix.authority {
+            wire_ingress_work!(conditional_postings);
+            if let Some(postings) = plans.postings.get(&WireWitnessKey(*source)) {
+                for (id, position, outcome) in postings {
+                    wire_ingress_work!(conditional_postings);
+                    let entry = selected
+                        .entry(WireWitnessKey(*id))
+                        .or_insert((*position, *outcome));
+                    if position < &entry.0 {
+                        *entry = (*position, *outcome);
+                    }
+                }
+            }
+        }
+        let mut active = BTreeMap::new();
+        for (id, (_, outcome)) in selected {
+            wire_ingress_work!(conditional_selection_steps);
+            if let Some(origin) = outcome {
+                active.insert(id, origin);
+            } else if let Some(stamp) = plans.incident.get(&id) {
+                prefix.incomplete_from =
+                    Some(prefix.incomplete_from.map_or(*stamp, |old| old.min(*stamp)));
+            }
+        }
+        let mut degree = 0usize;
+        for id in active.keys() {
+            wire_ingress_work!(conditional_selection_steps);
+            if let Some(adj) = plans.adjacency.get(id) {
+                degree += adj.partition_point(|(stamp, _)| {
+                    wire_ingress_work!(conditional_prefix_probes);
+                    *stamp < maximum
+                });
+            }
+        }
+        let k = active.len();
+        let pairs = k.checked_add(1).and_then(|next| {
+            if k.is_multiple_of(2) {
+                (k / 2).checked_mul(next)
+            } else {
+                k.checked_mul(next / 2)
+            }
+        });
+        if pairs.is_some_and(|budget| budget <= degree) {
+            for (a, oa) in &active {
+                for (b, ob) in active.range(*a..) {
+                    wire_ingress_work!(conditional_pair_probes);
+                    if let Some(stamp) = plans.pairs.get(&WireWitnessKey((a.0, b.0)))
+                        && *stamp < maximum
+                    {
+                        prefix.event(*stamp, *oa, *ob);
+                    }
+                }
+            }
+        } else {
+            for (a, oa) in &active {
+                if let Some(adj) = plans.adjacency.get(a) {
+                    for (stamp, b) in adj.iter().take_while(|(stamp, _)| {
+                        wire_ingress_work!(conditional_prefix_probes);
+                        *stamp < maximum
+                    }) {
+                        wire_ingress_work!(conditional_incidence_steps);
+                        if a.0 <= *b
+                            && let Some(ob) = active.get(&WireWitnessKey(*b))
+                        {
+                            prefix.event(*stamp, *oa, *ob);
+                        }
+                    }
+                }
+            }
+        }
+        for (id, origin) in active {
+            wire_ingress_work!(conditional_selection_steps);
+            if let Some(edges) = plans.strict_edges.get(&id) {
+                for (stamp, other) in edges.iter().take_while(|(stamp, _)| {
+                    wire_ingress_work!(conditional_prefix_probes);
+                    *stamp < maximum
+                }) {
+                    wire_ingress_work!(conditional_incidence_steps);
+                    prefix.event(*stamp, origin, *other);
+                }
+            }
+        }
+        prefix.events.sort_unstable_by(|a, b| {
+            wire_ingress_work!(prefix_event_comparisons);
+            a.0.cmp(&b.0)
+        });
+        prefix
+    }
+    fn intern(&mut self, origin: WireSemanticAxisOrigin) -> usize {
+        if let Some(id) = self.ids.get(&WireWitnessKey(origin)) {
+            return *id;
+        }
+        let id = self.parents.len();
+        self.ids.insert(WireWitnessKey(origin), id);
+        self.parents.push(id);
+        self.sizes.push(1);
+        self.incident.push(u64::MAX);
+        id
+    }
+    fn event(&mut self, stamp: u64, a: WireSemanticAxisOrigin, b: WireSemanticAxisOrigin) {
+        let a = self.intern(a);
+        let b = self.intern(b);
+        self.events.push((stamp, a, b, true));
+        wire_ingress_work!(prefix_event_records);
+    }
+    fn find(&self, mut id: usize) -> usize {
+        loop {
+            wire_ingress_work!(conditional_parent_steps);
+            let parent = self.parents[id];
+            if parent == id {
+                return id;
+            }
+            id = parent;
+        }
+    }
+    // Outer None declines this scheduling authority. Inner None preserves the
+    // original contextual resolver for an incomplete eligible prefix.
+    fn query(&mut self, question: WireWitnessQuestion<'_>) -> Option<Option<bool>> {
+        let mut membership = question
+            .sources
+            .iter()
+            .copied()
+            .filter(|source| {
+                wire_ingress_work!(prefix_authority_items);
+                usize::try_from(*source)
+                    .ok()
+                    .and_then(|id| self.members.get(id))
+                    .copied()
+                    == Some(true)
+            })
+            .collect::<Vec<_>>();
+        membership.sort_unstable_by(|a, b| {
+            wire_ingress_work!(key_comparisons);
+            a.cmp(b)
+        });
+        membership.dedup();
+        if !wire_shape_key_cmp(&membership, &self.authority).is_eq()
+            || question.cutoff < self.cutoff
+            || question.cutoff > self.maximum
+        {
+            return None;
+        }
+        self.cutoff = question.cutoff;
+        while let Some(&(stamp, a, b, genuine)) = self.events.get(self.next) {
+            wire_ingress_work!(conditional_prefix_probes);
+            if stamp >= self.cutoff {
+                break;
+            }
+            self.next += 1;
+            wire_ingress_work!(prefix_event_visits);
+            if genuine {
+                self.incident[a] = self.incident[a].min(stamp);
+                self.incident[b] = self.incident[b].min(stamp);
+                wire_ingress_work!(conditional_edges);
+            }
+            let mut a = self.find(a);
+            let mut b = self.find(b);
+            if a != b {
+                if self.sizes[a] > self.sizes[b] {
+                    std::mem::swap(&mut a, &mut b);
+                }
+                self.parents[a] = b;
+                self.sizes[b] += self.sizes[a];
+            }
+        }
+        if self
+            .incomplete_from
+            .is_some_and(|stamp| stamp < self.cutoff)
+        {
+            return Some(None);
+        }
+        wire_ingress_work!(conditional_queries);
+        let answer = if question.left == question.right {
+            !question.required
+                || self
+                    .ids
+                    .get(&WireWitnessKey(question.left))
+                    .is_some_and(|id| self.incident[*id] < self.cutoff)
+        } else {
+            match (
+                self.ids.get(&WireWitnessKey(question.left)),
+                self.ids.get(&WireWitnessKey(question.right)),
+            ) {
+                (Some(a), Some(b)) => self.find(*a) == self.find(*b),
+                _ => false,
+            }
+        };
+        Some(Some(answer))
     }
 }
 
@@ -4504,6 +4889,7 @@ struct WireAxisOriginCache {
     witness_index: Option<std::rc::Rc<std::cell::RefCell<WireWitnessIndex>>>,
     strict_observations: Option<std::rc::Rc<WireStrictObservationMemo>>,
     conditional_overlay: Option<std::rc::Rc<std::cell::RefCell<Option<WireConditionalOverlay>>>>,
+    witness_prefix: Option<std::rc::Rc<std::cell::RefCell<WireWitnessPrefix>>>,
 }
 
 // Context membership is observed only by Const/ConstTensor axis resolution.
@@ -4517,6 +4903,30 @@ struct WireShapeQuestion {
     left: u64,
     right: u64,
     sources: Vec<u64>,
+}
+fn wire_shape_cutoff(nodes: &[WireDagNode], sources: &[u64]) -> u64 {
+    sources
+        .iter()
+        .copied()
+        .inspect(|_| {
+            wire_ingress_work!(context_items);
+        })
+        .max()
+        .unwrap_or_else(|| u64::try_from(nodes.len()).unwrap_or(u64::MAX))
+}
+// Scheduling membership deliberately has no epoch field. It cannot be used
+// where semantic/axis caches require WireShapeAuthority.
+#[derive(PartialEq, Eq)]
+struct WireShapeMembership(Vec<u64>);
+impl Ord for WireShapeMembership {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        wire_shape_key_cmp(&self.0, &other.0)
+    }
+}
+impl PartialOrd for WireShapeMembership {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 #[derive(PartialEq, Eq)]
 struct WireShapeAuthority(Vec<u64>, usize);
@@ -4663,6 +5073,7 @@ struct WireIngressOrigins {
     semantic: std::cell::RefCell<BTreeMap<(u64, usize, usize), Option<u64>>>,
     semantic_authority: std::cell::RefCell<Option<WireShapeAuthority>>,
     conditional_overlay: std::rc::Rc<std::cell::RefCell<Option<WireConditionalOverlay>>>,
+    witness_prefix: Option<std::rc::Rc<std::cell::RefCell<WireWitnessPrefix>>>,
 }
 impl WireIngressOrigins {
     fn new(nodes: &[WireDagNode]) -> Self {
@@ -4702,6 +5113,7 @@ impl WireIngressOrigins {
             semantic: Default::default(),
             semantic_authority: Default::default(),
             conditional_overlay: Default::default(),
+            witness_prefix: None,
         }
     }
     fn discover(nodes: &[WireDagNode]) -> Self {
@@ -4747,17 +5159,26 @@ impl WireIngressOrigins {
         let WireShapeResolution::Discover(questions) = &self.resolution else {
             unreachable!("only discovery produces grouped shape answers");
         };
-        let mut groups = BTreeMap::<WireShapeAuthority, Vec<WireShapeQuestion>>::new();
+        let mut groups =
+            BTreeMap::<WireShapeMembership, Vec<(u64, usize, WireShapeQuestion)>>::new();
         for question in questions.borrow().keys() {
             let authority = self.authority(nodes, &question.sources, &self.semantic_members);
-            groups.entry(authority).or_default().push(question.clone());
+            let epoch = authority.1;
+            let cutoff = wire_shape_cutoff(nodes, &question.sources);
+            groups
+                .entry(WireShapeMembership(authority.0))
+                .or_default()
+                .push((cutoff, epoch, question.clone()));
         }
         let mut answers = BTreeMap::new();
-        for questions in groups.into_values() {
-            wire_ingress_work!(authority_groups);
+        for (membership, mut questions) in groups {
+            questions.sort_by(|a, b| {
+                wire_ingress_work!(prefix_question_comparisons);
+                a.0.cmp(&b.0)
+            });
             // One memo per exact authority, shared across interleaved questions.
             // Drop it before the next group; retain only the final booleans.
-            let group = Self {
+            let mut group = Self {
                 stable: self.stable.clone(),
                 contextual: Default::default(),
                 source_members: self.source_members.clone(),
@@ -4769,8 +5190,45 @@ impl WireIngressOrigins {
                 semantic: Default::default(),
                 semantic_authority: Default::default(),
                 conditional_overlay: Default::default(),
+                witness_prefix: None,
             };
-            for question in questions {
+            let maximum = questions.last().map(|q| q.0);
+            // A single epoch already reuses the existing exact overlay; it
+            // has no repeated prefix to amortize and needs no prepared state.
+            if let Some(maximum) = maximum
+                && questions.first().map(|q| q.1) != questions.last().map(|q| q.1)
+            {
+                // Index preparation needs exact witness-list and plan authority,
+                // not an otherwise unused contextual comparison memo.
+                let cache = WireAxisOriginCache {
+                    witnesses: Some(group.witnesses.clone()),
+                    plans: Some(group.plans.clone()),
+                    ..Default::default()
+                };
+                let mut index = group.witness_index.borrow_mut();
+                index.advance(nodes, maximum, &cache);
+                if !index.conditional.pairs.is_empty() {
+                    group.witness_prefix = Some(std::rc::Rc::new(std::cell::RefCell::new(
+                        WireWitnessPrefix::new(
+                            &index,
+                            membership.0,
+                            group.semantic_members.clone(),
+                            maximum,
+                        ),
+                    )));
+                }
+            }
+            let mut previous_epoch = None;
+            for (_, epoch, question) in questions {
+                if previous_epoch != Some(epoch) {
+                    wire_ingress_work!(authority_groups);
+                    // Connectivity is monotone; semantic/axis answers are not.
+                    group.contextual.borrow_mut().clear();
+                    group.semantic.borrow_mut().clear();
+                    *group.semantic_authority.borrow_mut() = None;
+                    *group.conditional_overlay.borrow_mut() = None;
+                    previous_epoch = Some(epoch);
+                }
                 let answer = wire_node_shape_equal(
                     nodes,
                     &nodes[question.left as usize],
@@ -4794,6 +5252,7 @@ impl WireIngressOrigins {
             semantic: Default::default(),
             semantic_authority: Default::default(),
             conditional_overlay: Default::default(),
+            witness_prefix: None,
         }
     }
     fn comparison(&self, nodes: &[WireDagNode], relevant: &[u64]) -> WireAxisOriginCache {
@@ -4811,6 +5270,7 @@ impl WireIngressOrigins {
             witness_index: Some(self.witness_index.clone()),
             strict_observations: None,
             conditional_overlay: Some(self.conditional_overlay.clone()),
+            witness_prefix: self.witness_prefix.clone(),
             plans: Some(self.plans.clone()),
             strict: false,
         }
@@ -7385,6 +7845,363 @@ mod tests {
     }
 
     #[test]
+    fn stable_membership_conditional_all_cutoffs_orders_and_opaque_match_original() {
+        for variant in 0..9 {
+            let mut nodes = shared_axis_diamond(0);
+            let mut other = nodes[0].clone();
+            other.id = 1;
+            nodes.push(other);
+            let mut constant = nodes[0].clone();
+            constant.id = 2;
+            constant.op = WireRiscOp::Const {
+                value: chelis_types::scalar_from_f64("conditional differential", Prim::F32, 0.0)
+                    .unwrap(),
+            };
+            constant.shape_deps = if variant == 0 {
+                vec![1, 0, 1]
+            } else {
+                vec![0, 1]
+            };
+            nodes.push(constant.clone());
+            // An unsupported candidate ahead of a strict success MUST remain
+            // opaque, including when the original contextual candidate fails.
+            if variant == 1 {
+                constant.id = 3;
+                constant.shape_deps = vec![2, 0];
+                nodes.push(constant);
+            } else if variant == 2 {
+                let mut alias = nodes[2].clone();
+                alias.id = 3;
+                alias.op = WireRiscOp::Add;
+                alias.inputs = vec![2, 2];
+                alias.shape_deps.clear();
+                nodes.push(alias);
+            } else if variant == 3 {
+                nodes[2].output_type.dims[0] = WireDimInfo::Lit {
+                    size: NonnegativeExtent::new(7).unwrap(),
+                };
+            } else if variant == 4 {
+                // Const source choice does not impose an extra precision check.
+                nodes[0].output_type.precision = "f64".into();
+            } else if variant == 5 {
+                let WireRiscOp::Const { value } = &nodes[2].op else {
+                    unreachable!()
+                };
+                nodes[2].op = WireRiscOp::ConstTensor {
+                    data: chelis_types::tensor_from_scalars(Prim::F32, std::slice::from_ref(value)),
+                };
+            }
+            if variant == 8 {
+                nodes[2].output_type.dims[0] = WireDimInfo::Named {
+                    name: "batch".into(),
+                    size: Some(NonnegativeExtent::new(7).unwrap()),
+                };
+            }
+            if variant == 6 || variant == 7 {
+                let mut scan = nodes[0].clone();
+                scan.id = nodes.len() as u64;
+                scan.op = WireRiscOp::Cumsum {
+                    axis: 0,
+                    direction: WireScanDirection::Increasing,
+                };
+                scan.inputs = vec![if variant == 6 { 2 } else { 0 }];
+                nodes.push(scan);
+            }
+            let observed = nodes.last().unwrap().id;
+            let anchor = append_test_witness(&mut nodes, 0, &[]);
+            let next = append_test_witness(&mut nodes, observed, &[anchor]);
+            append_test_witness(&mut nodes, observed, &[anchor, next, next]);
+            let origins = WireIngressOrigins::new(&nodes);
+            let initial = origins.comparison(&nodes, &[nodes.len() as u64 + 4]);
+            origins
+                .witness_index
+                .borrow_mut()
+                .advance(&nodes, nodes.len() as u64 + 4, &initial);
+            for subset in 0..8 {
+                let selected = (0..3)
+                    .filter(|i| subset & (1 << i) != 0)
+                    .collect::<Vec<u64>>();
+                let authority = origins.authority(&nodes, &selected, &origins.semantic_members);
+                let prefix = std::rc::Rc::new(std::cell::RefCell::new(WireWitnessPrefix::new(
+                    &origins.witness_index.borrow(),
+                    authority.0,
+                    origins.semantic_members.clone(),
+                    nodes.len() as u64 + 4,
+                )));
+                for cutoff in (0..nodes.len() + 2).chain((0..nodes.len() + 2).rev()) {
+                    let mut sources = (0..3)
+                        .filter(|i| subset & (1 << i) != 0)
+                        .collect::<Vec<u64>>();
+                    if subset != 0 {
+                        sources.push(cutoff as u64);
+                    }
+                    let mut cache = origins.comparison(&nodes, &sources);
+                    cache.witness_prefix = Some(prefix.clone());
+                    for mode in [false, true] {
+                        for id in [2, observed as usize] {
+                            for fuel in [0, 1, nodes.len()] {
+                                assert_eq!(
+                                    wire_axis_origin_cached(
+                                        &nodes, &nodes[id], 0, fuel, &sources, mode, &cache
+                                    ),
+                                    wire_axis_origin_cached(
+                                        &nodes,
+                                        &nodes[id],
+                                        0,
+                                        fuel,
+                                        &sources,
+                                        mode,
+                                        &WireAxisOriginCache::default()
+                                    ),
+                                    "axis variant={variant} cutoff={cutoff} sources={sources:?} mode={mode} fuel={fuel}"
+                                );
+                            }
+                        }
+                    }
+                    for a in [
+                        WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 },
+                        WireSemanticAxisOrigin::ExternalAxis { load: 1, axis: 0 },
+                        WireSemanticAxisOrigin::Literal(7),
+                    ] {
+                        for b in [
+                            WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 },
+                            WireSemanticAxisOrigin::ExternalAxis { load: 1, axis: 0 },
+                            WireSemanticAxisOrigin::Literal(7),
+                        ] {
+                            for required in [false, true] {
+                                assert_eq!(
+                                    wire_witnessed_origin_equal(
+                                        &nodes, a, b, &sources, required, &cache
+                                    ),
+                                    wire_witnessed_origin_equal_original(
+                                        &nodes,
+                                        a,
+                                        b,
+                                        &sources,
+                                        required,
+                                        &WireAxisOriginCache::default()
+                                    ),
+                                    "variant={variant} cutoff={cutoff} sources={sources:?} required={required}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // spec/10: all historical prefixes retain exact edge eligibility; synthetic
+    // union links must not manufacture incident evidence for an isolated root.
+    #[test]
+    fn stable_membership_strict_forest_all_cutoffs_and_self_incidence() {
+        let mut base = WireWitnessIndex::default();
+        let origin = |load| WireSemanticAxisOrigin::ExternalAxis { load, axis: 0 };
+        base.intern(origin(9));
+        for (a, b, stamp) in [(0, 1, 2), (2, 3, 4), (1, 2, 6), (0, 3, 8), (4, 4, 10)] {
+            base.edge(origin(a), origin(b), stamp);
+        }
+        let members = std::rc::Rc::new(vec![false; 20]);
+        let mut prefix = WireWitnessPrefix::new(&base, vec![], members, 20);
+        for cutoff in 0..=20 {
+            for a in [0, 1, 2, 3, 4, 9] {
+                for b in [0, 1, 2, 3, 4, 9] {
+                    for required in [false, true] {
+                        let expected = if a == b {
+                            !required
+                                || base.incident[base.origins[&WireWitnessKey(origin(a))]] < cutoff
+                        } else {
+                            base.find(base.origins[&WireWitnessKey(origin(a))], cutoff)
+                                == base.find(base.origins[&WireWitnessKey(origin(b))], cutoff)
+                        };
+                        assert_eq!(
+                            prefix.query(WireWitnessQuestion {
+                                left: origin(a),
+                                right: origin(b),
+                                cutoff,
+                                required,
+                                sources: &[cutoff],
+                            }),
+                            Some(Some(expected)),
+                            "a={a} b={b} cutoff={cutoff} required={required}"
+                        );
+                    }
+                }
+            }
+        }
+        // Descending access is outside the prepared monotone replay authority.
+        assert_eq!(
+            prefix.query(WireWitnessQuestion {
+                left: origin(0),
+                right: origin(3),
+                cutoff: 1,
+                required: true,
+                sources: &[1],
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn stable_membership_adverse_setup_and_missing_authority_are_counted() {
+        for n in [16usize, 32, 64] {
+            let mut base = WireWitnessIndex::default();
+            let origin = |load| WireSemanticAxisOrigin::ExternalAxis { load, axis: 0 };
+            for id in 0..n {
+                base.edge(origin(id as u64), origin(id as u64), id as u64 + 1);
+            }
+            let members = std::rc::Rc::new(vec![true; n]);
+            WIRE_INGRESS_WORK.with(|w| w.set(Some(WireIngressWork::default())));
+            for selected in 0..n {
+                let mut prefix = WireWitnessPrefix::new(
+                    &base,
+                    vec![selected as u64],
+                    members.clone(),
+                    n as u64 + 2,
+                );
+                assert_eq!(
+                    prefix.query(WireWitnessQuestion {
+                        left: origin(selected as u64),
+                        right: origin(selected as u64),
+                        cutoff: n as u64 + 1,
+                        required: true,
+                        sources: &[selected as u64, n as u64 + 1],
+                    }),
+                    Some(Some(true))
+                );
+                assert_eq!(
+                    prefix.query(WireWitnessQuestion {
+                        left: origin(selected as u64),
+                        right: origin(selected as u64),
+                        cutoff: n as u64 + 1,
+                        required: true,
+                        sources: &[(selected as u64 + 1) % n as u64, n as u64 + 1],
+                    }),
+                    None,
+                    "another membership cannot borrow this assignment"
+                );
+            }
+            let work = WIRE_INGRESS_WORK.with(|w| w.replace(None).unwrap());
+            assert_eq!(work.prefix_buckets, n);
+            assert_eq!(work.prefix_strict_preparation, 2 * n * n);
+            eprintln!("adverse membership n={n}: {work:?}");
+        }
+        let nodes = contextual_witness_nodes(false, false);
+        let origins = WireIngressOrigins::new(&nodes);
+        let sources = [0, 1, nodes.len() as u64];
+        let mut cache = origins.comparison(&nodes, &sources);
+        origins
+            .witness_index
+            .borrow_mut()
+            .advance(&nodes, nodes.len() as u64, &cache);
+        let authority = origins.authority(&nodes, &sources, &origins.semantic_members);
+        cache.witness_prefix = Some(std::rc::Rc::new(std::cell::RefCell::new(
+            WireWitnessPrefix::new(
+                &origins.witness_index.borrow(),
+                authority.0,
+                origins.semantic_members.clone(),
+                nodes.len() as u64,
+            ),
+        )));
+        cache.witnesses = None;
+        WIRE_INGRESS_WORK.with(|w| w.set(Some(WireIngressWork::default())));
+        let a = WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 };
+        let b = WireSemanticAxisOrigin::ExternalAxis { load: 1, axis: 0 };
+        assert_eq!(
+            wire_witnessed_origin_equal(&nodes, a, b, &sources, true, &cache),
+            wire_witnessed_origin_equal_original(
+                &nodes,
+                a,
+                b,
+                &sources,
+                true,
+                &WireAxisOriginCache::default()
+            )
+        );
+        let work = WIRE_INGRESS_WORK.with(|w| w.replace(None).unwrap());
+        assert_eq!(
+            work.witness_fallbacks, 1,
+            "missing list must not acquire prepared authority: {work:?}"
+        );
+        assert_eq!(work.conditional_queries, 0);
+    }
+
+    #[test]
+    fn stable_membership_conditional_edges_do_not_import_future_strict_unions() {
+        let mut nodes = shared_axis_diamond(0);
+        for id in 1..3 {
+            let mut load = nodes[0].clone();
+            load.id = id;
+            nodes.push(load);
+        }
+        let mut constant = nodes[0].clone();
+        constant.id = 3;
+        constant.op = WireRiscOp::Const {
+            value: chelis_types::scalar_from_f64("prefix future strict union", Prim::F32, 0.0)
+                .unwrap(),
+        };
+        constant.shape_deps = vec![0];
+        nodes.push(constant);
+        let first = append_test_witness(&mut nodes, 1, &[]);
+        let second = append_test_witness(&mut nodes, 2, &[]);
+        let conditional = append_test_witness(&mut nodes, 3, &[first]);
+        let strict = append_test_witness(&mut nodes, 1, &[second]);
+        let origins = WireIngressOrigins::new(&nodes);
+        let maximum = nodes.len() as u64 + 1;
+        let cache = origins.comparison(&nodes, &[0, maximum]);
+        origins
+            .witness_index
+            .borrow_mut()
+            .advance(&nodes, maximum, &cache);
+        let mut prefix = WireWitnessPrefix::new(
+            &origins.witness_index.borrow(),
+            vec![0],
+            origins.semantic_members.clone(),
+            maximum,
+        );
+        for cutoff in 0..=maximum {
+            for load in 0..4 {
+                for required in [false, true] {
+                    let a = WireSemanticAxisOrigin::ExternalAxis { load: 0, axis: 0 };
+                    let b = WireSemanticAxisOrigin::ExternalAxis { load, axis: 0 };
+                    let sources = [0, cutoff];
+                    let actual = prefix
+                        .query(WireWitnessQuestion {
+                            left: a,
+                            right: b,
+                            cutoff,
+                            required,
+                            sources: &sources,
+                        })
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        actual,
+                        wire_witnessed_origin_equal_original(
+                            &nodes,
+                            a,
+                            b,
+                            &sources,
+                            required,
+                            &WireAxisOriginCache::default()
+                        ),
+                        "cutoff={cutoff} load={load} required={required}"
+                    );
+                    if load == 2 {
+                        assert_eq!(actual, cutoff > strict);
+                    }
+                    if load == 1 {
+                        assert_eq!(actual, cutoff > conditional);
+                    }
+                    if load == 3 {
+                        assert!(!actual);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn public_conditional_const_tensor_preserves_acceptance_and_shape_rejection() {
         let mut dag = contextual_prefix_comparisons(0, 1);
         let mut constant = dag.nodes[1].clone();
@@ -7417,8 +8234,6 @@ mod tests {
         assert_eq!(error, original_public_witness_result(&bad).unwrap_err());
     }
 
-    // Explicit residual, not a linear-work oracle: repeated epochs can expose
-    // a growing active conditional-to-strict adjacency. Charge every incidence.
     #[test]
     fn public_cumsum_witness_strict_and_opaque_transfers_match_original() {
         for contextual in [false, true] {
@@ -7475,6 +8290,8 @@ mod tests {
 
     #[test]
     fn public_conditional_strict_incidence_residual_is_counted() {
+        let mut incidences = Vec::new();
+        let mut measurements = Vec::new();
         for n in [16, 32, 64] {
             let mut dag = contextual_prefix_comparisons(0, 1);
             let mut constant = dag.nodes[1].clone();
@@ -7510,11 +8327,10 @@ mod tests {
                 dag.nodes.len()
             );
             assert_eq!(work.witness_fallbacks, 0, "{work:?}");
-            assert_eq!(
-                work.conditional_incidence_steps,
-                (n * (n - 1) / 2) as usize,
-                "{work:?}"
-            );
+            let all_work = work.total();
+            measurements.push(work);
+            eprintln!("stable membership all counted work n={n}: {all_work}");
+            incidences.push(work.conditional_incidence_steps);
             assert!(original_public_witness_result(&json).is_ok());
             dag.nodes[observed as usize].shape_deps.clear();
             let bad = public_witness_json(&dag);
@@ -7522,6 +8338,26 @@ mod tests {
             assert!(error.contains("requires two same-shape"), "{error}");
             assert_eq!(error, original_public_witness_result(&bad).unwrap_err());
         }
+        for (n, work) in [16u64, 32, 64].into_iter().zip(measurements) {
+            assert_eq!(work.prefix_buckets, 1, "{work:?}");
+            assert_eq!(work.prefix_event_records, (n - 1) as usize, "{work:?}");
+            assert_eq!(work.prefix_event_visits, (n - 1) as usize, "{work:?}");
+            assert_eq!(work.conditional_postings, 2, "{work:?}");
+            assert_eq!(work.conditional_selection_steps, 3, "{work:?}");
+            assert_eq!(
+                work.prefix_authority_items,
+                6 * (n - 1) as usize,
+                "{work:?}"
+            );
+            let all_work = work.total();
+            assert!(
+                all_work <= 256 * n as usize * n.ilog2() as usize,
+                "{all_work}: {work:?}"
+            );
+        }
+        // spec/10: original cutoff and membership are independent authorities.
+        // Every eligible incidence must execute once, with no old fallback.
+        assert_eq!(incidences, vec![15, 31, 63]);
     }
 
     #[test]
