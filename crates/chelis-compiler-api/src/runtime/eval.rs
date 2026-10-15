@@ -1213,7 +1213,7 @@ fn actualize_tensor_entry_parameters(
     session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
     present: Option<&[bool]>,
     nested: Option<EntryClaimPatterns<'_>>,
-    mut loop_entry: Option<&mut LoopEntryReceipt>,
+    loop_entry: Option<&mut LoopEntryReceipt>,
 ) -> Result<Vec<(String, TensorType, Vec<usize>)>, String> {
     if loop_entry
         .as_ref()
@@ -1363,10 +1363,7 @@ fn actualize_tensor_entry_parameters(
             .collect::<Vec<_>>(),
     )
     .map_err(|error| format!("host runtime: could not actualize entry contract: {error}"))?;
-    if let Some(delta) = loop_entry
-        .as_deref_mut()
-        .and_then(|receipt| receipt.delta.as_mut())
-    {
+    if let Some(delta) = loop_entry.and_then(|receipt| receipt.delta.as_mut()) {
         let mut seen = std::collections::BTreeSet::new();
         delta.pending.clear();
         for (actual, ty) in actuals.iter().zip(&types) {
