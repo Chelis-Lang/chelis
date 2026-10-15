@@ -412,3 +412,48 @@ fn reef_blank_and_comment_files_remain_structured_errors() {
         );
     }
 }
+
+#[test]
+fn empty_libraries_and_namespace_imports_check_in_both_cache_modes() {
+    let root = tempfile::tempdir().unwrap();
+    for directory in ["src", "properties"] {
+        std::fs::create_dir(root.path().join(directory)).unwrap();
+    }
+    std::fs::write(root.path().join("reef.toml"), format!("schema = \"2\"\n[package]\nname = \"empty-module\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Demo\"\nresolver = \"2\"\nadditional_sources = [\"properties\"]\n", env!("CARGO_PKG_VERSION"))).unwrap();
+    let sources = [
+        ("src/empty.ch", "module Demo.Empty\n"),
+        (
+            "properties/generated.ch",
+            "-- Generated requirements with recorded coverage.\nmodule Demo.Properties.Generated\n",
+        ),
+        (
+            "src/importer.ch",
+            "module Demo.Importer\nimport Demo.Properties.Generated\n",
+        ),
+        ("recorded.ch", "module Demo.Recorded\n"),
+    ];
+    for (name, source) in sources {
+        std::fs::write(root.path().join(name), source).unwrap();
+    }
+    for disabled in [false, true] {
+        for (name, _) in sources {
+            let mut command = Command::cargo_bin("chelis").unwrap();
+            command.env_remove("CHELIS_STDLIB_CACHE_DISABLE");
+            if disabled {
+                command.env("CHELIS_STDLIB_CACHE_DISABLE", "1");
+            }
+            let output = command
+                .arg("check")
+                .arg(root.path().join(name))
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "cache disabled={disabled}, {name}: {stdout}"
+            );
+            assert!(parse_errors_array(&stdout).is_empty(), "{stdout}");
+        }
+    }
+}

@@ -113,6 +113,8 @@ inside and outside a Reef package. Module identity and imports pass
 through the same package preparation and validation as other library modules.
 Linking removes namespace forms from the executable entry declarations; that
 empty linked list does not make the original source declaration-free.
+Source emptiness is established before selecting the layered or monolithic
+checker; disabling the standard-library cache preserves the checking result.
 
 Source with no declarations, including whitespace and comments, remains an
 input error. `chelis build` retains its rejection of an empty linked entry

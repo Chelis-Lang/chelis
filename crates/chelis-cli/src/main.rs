@@ -3377,26 +3377,6 @@ fn cmd_check_one_on_grown_stack(
             return synthetic_check_report_with_error(&message);
         }
     };
-    // Wave-1 red-team M2 (#207 follow-up): inside a reef package the
-    // file's own contribution lives in `entry_decls` (chelis-std files
-    // partition into `stdlib_decls`, but `entry_decls` always reflects
-    // the source file the user pointed `check` at). Reject only when
-    // the file itself yields zero declarations, not when the rest of
-    // the reef graph is empty.
-    if let Some(prepared_ref) = &prepared
-        && prepared_ref.entry_decls.is_empty()
-    {
-        // Linking removes module/import/export forms from entry_decls. They
-        // remain source declarations, so a named empty library checks just as
-        // it does outside Reef. Reject genuinely declaration-free source.
-        match chelis_surf::parser::parse_str(&source) {
-            Ok(decls) if decls.is_empty() => {
-                return synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
-            }
-            Err(err) => return synthetic_check_report_with_error(&err.to_string()),
-            Ok(_) => {}
-        }
-    }
     let mut report = check_prepared_file(prepared.as_ref(), &source, show_inferred);
     // chelis#3269: a linked program's diagnostics name its declarations as
     // their author wrote them, not by the linker's private spelling.
@@ -3425,6 +3405,21 @@ fn check_prepared_file(
     source: &str,
     show_inferred: bool,
 ) -> CheckResult {
+    // Emptiness is a property of authored source, before the linker removes
+    // namespace declarations. Establish it once for both checker paths. Retain
+    // this parse for standalone checking; nonempty linked entries need no reparse.
+    let source_decls = if prepared.is_none_or(|program| program.entry_decls.is_empty()) {
+        match chelis_surf::parser::parse_str(source) {
+            Ok(decls) if decls.is_empty() => {
+                return synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+            }
+            Ok(decls) => Some(decls),
+            Err(err) => return synthetic_check_report_with_error(&err.to_string()),
+        }
+    } else {
+        None
+    };
+
     // RFC v5 (RT-1 F2 bypass): inside a reef package every decl checked
     // below (layered fast path AND the monolithic fallback on
     // `prepared.decls`) is reef-linker output, so accept the linker's
@@ -3485,113 +3480,90 @@ fn check_prepared_file(
         None
     };
 
-    let (report, effect_errors, linearity_errors, inferred_signatures) =
-        if let Some(layered) = layered {
-            match layered {
-                chelis_compiler_api::LayeredCheck::Clean {
-                    fitness,
-                    typed_program,
-                    effect_rows,
-                } => {
-                    let mut fitness = fitness;
-                    let inferred = if show_inferred {
-                        layered_inferred_signatures(&typed_program, effect_rows, &mut fitness)
-                    } else {
-                        None
-                    };
-                    (fitness, Vec::new(), Vec::new(), inferred)
-                }
-                chelis_compiler_api::LayeredCheck::EffectRejected {
-                    fitness,
-                    effect_errors,
-                    typed_program,
-                    effect_rows,
-                } => {
-                    let mut fitness = fitness;
-                    let inferred = if show_inferred {
-                        layered_inferred_signatures(&typed_program, effect_rows, &mut fitness)
-                    } else {
-                        None
-                    };
-                    (fitness, effect_errors, Vec::new(), inferred)
-                }
-                chelis_compiler_api::LayeredCheck::LinearityRejected {
-                    fitness,
-                    linearity_errors,
-                    typed_program,
-                    effect_rows,
-                } => {
-                    let mut fitness = fitness;
-                    let inferred = if show_inferred {
-                        layered_inferred_signatures(&typed_program, effect_rows, &mut fitness)
-                    } else {
-                        None
-                    };
-                    (fitness, Vec::new(), linearity_errors, inferred)
-                }
+    let (report, effect_errors, linearity_errors, inferred_signatures) = if let Some(layered) =
+        layered
+    {
+        match layered {
+            chelis_compiler_api::LayeredCheck::Clean {
+                fitness,
+                typed_program,
+                effect_rows,
+            } => {
+                let mut fitness = fitness;
+                let inferred = if show_inferred {
+                    layered_inferred_signatures(&typed_program, effect_rows, &mut fitness)
+                } else {
+                    None
+                };
+                (fitness, Vec::new(), Vec::new(), inferred)
             }
-        } else {
-            // Monolithic path: full inference over the whole merged
-            // program. Used when the input is not inside a reef package,
-            // when the cache is disabled, or when the non-chelis-std
-            // decls do not type-check clean.
-            let decls = match &prepared {
-                Some(prepared) => prepared.decls.clone(),
-                None => {
-                    // Reuses the source read at the top of this function. It
-                    // used to re-read the file here with `?`, a second
-                    // unreported failure path for the same file
-                    // (chelis#886 [04-FIT-12]).
-                    //
-                    // Wave-1 red-team M1 (#207 follow-up): same handling
-                    // as the prepared-path parse error above, for the
-                    // raw `parse_str` branch used when no reef context
-                    // resolves.
-                    match chelis_surf::parser::parse_str(source) {
-                        Ok(decls) => decls,
-                        Err(err) => {
-                            return synthetic_check_report_with_error(&err.to_string());
-                        }
-                    }
-                }
-            };
-            // Wave-1 red-team M2 (#207 follow-up): a parse-clean file
-            // with zero declarations (empty or whitespace-only `.ch`)
-            // used to report `score=1, errors=[]` and exit 0; both
-            // `chelis check` and `chelis build` now reject it with the
-            // same canonical message so the two surfaces agree.
-            if decls.is_empty() {
-                return synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+            chelis_compiler_api::LayeredCheck::EffectRejected {
+                fitness,
+                effect_errors,
+                typed_program,
+                effect_rows,
+            } => {
+                let mut fitness = fitness;
+                let inferred = if show_inferred {
+                    layered_inferred_signatures(&typed_program, effect_rows, &mut fitness)
+                } else {
+                    None
+                };
+                (fitness, effect_errors, Vec::new(), inferred)
             }
-            // [04-FIT-12]: "any preparation failure occurring before type
-            // checking begins" is the atom's own wording, so this is
-            // transported rather than propagated.
-            let prepared = match chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None) {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    // stderr kept, as above. A prelude-name collision is
-                    // reported here, and it is the kind of message a person
-                    // reads in a terminal rather than parses out of JSON.
-                    let message = error.to_string();
-                    eprintln!("error: {}", render_linked_names(prepared, &message));
-                    return match error {
-                        chelis_compiler_api::pipeline::PreparationError::SurfDesugar(error) => {
-                            synthetic_check_report_with_typed_error(
-                                chelis_types::errors::CheckErrorKind::TypeMismatch,
-                                message,
-                                error.span().map(|span| span.offset),
-                            )
-                        }
-                        _ => synthetic_check_report_with_error(&message),
-                    };
-                }
-            };
-            // chelis#1664 made this call fallible when inferred signatures
-            // gained a typed carrier, and for a while it was a [04-FIT-12]
-            // bypass with a `?`. It is total now: a failure to build the
-            // rows becomes a diagnostic inside `check_prepared_for_cli`.
-            check_prepared_for_cli(prepared, show_inferred)
+            chelis_compiler_api::LayeredCheck::LinearityRejected {
+                fitness,
+                linearity_errors,
+                typed_program,
+                effect_rows,
+            } => {
+                let mut fitness = fitness;
+                let inferred = if show_inferred {
+                    layered_inferred_signatures(&typed_program, effect_rows, &mut fitness)
+                } else {
+                    None
+                };
+                (fitness, Vec::new(), linearity_errors, inferred)
+            }
+        }
+    } else {
+        // Monolithic path: full inference over the whole merged
+        // program. Used when the input is not inside a reef package,
+        // when the cache is disabled, or when the non-chelis-std
+        // decls do not type-check clean.
+        let decls = match prepared {
+            Some(prepared) => prepared.decls.clone(),
+            None => source_decls.expect("standalone source was parsed before checker selection"),
         };
+        // [04-FIT-12]: "any preparation failure occurring before type
+        // checking begins" is the atom's own wording, so this is
+        // transported rather than propagated.
+        let prepared = match chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // stderr kept, as above. A prelude-name collision is
+                // reported here, and it is the kind of message a person
+                // reads in a terminal rather than parses out of JSON.
+                let message = error.to_string();
+                eprintln!("error: {}", render_linked_names(prepared, &message));
+                return match error {
+                    chelis_compiler_api::pipeline::PreparationError::SurfDesugar(error) => {
+                        synthetic_check_report_with_typed_error(
+                            chelis_types::errors::CheckErrorKind::TypeMismatch,
+                            message,
+                            error.span().map(|span| span.offset),
+                        )
+                    }
+                    _ => synthetic_check_report_with_error(&message),
+                };
+            }
+        };
+        // chelis#1664 made this call fallible when inferred signatures
+        // gained a typed carrier, and for a while it was a [04-FIT-12]
+        // bypass with a `?`. It is total now: a failure to build the
+        // rows becomes a diagnostic inside `check_prepared_for_cli`.
+        check_prepared_for_cli(prepared, show_inferred)
+    };
     assemble_check_report(
         report,
         &effect_errors,
