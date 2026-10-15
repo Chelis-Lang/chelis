@@ -100,16 +100,15 @@ fn shared_helper_row_does_not_unify_independent_caller_rows() {
 }
 
 #[test]
-fn declared_precision_and_effect_bounds_are_not_body_evidence_exemptions() {
+fn declared_precision_bounds_are_not_body_evidence_exemptions() {
     both(
         &format!("{LIBRARY}{WRAPPER}out = wrapped(to_tensor([1i32, 2i32]))\n"),
         false,
     );
-    both(
-        "def noisy[r](x: &tensor[..r, f32]) -> tensor[..r, f32] ! {IO} = { print(\"called\")\n neg(x) }\n\
-         def outer[s](x: &tensor[..s, f32]) -> tensor[..s, f32] ! {} = noisy(x)\n",
-        false,
-    );
+}
+
+#[test]
+fn effectful_body_can_have_row_evidence_without_erasing_its_declared_effects() {
     both(
         "def noisy[r](x: &tensor[..r, f32]) -> tensor[..r, f32] ! {IO} = { print(\"called\")\n neg(x) }\n\
          def outer[s](x: &tensor[..s, f32]) -> tensor[..s, f32] ! {IO} = noisy(x)\n",
@@ -148,13 +147,87 @@ fn lexical_shadowing_cannot_reuse_a_verified_declaration_summary() {
 }
 
 #[test]
-fn recursive_components_never_supply_provisional_body_evidence() {
+fn jointly_checked_recursive_bodies_preserve_rows_without_a_termination_claim() {
+    for bound in ["Float", "{f32, f64}"] {
+        both(
+            &format!(
+                "def recur[r, p: {bound}](x: &tensor[..r, p], stop: bool) -> tensor[..r, p] = if stop then neg(x) else recur(x, true)\n"
+            ),
+            true,
+        );
+        both(
+            &format!(
+                "def left[r, p: {bound}](x: &tensor[..r, p], stop: bool) -> tensor[..r, p] = if stop then neg(x) else right(x, true)\n\
+                 def right[s, q: {bound}](x: &tensor[..s, q], stop: bool) -> tensor[..s, q] = if stop then neg(x) else left(x, true)\n"
+            ),
+            true,
+        );
+    }
+    // These programs are checked only. Divergence supplies no returned value
+    // whose shape could violate the relation; it is not an execution oracle.
     for source in [
         "def loop[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = loop(x)\n",
         "def left[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = right(x)\n\
          def right[s](x: &tensor[..s, f32]) -> tensor[..s, f32] = left(x)\n",
     ] {
+        both(source, true);
+    }
+}
+
+#[test]
+fn recursive_component_cannot_hide_an_unsafe_member_or_growing_result_row() {
+    for source in [
+        "def left[r](x: &tensor[..r, f32], stop: bool) -> tensor[..r, f32] = if stop then neg(x) else right(x, true)\n\
+         def right[s](x: &tensor[..s, f32], stop: bool) -> tensor[..s, f32] = if stop then permute(x, 1i32, 0i32) else left(x, true)\n",
+        "def grow[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = grow(insert(x, extra, 1i64))\n",
+        "def left[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = right(cast(x, f32))\n\
+         def right[s, q: Float](x: &tensor[..s, q]) -> tensor[..s, q] = left(x)\n",
+        "def left[r](x: &tensor[..r, f32], callback: &tensor[..r, f32] -> tensor[..r, f32]) -> tensor[..r, f32] = right(x, callback)\n\
+         def right[s](x: &tensor[..s, f32], callback: &tensor[..s, f32] -> tensor[..s, f32]) -> tensor[..s, f32] = left(callback(x), callback)\n",
+    ] {
         both(source, false);
+    }
+}
+
+#[test]
+fn recursive_component_evidence_survives_context_round_trip() {
+    let library = parse(
+        "def left[r, p: Float](x: &tensor[..r, p], stop: bool) -> tensor[..r, p] = if stop then neg(x) else right(x, true)\n\
+         def right[s, q: Float](x: &tensor[..s, q], stop: bool) -> tensor[..s, q] = if stop then neg(x) else left(x, true)\n",
+    );
+    let (context, checked) =
+        build_compiled_library_context(&library).expect("all members establish evidence together");
+    assert!(context.matches_checked_program(&checked));
+    let restored: TypeEnv =
+        bincode::deserialize(&bincode::serialize(&context).expect("encode SCC"))
+            .expect("decode SCC");
+    for base in [context, restored] {
+        clean(
+            check_ir_with_context(
+                &base,
+                &parse(
+                    "def outer[t, v: Float](x: &tensor[..t, v]) -> tensor[..t, v] = left(x, false)\n",
+                ),
+            ),
+            "imported joint evidence",
+        );
+        let bad = parse(
+            "def left[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = right(x)\n\
+             def right[s](x: &tensor[..s, f32]) -> tensor[..s, f32] = left(permute(x, 1i32, 0i32))\n",
+        );
+        assert!(
+            build_compiled_library_context_with_base(&base, &bad).is_err(),
+            "unsafe replacement SCC cannot inherit accepted base summaries"
+        );
+        clean(
+            check_ir_with_context(
+                &base,
+                &parse(
+                    "def again[t, v: Float](x: &tensor[..t, v]) -> tensor[..t, v] = right(x, true)\n",
+                ),
+            ),
+            "failed component does not mutate its base",
+        );
     }
 }
 

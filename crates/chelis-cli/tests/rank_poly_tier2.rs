@@ -989,3 +989,60 @@ fn imported_helper_name_3668_does_not_authorize_a_shadowing_parameter() {
     let json = serde_json::from_slice(&output.stdout).expect("check JSON");
     assert_rank_rejected(&json, "imported name shadow has no body evidence");
 }
+
+#[test]
+fn recursive_checked_helpers_3668_execute_both_finite_branches_at_two_dtypes() {
+    for (bound, precision) in [("Float", "f32"), ("{f32, f64}", "f64")] {
+        let source = format!(
+            "def left[r, p: {bound}](x: &tensor[..r, p], stop: bool) -> tensor[..r, p] = if stop then neg(x) else right(x, true)\n\
+             def right[s, q: {bound}](x: &tensor[..s, q], stop: bool) -> tensor[..s, q] = if stop then neg(x) else left(x, true)\n\
+             direct = left(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], {precision}), true)\n\
+             recursive = left(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], {precision}), false)\n"
+        );
+        let formatted = fmt_stdout(&source);
+        assert_eq!(formatted, fmt_stdout(&formatted));
+        assert_clean(
+            &check_json(&formatted),
+            "jointly checked recursive helper component",
+        );
+        let dir = tempdir().expect("tempdir");
+        for output in [
+            eval_stdout(dir.path(), &formatted, "recursive_helpers_eval"),
+            build_compile_run(&formatted, "recursive_helpers_native"),
+        ] {
+            let tensors = parse_printed_tensors(&output);
+            for expected_name in ["direct", "recursive"] {
+                let (_, shape, data) = tensors
+                    .iter()
+                    .find(|(name, _, _)| name == expected_name)
+                    .unwrap_or_else(|| panic!("missing {expected_name}: {output}"));
+                assert_eq!(shape, &[2, 3]);
+                assert_eq!(data, &[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]);
+            }
+        }
+    }
+}
+
+#[test]
+fn recursive_and_acyclic_row_evidence_3668_do_not_discharge_effect_checks() {
+    let recursive = "def left[r, p: Float](x: &tensor[..r, p], stop: bool) -> tensor[..r, p] ! {IO} = if stop then neg(x) else right(x, true)\n\
+        def right[s, q: Float](x: &tensor[..s, q], stop: bool) -> tensor[..s, q] ! {IO} = { print(\"recursive body\")\n if stop then neg(x) else left(x, true) }\n";
+    let positive = format!(
+        "{recursive}def outer[t, v: Float](x: &tensor[..t, v]) -> tensor[..t, v] ! {{IO}} = left(x, false)\n"
+    );
+    assert_clean(
+        &check_json(&positive),
+        "joint row evidence with inherited IO",
+    );
+    let negative = format!(
+        "{recursive}def outer[t, v: Float](x: &tensor[..t, v]) -> tensor[..t, v] ! {{}} = left(x, false)\n"
+    );
+    assert_rejected_with(&check_json(&negative), "IO", "SCC effects still enforced");
+    let negative = "def noisy[r](x: &tensor[..r, f32]) -> tensor[..r, f32] ! {IO} = { print(\"called\")\n neg(x) }\n\
+        def outer[s](x: &tensor[..s, f32]) -> tensor[..s, f32] ! {} = noisy(x)\n";
+    assert_rejected_with(
+        &check_json(negative),
+        "IO",
+        "acyclic effects still enforced",
+    );
+}

@@ -1788,12 +1788,19 @@ not acquire this capability from a function type; their application in a
 rank-polymorphic body is rejected unless another controlling rule establishes
 and transports the same body-derived capability.
 
-Evidence has a finite acyclic derivation. A recursive strongly connected
-component containing a rank-polymorphic body is rejected by this discipline,
-including direct self-recursion. A provisional signature, an in-progress
-component, cancellation, or an incomplete analysis never counts as evidence.
-This restriction does not change the recursion rules for functions outside
-this discipline.
+Evidence is established over the finite graph of resolved declarations.
+An acyclic dependency uses its callee's checked evidence. A recursive strongly
+connected component is checked jointly: every member's complete body obeys
+this discipline, every internal call satisfies its complete ordered-row
+relation under a unitary substitution, and every call outside the component
+has independently established evidence. Recursive instantiation remains
+subject to §3.1.1. The component's row relations are hypotheses only within
+this joint check; they become evidence together after every member and edge
+has been checked successfully. A signature cycle alone proves nothing.
+An unsafe or unresolved member, cancellation, or incomplete analysis supplies
+no evidence for the component. Name preservation constrains each executed
+operation and each returned value; it does not assert termination or require
+a termination proof.
 
 A checked library context transports evidence with the declaration and
 library proof that produced it. Monolithic checking, layered checking, and

@@ -8,7 +8,7 @@ checked helper rule. The implementation proposal for chelis#3668 extends the
 existing body-discipline owner rather than exempting user-defined functions.
 
 The checker establishes a private declaration summary only after successful
-inference and semantic validation of that declaration's complete body. It
+inference and row-discipline validation of that declaration's complete body. It
 records the canonical declaration owner, complete quantified row relation,
 and the checked direct-call dependencies needed to derive name preservation.
 The ordinary scheme remains the authority for dtype bounds, effects, and
@@ -20,11 +20,23 @@ parameter/block shadowing and supplies dependency-first strongly connected
 components. Extend that owner to expose the per-application resolved target
 needed by body discipline; do not implement another name resolver or walk text.
 Keep body-discipline classification at the existing structural expression
-boundary, using the same lexical resolution. Validate acyclic callees before
-their callers. Reject recursive rank-body components, missing declarations,
-computed targets, and incomplete/cancelled graph analysis without minting a
-summary. A declaration rejected by ordinary body/type/precision/effect or
-ownership validation never becomes an accepted library authority.
+boundary, using the same lexical resolution. Validate dependencies in SCC
+order. For a recursive component, check all local operations and complete
+internal call-row relations jointly, with accepted summaries supplying the
+external edges. Publish the component's summaries atomically only after every
+member and edge has passed. Never use an in-progress signature or a cycle's
+existence as body evidence. Reject missing declarations, computed targets,
+unsafe members, and incomplete/cancelled analysis without publishing the
+component. Ordinary recursive-instantiation checks remain independently
+required.
+
+The finite proof checks the bodies once rather than unfolding recursive
+execution. Every local operation preserves the required named-row relation,
+and every internal edge passes that relation to another fully checked body;
+therefore each finite execution prefix preserves it. This establishes safety
+of executed operations and returned values, including when execution never
+returns. Acyclic-only admission would be an implementation restriction, not a
+consequence of name preservation or §3.1.1.
 
 The existing per-definition call to `check_rank_body_discipline` runs during
 inference and sees only a user-name set. Move its compositional decision into
@@ -33,8 +45,13 @@ product, complete declared-type view, and existing reference graph coexist.
 Preserve all existing builtin class checks and procedural named-axis checks;
 changing validation order must not turn their failures into successful
 summaries. Stage summaries privately during one check and publish them only
-across the existing empty-errors/totality boundary. No backend executor or
-numeric carrier changes are required by this proposal.
+across the existing empty-errors/totality boundary. A row summary certifies
+only the body discipline: `TypeEnv` construction is not a substitute for the
+effect and linearity passes. Section 7.1 infers effects after HM inference;
+its inherited-effect fixed point and declared-effect checks remain required,
+as do the existing ownership checks. Full compiler-library construction must
+retain those acceptance boundaries before publishing executable artifacts.
+No backend executor or numeric carrier changes are required by this proposal.
 
 ### Library and cache ownership
 
@@ -68,13 +85,20 @@ format number is allocated by this proposal.
 The test-first slice uses existing public checker APIs and CLI test harnesses.
 It covers direct/multi-hop rank helpers, `Float` and `{f32, f64}` bounds,
 unitary named-anchor reduction, monolithic/context/layered/serialized checks,
-replacement and lexical shadowing, body-less declarations, cycles, hidden
+replacement and lexical shadowing, body-less declarations, jointly safe and
+unsafe recursive components, hidden
 fixed-rank shape rewrites, and precision/effect/row mismatches. CLI positives
 add canonical formatting and actual Eval/C compilation/link/execution at
 ranks zero through three with unequal extents and exact finite values.
 Package fixtures exercise selective and qualified imports through two helper
-hops. The finite oracle does not claim all ranks, dtypes, modules, or call
-graphs have been exhaustively sampled. Existing negative tests stay enabled.
+hops. Recursive controls distinguish jointly safe bodies, unchecked or
+shape-rewriting members, incompatible recursive rows/precision, inherited IO,
+and restored component evidence. Divergent recursive controls run only through
+the checker; finite branch controls additionally require Eval/native-C
+agreement. Native lowering qualification is independent of the finite
+body-evidence proof and remains part of the oracle. The finite oracle does
+not claim all ranks, dtypes, modules, or call graphs have been exhaustively
+sampled. Existing negative tests stay enabled.
 
 This source-first proposal has no executed qualification; implementation
 follows an observed semantic RED on these fixtures.
