@@ -268,9 +268,51 @@ Discovery:
 
 Span lookup:
 
-- For each `.dp` input, auto-discover sibling `<stem>.spans.json`.
-- `--spans <path>` overrides auto-discovery for a single `.dp` input.
-- Multi-`.dp` custom layouts require conventional sibling spans in v1.
+- For each `.ch` or `.dp` input, discover sibling `<stem>.spans.json`.
+- `--spans <path>` overrides discovery for one explicitly selected source file.
+- A present or explicitly selected manifest is verified before any selected
+  file emits property verdicts. Invalid manifests are input errors (exit `3`).
+- Surf mappings use the property name in source. Reef linker names are restored
+  to that name before attribution. `--only` filters execution, not validation
+  of the complete manifest against the generated file's discovered properties.
+
+### Verified property spans
+
+The versioned manifest uses `schema_version: 1`, with these required fields:
+
+| Field | Contract |
+|---|---|
+| `artifact` | `{path, sha256}` identifying the selected generated source file |
+| `sources` | Array of distinct `{path, sha256}` source identities |
+| `requirements` | Array of `{id, source, span, clauses}` records with distinct nonempty IDs |
+| `properties` | Array of `{name, requirement_id}` mappings covering the discovered properties |
+
+Each `span` has `start_byte` and `end_byte`, a nonempty half-open byte range
+within UTF-8 source. Each clause has a distinct nonempty `kind` and a `span`
+contained in its requirement's span. A requirement's `source` names an entry
+in `sources`. Recorded requirements may have no property mapping. Each mapped
+property names an existing requirement. Duplicate property names, unknown
+names or IDs, unknown fields, and unsupported schema versions are errors.
+
+Paths resolve relative to the manifest directory; absolute paths are also
+accepted. Source identities must resolve to distinct files. A checksum has
+the form `sha256:` followed by the lowercase hexadecimal SHA-256 digest of
+the exact file bytes, including line endings. All source checksums and the
+artifact identity and checksum must match. The selected artifact is resolved
+once, so a producer may publish immutable bundles through an atomic symlink.
+
+The consumer derives requirement text, line, and byte column from verified
+source bytes. It does not accept independently supplied display text. Lines
+and columns are one-based. Text and NDJSON diagnostics retain generated-file
+identity and add original requirement identity and location. Attribution does
+not change proof engines, assumptions, evidence, or verdict precedence.
+
+Deep also accepts the legacy c-earchin manifest with `source`, `source_hash`,
+and `spans`. Its paths resolve from the invocation directory, matching that
+producer's path convention. Source hashes and byte spans are verified; stored
+text and line/column fields do not override the verified source. The legacy
+format has no generated-artifact checksum; the consumer validates its mapping
+against the discovered Deep properties. Surf requires the versioned format.
 
 Exit codes:
 

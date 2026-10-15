@@ -1224,6 +1224,7 @@ fn cli_main() {
                 max_attempts,
                 json,
                 spans: spans.as_deref(),
+                provenance: None,
                 tier: &_tier,
                 smt_timeout_ms: _smt_timeout,
                 beacon_budget: std::time::Duration::from_millis(beacon_budget),

@@ -6,6 +6,9 @@ use tempfile::tempdir;
 #[path = "common/mod.rs"]
 mod common;
 
+#[path = "support/surf_spans.rs"]
+mod surf_spans;
+
 fn write_prop(source: &str) -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
     std::fs::write(dir.path().join("prop.ch"), source).expect("write property");
@@ -1671,7 +1674,7 @@ fn deep_property_source_kind_must_be_valid_and_drives_json_source_kind() {
 }
 
 #[test]
-fn spans_override_requires_single_explicit_deep_file() {
+fn spans_override_requires_single_explicit_source_file() {
     let dir = tempfile::Builder::new()
         .prefix("chelis-prove-spans")
         .tempdir()
@@ -1703,7 +1706,7 @@ fn spans_override_requires_single_explicit_deep_file() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains(
-            "--spans can only be used with a single explicit .dp input",
+            "--spans requires a single explicit .ch or .dp input",
         ));
 }
 
@@ -1754,6 +1757,8 @@ fn bridge_failure_resolves_spans_manifest_to_ears_source() {
     )
     .expect("write spans");
 
+    surf_spans::verify_legacy_fixture(&spans);
+
     Command::cargo_bin("chelis")
         .expect("binary")
         .args([
@@ -1764,9 +1769,7 @@ fn bridge_failure_resolves_spans_manifest_to_ears_source() {
         ])
         .assert()
         .code(1)
-        .stdout(predicate::str::contains(
-            "references/finance_options/options_rules.ears:3:1 FIN-003",
-        ))
+        .stdout(predicate::str::contains("options_rules.ears:3:1 FIN-003"))
         .stdout(predicate::str::contains(
             "WHILE the exchange is open, the portfolio delta shall be at most the limit.",
         ));
@@ -1853,6 +1856,8 @@ fn wi8_bridge_green_assumption_discharge_tier_joins_to_c_earchin_source_id() {
 "#,
     )
     .expect("write spans");
+
+    surf_spans::verify_legacy_fixture(&spans);
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")

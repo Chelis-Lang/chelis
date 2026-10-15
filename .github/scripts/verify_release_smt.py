@@ -50,11 +50,13 @@ Exit codes:
   4  no cvc5/smt discharge record found (feature inert -- the regression)
   5  smt-disabled warning emitted (feature inert -- the regression)
   6  native Clarabel solve or ideal QP proof unavailable
+  7  native property attribution or source integrity verification unavailable
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -208,6 +210,60 @@ def verify_clarabel(chelis: Path) -> int:
     return 0
 
 
+def source_hash(source: str) -> str:
+    return "sha256:" + hashlib.sha256(source.encode()).hexdigest()
+
+
+def record_has_verified_requirement(record: dict, source: str) -> bool:
+    requirement = record.get("source", {}).get("requirement", {})
+    return (
+        record.get("kind") == "property"
+        and record.get("status") == "passed"
+        and requirement == {
+            "id": "REQ-001", "file": "requirements.ears", "line": 1,
+            "column": 1, "text": source, "source_hash": source_hash(source),
+            "span": {"start_byte": 0, "end_byte": len(source.encode())},
+        }
+    )
+
+
+def verify_property_spans(chelis: Path) -> int:
+    """Exercise verified Surf attribution in the exact distributed binary."""
+    with tempfile.TemporaryDirectory(prefix="chelis_spans_verify_") as tmp:
+        root = Path(tmp)
+        source = "REQ-001  The engine shall be non-negative.\n"
+        artifact = "@property provenance_probe forall(x: f64):\n  ((x * x) >= 0.0f64)\n"
+        (root / "requirements.ears").write_bytes(source.encode())
+        (root / "properties.ch").write_bytes(artifact.encode())
+        manifest = {
+            "schema_version": 1,
+            "artifact": {"path": "properties.ch", "sha256": source_hash(artifact)},
+            "sources": [{"path": "requirements.ears", "sha256": source_hash(source)}],
+            "requirements": [{"id": "REQ-001", "source": "requirements.ears",
+                "span": {"start_byte": 0, "end_byte": len(source.encode())}, "clauses": []}],
+            "properties": [{"name": "provenance_probe", "requirement_id": "REQ-001"}],
+        }
+        spans = root / "properties.spans.json"
+        spans.write_text(json.dumps(manifest))
+        command = [str(chelis), "prove", str(root / "properties.ch"), "--spans", str(spans), "--json"]
+        try:
+            valid = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+            records = parse_records(valid.stdout)
+            if valid.returncode != 0 or not any(record_has_verified_requirement(r, source) for r in records):
+                print(f"verify_release_smt: Surf attribution failed: {valid.stdout}\n{valid.stderr}", file=sys.stderr)
+                return 7
+            (root / "requirements.ears").write_bytes((source + "changed\n").encode())
+            stale = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+            if stale.returncode != 3 or any(r.get("kind") == "property" for r in parse_records(stale.stdout)):
+                print(f"verify_release_smt: stale Surf provenance was not rejected: {stale.stdout}\n{stale.stderr}", file=sys.stderr)
+                return 7
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print(f"verify_release_smt: Surf provenance probe failed: {error}", file=sys.stderr)
+            return 7
+    print("verify_release_smt: OK -- verified Surf attribution and stale-source rejection")
+    return 0
+
+
 def verify_binary(chelis: Path, *, clarabel: bool = False) -> int:
     """Run the cvc5-discharge probe against `chelis` and return an exit code.
 
@@ -247,6 +303,9 @@ def verify_binary(chelis: Path, *, clarabel: bool = False) -> int:
             "cvc5 (proof_tier=smt, engine=cvc5). The smt feature is live in "
             "this binary."
         )
+        spans_result = verify_property_spans(chelis)
+        if spans_result:
+            return spans_result
         return verify_clarabel(chelis) if clarabel else 0
 
     print(

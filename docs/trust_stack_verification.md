@@ -20,6 +20,12 @@ parameters, preconditions, and postconditions. A tool that translates
 requirements written in another notation emits those declarations; the proof
 pipeline does not depend on where they came from.
 
+Generated Surf properties can carry a sibling source manifest. The `prove`
+consumer verifies the generated artifact, original source hashes, byte ranges,
+and property-name mappings before adding requirement attribution to its
+results. Display text comes from verified source bytes. This provenance layer
+preserves the proof stack's evidence and verdicts.
+
 **chelis-prove** is the specification-consumption layer. It takes Chelis
 properties and dispatches them through three verification tiers:
 
