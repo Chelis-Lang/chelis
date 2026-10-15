@@ -300,6 +300,8 @@ EXPECTED_OP_MANIFESTS = {
 | checked sparse tensor_sparse_plan | `chelis_sparse_plan *chelis_tensor_sparse_plan(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, chelis_scalar axis, chelis_sparse_op operation)` |
 | checked sparse sparse_extent | `int64_t chelis_sparse_extent(const chelis_sparse_plan *plan, chelis_scalar axis)` |
 | checked sparse sparse_count | `int64_t chelis_sparse_count(const chelis_sparse_plan *plan)` |
+| checked sparse sparse_term | `int64_t chelis_sparse_term(const chelis_sparse_plan *plan, chelis_sparse_projection part, chelis_projection_field field, chelis_scalar term)` |
+| checked sparse sparse_check_index | `void chelis_sparse_check_index(const chelis_sparse_plan *plan, chelis_scalar selected)` |
 | checked sparse sparse_index_slot | `int64_t chelis_sparse_index_slot(const chelis_sparse_plan *plan, chelis_scalar linear)` |
 | checked sparse sparse_data_index | `int64_t chelis_sparse_data_index(const chelis_sparse_plan *plan, chelis_scalar linear, chelis_scalar selected)` |
 | checked sparse sparse_check_target | `void chelis_sparse_check_target(const chelis_sparse_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |

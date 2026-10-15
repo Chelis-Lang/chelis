@@ -190,8 +190,8 @@ fn body_contains_checked_sparse_loop(body: &str, operation: &str) -> bool {
         "chelis_tensor_sparse_plan(",
         "chelis_sparse_check_target(",
         "chelis_sparse_count(",
-        "chelis_sparse_index_slot(",
-        "chelis_sparse_data_index(",
+        "chelis_sparse_term(",
+        "chelis_sparse_check_index(",
         "chelis_sparse_plan_release(",
         "chelis_host_tensor_data(",
         "for (int64_t ",
@@ -199,6 +199,8 @@ fn body_contains_checked_sparse_loop(body: &str, operation: &str) -> bool {
     ]
     .iter()
     .all(|required| body.contains(required))
+        && !body.contains("chelis_sparse_index_slot(")
+        && !body.contains("chelis_sparse_data_index(")
 }
 
 fn body_contains_inline_gather_loop(body: &str) -> bool {

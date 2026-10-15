@@ -113,11 +113,14 @@ impl Probe {
     fn compile_plan_contract(&self, owner: &str) -> PathBuf {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let tests = std::fs::read_to_string(root.join("tests/metadata_plans.rs")).unwrap();
-        let marker = "use chelis_abi::metadata::{";
+        let marker = "use chelis_abi::metadata::{\n    ByteCount,";
         assert_eq!(tests.matches(marker).count(), 1);
-        // The contract is unchanged; only its import selects the actual
-        // source under mutation instead of the already-built external crate.
-        let source = tests.replacen(marker, "mod metadata;\nuse metadata::{", 1);
+        // The unchanged contract's imports and qualified type references
+        // select the actual source under mutation, never an external copy.
+        let source = tests
+            .replacen(marker, "mod metadata;\nuse metadata::{\n    ByteCount,", 1)
+            .replace("chelis_abi::metadata::", "metadata::");
+        assert!(!source.contains("chelis_abi::metadata::"));
         std::fs::write(self.0.join("metadata.rs"), owner).unwrap();
         let input = self.0.join("plan_contract.rs");
         std::fs::write(&input, source).unwrap();

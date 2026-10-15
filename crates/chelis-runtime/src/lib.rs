@@ -3119,6 +3119,10 @@ pub const CHELIS_MOVEMENT_RESULT: chelis_movement_side = 1;
 pub type chelis_projection_part = c_int;
 pub const CHELIS_PROJECTION_GROUP: chelis_projection_part = 0;
 pub const CHELIS_PROJECTION_LEAF: chelis_projection_part = 1;
+pub type chelis_sparse_projection = c_int;
+pub const CHELIS_SPARSE_INDEX: chelis_sparse_projection = 0;
+pub const CHELIS_SPARSE_BASE: chelis_sparse_projection = 1;
+pub const CHELIS_SPARSE_SELECTED: chelis_sparse_projection = 2;
 pub type chelis_projection_field = c_int;
 pub const CHELIS_PROJECTION_DIVISOR: chelis_projection_field = 0;
 pub const CHELIS_PROJECTION_MODULUS: chelis_projection_field = 1;
@@ -3749,11 +3753,30 @@ pub unsafe extern "C" fn chelis_sparse_index_slot(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn chelis_sparse_data_index(
+pub unsafe extern "C" fn chelis_sparse_term(
     plan: *const chelis_sparse_plan,
-    linear: chelis_scalar,
-    selected: chelis_scalar,
+    part: chelis_sparse_projection,
+    field: chelis_projection_field,
+    term: chelis_scalar,
 ) -> i64 {
+    let p = sparse_plan(plan);
+    let part = match part {
+        CHELIS_SPARSE_INDEX => metadata::SparseProjection::Index,
+        CHELIS_SPARSE_BASE => metadata::SparseProjection::Base,
+        CHELIS_SPARSE_SELECTED => metadata::SparseProjection::Selected,
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid sparse projection".into())),
+            p.op,
+        ),
+    };
+    projection_term(p.metadata.projection(part), field, term, p.op)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_check_index(
+    plan: *const chelis_sparse_plan,
+    selected: chelis_scalar,
+) {
     let p = sparse_plan(plan);
     let selected = affine_scalar(selected, p.op);
     let axis = p.metadata.axis();
@@ -3764,8 +3787,19 @@ pub unsafe extern "C" fn chelis_sparse_data_index(
             chelis_abi::failure::sparse_index_out_of_bounds(p.op, selected, axis, extent)
         );
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_data_index(
+    plan: *const chelis_sparse_plan,
+    linear: chelis_scalar,
+    selected: chelis_scalar,
+) -> i64 {
+    let p = sparse_plan(plan);
+    chelis_sparse_check_index(plan, selected);
     affine_result(
-        p.metadata.data_index(affine_scalar(linear, p.op), selected),
+        p.metadata
+            .data_index(affine_scalar(linear, p.op), affine_scalar(selected, p.op)),
         p.op,
     )
 }

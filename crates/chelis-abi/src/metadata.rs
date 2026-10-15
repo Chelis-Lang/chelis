@@ -293,6 +293,8 @@ impl AffineProjection {
     /// The index of a position its owner has checked is reachable.
     fn apply(&self, position: i64) -> Result<i64, MetadataError> {
         self.terms.iter().try_fold(self.base, |sum, term| {
+            #[cfg(test)]
+            AFFINE_TERM_VISITS.with(|visits| visits.set(visits.get() + 1));
             position
                 .checked_div(term.divisor)
                 .and_then(|n| n.checked_rem(term.modulus))
@@ -301,6 +303,11 @@ impl AffineProjection {
                 .ok_or(MetadataError::Overflow("projection index exceeds i64"))
         })
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFFINE_TERM_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Require the summed projections of a reachable domain to stay inside a
@@ -755,17 +762,38 @@ impl MatmulMetadata {
     }
 }
 
+/// A sparse plan's checked coordinate maps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SparseProjection {
+    Index,
+    Base,
+    Selected,
+}
+
+// Checked compact geometry serves standalone mappings independently of the
+// rank-sized projections exposed to generated C. Empty domains observe none
+// of these products; elementwise slots already are their linear positions.
+enum SparseMapping {
+    Empty,
+    Elementwise,
+    Hyperplane {
+        inner: ElementCount,
+        indices_per_batch: ElementCount,
+        outer_per_batch: ElementCount,
+        // No base-coordinate geometry is observed when the selected axis is empty.
+        source_axis: Option<AxisDecomposition>,
+    },
+}
+
 /// The checked row-major domain shared by gather and scatter consumers.
 pub struct SparseMetadata {
     base: ShapeMetadata,
-    indices: ShapeMetadata,
     domain: ShapeMetadata,
     axis: usize,
-    elementwise: bool,
-    inner: ElementCount,
-    source_axis: AxisDecomposition,
-    index_per_batch: ElementCount,
-    base_outer_per_batch: ElementCount,
+    index: AffineProjection,
+    offset: AffineProjection,
+    selected: AffineProjection,
+    mapping: SparseMapping,
 }
 
 impl SparseMetadata {
@@ -794,8 +822,6 @@ impl SparseMetadata {
                 "invalid paired sparse batch prefix".into(),
             ));
         }
-        let index_per_batch = ElementCount::from_extents(&indices.shape()[batch_rank..])?;
-        let base_outer_per_batch = ElementCount::from_extents(&base.shape()[batch_rank..axis])?;
         let shape = if elementwise {
             if batch_rank != 0 {
                 return Err(MetadataError::Domain(
@@ -833,22 +859,80 @@ impl SparseMetadata {
         };
         let domain = ShapeMetadata::contiguous(&shape, base.dtype())?;
         domain.bytes().allocation()?;
-        let inner = if domain.elements().get() == 0 || elementwise {
-            ElementCount::from_extents(&[0])?
+        let reachable = domain.elements().get() != 0;
+        let index_rank = indices.shape().len() - batch_rank;
+        let index = AffineProjection::new(
+            &shape,
+            reachable,
+            |d| {
+                Ok(if elementwise || d < batch_rank {
+                    indices.strides()[d]
+                } else if (axis..axis + index_rank).contains(&d) {
+                    indices.strides()[batch_rank + d - axis]
+                } else {
+                    0
+                })
+            },
+            || Ok(0),
+        )?;
+        require_within(&[&index], indices.elements(), reachable)?;
+        let has_selection = reachable && base.shape()[axis] != 0;
+        let offset = AffineProjection::new(
+            &shape,
+            has_selection,
+            |d| {
+                Ok(if elementwise {
+                    if d == axis { 0 } else { base.strides()[d] }
+                } else if d < axis {
+                    base.strides()[d]
+                } else if d >= axis + index_rank {
+                    base.strides()[d - index_rank + 1]
+                } else {
+                    0
+                })
+            },
+            || Ok(0),
+        )?;
+        let selected = AffineProjection::new(
+            &[base.shape()[axis]],
+            has_selection,
+            |_| Ok(base.strides()[axis]),
+            || Ok(0),
+        )?;
+        require_within(&[&offset, &selected], base.elements(), has_selection)?;
+        let mapping = if !reachable {
+            SparseMapping::Empty
+        } else if elementwise {
+            SparseMapping::Elementwise
         } else {
-            ElementCount::from_extents(&base.shape()[axis + 1..])?
+            SparseMapping::Hyperplane {
+                inner: ElementCount::from_extents(&base.shape()[axis + 1..])?,
+                indices_per_batch: ElementCount::from_extents(&indices.shape()[batch_rank..])?,
+                outer_per_batch: ElementCount::from_extents(&base.shape()[batch_rank..axis])?,
+                source_axis: if has_selection {
+                    Some(base.axis_decomposition(axis)?)
+                } else {
+                    None
+                },
+            }
         };
         Ok(Self {
             base: base.clone(),
-            indices: indices.clone(),
             domain,
             axis,
-            elementwise,
-            inner,
-            source_axis: base.axis_decomposition(axis)?,
-            index_per_batch,
-            base_outer_per_batch,
+            index,
+            offset,
+            selected,
+            mapping,
         })
+    }
+
+    pub fn projection(&self, part: SparseProjection) -> &AffineProjection {
+        match part {
+            SparseProjection::Index => &self.index,
+            SparseProjection::Base => &self.offset,
+            SparseProjection::Selected => &self.selected,
+        }
     }
 
     pub fn base(&self) -> &ShapeMetadata {
@@ -863,14 +947,25 @@ impl SparseMetadata {
     }
     pub fn index_slot(&self, linear: i64) -> Result<i64, MetadataError> {
         self.domain.require_index(linear)?;
-        Ok(if self.elementwise {
-            linear
-        } else {
-            (linear / self.inner.get() / self.index_per_batch.get())
-                / self.base_outer_per_batch.get()
-                * self.index_per_batch.get()
-                + linear / self.inner.get() % self.index_per_batch.get()
-        })
+        match &self.mapping {
+            SparseMapping::Empty => Err(MetadataError::Domain(
+                "empty sparse iteration domain".into(),
+            )),
+            SparseMapping::Elementwise => Ok(linear),
+            SparseMapping::Hyperplane {
+                inner,
+                indices_per_batch,
+                outer_per_batch,
+                ..
+            } => {
+                // Reachability proves each divisor nonzero. The checked INDEX
+                // projection proves both nonnegative summands fit its target.
+                let plane = linear / inner.get();
+                Ok(plane / indices_per_batch.get() / outer_per_batch.get()
+                    * indices_per_batch.get()
+                    + plane % indices_per_batch.get())
+            }
+        }
     }
     pub fn data_index(&self, linear: i64, selected: i64) -> Result<i64, MetadataError> {
         self.domain.require_index(linear)?;
@@ -879,35 +974,38 @@ impl SparseMetadata {
                 "sparse index outside base axis".into(),
             ));
         }
-        if self.elementwise {
-            let mut remaining = linear;
-            let mut offset = 0_i64;
-            for (axis, &extent) in self.indices.shape().iter().enumerate().rev() {
-                let coordinate = if axis == self.axis {
-                    selected
-                } else {
-                    remaining % extent
-                };
-                remaining /= extent;
-                offset = coordinate
-                    .checked_mul(self.base.strides[axis])
-                    .and_then(|n| offset.checked_add(n))
-                    .ok_or(MetadataError::Overflow("sparse offset exceeds i64"))?;
+        match &self.mapping {
+            SparseMapping::Empty => Err(MetadataError::Domain(
+                "empty sparse iteration domain".into(),
+            )),
+            SparseMapping::Elementwise => self
+                .offset
+                .apply(linear)?
+                .checked_add(self.selected.apply(selected)?)
+                .ok_or(MetadataError::Overflow("sparse offset exceeds i64")),
+            SparseMapping::Hyperplane {
+                inner,
+                indices_per_batch,
+                source_axis: Some(source_axis),
+                ..
+            } => {
+                let outer = linear / inner.get() / indices_per_batch.get();
+                let offset = source_axis.linear_index(
+                    usize::try_from(outer)
+                        .map_err(|_| MetadataError::Overflow("sparse outer exceeds target"))?,
+                    usize::try_from(selected)
+                        .map_err(|_| MetadataError::Overflow("sparse index exceeds target"))?,
+                    usize::try_from(linear % inner.get())
+                        .map_err(|_| MetadataError::Overflow("sparse inner exceeds target"))?,
+                )?;
+                i64::try_from(offset)
+                    .map_err(|_| MetadataError::Overflow("sparse offset exceeds i64"))
             }
-            self.base.require_index(offset)?;
-            Ok(offset)
-        } else {
-            let outer = linear / self.inner.get() / self.index_per_batch.get();
-            let inner = linear % self.inner.get();
-            let offset = self.source_axis.linear_index(
-                usize::try_from(outer)
-                    .map_err(|_| MetadataError::Overflow("sparse outer exceeds target"))?,
-                usize::try_from(selected)
-                    .map_err(|_| MetadataError::Overflow("sparse index exceeds target"))?,
-                usize::try_from(inner)
-                    .map_err(|_| MetadataError::Overflow("sparse inner exceeds target"))?,
-            )?;
-            i64::try_from(offset).map_err(|_| MetadataError::Overflow("sparse offset exceeds i64"))
+            SparseMapping::Hyperplane {
+                source_axis: None, ..
+            } => Err(MetadataError::Domain(
+                "sparse index outside base axis".into(),
+            )),
         }
     }
 }
@@ -1506,4 +1604,76 @@ fn unravel_into(
         linear /= extent;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod sparse_mapping_work_tests {
+    use super::*;
+
+    fn bounded_mapping_work(budget: usize, action: impl FnOnce()) -> Result<(), usize> {
+        AFFINE_TERM_VISITS.with(|visits| visits.set(0));
+        action();
+        let work = AFFINE_TERM_VISITS.with(std::cell::Cell::get);
+        if work <= budget { Ok(()) } else { Err(work) }
+    }
+
+    #[test]
+    fn hyperplane_queries_keep_rank_independent_mapping_work() {
+        for rank in [8, 32, 128] {
+            let mut shape = vec![1; rank];
+            shape[0] = 2;
+            shape[rank / 2] = 3;
+            shape[rank - 1] = 2;
+            let base = ShapeMetadata::contiguous(&shape, RuntimeDType::I64).unwrap();
+            let indices = ShapeMetadata::contiguous(&[2, 2], RuntimeDType::I64).unwrap();
+            let plan =
+                SparseMetadata::new_paired(&base, &indices, (rank / 2) as i64, false, 1).unwrap();
+            bounded_mapping_work(8 * 5, || {
+                for linear in 0..8 {
+                    assert_eq!(plan.index_slot(linear).unwrap(), linear / 2);
+                    assert_eq!(
+                        plan.data_index(linear, 2).unwrap(),
+                        linear / 4 * 6 + 4 + linear % 2
+                    );
+                }
+            })
+            .unwrap();
+            // Restoring the rank-sized projection path violates this same oracle.
+            assert_eq!(
+                bounded_mapping_work(8 * 5, || {
+                    for linear in 0..8 {
+                        plan.index.apply(linear).unwrap();
+                        plan.offset.apply(linear).unwrap();
+                        plan.selected.apply(2).unwrap();
+                    }
+                }),
+                Err(8 * (2 * plan.domain.shape().len() + 1))
+            );
+        }
+    }
+
+    #[test]
+    fn elementwise_slots_keep_rank_independent_mapping_work() {
+        for rank in [8, 32, 128] {
+            let mut shape = vec![1; rank];
+            shape[0] = 2;
+            shape[rank - 1] = 3;
+            let base = ShapeMetadata::contiguous(&shape, RuntimeDType::I64).unwrap();
+            let plan = SparseMetadata::new(&base, &base, (rank - 1) as i64, true).unwrap();
+            bounded_mapping_work(6, || {
+                for linear in 0..6 {
+                    assert_eq!(plan.index_slot(linear).unwrap(), linear);
+                }
+            })
+            .unwrap();
+            assert_eq!(
+                bounded_mapping_work(6, || {
+                    for linear in 0..6 {
+                        plan.index.apply(linear).unwrap();
+                    }
+                }),
+                Err(6 * rank)
+            );
+        }
+    }
 }

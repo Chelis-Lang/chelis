@@ -1126,6 +1126,13 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_sparse_term ( const chelis_sparse_plan * plan , chelis_sparse_projection part , chelis_projection_field field , chelis_scalar term ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_string_len ( chelis_string value ) ;",
       "flags": [
         "numeric-op"
@@ -1381,6 +1388,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_sparse_check_index ( const chelis_sparse_plan * plan , chelis_scalar selected ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_sparse_check_target ( const chelis_sparse_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
       "flags": []
     },
@@ -1569,6 +1581,11 @@
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef enum { CHELIS_SPARSE_GATHER = 0 , CHELIS_SPARSE_ADD = 1 , CHELIS_SPARSE_REPLACE = 2 , CHELIS_SPARSE_ELEMENTS = 3 } chelis_sparse_op",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef enum { CHELIS_SPARSE_INDEX = 0 , CHELIS_SPARSE_BASE = 1 , CHELIS_SPARSE_SELECTED = 2 } chelis_sparse_projection",
       "flags": []
     },
     {

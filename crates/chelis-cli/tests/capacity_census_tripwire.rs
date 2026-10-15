@@ -196,6 +196,12 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_SPARSE_INDEX = 0 , CHELIS_SPARSE_BASE = 1 , CHELIS_SPARSE_SELECTED = 2 } chelis_sparse_projection",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
         "chelis_runtime.h: typedef enum { CHELIS_PROJECTION_GROUP = 0 , CHELIS_PROJECTION_LEAF = 1 } chelis_projection_part",
         &[],
     ),
@@ -4333,6 +4339,26 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             "header-export",
             "chelis_runtime.h: int64_t chelis_sparse_extent ( const chelis_sparse_plan * plan , chelis_scalar axis ) ;",
             &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_sparse_term ( const chelis_sparse_plan * plan , chelis_sparse_projection part , chelis_projection_field field , chelis_scalar term ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_sparse_check_index ( const chelis_sparse_plan * plan , chelis_scalar selected ) ;",
+            &[],
         ),
         atom: "[05-OP-33]",
         authority_anchor: "`chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)",
