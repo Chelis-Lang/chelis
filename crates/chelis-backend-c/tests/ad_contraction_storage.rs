@@ -119,6 +119,7 @@ fn inputs([m, k, n]: [usize; 3]) -> UnordMap<String, TensorValue> {
 
 fn bytes(storage: &TensorStorage) -> Vec<u8> {
     match storage.view() {
+        StorageView::I64(v) => v.iter().flat_map(|n| n.to_le_bytes()).collect(),
         StorageView::F64(v) => v.iter().flat_map(|n| n.to_bits().to_le_bytes()).collect(),
         StorageView::F32(v) => v.iter().flat_map(|n| n.to_bits().to_le_bytes()).collect(),
         StorageView::F16(v) => v.iter().flat_map(|n| n.to_bits().to_le_bytes()).collect(),
@@ -873,6 +874,61 @@ fn ad_contraction_inputs_preserve_aliases_and_nonfinite_bits() {
                 8 * 9,
             ));
         }
+    }
+    execute(cases);
+}
+
+#[test]
+fn shape_reads_deferred_metadata_with_an_exact_integer_result() {
+    let mut cases = Vec::new();
+    for count in [0usize, 13] {
+        let mut dag = Dag::new();
+        let owner = dag.declare("test");
+        let vector = ty(&[count], Prim::F32);
+        let a = dag.add_node(
+            owner,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            vector.clone(),
+            None,
+        );
+        let owned = dag.add_node(owner, RiscOp::Add, vec![a, a], vector.clone(), None);
+        let moved = dag.add_node(
+            owner,
+            RiscOp::Permute { axes: vec![0] },
+            vec![owned],
+            vector,
+            None,
+        );
+        let sum = dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![moved],
+            ty(&[], Prim::F32),
+            None,
+        );
+        let shape = dag.add_node(
+            owner,
+            RiscOp::Shape { axis: 0 },
+            vec![moved],
+            ty(&[], Prim::Int64),
+            None,
+        );
+        dag.set_roots(vec![sum, shape]);
+        cases.push((
+            dag,
+            vec![sum, shape],
+            [(
+                "a".into(),
+                TensorValue::from_vec(vec![count], vec![0.25; count]),
+            )]
+            .into_iter()
+            .collect(),
+            8 * count.max(1),
+        ));
     }
     execute(cases);
 }

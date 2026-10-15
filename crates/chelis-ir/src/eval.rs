@@ -6799,58 +6799,68 @@ mod tests {
 
     #[test]
     fn canonical_forward_matmul_keeps_the_dense_typed_product_kernel() {
-        let mut dag = Dag::new();
-        let owner = dag.declare("test");
-        let ty = |shape: &[usize]| TensorType {
-            dims: shape.iter().copied().map(DimInfo::Lit).collect(),
-            precision: Prim::F32,
-        };
-        let at = ty(&[3, 13]);
-        let bt = ty(&[13, 5]);
-        let a = dag.add_node(
-            owner,
-            RiscOp::Load { name: "a".into() },
-            vec![],
-            at.clone(),
-            None,
-        );
-        let b = dag.add_node(
-            owner,
-            RiscOp::Load { name: "b".into() },
-            vec![],
-            bt.clone(),
-            None,
-        );
-        let output = crate::tier2::lower_matmul_with_accumulator(
-            owner.into(),
-            &mut dag,
-            a,
-            b,
-            &at,
-            &bt,
-            Prim::F32,
-            None,
-        );
-        dag.add_root(output);
-        let inputs: UnordMap<String, TensorValue> = [
-            (
-                "a".into(),
-                TensorValue::from_vec(vec![3, 13], vec![0.5; 39]),
-            ),
-            (
-                "b".into(),
-                TensorValue::from_vec(vec![13, 5], vec![0.25; 65]),
-            ),
-        ]
-        .into_iter()
-        .collect();
-        DENSE_PRODUCT_REDUCTIONS.with(|count| count.set(0));
-        VIEW_VISITS.with(|count| count.set((0, 0)));
-        let value =
-            eval_tensor_roots_with(&dag, &[output], |name| inputs.get(name).cloned()).unwrap();
-        assert_eq!(DENSE_PRODUCT_REDUCTIONS.with(std::cell::Cell::get), 1);
-        assert_eq!(VIEW_VISITS.with(std::cell::Cell::get), (0, 0));
-        assert_eq!(value[&output].to_f64_lossy_vec(), vec![1.625; 15]);
+        for numeric_source in [false, true] {
+            let mut dag = Dag::new();
+            let owner = dag.declare("test");
+            let ty = |shape: &[usize]| TensorType {
+                dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                precision: Prim::F32,
+            };
+            let at = ty(&[3, 13]);
+            let bt = ty(&[13, 5]);
+            let a = dag.add_node(
+                owner,
+                RiscOp::Load { name: "a".into() },
+                vec![],
+                at.clone(),
+                None,
+            );
+            let b = dag.add_node(
+                owner,
+                RiscOp::Load { name: "b".into() },
+                vec![],
+                bt.clone(),
+                None,
+            );
+            let lhs = if numeric_source {
+                dag.add_node(owner, RiscOp::Mul, vec![a, a], at.clone(), None)
+            } else {
+                a
+            };
+            let output = crate::tier2::lower_matmul_with_accumulator(
+                owner.into(),
+                &mut dag,
+                lhs,
+                b,
+                &at,
+                &bt,
+                Prim::F32,
+                None,
+            );
+            dag.add_root(output);
+            let inputs: UnordMap<String, TensorValue> = [
+                (
+                    "a".into(),
+                    TensorValue::from_vec(vec![3, 13], vec![0.5; 39]),
+                ),
+                (
+                    "b".into(),
+                    TensorValue::from_vec(vec![13, 5], vec![0.25; 65]),
+                ),
+            ]
+            .into_iter()
+            .collect();
+            DENSE_PRODUCT_REDUCTIONS.with(|count| count.set(0));
+            VIEW_VISITS.with(|count| count.set((0, 0)));
+            let value =
+                eval_tensor_roots_with(&dag, &[output], |name| inputs.get(name).cloned()).unwrap();
+            assert_eq!(DENSE_PRODUCT_REDUCTIONS.with(std::cell::Cell::get), 1);
+            assert_eq!(VIEW_VISITS.with(std::cell::Cell::get), (0, 0));
+            assert_eq!(
+                value[&output].to_f64_lossy_vec(),
+                vec![if numeric_source { 0.8125 } else { 1.625 }; 15]
+            );
+        }
     }
 
     #[test]

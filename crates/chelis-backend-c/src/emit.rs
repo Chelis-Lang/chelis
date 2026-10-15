@@ -4059,30 +4059,22 @@ impl CEmitter {
         // The destination may repurpose the last-use source at the same capacity.
         // Capture its logical extent while the source metadata still names it.
         let extent = format!("t{id}_shape_extent");
+        let index_type = Self::index_c_type();
         self.line(&format!(
-            "const int64_t {extent} = {};",
+            "const {index_type} {extent} = {};",
             self.tensor_extent(NodeId(a), axis)
         ));
         self.emit_slot_wrapper(id, ty);
         match ty.precision {
             Prim::Int64 => {
                 self.line(&format!(
-                    "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)({extent})));"
+                    "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {extent}));"
                 ));
             }
-            Prim::Int32 => {
+            Prim::Int32 | Prim::Int16 | Prim::Int8 => {
+                let element = Self::elem_type(ty);
                 self.line(&format!(
-                    "{{ int32_t *__p = (int32_t*)t{id}_data; __p[0] = (int32_t)({extent}); }}"
-                ));
-            }
-            Prim::Int16 => {
-                self.line(&format!(
-                    "{{ int16_t *__p = (int16_t*)t{id}_data; __p[0] = (int16_t)({extent}); }}"
-                ));
-            }
-            Prim::Int8 => {
-                self.line(&format!(
-                    "{{ int8_t *__p = (int8_t*)t{id}_data; __p[0] = (int8_t)({extent}); }}"
+                    "{{ {element} *__p = ({element}*)t{id}_data; __p[0] = ({element})({extent}); }}"
                 ));
             }
             other => panic!(
