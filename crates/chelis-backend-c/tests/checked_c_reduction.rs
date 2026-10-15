@@ -104,8 +104,14 @@ fn validate(source: &str) -> Result<(), String> {
     let leaves = inlined
         .find("self.emit_sum_level_lanes(")
         .ok_or("missing inlined Sum scratch")?;
-    if check >= output || output >= leaves || !inlined.contains("ty, \"CHELIS_REDUCE_SUM\", true)")
-    {
+    if check >= output || output >= leaves {
+        return Err("inlined Sum unchecked scratch domain".into());
+    }
+    let checked_domain = inlined[check..output]
+        .split_whitespace()
+        .collect::<String>()
+        .replace(",)", ")");
+    if !checked_domain.contains("ty,\"CHELIS_REDUCE_SUM\",true)") {
         return Err("inlined Sum unchecked scratch domain".into());
     }
     let plan = method(source, "emit_reduction_plan");
@@ -229,14 +235,20 @@ fn bypassing_each_consumer_and_scratch_owner_is_rejected() {
         "domain must precede vector allocation"
     );
     let inlined = method(source, "emit_inlined_product_sum");
-    for original in [
-        "self.emit_reduction_plan(",
-        "self.emit_sum_level_lanes(",
-        "ty, \"CHELIS_REDUCE_SUM\", true)",
-    ] {
+    for original in ["self.emit_reduction_plan(", "self.emit_sum_level_lanes("] {
         assert!(
             validate(&source.replace(inlined, &inlined.replace(original, "removed("))).is_err(),
             "inlined scratch: {original}"
         );
     }
+    assert_eq!(
+        inlined.matches("true,").count(),
+        1,
+        "one checked scratch-domain flag"
+    );
+    let unchecked = inlined.replacen("true,", "false,", 1);
+    assert!(
+        validate(&source.replace(inlined, &unchecked)).is_err(),
+        "inlined Sum must check its scratch domain"
+    );
 }

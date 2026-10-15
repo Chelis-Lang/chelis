@@ -410,8 +410,14 @@ int64_t chelis_movement_term(const chelis_movement_plan *plan, chelis_projection
 int64_t chelis_movement_base(const chelis_movement_plan *plan);
 typedef enum { CHELIS_PRODUCT_MUL = 0, CHELIS_PRODUCT_MATMUL = 1 } chelis_product_shape_context;
 void chelis_movement_check_product(const chelis_movement_plan *lhs, const chelis_movement_plan *rhs, chelis_product_shape_context context);
+chelis_metadata_plan *chelis_metadata_product_plan(const chelis_metadata_plan *lhs, const chelis_metadata_plan *rhs, chelis_product_shape_context context);
 void chelis_movement_check_target(const chelis_movement_plan *plan, chelis_scalar rank, const chelis_scalar *shape);
 void chelis_movement_plan_release(chelis_movement_plan *plan);
+chelis_metadata_plan *chelis_metadata_plan_tensor(const chelis_tensor *input);
+chelis_metadata_plan *chelis_metadata_plan_reshape(const chelis_metadata_plan *input, chelis_scalar rank, const chelis_scalar *shape);
+chelis_movement_plan *chelis_metadata_permute_plan(const chelis_metadata_plan *input, chelis_scalar rank, const chelis_scalar *axes);
+chelis_movement_plan *chelis_metadata_expand_plan(const chelis_metadata_plan *input, chelis_scalar axis, chelis_scalar size, chelis_movement_op operation);
+chelis_metadata_plan *chelis_movement_result_metadata(const chelis_movement_plan *plan);
 typedef struct chelis_window_plan chelis_window_plan;
 chelis_window_plan *chelis_tensor_window_plan(const chelis_tensor *input, chelis_scalar count, const chelis_scalar *window, const chelis_scalar *steps, chelis_window_op operation);
 int64_t chelis_window_extent(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar axis);

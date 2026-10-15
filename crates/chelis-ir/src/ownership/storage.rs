@@ -576,7 +576,16 @@ fn build_storage_plan(
     dag: VerifiedDagView<'_>,
     lane: StorageLaneKind,
 ) -> Result<BuiltStoragePlan, OwnershipError> {
+    let views = (lane == StorageLaneKind::C).then(|| dag.contraction_views());
     let mut skipped = dag.reduction_inlined_fused_elems();
+    if let Some(views) = &views {
+        skipped.extend(
+            dag.nodes()
+                .iter()
+                .filter(|node| views.is_deferred(node.id))
+                .map(|node| node.id),
+        );
+    }
     match lane {
         // The C emitter computes an inlined product inside its sum.
         StorageLaneKind::C => skipped.extend(
@@ -590,7 +599,14 @@ fn build_storage_plan(
     let owner_of = compute_owner_map(&placements);
     let destructively_dropped = destructively_dropped_owners(&placements, &owner_of);
     let mut requirements = owner_requirements(dag, &placements, &owner_of)?;
-    extend_lifetimes(dag, lane, &placements, &owner_of, &mut requirements);
+    extend_lifetimes(
+        dag,
+        lane,
+        &placements,
+        &owner_of,
+        &mut requirements,
+        views.as_ref(),
+    );
     let AssignedSlots { slots, reusable } = assign_slots(
         dag,
         &mut placements,
@@ -873,12 +889,18 @@ fn extend_lifetimes(
     placements: &[StoragePlacement],
     owner_of: &[Option<NodeId>],
     requirements: &mut BTreeMap<NodeId, OwnerRequirement>,
+    views: Option<&crate::contraction_views::ContractionViews>,
 ) {
     let epilogue = dag.len();
     for node in dag.nodes() {
-        if matches!(placements[node.id.0], StoragePlacement::Skipped) {
+        if matches!(placements[node.id.0], StoragePlacement::Skipped)
+            && !views.is_some_and(|views| views.is_deferred(node.id))
+        {
             continue;
         }
+        // Deferred storage omits only the payload. Its original operation
+        // still reads runtime bounds, shape/claim witnesses and activation
+        // at this position, before later consumers read the recipe's leaves.
         let mut effective_inputs = match &node.op {
             RiscOp::Drop => match placements[node.id.0] {
                 StoragePlacement::TerminalDrop { source } => vec![source],
@@ -886,7 +908,7 @@ fn extend_lifetimes(
             },
             // A node computing a skipped input inline reads, at its own
             // position, everything that input would have read.
-            _ => read_through_skipped(dag, placements, &node.inputs),
+            _ => read_through_skipped(dag, placements, &node.inputs, views),
         };
         // Ownership borrows shape dependencies as well as value inputs. A
         // result-claim witness stores the canonical scalar the producer reads;
@@ -938,6 +960,19 @@ fn extend_lifetimes(
             requirement.last_use_index = epilogue;
         }
     }
+    // The recipe planner propagates deferred reads in one reverse pass.
+    // These are payload borrows even when the original node only carried
+    // metadata at the later consumer; a source slot cannot be repurposed.
+    if let Some(views) = views {
+        for node in dag.nodes() {
+            if let Some(last) = views.base_last_read(node.id)
+                && let Some(owner) = owner_of[node.id.0]
+                && let Some(requirement) = requirements.get_mut(&owner)
+            {
+                requirement.last_use_index = requirement.last_use_index.max(last);
+            }
+        }
+    }
 }
 
 /// `inputs`, with each skipped node replaced by its own reads, transitively.
@@ -945,10 +980,15 @@ fn read_through_skipped(
     dag: VerifiedDagView<'_>,
     placements: &[StoragePlacement],
     inputs: &[NodeId],
+    views: Option<&crate::contraction_views::ContractionViews>,
 ) -> Vec<NodeId> {
     let mut reads = Vec::new();
     let mut pending = inputs.iter().rev().copied().collect::<Vec<_>>();
     while let Some(input) = pending.pop() {
+        if views.is_some_and(|views| views.is_deferred(input)) {
+            // Accounted for by the reverse-topological base-retirement pass.
+            continue;
+        }
         if !matches!(placements[input.0], StoragePlacement::Skipped) {
             reads.push(input);
             continue;
@@ -1390,6 +1430,186 @@ mod tests {
         );
         dag.add_root(second_node);
         dag
+    }
+
+    #[test]
+    fn deferred_payloads_keep_original_bound_and_claim_reads_live() {
+        for dependency in ["shape", "none"] {
+            let mut dag = Dag::new();
+            let owner = dag.declare("test");
+            let scalar = TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            };
+            let source = dag.add_node(
+                owner,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                TensorType::scalar_f32(),
+                None,
+            );
+            let claim = dag.add_node(
+                owner,
+                RiscOp::synth_const(Prim::Int64, 3.0),
+                vec![],
+                scalar.clone(),
+                None,
+            );
+            let zero = dag.add_node(
+                owner,
+                RiscOp::synth_const(Prim::Int64, 0.0),
+                vec![],
+                scalar.clone(),
+                None,
+            );
+            let bound = dag.add_node(owner, RiscOp::Add, vec![claim, zero], scalar.clone(), None);
+            let intervening = dag.add_node(
+                owner,
+                RiscOp::synth_const(Prim::Int64, 0.0),
+                vec![],
+                scalar,
+                None,
+            );
+            let expanded = dag.add_node(
+                owner,
+                RiscOp::Expand {
+                    axis: 0,
+                    size: crate::dag::RtDim::Node(1),
+                },
+                vec![source, bound],
+                vector(3, Prim::F32),
+                None,
+            );
+            match dependency {
+                "shape" => dag.add_shape_dep(expanded, claim),
+                "none" => (),
+                _ => unreachable!(),
+            }
+            let sum = dag.add_node(
+                owner,
+                RiscOp::Sum {
+                    axis: 0,
+                    accumulator: Prim::F32,
+                },
+                vec![expanded],
+                TensorType::scalar_f32(),
+                None,
+            );
+            dag.set_roots(vec![sum, intervening]);
+            let program = verified(dag);
+            assert!(program.emission().contraction_views().is_deferred(expanded));
+            let emission = program.emission();
+            let views = emission.contraction_views();
+            let placements = classify_nodes(
+                emission,
+                StorageLaneKind::C,
+                &[expanded].into_iter().collect(),
+            );
+            let owners = compute_owner_map(&placements);
+            let mut requirements = owner_requirements(emission, &placements, &owners).unwrap();
+            extend_lifetimes(
+                emission,
+                StorageLaneKind::C,
+                &placements,
+                &owners,
+                &mut requirements,
+                Some(&views),
+            );
+            assert_eq!(requirements[&bound].last_use_index, expanded.0);
+            assert_eq!(
+                requirements[&claim].last_use_index,
+                if dependency == "none" {
+                    bound.0
+                } else {
+                    expanded.0
+                }
+            );
+            let plan = plan_c_storage(program).unwrap();
+            assert!(matches!(
+                plan.placement(expanded),
+                Some(StoragePlacement::Skipped)
+            ));
+            let last = |node| {
+                plan.slot(plan.slot_for_node(node).unwrap())
+                    .unwrap()
+                    .last_use_index()
+            };
+            assert_eq!(
+                last(bound),
+                expanded.0,
+                "runtime bound is read at the original node"
+            );
+            if dependency != "none" {
+                assert!(
+                    last(claim) >= expanded.0,
+                    "{dependency} witness cannot be repurposed before its check"
+                );
+                assert_ne!(plan.slot_for_node(claim), plan.slot_for_node(intervening));
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_product_keeps_result_claim_witness_live() {
+        use crate::dag::{ExtentWitnessSite, RtAxis};
+        let mut dag = Dag::new();
+        let owner = dag.declare("test");
+        let source = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vector(3, Prim::F32),
+            None,
+        );
+        let claim = dag.add_node(
+            owner,
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::LiteralResultClaim,
+                parameter: String::new(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 3).unwrap()],
+                claims: vec![],
+            },
+            vec![],
+            scalar(Prim::Int64),
+            None,
+        );
+        let intervening = dag.add_node(
+            owner,
+            RiscOp::synth_const(Prim::Int64, 0.0),
+            vec![],
+            scalar(Prim::Int64),
+            None,
+        );
+        let product = dag.add_node(
+            owner,
+            RiscOp::Mul,
+            vec![source, source],
+            vector(3, Prim::F32),
+            None,
+        );
+        dag.add_result_claim_dep(product, claim);
+        let sum = dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![product],
+            TensorType::scalar_f32(),
+            None,
+        );
+        dag.set_roots(vec![sum, intervening]);
+        let program = verified(dag);
+        assert!(program.emission().contraction_views().is_deferred(product));
+        let plan = plan_c_storage(program).unwrap();
+        assert_ne!(plan.slot_for_node(claim), plan.slot_for_node(intervening));
+        assert!(
+            plan.slot(plan.slot_for_node(claim).unwrap())
+                .unwrap()
+                .last_use_index()
+                >= product.0
+        );
     }
 
     #[test]

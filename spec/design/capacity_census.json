@@ -387,7 +387,37 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_reshape ( const chelis_metadata_plan * input , chelis_scalar rank , const chelis_scalar * shape ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_tensor ( const chelis_tensor * input ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_view ( chelis_scalar rank , const chelis_scalar * shape , const chelis_scalar * strides , chelis_scalar exemplar , chelis_scalar byte_capacity ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_product_plan ( const chelis_metadata_plan * lhs , const chelis_metadata_plan * rhs , chelis_product_shape_context context ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_metadata_plan * chelis_movement_result_metadata ( const chelis_movement_plan * plan ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_movement_plan * chelis_metadata_expand_plan ( const chelis_metadata_plan * input , chelis_scalar axis , chelis_scalar size , chelis_movement_op operation ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_movement_plan * chelis_metadata_permute_plan ( const chelis_metadata_plan * input , chelis_scalar rank , const chelis_scalar * axes ) ;",
       "flags": []
     },
     {

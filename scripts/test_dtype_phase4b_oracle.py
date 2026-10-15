@@ -2279,6 +2279,39 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
+    def test_logical_contraction_metadata_manifest_keeps_exact_carriers_and_identities(self) -> None:
+        oracle.validate_contract(self.root)
+        path = self.root / "spec/registry/c_tensor_runtime.md"
+        original = path.read_text(encoding="utf-8")
+        signatures = (
+            "chelis_metadata_plan *chelis_metadata_product_plan(const chelis_metadata_plan *lhs, const chelis_metadata_plan *rhs, chelis_product_shape_context context)",
+            "chelis_metadata_plan *chelis_metadata_plan_tensor(const chelis_tensor *input)",
+            "chelis_metadata_plan *chelis_metadata_plan_reshape(const chelis_metadata_plan *input, chelis_scalar rank, const chelis_scalar *shape)",
+            "chelis_movement_plan *chelis_metadata_permute_plan(const chelis_metadata_plan *input, chelis_scalar rank, const chelis_scalar *axes)",
+            "chelis_movement_plan *chelis_metadata_expand_plan(const chelis_metadata_plan *input, chelis_scalar axis, chelis_scalar size, chelis_movement_op operation)",
+            "chelis_metadata_plan *chelis_movement_result_metadata(const chelis_movement_plan *plan)",
+        )
+        for signature in signatures:
+            rows = [row for row in original.splitlines() if f"`{signature}`" in row]
+            self.assertEqual(len(rows), 1, signature)
+            row = rows[0]
+            identity = re.search(r"\b(chelis_\w+)\(", signature).group(1)
+            carrier = re.search(r"const (chelis_\w+) \*", signature).group(1)
+            wrong_carrier = "chelis_tensor" if carrier == "chelis_metadata_plan" else "chelis_metadata_plan"
+            for mutation, changed in (
+                ("missing", ""),
+                ("unknown identity", row.replace(f"{identity}(", f"{identity}_successor(")),
+                ("wrong carrier", row.replace(f"const {carrier} *", f"const {wrong_carrier} *")),
+                ("duplicate", row + "\n" + row),
+            ):
+                with self.subTest(signature=signature, mutation=mutation):
+                    self.assertNotEqual(changed, row)
+                    path.write_text(original.replace(row, changed, 1), encoding="utf-8")
+                    try:
+                        self.assert_contract_fails("05-OP-33.*exact manifest")
+                    finally:
+                        path.write_text(original, encoding="utf-8")
+
     def test_reduction_metadata_declarations_cannot_disappear(self) -> None:
         path = self.root / "spec/registry/c_tensor_runtime.md"
         original = path.read_text(encoding="utf-8")

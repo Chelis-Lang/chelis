@@ -3324,6 +3324,15 @@ pub unsafe extern "C" fn chelis_movement_check_product(
     rhs: *const chelis_movement_plan,
     context: chelis_product_shape_context,
 ) {
+    validate_product_shape_context(context);
+    check_product_shapes(
+        movement_plan(lhs).metadata.result().shape(),
+        movement_plan(rhs).metadata.result().shape(),
+        context,
+    );
+}
+
+fn validate_product_shape_context(context: chelis_product_shape_context) {
     if !matches!(context, CHELIS_PRODUCT_MUL | CHELIS_PRODUCT_MATMUL) {
         affine_result::<()>(
             Err(MetadataError::Domain(
@@ -3332,8 +3341,9 @@ pub unsafe extern "C" fn chelis_movement_check_product(
             "movement",
         );
     }
-    let lhs = movement_plan(lhs).metadata.result().shape();
-    let rhs = movement_plan(rhs).metadata.result().shape();
+}
+
+fn check_product_shapes(lhs: &[i64], rhs: &[i64], context: chelis_product_shape_context) {
     if lhs != rhs {
         let message = match context {
             CHELIS_PRODUCT_MATMUL => chelis_abi::failure::matmul_product_disagreement(lhs, rhs),
@@ -3363,6 +3373,107 @@ pub unsafe extern "C" fn chelis_movement_check_target(
 pub unsafe extern "C" fn chelis_movement_plan_release(plan: *mut chelis_movement_plan) {
     movement_plan(plan);
     drop(Box::from_raw(plan));
+}
+
+unsafe fn logical_metadata<'a>(plan: *const chelis_metadata_plan, op: &str) -> &'a ShapeMetadata {
+    match &metadata_plan_owner(plan).layout {
+        MetadataPlanLayout::Contiguous(metadata) => metadata,
+        MetadataPlanLayout::Strided(_) => affine_result(
+            Err(MetadataError::Domain(
+                "movement requires contiguous logical metadata".into(),
+            )),
+            op,
+        ),
+    }
+}
+
+fn logical_metadata_plan(metadata: ShapeMetadata) -> *mut chelis_metadata_plan {
+    Box::into_raw(Box::new(chelis_metadata_plan {
+        layout: MetadataPlanLayout::Contiguous(metadata),
+    }))
+}
+
+/// [05-OP-33] original-position product agreement without replicated payloads.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_product_plan(
+    lhs: *const chelis_metadata_plan,
+    rhs: *const chelis_metadata_plan,
+    context: chelis_product_shape_context,
+) -> *mut chelis_metadata_plan {
+    validate_product_shape_context(context);
+    let lhs = logical_metadata(lhs, "mul");
+    let rhs = logical_metadata(rhs, "mul");
+    check_product_shapes(lhs.shape(), rhs.shape(), context);
+    logical_metadata_plan(lhs.clone())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_tensor(
+    input: *const chelis_tensor,
+) -> *mut chelis_metadata_plan {
+    tensor_metadata_dtype(input, "metadata_plan");
+    logical_metadata_plan((*input).metadata.clone())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_reshape(
+    input: *const chelis_metadata_plan,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) -> *mut chelis_metadata_plan {
+    let input = logical_metadata(input, "reshape");
+    let shape = reduction_array(rank, shape, "reshape");
+    let target = affine_result(ShapeMetadata::contiguous(&shape, input.dtype()), "reshape");
+    validate_reshape_metadata(input, &target, "reshape");
+    logical_metadata_plan(target)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_permute_plan(
+    input: *const chelis_metadata_plan,
+    rank: chelis_scalar,
+    axes: *const chelis_scalar,
+) -> *mut chelis_movement_plan {
+    let op = "permute";
+    let input = logical_metadata(input, op);
+    let axes = reduction_array(rank, axes, op);
+    let metadata = affine_result(MovementMetadata::permuted(input, &axes), op);
+    Box::into_raw(Box::new(chelis_movement_plan { metadata, op }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_expand_plan(
+    input: *const chelis_metadata_plan,
+    axis: chelis_scalar,
+    size: chelis_scalar,
+    operation: chelis_movement_op,
+) -> *mut chelis_movement_plan {
+    let (op, insert) = match operation {
+        CHELIS_MOVEMENT_EXPAND => ("expand", false),
+        CHELIS_MOVEMENT_INSERT => ("insert", true),
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid expansion operation".into())),
+            "movement",
+        ),
+    };
+    let input = logical_metadata(input, op);
+    let metadata = affine_result(
+        MovementMetadata::expanded(
+            input,
+            affine_scalar(axis, op),
+            affine_scalar(size, op),
+            insert,
+        ),
+        op,
+    );
+    Box::into_raw(Box::new(chelis_movement_plan { metadata, op }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_result_metadata(
+    plan: *const chelis_movement_plan,
+) -> *mut chelis_metadata_plan {
+    logical_metadata_plan(movement_plan(plan).metadata.result().clone())
 }
 
 pub struct chelis_window_plan {

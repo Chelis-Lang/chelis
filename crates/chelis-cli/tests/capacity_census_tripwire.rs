@@ -1063,6 +1063,48 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_product_plan ( const chelis_metadata_plan * lhs , const chelis_metadata_plan * rhs , chelis_product_shape_context context ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_product_plan` applies the same closed product shape context"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_tensor ( const chelis_tensor * input ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_tensor` snapshots a tensor"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_reshape ( const chelis_metadata_plan * input , chelis_scalar rank , const chelis_scalar * shape ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_reshape` admits a tagged target shape"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_movement_plan * chelis_metadata_permute_plan ( const chelis_metadata_plan * input , chelis_scalar rank , const chelis_scalar * axes ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_permute_plan` and"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_movement_plan * chelis_metadata_expand_plan ( const chelis_metadata_plan * input , chelis_scalar axis , chelis_scalar size , chelis_movement_op operation ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_expand_plan` construct the same movement plans"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_movement_result_metadata ( const chelis_movement_plan * plan ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_movement_result_metadata` snapshots a movement plan"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_view ( chelis_scalar rank , const chelis_scalar * shape , const chelis_scalar * strides , chelis_scalar exemplar , chelis_scalar byte_capacity ) ;",
         &[],
         "[05-OP-33]",
@@ -8745,7 +8787,7 @@ fn metadata_plan_callables_require_exact_op33_authority() {
         .collect();
     assert_eq!(
         rows.len(),
-        11,
+        13,
         "complete checked metadata plan API: {rows:?}"
     );
     let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).unwrap();
@@ -8868,6 +8910,61 @@ fn final_stdlib_registrations_are_exact_and_bijective_with_normative_registries(
             registered_identities,
             normative_registry_identities(registry),
             "final {kind} registrations must be bijective with their normative registry"
+        );
+    }
+}
+
+#[test]
+fn logical_contraction_metadata_callables_require_exact_op33_authority() {
+    let root = repo_root();
+    let files = preprocessed_headers(&root.join(INCLUDE_DIR_REL), HEADER_ROOTS);
+    let mut typedefs = BTreeMap::new();
+    for text in files.values() {
+        typedefs.append(&mut collect_typedefs(text));
+    }
+    let rows: Vec<_> = files
+        .iter()
+        .flat_map(|(name, text)| header_rows(name, text, &typedefs))
+        .collect();
+    let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).unwrap();
+    for callable in [
+        "chelis_metadata_plan_tensor",
+        "chelis_metadata_plan_reshape",
+        "chelis_metadata_product_plan",
+        "chelis_metadata_permute_plan",
+        "chelis_metadata_expand_plan",
+        "chelis_movement_result_metadata",
+    ] {
+        let matches: Vec<_> = rows
+            .iter()
+            .filter(|row| row.kind == "header-export" && row.id.contains(&format!(" {callable} (")))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "one complete callable identity: {callable}"
+        );
+        let surface = authority_surface(matches[0]);
+        assert_eq!(
+            capacity_census_authority::classify_final_authority(
+                &surface,
+                final_authority_registries(),
+                &spec
+            ),
+            Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-33]" })
+        );
+        let mut successor = surface;
+        successor.id = successor
+            .id
+            .replace(callable, "chelis_unchecked_logical_metadata");
+        assert!(
+            capacity_census_authority::classify_final_authority(
+                &successor,
+                final_authority_registries(),
+                &spec
+            )
+            .is_err(),
+            "an unregistered successor must fail: {callable}"
         );
     }
 }
