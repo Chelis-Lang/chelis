@@ -4542,10 +4542,14 @@ int main(int argc, char **argv) {
 /// owes. A retained invocation supplies work when its formal carries a named
 /// List.
 fn entry_named_state_lines(names: &[String]) -> Vec<String> {
+    entry_named_state_lines_named(names, "__chelis_entry_named_states")
+}
+
+fn entry_named_state_lines_named(names: &[String], variable: &str) -> Vec<String> {
     if names.is_empty() {
         return Vec::new();
     }
-    let mut lines = vec!["__chelis_entry_named_state __chelis_entry_named_states[] = {".into()];
+    let mut lines = vec![format!("__chelis_entry_named_state {variable}[] = {{")];
     for name in names {
         lines.push(format!(
             "    {{ {}, {}, 0, 0, 0, {{0}} }},",
@@ -5793,6 +5797,42 @@ fn verified_helper_result_origins(
         .collect()
 }
 
+fn stationary_callback_entry(callback: &HostCallback) -> Option<&HostExpr> {
+    let proof = callback.stationary_accumulator.as_ref()?;
+    let HostCallbackKind::Inline { params, body } = &callback.kind else {
+        return None;
+    };
+    if !proof.validates_body(body) {
+        return None;
+    }
+
+    let HostExprKind::Let { bindings, .. } = &body.kind else {
+        return None;
+    };
+    let entry = &bindings.first()?.value;
+    let HostExprKind::SignatureEntry {
+        contract,
+        args,
+        lists,
+        ..
+    } = &entry.kind
+    else {
+        return None;
+    };
+    if params.len() != 2
+        || contract.formals().len() != 2
+        || !args.is_empty()
+        || lists.len() != 1
+        || lists[0].position != 0
+        || lists[0].name != params[0].name
+        || proof.parameter() != params[0].name
+        || contract.formals()[1].pattern().has_tensor()
+    {
+        return None;
+    }
+    Some(entry)
+}
+
 struct CallbackAt<'a> {
     callback: &'a HostCallback,
     span: Option<&'a str>,
@@ -5810,7 +5850,16 @@ struct TailLoopPlan {
     formals: Vec<String>,
 }
 
+struct StationaryEntryGuard {
+    expression: *const HostExpr,
+    checked: String,
+    states: Option<(String, usize)>,
+}
+
 struct HostEmitter<'a> {
+    /// Exact inline entry expression and its loop-local successful-check flag.
+    /// The checked callback proof guarantees the accumulator cannot change.
+    stationary_entry: Option<StationaryEntryGuard>,
     lines: Vec<String>,
     /// [04-NUM-2]: the NaN finalization of the tensor builtin whose
     /// elementwise loop is being emitted.
@@ -6256,6 +6305,7 @@ impl<'a> HostEmitter<'a> {
                 .cloned()
                 .collect(),
             expression_site_index: 0,
+            stationary_entry: None,
             entry_projection: entry::Projection::default(),
             external_helpers: UnordSet::new(),
             interface_reload_names: UnordSet::new(),
@@ -7600,6 +7650,80 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
+    fn prepare_stationary_entry(
+        &mut self,
+        callback: &HostCallback,
+    ) -> Option<StationaryEntryGuard> {
+        let entry = stationary_callback_entry(callback)?;
+        let HostExprKind::SignatureEntry {
+            contract, lists, ..
+        } = &entry.kind
+        else {
+            return None;
+        };
+        let checked = self.next_temp("stationary_entry_checked");
+        self.lines
+            .push(format!("{}bool {checked} = false;", self.indent));
+        let mut binders = contract.named_list_binders().to_vec();
+        for pattern in lists.iter().filter_map(|entry| entry.claim.as_ref()) {
+            for binder in pattern.binders() {
+                if !binders.contains(&binder) {
+                    binders.push(binder);
+                }
+            }
+        }
+        let states = if binders.is_empty() {
+            None
+        } else {
+            let name = self.next_temp("stationary_entry_states");
+            self.lines.extend(
+                entry_named_state_lines_named(&binders, &name)
+                    .into_iter()
+                    .map(|line| format!("{}{line}", self.indent)),
+            );
+            Some((name, binders.len()))
+        };
+        Some(StationaryEntryGuard {
+            expression: entry as *const HostExpr,
+            checked,
+            states,
+        })
+    }
+
+    fn stationary_entry_matches(&self, expression: &HostExpr) -> bool {
+        self.stationary_entry
+            .as_ref()
+            .is_some_and(|guard| std::ptr::eq(guard.expression, expression))
+    }
+
+    fn emit_stationary_entry_validation(&mut self, expression: &HostExpr, lines: Vec<String>) {
+        if let Some(guard) = &self.stationary_entry
+            && std::ptr::eq(guard.expression, expression)
+        {
+            // Keep the invocation's witness variable in its original lexical
+            // scope. Result/local claims following entry can still read it.
+            if let Some((states, count)) = &guard.states {
+                self.lines.push(format!(
+                    "{}__chelis_entry_named_state __chelis_entry_named_states[{count}];",
+                    self.indent
+                ));
+                self.lines.push(format!("{}memcpy(__chelis_entry_named_states, {states}, sizeof __chelis_entry_named_states);", self.indent));
+            }
+            self.lines
+                .push(format!("{}if (!{}) {{", self.indent, guard.checked));
+            self.lines
+                .extend(lines.into_iter().map(|line| format!("    {line}")));
+            if let Some((states, _)) = &guard.states {
+                self.lines.push(format!("{}    memcpy({states}, __chelis_entry_named_states, sizeof __chelis_entry_named_states);", self.indent));
+            }
+            self.lines
+                .push(format!("{}    {} = true;", self.indent, guard.checked));
+            self.lines.push(format!("{}}}", self.indent));
+        } else {
+            self.lines.extend(lines);
+        }
+    }
+
     fn assign_expr(
         &mut self,
         target: &str,
@@ -8226,14 +8350,10 @@ impl<'a> HostEmitter<'a> {
                     actuals.push(temp);
                 }
                 if lists.is_empty() {
-                    self.lines.extend(signature_entry_lines(
-                        plan,
-                        &actuals,
-                        &self.indent,
-                        &[],
-                        None,
-                        true,
-                    )?);
+                    self.emit_stationary_entry_validation(
+                        expr,
+                        signature_entry_lines(plan, &actuals, &self.indent, &[], None, true)?,
+                    );
                 } else {
                     let count = contract.formals().len();
                     let mut named_list_binders = contract.named_list_binders().to_vec();
@@ -8308,14 +8428,17 @@ impl<'a> HostEmitter<'a> {
                             .ordered_extents
                             .push(entry_walk::ExtentStep::Walk(extent_call));
                     }
-                    self.lines.extend(signature_entry_lines(
-                        plan,
-                        &actuals,
-                        &self.indent,
-                        &[],
-                        Some(&work),
-                        true,
-                    )?);
+                    self.emit_stationary_entry_validation(
+                        expr,
+                        signature_entry_lines(
+                            plan,
+                            &actuals,
+                            &self.indent,
+                            &[],
+                            Some(&work),
+                            !self.stationary_entry_matches(expr),
+                        )?,
+                    );
                 }
                 self.lines.push(format!("{}{target} = 0;", self.indent));
             }
@@ -13061,6 +13184,7 @@ impl<'a> HostEmitter<'a> {
             "{}int64_t {} = chelis_list_len({});",
             self.indent, len_var, list_var
         ));
+        let stationary_entry = self.prepare_stationary_entry(callback);
         self.lines.push(format!(
             "{}for (int64_t __i = 0; __i < {}; __i++) {{",
             self.indent, len_var
@@ -13134,6 +13258,8 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
         self.declare_result_origin(&item_arg, &params[1].ty, Some("load"));
         self.bind_loop_item(site, &item_arg)?;
+        let outer_stationary_entry =
+            std::mem::replace(&mut self.stationary_entry, stationary_entry);
         self.emit_callback_assign(
             callback,
             &[acc_arg, item_arg],
@@ -13141,6 +13267,7 @@ impl<'a> HostEmitter<'a> {
             callback_span,
             (site, body_block),
         )?;
+        self.stationary_entry = outer_stationary_entry;
         self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
@@ -13208,6 +13335,7 @@ impl<'a> HostEmitter<'a> {
             "{}{target} = chelis_list_with_capacity({});",
             self.indent, len_var
         ));
+        let stationary_entry = self.prepare_stationary_entry(callback);
         self.lines.push(format!(
             "{}for (int64_t __i = 0; __i < {}; __i++) {{",
             self.indent, len_var
@@ -13261,6 +13389,8 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
         self.declare_result_origin(&item_arg, &params[1].ty, Some("load"));
         self.bind_loop_item(site, &item_arg)?;
+        let outer_stationary_entry =
+            std::mem::replace(&mut self.stationary_entry, stationary_entry);
         self.emit_callback_assign(
             callback,
             &[acc_arg, item_arg],
@@ -13268,6 +13398,7 @@ impl<'a> HostEmitter<'a> {
             callback_span,
             (site, body_block),
         )?;
+        self.stationary_entry = outer_stationary_entry;
         let pushed = self.box_value_expr(&acc_var, &acc_ty)?;
         self.emit_loop_step_block_actions(
             site,

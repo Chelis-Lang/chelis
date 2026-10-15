@@ -2122,6 +2122,38 @@ absent field would disagree (no trap), a static five-element literal field
 (checker rejection, unchanged), effects before and after the producer, and a
 call of the generic `make` whose result meets no claim (no guard emitted). HIP and Metal follow the platform interlocks below.
 
+#### C6.6 Stationary fold and scan accumulator claims
+
+A stationary-accumulator proof names a checked callback's first formal and
+proves that every admitted result path returns that same immutable value.
+The shared host lowering proof applies to inline callbacks. It accepts a
+direct formal reference and its
+block, let and conditional forwarding, rejects shadowed references, and
+requires a scalar second formal. It retains the first formal's authored
+claim pattern. The callback, its obligation and its witness source stay fixed
+for the loop; neither runtime infers the proof from equal extents or a reused
+address.
+
+On the first callback invocation, both lanes perform the complete entry
+check in signature order. Eval retains the first checked observation of each
+dimension binder,
+including its exact source path and extent. Later invocations reuse that
+bounded witness summary instead of collecting the accumulator's tensors.
+Literal-only claims require no witness summary after their successful check.
+Compiled C guards only that callback's entry checks with a loop-local
+successful-check flag. Named witness state is retained beside the flag and
+restored in the callback's original lexical scope for dependent guards. The
+callback body still runs on every iteration.
+Empty inputs execute no callback entry. Independent result and caller claims
+keep their existing schedule and checks.
+
+A callback that constructs or changes the accumulator or introduces another
+extent-bearing formal retains complete per-invocation validation. Eval also
+retains full checks for callable invocation adapters and their independent
+contracts. Discharging growing
+accumulators requires producer postconditions and component evidence; the
+stationary proof supplies neither and does not authorize skipping those walks.
+
 ## Part II: remaining delivery sequence
 
 Each row below is an owner of concrete work, not a claim that a PR exists.

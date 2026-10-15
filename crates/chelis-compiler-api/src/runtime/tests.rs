@@ -5020,3 +5020,51 @@ mod issue_2619_shared_capture_staging {
         );
     }
 }
+
+#[test]
+fn stationary_claimed_fold_and_scan_collect_the_seed_once() {
+    for combinator in ["fold", "scan"] {
+        for dimension in ["3", "n"] {
+            for elements in [100, 400] {
+                for steps in [40, 160] {
+                    let source = format!(
+                        r#"def produce(size: i64) -> tensor[*, f32] = insert(scalar_to_tensor(0.0f32), 0i32, size)
+def run[n]() -> i64 = len({combinator}(fn (acc: List[tensor[{dimension}, f32]], i: i64) -> acc, map(fn (i: i64) -> produce(3i64), range(0i64, {elements}i64)), range(0i64, {steps}i64)))
+out = run()
+"#
+                    );
+                    super::eval::reset_entry_claim_work();
+                    let result = crate::compiler::eval_selected(
+                        crate::schema::EvalRequest {
+                            source_kind: crate::schema::SourceKind::Surf,
+                            source,
+                            bindings: Default::default(),
+                        },
+                        &["out".into()],
+                    )
+                    .expect("stationary claimed accumulator evaluates");
+                    assert_eq!(
+                        serde_json::to_value(&result.roots[0].value).unwrap(),
+                        serde_json::to_value(crate::compiler::wire_values::scalar_integer(
+                            chelis_types::types::Prim::Int64,
+                            if combinator == "fold" {
+                                elements
+                            } else {
+                                steps
+                            }
+                        ))
+                        .unwrap()
+                    );
+                    let work = super::eval::entry_claim_work();
+                    eprintln!(
+                        "{combinator} [{dimension}]: {elements} elements, {steps} steps, {work} entry work units"
+                    );
+                    assert!(
+                        work <= 4 * (elements + steps) as u64,
+                        "{combinator} [{dimension}]: {work} entry work units for {elements} elements and {steps} steps"
+                    );
+                }
+            }
+        }
+    }
+}

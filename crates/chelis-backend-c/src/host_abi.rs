@@ -706,6 +706,7 @@ fn project_callback(
         },
     };
     Ok(HostAbiCallback {
+        stationary_accumulator: callback.stationary_accumulator,
         kind,
         ret_ty: HostAbiType::try_from_concrete(&callback.ret_ty)?,
     })
