@@ -1720,3 +1720,24 @@ fn lexical_forwarding_keeps_independent_wrapper_local_claims_in_order() {
         }
     }
 }
+
+#[test]
+fn lexical_forwarding_saved_roles_survive_later_formal_name_shadows() {
+    for steps in [100, 400] {
+        for unproved in [false, true] {
+            let source = forwarding_wrapper_source(400, steps, 2, unproved).replace(
+                "item0 = i\n",
+                "item0 = i\n i = 0i64\n acc = [produce(3i64)]\n",
+            );
+            let (work, origins) = counted_native(&source);
+            eprintln!(
+                "saved forwarding roles after shadows N=400 K={steps} unproved={unproved}: work={work} origins={origins}"
+            );
+            if unproved {
+                assert!(work >= 400 * steps as u64, "{work}");
+            } else {
+                assert!(work <= 96 * (400 + steps) as u64 + 100, "{work}");
+            }
+        }
+    }
+}

@@ -32025,6 +32025,8 @@ impl AccumulatorDeltaProof {
         parameter: &str,
     ) -> bool {
         fn alias<T>(expr: &HostExpr<T>) -> Option<&str> {
+            #[cfg(test)]
+            charge_accumulator_identity_work(1);
             match &expr.kind {
                 HostExprKind::Var(name, _) => Some(name),
                 HostExprKind::FormalIngress { value, .. } => alias(value),
@@ -32052,8 +32054,12 @@ impl AccumulatorDeltaProof {
                     if bindings.iter().any(|binding| binding.name == parameter) {
                         return false;
                     }
+                    #[cfg(test)]
+                    charge_accumulator_identity_work(aliases.len());
                     let mut local = aliases.clone();
                     for binding in bindings {
+                        #[cfg(test)]
+                        charge_accumulator_identity_work(1);
                         let source = alias(&binding.value).map(|name| {
                             local
                                 .get(name)
@@ -32152,6 +32158,16 @@ pub struct AccumulatorCompositionProof {
     forwarding: AccumulatorForwardingPlan,
 }
 
+#[cfg(test)]
+thread_local! {
+    static ACCUMULATOR_IDENTITY_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn charge_accumulator_identity_work(units: usize) {
+    ACCUMULATOR_IDENTITY_WORK.with(|work| work.set(work.get() + units));
+}
+
 /// Whole immutable-variable identity is shared by construction and
 /// forwarding proofs; metadata never creates a new binding occurrence.
 fn accumulator_identity_variable(mut expr: &Expr) -> Option<&str> {
@@ -32225,9 +32241,6 @@ pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForward
                         .copied();
                     let mut names = UnordSet::new();
                     collect_binder_names(binder, &mut names);
-                    if names.contains(&acc) || names.contains(&item) {
-                        return None;
-                    }
                     for name in names.into_sorted() {
                         roles.remove(&name);
                         bound.insert(name);
@@ -32256,7 +32269,7 @@ pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForward
                 }
                 return Some(AccumulatorForwardingPlan {
                     callee_name: callee.to_owned(),
-                    callsite: current.clone(),
+                    callsite: bare(current).clone(),
                     tails,
                 });
             }
@@ -32354,6 +32367,8 @@ fn accumulator_construction_proof_impl(
         aliases: &BTreeSet<String>,
         shadowed: &BTreeSet<String>,
     ) -> Option<(AccumulatorDeltaRecipe, bool)> {
+        #[cfg(test)]
+        charge_accumulator_identity_work(1);
         if let Expr::MetaExpr(meta, _) = expr {
             return recipe(
                 &meta.expr, parameter, pattern, position, root, aliases, shadowed,
@@ -32380,9 +32395,13 @@ fn accumulator_construction_proof_impl(
                 if bindings.tag() != DeepTag::Bind || !remainder.is_empty() {
                     return None;
                 }
+                #[cfg(test)]
+                charge_accumulator_identity_work(aliases.len() + shadowed.len());
                 let mut local_aliases = aliases.clone();
                 let mut local_shadowed = shadowed.clone();
                 for pair in pairs {
+                    #[cfg(test)]
+                    charge_accumulator_identity_work(1);
                     // Deep let bindings are sequential: read the old lexical
                     // environment before introducing this pair's binders.
                     let inherited = variable(&pair[1], parameter, &local_aliases);
@@ -32595,6 +32614,61 @@ mod accumulator_delta_tests {
             checked.exprs().iter().find_map(find_fn).unwrap(),
             checked.adt_registry(),
         )
+    }
+
+    #[test]
+    fn nested_alias_identity_analysis_has_bounded_source_and_lowered_work() {
+        for length in [40, 80, 160] {
+            let mut bindings = "old0 = acc\n".to_owned();
+            for index in 1..length {
+                bindings.push_str(&format!("old{index} = old{}\n", index - 1));
+            }
+            let body = format!(
+                "{{ {bindings} append(old{}, to_tensor([1.0f32, 2.0f32, 3.0f32])) }}",
+                length - 1
+            );
+            ACCUMULATOR_IDENTITY_WORK.with(|work| work.set(0));
+            let proof = proof(&body).unwrap();
+            let source_work = ACCUMULATOR_IDENTITY_WORK.with(std::cell::Cell::get);
+            let ty = proof.formal_type.clone();
+            let var = |name: String| HostExpr::new(HostExprKind::Var(name, ty.clone()));
+            let mut lowered = HostExpr::new(HostExprKind::Builtin {
+                name: "append".into(),
+                args: vec![
+                    var(format!("old{}", length - 1)),
+                    HostExpr::new(HostExprKind::Unit),
+                ],
+                ty: ty.clone(),
+            });
+            for index in (0..length).rev() {
+                lowered = HostExpr::new(HostExprKind::Let {
+                    bindings: vec![HostBinding {
+                        name: format!("old{index}"),
+                        display_name: None,
+                        display_roots: Vec::new(),
+                        ty: ty.clone(),
+                        value: var(if index == 0 {
+                            "acc".to_owned()
+                        } else {
+                            format!("old{}", index - 1)
+                        }),
+                    }],
+                    body: Box::new(lowered),
+                    ty: ty.clone(),
+                });
+            }
+            ACCUMULATOR_IDENTITY_WORK.with(|work| work.set(0));
+            assert!(proof.validates_body(&lowered));
+            let lowered_work = ACCUMULATOR_IDENTITY_WORK.with(std::cell::Cell::get);
+            eprintln!("lexical identity L={length}: source={source_work} lowered={lowered_work}");
+            assert!(source_work <= 16 * length + 100, "source={source_work}");
+            assert!(lowered_work <= 16 * length + 100, "lowered={lowered_work}");
+            let HostExprKind::Let { bindings, .. } = &mut lowered.kind else {
+                unreachable!()
+            };
+            bindings[0].value = var("equal_shape_unproved".to_owned());
+            assert!(!proof.validates_body(&lowered));
+        }
     }
 
     #[test]
@@ -32950,6 +33024,7 @@ mod accumulator_forwarding_wrapper_tests {
             "step(acc, i)",
             "{ old = acc\n item = i\n step(old, item) }",
             "{ old = acc\n old = old\n older = old\n item = i\n item2 = item\n step(older, item2) }",
+            "{ old = acc\n item = i\n acc = [to_tensor([1.0f32, 2.0f32, 3.0f32])]\n i = 0i64\n step(old, item) }",
         ] {
             assert!(proof(body).is_some(), "{body}");
         }
@@ -32961,6 +33036,7 @@ mod accumulator_forwarding_wrapper_tests {
             "{ item = if i == 0i64 then i else i\n step(acc, item) }",
             "{ step = fn (xs: List[tensor[*, f32]], n: i64) -> xs\n step(acc, i) }",
             "{ old = acc\n old = []\n step(old, i) }",
+            "{ old = acc\n acc = [to_tensor([1.0f32, 2.0f32, 3.0f32])]\n step(acc, i) }",
         ] {
             assert!(proof(body).is_none(), "{body}");
         }

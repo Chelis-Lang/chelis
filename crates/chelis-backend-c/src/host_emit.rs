@@ -5986,6 +5986,7 @@ fn retained_accumulator_entries<'a>(
         &'a HostExpr,
         &'a HostExpr,
         std::collections::BTreeMap<String, String>,
+        String,
     );
     fn collect<'a>(
         value: &'a HostExpr,
@@ -5995,12 +5996,26 @@ fn retained_accumulator_entries<'a>(
         match &value.kind {
             HostExprKind::Let { bindings, body, .. }
             | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+                let retained = matches!(value.kind, HostExprKind::RetainedInvocation { .. });
+                let mut ingress = Vec::new();
                 for (index, binding) in bindings.iter().enumerate() {
-                    if matches!(binding.value.kind, HostExprKind::SignatureEntry { .. }) {
+                    if let HostExprKind::SignatureEntry { contract, .. } = &binding.value.kind {
                         if index + 1 != bindings.len() {
                             return None;
                         }
-                        out.push((&binding.value, body, aliases.clone()));
+                        // A retained call stages every payload in formal
+                        // order. Scalar actuals are deliberately absent from
+                        // its observation list; the authored formal spelling
+                        // alone cannot identify their staged value.
+                        let item = if retained {
+                            if ingress.len() != contract.formals().len() {
+                                return None;
+                            }
+                            ingress.get(1).copied()?
+                        } else {
+                            contract.formals().get(1)?.name()
+                        };
+                        out.push((&binding.value, body, aliases.clone(), item.to_owned()));
                     } else {
                         let source = variable(&binding.value)
                             .and_then(|name| aliases.get(name))
@@ -6008,6 +6023,9 @@ fn retained_accumulator_entries<'a>(
                         aliases.remove(&binding.name);
                         if let Some(source) = source {
                             aliases.insert(binding.name.clone(), source);
+                        }
+                        if matches!(binding.value.kind, HostExprKind::FormalIngress { .. }) {
+                            ingress.push(binding.name.as_str());
                         }
                     }
                 }
@@ -6018,10 +6036,13 @@ fn retained_accumulator_entries<'a>(
             _ => Some(()),
         }
     }
-    let [acc, _] = params else {
+    let [acc, item] = params else {
         return None;
     };
-    let mut aliases = std::collections::BTreeMap::from([(acc.name.clone(), acc.name.clone())]);
+    let mut aliases = std::collections::BTreeMap::from([
+        (acc.name.clone(), acc.name.clone()),
+        (item.name.clone(), item.name.clone()),
+    ]);
     let mut candidates = Vec::new();
     collect(body, &mut aliases, &mut candidates)?;
     if candidates.len() != proofs.len() {
@@ -6030,7 +6051,7 @@ fn retained_accumulator_entries<'a>(
     candidates
         .into_iter()
         .zip(proofs)
-        .map(|((value, tail, aliases), proof)| {
+        .map(|((value, tail, aliases, item_alias), proof)| {
             let HostExprKind::SignatureEntry {
                 contract,
                 args,
@@ -6053,6 +6074,7 @@ fn retained_accumulator_entries<'a>(
                 && entry.position == 0
                 && entry.name == proof.parameter()
                 && !contract.formals()[1].pattern().has_tensor()
+                && aliases.get(&item_alias) == Some(&item.name)
                 && aliases.get(name).is_some_and(|source| source == &acc.name)
                 && same_obligation
                 && proof.validates_body_as(tail, name))
