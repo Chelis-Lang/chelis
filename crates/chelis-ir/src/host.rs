@@ -32174,12 +32174,12 @@ enum AccumulatorRootRole {
 
 /// One lexical analysis frame. Deliberately not Clone: entering a Let records
 /// only its changed bindings, and leaving restores them in reverse order.
-struct AccumulatorIdentities {
-    bindings: BTreeMap<String, Option<AccumulatorRootRole>>,
+struct AccumulatorIdentities<R = AccumulatorRootRole> {
+    bindings: BTreeMap<String, Option<R>>,
 }
 
-impl AccumulatorIdentities {
-    fn new(roots: impl IntoIterator<Item = (String, AccumulatorRootRole)>) -> Self {
+impl<R: Copy> AccumulatorIdentities<R> {
+    fn new(roots: impl IntoIterator<Item = (String, R)>) -> Self {
         let mut scope = Self {
             bindings: BTreeMap::new(),
         };
@@ -32188,7 +32188,7 @@ impl AccumulatorIdentities {
         }
         scope
     }
-    fn role(&self, name: &str) -> Option<AccumulatorRootRole> {
+    fn role(&self, name: &str) -> Option<R> {
         #[cfg(test)]
         charge_accumulator_identity_work(1);
         self.bindings.get(name).copied().flatten()
@@ -32201,13 +32201,13 @@ impl AccumulatorIdentities {
     fn bind(
         &mut self,
         name: &str,
-        role: Option<AccumulatorRootRole>,
-    ) -> Option<Option<AccumulatorRootRole>> {
+        role: Option<R>,
+    ) -> Option<Option<R>> {
         #[cfg(test)]
         charge_accumulator_identity_work(1);
         self.bindings.insert(name.to_owned(), role)
     }
-    fn restore(&mut self, name: &str, previous: Option<Option<AccumulatorRootRole>>) {
+    fn restore(&mut self, name: &str, previous: Option<Option<R>>) {
         #[cfg(test)]
         charge_accumulator_identity_work(1);
         if let Some(previous) = previous {
@@ -32335,6 +32335,204 @@ pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForward
             _ => return None,
         }
     }
+}
+
+/// Structural edges from the original checked callback body to one invocation.
+/// Ordinals identify source binding occurrences, never binder spellings/spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundForwardingEdge {
+    Metadata,
+    LetInitializer(usize),
+    LetBody,
+    BlockTail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundForwardingRole {
+    Original(AccumulatorRootRole),
+    InvocationResult(usize),
+}
+
+/// Static preparation only: this plan cannot authorize an entry receipt.
+/// Executors must independently validate the selected lowered region and the
+/// returned-value link before enabling reuse. Existing tail-call plans remain
+/// the only executable composition authority.
+#[derive(Debug, Clone)]
+pub struct BoundAccumulatorForwardingPlan {
+    owner: Expr,
+    occurrence: usize,
+    callee_name: String,
+    callsite: Expr,
+    route: Vec<BoundForwardingEdge>,
+    candidate_count: usize,
+    route_records: usize,
+}
+
+impl BoundAccumulatorForwardingPlan {
+    pub fn owner(&self) -> &Expr {
+        &self.owner
+    }
+    pub fn occurrence(&self) -> usize {
+        self.occurrence
+    }
+    pub fn callee_name(&self) -> &str {
+        &self.callee_name
+    }
+    pub fn callsite(&self) -> &Expr {
+        &self.callsite
+    }
+    pub fn route(&self) -> &[BoundForwardingEdge] {
+        &self.route
+    }
+    pub fn analysis_records(&self) -> (usize, usize) {
+        (self.candidate_count, self.route_records)
+    }
+}
+
+/// Prove only static returned-value lineage. No runtime value, inferred shape,
+/// callback/callee obligation or capture authority is supplied by this walk.
+pub fn bound_accumulator_forwarding_plan(
+    callback: &Expr,
+) -> Option<BoundAccumulatorForwardingPlan> {
+    struct RouteRecord {
+        parent: Option<usize>,
+        edge: BoundForwardingEdge,
+    }
+    struct Candidate {
+        route: Option<usize>,
+        callee_name: String,
+        callsite: Expr,
+    }
+    struct Walk {
+        routes: Vec<RouteRecord>,
+        candidates: Vec<Candidate>,
+    }
+    impl Walk {
+        fn edge(&mut self, parent: Option<usize>, edge: BoundForwardingEdge) -> Option<usize> {
+            #[cfg(test)]
+            charge_accumulator_identity_work(1);
+            let index = self.routes.len();
+            self.routes.push(RouteRecord { parent, edge });
+            Some(index)
+        }
+        fn value(
+            &mut self,
+            expr: &Expr,
+            parent: Option<usize>,
+            roles: &mut AccumulatorIdentities<BoundForwardingRole>,
+        ) -> Option<BoundForwardingRole> {
+            #[cfg(test)]
+            charge_accumulator_identity_work(1);
+            if let Expr::MetaExpr(meta, _) = expr {
+                let next = self.edge(parent, BoundForwardingEdge::Metadata);
+                return self.value(&meta.expr, next, roles);
+            }
+            let node = as_node(expr)?;
+            let children = node.children_slice();
+            match node.tag() {
+                DeepTag::Var => roles.role(accumulator_identity_variable(expr)?),
+                DeepTag::App => {
+                    let [function, first, second] = children else {
+                        return None;
+                    };
+                    if function.tag() != Some(DeepTag::Var) {
+                        return None;
+                    }
+                    let callee = accumulator_identity_variable(function)?;
+                    if roles.is_bound(callee)
+                        || roles.role(accumulator_identity_variable(first)?)
+                            != Some(BoundForwardingRole::Original(AccumulatorRootRole::Accumulator))
+                        || roles.role(accumulator_identity_variable(second)?)
+                            != Some(BoundForwardingRole::Original(AccumulatorRootRole::Item))
+                    {
+                        return None;
+                    }
+                    let occurrence = self.candidates.len();
+                    self.candidates.push(Candidate {
+                        route: parent,
+                        callee_name: callee.to_owned(),
+                        callsite: expr.clone(),
+                    });
+                    Some(BoundForwardingRole::InvocationResult(occurrence))
+                }
+                DeepTag::Let => {
+                    let bindings = children.first().and_then(as_node)?;
+                    let (pairs, remainder) = bindings.children_slice().as_chunks::<2>();
+                    if bindings.tag() != DeepTag::Bind || !remainder.is_empty() {
+                        return None;
+                    }
+                    let body = children.get(1)?;
+                    let mut undo = Vec::new();
+                    // Initializers are evaluated in the preceding lexical scope.
+                    for (ordinal, [binder, initializer]) in pairs.iter().enumerate() {
+                        let next = self.edge(parent, BoundForwardingEdge::LetInitializer(ordinal));
+                        let role = self.value(initializer, next, roles);
+                        let mut names = UnordSet::new();
+                        collect_binder_names(binder, &mut names);
+                        for name in names.into_sorted() {
+                            let previous = roles.bind(&name, None);
+                            undo.push((name, previous));
+                        }
+                        if let (Some(role), Some(name)) = (role, symbol_name(binder)) {
+                            let previous = roles.bind(name, Some(role));
+                            undo.push((name.to_owned(), previous));
+                        }
+                    }
+                    let next = self.edge(parent, BoundForwardingEdge::LetBody);
+                    let result = self.value(body, next, roles);
+                    for (name, previous) in undo.into_iter().rev() {
+                        roles.restore(&name, previous);
+                    }
+                    result
+                }
+                DeepTag::Block => {
+                    let tail = children.last()?;
+                    let next = self.edge(parent, BoundForwardingEdge::BlockTail);
+                    self.value(tail, next, roles)
+                }
+                _ => None,
+            }
+        }
+    }
+    let mut callback_node = callback;
+    while let Expr::MetaExpr(meta, _) = callback_node {
+        callback_node = &meta.expr;
+    }
+    let node = as_node(callback_node).filter(|node| node.tag() == DeepTag::Fn)?;
+    let params = as_node(node.children_slice().first()?)?;
+    let [acc, item] = params.children_slice() else {
+        return None;
+    };
+    let mut roles = AccumulatorIdentities::new([
+        (param_name(acc)?, BoundForwardingRole::Original(AccumulatorRootRole::Accumulator)),
+        (param_name(item)?, BoundForwardingRole::Original(AccumulatorRootRole::Item)),
+    ]);
+    let mut walk = Walk { routes: Vec::new(), candidates: Vec::new() };
+    let BoundForwardingRole::InvocationResult(occurrence) =
+        walk.value(node.children_slice().get(1)?, None, &mut roles)?
+    else {
+        return None;
+    };
+    let selected = walk.candidates.get(occurrence)?;
+    let mut current = selected.route;
+    let mut route = Vec::new();
+    while let Some(index) = current {
+        #[cfg(test)]
+        charge_accumulator_identity_work(1);
+        let record = walk.routes.get(index)?;
+        route.push(record.edge);
+        current = record.parent;
+    }
+    route.reverse();
+    Some(BoundAccumulatorForwardingPlan {
+        owner: callback.clone(),
+        occurrence,
+        callee_name: selected.callee_name.clone(),
+        callsite: selected.callsite.clone(),
+        route,
+        candidate_count: walk.candidates.len(),
+        route_records: walk.routes.len(),
+    })
 }
 
 impl AccumulatorCompositionProof {
@@ -33143,7 +33341,9 @@ mod accumulator_forwarding_wrapper_tests {
     fn returned_invocation_plan_selects_occurrences_not_expression_equality() {
         let first = returned_plan("{ result = step(acc, i)\n _ = step(acc, i)\n result }").unwrap();
         let second = returned_plan("{ _ = step(acc, i)\n result = step(acc, i)\n result }").unwrap();
-        assert_eq!(first.callsite(), second.callsite());
+        assert_eq!(first.callee_name(), second.callee_name());
+        assert_eq!(first.analysis_records().0, 2);
+        assert_eq!(second.analysis_records().0, 2);
         assert_ne!(first.occurrence(), second.occurrence());
         assert_ne!(first.route(), second.route());
     }
