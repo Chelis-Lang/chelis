@@ -396,7 +396,9 @@ fn replacing_a_dependency_invalidates_inherited_body_evidence_transitively() {
     let (base, _) = build_compiled_library_context(&parse(&format!(
         "{LIBRARY}{WRAPPER}\
          def via[t, v: Float](x: &tensor[..t, v]) -> tensor[..t, v] = wrapped(x)\n\
-         def independent[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = abs(x)\n"
+         def independent[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = abs(x)\n\
+         def left[r, p: Float](x: &tensor[..r, p], stop: bool) -> tensor[..r, p] = if stop then negate(x) else right(x, true)\n\
+         def right[s, q: Float](x: &tensor[..s, q], stop: bool) -> tensor[..s, q] = if stop then neg(x) else left(x, true)\n"
     )))
     .expect("base helper chain checks");
     let replacement = parse(
@@ -408,11 +410,16 @@ fn replacing_a_dependency_invalidates_inherited_body_evidence_transitively() {
         bincode::deserialize(&bincode::serialize(&layer).expect("encode layer"))
             .expect("decode layer with invalidated dependency evidence");
     for context in [layer, restored] {
-        for callee in ["wrapped", "via"] {
+        for (callee, arguments) in [
+            ("wrapped", "x"),
+            ("via", "x"),
+            ("left", "x, true"),
+            ("right", "x, true"),
+        ] {
             let result = check_ir_with_context(
                 &context,
                 &parse(&format!(
-                    "def consumer[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = {callee}(x)\n"
+                    "def consumer[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = {callee}({arguments})\n"
                 )),
             );
             let errors = &result
