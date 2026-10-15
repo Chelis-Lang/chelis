@@ -390,3 +390,85 @@ fn helper_evidence_does_not_allow_borrowed_values_to_escape() {
             .any(|error| matches!(error.kind, CheckErrorKind::InvalidBorrow))
     );
 }
+
+#[test]
+fn replacing_a_dependency_invalidates_inherited_body_evidence_transitively() {
+    let (base, _) = build_compiled_library_context(&parse(&format!(
+        "{LIBRARY}{WRAPPER}\
+         def via[t, v: Float](x: &tensor[..t, v]) -> tensor[..t, v] = wrapped(x)\n\
+         def independent[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = abs(x)\n"
+    )))
+    .expect("base helper chain checks");
+    let replacement = parse(
+        "def negate[a, b](x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1i32, 0i32)\n",
+    );
+    let (layer, _) = build_compiled_library_context_with_base(&base, &replacement)
+        .expect("concrete transpose is independently valid outside rank discipline");
+    let restored: TypeEnv =
+        bincode::deserialize(&bincode::serialize(&layer).expect("encode layer"))
+            .expect("decode layer with invalidated dependency evidence");
+    for context in [layer, restored] {
+        for callee in ["wrapped", "via"] {
+            let result = check_ir_with_context(
+                &context,
+                &parse(&format!(
+                    "def consumer[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = {callee}(x)\n"
+                )),
+            );
+            let errors = &result
+                .as_ref()
+                .expect_err("inherited dependency changed")
+                .errors;
+            assert!(
+                errors.iter().any(
+                    |error| matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                        && error.message.contains(callee)
+                        && error.message.contains("body evidence")
+                ),
+                "changed dependency cannot retain stale body authority: {errors:?}"
+            );
+            reject(result, "transitive dependency evidence invalidated");
+        }
+        clean(
+            check_ir_with_context(
+                &context,
+                &parse(
+                    "def untouched[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = independent(x)\n",
+                ),
+            ),
+            "unrelated base evidence survives",
+        );
+    }
+    clean(
+        check_ir_with_context(
+            &base,
+            &parse("def original[r, p: Float](x: &tensor[..r, p]) -> tensor[..r, p] = via(x)\n"),
+        ),
+        "replacement does not mutate the original base",
+    );
+}
+
+#[test]
+fn serialized_rank_body_evidence_is_mandatory_and_bound_to_the_library_proof() {
+    let (context, _) = build_compiled_library_context(&parse(LIBRARY)).expect("library checks");
+    let original = serde_json::to_value(&context).expect("JSON snapshot");
+    let mut missing = original.clone();
+    assert!(
+        missing["inner"]
+            .as_object_mut()
+            .expect("snapshot inner")
+            .remove("rank_bodies")
+            .is_some(),
+        "rank evidence is a mandatory payload"
+    );
+    assert!(
+        serde_json::from_value::<TypeEnv>(missing).is_err(),
+        "a snapshot cannot default omitted body evidence"
+    );
+    let mut erased = original;
+    erased["inner"]["rank_bodies"]["declarations"] = serde_json::json!({});
+    assert!(
+        serde_json::from_value::<TypeEnv>(erased).is_err(),
+        "an unchanged library proof cannot attest erased body evidence"
+    );
+}
