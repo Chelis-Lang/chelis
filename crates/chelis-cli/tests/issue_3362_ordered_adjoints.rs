@@ -157,20 +157,62 @@ fn ordered_adjoints_match_the_atoms_in_eval_and_c_at_every_float_width() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
-/// Residual gap (chelis#3414): [05-OP-33]'s adjoint is the base-free reverse
-/// scan, so a `-0` last cotangent is a `-0` last suffix, as `e_gap`'s host
-/// scan shows. Under `grad` the Tier 1 chain cuts an axis of two or more
-/// elements into slabs whose cotangents return to `x` through a shrink
-/// adjoint's `+0` fill, so `a_gap`'s last suffix accumulates to `+0`. An axis
-/// of one element has no cut and already conforms (`cs3`). The gap must keep
-/// failing exactly as recorded, in eval and C at every float width, so the
-/// scan primitive that closes it also removes it here.
-const SIGNED_ZERO_SUFFIX_GAP: &str = r#"
-def gap(x: tensor[2, P], w: tensor[2, P]) -> tensor[P] = sum(mul(cumsum(x, 0i32), w), 0i32)
+fn write_scan_program(reef: &std::path::Path, app: &std::path::Path, source: &str) {
+    common::write_file(&app.join("src/main.ch"), source);
+    for args in [
+        ["fmt", "--inplace", "src/main.ch"],
+        ["lint", "--check", "src/main.ch"],
+    ] {
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .env("CHELIS_REEF_HOME", reef)
+            .current_dir(app)
+            .args(args)
+            .assert()
+            .success();
+    }
+}
+
+fn build_scan_program(reef: &std::path::Path, app: &std::path::Path) -> std::process::Output {
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef)
+        .current_dir(app)
+        .args([
+            "build",
+            "src/main.ch",
+            "--target",
+            "c",
+            "--output",
+            "main-out",
+        ])
+        .output()
+        .unwrap()
+}
+
+fn run_scan_program(reef: &std::path::Path, app: &std::path::Path) -> std::process::Output {
+    let build = build_scan_program(reef, app);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    std::process::Command::new(app.join("main-out/main"))
+        .output()
+        .unwrap()
+}
+
+/// OP33's decreasing inclusive scan keeps the last cotangent as the first
+/// suffix. The explicit positive-zero addition is a counterfactual zero-base
+/// implementation: it erases the last sign and must not satisfy the oracle.
+const SIGNED_ZERO_SUFFIX_CASES: &str = r#"
+def weighted_scan(x: tensor[2, P], w: tensor[2, P]) -> tensor[P] = sum(mul(cumsum(x, 0i32), w), 0i32)
 w2 = to_tensor([1.0P, -0.0P])
 r2 = to_tensor([1i32, 0i32])
-a_gap = grad(gap, wrt=x)(to_tensor([1.0P, 2.0P]), w2)
-e_gap = gather(cumsum(gather(w2, r2, 0i32), 0i32), r2, 0i32)
+a_suffix = grad(weighted_scan, wrt=x)(to_tensor([1.0P, 2.0P]), w2)
+e_suffix = gather(cumsum(gather(w2, r2, 0i32), 0i32), r2, 0i32)
+wrong_suffix = add(a_suffix, to_tensor([0.0P, 0.0P]))
 "#;
 
 /// The `data=[...]` text of a printed tensor root.
@@ -185,28 +227,34 @@ fn root_data<'a>(stdout: &'a str, name: &str) -> &'a str {
 }
 
 #[test]
-fn recorded_signed_zero_suffix_gap_still_fails_exactly_as_recorded() {
+fn signed_zero_suffix_is_preserved_in_eval_and_c_at_every_float_width() {
     for dtype in ["f16", "bf16", "f32", "f64"] {
         let (_dir, reef, app) = common::make_app("issue-3414");
         let program = format!(
             "module Demo.Main\n{}",
-            SIGNED_ZERO_SUFFIX_GAP.replace('P', dtype)
+            SIGNED_ZERO_SUFFIX_CASES.replace('P', dtype)
         );
-        common::write_file(&app.join("src/main.ch"), &program);
+        write_scan_program(&reef, &app, &program);
         let output = eval_text(&reef, &app);
         assert!(output.status.success(), "{dtype}: {output:?}");
         let evaluated = String::from_utf8(output.stdout).unwrap();
         let native = common::build_and_run_app(&reef, &app, "main");
         for (lane, stdout) in [("eval", &evaluated), ("C", &native)] {
             assert_eq!(
-                root_data(stdout, "e_gap"),
+                root_data(stdout, "e_suffix"),
                 "data=[1.0, -0.0])",
                 "{dtype} {lane}: the base-free reverse scan keeps the -0 suffix"
             );
             assert_eq!(
-                root_data(stdout, "a_gap"),
-                "data=[1.0, 0.0])",
-                "{dtype} {lane}: the chain now keeps the -0 suffix; remove this gap (chelis#3414)"
+                root_data(stdout, "a_suffix"),
+                "data=[1.0, -0.0])",
+                "{dtype} {lane}: the adjoint keeps the last cotangent's stored sign"
+            );
+            assert_eq!(root_data(stdout, "wrong_suffix"), "data=[1.0, 0.0])");
+            assert_ne!(
+                root_data(stdout, "wrong_suffix"),
+                root_data(stdout, "a_suffix"),
+                "{dtype} {lane}: the zero-base counterfactual must fail exact comparison"
             );
         }
     }
@@ -366,22 +414,48 @@ fn integer_and_bool_forms_receive_no_adjoint() {
     );
 }
 
-/// An integer form inside a differentiated body keeps its checked host
-/// kernel, which the transform cannot consume; the rejection names the
-/// issue that owns the missing integer graph rather than the generic
-/// fallback.
+/// Integer forward scans remain ordinary computations when differentiating
+/// a separate float operand. Their intermediate overflow is still observable.
 #[test]
-fn integer_forms_inside_a_differentiated_body_cite_their_issue() {
-    let (_dir, reef, app) = common::make_app("issue-3362-int-body");
-    common::write_file(
-        &app.join("src/main.ch"),
-        "module Demo.Main\ndef f(x: tensor[3, f32], k: tensor[3, i32]) -> tensor[f32] = sum(mul(x, cast(cumsum(k, 0i32), f32)), 0i32)\ng = grad(f, wrt=x)(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([1i32, 2i32, 3i32]))\n",
-    );
-    let output = eval_text(&reef, &app);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
-    assert!(stderr.contains("chelis#3377"), "{stderr}");
-    assert!(!stderr.contains("has no numeric IR lowering"), "{stderr}");
+fn integer_cumsum_inside_a_differentiated_body_executes_and_preserves_overflow() {
+    for overflow in [false, true] {
+        let (_dir, reef, app) = common::make_app("issue-3362-int-body");
+        let integers = if overflow {
+            "[2147483647i32, 1i32, 0i32]"
+        } else {
+            "[1i32, 2i32, 3i32]"
+        };
+        write_scan_program(
+            &reef,
+            &app,
+            &format!(
+                "module Demo.Main\ndef f(x: tensor[3, f32], k: tensor[3, i32]) -> tensor[f32] = sum(mul(x, cast(cumsum(k, 0i32), f32)), 0i32)\ng = grad(f, wrt=x)(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor({integers}))\n"
+            ),
+        );
+        let evaluated = eval_text(&reef, &app);
+        let native = run_scan_program(&reef, &app);
+        for (lane, output) in [("eval", evaluated), ("C", native)] {
+            if overflow {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    !output.status.success(),
+                    "{lane}: integer intermediate overflow must trap"
+                );
+                assert!(
+                    stderr.contains("numeric trap: overflow in cumsum at i32"),
+                    "{lane}: {stderr}"
+                );
+                assert!(!String::from_utf8_lossy(&output.stdout).contains("g ="));
+            } else {
+                assert!(output.status.success(), "{lane}: {output:?}");
+                assert_eq!(
+                    root_data(&String::from_utf8(output.stdout).unwrap(), "g"),
+                    "data=[1.0, 3.0, 6.0])",
+                    "{lane}"
+                );
+            }
+        }
+    }
 }
 
 /// CPU seconds consumed by this process's waited-for children.
@@ -400,7 +474,7 @@ fn children_cpu_seconds() -> f64 {
     seconds(usage.ru_utime) + seconds(usage.ru_stime)
 }
 
-/// The cumsum graph is O(n) nodes, so lowering its adjoint must stay
+/// The ordered cumsum graph has constant node count; lowering and executing its adjoint must stay
 /// near-linear in n. Every axis-source query once scanned the whole graph,
 /// which made `grad` over a 1024-step cumsum take minutes (CPU grew about
 /// 32-fold from n = 256 to n = 1024). Child CPU time, not wall time, so load
@@ -435,20 +509,51 @@ fn cumsum_adjoint_lowering_scales_near_linearly() {
     );
 }
 
-/// A runtime extent has no static graph yet; the rejection names the issue
-/// that owns it rather than the generic fallback.
+/// A generic runtime extent keeps the same inclusive scan and reverse
+/// adjoint. An invalid axis still rejects in Eval and before C publication.
 #[test]
-fn runtime_extents_inside_a_differentiated_body_cite_their_issue() {
-    let (_dir, reef, app) = common::make_app("issue-3362-runtime-extent");
-    common::write_file(
-        &app.join("src/main.ch"),
-        "module Demo.Main\ndef f[n](x: tensor[n, f32]) -> tensor[f32] = sum(cumsum(x, 0i32), 0i32)\ng = grad(f)(to_tensor([1.0f32, 2.0f32]))\n",
-    );
-    let output = eval_text(&reef, &app);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
-    assert!(stderr.contains("chelis#3378"), "{stderr}");
-    assert!(!stderr.contains("has no numeric IR lowering"), "{stderr}");
+fn runtime_extent_cumsum_inside_a_differentiated_body_executes_and_rejects_bad_axis() {
+    for bad_axis in [false, true] {
+        let (_dir, reef, app) = common::make_app("issue-3362-runtime-extent");
+        let axis = if bad_axis { 1 } else { 0 };
+        write_scan_program(
+            &reef,
+            &app,
+            &format!(
+                "module Demo.Main\ndef f[n](x: tensor[n, f32]) -> tensor[f32] = sum(cumsum(x, {axis}i32), 0i32)\ng = grad(f)(to_tensor([1.0f32, 2.0f32]))\n"
+            ),
+        );
+        let evaluated = eval_text(&reef, &app);
+        if bad_axis {
+            let built = build_scan_program(&reef, &app);
+            for (lane, output) in [("eval", evaluated), ("C build", built)] {
+                assert!(
+                    !output.status.success(),
+                    "{lane}: rank-one axis one must reject"
+                );
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    stderr.contains("axis") && stderr.contains("cumsum"),
+                    "{lane}: {stderr}"
+                );
+                assert!(
+                    !stderr.contains("has no numeric IR lowering"),
+                    "{lane}: {stderr}"
+                );
+            }
+            assert!(!app.join("main-out/main").exists());
+        } else {
+            let native = run_scan_program(&reef, &app);
+            for (lane, output) in [("eval", evaluated), ("C", native)] {
+                assert!(output.status.success(), "{lane}: {output:?}");
+                assert_eq!(
+                    root_data(&String::from_utf8(output.stdout).unwrap(), "g"),
+                    "data=[2.0, 1.0])",
+                    "{lane}"
+                );
+            }
+        }
+    }
 }
 
 /// Extents of the generated einsum labels: `j` and `l` have extent 2 so
