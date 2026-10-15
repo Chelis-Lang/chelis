@@ -173,91 +173,95 @@ fn eval_performance_streamed_convolution_bits_and_scratch() {
     use chelis_ir::dag::Owner;
     use chelis_ir::eval::eval_tensor_roots_with;
     use chelis_ir::tier2::lower_conv;
-    let mut dag = Dag::new();
-    let owner = Owner::from(dag.declare("streamed convolution"));
-    let input_ty = shaped_ty(&[1, 3, 16, 16], Prim::F32);
-    let kernel_ty = shaped_ty(&[2, 3, 3, 3], Prim::F32);
-    let output_ty = shaped_ty(&[1, 2, 16, 16], Prim::F32);
-    let x = dag.add_node(
-        owner,
-        RiscOp::Load { name: "x".into() },
-        vec![],
-        input_ty.clone(),
-        None,
-    );
-    let k = dag.add_node(
-        owner,
-        RiscOp::Load { name: "k".into() },
-        vec![],
-        kernel_ty.clone(),
-        None,
-    );
-    let root = lower_conv(
-        owner,
-        &mut dag,
-        x,
-        k,
-        &input_ty,
-        &kernel_ty,
-        &output_ty,
-        &[1, 1],
-        &[(1, 1), (1, 1)],
-        None,
-    );
-    dag.add_root(root);
-    let inputs: UnordMap<String, TensorValue> = UnordMap::from([
-        (
-            "x".into(),
-            TensorValue::from_storage(
-                vec![1, 3, 16, 16],
-                finalize_tensor(
-                    "oracle",
-                    Prim::F32,
-                    RawTensor::Float(
-                        (0..768)
-                            .map(|i| [2048.0, -2048.0, 0.5, -0.0, 0.00006103515625][i % 5])
-                            .collect(),
-                    ),
-                )
-                .unwrap(),
+    for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("streamed convolution"));
+        let input_ty = shaped_ty(&[1, 3, 16, 16], prim);
+        let kernel_ty = shaped_ty(&[2, 3, 3, 3], prim);
+        let output_ty = shaped_ty(&[1, 2, 16, 16], prim);
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty.clone(),
+            None,
+        );
+        let k = dag.add_node(
+            owner,
+            RiscOp::Load { name: "k".into() },
+            vec![],
+            kernel_ty.clone(),
+            None,
+        );
+        let root = lower_conv(
+            owner,
+            &mut dag,
+            x,
+            k,
+            &input_ty,
+            &kernel_ty,
+            &output_ty,
+            &[1, 1],
+            &[(1, 1), (1, 1)],
+            None,
+        );
+        dag.add_root(root);
+        let inputs: UnordMap<String, TensorValue> = UnordMap::from([
+            (
+                "x".into(),
+                TensorValue::from_storage(
+                    vec![1, 3, 16, 16],
+                    finalize_tensor(
+                        "oracle",
+                        prim,
+                        RawTensor::Float(
+                            (0..768)
+                                .map(|i| [2048.0, -2048.0, 0.5, -0.0, 0.00006103515625][i % 5])
+                                .collect(),
+                        ),
+                    )
+                    .unwrap(),
+                ),
             ),
-        ),
-        (
-            "k".into(),
-            TensorValue::from_storage(
-                vec![2, 3, 3, 3],
-                finalize_tensor(
-                    "oracle",
-                    Prim::F32,
-                    RawTensor::Float((0..54).map(|i| [1.0, -1.0, 0.5][i % 3]).collect()),
-                )
-                .unwrap(),
+            (
+                "k".into(),
+                TensorValue::from_storage(
+                    vec![2, 3, 3, 3],
+                    finalize_tensor(
+                        "oracle",
+                        prim,
+                        RawTensor::Float((0..54).map(|i| [1.0, -1.0, 0.5][i % 3]).collect()),
+                    )
+                    .unwrap(),
+                ),
             ),
-        ),
-    ]);
-    let before = LIVE.load(Ordering::Relaxed);
-    PEAK.store(before, Ordering::Relaxed);
-    let rooted = eval_tensor_roots_with(&dag, &[root], |name| inputs.get(name).cloned()).unwrap();
-    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(before);
-    assert!(peak < 128 * 1024, "materialized convolution peak={peak}");
-    let dense = eval_tensor(&dag, &inputs).unwrap();
-    assert_eq!(
-        bincode::serialize(rooted[&root].storage()).unwrap(),
-        bincode::serialize(dense[&root].storage()).unwrap()
-    );
-    let indices = dag
-        .nodes()
-        .iter()
-        .find(|node| matches!(node.op, RiscOp::Gather { .. }))
-        .unwrap()
-        .inputs[1];
-    let selected =
-        eval_tensor_roots_with(&dag, &[root, indices], |name| inputs.get(name).cloned()).unwrap();
-    assert_eq!(
-        bincode::serialize(selected[&indices].storage()).unwrap(),
-        bincode::serialize(dense[&indices].storage()).unwrap()
-    );
-    eprintln!("eval-performance convolution peak_heap_delta={peak} PASS");
+        ]);
+        let before = LIVE.load(Ordering::Relaxed);
+        PEAK.store(before, Ordering::Relaxed);
+        let rooted =
+            eval_tensor_roots_with(&dag, &[root], |name| inputs.get(name).cloned()).unwrap();
+        let peak = PEAK.load(Ordering::Relaxed).saturating_sub(before);
+        assert!(peak < 128 * 1024, "materialized convolution peak={peak}");
+        let dense = eval_tensor(&dag, &inputs).unwrap();
+        assert_eq!(
+            bincode::serialize(rooted[&root].storage()).unwrap(),
+            bincode::serialize(dense[&root].storage()).unwrap()
+        );
+        let indices = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Gather { .. }))
+            .unwrap()
+            .inputs[1];
+        let selected =
+            eval_tensor_roots_with(&dag, &[root, indices], |name| inputs.get(name).cloned())
+                .unwrap();
+        assert_eq!(
+            bincode::serialize(selected[&indices].storage()).unwrap(),
+            bincode::serialize(dense[&indices].storage()).unwrap()
+        );
+        eprintln!("eval-performance convolution peak_heap_delta={peak} PASS");
+    }
 }
 
 #[test]

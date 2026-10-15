@@ -5709,6 +5709,18 @@ where
                 local_guard_verdict(*axis, claim, observed, &mut runtime_dims, &values)?;
             }
         }
+        // A transparent Copy can carry a private view to a selected root.
+        // Complete its storage before returning, so the root API does not
+        // defer output-sized work to the caller's first storage observation.
+        let value = if scope
+            .retained_roots()
+            .is_some_and(|roots| roots.contains(&node.id))
+            && matches!(value.storage, EvalStorage::View(_))
+        {
+            TensorValue::from_storage(value.shape.clone(), value.storage().clone())
+        } else {
+            value
+        };
         let produced_elements = value.len();
         if let Some(replaced) = values.insert(node.id, value) {
             live_elements -= replaced.len();

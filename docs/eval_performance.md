@@ -75,8 +75,9 @@ run this ignored case. Peak live heap increase must remain below 32 MiB,
 including source storage, graph scheduling, and output buffers.
 
 Root-scoped evaluation represents private expansion/product nodes as immutable
-views and feeds finalized tagged multiplication results into the same typed
-adjacent-pair sum kernel. The shared IR contraction planner controls eligibility;
+views and feeds finalized tagged multiplication results into typed
+canonical adjacent-pair sum kernels. Dense source storage dispatches once per
+contraction rather than validating tags at every leaf. The shared IR contraction planner controls eligibility;
 all-values evaluation and explicitly selected intermediate roots retain dense
 values. Views own their source values across last-use reclamation. Cartesian
 index views retain Add overflow and Gather domain checks at their original node
