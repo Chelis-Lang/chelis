@@ -2245,6 +2245,8 @@ pub enum HostExprKind<T = HostTypeTerm> {
         bindings: Vec<HostBinding<T>>,
         body: Box<HostExpr<T>>,
         ty: T,
+        /// Immutable source occurrence authority; never a checked-value stamp.
+        forwarding: Option<Arc<AccumulatorForwardingPlan>>,
     },
     Map {
         callback: HostCallback<T>,
@@ -2699,16 +2701,20 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
             body: Box::new(resolve_host_expr(*body)?),
             ty: ty.into_concrete()?,
         },
-        HostExprKind::RetainedInvocation { bindings, body, ty } => {
-            ConcreteHostExprKind::RetainedInvocation {
-                bindings: bindings
-                    .into_iter()
-                    .map(resolve_host_binding)
-                    .collect::<Result<Vec<_>, _>>()?,
-                body: Box::new(resolve_host_expr(*body)?),
-                ty: ty.into_concrete()?,
-            }
-        }
+        HostExprKind::RetainedInvocation {
+            bindings,
+            body,
+            ty,
+            forwarding,
+        } => ConcreteHostExprKind::RetainedInvocation {
+            bindings: bindings
+                .into_iter()
+                .map(resolve_host_binding)
+                .collect::<Result<Vec<_>, _>>()?,
+            body: Box::new(resolve_host_expr(*body)?),
+            ty: ty.into_concrete()?,
+            forwarding,
+        },
         HostExprKind::Map { callback, list, ty } => ConcreteHostExprKind::Map {
             callback: resolve_host_callback(callback)?,
             list: Box::new(resolve_host_expr(*list)?),
@@ -8230,7 +8236,12 @@ fn lower_host_expr_with_expected(
         );
         target.retained = retained.as_ref().is_ok_and(Option::is_some);
         let result = match retained? {
-            Some((body, _)) => body,
+            Some((mut body, _)) => {
+                if let HostExprKind::RetainedInvocation { forwarding, .. } = &mut body.kind {
+                    *forwarding = Some(Arc::new(target.plan.clone()));
+                }
+                body
+            }
             None => lower_host_expr_kind(expr, program, scope, tensor_helpers, expected_ty)?,
         };
         tensor_helpers.forwarding = Some(target);
@@ -8834,10 +8845,35 @@ fn lower_host_expr_kind(
             let mut nested_bindings = nested_layers
                 .as_ref()
                 .map(|layers| (0..layers.len()).map(|_| Vec::new()).collect::<Vec<_>>());
+            let mut source_layer = None;
+            let mut source_ordinal = 0;
             for (ordinal, binding) in let_bindings.iter().enumerate() {
+                if source_layer == Some(binding.layer) {
+                    source_ordinal += 1;
+                } else {
+                    source_layer = Some(binding.layer);
+                    source_ordinal = 0;
+                }
                 if let Some(name) = symbol_name(binding.binding) {
                     let initializer = binding.initializer;
                     let index = ordinal * 2;
+                    let selected = forwarding.as_ref().and_then(|target| {
+                        (!target.retained && !local_regions.contains_key(&index))
+                            .then(|| {
+                                target.plan.initializer(
+                                    target.position,
+                                    binding.layer,
+                                    source_ordinal,
+                                )
+                            })
+                            .flatten()
+                    });
+                    let saved_position = forwarding.as_ref().map(|target| target.position);
+                    if let Some(position) = selected {
+                        let mut target = forwarding.take().expect("selected initializer authority");
+                        target.position = position;
+                        tensor_helpers.forwarding = Some(target);
+                    }
                     let mut value = if let Some(local_region) = local_regions.get(&index) {
                         lower_checked_local_ascription_region(
                             name,
@@ -8852,6 +8888,14 @@ fn lower_host_expr_kind(
                         let value = lower_host_expr(initializer, program, &scoped, tensor_helpers)?;
                         retain_local_nested_ascription(value, initializer, program)?
                     };
+                    if selected.is_some() {
+                        forwarding = tensor_helpers.forwarding.take();
+                        if let (Some(target), Some(position)) =
+                            (forwarding.as_mut(), saved_position)
+                        {
+                            target.position = position;
+                        }
+                    }
                     // The original `(bind {span: a} ...)` node wraps this
                     // value even when a cross-let local-ascription region
                     // caused the sequential tail chain to be flattened.
@@ -8884,6 +8928,8 @@ fn lower_host_expr_kind(
                 };
                 if let Some(position) = position {
                     target.position = position;
+                    tensor_helpers.forwarding = forwarding;
+                } else if target.retained {
                     tensor_helpers.forwarding = forwarding;
                 }
             }
@@ -9919,7 +9965,9 @@ fn refine_host_expr_types(
             }
         }
         HostExprKind::Let { bindings, body, ty }
-        | HostExprKind::RetainedInvocation { bindings, body, ty } => {
+        | HostExprKind::RetainedInvocation {
+            bindings, body, ty, ..
+        } => {
             let mut local_scope = scope.clone();
             for binding in bindings.iter_mut() {
                 changed |= refine_host_expr_types(&mut binding.value, &mut local_scope, signatures);
@@ -15086,7 +15134,13 @@ fn retain_actualized_result_claim_with_order(
         span_id,
         merged_spans,
     } = body;
-    if let HostExprKind::RetainedInvocation { bindings, body, ty } = kind {
+    if let HostExprKind::RetainedInvocation {
+        bindings,
+        body,
+        ty,
+        forwarding,
+    } = kind
+    {
         let mut axes = literal_axes;
         if let Some((contract, observations, positions)) = bindings.iter().find_map(|binding| {
             let HostExprKind::SignatureEntry {
@@ -15116,7 +15170,12 @@ fn retain_actualized_result_claim_with_order(
         }
         if axes.is_empty() {
             return HostExpr {
-                kind: HostExprKind::RetainedInvocation { bindings, body, ty },
+                kind: HostExprKind::RetainedInvocation {
+                    bindings,
+                    body,
+                    ty,
+                    forwarding,
+                },
                 span_id,
                 merged_spans,
             };
@@ -15140,6 +15199,7 @@ fn retain_actualized_result_claim_with_order(
                 bindings,
                 body: Box::new(scoped),
                 ty,
+                forwarding,
             },
             span_id,
             merged_spans,
@@ -15277,6 +15337,7 @@ fn retain_nested_result_claim(
         mut bindings,
         body,
         ty,
+        forwarding,
     } = kind
     {
         let entry = bindings.iter().find_map(|binding| {
@@ -15400,6 +15461,7 @@ fn retain_nested_result_claim(
                 bindings,
                 body: Box::new(scoped),
                 ty,
+                forwarding,
             },
             span_id,
             merged_spans,
@@ -16919,6 +16981,7 @@ fn lower_retained_host_invocation(
         bindings,
         body: Box::new(body),
         ty,
+        forwarding: None,
     }))
 }
 
@@ -23211,6 +23274,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             bindings,
             body,
             ty: actual_ty,
+            forwarding,
         } => {
             let mut substitutions = UnordMap::new();
             collect_host_type_variable_substitutions(&actual_ty, &ty, &mut substitutions);
@@ -23234,6 +23298,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                 bindings,
                 body: Box::new(force_host_expr_type(*body, ty.clone())),
                 ty,
+                forwarding,
             }
         }
         HostExprKind::Map { callback, list, .. } => HostExprKind::Map {
@@ -31758,6 +31823,7 @@ mod record_hoist_binder_vocabulary_tests {
             });
             let result_ty = HostTypeTerm::Tensor(tensor.clone());
             let retained = HostExpr::new(HostExprKind::RetainedInvocation {
+                forwarding: None,
                 bindings: vec![HostBinding {
                     name: "entry".into(),
                     display_name: None,
@@ -32230,11 +32296,18 @@ fn accumulator_identity_variable(mut expr: &Expr) -> Option<&str> {
 
 /// One checked lexical tail path. Initializers and block prefixes are not
 /// members of this path, even when they contain an identical application.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AccumulatorForwardingPlan {
     callee_name: String,
     callsite: Expr,
-    tails: Vec<DeepTag>,
+    tails: Vec<ForwardingStep>,
+    returned: Option<BoundAccumulatorForwardingPlan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForwardingStep {
+    Tail(DeepTag),
+    Initializer(usize),
 }
 
 impl AccumulatorForwardingPlan {
@@ -32247,17 +32320,25 @@ impl AccumulatorForwardingPlan {
     pub fn is_target(&self, position: usize) -> bool {
         position == self.tails.len()
     }
+    pub fn is_returned_invocation(&self) -> bool {
+        self.returned.is_some()
+    }
+    pub fn initializer(&self, position: usize, layer: usize, ordinal: usize) -> Option<usize> {
+        let position = self.advance(position, DeepTag::Let, layer)?;
+        matches!(self.tails.get(position), Some(ForwardingStep::Initializer(index)) if *index == ordinal)
+            .then_some(position + 1)
+    }
     pub fn advance(&self, position: usize, tag: DeepTag, layers: usize) -> Option<usize> {
         let end = position.checked_add(layers)?;
         self.tails
             .get(position..end)?
             .iter()
-            .all(|step| *step == tag)
+            .all(|step| *step == ForwardingStep::Tail(tag))
             .then_some(end)
     }
 }
 
-pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForwardingPlan> {
+fn tail_accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForwardingPlan> {
     fn bare(mut expr: &Expr) -> &Expr {
         while let Expr::MetaExpr(meta, _) = expr {
             expr = &meta.expr;
@@ -32299,11 +32380,11 @@ pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForward
                         roles.bind(name, Some(role));
                     }
                 }
-                tails.push(DeepTag::Let);
+                tails.push(ForwardingStep::Tail(DeepTag::Let));
                 current = children.get(1)?;
             }
             DeepTag::Block => {
-                tails.push(DeepTag::Block);
+                tails.push(ForwardingStep::Tail(DeepTag::Block));
                 current = children.last()?;
             }
             DeepTag::App => {
@@ -32326,6 +32407,7 @@ pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForward
                     callee_name: callee.to_owned(),
                     callsite: bare(current).clone(),
                     tails,
+                    returned: None,
                 });
             }
             _ => return None,
@@ -32353,7 +32435,7 @@ enum BoundForwardingRole {
 /// Executors must independently validate the selected lowered region and the
 /// returned-value link before enabling reuse. Existing tail-call plans remain
 /// the only executable composition authority.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BoundAccumulatorForwardingPlan {
     owner: Expr,
     occurrence: usize,
@@ -32599,6 +32681,30 @@ pub fn bound_accumulator_forwarding_plan(
         route,
         candidate_count: walk.candidates.len(),
         route_records: walk.routes.len(),
+    })
+}
+
+pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForwardingPlan> {
+    tail_accumulator_forwarding_plan(callback).or_else(|| {
+        let returned = bound_accumulator_forwarding_plan(callback)?;
+        let tails = returned
+            .route
+            .iter()
+            .filter_map(|edge| match edge {
+                BoundForwardingEdge::Metadata => None,
+                BoundForwardingEdge::LetInitializer(index) => {
+                    Some(ForwardingStep::Initializer(*index))
+                }
+                BoundForwardingEdge::LetBody => Some(ForwardingStep::Tail(DeepTag::Let)),
+                BoundForwardingEdge::BlockTail => Some(ForwardingStep::Tail(DeepTag::Block)),
+            })
+            .collect();
+        Some(AccumulatorForwardingPlan {
+            callee_name: returned.callee_name.clone(),
+            callsite: returned.callsite.clone(),
+            tails,
+            returned: Some(returned),
+        })
     })
 }
 

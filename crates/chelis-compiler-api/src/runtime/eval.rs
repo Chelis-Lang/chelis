@@ -3453,8 +3453,25 @@ impl<'a> EvalContext<'a> {
             .map(|region| (region.producer_binding_index(), region))
             .collect::<BTreeMap<_, _>>();
 
+            let mut source_layer = None;
+            let mut source_ordinal = 0;
             for (ordinal, binding) in let_bindings.iter().enumerate() {
+                if source_layer == Some(binding.layer) {
+                    source_ordinal += 1;
+                } else {
+                    source_layer = Some(binding.layer);
+                    source_ordinal = 0;
+                }
                 let index = ordinal * 2;
+                if !local_regions.contains_key(&index)
+                    && let Some((frame, position)) = forwarding_cursor
+                {
+                    self.loop_compositions[frame].forwarding_position = self.loop_compositions
+                        [frame]
+                        .proof
+                        .forwarding()
+                        .initializer(position, binding.layer, source_ordinal);
+                }
                 let name = symbol_name(binding.binding)
                     .ok_or_else(|| "let binding must bind a name".to_string())?;
                 // Record the bound expr's static type (checker-annotated
@@ -3492,6 +3509,9 @@ impl<'a> EvalContext<'a> {
                 } else {
                     self.eval_expr(binding.initializer)?
                 };
+                // A selected App consumes its route before evaluating args.
+                // Any unsupported initializer continuation remains suspended.
+                self.take_forwarding_cursor();
                 let result_producer = self.result_producer.take();
                 self.binding_types.insert(name.to_string(), static_ty);
                 self.bindings
