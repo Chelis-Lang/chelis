@@ -102,6 +102,34 @@ their ideal contract report `unsupported`. A successful dependent result says
 `proven_modulo_asserted_axiom` and lists `real_arithmetic`. It is a conditional
 mathematical result, not a bound on the `f64` values returned by the solver.
 
+## Trace a generated property to its requirement
+
+A translator can supply a `.spans.json` manifest beside generated Surf source.
+The manifest connects each property name to a requirement in its original file.
+For example, a generated `properties.ch` file uses `properties.spans.json`:
+
+```sh
+chelis prove properties.ch --json
+chelis prove properties.ch --spans properties.spans.json --json
+```
+
+The first command discovers the sibling manifest. The second selects it
+explicitly. An explicit manifest accompanies a single `.ch` or `.dp` input.
+Directory discovery uses each source file's sibling manifest.
+
+Before reporting property results, Chelis checks the manifest's generated-file
+identity, source hashes, byte ranges, and property mappings. An edited
+requirement or generated file produces an input error until the translator
+regenerates the artifacts. The displayed requirement text comes from the
+verified original file. JSON records retain `source.file` for the generated
+file and add `source.requirement` with its ID, original file, line, column,
+text, source hash, and byte span.
+
+The provenance check leaves proof results intact. A counterexample remains a
+counterexample, and a sampled result retains its sampling verdict. A valid
+source mapping establishes where the proposition came from; the proposition
+and the named verification method establish what was checked.
+
 ## Read the result
 
 In a standard build, `--json` writes newline-delimited JSON property and obligation records,

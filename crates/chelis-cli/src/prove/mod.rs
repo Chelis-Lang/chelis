@@ -24,6 +24,7 @@ use walkdir::WalkDir;
 mod obligation_run;
 #[cfg(feature = "chelis-prove")]
 mod property_run;
+mod spans;
 
 #[derive(Debug, Clone)]
 pub struct ProveOptions<'a> {
@@ -34,6 +35,8 @@ pub struct ProveOptions<'a> {
     pub max_attempts: Option<usize>,
     pub json: bool,
     pub spans: Option<&'a Path>,
+    /// Verified, invocation-local attribution. Populated before running properties.
+    pub(super) provenance: Option<spans::VerifiedSpans>,
     #[allow(dead_code)]
     pub tier: &'a str,
     #[allow(dead_code)]
@@ -152,16 +155,60 @@ fn cmd_prove_on_grown_stack(options: ProveOptions<'_>) -> Result<i32, String> {
     if inputs.is_empty() {
         return Err("no .ch or .dp files selected for property discovery".to_string());
     }
-    if options.spans.is_some() && !is_single_explicit_deep_input(options.path, &inputs) {
-        return Err("--spans can only be used with a single explicit .dp input".to_string());
+    if options.spans.is_some() && !is_single_explicit_input(options.path, &inputs) {
+        return Err("--spans requires a single explicit .ch or .dp input".to_string());
     }
+
+    // Validate every selected sidecar before any file can emit a verdict. Resolve
+    // artifact symlinks once so an atomic generation switch cannot mix bundles.
+    let inputs = inputs
+        .into_iter()
+        .map(|input| {
+            let sidecar = options
+                .spans
+                .map(Path::to_path_buf)
+                .or_else(|| sibling_spans_path(&input));
+            let Some(sidecar) = sidecar else {
+                return Ok((input, None));
+            };
+            let artifact = fs::canonicalize(&input)
+                .map_err(|err| format!("read {}: {err}", input.display()))?;
+            let verified = spans::VerifiedSpans::load(&sidecar, &artifact)?;
+            let source = fs::read_to_string(&artifact)
+                .map_err(|err| format!("read {}: {err}", artifact.display()))?;
+            verified.verify_artifact(&source)?;
+            let names: Vec<_> = match artifact.extension().and_then(|ext| ext.to_str()) {
+                Some("ch") => {
+                    let parsed = chelis_surf::parser::parse_str(&source)
+                        .map_err(|err| format!("parse {}: {err}", artifact.display()))?;
+                    property_names(&parsed)
+                        .into_iter()
+                        .map(|name| (name, None))
+                        .collect()
+                }
+                Some("dp") => {
+                    let parsed = chelis_deep::parse_and_stamp_file(&source)
+                        .map_err(|err| format!("parse {}: {err}", artifact.display()))?;
+                    discover_deep_properties(&artifact, &parsed, None)?
+                        .into_iter()
+                        .map(|p| (p.name, p.source_id))
+                        .collect()
+                }
+                _ => return Err("spans artifact must be Surf or Deep source".into()),
+            };
+            verified.verify_properties(&names)?;
+            Ok((artifact, Some(verified)))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     let mut totals = Summary::default();
     let mut worst = Status::Passed;
     let mut all_dependency_edges: Vec<serde_json::Value> = Vec::new();
     let mut dependency_graphs = Vec::new();
     let mut dependency_graph_unavailable = Vec::new();
-    for input in &inputs {
+    for (input, provenance) in &inputs {
+        let mut options = options.clone();
+        options.provenance = provenance.clone();
         let status = match input.extension().and_then(|ext| ext.to_str()) {
             Some("ch") => prove_surf_file(input, &options, &mut totals)?,
             Some("dp") => prove_deep_file(input, &options, &mut totals)?,
@@ -436,10 +483,10 @@ fn collect_deep_refs(
     }
 }
 
-fn is_single_explicit_deep_input(path: Option<&Path>, inputs: &[PathBuf]) -> bool {
+fn is_single_explicit_input(path: Option<&Path>, inputs: &[PathBuf]) -> bool {
     matches!(path, Some(path) if path.is_file())
         && inputs.len() == 1
-        && inputs[0].extension().and_then(|ext| ext.to_str()) == Some("dp")
+        && is_supported_input(&inputs[0])
 }
 
 fn combine_status(lhs: Status, rhs: Status) -> Status {
@@ -521,6 +568,9 @@ fn prove_surf_file(
 ) -> Result<Status, String> {
     let source =
         fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    if let Some(provenance) = &options.provenance {
+        provenance.verify_artifact(&source)?;
+    }
     let parsed = chelis_surf::parser::parse_str(&source)
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
     require_package_option_to_match_module_file(path, &parsed, options.package)?;
@@ -711,7 +761,6 @@ fn linked_property_display_names(
         .collect()
 }
 
-#[cfg(feature = "chelis-prove")]
 fn property_names(decls: &[Decl]) -> Vec<String> {
     let mut names = Vec::new();
     for decl in decls {
@@ -1714,6 +1763,9 @@ fn prove_deep_file(
 ) -> Result<Status, String> {
     let source =
         fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    if let Some(provenance) = &options.provenance {
+        provenance.verify_artifact(&source)?;
+    }
     let exprs = chelis_deep::parse_and_stamp_file(&source)
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
     if let Err(err) = chelis_validate::validate_deep(&source) {
@@ -2820,7 +2872,7 @@ fn emit_record(
             "failed" => println!(
                 "property failure: {}\n  --> {}",
                 property.name,
-                property.source.display()
+                property_location_text(&property.source, &property.name, options)
             ),
             "unsupported" => println!(
                 "property unsupported: {}: {}",
@@ -2970,6 +3022,9 @@ fn emit_deep_error(options: &ProveOptions<'_>, property: &DeepProperty, message:
 
 #[cfg(not(feature = "chelis-prove"))]
 fn source_json(property: &Property, options: &ProveOptions<'_>) -> serde_json::Value {
+    if let Some(provenance) = &options.provenance {
+        return provenance.source_json(&property.source, "surf", &property.name);
+    }
     if property.source.extension().and_then(|ext| ext.to_str()) == Some("dp") {
         let spans = options
             .spans
@@ -2988,6 +3043,9 @@ fn source_json(property: &Property, options: &ProveOptions<'_>) -> serde_json::V
 }
 
 fn source_json_deep(property: &DeepProperty, options: &ProveOptions<'_>) -> serde_json::Value {
+    if let Some(provenance) = &options.provenance {
+        return provenance.source_json(&property.source, &property.source_kind, &property.name);
+    }
     if property.source_kind == "user" {
         return json!({
             "kind": "user",
@@ -3027,38 +3085,52 @@ fn bridge_source_details(
     property: &DeepProperty,
     options: &ProveOptions<'_>,
 ) -> Option<BridgeSourceDetails> {
-    if property.source_kind != "bridge:c-earchin" {
-        return None;
-    }
-    let spans_path = options
-        .spans
-        .map(Path::to_path_buf)
-        .or_else(|| sibling_spans_path(&property.source))?;
-    let source = fs::read_to_string(spans_path).ok()?;
-    let manifest = serde_json::from_str::<serde_json::Value>(&source).ok()?;
-    let entry = manifest.get("spans")?.as_array()?.iter().find(|entry| {
-        let ears_id = entry.get("ears_id").and_then(|value| value.as_str());
-        let deep_node_id = entry.get("deep_node_id").and_then(|value| value.as_str());
-        property
-            .source_id
-            .as_deref()
-            .is_some_and(|id| ears_id == Some(id))
-            || deep_node_id == Some(property.name.as_str())
-    })?;
-    let ears = entry.get("ears")?;
+    let source = options.provenance.as_ref()?.get(&property.name)?;
     Some(BridgeSourceDetails {
-        id: entry.get("ears_id")?.as_str()?.to_string(),
-        file: entry.get("ears_file")?.as_str()?.to_string(),
-        line: ears.get("start_line")?.as_u64()? as usize,
-        column: ears.get("start_column")?.as_u64()? as usize,
-        text: entry.get("ears_text")?.as_str()?.to_string(),
+        id: source.id.clone(),
+        file: source.file.clone(),
+        line: source.line,
+        column: source.column,
+        text: source.text.clone(),
     })
+}
+
+#[cfg(feature = "chelis-prove")]
+fn property_source_json(
+    path: &Path,
+    kind: &str,
+    name: &str,
+    options: &ProveOptions<'_>,
+) -> serde_json::Value {
+    match &options.provenance {
+        Some(provenance) => provenance.source_json(path, kind, name),
+        None => json!({"kind":kind,"file":path.display().to_string()}),
+    }
+}
+
+fn property_location_text(path: &Path, name: &str, options: &ProveOptions<'_>) -> String {
+    match options
+        .provenance
+        .as_ref()
+        .and_then(|spans| spans.get(name))
+    {
+        Some(source) => format!(
+            "{}:{}:{} {}\n  | {}",
+            source.file, source.line, source.column, source.id, source.text
+        ),
+        None => path.display().to_string(),
+    }
 }
 
 fn sibling_spans_path(path: &Path) -> Option<PathBuf> {
     let stem = path.file_stem()?.to_str()?;
     let candidate = path.with_file_name(format!("{stem}.spans.json"));
-    candidate.exists().then_some(candidate)
+    match fs::symlink_metadata(&candidate) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        // A present symlink or metadata failure must reach manifest validation.
+        // Path::exists follows links and would silently discard a dangling one.
+        _ => Some(candidate),
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -344,7 +344,7 @@ fn emit(
             "assumptions": &outcome.assumptions,
             "samples": outcome.samples,
             "seed": outcome.seed,
-            "source": json!({ "kind": source_kind, "file": path.display().to_string() }),
+            "source": super::property_source_json(path, source_kind, &outcome.name, options),
         });
         // chelis#436: the discharged proposition travels with the record so a
         // consumer displays exactly what was discharged. Emitted only when the
@@ -411,7 +411,7 @@ fn emit(
             "failed" => println!(
                 "property failure: {}\n  --> {}",
                 outcome.name,
-                path.display()
+                super::property_location_text(path, &outcome.name, options)
             ),
             "unsupported" => println!(
                 "property unsupported: {}: {}",

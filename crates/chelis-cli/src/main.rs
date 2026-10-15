@@ -385,7 +385,7 @@ enum Command {
         /// Emit newline-delimited JSON records instead of plain text
         #[clap(long)]
         json: bool,
-        /// Override bridge span manifest for a single `.dp` input
+        /// Override source span manifest for a single `.ch` or `.dp` input
         #[clap(long)]
         spans: Option<PathBuf>,
         /// Verification tier: auto (type check, then induction for a property that calls a recursive function, otherwise SMT, then sampling), fuzz-only, smt-only, induction-only, beacon-only
@@ -1224,6 +1224,7 @@ fn cli_main() {
                 max_attempts,
                 json,
                 spans: spans.as_deref(),
+                provenance: None,
                 tier: &_tier,
                 smt_timeout_ms: _smt_timeout,
                 beacon_budget: std::time::Duration::from_millis(beacon_budget),

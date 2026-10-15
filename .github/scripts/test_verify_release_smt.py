@@ -166,6 +166,20 @@ class ClarabelReleaseRecordTest(unittest.TestCase):
 
 
 class ParseRecordsTest(unittest.TestCase):
+    def test_verified_requirement_requires_complete_source_identity(self) -> None:
+        source = "REQ-001  The engine shall be non-negative.\n"
+        record = {"kind": "property", "status": "passed", "source": {"requirement": {
+            "id": "REQ-001", "file": "requirements.ears", "line": 1,
+            "column": 1, "text": source, "source_hash": VRS.source_hash(source),
+            "span": {"start_byte": 0, "end_byte": len(source.encode())},
+        }}}
+        self.assertTrue(VRS.record_has_verified_requirement(record, source))
+        for field in ("id", "text", "source_hash", "line", "span"):
+            import copy
+            changed = copy.deepcopy(record)
+            del changed["source"]["requirement"][field]
+            self.assertFalse(VRS.record_has_verified_requirement(changed, source))
+
     def test_skips_blank_and_non_json_lines(self) -> None:
         stdout = (
             "\n"
