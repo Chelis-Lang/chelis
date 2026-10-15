@@ -230,12 +230,12 @@ static chelis_value __probe_index(const chelis_list *x, int64_t slot) {
     let counts = output
         .lines()
         .filter_map(|line| line.strip_prefix("__work__="))
-        .last()
+        .next_back()
         .expect("executed counters");
     let memory = output
         .lines()
         .filter_map(|line| line.strip_prefix("__memory__="))
-        .last()
+        .next_back()
         .expect("origin allocation bytes");
     eprintln!("native invocation origin bytes retained until teardown: {memory}");
     let (entry, origin) = counts.split_once(',').unwrap();
