@@ -90,8 +90,8 @@ jobs:
           shared-key: drift-chelis
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features sealed-runtime,smt
+      - name: Build chelis-cli (distribution)
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features distribution
 
       # Build chelis-std from HEAD source with the HEAD binary: the dist pair
       # is not committed, and `reef install --from-monorepo` in the drift job
@@ -155,7 +155,7 @@ jobs:
           set -euo pipefail
           ./chelis-head-toolchain/bin/chelis prove --capabilities |
             python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("smt_available") is True else "HEAD toolchain requires smt_available=true")'
-          python3 .github/scripts/verify_release_smt.py --tarball chelis-head-toolchain.tar.gz
+          python3 .github/scripts/verify_release_smt.py --clarabel --tarball chelis-head-toolchain.tar.gz
 
       - name: Upload HEAD toolchain artifact
         uses: actions/upload-artifact@v7
@@ -316,7 +316,7 @@ jobs:
               cargo test --workspace --locked
               cargo clippy --workspace --all-targets --locked -- -D warnings
               cargo fmt --all -- --check
-              python3 scripts/generate_vocabulary.py --check
+              .venv/bin/python scripts/generate_vocabulary.py --check
               chelis fmt --check src/vocabulary.ch
               chelis check src/vocabulary.ch
               chelis check tests/integration/consumer/src/main.ch
@@ -325,7 +325,7 @@ jobs:
               # checkout uses HEAD. Regeneration in this throwaway checkout
               # still enforces repeated generation, native Surf attribution,
               # conforming proofs and every implementation-mutant failure.
-              python3 scripts/check_examples.py --regenerate
+              .venv/bin/python scripts/check_examples.py --regenerate
               chelis reef build --no-auto-fetch tests/integration/consumer
               chelis reef build --no-auto-fetch .
           - repo: hydronnx
@@ -552,7 +552,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Install uv
-        if: matrix.type == 'cargo' && matrix.needs_chelis_sibling
+        if: matrix.type == 'cargo' && (matrix.needs_chelis_sibling || matrix.repo == 'c-earchin')
         uses: astral-sh/setup-uv@v8.1.0
 
       # The chelis sibling's `.cargo/config.toml` sets PYO3_PYTHON to its
@@ -568,6 +568,11 @@ jobs:
       - name: Install uv (fixture generation)
         if: matrix.type == 'cargo' && !matrix.needs_chelis_sibling && matrix.repo == 'hydronnx'
         uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create c-earchin Python environment
+        if: matrix.type == 'cargo' && matrix.repo == 'c-earchin'
+        working-directory: shell
+        run: uv sync --locked
 
       - name: Cache cargo registry and build (${{ matrix.repo }})
         if: matrix.type == 'cargo'
