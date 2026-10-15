@@ -1,0 +1,574 @@
+//! chelis#3636: Tier C mixes a deterministic edge set into its proposals.
+//!
+//! The issue's complaint is not that the proposal box is too narrow
+//! (chelis#644) but that no point inside the guards is ever *chosen*
+//! deliberately: the sampler drew uniformly and so never visited a guard
+//! endpoint, an exact representable singularity, a subnormal, or an extreme
+//! magnitude. Each test below names the class of point the issue asks for and
+//! a property that is refuted only by that class.
+//!
+//! Every positive test (the edge point is reached, so the false property
+//! fails) is paired with a negative test (a property that is actually true
+//! over the same domain still passes, and the sampler still reports its
+//! guard-filtered sample accounting).
+use assert_cmd::Command;
+use serde_json::Value;
+use tempfile::tempdir;
+
+/// Run `prove --tier fuzz-only` over `source` and return the exit code with
+/// the single property record.
+fn prove(source: &str, samples: &str, seed: &str) -> (i32, Value) {
+    prove_at_tier(source, samples, seed, "fuzz-only")
+}
+
+/// As [`prove`], at an explicit tier.
+fn prove_at_tier(source: &str, samples: &str, seed: &str, tier: &str) -> (i32, Value) {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("edge.ch");
+    std::fs::write(&path, source).expect("write fixture");
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            tier,
+            "--samples",
+            samples,
+            "--seed",
+            seed,
+        ])
+        .output()
+        .expect("run prove");
+    let record = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|value| value["kind"] == "property")
+        .unwrap_or_else(|| {
+            panic!(
+                "property record missing: {}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        });
+    (output.status.code().unwrap_or(-1), record)
+}
+
+/// A finiteness claim over `body`, guarded by `guard` when non-empty.
+fn finite_claim(name: &str, body: &str, guard: &str) -> String {
+    let where_clause = if guard.is_empty() {
+        String::new()
+    } else {
+        format!("\nwhere {guard}")
+    };
+    format!(
+        "module Edge.Finite\ndef subject(x: f64) -> f64 = {body}\n\
+         @property {name} forall(x: f64){where_clause}:\n  \
+         ((subject(x) <= 1.7976931348623157e308f64) && (subject(x) >= -1.7976931348623157e308f64))\n"
+    )
+}
+
+// --- the issue's own two reproductions -----------------------------------
+
+/// `1/(x+1) - 1/x` is infinite at the exactly representable `x = -1.0`,
+/// which sits strictly inside the stated guard. The issue measured
+/// `100/100 passed` and `10000/10000 passed` here.
+#[test]
+fn issue_3636_representable_singularity_inside_the_guard_is_refuted() {
+    let source = finite_claim(
+        "recip_gap_finite_neg",
+        "((1.0f64 / (x + 1.0f64)) - (1.0f64 / x))",
+        "x > -2.0f64, x < -0.5f64",
+    );
+    let (code, record) = prove(&source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["status"], "failed", "{record:#}");
+    assert_ne!(record["composite_verdict"], "fuzz_validated", "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert!(
+        witness > -2.0 && witness < -0.5,
+        "the witness must satisfy the guard it was drawn under: {record:#}"
+    );
+}
+
+/// `x * x` overflows at an ordinary representable magnitude. The binder is
+/// unguarded, so the admissible range is the whole of `f64` and the issue's
+/// "0, ±min subnormal, ±max finite" row is what reaches it.
+#[test]
+fn issue_3636_unguarded_binder_reaches_extreme_magnitudes() {
+    let source = finite_claim("sq_finite", "(x * x)", "");
+    let (code, record) = prove(&source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["status"], "failed", "{record:#}");
+    assert_ne!(record["composite_verdict"], "fuzz_validated", "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert!(
+        witness.abs() > 1.0e100,
+        "overflow needs an extreme magnitude, got {witness}: {record:#}"
+    );
+}
+
+// --- one test per class of point the issue's request list names ----------
+
+/// Guard endpoints. `x <= 2.0` admits exactly `2.0`, and only that endpoint
+/// refutes `subject(x) < 4.0`.
+#[test]
+fn issue_3636_guard_endpoint_is_proposed() {
+    let source = "module Edge.Endpoint
+def subject(x: f64) -> f64 = (x * x)
+@property below_four forall(x: f64)
+where x >= 0.0f64, x <= 2.0f64:
+  (subject(x) < 4.0f64)
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["counterexample"]["x"], 2.0, "{record:#}");
+}
+
+/// The double adjacent to a guard endpoint. A strict guard admits exactly
+/// `next_up(1.0)`, where `x - 1.0` is `2.22e-16`; the property is true from
+/// `1.0 + 1e-12` upwards, and the proposal window for a one-sided guard is
+/// 20 wide, so a uniform draw refutes this only with probability ~5e-14.
+#[test]
+fn issue_3636_double_adjacent_to_a_guard_endpoint_is_proposed() {
+    let source = "module Edge.Adjacent
+@property gap_above_one forall(x: f64)
+where x > 1.0f64:
+  ((x - 1.0f64) > 1.0e-12f64)
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert!(
+        witness > 1.0 && witness - 1.0 <= 1.0e-12,
+        "the witness must be the adjacent double, got {witness}: {record:#}"
+    );
+}
+
+/// Negative control for the adjacent double: the same strict guard, with a
+/// property that is true at `next_up(1.0)` as well, stays green.
+#[test]
+fn issue_3636_adjacent_double_does_not_refute_a_true_strict_guard() {
+    let source = "module Edge.AdjacentTrue
+@property above_one forall(x: f64)
+where x > 1.0f64:
+  (x > 1.0f64)
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    assert_eq!(record["rejected_samples"], 0, "{record:#}");
+}
+
+/// Zero. `x >= 0.0` admits the exact zero at which `1/x` is infinite.
+#[test]
+fn issue_3636_zero_is_proposed() {
+    let source = finite_claim("recip_finite", "(1.0f64 / x)", "x >= 0.0f64, x <= 1.0f64");
+    let (code, record) = prove(&source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["counterexample"]["x"], 0.0, "{record:#}");
+}
+
+/// The minimum positive subnormal. `1/x` overflows there while remaining
+/// finite at every normal magnitude the uniform draw can reach.
+#[test]
+fn issue_3636_minimum_subnormal_is_proposed() {
+    let source = finite_claim("recip_finite_pos", "(1.0f64 / x)", "x > 0.0f64, x < 1.0f64");
+    let (code, record) = prove(&source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert!(
+        witness > 0.0 && witness < 1.0e-300,
+        "overflowing `1/x` needs a subnormal, got {witness}: {record:#}"
+    );
+}
+
+/// A small integer. `x != 0` is not stated, and the only representable
+/// value at which `subject` divides by zero is the integer `3`.
+#[test]
+fn issue_3636_small_integers_are_proposed() {
+    let source = finite_claim(
+        "shifted_pole_finite",
+        "(1.0f64 / (x - 3.0f64))",
+        "x > 2.0f64, x < 4.0f64",
+    );
+    let (code, record) = prove(&source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["counterexample"]["x"], 3.0, "{record:#}");
+}
+
+// --- `!=` guards ---------------------------------------------------------
+
+/// The issue's third reproduction: a `!=` guard reported
+/// `unsupported scalar guard: expected a conjunction of <, <=, >, or >=
+/// comparisons`. It must now sample, and must reach the neighbours of the
+/// excluded value, where `1/x` overflows.
+#[test]
+fn issue_3636_not_equal_guard_is_sampled_and_its_neighbours_are_proposed() {
+    let source = finite_claim("inv_finite", "(1.0f64 / x)", "x != 0.0f64");
+    let (code, record) = prove(&source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["status"], "failed", "{record:#}");
+    assert_eq!(
+        record["sampling_method"], "constraint_directed",
+        "{record:#}"
+    );
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert_ne!(witness, 0.0, "the `!=` guard must still exclude its value");
+}
+
+/// Negative control for the `!=` guard: a property that holds on the
+/// excluded value's neighbourhood passes, and no sample equals the excluded
+/// value.
+#[test]
+fn issue_3636_not_equal_guard_never_proposes_the_excluded_value() {
+    let source = "module Edge.NotEqual
+@property nonzero forall(x: f64)
+where x != 0.0f64, x > -1.0f64, x < 1.0f64:
+  ((x * x) >= 0.0f64)
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["composite_verdict"], "fuzz_validated", "{record:#}");
+    assert_eq!(
+        record["sampling_method"], "constraint_directed",
+        "{record:#}"
+    );
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    assert_eq!(record["rejected_samples"], 0, "{record:#}");
+}
+
+/// A `!=` between two binders is not an interval constraint and stays
+/// unsupported rather than silently sampling a domain it cannot enforce.
+#[test]
+fn issue_3636_not_equal_between_binders_stays_unsupported() {
+    let source = "module Edge.NotEqualVars
+@property distinct forall(x: f64, y: f64)
+where x != y:
+  (x == x)
+";
+    let (code, record) = prove(source, "32", "0");
+    assert_eq!(code, 2, "{record:#}");
+    assert_eq!(record["status"], "unsupported", "{record:#}");
+    assert_ne!(record["composite_verdict"], "fuzz_validated", "{record:#}");
+    assert_eq!(record["accepted_samples"], 0, "{record:#}");
+}
+
+/// A `!=` that empties the domain is still caught before any sample.
+#[test]
+fn issue_3636_not_equal_emptying_a_singleton_domain_fails_closed() {
+    let source = "module Edge.NotEqualEmpty
+@property impossible forall(x: f64)
+where x >= 1.0f64, x <= 1.0f64, x != 1.0f64:
+  (x == x)
+";
+    let (code, record) = prove(source, "32", "0");
+    assert_eq!(code, 2, "{record:#}");
+    assert_eq!(record["status"], "unsupported", "{record:#}");
+    assert_ne!(record["composite_verdict"], "fuzz_validated", "{record:#}");
+    assert_eq!(record["accepted_samples"], 0, "{record:#}");
+}
+
+// --- negative parity: true properties still pass, with honest accounting --
+
+/// The guarded negative control. Every point the edge set adds to
+/// `-2 < x < -0.5` satisfies this, so the verdict stays green and the
+/// guard-filtered accounting is unchanged.
+#[test]
+fn issue_3636_true_guarded_property_still_passes_with_unchanged_accounting() {
+    let source = "module Edge.True
+@property in_range forall(x: f64)
+where x > -2.0f64, x < -0.5f64:
+  ((x < -0.5f64) && (x > -2.0f64))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["composite_verdict"], "fuzz_validated", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    assert_eq!(record["attempted_samples"], 100, "{record:#}");
+    assert_eq!(record["rejected_samples"], 0, "{record:#}");
+}
+
+/// The unguarded negative control: an edge set that now reaches `±f64::MAX`
+/// and the subnormals must not invent a counterexample for a property that
+/// is true at every finite double.
+#[test]
+fn issue_3636_true_unguarded_property_still_passes_over_the_whole_range() {
+    let source = "module Edge.TrueUnguarded
+@property reflexive forall(x: f64):
+  (x == x)
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["composite_verdict"], "fuzz_validated", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+}
+
+/// The edge set is part of the sample sequence, so it stays
+/// seed-deterministic: the same seed and inputs produce the same record.
+#[test]
+fn issue_3636_edge_schedule_is_seed_deterministic() {
+    let source = finite_claim("sq_finite", "(x * x)", "");
+    let (first_code, first) = prove(&source, "100", "7");
+    let (second_code, second) = prove(&source, "100", "7");
+    assert_eq!(first_code, second_code);
+    assert_eq!(
+        first["counterexample"], second["counterexample"],
+        "{first:#}"
+    );
+}
+
+/// The edge set does not depend on the seed, so a property refuted only at an
+/// edge point is refuted under every seed rather than at one lucky draw.
+#[test]
+fn issue_3636_edge_schedule_refutes_under_every_seed() {
+    let source = finite_claim("sq_finite", "(x * x)", "");
+    for seed in ["0", "1", "42", "9999"] {
+        let (code, record) = prove(&source, "100", seed);
+        assert_eq!(code, 1, "seed {seed}: {record:#}");
+        assert_eq!(record["status"], "failed", "seed {seed}: {record:#}");
+    }
+}
+
+/// A sample budget smaller than the edge set still spends it on edge points
+/// rather than on uniform draws, so the refutation survives `--samples 4`.
+#[test]
+fn issue_3636_small_sample_budget_spends_on_edge_points_first() {
+    let source = finite_claim("sq_finite", "(x * x)", "");
+    let (code, record) = prove(&source, "4", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["status"], "failed", "{record:#}");
+}
+
+/// The `f32` absorption `x + 1.0 == x`. It first holds at `x = 2^24`, where
+/// the ulp becomes `2.0` and adding exactly half of it ties to even; through
+/// `[2^24, 2^25)` it alternates with the mantissa parity, and from `2^25`
+/// upward it holds at every representable value. This
+/// was the body of `chelis-prove`'s own
+/// `GREEN_FUZZ_PRECONDITION_PROPERTY` fixture, asserted to *pass* via Tier C;
+/// it passed only because no large magnitude was ever proposed. The fixture
+/// now uses a total body and the defect it was hiding is pinned here.
+#[test]
+fn issue_3636_f32_absorption_at_large_magnitudes_is_refuted() {
+    let source = "module Edge.Absorb
+@property increments forall(x: f32)
+where x > 0.0:
+  ((x + 1.0) > x)
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["status"], "failed", "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f32 witness: {record:#}"));
+    assert!(
+        witness >= 16_777_216.0,
+        "absorption starts at 2^24, got {witness}: {record:#}"
+    );
+    // Check the witness really absorbs rather than merely being large:
+    // absorption alternates through `[2^24, 2^25)`, so clearing the
+    // threshold does not by itself make `x + 1.0 == x`.
+    let witness = witness as f32;
+    assert_eq!(
+        witness + 1.0,
+        witness,
+        "the reported witness must actually absorb: {record:#}"
+    );
+}
+
+/// Negative parity for absorption: the same guard with a body that survives
+/// absorption stays green, so the test above is not just "large magnitudes
+/// break everything".
+#[test]
+fn issue_3636_f32_doubling_at_large_magnitudes_still_passes() {
+    let source = "module Edge.Double
+@property doubles forall(x: f32)
+where x > 0.0:
+  ((x * 2.0) > x)
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+}
+
+/// Negative zero. `x >= 0.0` admits `-0.0` as well, because IEEE equates the
+/// two zeros under comparison but not under division: `1/0.0` is `+inf` and
+/// `1/-0.0` is `-inf`, so only the signed zero refutes a positive-result
+/// claim.
+#[test]
+fn issue_3636_negative_zero_is_proposed() {
+    let source = "module Edge.NegativeZero
+def subject(x: f64) -> f64 = (1.0f64 / x)
+@property positive_recip forall(x: f64)
+where x >= 0.0f64, x <= 1.0f64:
+  (subject(x) > 0.0f64)
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["status"], "failed", "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert_eq!(witness, 0.0, "the witness is a zero: {record:#}");
+    assert!(
+        witness.is_sign_negative(),
+        "only the negatively signed zero refutes this: {record:#}"
+    );
+}
+
+/// A magnitude between the uniform proposal window and `f64::MAX`. The
+/// property is true at every edge point *except* the ladder rungs inside
+/// `(1e20, 1e40)`: `±f64::MAX`, the zeros, the subnormals and the small
+/// integers all satisfy it, and the window only reaches 10. The ladder is a
+/// fixed list rather than a random draw, so this holds under every seed.
+#[test]
+fn issue_3636_magnitude_ladder_reaches_between_the_window_and_max() {
+    let source = "module Edge.Ladder
+@property outside_band forall(x: f64):
+  ((x <= 1.0e20f64) || (x >= 1.0e40f64))
+";
+    for seed in ["0", "1", "42", "9999"] {
+        let (code, record) = prove(source, "100", seed);
+        assert_eq!(code, 1, "seed {seed}: {record:#}");
+        let witness = record["counterexample"]["x"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+        assert!(
+            witness > 1.0e20 && witness < 1.0e40,
+            "seed {seed}: the witness must be in the band, got {witness}: {record:#}"
+        );
+    }
+}
+
+/// Negative parity for the ladder: a claim that holds at every rung stays
+/// green, so the test above is not just "extreme magnitudes break anything".
+#[test]
+fn issue_3636_magnitude_ladder_does_not_refute_a_total_claim() {
+    let source = "module Edge.LadderTrue
+@property finite_or_not forall(x: f64):
+  ((x <= 1.7976931348623157e308f64) && (x >= -1.7976931348623157e308f64))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+}
+
+/// Two `!=` guards that exclude the *top* two representable values of the
+/// interval, leaving only its lower endpoint. A draw that lands on the upper
+/// endpoint cannot be nudged up, so the nudge must walk down past the second
+/// exclusion to reach `1.0`. A nudge that alternated directions would
+/// ping-pong between the two exclusions and report the domain as empty — so
+/// this is the test that distinguishes a monotone scan from an alternating
+/// one, not an interval whose exclusions have room above them.
+#[test]
+fn issue_3636_exclusions_at_the_interval_top_nudge_downward_not_back_up() {
+    let first = f64::from_bits(1.0f64.to_bits() + 1);
+    let second = f64::from_bits(1.0f64.to_bits() + 2);
+    // `[1.0, second]` holds exactly three doubles; two are excluded.
+    let source = format!(
+        "module Edge.TopExclusions
+@property only_one forall(x: f64)
+where x >= 1.0f64, x <= {second:?}f64, x != {second:?}f64, x != {first:?}f64:
+  (x == 1.0f64)
+"
+    );
+    let (code, record) = prove(&source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    assert_eq!(record["rejected_samples"], 0, "{record:#}");
+}
+
+/// The same two exclusions, with a claim that is false at the next
+/// representable value above them: the nudge must land there rather than
+/// skip past it.
+#[test]
+fn issue_3636_nudge_lands_on_the_nearest_admissible_neighbour() {
+    let first = f64::from_bits(1.0f64.to_bits() + 1);
+    let second = f64::from_bits(1.0f64.to_bits() + 2);
+    let source = format!(
+        "module Edge.NudgeTarget
+@property not_the_third forall(x: f64)
+where x >= 1.0f64, x <= 2.0f64, x != 1.0f64, x != {first:?}f64:
+  (x != {second:?}f64)
+"
+    );
+    let (code, record) = prove(&source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert_eq!(witness, second, "{record:#}");
+}
+
+/// `auto` reaches the same schedule. Tier C is `auto`'s fall-through, and in
+/// a build without the `smt` feature it is the only lane these properties
+/// reach; with the feature the solver refutes them over the reals instead.
+/// Either way the verdict must not be green, which is the assertion both
+/// builds share.
+#[test]
+fn issue_3636_auto_does_not_report_green_for_a_refutable_property() {
+    for body in ["(x * x)", "((1.0f64 / (x + 1.0f64)) - (1.0f64 / x))"] {
+        let source = finite_claim("subject_finite", body, "");
+        let (code, record) = prove_at_tier(&source, "100", "0", "auto");
+        assert_eq!(code, 1, "{body}: {record:#}");
+        assert_eq!(record["status"], "failed", "{body}: {record:#}");
+        assert_ne!(
+            record["composite_verdict"], "fuzz_validated",
+            "{body}: {record:#}"
+        );
+    }
+}
+
+/// A mixed-type property takes the typed-generator lane, where a guard is
+/// enforced by rejection rather than by interval construction. Both binders
+/// index the same schedule, so a rejected integer candidate discards the
+/// float candidate at that ordinal — the limitation recorded in
+/// `spec/design/chelis_property_spec.md`. The lane must still propose enough
+/// of each schedule to refute: `x * x` overflows at the float binder's
+/// `±MAX`, and the surviving attempt is the one whose integer candidate
+/// satisfies `n > 0`.
+#[test]
+fn issue_3636_mixed_binder_lane_proposes_edge_points_despite_rejection() {
+    let source = "module Edge.Mixed
+def subject(x: f64) -> f64 = (x * x)
+@property mixed_finite forall(x: f64, n: i32)
+where n > 0:
+  ((subject(x) <= 1.7976931348623157e308f64) && (n > 0))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["status"], "failed", "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert!(
+        witness.abs() > 1.0e100,
+        "overflow needs an extreme magnitude, got {witness}: {record:#}"
+    );
+    assert!(
+        record["counterexample"]["n"].as_i64().unwrap_or_default() > 0,
+        "the witness must satisfy the rejected guard: {record:#}"
+    );
+    assert!(
+        record["rejected_samples"].as_u64().unwrap_or_default() >= 1,
+        "the integer schedule's non-positive candidates are rejected: {record:#}"
+    );
+}

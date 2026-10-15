@@ -53,11 +53,16 @@ The `--tier` values select how a property is checked:
 | `auto` (default) | Type checking first. Then induction when the property calls a recursive function, otherwise the SMT solver. Sampling when neither applies. | Whatever the method named in `proof_tier` establishes. |
 | `smt-only` | The SMT solver, over real numbers. | The property for every input satisfying the `where` preconditions, in real arithmetic. |
 | `induction-only` | Induction on one integer argument of a recursive function: the solver proves a concrete base case and a symbolic step case. | As `smt-only`: every input, in real arithmetic. Both cases must be proved; either failing or being vacuous leaves the property unproved. |
-| `fuzz-only` | Seeded random sampling of inputs that satisfy the preconditions. | The property held on every sampled input, and nothing about the others. |
+| `fuzz-only` | A fixed set of edge inputs, then seeded random sampling. The edge inputs are each binder's guard endpoints and their adjacent values, the neighbours of a `!=` guard's excluded value, both zeros, the smallest positive subnormals, the largest finite values of the type, small integers, and a ladder of decade magnitudes. Every input, edge or random, must satisfy the preconditions. | The property held on every sampled input, and nothing about the others. |
 
 An unknown tier is a usage error before discovery or verification. With
 `auto`, an SMT proof reports zero samples even when `--samples` was supplied;
 the sample count and seed apply when sampling runs.
+
+The edge inputs do not depend on the seed, so a property refuted at one is
+refuted under every seed. They are proposed first, so a budget smaller than
+the edge set spends all of it on edge inputs and draws nothing at random; raise
+`--samples` to add random draws on top.
 
 Induction applies to a recursion on an integer such as this bond valuation,
 which recurses on `n` down to a base case at `n <= 0`:

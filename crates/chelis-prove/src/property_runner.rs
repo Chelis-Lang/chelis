@@ -3041,6 +3041,17 @@ impl FloatKind {
         }
     }
 
+    /// The smallest positive value the binder dtype represents at all. This
+    /// is the subnormal minimum, not `MIN_POSITIVE`: `1.0 / MIN_POSITIVE` is
+    /// finite at both widths, so only the subnormal reaches the overflow
+    /// chelis#3636 reports.
+    fn min_positive_subnormal(self) -> f64 {
+        match self {
+            Self::F32 => f32::from_bits(1) as f64,
+            Self::F64 => f64::from_bits(1),
+        }
+    }
+
     fn round_into_domain(self, value: f64, lower: f64, upper: f64) -> Option<f64> {
         let mut rounded = match self {
             Self::F32 => (value as f32) as f64,
@@ -3055,9 +3066,113 @@ impl FloatKind {
     }
 }
 
+/// The deterministic edge points chelis#3636 asks Tier C to propose, for a
+/// float binder admitted on `[lower, upper]` and excluded from `excluded`.
+///
+/// The order is the schedule: attempt `i` of a run proposes entry `i`, so the
+/// classes a property is most likely to be refuted at come first and a budget
+/// smaller than the schedule still spends what it has on them. The list holds
+/// only values the dtype represents inside the admissible range, deduplicated
+/// by bit pattern — so `0.0` and `-0.0` are distinct entries while a clamped
+/// duplicate of an endpoint is not — and it never depends on the seed, which
+/// is why a property refuted at an edge point is refuted under every seed.
+///
+/// `lower`/`upper` are the *guards'* admissible range, not the random
+/// proposal window: an unguarded `f64` binder admits `±f64::MAX`, and
+/// narrowing that window is chelis#644's separate question.
+fn float_edge_candidates(kind: FloatKind, lower: f64, upper: f64, excluded: &[f64]) -> Vec<f64> {
+    let mut candidates: Vec<f64> = Vec::new();
+    let mut seen: BTreeSet<u64> = BTreeSet::new();
+    let push = |value: f64, candidates: &mut Vec<f64>, seen: &mut BTreeSet<u64>| {
+        let Some(rounded) = kind.round_into_domain(value, lower, upper) else {
+            return;
+        };
+        if excluded.contains(&rounded) {
+            return;
+        }
+        if seen.insert(rounded.to_bits()) {
+            candidates.push(rounded);
+        }
+    };
+
+    // The guard endpoints and their adjacent representable neighbours.
+    push(lower, &mut candidates, &mut seen);
+    push(upper, &mut candidates, &mut seen);
+    push(kind.next_up(lower), &mut candidates, &mut seen);
+    push(kind.next_down(upper), &mut candidates, &mut seen);
+    // The excluded value of a `!=` guard is unreachable, so its neighbours
+    // are the points nearest the singularity the guard was written to avoid.
+    for value in excluded {
+        push(kind.next_up(*value), &mut candidates, &mut seen);
+        push(kind.next_down(*value), &mut candidates, &mut seen);
+    }
+    // The IEEE landmarks.
+    push(0.0, &mut candidates, &mut seen);
+    push(-0.0, &mut candidates, &mut seen);
+    push(kind.min_positive_subnormal(), &mut candidates, &mut seen);
+    push(-kind.min_positive_subnormal(), &mut candidates, &mut seen);
+    push(kind.max_finite(), &mut candidates, &mut seen);
+    push(-kind.max_finite(), &mut candidates, &mut seen);
+    // Small integers: the exact representable points at which a shifted pole
+    // such as `1.0 / (x - 3.0)` is singular.
+    for value in [1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 10.0, -10.0] {
+        push(value, &mut candidates, &mut seen);
+    }
+    // Log-uniform magnitudes up to the dtype's maximum, as a fixed ladder of
+    // decades rather than a random draw: a uniform draw over the `[-10, 10]`
+    // window never proposes `1e100`, and a *random* log-uniform draw would
+    // make "this magnitude class is covered" a probabilistic claim no test
+    // can pin. The rungs grow geometrically, so a ladder of this length
+    // spans every decade `f64` has to the nearest factor of three, and the
+    // `f32` rungs beyond its range round to infinity and are filtered out.
+    for exponent in LOG_MAGNITUDE_LADDER {
+        let magnitude = 10f64.powi(exponent);
+        push(magnitude, &mut candidates, &mut seen);
+        push(-magnitude, &mut candidates, &mut seen);
+    }
+    candidates
+}
+
+/// The decimal exponents of the magnitude ladder `float_edge_candidates`
+/// proposes. Geometric in both directions from `1`, ending at the `f64`
+/// extremes: the largest finite decade and the smallest subnormal one.
+const LOG_MAGNITUDE_LADDER: [i32; 15] = [
+    1, 3, 9, 27, 81, 243, 308, -1, -3, -9, -27, -81, -243, -308, -324,
+];
+
+/// The integer counterpart: the representable ends of the binder's fuzz
+/// range and the small integers around zero. Widening the integer range
+/// itself is chelis#644.
+fn int_edge_candidates(lower: i64, upper: i64) -> Vec<i64> {
+    let mut candidates = Vec::new();
+    let push = |value: i64, candidates: &mut Vec<i64>| {
+        if (lower..=upper).contains(&value) && !candidates.contains(&value) {
+            candidates.push(value);
+        }
+    };
+    push(lower, &mut candidates);
+    push(upper, &mut candidates);
+    push(0, &mut candidates);
+    push(1, &mut candidates);
+    push(-1, &mut candidates);
+    push(lower.saturating_add(1), &mut candidates);
+    push(upper.saturating_sub(1), &mut candidates);
+    push(2, &mut candidates);
+    push(-2, &mut candidates);
+    candidates
+}
+
 #[derive(Debug, Clone)]
 struct ConstraintSamplingPlan {
+    /// The random proposal window: the guards narrowed by the historical
+    /// finite-window synthesis. chelis#644 owns its width.
     domains: BTreeMap<String, ScalarDomain>,
+    /// The admissible range: the guards clamped only to the binder dtype's
+    /// finite range. The deterministic edge schedule is drawn from here, so
+    /// an unguarded binder still reaches `±MAX` (chelis#3636).
+    ranges: BTreeMap<String, ScalarDomain>,
+    /// The values `!=` guards exclude, ascending, per binder.
+    excluded: BTreeMap<String, Vec<f64>>,
     kinds: BTreeMap<String, FloatKind>,
     incoming: BTreeMap<String, Vec<(String, bool)>>,
     topo: Vec<String>,
@@ -3087,8 +3202,23 @@ impl ConstraintSamplingPlan {
             .map(|name| (name, default))
             .collect::<BTreeMap<_, _>>();
         let mut edges = Vec::new();
+        let mut excluded = names
+            .iter()
+            .cloned()
+            .map(|name| (name, Vec::<f64>::new()))
+            .collect::<BTreeMap<_, _>>();
         for precondition in preconditions {
-            collect_scalar_constraints(precondition, &names, &mut domains, &mut edges)?;
+            collect_scalar_constraints(
+                precondition,
+                &names,
+                &mut domains,
+                &mut edges,
+                &mut excluded,
+            )?;
+        }
+        for values in excluded.values_mut() {
+            values.sort_by(f64::total_cmp);
+            values.dedup();
         }
 
         // Propagate constant bounds through the order graph. This is enough
@@ -3125,6 +3255,46 @@ impl ConstraintSamplingPlan {
             {
                 return Err(format!(
                     "inconsistent scalar guards leave `{name}` with an empty interval"
+                ));
+            }
+        }
+
+        // The admissible range is the guards themselves, with a missing side
+        // replaced by the binder dtype's finite extremum rather than by the
+        // generator's window. The edge schedule reads this, so an unguarded
+        // binder reaches `±MAX` even though the random draw does not
+        // (chelis#3636); narrowing the random window is chelis#644.
+        let ranges = domains
+            .iter()
+            .map(|(name, domain)| {
+                let max_finite = kinds[name].max_finite();
+                let mut range = *domain;
+                if !range.lower.value.is_finite() {
+                    range.lower = ScalarBound {
+                        value: -max_finite,
+                        strict: false,
+                    };
+                }
+                if !range.upper.value.is_finite() {
+                    range.upper = ScalarBound {
+                        value: max_finite,
+                        strict: false,
+                    };
+                }
+                (name.clone(), range)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        // A `!=` that removes the only value an interval admits leaves no
+        // sample, and must fail closed before any draw rather than be
+        // discovered as a nudge failure mid-run.
+        for (name, range) in &ranges {
+            let kind = kinds[name];
+            let lower = kind.lower_value(range.lower.value, range.lower.strict);
+            let upper = kind.upper_value(range.upper.value, range.upper.strict);
+            if lower == upper && excluded[name].contains(&lower) {
+                return Err(format!(
+                    "inconsistent scalar guards leave `{name}` with no representable sample"
                 ));
             }
         }
@@ -3214,6 +3384,8 @@ impl ConstraintSamplingPlan {
         }
         Ok(Self {
             domains,
+            ranges,
+            excluded,
             kinds,
             incoming,
             topo,
@@ -3221,41 +3393,113 @@ impl ConstraintSamplingPlan {
         })
     }
 
-    fn sample(&self, rng: &mut Lcg) -> Result<BTreeMap<String, f64>, String> {
+    /// Resolve `domain` into the representable `[lower, upper]` this attempt
+    /// may draw `name` from: the bound strictness, then every order
+    /// predecessor already sampled, then the successors' reserved spacing.
+    fn resolve(
+        &self,
+        name: &str,
+        domain: ScalarDomain,
+        values: &BTreeMap<String, f64>,
+    ) -> Result<(f64, f64), String> {
+        let kind = self.kinds[name];
+        let mut lower = kind.lower_value(domain.lower.value, domain.lower.strict);
+        for (predecessor, strict) in self.incoming.get(name).into_iter().flatten() {
+            let predecessor_value = values[predecessor];
+            lower = lower.max(if *strict {
+                kind.next_up(predecessor_value)
+            } else {
+                predecessor_value
+            });
+        }
+        let mut upper = kind.upper_value(domain.upper.value, domain.upper.strict);
+        for _ in 0..self.reserve_depth[name] {
+            upper = kind.next_down(upper);
+        }
+        if !lower.is_finite() || !upper.is_finite() || lower > upper {
+            return Err(format!(
+                "inconsistent scalar guards leave `{name}` with no representable sample"
+            ));
+        }
+        Ok((lower, upper))
+    }
+
+    /// Draw one assignment. `attempt` is the run's zero-based attempt
+    /// ordinal, which selects the schedule: the first entries of each
+    /// binder's deterministic edge list (chelis#3636), then the historical
+    /// uniform draw over the unchanged proposal window. The whole schedule is
+    /// a function of `attempt` and the seed, so a run remains reproducible.
+    fn sample(&self, rng: &mut Lcg, attempt: usize) -> Result<BTreeMap<String, f64>, String> {
         let mut values = BTreeMap::new();
         for name in &self.topo {
-            let domain = self.domains[name];
             let kind = self.kinds[name];
-            let mut lower = kind.lower_value(domain.lower.value, domain.lower.strict);
-            for (predecessor, strict) in self.incoming.get(name).into_iter().flatten() {
-                let predecessor_value = values[predecessor];
-                lower = lower.max(if *strict {
-                    kind.next_up(predecessor_value)
-                } else {
-                    predecessor_value
-                });
-            }
-            let mut upper = kind.upper_value(domain.upper.value, domain.upper.strict);
-            for _ in 0..self.reserve_depth[name] {
-                upper = kind.next_down(upper);
-            }
-            if !lower.is_finite() || !upper.is_finite() || lower > upper {
-                return Err(format!(
-                    "inconsistent scalar guards leave `{name}` with no representable sample"
-                ));
-            }
-            let draw = if lower == upper {
-                lower
-            } else {
-                rng.next_f64(lower, upper)
+            let excluded = &self.excluded[name];
+            let (window_lower, window_upper) = self.resolve(name, self.domains[name], &values)?;
+            let (lower, upper) = self.resolve(name, self.ranges[name], &values)?;
+            let candidates = float_edge_candidates(kind, lower, upper, excluded);
+            // Once the schedule is spent the draw is the historical uniform
+            // one over the unchanged proposal window; widening that window is
+            // chelis#644.
+            let draw = match candidates.get(attempt) {
+                Some(candidate) => *candidate,
+                None if window_lower == window_upper => window_lower,
+                None => rng.next_f64(window_lower, window_upper),
             };
-            let value = kind.round_into_domain(draw, lower, upper).ok_or_else(|| {
-                format!("inconsistent scalar guards leave `{name}` with no representable sample")
-            })?;
+            let value = kind
+                .round_into_domain(draw, lower, upper)
+                .and_then(|value| nudge_off_excluded(kind, value, lower, upper, excluded))
+                .ok_or_else(|| {
+                    format!(
+                        "inconsistent scalar guards leave `{name}` with no representable sample"
+                    )
+                })?;
             values.insert(name.clone(), value);
         }
         Ok(values)
     }
+}
+
+/// Move `value` off any value a `!=` guard excludes, to the nearest
+/// representable neighbour still inside `[lower, upper]`. Returns `None` when
+/// no such neighbour exists, which is the empty-domain diagnostic.
+///
+/// The scan is monotone: it walks up while the value is excluded and only
+/// then, from the original value, walks down. Alternating directions would
+/// ping-pong forever between two adjacent exclusions, and a value can be
+/// excluded at most `excluded.len()` times in a row, so each walk needs no
+/// more steps than that.
+fn nudge_off_excluded(
+    kind: FloatKind,
+    value: f64,
+    lower: f64,
+    upper: f64,
+    excluded: &[f64],
+) -> Option<f64> {
+    let admissible = |value: f64| (lower..=upper).contains(&value) && !excluded.contains(&value);
+    if admissible(value) {
+        return Some(value);
+    }
+    let mut upward = value;
+    for _ in 0..excluded.len() {
+        upward = kind.next_up(upward);
+        if upward > upper {
+            break;
+        }
+        if admissible(upward) {
+            return Some(upward);
+        }
+    }
+    let mut downward = value;
+    for _ in 0..excluded.len() {
+        downward = kind.next_down(downward);
+        if downward < lower {
+            break;
+        }
+        if admissible(downward) {
+            return Some(downward);
+        }
+    }
+    None
 }
 
 fn tighten_lower(domain: &mut ScalarDomain, candidate: ScalarBound) -> bool {
@@ -3285,18 +3529,41 @@ fn collect_scalar_constraints(
     names: &BTreeSet<String>,
     domains: &mut BTreeMap<String, ScalarDomain>,
     edges: &mut Vec<OrderEdge>,
+    excluded: &mut BTreeMap<String, Vec<f64>>,
 ) -> Result<(), String> {
     use crate::solver::{BoolOp, CmpOp, SmtExpr};
     if let SmtExpr::Bool(BoolOp::And, terms) = expr {
         for term in terms {
-            collect_scalar_constraints(term, names, domains, edges)?;
+            collect_scalar_constraints(term, names, domains, edges, excluded)?;
         }
+        return Ok(());
+    }
+    // `binder != literal` punches a point out of an interval rather than
+    // bounding it (chelis#3636). It keeps the binder's interval and records
+    // the excluded value, whose representable neighbours are exactly the
+    // points nearest the singularity the guard was written to avoid.
+    if let SmtExpr::Cmp(CmpOp::Ne, left, right) = expr {
+        let excluded_value = match (left.as_ref(), right.as_ref()) {
+            (SmtExpr::Var(name), literal) | (literal, SmtExpr::Var(name))
+                if names.contains(name) =>
+            {
+                scalar_guard_literal(literal).map(|value| (name.clone(), value))
+            }
+            _ => None,
+        };
+        let Some((name, value)) = excluded_value else {
+            return Err(
+                "unsupported scalar guard: `!=` must compare a scalar binder with a literal"
+                    .to_string(),
+            );
+        };
+        excluded.get_mut(&name).expect("known variable").push(value);
         return Ok(());
     }
     let SmtExpr::Cmp(op @ (CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge), left, right) = expr
     else {
         return Err(
-            "unsupported scalar guard: expected a conjunction of <, <=, >, or >= comparisons"
+            "unsupported scalar guard: expected a conjunction of <, <=, >, >=, or != comparisons"
                 .to_string(),
         );
     };
@@ -3431,8 +3698,8 @@ fn prove_surf_property_fuzz(
     while accepted < samples_needed && attempts < max_attempts {
         attempts += 1;
         let sample = match &constraint_plan {
-            Some(plan) => sample_property_with_constraints(property, plan, &mut rng),
-            None => sample_property(property, &mut rng),
+            Some(plan) => sample_property_with_constraints(property, plan, &mut rng, attempts - 1),
+            None => sample_property(property, &mut rng, attempts - 1),
         };
         let sample = match sample {
             Ok(sample) => sample,
@@ -3850,14 +4117,14 @@ fn unsupported_type(ty: &TypeExpr) -> Option<String> {
     }
 }
 
-fn sample_property(property: &Property, rng: &mut Lcg) -> Result<Sample, String> {
+fn sample_property(property: &Property, rng: &mut Lcg, attempt: usize) -> Result<Sample, String> {
     let mut values = Vec::new();
     for param in &property.params {
         let ty = param
             .ty
             .as_ref()
             .ok_or_else(|| format!("{} is missing an explicit type", param.name))?;
-        values.push(sample_value(&param.name, ty, rng)?);
+        values.push(sample_value(&param.name, ty, rng, attempt)?);
     }
     Ok(Sample { values })
 }
@@ -3915,8 +4182,9 @@ fn sample_property_with_constraints(
     property: &Property,
     plan: &ConstraintSamplingPlan,
     rng: &mut Lcg,
+    attempt: usize,
 ) -> Result<Sample, String> {
-    let values = plan.sample(rng)?;
+    let values = plan.sample(rng, attempt)?;
     let mut sampled = Vec::with_capacity(property.params.len());
     for param in &property.params {
         let TypeExpr::Named(type_name, _) = param.ty.as_ref().expect("plan requires typed params")
@@ -3929,7 +4197,21 @@ fn sample_property_with_constraints(
     Ok(Sample { values: sampled })
 }
 
-fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue, String> {
+/// Draw one binder value for the typed generator: the lane a property takes
+/// when it has no guards at all, or guards the constraint plan cannot read.
+///
+/// `attempt` is the run's zero-based attempt ordinal. Its first entries
+/// propose the binder's deterministic edge points (chelis#3636) — for a
+/// binder with no guards the admissible range is the whole dtype, so
+/// `±MAX` and the subnormals are reached here — and later entries fall back
+/// to the historical uniform draw. Guards still filter the proposal: a
+/// precondition rejects an edge point exactly as it rejects a random one.
+fn sample_value(
+    name: &str,
+    ty: &TypeExpr,
+    rng: &mut Lcg,
+    attempt: usize,
+) -> Result<SampleValue, String> {
     let sp = chelis_deep::Span::new(0, 0);
     match ty {
         TypeExpr::Named(type_name, _) if type_name == "bool" => {
@@ -3948,7 +4230,11 @@ fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue,
         TypeExpr::Named(type_name, _) if crate::opaque::is_int_width(type_name) => {
             let (lo, hi) = crate::opaque::int_sample_bounds(type_name)
                 .expect("is_int_width implies int_sample_bounds");
-            let value = rng.next_i64(lo, hi);
+            let candidates = int_edge_candidates(lo, hi);
+            let value = match candidates.get(attempt) {
+                Some(candidate) => *candidate,
+                None => rng.next_i64(lo, hi),
+            };
             let lit = Expr::Lit(Literal::Int(value), sp);
             if type_name == "i32" {
                 // i32 is the integer-literal default; no cast needed.
@@ -3968,7 +4254,15 @@ fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue,
             }
         }
         TypeExpr::Named(type_name, _) if type_name == "f32" || type_name == "f64" => {
-            let value = rng.next_f64(-10.0, 10.0);
+            let kind = FloatKind::from_type_name(type_name);
+            let (lower, upper) = (-kind.max_finite(), kind.max_finite());
+            let candidates = float_edge_candidates(kind, lower, upper, &[]);
+            let value = match candidates.get(attempt) {
+                Some(candidate) => *candidate,
+                // The uniform window stays `[-10, 10]`; widening it is
+                // chelis#644's separate question.
+                None => rng.next_f64(-10.0, 10.0),
+            };
             Ok(float_sample(name, type_name, value))
         }
         TypeExpr::Named(type_name, _) if type_name == "string" => {
@@ -4867,8 +5161,10 @@ fn prove_deep_property(
     while accepted < samples_needed && attempts < max_attempts {
         attempts += 1;
         let sample = match &constraint_plan {
-            Some(plan) => sample_deep_property_with_constraints(property, plan, &mut rng),
-            None => sample_deep_property(property, &mut rng),
+            Some(plan) => {
+                sample_deep_property_with_constraints(property, plan, &mut rng, attempts - 1)
+            }
+            None => sample_deep_property(property, &mut rng, attempts - 1),
         };
         let sample = match sample {
             Ok(sample) => sample,
@@ -5189,14 +5485,18 @@ fn try_deep_tier_b(
     }
 }
 
-fn sample_deep_property(property: &DeepProperty, rng: &mut Lcg) -> Result<Sample, String> {
+fn sample_deep_property(
+    property: &DeepProperty,
+    rng: &mut Lcg,
+    attempt: usize,
+) -> Result<Sample, String> {
     let mut values = Vec::new();
     for param in &property.params {
         let ty = param
             .ty
             .as_ref()
             .ok_or_else(|| format!("{} is missing an explicit type", param.name))?;
-        values.push(sample_value(&param.name, ty, rng)?);
+        values.push(sample_value(&param.name, ty, rng, attempt)?);
     }
     Ok(Sample { values })
 }
@@ -5245,8 +5545,9 @@ fn sample_deep_property_with_constraints(
     property: &DeepProperty,
     plan: &ConstraintSamplingPlan,
     rng: &mut Lcg,
+    attempt: usize,
 ) -> Result<Sample, String> {
-    let values = plan.sample(rng)?;
+    let values = plan.sample(rng, attempt)?;
     let mut sampled = Vec::with_capacity(property.params.len());
     for param in &property.params {
         let TypeExpr::Named(type_name, _) = param.ty.as_ref().expect("plan requires typed params")

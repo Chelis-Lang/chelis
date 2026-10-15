@@ -64,8 +64,8 @@ fn prepared_surf_samples_preserve_monolithic_guards_predicates_and_shrinking() {
             ))
         };
         let mut rng = Lcg::new(0);
-        for _ in 0..8 {
-            let sample = sample_property(&property, &mut rng).unwrap();
+        for attempt in 0..8 {
+            let sample = sample_property(&property, &mut rng, attempt).unwrap();
             for precondition in [true, false] {
                 assert_eq!(
                     eval_surf_sample(&library, &property, &roots, &sample, precondition),
@@ -1386,9 +1386,21 @@ fn assert_assumptions_are_tiered(outcome: &PropertyOutcome) -> usize {
 /// A green fuzz property whose `where` precondition drives the
 /// `fuzz_precondition_assumptions` discharge site: the pass carries one
 /// `preconditions:*` assumption that must be tiered.
+///
+/// The body must hold at every `f32` the guard admits, because the subject
+/// here is the assumption's tier stamp and not the property's content. The
+/// original body was `x + 1.0 > x`, which `f32` first falsifies at `x = 2^24`,
+/// where the ulp becomes `2.0` and adding exactly half of it ties to even.
+/// Through `[2^24, 2^25)` it alternates with the mantissa parity --
+/// `16777216` absorbs, `16777218` rounds up -- and from `2^25` upward the ulp
+/// exceeds `2.0` and every representable value absorbs. Tier C passed it
+/// only because the sampler never proposed a magnitude that large (chelis#3636);
+/// `x * 2.0 > x` is total over the guard, overflowing to `inf` at `f32::MAX`
+/// rather than absorbing. The absorption itself is now covered by
+/// `issue_3636_f32_absorption_at_large_magnitudes_is_refuted`.
 const GREEN_FUZZ_PRECONDITION_PROPERTY: &str = "module M
 @property guarded forall(x: f32) where x > 0.0:
-  (x + 1.0 > x)
+  (x * 2.0 > x)
 ";
 
 #[test]
