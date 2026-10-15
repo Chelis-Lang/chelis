@@ -271,7 +271,19 @@ is made. The dense-active/sparse-edge control takes 30/62/126 incidences and no
 pair probes at 16/32/64 active plans. A 4,096-plan chain validates and rejects a
 missing source on a 512 KiB worker stack.
 
-The remaining opaque/contextual fallback can still cause polynomial repeated
+The public `public_conditional_strict_incidence_residual_is_counted` control
+makes the active conditional-to-strict term A_g explicit. One Const depending on
+Load0 is observed by successive witnesses, each linked to another strict Load
+anchor, followed by Compare(Load0, Load_j). At 16/32/64 choices the encoded graph
+has 63/127/255 nodes, but changing epochs construct 120/496/2,016 conditional-to-
+strict incidences and overlay edges. It has no original fallback. Clearing the
+Const's source dependency preserves the original exact shape rejection. This
+is an executable polynomial repeated-work residual inside #3231; the conditional
+pair strategy does not close it. Allocation/peak for this residual is not measured
+by the singleton allocation owner. A separate resolved-assignment/prefix-sharing
+mechanism would require its own authority, cutoff, completeness and memory proof.
+
+The remaining opaque/contextual fallback can also cause polynomial repeated
 prefix work. No remaining exponential expanded-path acceptance witness is
 established by these probes. Arbitrary nested metadata proof reentry and universal
 whole-ingress bounds remain unknown; this mechanism makes no termination or
