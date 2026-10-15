@@ -145,7 +145,9 @@ fn payload(n: usize, changing: bool, witnesses: bool, alternating: bool) -> Stri
     json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":nodes,"roots":roots}).to_string()
 }
 fn measure_contextual_case(changing: bool, witnesses: bool, alternating: bool) {
-    let _measurement = MEASUREMENT.lock().expect("exclusive allocation measurement");
+    let _measurement = MEASUREMENT
+        .lock()
+        .expect("exclusive allocation measurement");
     for n in [32, 64, 128] {
         let json = payload(n, changing, witnesses, alternating);
         let before = LIVE.load(Relaxed);
@@ -201,7 +203,9 @@ fn contextual_distinct_witness_authority_allocation() {
 
 #[test]
 fn public_ingress_preserves_exact_first_diagnostics() {
-    let _measurement = MEASUREMENT.lock().expect("exclusive allocation measurement");
+    let _measurement = MEASUREMENT
+        .lock()
+        .expect("exclusive allocation measurement");
     let mut dag: Value = serde_json::from_str(&payload(4, false, false, false)).unwrap();
     let compare = dag["nodes"]
         .as_array()
