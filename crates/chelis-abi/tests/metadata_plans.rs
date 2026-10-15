@@ -276,3 +276,93 @@ fn matmul_metadata_binds_matrix_spans_and_vendor_projection_without_storage() {
         Err(MetadataError::Overflow(_))
     ));
 }
+
+#[test]
+fn sparse_projections_bind_slots_and_selected_offsets() {
+    use chelis_abi::metadata::{SparseMetadata, SparseProjection};
+    let shape = |s: &[i64]| ShapeMetadata::contiguous(s, RuntimeDType::I64).unwrap();
+    for (base, indices, axis, elementwise, batch) in [
+        (vec![2, 3, 4], vec![2, 2], 1, false, 1),
+        (vec![2, 3, 4], vec![2, 2], 1, false, 0),
+        (vec![2, 3, 4], vec![1, 2, 3], 1, true, 0),
+        (vec![3], vec![], 0, false, 0),
+        (vec![0, 3, 4], vec![2], 1, false, 0),
+        (vec![0], vec![2], 0, false, 0),
+    ] {
+        let plan =
+            SparseMetadata::new_paired(&shape(&base), &shape(&indices), axis, elementwise, batch)
+                .unwrap();
+        let index = plan.projection(SparseProjection::Index);
+        let offset = plan.projection(SparseProjection::Base);
+        let selected = plan.projection(SparseProjection::Selected);
+        assert_eq!(index.terms().len(), plan.domain().shape().len());
+        assert_eq!(offset.terms().len(), plan.domain().shape().len());
+        assert_eq!(selected.terms().len(), 1);
+        let apply = |projection: &chelis_abi::metadata::AffineProjection, position: i64| {
+            projection
+                .terms()
+                .iter()
+                .map(|t| (position / t.divisor % t.modulus) * t.scale)
+                .sum::<i64>()
+        };
+        for linear in 0..plan.domain().elements().get() {
+            let inner: i64 = base[axis as usize + 1..].iter().product();
+            let index_per_batch: i64 = indices[batch..].iter().product();
+            let outer_per_batch: i64 = base[batch..axis as usize].iter().product();
+            let expected_slot = if elementwise {
+                linear
+            } else {
+                (linear / inner / index_per_batch) / outer_per_batch * index_per_batch
+                    + linear / inner % index_per_batch
+            };
+            assert_eq!(apply(index, linear), expected_slot);
+            assert_eq!(plan.index_slot(linear).unwrap(), expected_slot);
+            for selection in 0..base[axis as usize] {
+                let expected_offset = if elementwise {
+                    let mut remaining = linear;
+                    let mut result = 0;
+                    let mut stride = 1;
+                    for d in (0..base.len()).rev() {
+                        let coordinate = if d == axis as usize {
+                            selection
+                        } else {
+                            remaining % indices[d]
+                        };
+                        remaining /= indices[d];
+                        result += coordinate * stride;
+                        stride *= base[d];
+                    }
+                    result
+                } else {
+                    (linear / inner / index_per_batch * base[axis as usize] + selection) * inner
+                        + linear % inner
+                };
+                assert_eq!(plan.data_index(linear, selection).unwrap(), expected_offset);
+                assert_eq!(
+                    apply(offset, linear) + selection * selected.terms()[0].scale,
+                    plan.data_index(linear, selection).unwrap()
+                );
+            }
+            for selection in [-1, base[axis as usize]] {
+                assert!(matches!(
+                    plan.data_index(linear, selection),
+                    Err(MetadataError::Domain(_))
+                ));
+            }
+        }
+        for linear in [-1, plan.domain().elements().get()] {
+            assert!(plan.index_slot(linear).is_err());
+            assert!(plan.data_index(linear, 0).is_err());
+        }
+        if plan.domain().elements().get() == 0 {
+            for projection in [index, offset, selected] {
+                assert!(
+                    projection
+                        .terms()
+                        .iter()
+                        .all(|t| t.divisor == 1 && t.scale == 0)
+                );
+            }
+        }
+    }
+}

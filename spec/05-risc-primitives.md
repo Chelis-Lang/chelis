@@ -2567,6 +2567,22 @@ exact ADT identity by [05-OP-34].
 > `Overflow`, retaining [04-NUM-9]'s canonical primitive identity at i64. These
 > metadata operations have no cotangent or arithmetic accumulator.
 >
+> `chelis_sparse_term` observes a field (`DIVISOR`, `MODULUS`, or `SCALE`)
+> of a checked `INDEX`, `BASE`, or `SELECTED` projection. INDEX and BASE have
+> one term per iteration-domain axis; SELECTED has one term whose modulus is
+> the selected base-axis extent. INDEX maps the iteration position to the
+> index-tensor slot. BASE omits the selected coordinate; adding SELECTED's scale
+> times the selected index gives the base-tensor position. Each projection has
+> base zero. Every reachable valid index and partial sum fits nonnegative i64
+> and lies within its tensor. Empty iteration domains have divisor one and
+> scale zero; a zero selected-axis extent admits no selected index. Invalid
+> projection, field, term, or tagged carrier traps Domain.
+> `chelis_sparse_check_index` checks an exact tagged i64 selected index against
+> the base axis and reports the same canonical sparse-index failure as
+> `chelis_sparse_data_index`, without mapping the iteration position. Consumers
+> retain this check at every row-major iteration before accessing base storage;
+> checked projection terms need no additional per-element metadata checks.
+>
 > `chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands
 > and an exact tagged exemplar selecting the result representation. Both operands
 > have rank at least two, equal leading batch shapes, equal payload dtype, and

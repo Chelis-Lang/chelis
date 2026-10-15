@@ -24,6 +24,20 @@ fn sparse_plans_preserve_exact_slots_shapes_and_input_lifetimes() {
                 CHELIS_SPARSE_GATHER,
             );
             assert_eq!(chelis_sparse_count(p), 16);
+            assert_eq!(
+                chelis_sparse_term(p, CHELIS_SPARSE_INDEX, CHELIS_PROJECTION_SCALE, int(1)),
+                2
+            );
+            assert_eq!(
+                chelis_sparse_term(p, CHELIS_SPARSE_BASE, CHELIS_PROJECTION_SCALE, int(0)),
+                6
+            );
+            assert_eq!(
+                chelis_sparse_term(p, CHELIS_SPARSE_SELECTED, CHELIS_PROJECTION_SCALE, int(0)),
+                2
+            );
+            chelis_sparse_check_index(p, int(2));
+
             assert_eq!(chelis_sparse_extent(p, int(-1)), 2);
             chelis_sparse_check_target(p, int(4), [int(2); 4].as_ptr());
             let guard = chelis_tensor_begin_write(base);
@@ -194,6 +208,28 @@ fn invalid_sparse_child() {
             op,
         );
         match case.as_str() {
+            "projection" => {
+                chelis_sparse_term(p, -1, CHELIS_PROJECTION_SCALE, int(0));
+            }
+            "projection-field" => {
+                chelis_sparse_term(p, CHELIS_SPARSE_INDEX, -1, int(0));
+            }
+            "projection-term" => {
+                chelis_sparse_term(p, CHELIS_SPARSE_SELECTED, CHELIS_PROJECTION_SCALE, int(1));
+            }
+            "projection-scalar" => {
+                chelis_sparse_term(
+                    p,
+                    CHELIS_SPARSE_INDEX,
+                    CHELIS_PROJECTION_SCALE,
+                    chelis_scalar_from_bits(CHELIS_DTYPE_F32, 0),
+                );
+            }
+            "check-index" => chelis_sparse_check_index(p, int(3)),
+            "check-negative-index" => chelis_sparse_check_index(p, int(-1)),
+            "check-scalar" => {
+                chelis_sparse_check_index(p, chelis_scalar_from_bits(CHELIS_DTYPE_F32, 0))
+            }
             "target" => chelis_sparse_check_target(p, int(2), [int(1), int(6)].as_ptr()),
             "slot" => {
                 chelis_sparse_index_slot(p, int(4));
@@ -222,6 +258,13 @@ fn invalid_sparse_child() {
 #[test]
 fn sparse_shape_and_index_failures_keep_the_owning_diagnostic() {
     for case in [
+        "projection",
+        "projection-field",
+        "projection-term",
+        "projection-scalar",
+        "check-index",
+        "check-negative-index",
+        "check-scalar",
         "updates-shape",
         "updates-dtype",
         "index-dtype",

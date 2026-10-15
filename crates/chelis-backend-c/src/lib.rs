@@ -2632,6 +2632,133 @@ int main(void) {{
     }
 
     #[test]
+    fn sparse_affine_paired_gather_preserves_bits_and_index_traps() {
+        let mut dag = Dag::new();
+        let decl = dag.declare("sparse_bits");
+        let batched = |shape: &[usize], dtype| {
+            let mut ty = tensor_ty(shape, dtype);
+            ty.dims[0] = DimInfo::Named("batch".into(), None);
+            ty
+        };
+        let values = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            batched(&[2, 3, 2], Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            batched(&[2, 2], Prim::Int64),
+            None,
+        );
+        let gathered = dag.add_node(
+            decl,
+            RiscOp::Gather {
+                axis: 1,
+                batch_rank: 1,
+            },
+            vec![values, indices],
+            batched(&[2, 2, 2], Prim::F32),
+            None,
+        );
+        dag.add_root(gathered);
+        let result = codegen(&dag, "sparse_bits").unwrap();
+        assert!(result.c_source.contains("chelis_sparse_term("));
+        assert!(result.c_source.contains("chelis_sparse_check_index("));
+        assert!(!result.c_source.contains("chelis_sparse_index_slot("));
+        assert!(!result.c_source.contains("chelis_sparse_data_index("));
+        let loop_start = result.c_source.find("for (int64_t t2_i = 0;").unwrap();
+        assert!(result.c_source.rfind("chelis_sparse_term(").unwrap() < loop_start);
+        let loop_body = &result.c_source[loop_start..];
+        assert!(
+            loop_body.find("chelis_sparse_check_index(").unwrap()
+                < loop_body.find("t2_base_index =").unwrap()
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        stage_runtime(tmp.path());
+        write_temp_file(tmp.path(), "model.c", &result.c_source);
+        let main = r#"
+#include "chelis_runtime.h"
+#include <string.h>
+void sparse_bits(chelis_tensor **, int, chelis_tensor **, int);
+int main(int argc, char **argv) {
+    const int empty = argc > 1 && strcmp(argv[1], "empty") == 0;
+    const int64_t batch = empty ? 0 : 2;
+    const uint32_t bits[12] = {0x80000000,0x00000001,0x3f800000,0xbf800000,0x7fc12345,0x7f800000,0xff800000,0x00000000,0x00800000,0x80800000,0x3eaaaaab,0xbeaaaaab};
+    const uint32_t expected[8] = {0x7fc12345,0x7f800000,0x80000000,0x00000001,0x00800000,0x80800000,0x3eaaaaab,0xbeaaaaab};
+    int64_t picks[4] = {2,0,1,2};
+    if (argc > 1 && !empty) picks[0] = -1;
+    chelis_tensor *values = chelis_alloc(3, (int64_t[]){batch,3,2}, CHELIS_DTYPE_F32);
+    chelis_tensor *indices = chelis_alloc(2, (int64_t[]){batch,2}, CHELIS_DTYPE_I64);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(values);
+    if (!empty) memcpy(chelis_tensor_write_view(guard).data, bits, sizeof(bits));
+    chelis_tensor_end_write(guard);
+    guard = chelis_tensor_begin_write(indices);
+    if (!empty) memcpy(chelis_tensor_write_view(guard).data, picks, sizeof(picks));
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[2] = {VALUES, INDICES}, *outputs[1] = {0};
+    sparse_bits(inputs, 2, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    if (empty ? view.count != 0 : (view.count != 8 || memcmp(view.data, expected, sizeof(expected)) != 0)) return 7;
+    chelis_tensor_release(values); chelis_tensor_release(indices); chelis_tensor_release(outputs[0]);
+    return 0;
+}
+"#;
+        let inputs = result
+            .input_labels
+            .iter()
+            .map(|name| match name.as_str() {
+                "values" => "values",
+                "indices" => "indices",
+                _ => panic!("unexpected input"),
+            })
+            .collect::<Vec<_>>();
+        let main = main
+            .replace("VALUES", inputs[0])
+            .replace("INDICES", inputs[1]);
+        write_temp_file(tmp.path(), "main.c", &main);
+        let binary = tmp.path().join("sparse_bits");
+        let toolchain = test_toolchain(result.requirements);
+        let mut command = Command::new(&toolchain.compiler);
+        apply_c_test_flags(&mut command);
+        command.args(["-O2", "-fsanitize=undefined", "-fno-sanitize-recover=all"]);
+        command
+            .args(&toolchain.compile_flags)
+            .arg(tmp.path().join("main.c"))
+            .arg(tmp.path().join("model.c"));
+        add_runtime_link(&mut command, tmp.path());
+        command.args(&toolchain.link_flags).arg("-o").arg(&binary);
+        let built = command.output().unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let good = Command::new(&binary).output().unwrap();
+        assert!(good.status.success(), "{:?}", good);
+        let empty = Command::new(&binary).arg("empty").output().unwrap();
+        assert!(empty.status.success(), "{:?}", empty);
+        let bad = Command::new(&binary).arg("bad").output().unwrap();
+        assert_eq!(bad.status.code(), Some(1), "{:?}", bad);
+        let stderr = String::from_utf8_lossy(&bad.stderr);
+        assert!(
+            stderr.contains("gather index -1 out of bounds at axis 1 of extent 3"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("numeric trap: domain in gather at i64"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
     fn numerical_pad_with_runtime_input() {
         let mut dag = Dag::new();
         let decl = dag.declare("test");

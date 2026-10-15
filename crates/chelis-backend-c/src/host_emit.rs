@@ -12035,6 +12035,11 @@ impl<'a> HostEmitter<'a> {
             self.push_relative_lines(lines);
             prefix
         });
+        let prefix = self.next_temp("sparse_projection");
+        let rank = summary.input_tys[summary.input_indices[0]].dims.len()
+            + summary.input_tys[summary.input_indices[1]].dims.len()
+            - 1;
+        self.push_relative_lines(CEmitter::sparse_projection_terms(&prefix, plan, rank));
         let linear = self.next_temp("sparse_linear");
         let slot = self.next_temp("sparse_slot");
         let selected = self.next_temp("sparse_selected");
@@ -12043,9 +12048,15 @@ impl<'a> HostEmitter<'a> {
             "{}for ({index_type} {linear} = 0; {linear} < {count}; ++{linear}) {{",
             self.indent
         ));
-        self.lines.push(format!("{}    {index_type} {slot} = chelis_sparse_index_slot({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {linear}));", self.indent));
+        let slot_expression = CEmitter::sparse_projection_index(&prefix, "index", rank, &linear);
+        let offset_expression = CEmitter::sparse_projection_index(&prefix, "base", rank, &linear);
+        self.lines.push(format!(
+            "{}    {index_type} {slot} = {slot_expression};",
+            self.indent
+        ));
         self.lines.push(format!("{}    {index_type} {selected} = ((const {index_element}*)chelis_host_tensor_data({indices}))[{slot}];", self.indent));
-        self.lines.push(format!("{}    {index_type} {offset} = chelis_sparse_data_index({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {linear}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, {selected}));", self.indent));
+        self.lines.push(format!("{}    chelis_sparse_check_index({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {selected}));", self.indent));
+        self.lines.push(format!("{}    {index_type} {offset} = {offset_expression} + {selected} * {prefix}_selected_scale;", self.indent));
         match kind {
             SparseSummaryKind::Gather => self.lines.push(format!("{}    (({element}*){view}.data)[{linear}] = ((const {element}*)chelis_host_tensor_data({base}))[{offset}];", self.indent)),
             SparseSummaryKind::ScatterAdd => {

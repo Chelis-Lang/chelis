@@ -55,8 +55,11 @@ fn validate(source: &str) -> Result<(), String> {
         }
     }
     for check in [
-        "chelis_sparse_index_slot(",
-        "chelis_sparse_data_index(",
+        "sparse_projection_terms(",
+        r#"sparse_projection_index(&prefix, "index","#,
+        r#"sparse_projection_index(&prefix, "base","#,
+        "selected_scale",
+        "chelis_sparse_check_index(",
         "chelis_sparse_plan_release(",
         "_byte_capacity != 0",
     ] {
@@ -121,8 +124,11 @@ fn validate_host(source: &str) -> Result<(), String> {
     }
     let loop_body = method(source, "emit_sparse_summary_body");
     for check in [
-        "chelis_sparse_index_slot(",
-        "chelis_sparse_data_index(",
+        "sparse_projection_terms(",
+        r#"sparse_projection_index(&prefix, "index","#,
+        r#"sparse_projection_index(&prefix, "base","#,
+        "selected_scale",
+        "chelis_sparse_check_index(",
         "chelis_tensor_byte_count(",
         "chelis_sparse_plan_release(",
     ] {
@@ -152,8 +158,11 @@ fn sparse_host_summaries_use_checked_submission_and_indexing() {
         "chelis_tensor_sparse_plan(",
         "chelis_sparse_check_target(",
         "chelis_sparse_count(",
-        "chelis_sparse_index_slot(",
-        "chelis_sparse_data_index(",
+        "sparse_projection_terms(",
+        r#"sparse_projection_index(&prefix, "index","#,
+        r#"sparse_projection_index(&prefix, "base","#,
+        "selected_scale",
+        "chelis_sparse_check_index(",
         "chelis_tensor_byte_count(",
         "chelis_sparse_plan_release(",
     ] {
@@ -180,8 +189,11 @@ fn bypassing_sparse_projection_or_submission_is_rejected() {
         "chelis_tensor_sparse_plan(",
         "chelis_sparse_check_target(",
         "chelis_sparse_count(",
-        "chelis_sparse_index_slot(",
-        "chelis_sparse_data_index(",
+        "sparse_projection_terms(",
+        r#"sparse_projection_index(&prefix, "index","#,
+        r#"sparse_projection_index(&prefix, "base","#,
+        "selected_scale",
+        "chelis_sparse_check_index(",
         "chelis_sparse_plan_release(",
         "_byte_capacity != 0",
     ] {

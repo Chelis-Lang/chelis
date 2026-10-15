@@ -6856,6 +6856,57 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("chelis_matmul_plan_release(t{id}_matmul);"));
     }
 
+    /// Sparse offsets use immutable checked projection terms; only the selected
+    /// payload index still owes a per-iteration trap.
+    pub(crate) fn sparse_projection_terms(
+        prefix: &str,
+        plan: &str,
+        rank: usize,
+    ) -> Vec<(usize, String)> {
+        let mut lines = Vec::new();
+        for (part, tag) in [("index", "INDEX"), ("base", "BASE")] {
+            for axis in 0..rank {
+                let mut fields = vec![("scale", "SCALE")];
+                if axis + 1 < rank {
+                    fields.push(("divisor", "DIVISOR"));
+                }
+                if axis > 0 {
+                    fields.push(("modulus", "MODULUS"));
+                }
+                for (name, field) in fields {
+                    lines.push(format!("const int64_t {prefix}_{part}{axis}_{name} = chelis_sparse_term({plan}, CHELIS_SPARSE_{tag}, CHELIS_PROJECTION_{field}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}));"));
+                }
+            }
+        }
+        lines.push(format!("const int64_t {prefix}_selected_scale = chelis_sparse_term({plan}, CHELIS_SPARSE_SELECTED, CHELIS_PROJECTION_SCALE, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));"));
+        lines.into_iter().map(|line| (0, line)).collect()
+    }
+
+    pub(crate) fn sparse_projection_index(
+        prefix: &str,
+        part: &str,
+        rank: usize,
+        position: &str,
+    ) -> String {
+        let terms = (0..rank)
+            .map(|axis| {
+                let name = format!("{prefix}_{part}{axis}");
+                let coordinate = match (axis == 0, axis + 1 == rank) {
+                    (true, true) => position.to_string(),
+                    (true, false) => format!("({position} / {name}_divisor)"),
+                    (false, true) => format!("({position} % {name}_modulus)"),
+                    (false, false) => format!("(({position} / {name}_divisor) % {name}_modulus)"),
+                };
+                format!("{coordinate} * {name}_scale")
+            })
+            .collect::<Vec<_>>();
+        if terms.is_empty() {
+            "0".into()
+        } else {
+            terms.join(" + ")
+        }
+    }
+
     /// Validate the whole iteration shape before storage submission; each loop
     /// position then obtains both its index slot and base offset from that plan.
     fn emit_sparse_checked(
@@ -6869,6 +6920,16 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     ) {
         let base = inputs[0].0;
         let indices = inputs[1].0;
+        let domain_rank = if matches!(operation, SparseEmission::Elements) {
+            dag.get(inputs[1]).unwrap().output_type.dims.len()
+        } else {
+            dag.get(inputs[0]).unwrap().output_type.dims.len()
+                + dag.get(inputs[1]).unwrap().output_type.dims.len()
+                - axes.batch_rank
+                - 1
+        };
+        let prefix = format!("t{id}_sparse");
+
         let (operation, update) = match operation {
             SparseEmission::Gather => ("CHELIS_SPARSE_GATHER", None),
             SparseEmission::Add => ("CHELIS_SPARSE_ADD", Some("+=")),
@@ -6894,6 +6955,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!(
             "{index_type} t{id}_sparse_count = chelis_sparse_count(t{id}_sparse);"
         ));
+        self.emit_relative_lines(Self::sparse_projection_terms(&prefix, &prefix, domain_rank));
         self.emit_slot_wrapper(id, ty);
         if updates.is_some() {
             self.line(&format!("if (t{id}_byte_capacity != 0 && t{id}_data != t{base}_data) memcpy(t{id}_data, t{base}_data, (size_t)t{id}_byte_capacity);"));
@@ -6915,9 +6977,16 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for ({index_type} t{id}_i = 0; t{id}_i < t{id}_sparse_count; ++t{id}_i) {{"
         ));
         self.indent += 1;
-        self.line(&format!("{index_type} t{id}_index_slot = chelis_sparse_index_slot(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i));"));
+        let slot =
+            Self::sparse_projection_index(&prefix, "index", domain_rank, &format!("t{id}_i"));
+        let offset =
+            Self::sparse_projection_index(&prefix, "base", domain_rank, &format!("t{id}_i"));
+        self.line(&format!("{index_type} t{id}_index_slot = {slot};"));
         self.line(&format!("{index_type} t{id}_selected = ((const {index_element}*)t{indices}_data)[t{id}_index_slot];"));
-        self.line(&format!("{index_type} t{id}_base_index = chelis_sparse_data_index(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i), chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_selected));"));
+        self.line(&format!("chelis_sparse_check_index(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_selected));"));
+        self.line(&format!(
+            "{index_type} t{id}_base_index = {offset} + t{id}_selected * {prefix}_selected_scale;"
+        ));
         if add {
             self.line(&Self::scatter_add_tree_record_line(
                 &tree,
@@ -12593,7 +12662,8 @@ mod tests {
         let c = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(c.contains("((const int32_t*)t1_data)[t2_index_slot]"));
-        assert!(c.contains("chelis_sparse_data_index(t2_sparse,"));
+        assert!(c.contains("chelis_sparse_check_index(t2_sparse,"));
+        assert!(!c.contains("chelis_sparse_data_index("));
         assert!(c.contains("((double*)t2_data)[t2_i] = ((const double*)t0_data)[t2_base_index];"));
     }
 
@@ -12641,7 +12711,8 @@ mod tests {
             !c.contains("128 * 50000 * 1024"),
             "sparse gather codegen must not compute dense embedding volume"
         );
-        assert!(c.contains("chelis_sparse_index_slot(t2_sparse,"));
+        assert!(c.contains("chelis_sparse_term(t2_sparse,"));
+        assert!(!c.contains("chelis_sparse_index_slot("));
     }
 
     #[test]

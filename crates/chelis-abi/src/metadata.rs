@@ -755,17 +755,22 @@ impl MatmulMetadata {
     }
 }
 
+/// A sparse plan's checked coordinate maps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SparseProjection {
+    Index,
+    Base,
+    Selected,
+}
+
 /// The checked row-major domain shared by gather and scatter consumers.
 pub struct SparseMetadata {
     base: ShapeMetadata,
-    indices: ShapeMetadata,
     domain: ShapeMetadata,
     axis: usize,
-    elementwise: bool,
-    inner: ElementCount,
-    source_axis: AxisDecomposition,
-    index_per_batch: ElementCount,
-    base_outer_per_batch: ElementCount,
+    index: AffineProjection,
+    offset: AffineProjection,
+    selected: AffineProjection,
 }
 
 impl SparseMetadata {
@@ -794,8 +799,6 @@ impl SparseMetadata {
                 "invalid paired sparse batch prefix".into(),
             ));
         }
-        let index_per_batch = ElementCount::from_extents(&indices.shape()[batch_rank..])?;
-        let base_outer_per_batch = ElementCount::from_extents(&base.shape()[batch_rank..axis])?;
         let shape = if elementwise {
             if batch_rank != 0 {
                 return Err(MetadataError::Domain(
@@ -833,22 +836,63 @@ impl SparseMetadata {
         };
         let domain = ShapeMetadata::contiguous(&shape, base.dtype())?;
         domain.bytes().allocation()?;
-        let inner = if domain.elements().get() == 0 || elementwise {
-            ElementCount::from_extents(&[0])?
-        } else {
-            ElementCount::from_extents(&base.shape()[axis + 1..])?
-        };
+        let reachable = domain.elements().get() != 0;
+        let index_rank = indices.shape().len() - batch_rank;
+        let index = AffineProjection::new(
+            &shape,
+            reachable,
+            |d| {
+                Ok(if elementwise || d < batch_rank {
+                    indices.strides()[d]
+                } else if (axis..axis + index_rank).contains(&d) {
+                    indices.strides()[batch_rank + d - axis]
+                } else {
+                    0
+                })
+            },
+            || Ok(0),
+        )?;
+        require_within(&[&index], indices.elements(), reachable)?;
+        let has_selection = reachable && base.shape()[axis] != 0;
+        let offset = AffineProjection::new(
+            &shape,
+            has_selection,
+            |d| {
+                Ok(if elementwise {
+                    if d == axis { 0 } else { base.strides()[d] }
+                } else if d < axis {
+                    base.strides()[d]
+                } else if d >= axis + index_rank {
+                    base.strides()[d - index_rank + 1]
+                } else {
+                    0
+                })
+            },
+            || Ok(0),
+        )?;
+        let selected = AffineProjection::new(
+            &[base.shape()[axis]],
+            has_selection,
+            |_| Ok(base.strides()[axis]),
+            || Ok(0),
+        )?;
+        require_within(&[&offset, &selected], base.elements(), has_selection)?;
         Ok(Self {
             base: base.clone(),
-            indices: indices.clone(),
             domain,
             axis,
-            elementwise,
-            inner,
-            source_axis: base.axis_decomposition(axis)?,
-            index_per_batch,
-            base_outer_per_batch,
+            index,
+            offset,
+            selected,
         })
+    }
+
+    pub fn projection(&self, part: SparseProjection) -> &AffineProjection {
+        match part {
+            SparseProjection::Index => &self.index,
+            SparseProjection::Base => &self.offset,
+            SparseProjection::Selected => &self.selected,
+        }
     }
 
     pub fn base(&self) -> &ShapeMetadata {
@@ -863,14 +907,7 @@ impl SparseMetadata {
     }
     pub fn index_slot(&self, linear: i64) -> Result<i64, MetadataError> {
         self.domain.require_index(linear)?;
-        Ok(if self.elementwise {
-            linear
-        } else {
-            (linear / self.inner.get() / self.index_per_batch.get())
-                / self.base_outer_per_batch.get()
-                * self.index_per_batch.get()
-                + linear / self.inner.get() % self.index_per_batch.get()
-        })
+        self.index.apply(linear)
     }
     pub fn data_index(&self, linear: i64, selected: i64) -> Result<i64, MetadataError> {
         self.domain.require_index(linear)?;
@@ -879,36 +916,10 @@ impl SparseMetadata {
                 "sparse index outside base axis".into(),
             ));
         }
-        if self.elementwise {
-            let mut remaining = linear;
-            let mut offset = 0_i64;
-            for (axis, &extent) in self.indices.shape().iter().enumerate().rev() {
-                let coordinate = if axis == self.axis {
-                    selected
-                } else {
-                    remaining % extent
-                };
-                remaining /= extent;
-                offset = coordinate
-                    .checked_mul(self.base.strides[axis])
-                    .and_then(|n| offset.checked_add(n))
-                    .ok_or(MetadataError::Overflow("sparse offset exceeds i64"))?;
-            }
-            self.base.require_index(offset)?;
-            Ok(offset)
-        } else {
-            let outer = linear / self.inner.get() / self.index_per_batch.get();
-            let inner = linear % self.inner.get();
-            let offset = self.source_axis.linear_index(
-                usize::try_from(outer)
-                    .map_err(|_| MetadataError::Overflow("sparse outer exceeds target"))?,
-                usize::try_from(selected)
-                    .map_err(|_| MetadataError::Overflow("sparse index exceeds target"))?,
-                usize::try_from(inner)
-                    .map_err(|_| MetadataError::Overflow("sparse inner exceeds target"))?,
-            )?;
-            i64::try_from(offset).map_err(|_| MetadataError::Overflow("sparse offset exceeds i64"))
-        }
+        self.offset
+            .apply(linear)?
+            .checked_add(self.selected.apply(selected)?)
+            .ok_or(MetadataError::Overflow("sparse offset exceeds i64"))
     }
 }
 
