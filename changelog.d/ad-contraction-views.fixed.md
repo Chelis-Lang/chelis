@@ -1,1 +1,1 @@
-Reduce temporary tensor storage for private matmul adjoints and shared-label binary einsum contractions, including mapped gradients, while preserving primitive arithmetic, checks, and exposed intermediate tensors.
+Reduce temporary tensor storage for private matmul adjoints and shared-label binary einsum contractions, including mapped gradients, while preserving primitive arithmetic, checks, and exposed intermediate tensors. Keep runtime bounds and extent witnesses live through each deferred operation’s original checks.
