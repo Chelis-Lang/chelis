@@ -1550,13 +1550,24 @@ fn lexical_forwarding_example_preserves_the_independent_callee_claim() {
     for native in [false, true] {
         let (success, output) = result_claims::run(source, native);
         assert!(success && output.contains("out = 5"), "{output}");
-        let (success, output) = result_claims::run(&negative, native);
-        assert!(!success, "{output}");
-        assert!(
-            output.contains("numeric trap: domain in load at i64"),
-            "{output}"
-        );
     }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("contradictory.ch");
+    std::fs::write(&path, negative).unwrap();
+    let rejected = assert_cmd::Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(diagnostic.contains("DimensionMismatch"), "{diagnostic}");
 }
 
 #[test]
@@ -1682,7 +1693,7 @@ fn lexical_forwarding_keeps_independent_wrapper_local_claims_in_order() {
                 );
                 if !success {
                     assert!(
-                        output.contains("numeric trap: domain in load at i64"),
+                        output.contains("numeric trap: domain in append at i64"),
                         "{output}"
                     );
                 }
