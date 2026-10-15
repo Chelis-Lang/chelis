@@ -1,1 +1,0 @@
-On Linux, every build of `chelis` now carries a GNU build id, because its build script asks the linker for one. Before, builds with the Nix toolchain had none. Then each `chelis` process computed SHA-256 over the whole executable to identify its own build, which took about 200 ms on aarch64-linux. See [#3659](https://github.com/Chelis-Lang/chelis/issues/3659).

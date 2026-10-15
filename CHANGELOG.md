@@ -4,6 +4,151 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.20.0] - 2026-10-16
+
+### Added
+
+- **BREAKING:** Add `is_nan`, `is_finite`, and `is_infinite` for scalar and tensor `f16`, `bf16`, `f32`, and `f64` values in the evaluator and C backend. Classification reads stored bits without conversion and preserves tensor dimensions through direct calls, callable aliases captured by wrappers, and borrowed callbacks, including rank-zero tensors and composed runtime-shaped movement results inside enclosing values and branch results. Authored shape claims remain checked independently of inferred result metadata. HIP and Metal report a typed unsupported-feature diagnostic. Runtime selection between distinct checked predicates retains their logical contracts and receives the C target's unsupported function-value diagnostic (chelis#879).
+
+  WireDag requires schema 30, binary Shell metadata requires format 8, and Reef package schemas require format 5. Rebuild older package metadata and update graph consumers.
+
+- `chelis-cli` has a `distribution` feature, the feature set of every distributed
+  compiler: `smt`, `sealed-runtime`, and `clarabel-provider`. The release workflow
+  and the Nix flake `chelis` package build it. A downstream package selects the
+  same set with `--features distribution`.
+
+- Published releases push the Nix `chelis`, `chelis-runtime`, and `chelisup`
+  packages to the `chelis-lang` Cachix cache, and `flake.nix` names that cache.
+  After `release.yml` publishes a release, it starts the native Nix checks on the
+  release tag, and that run pushes the packages.
+  When Nix trusts that cache, `nix run` and `nix build` of a released revision
+  download these packages and do not compile cvc5 and the Rust crates. A trusted
+  Nix user passes `--accept-flake-config`. On a multi-user install, an
+  administrator adds the cache to the system Nix configuration. See
+  [#3610](https://github.com/Chelis-Lang/chelis/issues/3610).
+
+- `chelis prove` accepts verified requirement spans for Surf properties, including
+  Reef-linked properties, and reports original requirement locations in text and
+  JSON. Versioned manifests verify source and generated-artifact hashes, byte
+  ranges, and property mappings before property results are emitted. Legacy Deep
+  source manifests also verify their source hashes and derive display text from
+  the original bytes; stale or malformed manifests are input errors.
+
+### Changed
+
+- Fuse wildcard-shaped C contractions through checked operand-shape agreement and compute canonical matmul reductions across independent output-column lanes, preserving product rounding, reduction order, and traps without rank-3 intermediates.
+
+- The `chelis-lang` Cachix cache also receives the cvc5 tree and the Rust crate
+  builds of the Nix packages. A Nix build of a later revision downloads the
+  unchanged ones and compiles only the crates whose sources or dependencies
+  changed. A maintainer can fill the cache between releases with a dispatch of
+  `nix-packages.yml` on `main`. See
+  [#3610](https://github.com/Chelis-Lang/chelis/issues/3610).
+
+- The Nix flake imports a committed `Cargo.nix` and no longer needs import from
+  derivation. One host can now evaluate the packages of both supported systems
+  without a builder for the other system. A change to `Cargo.lock`, a workspace
+  manifest, or a crate target must also regenerate `Cargo.nix`. The new
+  `Cargo.nix freshness` CI job checks that file. See
+  [#3611](https://github.com/Chelis-Lang/chelis/issues/3611).
+
+- Compute generated C gather and scatter offsets from checked affine projection terms, retaining each selected-index trap, the canonical scatter update order, and compact standalone hyperplane mappings and elementwise index slots.
+
+### Fixed
+
+- **BREAKING:** Preserve first-element and negative-zero suffix semantics in differentiated cumulative sums, with compact directional scan graphs and bounded C, HIP and Metal kernels. Cumulative sums inside transforms accept runtime extents. Wire DAG version 30 records the scan direction explicitly.
+
+- Preserve definitions referenced by retained type invariants during build pruning, so an in-module constant remains valid when the entry imports an unrelated module. Keep each flattened reef declaration in its defining module when validating invariant constants. Respect invariant binders and helper parameter scopes when following dependencies.
+
+- Reuse ordered conditional shape observations and sparse witness overlays during WireDag ingress while preserving original witness cutoffs and diagnostics. Unsupported observations retain contextual validation.
+
+- Reuse supported conditional witness prefixes across changing cutoffs with identical semantic source membership, preserving epoch-bound shape answers and original validation diagnostics.
+
+- Reuse strict-observation witness connectivity across WireDag shape-validation contexts while preserving historical cutoffs, required witness edges, and contextual fallback.
+
+- C builds retain the forward extent declaration when a gradient restores a tensor shape through metadata reads, allowing convolution and reshape gradients to compose without a later adjoint redeclaring the extent.
+
+- C gradients over runtime Lists of fixed numeric ADT blocks preserve each tensor field's row shape, including ragged and empty tensors. Empty Lists need no external extent witness. Reconstructed single-constructor ADT arguments also compile, retaining argument effects in source order. Statically known nested constructors retain their match-arm selection during eager argument evaluation.
+
+- Reuse independent fold and scan accumulator entry evidence when one checked named call result returns through whole immutable local aliases. Preserve independent guards, effects, witnesses and returned-view owners. Correct the dimension-only empty nominal List oracle while retaining unresolved stored-type and dtype refusals.
+
+- Reuse independent accumulator entry evidence through checked immutable local
+  forwarding wrappers around a direct named fold or scan callback. Sequential
+  effects, local claims, and the callee's own entry and result obligations retain
+  their original execution order.
+
+- Preserve exact integer scalar primals at grad/vmap ingress, including nested List and ADT fields, so values above 2^53 retain branch selection and i64::MAX does not overflow a synthetic load.
+
+- Reduce temporary tensor storage for private matmul adjoints and shared-label binary einsum contractions, including mapped gradients, while preserving primitive arithmetic, checks, and exposed intermediate tensors. Keep runtime bounds and extent witnesses live through each deferred operation’s original checks.
+
+- Default `reef install --bootstrap` jointly resolves canonical nautilus, coral, and shoals and their complete dependency closure from bounded GitHub release inputs compatible with the running compiler and bundled runtime. Public discovery supports anonymous requests; explicit selectors retain closed-graph validation.
+
+- `chelis reef install --bootstrap` matches dependency requirements with the manifest's typed resolver semantics, accepting exact matching requirements such as `=0.4.0` for the bundled runtime and selected shell peers. Incompatible requirements fail before installation; the runtime remains compiler-bundled and peers remain explicitly selected.
+
+- Read evaluator gather, scatter, and one-hot indices without copying the entire
+  index tensor for each element, preserving exact signed-integer values and traps.
+
+- Checking a named Surf module with an empty member list now succeeds inside a
+  Reef package, matching standalone checking. Package identity and import
+  validation remain enforced. Declaration-free source remains an input error.
+
+- Reclaim compiled-host producer origins and projected claim frames after their construction and loop lifetimes, while preserving returned views, shared origins, independent claims and producer diagnostics.
+
+- Reuse contextual WireDag shape answers across interleaved equivalent source contexts with one temporary memo per authority. Resolve anonymous identical-input Add and identical-branch Where prefixes and ordered shape-source alternatives without rescanning their shared paths, while preserving validation order, fuel, dimensions and failed alternatives. Distinct contextual graph forms and witness connectivity remain outside a universal linear-work bound.
+
+- Fix compiled field reads of lexical aggregate values whose names also identify
+  top-level values. Helpers consuming computed ADT gradients read the cotangent
+  fields instead of replaying the same-spelled primal initializer.
+
+- Reuse independently checked immutable accumulator components in eligible inline fold and scan callbacks, checking fresh components at the next entry while preserving effects and extent-trap attribution.
+
+- On Linux, a dynamically linked `chelis` now identifies its own executable even when `argv[0]` names another file. Before, `chelis test` could fail with "compiled context belongs to an incompatible compiler build". A wrapper such as the Nix `wrapProgram` wrapper caused this failure, and so did a file named `chelis` in the working directory. See [#3649](https://github.com/Chelis-Lang/chelis/issues/3649).
+
+- Fold and scan construction receipts retain the original accumulator identity through immutable local aliases and alias chains within checked construction bodies, avoiding repeated full extent checks while preserving independent claims and callback effects.
+
+- Direct named fold and scan callbacks, and checked inline callbacks forwarding to them, reuse independently validated accumulator construction evidence. Growing List and Chain entry checks retain separate caller and callee witnesses, effect order, and dependent local and result guards. Unproved callable paths retain complete checks.
+
+- Preserve each nested generic ADT field's nominal dimensions during C lowering, including disconnected gradients over fields with different shapes. Keep folding and recursive ADT results compatible with their C value layouts while enforcing each activation's own extent claims. Dimension-only nominal parameters retain a parametric C value layout for empty Lists without inventing an extent; unresolved stored types and precisions remain rejected.
+
+- On Linux, every build of `chelis` now carries a GNU build id, because its build script asks the linker for one. Before, builds with the Nix toolchain had none. Then each `chelis` process computed SHA-256 over the whole executable to identify its own build, which took about 200 ms on aarch64-linux. See [#3659](https://github.com/Chelis-Lang/chelis/issues/3659).
+
+- The Nix flake `chelis` package carries the native Clarabel provider, as the
+  GitHub release does. Its flake check needs a native Clarabel solve and an ideal
+  QP proof.
+
+- Keep runtime fold result extents independent across generic call
+  activations, including gradients of List-valued models. Recurrence adjoints
+  retain the shape of their differentiated input. Callback and caller shape
+  claims remain checked.
+
+- Avoid repeated nested extent walks in `fold` and `scan` callbacks proven to return their unchanged immutable accumulator, while retaining the first entry check, callback effects, and independent claims.
+
+- Generate evaluator movement and axis-reduction coordinates on demand, avoiding
+  output-sized pick arrays and retained reduction-index groups. Sum uses bounded
+  scratch while preserving the canonical reduction tree and numeric results.
+
+- Root-scoped tensor evaluation streams private exact contraction products and Cartesian convolution coordinates through tagged kernels, preserving canonical reduction bits and original checks while bounding scratch by source and result sizes. All-values evaluation retains every intermediate.
+
+- Tier B uses exact finalized numeric literal values for dtype-stating casts,
+  float rounding and signed i64 minima in direct and inlined properties. Surf
+  and Deep integer property inputs retain their representable domains without
+  changing the qualified ideal-arithmetic model of intermediate operations.
+  Declaration-bound literal dtypes survive semantic reconstruction, including
+  standalone signatures and typed local bindings, before inlined goal or guard
+  planning. Source presentation and concrete evaluation retain authored inputs.
+  Scalar-gradient coefficients and direct expressions share canonical scalar
+  decoding, including subnormal literals and values that round to zero.
+  Canonical reconstruction preserves nested gradient selector identity so valid
+  unsupported transforms retain their diagnostic and leave numerical siblings
+  and guarded sampling unaffected.
+
+- Preserve caller-declared tensor extent claims through host `grad` and `vmap`
+  applications, including nested gradient results and multi-output C helpers.
+  Disagreeing runtime extents trap at their primitive producers before later
+  effects on the supported result spine.
+
+- Reuse context-independent axis origins across WireDag shape comparisons, avoiding repeated traversal of shared input prefixes while retaining comparison-local shape sources and extent witnesses.
+
 ## [0.19.4] - 2026-10-13
 
 ### Added

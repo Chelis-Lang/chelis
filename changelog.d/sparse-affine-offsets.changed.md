@@ -1,1 +1,0 @@
-Compute generated C gather and scatter offsets from checked affine projection terms, retaining each selected-index trap, the canonical scatter update order, and compact standalone hyperplane mappings and elementwise index slots.

@@ -1,1 +1,0 @@
-Reuse ordered conditional shape observations and sparse witness overlays during WireDag ingress while preserving original witness cutoffs and diagnostics. Unsupported observations retain contextual validation.
