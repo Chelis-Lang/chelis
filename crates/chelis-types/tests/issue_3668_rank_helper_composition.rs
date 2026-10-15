@@ -156,6 +156,18 @@ fn lexical_shadowing_cannot_reuse_a_verified_declaration_summary() {
 }
 
 #[test]
+fn builtin_named_parameters_have_no_intrinsic_body_evidence() {
+    for callee in ["neg", "abs", "relu"] {
+        both(
+            &format!(
+                "def outer[r, p: Float]({callee}: &tensor[..r, p] -> tensor[..r, p], x: &tensor[..r, p]) -> tensor[..r, p] = {callee}(x)\n"
+            ),
+            false,
+        );
+    }
+}
+
+#[test]
 fn jointly_checked_recursive_bodies_preserve_rows_without_a_termination_claim() {
     for bound in ["Float", "{f32, f64}"] {
         both(
