@@ -532,6 +532,164 @@ impl AdtRegistry {
         self.aliases.get(name)
     }
 
+    /// Exact alias identity, or the existing unique linked terminal identity.
+    /// An ordinary nominal declaration always wins over a terminal alias.
+    pub fn resolve_alias_named(&self, name: &str) -> Option<(&str, &TypeAliasDef)> {
+        if let Some((name, alias)) = self.aliases.get_key_value(name) {
+            return Some((name, alias));
+        }
+        if self.lookup(name).is_some() {
+            return None;
+        }
+        let mut aliases = self
+            .aliases
+            .iter()
+            .filter(|(key, _)| terminal_name_matches(key, name));
+        let (name, alias) = aliases.next()?;
+        aliases.next().is_none().then_some((name.as_str(), alias))
+    }
+
+    /// Expand transparent aliases using declaration-owned parameter identities.
+    /// Actual checked argument syntax/metadata is retained; no fresh validation
+    /// variable becomes an output binder. The input remains the origin owner.
+    pub fn normalize_alias_syntax(&self, expr: &deep::Expr) -> Result<deep::Expr, String> {
+        fn expand(
+            registry: &AdtRegistry,
+            headers: &TypeResolutionEnv,
+            expr: &deep::Expr,
+            visiting: &mut UnordMap<String, usize>,
+            constructor_depth: usize,
+        ) -> Result<deep::Expr, String> {
+            match expr {
+                deep::Expr::MetaExpr(meta, span) => {
+                    let mut meta = meta.clone();
+                    meta.expr = Box::new(expand(
+                        registry,
+                        headers,
+                        &meta.expr,
+                        visiting,
+                        constructor_depth,
+                    )?);
+                    Ok(deep::Expr::MetaExpr(meta, *span))
+                }
+                deep::Expr::Node(node, span) => {
+                    if node.tag() == DeepTag::TAdt {
+                        let [name, arguments @ ..] = node.children_slice() else {
+                            return Err("nominal type has no name".into());
+                        };
+                        let deep::Expr::Atom(deep::Atom::Name(name), _) = name else {
+                            return Err("nominal type name is not a symbol".into());
+                        };
+                        if let Some((canonical, alias)) = registry.resolve_alias_named(name) {
+                            let arguments = arguments
+                                .iter()
+                                .map(|argument| {
+                                    expand(registry, headers, argument, visiting, constructor_depth)
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            let mut children = vec![deep::Expr::Atom(
+                                deep::Atom::Name(canonical.to_owned()),
+                                *span,
+                            )];
+                            children.extend(arguments.iter().cloned());
+                            let application = deep::Expr::node(
+                                DeepTag::TAdt,
+                                node.meta().clone(),
+                                children,
+                                *span,
+                            );
+                            let kinds = crate::session::checked_alias_argument_kinds(
+                                headers,
+                                &application,
+                            )?;
+                            if kinds.len() != arguments.len() {
+                                return Err(
+                                    "checked alias resolver lost argument kind alignment".into()
+                                );
+                            }
+                            let actuals = arguments
+                                .into_iter()
+                                .zip(kinds)
+                                .map(|(argument, kind)| match kind {
+                                    NominalParamKind::Type => NominalActual::Type(argument),
+                                    NominalParamKind::Dimension => {
+                                        // The canonical resolver disambiguates a Surf
+                                        // t-var argument by the declaration's kind.
+                                        let argument = match &argument {
+                                            deep::Expr::Node(node, span)
+                                                if node.tag() == DeepTag::TVar =>
+                                            {
+                                                deep::Expr::node(
+                                                    DeepTag::DVar,
+                                                    node.meta().clone(),
+                                                    node.children_slice().to_vec(),
+                                                    *span,
+                                                )
+                                            }
+                                            _ => argument,
+                                        };
+                                        NominalActual::Dimension(argument)
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+                            let (types, dimensions) = nominal_argument_bindings(&alias.param_args, &actuals)
+                                .ok_or_else(|| format!("alias `{canonical}` lost declaration parameter kind/arity alignment"))?;
+                            if let Some(depth) = visiting.get(canonical) {
+                                // Transparent aliases form a finite graph. A
+                                // value constructor makes recursion productive;
+                                // retain its canonical applied edge instead of
+                                // unfolding it (possibly with growing arguments).
+                                if constructor_depth > *depth {
+                                    return Ok(application);
+                                }
+                                return Err(format!(
+                                    "unproductive alias cycle through `{canonical}`"
+                                ));
+                            }
+                            visiting.insert(canonical.to_owned(), constructor_depth);
+                            let materialized = crate::infer::type_to_deep_expr_with_arguments(
+                                &alias.body,
+                                &types,
+                                &dimensions,
+                            )?;
+                            let result = expand(
+                                registry,
+                                headers,
+                                &materialized,
+                                visiting,
+                                constructor_depth,
+                            );
+                            visiting.remove(canonical);
+                            return result;
+                        }
+                        if headers.param_kinds(name).is_none() {
+                            return Err(format!("unknown or ambiguous nominal type `{name}`"));
+                        }
+                    }
+                    let child_depth = constructor_depth
+                        + usize::from(matches!(
+                            node.tag(),
+                            DeepTag::TTuple | DeepTag::TFn | DeepTag::TAdt
+                        ));
+                    let children = node
+                        .children_slice()
+                        .iter()
+                        .map(|child| expand(registry, headers, child, visiting, child_depth))
+                        .collect::<Result<_, _>>()?;
+                    Ok(deep::Expr::node(
+                        node.tag(),
+                        node.meta().clone(),
+                        children,
+                        *span,
+                    ))
+                }
+                _ => Ok(expr.clone()),
+            }
+        }
+        let headers = TypeResolutionEnv::for_normalization(self)?;
+        expand(self, &headers, expr, &mut UnordMap::new(), 0)
+    }
+
     /// Instantiate a type alias with the given type arguments.
     pub fn instantiate_alias(&self, name: &str, args: &[Type]) -> Option<Type> {
         let args = args
@@ -654,27 +812,46 @@ pub(crate) fn substitute_alias_type(ty: &Type, subst: &UnordMap<TypeVar, Type>) 
     substitute_nominal_type(ty, subst, &UnordMap::new())
 }
 
-pub(crate) fn nominal_substitutions(
+enum NominalActual<T, D> {
+    Type(T),
+    Dimension(D),
+}
+
+fn nominal_argument_bindings<T: Clone, D: Clone>(
     parameters: &[NominalArg],
-    arguments: &[NominalArg],
-) -> Option<(UnordMap<TypeVar, Type>, UnordMap<DimVar, Dim>)> {
+    arguments: &[NominalActual<T, D>],
+) -> Option<(UnordMap<TypeVar, T>, UnordMap<DimVar, D>)> {
     if parameters.len() != arguments.len() {
         return None;
     }
-    let mut type_subst = UnordMap::new();
-    let mut dim_subst = UnordMap::new();
+    let mut types = UnordMap::new();
+    let mut dimensions = UnordMap::new();
     for (parameter, argument) in parameters.iter().zip(arguments) {
         match (parameter, argument) {
-            (NominalArg::Type(Type::Var(parameter)), NominalArg::Type(argument)) => {
-                type_subst.insert(*parameter, argument.clone());
+            (NominalArg::Type(Type::Var(parameter)), NominalActual::Type(argument)) => {
+                types.insert(*parameter, argument.clone());
             }
-            (NominalArg::Dimension(Dim::Var(parameter)), NominalArg::Dimension(argument)) => {
-                dim_subst.insert(*parameter, argument.clone());
+            (NominalArg::Dimension(Dim::Var(parameter)), NominalActual::Dimension(argument)) => {
+                dimensions.insert(*parameter, argument.clone());
             }
             _ => return None,
         }
     }
-    Some((type_subst, dim_subst))
+    Some((types, dimensions))
+}
+
+pub(crate) fn nominal_substitutions(
+    parameters: &[NominalArg],
+    arguments: &[NominalArg],
+) -> Option<(UnordMap<TypeVar, Type>, UnordMap<DimVar, Dim>)> {
+    let arguments = arguments
+        .iter()
+        .map(|argument| match argument {
+            NominalArg::Type(ty) => NominalActual::Type(ty.clone()),
+            NominalArg::Dimension(dim) => NominalActual::Dimension(dim.clone()),
+        })
+        .collect::<Vec<_>>();
+    nominal_argument_bindings(parameters, &arguments)
 }
 
 pub(crate) fn substitute_nominal_type(
@@ -739,5 +916,421 @@ pub(crate) fn substitute_nominal_type(
                 .collect(),
         ),
         _ => ty.clone(),
+    }
+}
+
+#[cfg(test)]
+mod alias_syntax_materialization_tests {
+    use super::*;
+
+    fn parse(source: &str) -> deep::Expr {
+        chelis_deep::parser::parse_str(source).unwrap().remove(0)
+    }
+    fn registry() -> AdtRegistry {
+        let mut registry = AdtRegistry::default();
+        registry.register_alias(
+            "Contract".into(),
+            vec!["n".into()],
+            vec![NominalParamKind::Dimension],
+            vec![NominalArg::Dimension(Dim::Var(DimVar(77)))],
+            Type::Fn(
+                vec![Type::Ref(Box::new(Type::Tensor(
+                    vec![Dim::Wildcard],
+                    TensorPrec::Concrete(Prim::F64),
+                )))],
+                Box::new(Type::Tensor(
+                    vec![Dim::Var(DimVar(77))],
+                    TensorPrec::Concrete(Prim::Bool),
+                )),
+            ),
+        );
+        registry.register_alias(
+            "Identity".into(),
+            vec!["T".into()],
+            vec![NominalParamKind::Type],
+            vec![NominalArg::Type(Type::Var(TypeVar(77)))],
+            Type::Var(TypeVar(77)),
+        );
+        registry
+    }
+
+    #[test]
+    fn alias_syntax_preserves_borrow_full_result_and_actual_argument_metadata() {
+        let registry = registry();
+        let actual = parse("(t-adt {} Contract (d-lit {span: \"source_extent\"} 2))");
+        let expanded = registry.normalize_alias_syntax(&actual).unwrap();
+        let deep::Expr::Node(function, _) = &expanded else {
+            panic!("function");
+        };
+        assert_eq!(function.tag(), DeepTag::TFn);
+        assert_eq!(function.children_slice()[0].tag(), Some(DeepTag::TRef));
+        let deep::Expr::Node(result, _) = &function.children_slice()[1] else {
+            panic!("result");
+        };
+        let deep::Expr::Node(application, _) = &actual else {
+            panic!("application");
+        };
+        assert_eq!(
+            &result.children_slice()[0],
+            &application.children_slice()[1]
+        );
+        let borrowed = parse(
+            "(t-adt {} Identity (t-ref {span: \"borrowed_actual\"} (t-tensor {} (d-lit {} 2) (t-prim {} f32))))",
+        );
+        let deep::Expr::Node(application, _) = &borrowed else {
+            panic!("application");
+        };
+        assert_eq!(
+            registry.normalize_alias_syntax(&borrowed).unwrap(),
+            application.children_slice()[1]
+        );
+        let nested = parse(
+            "(t-adt {} Identity (t-ref {span: \"nested_borrow\"} (t-adt {} Contract (d-lit {} 2))))",
+        );
+        let expanded = registry.normalize_alias_syntax(&nested).unwrap();
+        let deep::Expr::Node(reference, _) = &expanded else {
+            panic!("nested reference");
+        };
+        assert_eq!(reference.tag(), DeepTag::TRef);
+        assert_eq!(reference.children_slice()[0].tag(), Some(DeepTag::TFn));
+        let collision = parse("(t-adt {} Identity (t-var {span: \"caller_t77\"} t77))");
+        let deep::Expr::Node(application, _) = &collision else {
+            panic!("application");
+        };
+        assert_eq!(
+            registry.normalize_alias_syntax(&collision).unwrap(),
+            application.children_slice()[1]
+        );
+    }
+
+    #[test]
+    fn alias_syntax_rejects_kind_arity_unknown_and_error_recovery() {
+        let mut registry = registry();
+        for source in [
+            "(t-adt {} Contract)",
+            "(t-adt {} Contract (d-lit {} 2) (d-lit {} 3))",
+            "(t-adt {} Contract (t-prim {} f64))",
+            "(t-adt {} Identity (d-lit {} 2))",
+            "(t-adt {} Unknown)",
+        ] {
+            assert!(
+                registry.normalize_alias_syntax(&parse(source)).is_err(),
+                "{source}"
+            );
+        }
+        registry.register_alias(
+            "Broken".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            // Simulate rejected metadata at a serialized ingress; the required
+            // materializer must refuse it, not recover a successful hole.
+            serde_json::from_str::<Type>(r#"{"Error":null}"#).unwrap(),
+        );
+        assert!(
+            registry
+                .normalize_alias_syntax(&parse("(t-adt {} Broken)"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn alias_syntax_preserves_scoped_actual_names_and_rejects_cycles_or_ambiguous_aliases() {
+        let mut registry = registry();
+        let actual = parse("(t-adt {} Contract (d-name {span: \"enclosing_n\"} n))");
+        let deep::Expr::Node(application, _) = &actual else {
+            panic!("application");
+        };
+        let expanded = registry.normalize_alias_syntax(&actual).unwrap();
+        let deep::Expr::Node(function, _) = &expanded else {
+            panic!("function");
+        };
+        let deep::Expr::Node(result, _) = &function.children_slice()[1] else {
+            panic!("result");
+        };
+        assert_eq!(
+            &result.children_slice()[0],
+            &application.children_slice()[1]
+        );
+        registry.register_alias(
+            "A".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Type::Ref(Box::new(Type::Adt("B".into(), Vec::new()))),
+        );
+        registry.register_alias(
+            "B".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Type::Adt("A".into(), Vec::new()),
+        );
+        assert!(
+            registry
+                .normalize_alias_syntax(&parse("(t-adt {} A)"))
+                .is_err()
+        );
+        let contract = registry.resolve_alias("Contract").unwrap().clone();
+        registry.aliases.remove("Contract");
+        registry
+            .aliases
+            .insert("Left__Contract".into(), contract.clone());
+        registry.aliases.insert("Right__Contract".into(), contract);
+        assert!(
+            registry
+                .normalize_alias_syntax(&parse("(t-adt {} Pkg__Contract (d-lit {} 2))"))
+                .is_err()
+        );
+    }
+
+    // Spec/02 alias transparency and [04-INF-6] apply to every complete
+    // registry, including public registration and serialized checked contexts.
+    fn registry_normalization_context() -> AdtRegistry {
+        let mut registry = AdtRegistry::default();
+        registry.register_alias(
+            "Function".into(),
+            vec!["T".into(), "n".into()],
+            vec![NominalParamKind::Type, NominalParamKind::Dimension],
+            vec![
+                NominalArg::Type(Type::Var(TypeVar(77))),
+                NominalArg::Dimension(Dim::Var(DimVar(99))),
+            ],
+            Type::Fn(
+                vec![Type::Ref(Box::new(Type::Var(TypeVar(77))))],
+                Box::new(Type::Tensor(
+                    vec![Dim::Var(DimVar(99))],
+                    TensorPrec::Concrete(Prim::Bool),
+                )),
+            ),
+        );
+        registry
+    }
+
+    fn assert_registry_context_full_signature(
+        registry: &AdtRegistry,
+        actual: &deep::Expr,
+    ) -> deep::Expr {
+        let normalized = registry.normalize_alias_syntax(actual).unwrap();
+        let deep::Expr::Node(application, _) = actual else {
+            panic!("nominal application");
+        };
+        let deep::Expr::Node(function, _) = &normalized else {
+            panic!("normalized function");
+        };
+        assert_eq!(function.tag(), DeepTag::TFn);
+        let deep::Expr::Node(borrow, _) = &function.children_slice()[0] else {
+            panic!("borrowed parameter");
+        };
+        assert_eq!(borrow.tag(), DeepTag::TRef);
+        assert_eq!(
+            &borrow.children_slice()[0],
+            &application.children_slice()[1],
+            "actual checked type syntax and metadata remain intact"
+        );
+        let deep::Expr::Node(result, _) = &function.children_slice()[1] else {
+            panic!("independent result");
+        };
+        assert_eq!(result.tag(), DeepTag::TTensor);
+        assert_eq!(
+            &result.children_slice()[0],
+            &application.children_slice()[2],
+            "actual checked dimension syntax and metadata remain intact"
+        );
+        assert_eq!(
+            result.children_slice()[1],
+            crate::infer::type_to_deep_expr(&Type::Prim(Prim::Bool)),
+            "result precision is independent of the input type argument"
+        );
+        normalized
+    }
+
+    #[test]
+    fn registry_normalization_context_public_registration_retains_full_signature() {
+        let registry = registry_normalization_context();
+        assert!(registry.resolution_env().param_kinds("Function").is_none());
+        let actual = parse(
+            "(t-adt {span: \"caller_adapter\"} Function (t-tensor {span: \"caller_tensor\"} (d-name {} *) (t-prim {span: \"caller_precision\"} f32)) (d-lit {span: \"caller_extent\"} 2))",
+        );
+        assert_registry_context_full_signature(&registry, &actual);
+    }
+
+    #[test]
+    fn registry_normalization_context_serde_roundtrip_retains_arguments_and_borrows() {
+        let registry = registry_normalization_context();
+        let restored: AdtRegistry =
+            serde_json::from_slice(&serde_json::to_vec(&registry).unwrap()).unwrap();
+        assert!(restored.resolution_env().param_kinds("Function").is_none());
+        let actual = parse(
+            "(t-adt {} Function (t-ref {span: \"caller_borrow\"} (t-tensor {} (d-lit {} 4) (t-prim {} f64))) (d-name {span: \"caller_extent\"} n))",
+        );
+        let original = assert_registry_context_full_signature(&registry, &actual);
+        let roundtrip = assert_registry_context_full_signature(&restored, &actual);
+        assert_eq!(original, roundtrip);
+        let collision = parse(
+            "(t-adt {} Function (t-var {span: \"caller_type_identity\"} t77) (d-var {span: \"caller_dimension_identity\"} d99))",
+        );
+        assert_registry_context_full_signature(&restored, &collision);
+    }
+
+    #[test]
+    fn registry_normalization_context_rejects_wrong_arguments_and_unknown_names() {
+        let registry = registry_normalization_context();
+        for source in [
+            "(t-adt {} Function)",
+            "(t-adt {} Function (t-prim {} f32))",
+            "(t-adt {} Function (t-prim {} f32) (d-lit {} 2) (d-lit {} 3))",
+            "(t-adt {} Function (d-lit {} 2) (d-lit {} 3))",
+            "(t-adt {} Function (t-prim {} f32) (t-prim {} f64))",
+            "(t-adt {} Missing)",
+        ] {
+            assert!(
+                registry.normalize_alias_syntax(&parse(source)).is_err(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_normalization_context_rejects_malformed_stored_alignment() {
+        let baseline = registry_normalization_context();
+        let actual = parse("(t-adt {} Function (t-prim {} f32) (d-lit {} 2))");
+        for mutation in 0..5 {
+            let mut registry = baseline.clone();
+            let alias = registry.aliases.get_mut("Function").unwrap();
+            match mutation {
+                0 => alias.param_kinds.clear(),
+                1 => assert!(alias.param_args.pop().is_some()),
+                2 => alias.param_args[0] = NominalArg::Dimension(Dim::Var(DimVar(77))),
+                3 => alias.param_args[1] = NominalArg::Type(Type::Var(TypeVar(99))),
+                4 => alias.params.push("extra".into()),
+                _ => unreachable!(),
+            }
+            assert!(
+                registry.normalize_alias_syntax(&actual).is_err(),
+                "mutation {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_normalization_context_preserves_nominal_precedence_and_rejects_ambiguity() {
+        let mut registry = registry_normalization_context();
+        let alias = registry.aliases.remove("Function").unwrap();
+        registry
+            .aliases
+            .insert("Left__Function".into(), alias.clone());
+        registry.aliases.insert("Right__Function".into(), alias);
+        registry.defs.insert(
+            "Function".into(),
+            AdtDef {
+                name: "Function".into(),
+                type_params: Vec::new(),
+                param_kinds: Vec::new(),
+                param_vars: Vec::new(),
+                param_args: Vec::new(),
+                variants: Vec::new(),
+                opaque: false,
+                defining_module: None,
+            },
+        );
+        let nominal = parse("(t-adt {span: \"ordinary_nominal\"} Function)");
+        assert_eq!(registry.normalize_alias_syntax(&nominal).unwrap(), nominal);
+        assert!(
+            registry
+                .normalize_alias_syntax(&parse(
+                    "(t-adt {} Pkg__Function (t-prim {} f32) (d-lit {} 2))"
+                ))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn alias_normalization_preserves_productive_recursion_as_a_finite_graph() {
+        let mut registry = registry();
+        registry.register_alias(
+            "R".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Type::Tuple(vec![
+                Type::Prim(Prim::Int64),
+                Type::Adt("R".into(), Vec::new()),
+            ]),
+        );
+        registry.register_alias(
+            "Grow".into(),
+            vec!["a".into()],
+            vec![NominalParamKind::Type],
+            vec![NominalArg::Type(Type::Var(TypeVar(17)))],
+            Type::Tuple(vec![
+                Type::Var(TypeVar(17)),
+                Type::Adt(
+                    "Grow".into(),
+                    vec![Type::Tuple(vec![
+                        Type::Var(TypeVar(17)),
+                        Type::Var(TypeVar(17)),
+                    ])],
+                ),
+            ]),
+        );
+        for registry in [
+            registry.clone(),
+            serde_json::from_slice::<AdtRegistry>(&serde_json::to_vec(&registry).unwrap()).unwrap(),
+        ] {
+            assert_eq!(
+                chelis_deep::printer::print_expr_flat(
+                    &registry
+                        .normalize_alias_syntax(&parse("(t-adt {} R)"))
+                        .unwrap()
+                ),
+                "(t-tuple {} (t-prim {} i64) (t-adt {} R))",
+            );
+            assert_eq!(
+                chelis_deep::printer::print_expr_flat(
+                    &registry
+                        .normalize_alias_syntax(&parse("(t-adt {} Grow (t-prim {} i64))"))
+                        .unwrap()
+                ),
+                "(t-tuple {} (t-prim {} i64) (t-adt {} Grow (t-tuple {} (t-prim {} i64) (t-prim {} i64))))",
+            );
+        }
+    }
+
+    #[test]
+    fn registry_normalization_context_rejects_cycles_recovery_and_provisional_only_names() {
+        let mut registry = registry_normalization_context();
+        registry.register_alias(
+            "A".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Type::Ref(Box::new(Type::Adt("B".into(), Vec::new()))),
+        );
+        registry.register_alias(
+            "B".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Type::Adt("A".into(), Vec::new()),
+        );
+        registry.register_alias(
+            "Broken".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            serde_json::from_str::<Type>(r#"{"Error":null}"#).unwrap(),
+        );
+        registry
+            .resolution_env
+            .insert("OnlyProvisional", Vec::new());
+        for name in ["A", "Broken", "OnlyProvisional"] {
+            assert!(
+                registry
+                    .normalize_alias_syntax(&parse(&format!("(t-adt {{}} {name})")))
+                    .is_err(),
+                "{name}"
+            );
+        }
     }
 }

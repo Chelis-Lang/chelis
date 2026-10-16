@@ -146,3 +146,183 @@ fn non_recursive_unconstrained_generic_call_compiles() {
     assert_eq!(eval, "1");
     assert_eq!(compiled, eval, "compiled output must match the eval lane");
 }
+
+// [04-ADT-1], [04-INF-6] and §4.7: discard of an unobserved,
+// payload-free result cannot discard the computation which produces it.
+fn retained_nullary_source(producer: &str, actual: &str) -> String {
+    format!(
+        "type Box[a] =\n  | Empty\n  | Full {{ value: a }}\n\
+         {producer}\n\
+         def pick[a, b](x: a, y: Box[b]) -> a ! {{IO}} = {{\n\
+         _ = print(\"body\")\n x\n}}\n\
+         def main() -> i32 ! {{IO}} = pick({{\n\
+         _ = print(\"actual-x\")\n 1i32\n}}, {{\n\
+         _ = print(\"actual-y\")\n {actual}\n}})\n\
+         out = print(main())\n"
+    )
+}
+
+fn assert_retained_nullary_execution(source: &str, stem: &str, markers: &[&str], trap: bool) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(format!("{stem}.ch"));
+    write_file(&path, source);
+    for native in [false, true] {
+        let output = if native {
+            let (_build_dir, out_dir) = build_ok(source, stem);
+            assert!(link_generated(&out_dir, &format!("{stem}.c"), "run").success());
+            StdCommand::new(out_dir.join("run")).output().unwrap()
+        } else {
+            chelis()
+                .args(["eval", "--file", path.to_str().unwrap()])
+                .output()
+                .unwrap()
+        };
+        let lane = if native { "native" } else { "Eval" };
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.status.success(),
+            !trap,
+            "{lane} {stem}: {source}\n{text}"
+        );
+        let mut previous = 0;
+        for marker in markers {
+            assert_eq!(
+                text.matches(marker).count(),
+                1,
+                "{lane} {stem} {marker}: {text}"
+            );
+            let position = text.find(marker).unwrap();
+            assert!(position >= previous, "{lane} {stem} order: {text}");
+            previous = position + marker.len();
+        }
+        if trap {
+            assert!(!text.contains("body"), "{lane} {stem}: {text}");
+            assert!(!text.contains("out ="), "{lane} {stem}: {text}");
+            assert!(
+                text.contains("trap") || text.contains("Domain"),
+                "{lane} {stem}: {text}"
+            );
+        } else {
+            assert!(
+                text.lines().any(|line| line == "1"),
+                "{lane} {stem}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn retained_unused_nullary_actual_keeps_eager_effects_once() {
+    let source = retained_nullary_source("", "Empty");
+    assert_retained_nullary_execution(
+        &source,
+        "unused_empty",
+        &["actual-x", "actual-y", "body"],
+        false,
+    );
+}
+
+#[test]
+fn retained_unused_nullary_named_producer_keeps_its_boundary() {
+    let source = retained_nullary_source(
+        "def empty[b]() -> Box[b] ! {IO} = {\n _ = print(\"producer\")\n Empty\n}",
+        "empty()",
+    );
+    assert_retained_nullary_execution(
+        &source,
+        "unused_named_empty",
+        &["actual-x", "actual-y", "producer", "body"],
+        false,
+    );
+}
+
+#[test]
+fn retained_unused_nullary_actual_keeps_producer_trap_before_body() {
+    let source = retained_nullary_source(
+        "def empty[b](zero: i32) -> Box[b] ! {IO} = {\n _ = print(\"producer\")\n _ = trunc_div(1i32, zero)\n Empty\n}",
+        "empty(0i32)",
+    );
+    assert_retained_nullary_execution(
+        &source,
+        "unused_empty_trap",
+        &["actual-x", "actual-y", "producer"],
+        true,
+    );
+}
+
+#[test]
+fn retained_unused_nullary_actual_keeps_named_input_claim() {
+    // Precision polymorphism selects the retained entry owner. The ordinary
+    // monomorphized-call validator independently rejects known mismatches
+    // before their runtime named-input claim; that residual has its own repro.
+    let source = retained_nullary_source(
+        "def required[n, p: Float](value: tensor[n, p], ignored: tensor[n, p]) -> tensor[n, p] ! {IO} = {\n _ = print(\"producer\")\n relu(value)\n}\ndef empty[b](value: tensor[*, f64], ignored: tensor[*, f64]) -> Box[b] ! {IO} = {\n _ = required(value, ignored)\n Empty\n}",
+        "empty(to_tensor([1.0f64, 2.0f64]), to_tensor([1.0f64, 2.0f64, 3.0f64]))",
+    );
+    assert_retained_nullary_execution(
+        &source,
+        "unused_empty_input_claim",
+        &["actual-x", "actual-y"],
+        true,
+    );
+}
+
+#[test]
+fn retained_unused_nullary_actual_keeps_prefix_result_claim() {
+    let source = retained_nullary_source(
+        "def broken(value: tensor[*, f64]) -> tensor[2, f64] ! {IO} = {\n _ = print(\"producer\")\n relu(value)\n}",
+        "{\n _ = broken(to_tensor([1.0f64, 2.0f64, 3.0f64]))\n Empty\n}",
+    );
+    assert_retained_nullary_execution(
+        &source,
+        "unused_empty_result_claim",
+        &["actual-x", "actual-y", "producer"],
+        true,
+    );
+}
+
+#[test]
+fn retained_unused_payload_constructor_keeps_its_producer_trap() {
+    let source = retained_nullary_source(
+        "def payload(zero: i32) -> i32 ! {IO} = {\n _ = print(\"producer\")\n trunc_div(1i32, zero)\n}",
+        "Full { value: payload(0i32) }",
+    );
+    assert_retained_nullary_execution(
+        &source,
+        "unused_payload_trap",
+        &["actual-x", "actual-y", "producer"],
+        true,
+    );
+}
+
+#[test]
+fn retained_observed_unconstrained_nullary_result_stays_unresolved() {
+    let source = "type Box[a] =\n  | Empty\n  | Full { value: a }\ndef observe[a, b](x: a, y: Box[b]) -> Box[b] = y\nout = print(observe(1i32, Empty))\n";
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("observed_empty.ch");
+    let out_dir = dir.path().join("out");
+    write_file(&path, source);
+    let output = chelis()
+        .args([
+            "build",
+            "--emit-c",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        text.contains("unresolved host type variable") && text.contains("[05-UNS-1]"),
+        "{text}"
+    );
+    assert!(!out_dir.join("observed_empty.c").exists());
+}

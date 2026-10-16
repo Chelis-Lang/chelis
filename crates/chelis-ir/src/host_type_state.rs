@@ -25,6 +25,7 @@ use crate::dag::{DimInfo, TensorType};
 /// concrete callback formal selects one of its scalar/tensor signatures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckedBuiltinCallable {
+    Admitted(chelis_types::AdmittedBuiltin),
     FloatClassify(chelis_types::FloatClassify),
     FromSeed,
     Split,
@@ -42,12 +43,13 @@ impl CheckedBuiltinCallable {
             "split_key" => Some(Self::Split),
             "split_keys" => Some(Self::SplitMany),
             "fold_in" => Some(Self::FoldIn),
-            _ => None,
+            _ => chelis_types::AdmittedBuiltin::resolve(name).map(Self::Admitted),
         }
     }
 
     pub fn symbol(self) -> &'static str {
         match self {
+            Self::Admitted(operation) => operation.symbol(),
             Self::FloatClassify(kind) => kind.name(),
             Self::FromSeed => "key_from_seed",
             Self::Split => "split_key",

@@ -2652,6 +2652,64 @@ pub fn builtin_value_contract_carried(decl: &BuiltinDecl, scheme: &Scheme) -> bo
         || scheme.result_origin.is_some()
 }
 
+/// Canonical builtin identity whose complete operation contract is carried by
+/// its function value ([04-INF-9]). Only registry admission constructs one;
+/// a function signature or a caller's spelling is never identity evidence.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmittedBuiltin {
+    declaration: &'static BuiltinDecl,
+    scheme: &'static Scheme,
+}
+
+impl AdmittedBuiltin {
+    pub fn resolve(symbol: &str) -> Option<Self> {
+        static VALUES: std::sync::OnceLock<
+            std::collections::BTreeMap<&'static str, AdmittedBuiltin>,
+        > = std::sync::OnceLock::new();
+        VALUES
+            .get_or_init(|| {
+                static ENVIRONMENT: std::sync::OnceLock<Env> = std::sync::OnceLock::new();
+                let environment = ENVIRONMENT.get_or_init(|| builtin_env().0);
+                BUILTINS
+                    .iter()
+                    .filter_map(|declaration| {
+                        let scheme = environment.lookup(declaration.name)?;
+                        (builtin_value_contract_carried(declaration, scheme)
+                            && matches!(scheme.body, Type::Fn(_, _)))
+                        .then_some((
+                            declaration.name,
+                            Self {
+                                declaration,
+                                scheme,
+                            },
+                        ))
+                    })
+                    .collect()
+            })
+            .get(symbol)
+            .cloned()
+    }
+
+    pub fn symbol(&self) -> &'static str {
+        self.declaration.name
+    }
+
+    pub fn declaration(&self) -> &BuiltinDecl {
+        self.declaration
+    }
+
+    pub fn scheme(&self) -> &Scheme {
+        self.scheme
+    }
+}
+
+impl PartialEq for AdmittedBuiltin {
+    fn eq(&self, other: &Self) -> bool {
+        self.declaration.name == other.declaration.name
+    }
+}
+impl Eq for AdmittedBuiltin {}
+
 pub fn axis_argument_layout(name: &str) -> Option<AxisArgumentLayout> {
     match builtin_decl(name)?.axis_arguments {
         AxisArgumentLayout::NoAxes => None,

@@ -158,6 +158,64 @@ fn unannotated_key_aliases_shadowing_a_def_agree_on_direct_calls() {
     }
 }
 
+#[test]
+fn nested_tuple_copy_preserves_builtin_values_through_pattern_aliases() {
+    assert_eval_and_c_agree(
+        "def seed(n: i64) -> key = key_from_seed(0i64)\n\
+         def main() = {\n\
+           bundle = ((key_from_seed, fold_in), 1i64)\n\
+           alias = copy(bundle)\n\
+           ((seed, mix), n) = alias\n\
+           (seed(n), mix(seed(n), 2i64))\n\
+         }\n",
+        &[
+            "main.0 = key(0000000000000001)",
+            "main.1 = key(b2fe04bac90dd534)",
+        ],
+    );
+}
+
+#[test]
+fn callback_tuple_parameter_shadows_outer_static_builtin_tuple() {
+    assert_eval_and_c_agree(
+        "def main() = {\n\
+           bundle = (key_from_seed, 1i64)\n\
+           mapped = map(fn (bundle: (i64, i64)) -> { (n,m) = bundle\n n + m }, [(2i64,3i64),(4i64,5i64)])\n\
+           (seed,n) = bundle\n\
+           (mapped, seed(n))\n\
+         }\n",
+        &["main.0 = [5, 9]", "main.1 = key(0000000000000001)"],
+    );
+}
+
+#[test]
+fn callback_scalar_parameter_shadows_outer_static_builtin_value() {
+    assert_eval_and_c_agree(
+        "def main() = {\n\
+           seed: i64 -> key = key_from_seed\n\
+           mapped = map(fn (seed: i64) -> { alias = seed\n alias + 1i64 }, [2i64,4i64])\n\
+           (mapped, seed(1i64))\n\
+         }\n",
+        &["main.0 = [3, 5]", "main.1 = key(0000000000000001)"],
+    );
+}
+
+#[test]
+fn typed_builtin_callback_formal_preserves_lexical_identity_and_parameter_names() {
+    assert_eval_and_c_agree(
+        "def arg0(n: i64) -> key = key_from_seed(0i64)\n\
+         def apply(arg0: i64 -> key, xs: List[i64]) -> List[key] = map(arg0, xs)\n\
+         def main() = {\n\
+           arg0: i64 -> key = key_from_seed\n\
+           (apply(arg0, [1i64, 2i64]), arg0(3i64))\n\
+         }\n",
+        &[
+            "main.0 = [key(0000000000000001), key(0000000000000002)]",
+            "main.1 = key(0000000000000003)",
+        ],
+    );
+}
+
 /// An unannotated or pattern-bound key-builtin alias has no function type
 /// for a C loop callback. When it shadows a def, the C lane refuses the
 /// program exactly as it does when no def has that spelling, rather than

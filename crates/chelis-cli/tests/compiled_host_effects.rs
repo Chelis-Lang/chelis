@@ -1170,6 +1170,160 @@ fn agreeing_or_runtime_operand_lengths_are_not_refuted_at_build() {
     }
 }
 
+/// A value fact belongs to one prepared actual, not a List type or a
+/// prior call's same-spelled formal. Both complete calls keep their sizes.
+#[test]
+fn closed_list_callsite_values_keep_independent_shapes() {
+    let source = "def g(a: List[f32], b: List[f32]) -> tensor[*, f32] = add(to_tensor(a), to_tensor(b))\n\
+                  first = g([1.0f32, 2.0f32], [3.0f32, 4.0f32])\n\
+                  second = g([1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32])\n";
+    let run = parity::assert_lanes_agree(source, "closed_list_callsites");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    assert!(
+        run.stdout
+            .contains("first = tensor(shape=[2], data=[4.0, 6.0])"),
+        "{run:?}"
+    );
+    assert!(
+        run.stdout
+            .contains("second = tensor(shape=[3], data=[5.0, 7.0, 9.0])"),
+        "{run:?}"
+    );
+}
+
+/// A builtin-spelled user producer is not a closed numeric literal. Its
+/// checked call and effects run once before the complete callee body.
+#[test]
+fn closed_list_evidence_does_not_authorize_a_shadowed_neg_producer() {
+    // §8.6 allows lexical callable shadowing; a top-level def neg would be
+    // rejected independently of this value-formation/ordering contract.
+    let source = r#"def g(a: List[f32], b: List[f32]) -> tensor[*, f32] ! {IO} = {
+  _ = print("callee-body")
+  add(to_tensor(a), to_tensor(b))
+}
+out = {
+  neg = fn (x: f32) -> {
+    _ = print("shadow-producer")
+    x
+  }
+  g([-1.0f32, -2.0f32], [1.0f32, 2.0f32])
+}
+"#;
+    let run = parity::assert_lanes_agree(source, "closed_list_shadow");
+    assert_eq!(run.status, Some(0), "{run:?}");
+    assert_eq!(run.stdout.matches("shadow-producer").count(), 2, "{run:?}");
+    assert_eq!(run.stdout.matches("callee-body").count(), 1, "{run:?}");
+    assert!(
+        run.stdout.find("shadow-producer").unwrap() < run.stdout.find("callee-body").unwrap(),
+        "{run:?}"
+    );
+    assert!(
+        run.stdout
+            .contains("out = tensor(shape=[2], data=[2.0, 4.0])"),
+        "{run:?}"
+    );
+}
+
+/// spec/06 §5.2: discarding a prepared List does not discard a trapping
+/// numeric leaf. TrapSeeds, not the callee's data use, owns that execution.
+#[test]
+fn closed_list_unused_numeric_actual_keeps_its_trap_and_safe_twin() {
+    for (traps, divisor_rhs) in [(false, "4i64"), (true, "5i64")] {
+        let source = format!(
+            "def g(ignored: List[i64], values: List[i64]) -> tensor[*, i64] = to_tensor(values)\n\
+             def compute(x: i64, y: i64, z: i64) -> tensor[*, i64] = g([trunc_div(x, sub(y, z))], [9i64])\n\
+             before = print(\"caller-before\")\n\
+             out = compute(7i64, 5i64, {divisor_rhs})\n\
+             after = print(\"caller-after\")\n"
+        );
+        let run = parity::assert_lanes_agree(&source, &format!("closed_list_unused_{traps}"));
+        assert_eq!(run.stdout.matches("caller-before").count(), 1, "{run:?}");
+        if traps {
+            assert_eq!(run.status, Some(1), "{run:?}");
+            assert_eq!(
+                run.failure, "numeric trap: division by zero in trunc_div at i64",
+                "{run:?}"
+            );
+            assert!(!run.stdout.contains("caller-after"), "{run:?}");
+            assert!(!run.stdout.contains("out ="), "{run:?}");
+        } else {
+            assert_eq!(run.status, Some(0), "{run:?}");
+            assert_eq!(run.stdout.matches("caller-after").count(), 1, "{run:?}");
+            assert!(
+                run.stdout.contains("out = tensor(shape=[1], data=[9])"),
+                "{run:?}"
+            );
+        }
+    }
+}
+
+/// Runtime List controls remain attached to their existing protocol. A
+/// whole-call tensor attempt cannot turn the control roots into value roots
+/// or omit their nonnegative/index-bounds checks before falling back to host.
+#[test]
+fn closed_list_runtime_selection_controls_keep_host_fallback_and_traps() {
+    for (traps, selector) in [(false, "one"), (true, "sub(0i64, one)")] {
+        let source = format!(
+            "def loss(xs: List[f32], idx: i64) -> f32 = index(xs, idx)\n\
+             def g(values: List[f32], idx: i64) -> tensor[*, f32] = add(to_tensor(values), to_tensor(grad(loss, wrt=xs)([2.0f32, 3.0f32], idx)))\n\
+             mask = to_tensor([true, false])\n\
+             one = tensor_to_scalar(count(mask, 0i32))\n\
+             before = print(\"caller-before\")\n\
+             out = g([2.0f32, 3.0f32], {selector})\n\
+             after_call = print(\"callee-after\")\n\
+             after = print(\"caller-after\")\n"
+        );
+        // A lexical List gradient actual has the independent #2740 target
+        // limit. Keep that actual literal while the outer prepared List call
+        // and runtime index still exercise the full control-product boundary.
+        // Like issue_1293_stdlib_adjoints, compare the semantic failure while
+        // retaining Eval's host-runtime/grad envelope and C's raw check.
+        let name = format!("closed_list_controls_{traps}");
+        let eval = parity::eval_lane(&source, &name);
+        let native = parity::compiled_lane(&source, &name);
+        assert_eq!(
+            eval.status, native.status,
+            "Eval: {eval:?}; native: {native:?}"
+        );
+        assert_eq!(
+            eval.stdout, native.stdout,
+            "Eval: {eval:?}; native: {native:?}"
+        );
+        for run in [eval, native] {
+            assert_eq!(run.stdout.matches("caller-before").count(), 1, "{run:?}");
+            if traps {
+                assert_eq!(run.status, Some(1), "{run:?}");
+                assert!(
+                    run.failure.contains("index requires non-negative index"),
+                    "{run:?}"
+                );
+                assert!(!run.stdout.contains("callee-after"), "{run:?}");
+                assert!(!run.stdout.contains("caller-after"), "{run:?}");
+                assert!(!run.stdout.contains("out ="), "{run:?}");
+            } else {
+                assert_eq!(run.status, Some(0), "{run:?}");
+                assert_eq!(run.stdout.matches("callee-after").count(), 1, "{run:?}");
+                assert_eq!(run.stdout.matches("caller-after").count(), 1, "{run:?}");
+                assert!(
+                    run.stdout.find("caller-before").unwrap()
+                        < run.stdout.find("callee-after").unwrap(),
+                    "{run:?}"
+                );
+                assert!(
+                    run.stdout.find("callee-after").unwrap()
+                        < run.stdout.find("caller-after").unwrap(),
+                    "{run:?}"
+                );
+                assert!(
+                    run.stdout
+                        .contains("out = tensor(shape=[2], data=[2.0, 4.0])"),
+                    "{run:?}"
+                );
+            }
+        }
+    }
+}
+
 /// Wildcard contraction helpers execute every active float representation,
 /// preserving operand-width multiplication and explicit accumulator rules.
 #[test]

@@ -1272,3 +1272,61 @@ fn vmap_grad_records_the_batched_forward_activation_as_a_shape_dep() {
         );
     }
 }
+
+/// [04-INF-9], spec/06 §3: admitted values preserve their operation and
+/// independently typed result. These controls also run against resolver,
+/// identity, result-precision and mapped-axis mutations.
+#[test]
+fn admitted_builtin_vmap_resolution_identity_and_bool_rows() {
+    for (target, expected, precision) in [
+        ("neg", vec![-1.0, 2.0, -3.0, 4.0], Prim::F32),
+        ("abs", vec![1.0, 2.0, 3.0, 4.0], Prim::F32),
+        ("is_finite", vec![1.0; 4], Prim::Bool),
+    ] {
+        let result_precision = if precision == Prim::Bool {
+            "bool"
+        } else {
+            "f32"
+        };
+        let source = format!(
+            "f = {target}\ndef run(x: tensor[2,2,f32]) -> tensor[2,2,{result_precision}] = vmap(f)(x)\n"
+        );
+        let dag = lower_surf_program(&source).unwrap();
+        let root = *dag.roots().last().unwrap();
+        assert_eq!(dag.get(root).unwrap().output_type.precision, precision);
+        let values = eval_tensor_roots_with_strict(&dag, &[root], |_| {
+            Some(TensorValue::from_vec(
+                vec![2, 2],
+                vec![1.0, -2.0, 3.0, -4.0],
+            ))
+        })
+        .unwrap();
+        assert_eq!(values[&root].shape, vec![2, 2]);
+        assert_eq!(values[&root].prim(), precision);
+        assert_eq!(values[&root].to_f64_lossy_vec(), expected);
+    }
+}
+
+/// Axis zero is a distinguishable wrong answer for this reduction, whereas
+/// an elementwise negation alone cannot detect a wrong-axis implementation.
+#[test]
+fn admitted_builtin_vmap_shared_axis_owner_has_an_independent_reduction_control() {
+    let dag = lower_surf_program(r#"
+def run(x: tensor[2,3,2,f64]) -> tensor[2,3,f64] = vmap(fn (z: tensor[2,2,f64]) -> sum(z,0),axis=1)(x)
+"#).unwrap();
+    let root = *dag.roots().last().unwrap();
+    let values = eval_tensor_roots_with_strict(&dag, &[root], |_| {
+        Some(TensorValue::from_vec(
+            vec![2, 3, 2],
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0,
+            ],
+        ))
+    })
+    .unwrap();
+    assert_eq!(values[&root].shape, vec![2, 3]);
+    assert_eq!(
+        values[&root].to_f64_lossy_vec(),
+        vec![11.0, 33.0, 55.0, 22.0, 44.0, 66.0]
+    );
+}

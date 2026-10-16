@@ -25,6 +25,7 @@ pub const EVAL_TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
 pub mod analysis;
 pub mod anonymous_dims;
 pub mod axis_sources;
+pub mod callable_value;
 #[expect(
     dead_code,
     reason = "the #893 CapacityKey prerequisite lands before PR #1565 consumes it"

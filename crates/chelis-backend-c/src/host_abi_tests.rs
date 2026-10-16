@@ -1056,6 +1056,54 @@ fn emitted_owned_body(source: &str, name: &str) -> String {
     .to_string()
 }
 
+/// Run the emitted program before inspecting its private body. Root output is
+/// an independent value oracle for alias identity, including shadowed defs.
+fn executed_owned_body(source: &str, name: &str, expected: &str) -> String {
+    let verified = verified_host_from_source(source);
+    let generated = crate::codegen_host_program(&verified, name).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let staged = chelis_runtime_bundle::stage(dir.path()).unwrap();
+    let c_source = dir.path().join("probe.c");
+    std::fs::write(&c_source, &generated.c_source).unwrap();
+    std::fs::write(dir.path().join(format!("{name}.h")), &generated.h_header).unwrap();
+    let binary = dir.path().join("probe");
+    let toolchain = crate::toolchain::test_toolchain(generated.requirements);
+    let built = crate::toolchain::tool_command(&toolchain.compiler)
+        .arg("-I")
+        .arg(dir.path())
+        .args(crate::toolchain::link_args(
+            &toolchain.compile_flags,
+            &[c_source.as_os_str(), staged.archive.as_os_str()],
+            &toolchain.link_flags,
+            binary.as_os_str(),
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let run = std::process::Command::new(binary).output().unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let value = expected
+        .strip_prefix("out = ")
+        .expect("authored root label");
+    assert_eq!(
+        String::from_utf8(run.stdout).unwrap(),
+        format!("{expected}{name} = {value}")
+    );
+    emitted_function_body(
+        &generated.c_source,
+        &format!("{}__chelis_owned_body", authored_function_symbol(name)),
+    )
+    .to_string()
+}
+
 /// Whether `body` calls the C identifier `name` itself, not merely an
 /// identifier that ends with it.
 fn calls_c_identifier(body: &str, name: &str) -> bool {
@@ -1185,13 +1233,12 @@ fn emitted_binding_oracle_rejects_broken_edges_and_calls() {
     }
 }
 
-/// chelis#3440: a flattened let spine declares each binding under a
-/// generated C alias, so a call through a typed key-builtin alias must name
-/// that alias. The source spelling is undeclared in C, and gcc 13 accepts
-/// the implicit declaration with only a warning.
+/// chelis#3440: typed builtin aliases retain the resolved operation through
+/// a flattened let spine. Execute the C and reject undeclared source calls;
+/// closed builtin values need not materialize as C function-pointer aliases.
 #[test]
-fn typed_key_alias_chain_calls_the_declared_let_alias() {
-    let body = emitted_owned_body(
+fn typed_key_alias_chain_executes_the_resolved_binding() {
+    let body = executed_owned_body(
         "def chain() -> key = {\n  \
            first: i64 -> key = key_from_seed\n  \
            second: i64 -> key = first\n  \
@@ -1199,116 +1246,43 @@ fn typed_key_alias_chain_calls_the_declared_let_alias() {
          }\n\
          out = chain()\n",
         "chain",
-    );
-    let aliases = lexical_function_aliases(&body);
-    assert_eq!(aliases.len(), 2, "{body}");
-    assert!(
-        alias_reaches(
-            &body,
-            aliases[1],
-            aliases[0],
-            &function_pointer_names(&body)
-        ),
-        "{body}"
-    );
-    assert!(
-        alias_reaches(
-            &body,
-            aliases[0],
-            "__chelis_checked_callable_seed_scalar",
-            &function_pointer_names(&body)
-        ),
-        "{body}"
-    );
-    let argument = declared_c_role(
-        &body,
-        HostAbiType::Int64.c_type_name().unwrap(),
-        "__call_arg0_",
-    );
-    assert!(
-        assigned_call(&body, "__result", aliases[1], &[argument]),
-        "the call must go through the second binding's declared alias:\n{body}"
+        "out = key(ffffffffffffffff)\n",
     );
     for alias in ["first", "second"] {
-        assert!(
-            !calls_c_identifier(&body, alias),
-            "`{alias}` is not a C function:\n{body}"
-        );
+        assert!(!calls_c_identifier(&body, alias), "{body}");
     }
 }
 
-/// chelis#3440: a named loop callback is a call through the same lexical
-/// binding, so map and fold name the declared alias too.
+/// Named map and fold callbacks execute the operation carried by the binding.
 #[test]
-fn named_loop_callbacks_call_the_declared_let_alias() {
-    let mapped = emitted_owned_body(
+fn named_loop_callbacks_execute_the_resolved_binding() {
+    let mapped = executed_owned_body(
         "def mapped() -> List[key] = {\n  \
            seed: i64 -> key = key_from_seed\n  \
            map(seed, [1i64, -1i64])\n\
          }\n\
          out = mapped()\n",
         "mapped",
-    );
-    let aliases = lexical_function_aliases(&mapped);
-    assert_eq!(aliases.len(), 1, "{mapped}");
-    assert!(
-        alias_reaches(
-            &mapped,
-            aliases[0],
-            "__chelis_checked_callable_seed_scalar",
-            &function_pointer_names(&mapped)
-        ),
-        "{mapped}"
-    );
-    let result = declared_c_role(&mapped, "chelis_key", "__map_result_");
-    let item = declared_c_role(
-        &mapped,
-        HostAbiType::Int64.c_type_name().unwrap(),
-        "__map_item_",
-    );
-    assert!(
-        assigned_call(&mapped, result, aliases[0], &[item]),
-        "map must call the declared alias:\n{mapped}"
+        "out = [key(0000000000000001), key(ffffffffffffffff)]\n",
     );
     assert!(!calls_c_identifier(&mapped, "seed"), "{mapped}");
-    let folded = emitted_owned_body(
+    let folded = executed_owned_body(
         "def folded() -> key = {\n  \
            mix: key -> i64 -> key = fold_in\n  \
            fold(mix, key_from_seed(7i64), [1i64, 2i64])\n\
          }\n\
          out = folded()\n",
         "folded",
-    );
-    let aliases = lexical_function_aliases(&folded);
-    assert_eq!(aliases.len(), 1, "{folded}");
-    assert!(
-        alias_reaches(
-            &folded,
-            aliases[0],
-            "__chelis_checked_callable_fold_scalar",
-            &function_pointer_names(&folded)
-        ),
-        "{folded}"
-    );
-    let acc = declared_c_role(&folded, "chelis_key", "__fold_acc_");
-    let item = declared_c_role(
-        &folded,
-        HostAbiType::Int64.c_type_name().unwrap(),
-        "__fold_item_",
-    );
-    assert!(
-        assigned_call(&folded, "__result", aliases[0], &[acc, item]),
-        "fold must call the declared alias:\n{folded}"
+        "out = key(b3ccd76d1f33866a)\n",
     );
     assert!(!calls_c_identifier(&folded, "mix"), "{folded}");
 }
 
-/// A lexical key alias shadows a def of the same spelling. Ownership lowering
-/// resolves the call to the alias, so the emitted C must call the alias and
-/// never the def's private body, in a direct call and in a loop callback.
+/// A lexical key alias shadows a def in direct calls and loop callbacks.
+/// Exact runtime values distinguish the builtin from the shadowed def.
 #[test]
-fn key_alias_shadowing_a_def_calls_the_alias() {
-    let call = emitted_owned_body(
+fn key_alias_shadowing_a_def_executes_the_alias() {
+    let call = executed_owned_body(
         "def mix(k: key, n: i64) -> key = k\n\
          def shadow_call() -> key = {\n  \
            mix: key -> i64 -> key = fold_in\n  \
@@ -1316,31 +1290,12 @@ fn key_alias_shadowing_a_def_calls_the_alias() {
          }\n\
          out = shadow_call()\n",
         "shadow_call",
-    );
-    let aliases = lexical_function_aliases(&call);
-    assert_eq!(aliases.len(), 1, "{call}");
-    assert!(
-        alias_reaches(
-            &call,
-            aliases[0],
-            "__chelis_checked_callable_fold_scalar",
-            &function_pointer_names(&call)
-        ),
-        "{call}"
-    );
-    let arg0 = declared_c_role(&call, "chelis_key", "__call_arg0_");
-    let arg1 = declared_c_role(
-        &call,
-        HostAbiType::Int64.c_type_name().unwrap(),
-        "__call_arg1_",
-    );
-    assert!(
-        assigned_call(&call, "__result", aliases[0], &[arg0, arg1]),
-        "the call must go through the alias:\n{call}"
+        "out = key(45c80b557fb94ddb)\n",
     );
     let def = format!("{}__chelis_owned_body", authored_function_symbol("mix"));
     assert!(!calls_c_identifier(&call, &def), "{call}");
-    let mapped = emitted_owned_body(
+    assert!(!calls_c_identifier(&call, "mix"), "{call}");
+    let mapped = executed_owned_body(
         "def seed(x: i64) -> key = key_from_seed(0i64)\n\
          def shadow_map() -> List[key] = {\n  \
            seed: i64 -> key = key_from_seed\n  \
@@ -1348,30 +1303,11 @@ fn key_alias_shadowing_a_def_calls_the_alias() {
          }\n\
          out = shadow_map()\n",
         "shadow_map",
-    );
-    let aliases = lexical_function_aliases(&mapped);
-    assert_eq!(aliases.len(), 1, "{mapped}");
-    assert!(
-        alias_reaches(
-            &mapped,
-            aliases[0],
-            "__chelis_checked_callable_seed_scalar",
-            &function_pointer_names(&mapped)
-        ),
-        "{mapped}"
-    );
-    let result = declared_c_role(&mapped, "chelis_key", "__map_result_");
-    let item = declared_c_role(
-        &mapped,
-        HostAbiType::Int64.c_type_name().unwrap(),
-        "__map_item_",
-    );
-    assert!(
-        assigned_call(&mapped, result, aliases[0], &[item]),
-        "map must call the alias:\n{mapped}"
+        "out = [key(0000000000000001), key(ffffffffffffffff)]\n",
     );
     let def = format!("{}__chelis_owned_body", authored_function_symbol("seed"));
     assert!(!calls_c_identifier(&mapped, &def), "{mapped}");
+    assert!(!calls_c_identifier(&mapped, "seed"), "{mapped}");
 }
 
 /// Negative control: with no lexical binding of the spelling, the same

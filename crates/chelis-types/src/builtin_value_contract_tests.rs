@@ -477,3 +477,24 @@ fn admitted_builtin_values_are_exactly_the_schemes_that_reproduce_the_direct_rul
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn runtime_builtin_tokens_are_exactly_whole_contract_admitted_registry_functions() {
+    let (environment, _) = builtin_env();
+    for declaration in BUILTINS {
+        let scheme = environment.lookup(declaration.name).unwrap();
+        let admitted = builtin_value_contract_carried(declaration, scheme)
+            && matches!(scheme.body, Type::Fn(_, _));
+        let token = crate::builtins::AdmittedBuiltin::resolve(declaration.name);
+        assert_eq!(token.is_some(), admitted, "{}", declaration.name);
+        if let Some(token) = token {
+            assert_eq!(token.symbol(), declaration.name);
+            assert_eq!(token.declaration(), declaration);
+            assert_eq!(
+                serde_json::to_value(token.scheme()).unwrap(),
+                serde_json::to_value(scheme).unwrap()
+            );
+        }
+    }
+    assert!(crate::builtins::AdmittedBuiltin::resolve("__not_a_builtin").is_none());
+}

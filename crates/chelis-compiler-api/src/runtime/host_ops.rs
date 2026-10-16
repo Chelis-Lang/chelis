@@ -324,7 +324,7 @@ pub(super) fn terminal_name(name: &str) -> &str {
 /// spec/04-type-system.md section 4.7 over the host interpreter's `usize`
 /// shapes: the shared rendering every lane reports for operands of `op` whose
 /// shapes disagree.
-fn operand_shape_disagreement(op: &str, lhs: &[usize], rhs: &[usize]) -> String {
+pub(super) fn operand_shape_disagreement(op: &str, lhs: &[usize], rhs: &[usize]) -> String {
     let exact = |shape: &[usize]| {
         shape
             .iter()
@@ -3508,7 +3508,7 @@ pub(crate) fn render_value(value: &RuntimeValue) -> String {
             RuntimeValue::MappedFile(bytes) => {
                 out.push_str(&format!("<mapped-file:{}>", bytes.len()));
             }
-            RuntimeValue::Closure { .. } => out.push_str("<closure>"),
+            RuntimeValue::Builtin(_) | RuntimeValue::Closure { .. } => out.push_str("<closure>"),
             RuntimeValue::Transform { kind, .. } => out.push_str(match kind {
                 TransformKind::Grad => "<grad>",
                 TransformKind::Vmap => "<vmap>",

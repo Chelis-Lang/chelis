@@ -470,18 +470,34 @@ fn unused_exported_key_callable_values_reject_before_public_c_abi() {
     }
 }
 
-/// #879 still rejects a concrete first-class function nested in a tuple.
+/// Static builtin tuple payloads retain identity even with a concrete signature.
+#[test]
+fn typed_builtin_function_tuple_executes_in_eval_and_c() {
+    let source = "def main() = {\n  seed: i64 -> key = key_from_seed\n  ops = (seed, 1i64)\n  make = ops.0\n  make(9i64)\n}\n";
+    assert_alias_eval_c(source, &["main = key(0000000000000009)".into()]);
+}
+
+/// An ordinary function's signature cannot supply a static builtin identity.
 #[test]
 fn typed_ordinary_function_tuple_remains_a_loud_c_rejection() {
-    let source = "def main() = {\n  seed: i64 -> key = key_from_seed\n  ops = (seed, 1i64)\n  make = ops.0\n  make(9i64)\n}\n";
-    let error = compile(CompileRequest {
-        source_kind: SourceKind::Surf,
-        source: source.to_string(),
-        target: CompileTarget::C,
-        entry_name: Some("key-typed-tuple".into()),
-    })
-    .expect_err("ordinary function value ABI remains unsupported");
-    assert!(format!("{error:?}").contains("chelis#879"), "{error:?}");
+    for callable in ["fn (n: i64) -> key_from_seed(n)", "ordinary"] {
+        let source = format!(
+            "def ordinary(n: i64) -> key = key_from_seed(n)\ndef main() = {{\n  seed: i64 -> key = {callable}\n  ops = (seed, 1i64)\n  make = ops.0\n  make(9i64)\n}}\n"
+        );
+        let error = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source,
+            target: CompileTarget::C,
+            entry_name: Some("key-typed-tuple".into()),
+        })
+        .expect_err("ordinary function value ABI remains unsupported");
+        let detail = format!("{error:?}");
+        assert!(
+            detail.contains("chelis#879")
+                || detail.contains("ownership lowering in `main` names unknown callee `make`"),
+            "{detail}"
+        );
+    }
 }
 
 /// A lexical function named like the builtin keeps the lexical meaning.

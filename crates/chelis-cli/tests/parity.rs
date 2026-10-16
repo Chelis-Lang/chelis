@@ -1017,3 +1017,14 @@ fn parity_literal_ascriptions() {
 fn parity_linspace() {
     drive_parity(&examples_root().join("linspace.ch"), true);
 }
+
+#[test]
+fn parity_vmap_builtin_targets() {
+    let path = examples_root().join("vmap_builtin_targets.ch");
+    assert_check_clean(&path);
+    assert_eq!(
+        run_eval(&path),
+        b"x = tensor(shape=[2, 2], data=[1.0, -2.0, 3.0, -4.0])\nnegative = tensor(shape=[2, 2], data=[-1.0, 2.0, -3.0, 4.0])\npositive = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])\nfinite = tensor(shape=[2, 2], data=[true, true, true, true])\nchecked_rows = tensor(shape=[2, 2], data=[true, true, true, true])\n",
+    );
+    drive_parity(&path, true);
+}

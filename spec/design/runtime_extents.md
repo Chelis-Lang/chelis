@@ -1,5 +1,13 @@
 # Runtime Extents: values, claims, and their witnesses
 
+Ordinary `vmap` argument substitution carries the physical caller value together with
+its canonical parameter layout. Caller observations read the physical value
+and axis. A checked unit refinement consumes that same observation and value,
+refines only the observed axis, and then transports the refined value through
+the parameter layout. Axis-name views preserve physical extents and do not
+borrow another tensor's refinement witness. Shape reads follow the same
+layout correspondence back to the physical source.
+
 **Status:** IN PROGRESS. Slice A and Slice B's mechanisms have landed, and
 every non-deferred row of the recorded phase-A and phase-B corpus is at an exit
 state: `runtime_extent_oracle.py --phase final` passes on the host lanes, with
@@ -2304,6 +2312,16 @@ the exact checked call site and canonical callee definition and consumes its
 inner receipt during that one application, so recursive or unrelated calls
 cannot borrow it. Callable and capture resolution remain at the original call
 site. A mismatch disables reuse and retains complete checks.
+
+After eager actual preparation, an unobserved checked zero-field constructor
+needs no terminal value storage. The retained invocation owner derives demand
+from its body, entry guards, List observations and backward binding dependencies.
+It may discard that terminal constructor materialization while preserving every
+producer prefix, effect, trap and entry/result observation. The discard expression
+yields unit; it does not replace an unconstrained type argument or an ADT layout.
+A stored parameter remains stored under [04-ADT-1]. Observed constructors,
+payload-bearing variants and values needed by an entry or result claim retain
+their complete typed materialization and unresolved-type rejection.
 
 C retains the named invocation's staged payloads, formal ingress, signature
 entry and result claim scopes. The entry receipt validates immutable forwarding
