@@ -61,6 +61,11 @@ the sample count and seed apply when sampling runs, including the
 machine-arithmetic search described below, whose own count is reported
 separately in `machine_arithmetic`.
 
+The edge inputs do not depend on the seed, so a property refuted at one is
+refuted under every seed. They are proposed first, so a budget smaller than
+the edge set spends all of it on edge inputs and draws nothing at random; raise
+`--samples` to add random draws on top.
+
 ## A solver proof is checked again in machine arithmetic
 
 The solver decides a property over the real numbers, so it rules out a real
@@ -111,11 +116,6 @@ Checking the proof costs the sample budget, so proving a module whose
 properties all pass takes roughly as long as the solver and the sampler
 together. Use `--tier smt-only` to pay for the solver alone; that run reports
 the machine-arithmetic question as unchecked rather than answering it.
-
-The edge inputs do not depend on the seed, so a property refuted at one is
-refuted under every seed. They are proposed first, so a budget smaller than
-the edge set spends all of it on edge inputs and draws nothing at random; raise
-`--samples` to add random draws on top.
 
 Induction applies to a recursion on an integer such as this bond valuation,
 which recurses on `n` down to a base case at `n <= 0`:
