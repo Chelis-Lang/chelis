@@ -27,6 +27,8 @@
 use std::fmt;
 use std::sync::OnceLock;
 
+use crate::c_source::Kernel;
+
 /// One rule of the profile, and the spec text that states it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Obligation {
@@ -156,6 +158,22 @@ pub struct Primitive {
     pub c: Option<&'static str>,
     /// The value classes its rows must cover.
     pub classes: &'static [Class],
+}
+
+impl Primitive {
+    /// The kernel whose entry the C expression calls. It is `None` for
+    /// arithmetic, comparisons, conversions, and the expression shapes.
+    pub fn kernel(&self) -> Option<Kernel> {
+        self.c?
+            .split(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+            .find_map(Kernel::from_entry)
+    }
+
+    /// Whether the canary for `kernels` runs this primitive: C compiles it, and
+    /// it calls no kernel or one of `kernels`.
+    pub fn in_canary(&self, kernels: &[Kernel]) -> bool {
+        self.c.is_some() && self.kernel().is_none_or(|kernel| kernels.contains(&kernel))
+    }
 }
 
 const ARITHMETIC: &[Class] = &[
@@ -557,14 +575,17 @@ pub fn canary_prelude() -> &'static str {
          }\n"
 }
 
-/// The canary's `main`, generated from [`PRIMITIVES`]. It reads one row per line from
-/// standard input (`name fWIDTH operand-bits...`, hexadecimal) and prints the result's
-/// bits in hexadecimal, one line per row, so every operand is a run-time value and
-/// nothing folds. It expects [`canary_prelude`] before it, and definitions of
-/// `chelis_canary_finalize_f32(float)` and `chelis_canary_finalize_f64(double)`, the
-/// NaN finalization generated code applies to arithmetic results. It exits nonzero on
-/// a row it cannot read.
-pub fn canary_driver() -> String {
+/// The canary's `main` for `kernels`, generated from [`PRIMITIVES`]: one branch for
+/// each primitive that [`Primitive::in_canary`] selects. It names the entry of each
+/// of `kernels` and of no other kernel.
+///
+/// It reads one row per line from standard input (`name fWIDTH operand-bits...`,
+/// hexadecimal). It prints the result's bits in hexadecimal, one line per row. So
+/// every operand is a run-time value, and nothing folds. It expects
+/// [`canary_prelude`] before it, and definitions of `chelis_canary_finalize_f32(float)`
+/// and `chelis_canary_finalize_f64(double)`, the NaN finalization generated code
+/// applies to arithmetic results. It exits nonzero on a row it cannot read.
+pub fn canary_driver(kernels: &[Kernel]) -> String {
     let mut text = String::from(
         "int main(void) {\n\
          \x20   char name[32];\n\
@@ -575,7 +596,7 @@ pub fn canary_driver() -> String {
     );
     let mut first = true;
     for primitive in PRIMITIVES {
-        let Some(expression) = primitive.c else {
+        let Some(expression) = primitive.c.filter(|_| primitive.in_canary(kernels)) else {
             continue;
         };
         let keyword = if first { "if" } else { "} else if" };
@@ -626,15 +647,18 @@ pub fn canary_driver() -> String {
     text
 }
 
-/// The rows the C canary runs: every row whose primitive C compiles.
-pub fn canary_rows() -> impl Iterator<Item = &'static Row> {
-    rows().iter().filter(|row| row.primitive.c.is_some())
+/// The rows the C canary for `kernels` runs: every row whose primitive
+/// [`Primitive::in_canary`] selects.
+pub fn canary_rows(kernels: &[Kernel]) -> impl Iterator<Item = &'static Row> {
+    rows()
+        .iter()
+        .filter(move |row| row.primitive.in_canary(kernels))
 }
 
-/// The canary's standard input: one line per [`canary_rows`] row.
-pub fn canary_input() -> String {
+/// The canary's standard input for `kernels`: one line per [`canary_rows`] row.
+pub fn canary_input(kernels: &[Kernel]) -> String {
     let mut text = String::new();
-    for row in canary_rows() {
+    for row in canary_rows(kernels) {
         text.push_str(&format!("{} f{}", row.primitive.name, row.primitive.width));
         for operand in &row.operands {
             text.push_str(&format!(" {operand:x}"));
@@ -661,12 +685,12 @@ impl fmt::Display for Mismatch {
     }
 }
 
-/// Compare the canary's output with the table: the rows whose printed bits differ,
-/// in row order. An error when the output does not have exactly one readable line
-/// per row.
-pub fn canary_mismatches(output: &str) -> Result<Vec<Mismatch>, String> {
+/// Compare the output of the canary for `kernels` with the table: the rows whose
+/// printed bits differ, in row order. An error when the output does not have exactly
+/// one readable line per row.
+pub fn canary_mismatches(kernels: &[Kernel], output: &str) -> Result<Vec<Mismatch>, String> {
     let lines: Vec<&str> = output.lines().collect();
-    let rows: Vec<&'static Row> = canary_rows().collect();
+    let rows: Vec<&'static Row> = canary_rows(kernels).collect();
     if lines.len() != rows.len() {
         return Err(format!(
             "the canary printed {} results for {} rows",

@@ -293,14 +293,15 @@ target. In `crates/chelis-backend-c/src/toolchain.rs` and the native build drive
   math (`__FAST_MATH__`), finite-only math (`__FINITE_MATH_ONLY__`), and a dropped `-O2`
   (`__OPTIMIZE__`). The amalgamation's `#error` guards refuse the same two modes and
   excess-precision evaluation (`FLT_EVAL_METHOD` other than 0) when the canary compiles.
-  The canary then runs, and any bit it prints that differs from the profile refuses the
-  compiler, naming each broken obligation, its spec text, and its first broken row. A
-  compiler that cannot build the canary at all is refused with its own diagnostic and
-  without the claim that something added flags: the canary carries every kernel, so a
-  builtin or C library function a kernel calls unconditionally would make every native
-  build fail where it is missing. The kernels therefore round to an integer through
-  §3.3's helper. Every supported GCC and Clang has its builtin, and every C99 C library
-  has `rint`, the one function that the helper can call.
+  The canary then runs. Any bit it prints that differs from the profile refuses the
+  compiler, naming each broken obligation, its spec text, and its first broken row.
+
+  A compiler that cannot build the canary at all is refused with its own diagnostic and
+  without the claim that something added flags. The canary carries the program's kernels
+  and the sentinel kernel (below). A builtin or C library function that one of them calls
+  unconditionally would make those builds fail where it is missing. The kernels therefore
+  round to an integer through §3.3's helper. Every supported GCC and Clang has its
+  builtin, and every C99 C library has `rint`, the one function that the helper can call.
 - A selected compiler whose C library is not the one the carried runtime archive was
   built for fails the build before anything compiles (spec/08 §7). The archive comes
   from the compiler's own build, so its C library is that build's Rust target
@@ -344,9 +345,9 @@ reach their integer bit arithmetic. The runtime, the evaluator, and generated C'
 conversion helpers check their rows instead (§8, test 15).
 
 **Accepted flags.** The check accepts a flag exactly when the compiler passes the macro
-checks and the canary built with the flag reproduces every obligation row; the wrapper
-tests assert that rule, and assert byte-identical canary assembly only for flags that
-change no instruction on either clang or gcc. `-fassociative-math` alone (clang and gcc
+checks and the canary built with the flag reproduces each of its rows. The wrapper tests
+assert that rule. They assert byte-identical canary assembly only for flags that change
+no instruction on either clang or gcc. `-fassociative-math` alone (clang and gcc
 reassociate only once signed zeros and trapping are also given up) and
 `-fexcess-precision=fast` on SSE2 and AArch64 (where `FLT_EVAL_METHOD` is 0) change no
 instruction. `-fno-trapping-math` (status flags are unobservable and the profile installs
@@ -354,23 +355,42 @@ no trap) changes gcc's code but no row, and `-ffp-contract=on` is refused where 
 contracts (clang) and accepted where ISO C mode treats it as `off` (gcc).
 `-ffp-contract=fast` and every other flag in the wrapper tests are refused.
 
-**Five canary units.** Each of four kernel units carries the text of its kernels exactly
-as `kernel_text` gives it to a generated unit. It also defines one external wrapper for
-each kernel entry. The driver unit carries the amalgamation's prelude, the bit-cast
-helpers, generated code's own NaN-finalization helpers (`fp_env.rs`), and the generated
-`main`. The `main` calls each kernel through its wrapper, so the canary compiles the bytes
-generated units carry.
+**Canary units.** The canary checks the kernels that the program's generated units carry
+(`chelis_backend_c::called_kernels`) and the sentinel kernel. Each of at most four kernel
+units carries the text of its kernels exactly as `kernel_text` gives it to a generated
+unit. It also defines one external wrapper for each kernel entry. The driver unit carries
+the amalgamation's prelude, the bit-cast helpers, generated code's own NaN-finalization
+helpers (`fp_env.rs`), and the generated `main`. The `main` calls each checked kernel
+through its wrapper, so the canary compiles the bytes generated units carry.
+
+**Program kernels (#3712).** The `main` runs every arithmetic, comparison, conversion, and
+expression-shape row, because generated code outside the kernels computes those
+primitives. It runs the kernel rows of the checked kernels only. A unit carries a kernel
+only when the program calls it (§4.2), so a flag can change a kernel's code only in such a
+program. Of the 85 top-level examples that emit C, 80 carry no kernel.
+
+On clang, `-fno-honor-infinities` changes no row outside the kernels. It changes one
+binary64 `log` row and two rows each of binary64 `cos` and `tan`. So every canary also
+checks the sentinel kernel, binary64 `log`, whose section compiles fastest of the three
+under GCC. The wrapper tests check each verdict for a program with every kernel and for
+a program with none. A flag that only the rows of a kernel outside the program detect
+goes unnoticed in that build.
 
 **Cost.** The kernel text is about 1 MB, and the binary64 `pow` section is 29% of it. As
-one translation unit, the canary took 1.7 s to compile with GCC 16 on aarch64-linux and
-0.73 s with Nix clang 21 on macOS. So the check compiles the five units in parallel and
-links the objects with `link_args`. Each unit compiles with the profile's compile flags
-and `-c`, as a build compiles an object.
+one translation unit, every kernel took 1.7 s to compile with GCC 16 on aarch64-linux and
+0.73 s with Nix clang 21 on macOS. So the check compiles its units in parallel and links
+the objects with `link_args`. Each unit compiles with the profile's compile flags and
+`-c`, as a build compiles an object.
 
 The kernels go to the units largest section first, each to the unit with the least text
-so far. The compile then took 0.56 s and 0.25 s. The unit that carries `pow` bounds that
-time, so more units would not help. The run is negligible (about 2 ms for every row), but
-macOS delays the first run of each new executable by about 0.15 s.
+so far. With every kernel, the compile then took 0.56 s and 0.25 s, and the unit that
+carries `pow` bounds that time.
+
+One study run on aarch64-linux measured the canary of a program without kernels, whose
+units are the driver and the sentinel. It compiled in 0.10 s with GCC 16 and 0.09 s
+with clang 21. With every kernel, the same run took 0.82 s and 0.21 s. The run is
+negligible (about 2 ms for every row), but macOS delays the first run of each new
+executable by about 0.15 s.
 
 **Overlap.** `chelis build` compiles the program in its scratch directory while the canary
 compiles and runs (`toolchain::verify_compiler_during`). The program compile starts after
@@ -383,7 +403,8 @@ compiler.
 reuses that read while the executable's size and modification time stay the same.
 Otherwise the check reads the text itself.
 
-A process checks each compiler once and keeps the accepted ones in memory. The key is the
+A process keeps each accepted compiler in memory, with the kernels that its canaries
+checked. It checks the compiler again only for a kernel outside that set. The key is the
 resolved path, the `--version` line, the profile argv, and the executable's size and
 modification time. So a wrapper edited in place is checked again.
 
@@ -493,12 +514,22 @@ has a negative partner.
    unsafe math, reassociation, reciprocal math, `-fno-signed-zeros`,
    `-ffp-model=fast`, and `-ffp-eval-method=double` (refused), and the accepted flags of
    §5 (accepted exactly when every row passes). `crmath_profile.rs` checks the obligation table itself.
+
    The canary unit tests check that each kernel unit carries the `kernel_text` of its
-   kernels byte for byte, and every kernel once. Finite-only math in any one unit stops
-   that unit's compile, and ignored signed zeros in the driver unit break its rows. The
-   `verify_compiler_during` tests check that the work starts only after the macro and C
-   library checks, and that a refusal drops its result. A build reads an unchanged
-   compiler's `--version` once.
+   kernels byte for byte. The units carry each checked kernel once and no other kernel.
+   Each wrapper test checks its verdict for a program with every kernel and for a
+   program with none. Finite-only math in any one unit stops that unit's compile, and
+   ignored signed zeros in the driver unit break its rows.
+
+   The `verify_compiler_during` tests check that the work starts only after the macro
+   and C library checks, and that a refusal drops its result. A build reads an
+   unchanged compiler's `--version` once. A process checks a compiler again only for a
+   kernel that its canaries did not check.
+
+   A `chelis build` and a Python compile job each run with a wrapper that cannot
+   compile a canary unit that defines one kernel entry. The wrapper refuses a program
+   that calls that kernel, and a program without kernels when the kernel is the
+   sentinel. It accepts a program that does not call the kernel.
 10. FP environment: a host C driver that sets FTZ/DAZ and `FE_UPWARD`, then calls an
     exported function of a built static library on inputs with subnormal and inexact
     results, gets bits identical to eval and finds its own FTZ/DAZ/rounding state

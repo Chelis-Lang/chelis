@@ -1319,8 +1319,21 @@ fn compile_shared_library_inner(
     if artifact.compile_result.target == CompileTarget::C {
         let profile: Vec<String> = compile_flags.iter().map(|flag| flag.to_string()).collect();
         let links: Vec<String> = link_flags.iter().map(|flag| flag.to_string()).collect();
-        chelis_backend_c::toolchain::verify_compiler(&compiler.to_string_lossy(), &profile, &links)
-            .map_err(|error| format!("native compile: {error}"))?;
+        // The canary checks the kernels that the C units carry.
+        let kernels: Vec<_> = artifact
+            .compile_result
+            .files
+            .iter()
+            .filter(|file| file.path.ends_with(".c"))
+            .flat_map(|file| chelis_backend_c::called_kernels(&file.contents))
+            .collect();
+        chelis_backend_c::toolchain::verify_compiler(
+            &compiler.to_string_lossy(),
+            &profile,
+            &links,
+            &kernels,
+        )
+        .map_err(|error| format!("native compile: {error}"))?;
     }
     let mut command = match artifact.compile_result.target {
         CompileTarget::C => chelis_backend_c::toolchain::tool_command(&compiler),
@@ -2563,6 +2576,7 @@ loss = (mean(x, 0) : tensor[f32])
                 &toolchain.compiler,
                 &toolchain.compile_flags,
                 &toolchain.link_flags,
+                &[],
             )
             .unwrap_or_else(|error| panic!("{error}"))
             .path;
@@ -2611,6 +2625,93 @@ loss = (mean(x, 0) : tensor[f32])
             "{message}"
         );
         assert!(!dir.path().join("model.so").exists(), "no library is built");
+    }
+
+    /// chelis#3712: the canary of a job checks the kernels that its C units call
+    /// and the sentinel kernel, binary64 `log`, and no other kernel. A wrapper
+    /// that cannot compile a canary unit with one entry's `#define` refuses
+    /// exactly the jobs whose canary checks that kernel. `CHELIS_CC` selects the
+    /// compiler, so each job runs in a child test process.
+    #[cfg(unix)]
+    #[test]
+    fn compile_and_load_job_checks_its_kernels_and_the_sentinel() {
+        const TEST: &str = "tests::compile_and_load_job_checks_its_kernels_and_the_sentinel";
+        const EXP4_SOURCE: &str = "def exp4(x: tensor[4, f32]) -> tensor[4, f32] = exp(x)\n";
+        let dir = tempdir().expect("tempdir");
+        let Some(case) = std::env::var_os("CHELIS_PYTHON_WRAPPER_CHILD") else {
+            use std::os::unix::fs::PermissionsExt;
+            let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+            let real = chelis_backend_c::toolchain::verify_compiler(
+                &toolchain.compiler,
+                &toolchain.compile_flags,
+                &toolchain.link_flags,
+                &[],
+            )
+            .unwrap_or_else(|error| panic!("{error}"))
+            .path;
+            for (model, entry, refused) in [
+                ("exp4", "chelis_cr_expf", true),
+                ("relu4", "chelis_cr_expf", false),
+                ("relu4", "chelis_cr_log", true),
+                ("exp4", "chelis_cr_sinf", false),
+            ] {
+                let wrapper = dir.path().join(format!("no-{entry}-cc"));
+                fs::write(
+                    &wrapper,
+                    format!(
+                        "#!/bin/sh\nfor arg in \"$@\"; do\n\
+                         case \"$arg\" in *chelis-compiler-canary*.c) \
+                         grep -q '#define {entry} ' \"$arg\" && exit 1;; esac\n\
+                         done\nexec '{}' \"$@\"\n",
+                        real.display()
+                    ),
+                )
+                .expect("write wrapper");
+                fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))
+                    .expect("chmod wrapper");
+                let status =
+                    std::process::Command::new(std::env::current_exe().expect("test binary"))
+                        .args(["--exact", TEST])
+                        .env("CHELIS_PYTHON_WRAPPER_CHILD", format!("{model} {refused}"))
+                        .env("CHELIS_CC", &wrapper)
+                        .status()
+                        .expect("run child");
+                assert!(
+                    status.success(),
+                    "{TEST} failed in the child: {model} with {entry}"
+                );
+            }
+            return;
+        };
+        let case = case.into_string().expect("a UTF-8 case");
+        let (model, refused) = case.split_once(' ').expect("a model and a verdict");
+        let source_path = dir.path().join("model.ch");
+        let source = if model == "exp4" {
+            EXP4_SOURCE
+        } else {
+            RELU4_SOURCE
+        };
+        fs::write(&source_path, source).expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        });
+        match (result, refused) {
+            (Err(CompileAndLoadError::Message(message)), "true") => assert!(
+                message.contains("did not build the floating-point canary"),
+                "{message}"
+            ),
+            (Ok(_), "false") => {}
+            (result, _) => panic!(
+                "{model}: expected refused {refused}, got {:?}",
+                result.err()
+            ),
+        }
     }
 
     const RELU4_SOURCE: &str = "def relu4(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n";
