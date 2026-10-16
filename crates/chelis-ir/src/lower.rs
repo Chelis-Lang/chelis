@@ -5982,6 +5982,13 @@ fn expr_depends_on_nonlowerable_name(
                 })
                 .collect::<Vec<_>>();
             if has_callable_formals && visiting.insert(name.clone()) {
+                // Supplying a static callable resolves the template's
+                // callable requirement, not its independent host-control or
+                // aggregate representation requirements.
+                if def_body_requires_host_runtime(body) {
+                    visiting.remove(&name);
+                    return true;
+                }
                 let scoped = LowerabilityBindings {
                     supplied_unresolved_formals: Some(supplied),
                     unresolved_vmap: bound_names.unresolved_vmap.clone(),
@@ -16350,10 +16357,24 @@ impl<'program> LowerCtx<'program> {
         // Loads describe the supplied rows, independently of the authored
         // row formal. Claim construction below compares that physical shape
         // against the formal instead of assuming its literal extents at ingress.
-        for (name, actual) in param_names.iter().zip(&actual_types) {
+        for ((name, actual), formal) in param_names.iter().zip(&actual_types).zip(&param_types) {
             let mut physical_row = actual.clone();
             if axis < physical_row.dims.len() {
                 physical_row.dims.remove(axis);
+            }
+            // The invocation gives each physical axis its authored identity,
+            // independently of any asserted literal extent. Equal-sized axes
+            // remain distinguishable, and a literal claim never changes data.
+            if physical_row.dims.len() == formal.dims.len() {
+                for (physical, authored) in physical_row.dims.iter_mut().zip(&formal.dims) {
+                    if let DimInfo::Named(name, _) = authored {
+                        let extent = match physical {
+                            DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => Some(*size),
+                            DimInfo::Named(_, None) => None,
+                        };
+                        *physical = DimInfo::Named(name.clone(), extent);
+                    }
+                }
             }
             subctx.interface_loads.insert(name.clone());
             let load = subctx.dag.add_node(

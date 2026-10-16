@@ -45,3 +45,8 @@ copying and projection; typed builtin formals remain executable collection callb
 Independent result frames check in nested invocation return order on Eval and C.
 Sequential host bindings avoid a lowering call frame per binding while retaining
 their source scope and result boundaries.
+Recursive alias normalization retains finite productive edges while rejecting
+alias-only cycles. Direct and aliased builtins share execution-lane ownership;
+static callable admission preserves independent host-control requirements.
+Mapped rows retain authored axis identity independently of physical extents,
+and repeated branch identities retain their complete invocation frames.

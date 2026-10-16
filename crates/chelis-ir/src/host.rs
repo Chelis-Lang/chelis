@@ -10447,37 +10447,40 @@ pub(crate) fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
         // the checker-proven relation at the partition boundary.
         return true;
     }
+    name.is_some_and(builtin_keeps_tensor_in_host_lane)
+}
+
+// Lane ownership follows resolved operation identity, including aliases.
+fn builtin_keeps_tensor_in_host_lane(name: &str) -> bool {
     matches!(
         name,
-        Some(
-            "copy"
-                | "key_from_seed"
-                | "split_key"
-                | "split_keys"
-                | "fold_in"
-                | "to_tensor"
-                | "mmap_tensor"
-                | "scalar_to_tensor"
-                | "pad_sequences"
-                | "pad_sequences_to"
-                | "concat"
-                | "split"
-                | "scatter"
-                | "where"
-                | "cumsum"
-                | "map"
-                | "filter"
-                | "fold"
-                | "scan"
-                | "tensor_scan"
-                | "partition"
-                | "flat_map"
-                | "sort"
-                | "diagonal"
-                | "trace"
-                | "clamp"
-                | "einsum"
-        )
+        "copy"
+            | "key_from_seed"
+            | "split_key"
+            | "split_keys"
+            | "fold_in"
+            | "to_tensor"
+            | "mmap_tensor"
+            | "scalar_to_tensor"
+            | "pad_sequences"
+            | "pad_sequences_to"
+            | "concat"
+            | "split"
+            | "scatter"
+            | "where"
+            | "cumsum"
+            | "map"
+            | "filter"
+            | "fold"
+            | "scan"
+            | "tensor_scan"
+            | "partition"
+            | "flat_map"
+            | "sort"
+            | "diagonal"
+            | "trace"
+            | "clamp"
+            | "einsum"
     )
 }
 
@@ -14333,6 +14336,31 @@ fn resolve_host_builtin_payload_inner(
                 };
                 return resolve_host_builtin_payload(actual, program, scope, helpers);
             }
+            DeepTag::If => {
+                let [_, then_expr, else_expr] = children else {
+                    return Err(host_expr_lowering_error(
+                        expr,
+                        "checked callable choice lacks its branches",
+                    ));
+                };
+                let then_value = resolve_host_builtin_value(then_expr, program, scope, helpers)?;
+                let else_value = resolve_host_builtin_value(else_expr, program, scope, helpers)?;
+                if let (Some(then_value), Some(else_value)) = (then_value, else_value)
+                    && then_value.operation() == else_value.operation()
+                    && then_value.contracts().len() == else_value.contracts().len()
+                    && then_value
+                        .contracts()
+                        .iter()
+                        .zip(else_value.contracts())
+                        .all(|(left, right)| {
+                            left.authored() == right.authored()
+                                && left.signature() == right.signature()
+                        })
+                {
+                    return Ok(Some(HostBuiltinPayload::Callable(then_value)));
+                }
+                return Ok(None);
+            }
             _ => {}
         }
     }
@@ -14375,6 +14403,7 @@ fn lower_closed_host_application(
         });
     if let HostTypeTerm::Tensor(tensor_ty) = &expected
         && numeric_owner
+        && !builtin_keeps_tensor_in_host_lane(operation.symbol())
         && !should_keep_tensor_expr_in_host_lane(app_expr)
     {
         let value =

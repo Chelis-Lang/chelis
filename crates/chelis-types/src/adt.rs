@@ -557,12 +557,19 @@ impl AdtRegistry {
             registry: &AdtRegistry,
             headers: &TypeResolutionEnv,
             expr: &deep::Expr,
-            visiting: &mut UnordSet<String>,
+            visiting: &mut UnordMap<String, usize>,
+            constructor_depth: usize,
         ) -> Result<deep::Expr, String> {
             match expr {
                 deep::Expr::MetaExpr(meta, span) => {
                     let mut meta = meta.clone();
-                    meta.expr = Box::new(expand(registry, headers, &meta.expr, visiting)?);
+                    meta.expr = Box::new(expand(
+                        registry,
+                        headers,
+                        &meta.expr,
+                        visiting,
+                        constructor_depth,
+                    )?);
                     Ok(deep::Expr::MetaExpr(meta, *span))
                 }
                 deep::Expr::Node(node, span) => {
@@ -576,7 +583,9 @@ impl AdtRegistry {
                         if let Some((canonical, alias)) = registry.resolve_alias_named(name) {
                             let arguments = arguments
                                 .iter()
-                                .map(|argument| expand(registry, headers, argument, visiting))
+                                .map(|argument| {
+                                    expand(registry, headers, argument, visiting, constructor_depth)
+                                })
                                 .collect::<Result<Vec<_>, _>>()?;
                             let mut children = vec![deep::Expr::Atom(
                                 deep::Atom::Name(canonical.to_owned()),
@@ -625,17 +634,31 @@ impl AdtRegistry {
                                 .collect::<Vec<_>>();
                             let (types, dimensions) = nominal_argument_bindings(&alias.param_args, &actuals)
                                 .ok_or_else(|| format!("alias `{canonical}` lost declaration parameter kind/arity alignment"))?;
-                            if !visiting.insert(canonical.to_owned()) {
+                            if let Some(depth) = visiting.get(canonical) {
+                                // Transparent aliases form a finite graph. A
+                                // value constructor makes recursion productive;
+                                // retain its canonical applied edge instead of
+                                // unfolding it (possibly with growing arguments).
+                                if constructor_depth > *depth {
+                                    return Ok(application);
+                                }
                                 return Err(format!(
-                                    "recursive alias `{canonical}` cannot be normalized"
+                                    "unproductive alias cycle through `{canonical}`"
                                 ));
                             }
+                            visiting.insert(canonical.to_owned(), constructor_depth);
                             let materialized = crate::infer::type_to_deep_expr_with_arguments(
                                 &alias.body,
                                 &types,
                                 &dimensions,
                             )?;
-                            let result = expand(registry, headers, &materialized, visiting);
+                            let result = expand(
+                                registry,
+                                headers,
+                                &materialized,
+                                visiting,
+                                constructor_depth,
+                            );
                             visiting.remove(canonical);
                             return result;
                         }
@@ -643,10 +666,15 @@ impl AdtRegistry {
                             return Err(format!("unknown or ambiguous nominal type `{name}`"));
                         }
                     }
+                    let child_depth = constructor_depth
+                        + usize::from(matches!(
+                            node.tag(),
+                            DeepTag::TTuple | DeepTag::TFn | DeepTag::TAdt
+                        ));
                     let children = node
                         .children_slice()
                         .iter()
-                        .map(|child| expand(registry, headers, child, visiting))
+                        .map(|child| expand(registry, headers, child, visiting, child_depth))
                         .collect::<Result<_, _>>()?;
                     Ok(deep::Expr::node(
                         node.tag(),
@@ -659,7 +687,7 @@ impl AdtRegistry {
             }
         }
         let headers = TypeResolutionEnv::for_normalization(self)?;
-        expand(self, &headers, expr, &mut UnordSet::new())
+        expand(self, &headers, expr, &mut UnordMap::new(), 0)
     }
 
     /// Instantiate a type alias with the given type arguments.
@@ -1215,6 +1243,58 @@ mod alias_syntax_materialization_tests {
                 ))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn alias_normalization_preserves_productive_recursion_as_a_finite_graph() {
+        let mut registry = registry();
+        registry.register_alias(
+            "R".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Type::Tuple(vec![
+                Type::Prim(Prim::Int64),
+                Type::Adt("R".into(), Vec::new()),
+            ]),
+        );
+        registry.register_alias(
+            "Grow".into(),
+            vec!["a".into()],
+            vec![NominalParamKind::Type],
+            vec![NominalArg::Type(Type::Var(TypeVar(17)))],
+            Type::Tuple(vec![
+                Type::Var(TypeVar(17)),
+                Type::Adt(
+                    "Grow".into(),
+                    vec![Type::Tuple(vec![
+                        Type::Var(TypeVar(17)),
+                        Type::Var(TypeVar(17)),
+                    ])],
+                ),
+            ]),
+        );
+        for registry in [
+            registry.clone(),
+            serde_json::from_slice::<AdtRegistry>(&serde_json::to_vec(&registry).unwrap()).unwrap(),
+        ] {
+            assert_eq!(
+                chelis_deep::printer::print_expr_flat(
+                    &registry
+                        .normalize_alias_syntax(&parse("(t-adt {} R)"))
+                        .unwrap()
+                ),
+                "(t-tuple {} (t-prim {} i64) (t-adt {} R))",
+            );
+            assert_eq!(
+                chelis_deep::printer::print_expr_flat(
+                    &registry
+                        .normalize_alias_syntax(&parse("(t-adt {} Grow (t-prim {} i64))"))
+                        .unwrap()
+                ),
+                "(t-tuple {} (t-prim {} i64) (t-adt {} Grow (t-tuple {} (t-prim {} i64) (t-prim {} i64))))",
+            );
+        }
     }
 
     #[test]

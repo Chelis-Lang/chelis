@@ -1831,3 +1831,116 @@ fn retained_builtin_control_preconditions_precede_result_extent() {
         assert!(!String::from_utf8_lossy(&output.stdout).contains("after-probe"));
     }
 }
+
+/// [04-INF-9]: a repeated identity carries its whole frame and evaluates its
+/// condition once, even when that frame rejects before the later effect.
+#[test]
+fn repeated_callable_branch_frames_preserve_claims_and_condition_effects() {
+    for flag in [false, true] {
+        for width in [2, 3] {
+            let values = vec!["1.0f32"; width].join(",");
+            let source = format!(
+                r#"
+def choose(flag: bool) -> bool ! {{IO}} = {{
+  _ = print("choose-before-claim")
+  flag
+}}
+def selected(flag: bool, x: tensor[*,f32]) -> tensor[*,bool] ! {{IO}} = {{
+  f: (&tensor[3,f32] -> tensor[3,bool]) = is_finite
+  h = if choose(flag) then f else f
+  result = h(x)
+  _ = print("after-local-claim")
+  result
+}}
+result = selected({flag},to_tensor([{values}]))
+"#
+            );
+            let (dir, path) = canonical_contract_program(&source, "repeated_frames");
+            let evaluated = Command::cargo_bin("chelis")
+                .unwrap()
+                .args(["eval", "--file"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            let out = dir.path().join("native");
+            Command::cargo_bin("chelis")
+                .unwrap()
+                .arg("build")
+                .arg(&path)
+                .args(["--target", "c", "--output"])
+                .arg(&out)
+                .assert()
+                .success();
+            let native = std::process::Command::new(out.join("repeated_frames"))
+                .output()
+                .unwrap();
+            for output in [&evaluated, &native] {
+                assert_local_callable_contract_output(
+                    output,
+                    (width == 2).then_some("numeric trap: domain in load at i64"),
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout)
+                        .matches("choose-before-claim")
+                        .count(),
+                    1
+                );
+            }
+            assert_eq!(evaluated.stdout, native.stdout);
+            if width == 3 {
+                assert!(
+                    String::from_utf8_lossy(&native.stdout)
+                        .contains("result = tensor(shape=[3], data=[true, true, true])")
+                );
+            }
+        }
+    }
+}
+
+/// Operation identity alone cannot collapse different invocation frames.
+#[test]
+fn repeated_operation_with_distinct_branch_frames_retains_callable_refusal() {
+    for flag in [false, true] {
+        let source = format!(
+            r#"
+def selected(flag: bool, x: tensor[*,f32]) -> tensor[*,bool] ! {{IO}} = {{
+  f: (&tensor[*,f32] -> tensor[3,bool]) = is_finite
+  h = if flag then f else is_finite
+  result = h(x)
+  _ = print("after-local-claim")
+  result
+}}
+result = selected({flag},to_tensor([1.0f32,2.0f32]))
+"#
+        );
+        let (dir, path) = canonical_contract_program(&source, "distinct_frames");
+        let evaluated = Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["eval", "--file"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert_local_callable_contract_output(
+            &evaluated,
+            flag.then_some("numeric trap: domain in is_finite at i64"),
+        );
+        if !flag {
+            assert!(
+                String::from_utf8_lossy(&evaluated.stdout)
+                    .contains("result = tensor(shape=[2], data=[true, true])")
+            );
+        }
+        let out = dir.path().join("native");
+        let built = Command::cargo_bin("chelis")
+            .unwrap()
+            .arg("build")
+            .arg(&path)
+            .args(["--target", "c", "--output"])
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert!(!built.status.success());
+        assert!(String::from_utf8_lossy(&built.stderr).contains("chelis#879"));
+        assert!(!out.join("distinct_frames.c").exists());
+    }
+}

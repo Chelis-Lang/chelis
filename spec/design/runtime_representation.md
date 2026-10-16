@@ -1116,6 +1116,11 @@ canonical argument validation share this context. Provisional self/forward
 headers belong to declaration checking and cannot admit a name absent from the
 stored registry. Public registration and serialized registry reuse therefore
 retain the same alias transparency and ordinary nominal precedence.
+Normalization retains a finite alias graph: recursion through a value
+constructor closes at the canonical alias application with its actual arguments.
+An alias-only cycle still fails required materialization. Claim derivation owns
+whether a recursive payload admits a finite extent pattern; normalization does
+not replace that decision with a blanket recursion rejection.
 Logical callable types and ABI descriptors cannot reconstruct a contract-free
 execution value. Lexical bindings precede declaration and builtin resolution;
 a function signature never establishes operation identity.
@@ -1128,6 +1133,14 @@ replacing the target's own signature. AST-only body substitution is evidence
 construction; an executable use carries the complete retained invocation and
 body authority before it can return a helper product. An uninvoked callback
 installs no target entry or result obligation.
+Prepared actuals retain their physical value, exact static facts and constructor
+geometry through the invocation boundary. Authored axis identities and obligations
+remain distinct from physical extents, including zero and equal-sized axes.
+Kernel admission consumes that complete invocation evidence; a body requiring
+runtime host control keeps its host execution boundary.
+Resolved builtin identity selects the same execution-lane policy at direct and
+aliased applications. A branch join retains a static callable only when both
+alternatives carry the same operation and complete ordered contract frames.
 
 A callable adapter retains its complete registry-normalized authored signature,
 including independent input and result obligations. Result-only signatures do
