@@ -964,3 +964,74 @@ where x > 1.0e300f64, y > 0.0f64, y < 1.0e-300f64:
     let y = record["counterexample"]["y"].as_f64().expect("y");
     assert!(x > 1.0e300 && y > 0.0 && y < 1.0e-300, "{record:#}");
 }
+
+// --- the routing reads the reason ---------------------------------------
+//
+// A draw that produces no value carries one of two facts, and they route
+// oppositely. `SamplingError::Unresolvable` is local to the attempt and is a
+// rejection; `SamplingError::Unsupported` is a fact about the property and is
+// terminal. An untyped error forced the routing to guess, which required
+// `derive` to predict every terminal case in advance -- and the cases it did
+// not predict reached `generator exhausted` (exit 3) where the design doc
+// requires `unsupported` (exit 2).
+
+/// Exclusions covering every value of a two-value interval. `derive`'s
+/// singleton check does not fire, because the interval holds two values, not
+/// one; the sampler discovers it. The binder has no order predecessor, so the
+/// discovery is a property-level fact and must be terminal.
+#[test]
+fn issue_3636_exclusions_covering_a_two_value_interval_report_unsupported() {
+    let source = "module Edge.TwoValueExcluded
+@property two_excluded forall(x: f64)
+where x >= 1.0f64, x <= 1.0000000000000002f64, x != 1.0f64, x != 1.0000000000000002f64:
+  (x == x)
+";
+    let (code, record) = prove(source, "8", "0");
+    assert_eq!(code, 2, "must be unsupported, not exhausted: {record:#}");
+    assert_eq!(record["status"], "unsupported", "{record:#}");
+    assert!(
+        record["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no representable sample"),
+        "the reason must name the guards, not the sample budget: {record:#}"
+    );
+    assert_ne!(record["composite_verdict"], "fuzz_validated", "{record:#}");
+}
+
+/// A binder the typed generator cannot sample at all. `unsupported_property_params`
+/// admits any fixed-shape numeric tensor, but `sample_tensor_value` rejects
+/// rank 0 and rank > 2, so only the sampler knows. That is a property-level
+/// fact reported through the same channel.
+#[test]
+fn issue_3636_unsamplable_tensor_rank_reports_unsupported() {
+    for ty in ["tensor[2, 2, 2, f32]", "tensor[f32]"] {
+        let source =
+            format!("module Edge.Rank\n@property ranked forall(t: {ty}):\n  (1.0f64 == 1.0f64)\n");
+        let (code, record) = prove(&source, "8", "0");
+        assert_eq!(code, 2, "{ty} must be unsupported: {record:#}");
+        assert_eq!(record["status"], "unsupported", "{ty}: {record:#}");
+        assert_eq!(record["accepted_samples"], 0, "{ty}: {record:#}");
+        assert!(
+            record["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rank-1 and rank-2"),
+            "{ty}: the reason must name the rank limit: {record:#}"
+        );
+    }
+}
+
+/// Negative parity: a rank-2 tensor binder is sampleable, so the same channel
+/// must not report it unsupported.
+#[test]
+fn issue_3636_samplable_tensor_rank_still_samples() {
+    let source = "module Edge.Rank2
+@property ranked forall(t: tensor[2, 2, f32]):
+  (1.0f64 == 1.0f64)
+";
+    let (code, record) = prove(source, "8", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 8, "{record:#}");
+}

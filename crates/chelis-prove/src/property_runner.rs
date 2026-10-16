@@ -3066,6 +3066,19 @@ impl FloatKind {
     }
 }
 
+/// Why a draw produced no value. The two cases route differently, and the
+/// routing must read the reason rather than infer it: conflating them is the
+/// defect chelis#3636's review rounds found three times, in both directions.
+#[derive(Debug, Clone, PartialEq)]
+enum SamplingError {
+    /// This attempt produced nothing; a later one may succeed. A binder whose
+    /// admissible range depends on an order predecessor can be pinned by the
+    /// value that predecessor happened to take.
+    Unresolvable,
+    /// The property cannot be sampled at all, whatever the attempt. Terminal.
+    Unsupported(String),
+}
+
 /// The deterministic edge points chelis#3636 asks Tier C to propose, for a
 /// float binder admitted on `[lower, upper]` and excluded from `excluded`.
 ///
@@ -3446,20 +3459,31 @@ impl ConstraintSamplingPlan {
     /// binder's deterministic edge list (chelis#3636), then the historical
     /// uniform draw over the unchanged proposal window. The whole schedule is
     /// a function of `attempt` and the seed, so a run remains reproducible.
-    fn sample(&self, rng: &mut Lcg, attempt: usize) -> Result<BTreeMap<String, f64>, String> {
+    fn sample(
+        &self,
+        rng: &mut Lcg,
+        attempt: usize,
+    ) -> Result<BTreeMap<String, f64>, SamplingError> {
         let mut values = BTreeMap::new();
         for name in &self.topo {
             let kind = self.kinds[name];
             let excluded = &self.excluded[name];
-            // The admissible range is authoritative: only an empty one means
-            // the guards really leave no sample.
-            let (lower, upper) =
-                self.resolve(name, self.ranges[name], &values)
-                    .ok_or_else(|| {
-                        format!(
-                            "inconsistent scalar guards leave `{name}` with no representable sample"
-                        )
-                    })?;
+            // A binder with no order predecessor has a fixed admissible
+            // range, so a failure here recurs on every attempt and is
+            // terminal. One that inherits a predecessor's value can be pinned
+            // by that value alone, and the next attempt may differ.
+            let terminal = || {
+                if self.incoming.get(name).is_none_or(Vec::is_empty) {
+                    SamplingError::Unsupported(format!(
+                        "inconsistent scalar guards leave `{name}` with no representable sample"
+                    ))
+                } else {
+                    SamplingError::Unresolvable
+                }
+            };
+            let (lower, upper) = self
+                .resolve(name, self.ranges[name], &values)
+                .ok_or_else(terminal)?;
             let candidates = float_edge_candidates(kind, lower, upper, excluded);
             // Once the schedule is spent the draw is a random one, preferring
             // the narrower proposal window (chelis#644 owns its width). The
@@ -3494,11 +3518,7 @@ impl ConstraintSamplingPlan {
             let value = kind
                 .round_into_domain(draw, lower, upper)
                 .and_then(|value| nudge_off_excluded(kind, value, lower, upper, excluded))
-                .ok_or_else(|| {
-                    format!(
-                        "inconsistent scalar guards leave `{name}` with no representable sample"
-                    )
-                })?;
+                .ok_or_else(terminal)?;
             values.insert(name.clone(), value);
         }
         Ok(values)
@@ -3755,7 +3775,16 @@ fn prove_surf_property_fuzz(
         // `ConstraintSamplingPlan::derive`, before any draw.
         let sample = match sample {
             Ok(sample) => sample,
-            Err(_) => continue,
+            // Local to this attempt: a rejection, and the run continues.
+            Err(SamplingError::Unresolvable) => continue,
+            // A fact about the property: terminal, with its own reason.
+            Err(SamplingError::Unsupported(reason)) => {
+                return unsupported(&property.name, seed, reason).with_sampling(
+                    sampling_method,
+                    attempts.saturating_sub(1),
+                    accepted,
+                );
+            }
         };
         if !property.preconditions.is_empty() {
             match eval_surf_sample(&library, property, &roots, &sample, true) {
@@ -4163,13 +4192,16 @@ fn unsupported_type(ty: &TypeExpr) -> Option<String> {
     }
 }
 
-fn sample_property(property: &Property, rng: &mut Lcg, attempt: usize) -> Result<Sample, String> {
+fn sample_property(
+    property: &Property,
+    rng: &mut Lcg,
+    attempt: usize,
+) -> Result<Sample, SamplingError> {
     let mut values = Vec::new();
     for param in &property.params {
-        let ty = param
-            .ty
-            .as_ref()
-            .ok_or_else(|| format!("{} is missing an explicit type", param.name))?;
+        let ty = param.ty.as_ref().ok_or_else(|| {
+            SamplingError::Unsupported(format!("{} is missing an explicit type", param.name))
+        })?;
         values.push(sample_value(&param.name, ty, rng, attempt)?);
     }
     Ok(Sample { values })
@@ -4229,7 +4261,7 @@ fn sample_property_with_constraints(
     plan: &ConstraintSamplingPlan,
     rng: &mut Lcg,
     attempt: usize,
-) -> Result<Sample, String> {
+) -> Result<Sample, SamplingError> {
     let values = plan.sample(rng, attempt)?;
     let mut sampled = Vec::with_capacity(property.params.len());
     for param in &property.params {
@@ -4257,7 +4289,7 @@ fn sample_value(
     ty: &TypeExpr,
     rng: &mut Lcg,
     attempt: usize,
-) -> Result<SampleValue, String> {
+) -> Result<SampleValue, SamplingError> {
     let sp = chelis_deep::Span::new(0, 0);
     match ty {
         TypeExpr::Named(type_name, _) if type_name == "bool" => {
@@ -4321,7 +4353,9 @@ fn sample_value(
             ))
         }
         TypeExpr::Tensor(dims, precision, _) => sample_tensor_value(name, dims, precision, rng),
-        _ => Err("type is not supported in L2 v1".to_string()),
+        _ => Err(SamplingError::Unsupported(
+            "type is not supported in L2 v1".to_string(),
+        )),
     }
 }
 
@@ -4354,20 +4388,24 @@ fn sample_tensor_value(
     dims: &[TypeExpr],
     precision: &str,
     rng: &mut Lcg,
-) -> Result<SampleValue, String> {
+) -> Result<SampleValue, SamplingError> {
     let shape = dims
         .iter()
         .map(|dim| match dim {
-            TypeExpr::Named(value, _) => value
-                .parse::<usize>()
-                .map_err(|_| "symbolic tensor dimensions are not supported in L2 v1".to_string()),
-            _ => Err("symbolic tensor dimensions are not supported in L2 v1".to_string()),
+            TypeExpr::Named(value, _) => value.parse::<usize>().map_err(|_| {
+                SamplingError::Unsupported(
+                    "symbolic tensor dimensions are not supported in L2 v1".to_string(),
+                )
+            }),
+            _ => Err(SamplingError::Unsupported(
+                "symbolic tensor dimensions are not supported in L2 v1".to_string(),
+            )),
         })
         .collect::<Result<Vec<_>, _>>()?;
     if shape.is_empty() || shape.len() > 2 {
-        return Err(
+        return Err(SamplingError::Unsupported(
             "only rank-1 and rank-2 fixed-shape tensors are supported in L2 v1".to_string(),
-        );
+        ));
     }
     let count = shape.iter().product::<usize>();
     let values = (0..count)
@@ -5216,7 +5254,16 @@ fn prove_deep_property(
         // terminal (chelis#3636 round 2).
         let sample = match sample {
             Ok(sample) => sample,
-            Err(_) => continue,
+            // Local to this attempt: a rejection, and the run continues.
+            Err(SamplingError::Unresolvable) => continue,
+            // A fact about the property: terminal, with its own reason.
+            Err(SamplingError::Unsupported(reason)) => {
+                return unsupported(&property.name, seed, reason).with_sampling(
+                    sampling_method,
+                    attempts.saturating_sub(1),
+                    accepted,
+                );
+            }
         };
         if !property.preconditions.is_empty() {
             match eval_deep_sample(exprs, property, &roots, &sample, true) {
@@ -5531,13 +5578,12 @@ fn sample_deep_property(
     property: &DeepProperty,
     rng: &mut Lcg,
     attempt: usize,
-) -> Result<Sample, String> {
+) -> Result<Sample, SamplingError> {
     let mut values = Vec::new();
     for param in &property.params {
-        let ty = param
-            .ty
-            .as_ref()
-            .ok_or_else(|| format!("{} is missing an explicit type", param.name))?;
+        let ty = param.ty.as_ref().ok_or_else(|| {
+            SamplingError::Unsupported(format!("{} is missing an explicit type", param.name))
+        })?;
         values.push(sample_value(&param.name, ty, rng, attempt)?);
     }
     Ok(Sample { values })
@@ -5588,7 +5634,7 @@ fn sample_deep_property_with_constraints(
     plan: &ConstraintSamplingPlan,
     rng: &mut Lcg,
     attempt: usize,
-) -> Result<Sample, String> {
+) -> Result<Sample, SamplingError> {
     let values = plan.sample(rng, attempt)?;
     let mut sampled = Vec::with_capacity(property.params.len());
     for param in &property.params {

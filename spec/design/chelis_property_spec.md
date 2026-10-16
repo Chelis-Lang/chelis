@@ -334,9 +334,10 @@ reproducible for a given seed and inputs.
 
 Edge candidates are proposals, filtered exactly as random ones are: the
 precondition still runs, so a rejected edge point is a rejected sample and
-consumes its attempt. For the constraint-directed lane the candidates are
-constructed inside the derived interval, so the guard-filtered accounting
-(`accepted_samples`, `attempted_samples`, `rejected_samples`) is unchanged.
+consumes its attempt. `rejected_samples` counts every attempt that produced no
+accepted sample, which includes an attempt whose draw could not be resolved as
+well as one whose draw the precondition refused; `accepted_samples` plus
+`rejected_samples` equals `attempted_samples` in every record.
 
 Because the schedule reads the admissible range while the random draw prefers
 the narrower proposal window, an order predecessor can be drawn from outside
@@ -344,8 +345,30 @@ its successor's window: `forall(lo, hi) where lo < hi` can put `lo` at a
 magnitude the window's width cannot reach, after which `hi`'s window admits
 nothing. **The window is a preference, not a constraint.** A binder whose
 window admits no value, given the predecessors already drawn, draws from its
-admissible range instead. Only an empty *admissible* range means the guards
-leave no representable sample, and only that reports `unsupported`.
+admissible range instead.
+
+An empty *admissible* range is a different matter, and which verdict it earns
+depends on whether it is a fact about the attempt or about the property. A
+draw that yields no value reports which:
+
+- **Local to the attempt.** A binder that inherits an order predecessor's
+  value can be pinned by the value that predecessor happened to take -- onto a
+  singleton a `!=` guard excludes, for instance, because a non-strict order
+  edge reserves no spacing. The attempt is rejected and the run continues; a
+  later attempt draws a different predecessor.
+- **A fact about the property.** A binder with no order predecessor has a
+  fixed admissible range, so the same failure recurs on every attempt. So does
+  a binder the typed generator cannot sample at all, such as a tensor outside
+  rank 1 or 2. Both are terminal and report `status:"unsupported"` with the
+  reason that names the cause.
+
+The two are distinguished in the error the sampler returns, not inferred at
+the routing site. That matters because inferring it requires the derivation to
+predict every terminal case before any draw, and a case it fails to predict
+reaches the exhausted-generator verdict (exit `3`) instead of `unsupported`
+(exit `2`) -- which this document requires for every unsupportable shape.
+Derivation-time checks remain, because deciding before any draw reports
+`attempted_samples: 0`, but they are no longer what makes the verdict correct.
 
 Where the window does admit a value it is always inside the admissible range,
 because the synthesis narrows the same guards and both ranges take the same
@@ -387,7 +410,8 @@ coverage needs 1936 attempts. No reindexing makes the off-diagonal class
 impossible within a budget linear in the schedule length; it only chooses
 which vanishing fraction of the grid to spend the budget on, and the diagonal
 spends it on the per-binder classes this schedule exists to reach. Closing the
-multi-binder case needs a budget policy, not an index policy.
+multi-binder case needs a budget policy, not an index policy; chelis#3697 owns
+that question.
 
 The shared Tier-C runner is enabled in every normal CLI build, including a
 build without the `smt` feature, and is also the Tide implementation. Solver
