@@ -11688,7 +11688,8 @@ fn cmd_build_c_result(
     if !symbolic_dims.is_empty() {
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
     }
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
+    let (toolchain, version_probe) =
+        chelis_backend_c::toolchain::runtime_toolchain_probed(result.requirements);
     native_build::NativeBuild {
         target: "c",
         compiler: toolchain.compiler.into(),
@@ -11697,6 +11698,7 @@ fn cmd_build_c_result(
         link_flags: toolchain.link_flags,
         runtime_archive: staged.archive,
         requires_main,
+        version_probe,
     }
     .finish(emit_c)
 }
@@ -11783,6 +11785,7 @@ fn cmd_build_hip_host(
         link_flags,
         runtime_archive: staged.archive,
         requires_main,
+        version_probe: None,
     }
     .finish(emit_c)
 }
@@ -11871,6 +11874,7 @@ fn cmd_build_metal_host(
         link_flags,
         runtime_archive: staged.archive,
         requires_main,
+        version_probe: None,
     }
     .finish(emit_c)
 }
@@ -12108,6 +12112,7 @@ fn cmd_build_hip(
         link_flags,
         runtime_archive: staged.archive,
         requires_main,
+        version_probe: None,
     }
     .finish(emit_c)
 }
@@ -12198,6 +12203,7 @@ fn cmd_build_metal(
         link_flags: result.link_flags,
         runtime_archive: staged.archive,
         requires_main,
+        version_probe: None,
     }
     .finish(emit_c)
 }

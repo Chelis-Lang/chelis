@@ -207,6 +207,13 @@ fn sections() -> (&'static str, [&'static str; 20]) {
     (prelude, bodies)
 }
 
+/// The amalgamation's shared prelude, which every kernel text starts with. It
+/// holds the fast-math, finite-math, and evaluation-method guards, the headers
+/// the kernels include first, and the canonical NaN helpers.
+pub fn prelude() -> &'static str {
+    sections().0
+}
+
 /// The C text that defines `kernels` as `static` functions: the prelude once, then
 /// each requested kernel's section once, in amalgamation order whatever the order or
 /// repetition of the request. An empty request yields an empty string.

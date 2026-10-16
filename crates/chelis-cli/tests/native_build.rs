@@ -638,6 +638,100 @@ fn c_build_ignores_compiler_environment_and_refuses_profile_changing_wrapper() {
     }
 }
 
+/// The absolute path of the C compiler a default build selects, for wrapper
+/// scripts that hand their arguments to it.
+#[cfg(unix)]
+fn real_compiler() -> std::path::PathBuf {
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(Default::default());
+    chelis_backend_c::toolchain::verify_compiler(
+        &toolchain.compiler,
+        &toolchain.compile_flags,
+        &toolchain.link_flags,
+    )
+    .unwrap()
+    .path
+}
+
+/// chelis#3689: one build reads the compiler's `--version` once. Selecting
+/// the toolchain reads it, and the compiler check reuses that read.
+#[cfg(unix)]
+#[test]
+fn one_build_reads_the_compiler_version_once() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("answer.ch");
+    fs::write(&file, "answer = add(20i64, 22i64)\n").unwrap();
+    let log = dir.path().join("versions.log");
+    let compiler = dir.path().join("counted-cc");
+    executable_script(
+        &compiler,
+        &format!(
+            "case \" $* \" in *' --version '*) echo version >> '{}';; esac\nexec '{}' \"$@\"",
+            log.display(),
+            real_compiler().display()
+        ),
+    );
+    build(&file, &dir.path().join("out"))
+        .env("CHELIS_CC", &compiler)
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 1);
+}
+
+/// chelis#3689: the program compiles in the scratch directory while the
+/// floating-point canary checks the compiler. When the canary refuses the
+/// compiler, the build fails, publishes nothing it compiled, and keeps the
+/// previous artifact.
+#[cfg(unix)]
+#[test]
+fn canary_refusal_publishes_nothing_built_beside_it() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("growth.ch");
+    fs::write(&file, "y = exp(cast(0.3, f32))\n").unwrap();
+    let out = dir.path().join("out");
+    build(&file, &out).assert().success();
+    let original = fs::read(out.join("growth")).unwrap();
+    // No predefined macro reveals contraction, so only the canary refuses
+    // this wrapper, and the program compile starts before the refusal.
+    let contract = if cfg!(target_arch = "x86_64") {
+        "-mfma -ffp-contract=fast"
+    } else {
+        "-ffp-contract=fast"
+    };
+    let log = dir.path().join("program.log");
+    let compiler = dir.path().join("contract-cc");
+    executable_script(
+        &compiler,
+        &format!(
+            "case \" $* \" in *growth.c*) echo program >> '{}';; esac\nexec '{}' \"$@\" {contract}",
+            log.display(),
+            real_compiler().display()
+        ),
+    );
+    build(&file, &out)
+        .env("CHELIS_CC", &compiler)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("floating-point canary disagrees"))
+        .stdout(predicate::str::contains("Built executable").not());
+    assert!(
+        fs::read_to_string(&log).is_ok_and(|text| text.contains("program")),
+        "the test needs the program compile to run beside the canary"
+    );
+    assert_eq!(fs::read(out.join("growth")).unwrap(), original);
+    let scratch: Vec<_> = fs::read_dir(&out)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".chelis-native-")
+        })
+        .map(|entry| entry.path())
+        .collect();
+    assert!(scratch.is_empty(), "{scratch:?}");
+}
+
 /// One float storage width of the NaN finalization oracle: its Surf name, C
 /// storage type, dtype macro, canonical quiet NaN, and the input classes
 /// (positive payload NaN, negative NaN, signaling NaN, one, minus one, +inf,

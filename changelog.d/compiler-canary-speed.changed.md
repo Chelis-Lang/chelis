@@ -1,0 +1,1 @@
+`chelis build` checks the C compiler in less time. The floating-point canary now compiles as five units in parallel, the program compiles while the canary runs, and a build reads the compiler's `--version` once. The check itself is unchanged. On aarch64-linux with GCC, a small build took 0.67 s instead of 2.0 s. See [#3689](https://github.com/Chelis-Lang/chelis/issues/3689).
