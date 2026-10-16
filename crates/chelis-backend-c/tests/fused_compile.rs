@@ -317,3 +317,133 @@ fn c_fused_reduce_compiles() {
         }
     }
 }
+
+/// Write `result` and every public runtime header into a new directory. The
+/// returned guard keeps the directory, and the path names the unit.
+fn stage_unit(
+    label: &str,
+    result: &chelis_backend_c::CodegenResult,
+) -> (tempfile::TempDir, std::path::PathBuf) {
+    let probe = common::probe_dir(label);
+    for (name, contents) in chelis_runtime_bundle::PUBLIC_HEADERS {
+        std::fs::write(probe.path().join(name), contents).unwrap();
+    }
+    let unit = probe.path().join(format!("{label}.c"));
+    std::fs::write(&unit, &result.c_source).unwrap();
+    std::fs::write(unit.with_extension("h"), &result.h_header).unwrap();
+    (probe, unit)
+}
+
+/// Run the test compiler on `unit` under the profile with `extra`, and return
+/// its standard output. The test fails when the compiler fails.
+fn run_profile_compiler(
+    unit: &std::path::Path,
+    result: &chelis_backend_c::CodegenResult,
+    extra: &[&str],
+) -> String {
+    let toolchain = chelis_backend_c::toolchain::test_toolchain(result.requirements);
+    let output = chelis_backend_c::toolchain::tool_command(&toolchain.compiler)
+        .args(&toolchain.compile_flags)
+        .arg("-I")
+        .arg(unit.parent().unwrap())
+        .args(extra)
+        .arg(unit)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{} failed on {}:\n{}",
+        toolchain.compiler,
+        unit.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// chelis#3704: a unit that calls no `chelis_simd.h` helper does not include
+/// the header. So its compile reads neither `arm_neon.h` nor `immintrin.h`.
+#[test]
+fn a_unit_without_simd_helper_calls_reads_no_intrinsics_header() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let sum = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
+    dag.add_root(sum);
+    let result = codegen(&dag, "no_simd_helpers").unwrap();
+    let (_probe, unit) = stage_unit("no_simd_helpers", &result);
+    let dependencies = run_profile_compiler(&unit, &result, &["-M"]);
+    // The dependency list names the runtime header, so it lists headers at all.
+    assert!(dependencies.contains("chelis_runtime.h"), "{dependencies}");
+    for header in ["chelis_simd.h", "arm_neon.h", "immintrin.h"] {
+        assert!(
+            !dependencies.contains(header),
+            "the unit reads {header}:\n{dependencies}"
+        );
+    }
+}
+
+/// chelis#3704: a fused max reduction calls `chelis_fmax_propnan_f32`, so its
+/// unit includes `chelis_simd.h` once. The chain also calls a correctly rounded
+/// kernel, so the unit carries kernel text too, and it compiles under the
+/// profile.
+#[test]
+fn a_fused_max_reduce_unit_includes_the_simd_header_and_compiles() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
+    let c = dag.add_node(
+        decl,
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
+    let added = dag.add_node(decl, RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let raised = dag.add_node(decl, RiscOp::Exp, vec![added], mat_f32(3, 4), None);
+    let negated = dag.add_node(decl, RiscOp::Neg, vec![raised], mat_f32(3, 4), None);
+    let maxed = dag.add_node(
+        decl,
+        RiscOp::MaxReduce { axis: 1 },
+        vec![negated],
+        vec_f32(3),
+        None,
+    );
+    dag.add_root(maxed);
+    let result = codegen(&fuse(&dag), "fused_max_simd_header").unwrap();
+    for call in ["chelis_fmax_propnan_f32(", "chelis_cr_expf("] {
+        assert!(
+            result.c_source.contains(call),
+            "the unit does not call {call}"
+        );
+    }
+    assert_eq!(
+        result
+            .c_source
+            .matches("#include \"chelis_simd.h\"\n")
+            .count(),
+        1
+    );
+    let (probe, unit) = stage_unit("fused_max_simd_header", &result);
+    let object = probe.path().join("fused_max_simd_header.o");
+    run_profile_compiler(&unit, &result, &["-c", "-o", object.to_str().unwrap()]);
+    assert!(object.is_file());
+}

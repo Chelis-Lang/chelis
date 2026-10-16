@@ -3,7 +3,7 @@
 
 /* Self-contained SIMD reduction helpers for Chelis generated C code.
  * All functions are static inline — no external linkage.
- * Include order: this file is included by chelis_runtime.h unconditionally.
+ * Generated C includes this file only in a unit that calls a helper (#3704).
  *
  * `restrict` is a C99 keyword only; guard it so this header compiles in C++
  * contexts (e.g. HIP/CUDA host wrappers that include chelis_runtime.h).

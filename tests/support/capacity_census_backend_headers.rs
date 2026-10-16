@@ -58,7 +58,12 @@ fn live_backend_rows(root: &Path) -> Vec<Row> {
     let hip_environment = closed_hip_environment(&hip_sdk);
     rows.extend(scan_published_backend_rows(
         &hip,
-        &["chelis_hip_runtime.h", "chelis_blas.h", "chelis_math.h"],
+        &[
+            "chelis_hip_runtime.h",
+            "chelis_blas.h",
+            "chelis_math.h",
+            "chelis_simd.h",
+        ],
         &[hip_environment],
         &hip_published_headers,
     ));

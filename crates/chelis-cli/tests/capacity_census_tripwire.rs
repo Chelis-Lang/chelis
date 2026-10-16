@@ -62,10 +62,15 @@ use capacity_census_authority::{
 const BASELINE_REL: &str = "spec/design/capacity_census.json";
 const INCLUDE_DIR_REL: &str = "crates/chelis-runtime/include";
 /// Roots of the published header surface: `chelis_runtime.h`'s transitive
-/// closure is the tarball surface; `chelis_blas.h` and `chelis_math.h` are
-/// emitted as `#include`s by the C backend, so generated programs compile
-/// against them too.
-const HEADER_ROOTS: &[&str] = &["chelis_runtime.h", "chelis_blas.h", "chelis_math.h"];
+/// closure is the tarball surface. The C backend emits `#include`s of
+/// `chelis_blas.h`, `chelis_math.h`, and `chelis_simd.h`, so generated
+/// programs compile against them too.
+const HEADER_ROOTS: &[&str] = &[
+    "chelis_runtime.h",
+    "chelis_blas.h",
+    "chelis_math.h",
+    "chelis_simd.h",
+];
 const STD_SRC_REL: &str = "packages/chelis-std/src";
 const CONTROLLING_SPEC_REL: &str = "spec/05-risc-primitives.md";
 static PLANTED_INCLUDE_SEQUENCE: AtomicU64 = AtomicU64::new(0);

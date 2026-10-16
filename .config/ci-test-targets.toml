@@ -2561,6 +2561,11 @@ disposition = "packages"
 packages = ["chelis-cli"]
 
 [[path_rule]]
+prefix = "tests/support/capacity_census_backend_headers.rs"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
 prefix = "tests/support/capacity_census_stdlib.rs"
 disposition = "packages"
 packages = ["chelis-cli"]

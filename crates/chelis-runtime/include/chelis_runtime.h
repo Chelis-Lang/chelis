@@ -8,7 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "chelis_simd.h"
 #include "chelis_runtime_dtype.h"
 
 typedef struct {
