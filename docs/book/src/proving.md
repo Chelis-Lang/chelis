@@ -159,6 +159,15 @@ record's fields into the function body before lowering arithmetic. A square root
 SMT only after a separate proof establishes that its argument is nonnegative from
 independent, total preconditions. The solver then uses the unique nonnegative root of
 `q*q = argument`. A missing domain proof or an inconclusive solver result stays
+`unsupported`. When the solver instead shows the domain obligation **false**, it has a witness:
+an input, admitted by the conjuncts the domain proof was allowed to use, at which the square
+root takes a negative argument. Those conjuncts are only part of the property's preconditions
+and the solver reasons over real arithmetic, so the witness is a candidate, not a result: it is
+rounded to each parameter's declared width and evaluated concretely. If every
+precondition holds there and the property body is false, the result is `failed` with that
+machine value as the counterexample, and the verdict is a definite `failed` rather than
+`disproved_modulo_real_arithmetic`, because a concrete evaluation decided it. If the witness
+violates a precondition the domain proof did not use, or the body holds there, the result stays
 `unsupported`. [The executable record example](../../../examples/record_sqrt_property.ch) shows
 this route.
 

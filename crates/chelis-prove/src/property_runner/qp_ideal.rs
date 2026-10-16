@@ -1755,7 +1755,11 @@ pub(super) fn prove(
         ),
         TierBResult::Timeout => unsupported_outcome(unsupported("SMT timeout")),
         TierBResult::Unknown => unsupported_outcome(unsupported("SMT unknown")),
-        TierBResult::Error(reason) => {
+        // chelis#3635: the Clarabel ideal-optimality goal is a quantified
+        // axiom query, and this lane has no typed property binders to evaluate
+        // a domain witness at, so a false `sqrt` domain obligation is the same
+        // honest unsupported result it was before that variant existed.
+        TierBResult::Error(reason) | TierBResult::DomainDisproved { reason, .. } => {
             unsupported_outcome(unsupported(format!("SMT lowering error: {reason}")))
         }
     }

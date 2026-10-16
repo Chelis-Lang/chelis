@@ -2138,3 +2138,53 @@ fn induction_plan_lowers_declared_helpers_from_the_cached_semantic_view() {
         }
     }
 }
+
+/// chelis#3635: the integer witness bound is the width's REPRESENTABLE range,
+/// not `integer_fuzz_bounds`'s `[-1000, 1000]` convenience window.
+///
+/// The first version of this lane used the fuzz window, so a guard admitting
+/// `n > 4000i32` declined its own witness with "not representable at i32" --
+/// a false statement about a value `i32` represents perfectly well. The paired
+/// negative keeps the real bound honest: a value genuinely outside the width
+/// still fails, and says so accurately.
+#[test]
+fn issue3635_integer_witness_bound_is_the_width_not_the_fuzz_window() {
+    fn param(name: &str, type_name: &str) -> Param {
+        Param {
+            name: name.to_string(),
+            ty: Some(TypeExpr::Named(
+                type_name.to_string(),
+                chelis_deep::Span::new(0, 0),
+            )),
+            span: chelis_deep::Span::new(0, 0),
+        }
+    }
+
+    // Inside i32 but far outside the fuzz window: accepted, and carried
+    // through at its exact value rather than clamped to 1000.
+    let sample = witness_sample(&[param("n", "i32")], &serde_json::json!({"n": 4001}))
+        .expect("4001 is representable at i32");
+    assert_eq!(sample.values.len(), 1);
+    assert_eq!(sample.values[0].json, serde_json::json!(4001));
+
+    // The i32 extremes are admitted, which the fuzz window would have refused.
+    for edge in [i64::from(i32::MIN), i64::from(i32::MAX)] {
+        let sample = witness_sample(&[param("n", "i32")], &serde_json::json!({"n": edge}))
+            .unwrap_or_else(|reason| panic!("{edge} is representable at i32: {reason}"));
+        assert_eq!(sample.values[0].json, serde_json::json!(edge));
+    }
+
+    // Outside the declared width: declined, with the width's real range named
+    // and no claim that a representable value is unrepresentable.
+    let reason = witness_sample(&[param("n", "i8")], &serde_json::json!({"n": 4001}))
+        .expect_err("4001 does not fit i8");
+    assert!(
+        reason.contains("representable range"),
+        "the reason names the real bound: {reason}"
+    );
+    assert!(
+        reason.contains("[-128, 127]"),
+        "the reason quotes i8's actual range: {reason}"
+    );
+    witness_sample(&[param("n", "i8")], &serde_json::json!({"n": 127})).expect("127 fits i8");
+}

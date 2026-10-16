@@ -2931,6 +2931,12 @@ rec {
             features = [ "num-bigint" ];
           }
           {
+            name = "num-traits";
+            packageId = "num-traits";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+          {
             name = "serde";
             packageId = "serde";
             features = [ "derive" "rc" ];
@@ -2976,7 +2982,7 @@ rec {
           "clarabel-provider" = [ "chelis-compiler-api/clarabel-provider" ];
           "cvc5-rs" = [ "dep:cvc5-rs" ];
           "num-rational" = [ "dep:num-rational" ];
-          "smt" = [ "cvc5-rs" "num-rational" ];
+          "smt" = [ "cvc5-rs" "num-rational" "dep:num-traits" ];
           "z3" = [ "dep:z3" "num-rational" ];
         };
         resolvedDefaultFeatures = [ "clarabel-provider" "cvc5-rs" "num-rational" "smt" ];

@@ -578,9 +578,14 @@ pub fn classify_smt_outcome(result: &TierBResult) -> (Soundness, QualifierSet) {
             Soundness::SoundApproximate,
             QualifierSet::from_iter_kinds([Qualifier::RealArith]),
         ),
-        TierBResult::Timeout | TierBResult::Unknown | TierBResult::Error(_) => {
-            (Soundness::Untrusted, QualifierSet::new())
-        }
+        // A false `sqrt` domain obligation decides nothing about the goal
+        // (chelis#3635): it is neither a proof nor a disproof, so the discharge
+        // carries no guarantee and the caller's verdict rests on its own
+        // host-lane confirmation of the witness, never on this classification.
+        TierBResult::Timeout
+        | TierBResult::Unknown
+        | TierBResult::Error(_)
+        | TierBResult::DomainDisproved { .. } => (Soundness::Untrusted, QualifierSet::new()),
     }
 }
 

@@ -574,9 +574,28 @@ their mathematical domains. In particular, Tier B lowers `sqrt(a)` only after
 an auxiliary obligation proves every exact argument `a >= 0` from independent,
 sqrt-free total-algebraic conjuncts in the user's preconditions. The derived
 domain facts are redundant assertions in the main query, never added user
-assumptions. If an argument is not proved non-negative, or the proof times out,
-is unknown, or lies outside that conservative fragment, Tier B returns a loud
-unsupported result and `auto` routes to Tier C (chelis#1475).
+assumptions. If an argument is not proved non-negative because the proof times
+out, is unknown, or lies outside that conservative fragment, Tier B returns a
+loud unsupported result and `auto` routes to Tier C (chelis#1475).
+
+An obligation the solver decides **false** is the one case that carries
+evidence: the model that falsifies it gives some `sqrt` argument a negative
+value under the user's total, sqrt-free conjuncts. That model is not a
+counterexample on its own -- the evidence set is a weakening of the stated
+preconditions, and the decision is over the reals -- so its only authority is a
+concrete evaluation. Tier B hands the witness to the property's host lane, which
+rounds it once to each binder's declared width and runs exactly the evaluation a
+Tier C sample gets. A witness every precondition admits and at which the body is
+false is reported as `failed` with that machine value as the counterexample; its
+verdict is a definite `failed` and carries no `real_arithmetic` qualifier,
+because the concrete evaluation, not the solver, decided it. A witness the host
+lane rejects, or one the lane cannot build (a binder outside the scalar
+fragment, a value the model parser does not claim), keeps the unsupported result
+above, so `unsupported` stays reserved for an obligation nothing decided
+(chelis#3635). The derived-obligation lane does not run this confirmation: its
+Tier C is a constructor-probe lane over a producer's arguments rather than an
+evaluation of typed property binders, so a false domain obligation there is
+still reported unsupported.
 
 ## Relationship To `chelis test`
 

@@ -809,6 +809,9 @@ pub(super) fn prove(
                 TierBResult::Unknown => "unknown",
                 TierBResult::Timeout => "timeout",
                 TierBResult::Error(_) => "error",
+                // A Beacon bound discharge never produces this (chelis#3635);
+                // record it rather than folding it into a neighbouring token.
+                TierBResult::DomainDisproved { .. } => "domain_disproved",
             };
             let mut engine_evidence = discharge.evidence().clone();
             engine_evidence["source_output_root"] = serde_json::json!(source_output_root);

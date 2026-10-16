@@ -28,6 +28,31 @@ pub enum TierBResult {
     /// allowed to reach cvc5 as an invalid term (which would abort the
     /// solver with empty stdout).
     Error(String),
+    /// The auxiliary `sqrt` domain obligation is FALSE: the solver returned a
+    /// model, admitted by the user's total sqrt-free conjunctive
+    /// preconditions, that gives a `sqrt` argument a negative value
+    /// (chelis#3635).
+    ///
+    /// This is NOT a disproof of the property, and the variant deliberately
+    /// does not pretend to be one. The evidence conjuncts are a WEAKENING of
+    /// the stated preconditions, so the witness need not be admitted by the
+    /// property at all, and the obligation is decided over the reals. The
+    /// `witness` is therefore a SEARCH HINT whose only authority is the
+    /// concrete host-lane evaluation the caller runs at it; a caller that
+    /// cannot run one must treat this exactly as [`TierBResult::Error`], which
+    /// is what it reports today.
+    ///
+    /// `witness` is a binding map from each property variable to a plain JSON
+    /// scalar -- a number for `Int`/`Real`, a bool for `Bool` -- so a consumer
+    /// built without the `smt` feature needs no solver-output parser of its
+    /// own. A variable whose printed value the model parser does not claim is
+    /// ABSENT rather than substituted.
+    DomainDisproved {
+        /// The same human-facing reason the pre-chelis#3635 `Error` carried,
+        /// so a caller that declines the witness reports what it always did.
+        reason: String,
+        witness: Value,
+    },
 }
 
 /// Satisfiability of a property's assumptions alone.
@@ -129,6 +154,12 @@ pub fn check_assumptions_satisfiable(
         TierBResult::Timeout => AssumptionSatisfiability::Timeout,
         TierBResult::Unknown => AssumptionSatisfiability::Unknown,
         TierBResult::Error(reason) => AssumptionSatisfiability::Error(reason),
+        // A precondition's own `sqrt` domain obligation can be false while the
+        // assumption set is still satisfiable, so this is not `Unsat`. The
+        // witness is a candidate counterexample to a PROPERTY, not evidence
+        // about assumption satisfiability, so it has nothing to contribute
+        // here (chelis#3635).
+        TierBResult::DomainDisproved { reason, .. } => AssumptionSatisfiability::Error(reason),
     }
 }
 
@@ -491,17 +522,99 @@ struct SqrtDomainAuthorization {
     main_timeout_ms: u64,
 }
 
+/// Classify the auxiliary domain obligation's outcome into this lane's own
+/// outcome. Only `Proved` authorizes lowering; every other answer fails closed.
+///
+/// A `Disproved` obligation is the one answer that carries evidence: the solver
+/// has exhibited a model, admitted by the evidence conjuncts, in which a `sqrt`
+/// argument is negative. Before chelis#3635 that model was discarded and the
+/// property reported `unsupported`, so `smt-only` said nothing actionable about
+/// a defect the solver had already located. It is now returned as
+/// [`TierBResult::DomainDisproved`], which carries the SAME reason string so a
+/// caller that cannot use the witness reports exactly what it used to.
 #[cfg(feature = "smt")]
-fn require_proved_sqrt_domain(result: TierBResult) -> Result<(), String> {
+fn require_proved_sqrt_domain(
+    obligation: &SmtProperty,
+    result: TierBResult,
+) -> Result<(), TierBResult> {
     match result {
         TierBResult::Proved => Ok(()),
-        TierBResult::Disproved(_) => Err(sqrt_domain_error("the domain obligation is false")),
-        TierBResult::Timeout => Err(sqrt_domain_error("the domain obligation timed out")),
-        TierBResult::Unknown => Err(sqrt_domain_error("the domain obligation is unknown")),
-        TierBResult::Error(reason) => Err(sqrt_domain_error(&format!(
-            "the domain obligation could not be lowered safely: {reason}"
+        TierBResult::Disproved(Value::Object(bindings)) => Err(TierBResult::DomainDisproved {
+            reason: sqrt_domain_error("the domain obligation is false"),
+            witness: witness_scalars(obligation, &bindings),
+        }),
+        // A disproof whose model is not a binding map is not a witness this
+        // lane can hand on. Fail closed on the historical reason.
+        TierBResult::Disproved(_) => Err(TierBResult::Error(sqrt_domain_error(
+            "the domain obligation is false",
         ))),
+        TierBResult::Timeout => Err(TierBResult::Error(sqrt_domain_error(
+            "the domain obligation timed out",
+        ))),
+        TierBResult::Unknown => Err(TierBResult::Error(sqrt_domain_error(
+            "the domain obligation is unknown",
+        ))),
+        TierBResult::Error(reason) => Err(TierBResult::Error(sqrt_domain_error(&format!(
+            "the domain obligation could not be lowered safely: {reason}"
+        )))),
+        // The domain obligation is sqrt-free by construction
+        // (`collect_sqrt_arguments` admits only total algebraic, sqrt-free
+        // arguments), so it has no domain phase of its own and cannot produce
+        // this outcome. Fail closed rather than forward a nested witness.
+        TierBResult::DomainDisproved { reason, .. } => Err(TierBResult::Error(reason)),
     }
+}
+
+/// Read a solver model back as plain JSON scalars for
+/// [`TierBResult::DomainDisproved`].
+///
+/// Each value is the exact rational cvc5 printed, read by the same
+/// [`parse_smt_model_value`] the chelis#1224 model guard uses and then rounded
+/// ONCE to `f64` (`Int` to `i64`, `Bool` to a JSON bool). The consumer rounds
+/// again to the binder's declared width and confirms the result concretely, so
+/// this projection cannot manufacture a verdict -- only a candidate.
+///
+/// A variable this parser does not claim, or whose value does not land in the
+/// target type, is OMITTED. The consumer then sees that it has no value for
+/// that binder and declines, rather than evaluating a substituted one.
+#[cfg(feature = "smt")]
+fn witness_scalars(property: &SmtProperty, bindings: &serde_json::Map<String, Value>) -> Value {
+    use num_traits::ToPrimitive;
+
+    let mut scalars = serde_json::Map::new();
+    for (name, sort) in &property.variables {
+        let Some(value) = bindings
+            .get(name)
+            .and_then(Value::as_str)
+            .and_then(|raw| parse_smt_model_value(raw, *sort))
+        else {
+            continue;
+        };
+        let json = match value {
+            ExactValue::Bool(value) => Value::Bool(value),
+            ExactValue::Num(exact) if matches!(sort, SmtSort::Int) => {
+                // `to_i64` truncates a non-integral ratio; an Int-sorted model
+                // value is integral, and one that is not is not a value this
+                // projection claims.
+                let Some(value) = exact.to_i64().filter(|_| exact.is_integer()) else {
+                    continue;
+                };
+                Value::from(value)
+            }
+            ExactValue::Num(exact) => {
+                let Some(number) = exact
+                    .to_f64()
+                    .filter(|value| value.is_finite())
+                    .and_then(serde_json::Number::from_f64)
+                else {
+                    continue;
+                };
+                Value::Number(number)
+            }
+        };
+        scalars.insert(name.clone(), json);
+    }
+    Value::Object(scalars)
 }
 
 /// Prove, without assuming any new user-visible facts, that every exact
@@ -517,13 +630,15 @@ fn require_proved_sqrt_domain(result: TierBResult) -> Result<(), String> {
 fn authorize_sqrt_domains(
     property: &SmtProperty,
     timeout_ms: u64,
-) -> Result<SqrtDomainAuthorization, String> {
+) -> Result<SqrtDomainAuthorization, TierBResult> {
     let mut arguments = Vec::new();
     for precondition in &property.preconditions {
-        collect_sqrt_arguments(precondition, false, &mut arguments)?;
+        collect_sqrt_arguments(precondition, false, &mut arguments).map_err(TierBResult::Error)?;
     }
-    collect_sqrt_arguments(&property.postcondition, false, &mut arguments)?;
-    let timeout_plan = solver_timeout_plan(!arguments.is_empty(), timeout_ms)?;
+    collect_sqrt_arguments(&property.postcondition, false, &mut arguments)
+        .map_err(TierBResult::Error)?;
+    let timeout_plan =
+        solver_timeout_plan(!arguments.is_empty(), timeout_ms).map_err(TierBResult::Error)?;
     let Some(domain_timeout_ms) = timeout_plan.domain_ms else {
         return Ok(SqrtDomainAuthorization {
             arguments,
@@ -551,7 +666,10 @@ fn authorize_sqrt_domains(
         preconditions: evidence,
         postcondition: SmtExpr::Bool(BoolOp::And, obligations),
     };
-    require_proved_sqrt_domain(solve_property_cvc5(&obligation, domain_timeout_ms))?;
+    require_proved_sqrt_domain(
+        &obligation,
+        solve_property_cvc5(&obligation, domain_timeout_ms),
+    )?;
     Ok(SqrtDomainAuthorization {
         arguments,
         main_timeout_ms: timeout_plan.main_ms,
@@ -707,7 +825,7 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
         main_timeout_ms,
     } = match authorize_sqrt_domains(property, timeout_ms) {
         Ok(authorization) => authorization,
-        Err(reason) => return TierBResult::Error(reason),
+        Err(result) => return result,
     };
 
     if !authorized_sqrt_arguments.is_empty() {
@@ -1767,23 +1885,115 @@ mod tests {
     use super::*;
     use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
 
+    /// The domain obligation shape `require_proved_sqrt_domain` classifies:
+    /// one `Real` variable, no evidence, `x >= 0`.
+    fn domain_obligation() -> SmtProperty {
+        SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(SmtExpr::Var("x".to_string())),
+                Box::new(SmtExpr::RealLit(0.0)),
+            ),
+        }
+    }
+
     #[test]
     fn issue1475_only_a_proved_domain_obligation_authorizes_sqrt() {
-        assert_eq!(require_proved_sqrt_domain(TierBResult::Proved), Ok(()));
+        let obligation = domain_obligation();
+        assert_eq!(
+            require_proved_sqrt_domain(&obligation, TierBResult::Proved),
+            Ok(())
+        );
         for result in [
             TierBResult::Disproved(serde_json::json!({})),
             TierBResult::Timeout,
             TierBResult::Unknown,
             TierBResult::Error("planted lowering failure".to_string()),
         ] {
-            let reason = require_proved_sqrt_domain(result)
+            let outcome = require_proved_sqrt_domain(&obligation, result)
                 .expect_err("every non-proof domain result must fail closed");
+            let reason = match &outcome {
+                TierBResult::Error(reason) => reason,
+                TierBResult::DomainDisproved { reason, .. } => reason,
+                other => panic!("a non-proof must not authorize lowering: {other:?}"),
+            };
             assert!(reason.contains("sqrt"), "reason names sqrt: {reason}");
             assert!(
                 reason.contains("Tier C"),
                 "reason names the safe fallback: {reason}"
             );
         }
+    }
+
+    /// chelis#3635: a FALSE domain obligation keeps #1475's refusal to lower
+    /// and additionally carries the model that falsified it, projected to the
+    /// plain machine scalars a consumer can evaluate. Every other non-proof
+    /// stays a bare `Error` with no witness to confirm.
+    #[test]
+    fn issue3635_a_false_domain_obligation_carries_its_witness() {
+        let obligation = domain_obligation();
+        let TierBResult::DomainDisproved { reason, witness } = require_proved_sqrt_domain(
+            &obligation,
+            TierBResult::Disproved(serde_json::json!({"x": "(- (/ 1 2))"})),
+        )
+        .expect_err("a false domain obligation still refuses to lower") else {
+            panic!("a false domain obligation carries its witness");
+        };
+        assert!(
+            reason.contains("the domain obligation is false"),
+            "the historical reason is preserved: {reason}"
+        );
+        assert_eq!(witness, serde_json::json!({"x": -0.5}));
+
+        for result in [
+            TierBResult::Timeout,
+            TierBResult::Unknown,
+            TierBResult::Error("planted lowering failure".to_string()),
+        ] {
+            assert!(
+                matches!(
+                    require_proved_sqrt_domain(&obligation, result.clone()),
+                    Err(TierBResult::Error(_))
+                ),
+                "{result:?} decides nothing and carries no witness"
+            );
+        }
+    }
+
+    /// The witness projection reads each sort at its own target and OMITS a
+    /// variable it cannot claim, so a consumer sees a missing binder rather
+    /// than a substituted value (chelis#3635).
+    #[test]
+    fn issue3635_witness_scalars_project_per_sort_and_omit_the_unreadable() {
+        let property = SmtProperty {
+            variables: vec![
+                ("r".to_string(), SmtSort::Real),
+                ("n".to_string(), SmtSort::Int),
+                ("b".to_string(), SmtSort::Bool),
+                ("algebraic".to_string(), SmtSort::Real),
+                ("fractional_int".to_string(), SmtSort::Int),
+                ("absent".to_string(), SmtSort::Real),
+            ],
+            preconditions: vec![],
+            postcondition: SmtExpr::BoolLit(true),
+        };
+        let witness = witness_scalars(
+            &property,
+            serde_json::json!({
+                "r": "(/ 7 2)",
+                "n": "-9",
+                "b": "true",
+                // cvc5 prints an algebraic number as a witness interval, which
+                // the model parser does not claim.
+                "algebraic": "(witness ((BOUND_VARIABLE_1 Real)) (= 2.0 (* BOUND_VARIABLE_1 BOUND_VARIABLE_1)))",
+                "fractional_int": "(/ 1 2)",
+            })
+            .as_object()
+            .expect("object literal"),
+        );
+        assert_eq!(witness, serde_json::json!({"r": 3.5, "n": -9, "b": true}));
     }
 
     #[test]
@@ -2161,6 +2371,10 @@ mod tests {
                         | TierBResult::Timeout
                         | TierBResult::Unknown
                         | TierBResult::Error(_)
+                        // `sqrt(x) >= 0` with no guard on `x` decides the
+                        // domain obligation FALSE, which is determinate and
+                        // carries its witness (chelis#3635).
+                        | TierBResult::DomainDisproved { .. }
                 ),
                 "intrinsic `{name}` at arity {arity} must yield a determinate result, got {result:?}"
             );
@@ -2747,10 +2961,14 @@ mod tests {
                 Box::new(SmtExpr::RealLit(0.0)),
             ),
         };
-        assert!(matches!(
-            solve_property(&negative, 5000),
-            TierBResult::Error(reason) if reason.contains("sqrt")
-        ));
+        // `x == -1` is itself domain evidence, so the obligation is DECIDED
+        // false and the refusal carries the pinned witness (chelis#3635).
+        let TierBResult::DomainDisproved { reason, witness } = solve_property(&negative, 5000)
+        else {
+            panic!("a negative pinned argument must refuse to lower `sqrt`")
+        };
+        assert!(reason.contains("sqrt"), "{reason}");
+        assert_eq!(witness, serde_json::json!({"x": -1.0}));
     }
 
     #[test]
