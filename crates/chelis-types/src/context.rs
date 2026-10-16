@@ -152,7 +152,8 @@ pub struct TypeEnv {
 // Neither scalar-only v9 nor origin-free key-relation v7 snapshots can be reused.
 // v11 separates raw-origin restrictions from the solved public signature.
 // v13 transports declaration-owned rank body evidence and its dependencies.
-const TYPE_ENV_FORMAT_VERSION: u32 = 13;
+// v14 also retains private checked callable binding occurrences.
+const TYPE_ENV_FORMAT_VERSION: u32 = 14;
 
 #[derive(Serialize)]
 struct TypeEnvWireRef<'a> {
@@ -373,7 +374,7 @@ mod tests {
         wire.as_object_mut().unwrap().remove("result_origin");
         assert!(serde_json::from_value::<Scheme>(wire).is_err());
         let mut wire = serde_json::to_value(TypeEnv::empty()).unwrap();
-        for version in [6, 7, 8, 9, 10, 11, 12] {
+        for version in [6, 7, 8, 9, 10, 11, 12, 13] {
             wire["format_version"] = serde_json::json!(version);
             assert!(serde_json::from_value::<TypeEnv>(wire.clone()).is_err());
         }
@@ -602,6 +603,16 @@ mod tests {
             &mut float_trial,
         )
         .expect("round-tripped restriction must accept f32");
+    }
+
+    #[test]
+    fn type_env_rejects_the_pre_checked_binding_occurrence_encoding() {
+        let mut encoded = bincode::serialize(&TypeEnv::empty()).expect("encode current context");
+        encoded[..4].copy_from_slice(&11_u32.to_le_bytes());
+        assert!(
+            bincode::deserialize::<TypeEnv>(&encoded).is_err(),
+            "v11 embeds the old Deep Metadata encoding"
+        );
     }
 
     #[test]

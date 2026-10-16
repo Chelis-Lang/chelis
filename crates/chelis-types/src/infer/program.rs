@@ -449,6 +449,7 @@ pub(super) fn infer_program_with_product_in_session(
     let mut adt_reg = AdtRegistry::new();
     builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
     let mut product = InferenceProduct::default();
+    product.register_source_binding_occurrences(exprs, errors);
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
     // wrapper in this check unit (module-identity forgery).
@@ -1539,6 +1540,7 @@ pub(super) fn infer_ir_program_with_state(
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
     let mut product = InferenceProduct::default();
+    product.register_source_binding_occurrences(exprs, errors);
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
     // wrapper in this check unit (module-identity forgery). Reef-linked

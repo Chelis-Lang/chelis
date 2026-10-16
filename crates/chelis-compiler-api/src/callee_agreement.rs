@@ -216,6 +216,28 @@ fn typed_builtin_callback_formal_preserves_lexical_identity_and_parameter_names(
     );
 }
 
+/// Nested products and copies keep producer authority without choosing a shadowed def.
+#[test]
+fn nested_key_products_and_forwarded_fold_keep_complete_callable_values() {
+    assert_eval_and_c_agree(
+        "def seed(x: i64) -> key = key_from_seed(0i64)\n\
+         def main() = {\n\
+           pair = ((key_from_seed, 1i64), fold_in)\n\
+           ((seed, n), mix) = copy(pair)\n\
+           (seed(n), mix(seed(n), 2i64))\n\
+         }\n",
+        &[
+            "main.0 = key(0000000000000001)",
+            "main.1 = key(b2fe04bac90dd534)",
+        ],
+    );
+    assert_eval_and_c_agree(
+        "def reduce(f: key -> i64 -> key, k: key, xs: List[i64]) -> key = fold(f, k, xs)\n\
+         def main() = (reduce(fold_in, key_from_seed(1i64), [2i64]), 9i64)\n",
+        &["main.0 = key(b2fe04bac90dd534)", "main.1 = 9"],
+    );
+}
+
 /// An unannotated or pattern-bound key-builtin alias has no function type
 /// for a C loop callback. When it shadows a def, the C lane refuses the
 /// program exactly as it does when no def has that spelling, rather than

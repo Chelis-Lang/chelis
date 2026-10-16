@@ -3407,24 +3407,27 @@ _LOCAL_ASCRIPTION_PROVENANCE_REMOVED = """\
 """
 _LOCAL_ASCRIPTION_CHECKER_SOURCE = REPO_ROOT / "crates/chelis-types/src/infer/checked.rs"
 _LOCAL_ASCRIPTION_CHECKER_TRANSPORT = """\
-        local_tensor_ascriptions: product.local_tensor_ascriptions.clone(),
+            let mut records = product.local_ascriptions.clone();
 """
 _LOCAL_ASCRIPTION_CHECKER_TRANSPORT_REMOVED = """\
-        local_tensor_ascriptions: Vec::new(),
+            let mut records = Vec::new();
 """
 _LOCAL_ASCRIPTION_LOWER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/lower.rs"
 _LOCAL_ASCRIPTION_LIBRARY_CARRIER = """\
-        local_tensor_ascriptions: program.local_tensor_ascriptions().to_vec(),
+        local_ascriptions: program.local_ascriptions().to_vec(),
 """
 _LOCAL_ASCRIPTION_LIBRARY_CARRIER_REMOVED = """\
-        local_tensor_ascriptions: Vec::new(),
+        local_ascriptions: Vec::new(),
 """
 _LOCAL_ASCRIPTION_CONTEXT_COMPOSITION = """\
-    ctx.local_tensor_ascriptions = Arc::new(local_tensor_ascriptions);
+    ctx.local_ascriptions = Arc::new(composition.into_records());
 """
 _LOCAL_ASCRIPTION_CONTEXT_COMPOSITION_REMOVED = """\
-    ctx.local_tensor_ascriptions =
-        Arc::new(new_program.local_tensor_ascriptions().to_vec());
+    ctx.local_ascriptions = Arc::new({
+        let mut records = composition.into_records();
+        let incoming_start = records.len() - new_program.local_ascriptions().len();
+        records.split_off(incoming_start)
+    });
 """
 _LOCAL_ASCRIPTION_ATTACHMENT = """\
                                 self.dag.add_shape_dep(owner, *token);

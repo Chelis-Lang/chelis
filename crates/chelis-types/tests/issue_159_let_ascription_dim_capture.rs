@@ -136,3 +136,82 @@ def caller[n, m](a: &tensor[n, f32], b: &tensor[m, f32]) -> &tensor[n, f32] =
         errors_summary(&errors)
     );
 }
+
+// [04-INF-9], sections 4.7 and 5.6: a value-identity rewrite cannot erase
+// independently authored invocation obligations from an adapter boundary.
+fn callable_copy_binding<'a>(exprs: &'a [chelis_deep::Expr], name: &str) -> &'a chelis_deep::Expr {
+    fn find<'a>(expr: &'a chelis_deep::Expr, name: &str) -> Option<&'a chelis_deep::Expr> {
+        if let chelis_deep::Expr::Node(node, _) = expr {
+            if node.tag() == chelis_deep::DeepTag::Bind {
+                for pair in node.children_slice().as_chunks::<2>().0 {
+                    if matches!(&pair[0], chelis_deep::Expr::Atom(chelis_deep::Atom::Name(n), _) if n == name)
+                    {
+                        return Some(&pair[1]);
+                    }
+                }
+            }
+            return node
+                .children_slice()
+                .iter()
+                .find_map(|child| find(child, name));
+        }
+        None
+    }
+    exprs
+        .iter()
+        .find_map(|expr| find(expr, name))
+        .expect("fixture binding exists")
+}
+
+#[test]
+fn callable_copy_annotation_retains_independent_origin_type_and_span() {
+    let source = "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n h: &tensor[*, f64] -> tensor[2, bool] = copy(copy(g))\n h(x)\n}\n";
+    let deep = desugar_program(&parse_str(source).expect("Surf parses")).expect("desugars");
+    let checked = check_typed_program(&deep).expect("runtime extents defer independent claims");
+    for name in ["g", "h"] {
+        let source_binding = callable_copy_binding(&deep, name);
+        let checked_binding = callable_copy_binding(checked.annotated_exprs(), name);
+        let chelis_deep::Expr::Node(source_node, _) = source_binding else {
+            panic!("source Copy")
+        };
+        let chelis_deep::Expr::Node(checked_node, _) = checked_binding else {
+            panic!("checked Copy")
+        };
+        assert_eq!(
+            checked_node.tag(),
+            chelis_deep::DeepTag::Copy,
+            "{name}: preserve its contract boundary"
+        );
+        assert_eq!(checked_binding.span(), source_binding.span());
+        assert_eq!(
+            checked_node.meta().surf_binding_type(),
+            source_node.meta().surf_binding_type()
+        );
+        assert_eq!(
+            checked_node.meta().ty(),
+            source_node.meta().ty(),
+            "{name}: original independent type syntax"
+        );
+        assert_eq!(
+            checked_node.meta().surf_binding_type().unwrap().value(),
+            &chelis_deep::annotations::BindingTypeOrigin::Explicit
+        );
+    }
+}
+
+#[test]
+fn callable_copy_annotation_unannotated_static_and_invalid_dtype_controls() {
+    let source = "def run(x: tensor[2, f64]) -> tensor[2, bool] = {\n f = is_nan\n g = copy(copy(f))\n g(x)\n}\n";
+    let deep = desugar_program(&parse_str(source).expect("Surf parses")).expect("desugars");
+    let checked = check_typed_program(&deep).expect("static unannotated copies remain valid");
+    assert!(
+        matches!(callable_copy_binding(checked.annotated_exprs(), "g"), chelis_deep::Expr::Node(node, _) if node.tag() == chelis_deep::DeepTag::Var)
+    );
+    let errors = typecheck_surf(
+        "def run(x: tensor[2, f64]) -> tensor[2, bool] = {\n f = is_nan\n g: &tensor[2, i32] -> tensor[2, bool] = copy(f)\n g(x)\n}\n",
+    );
+    assert!(
+        !errors.is_empty(),
+        "copy cannot authorize a classifier's integer input"
+    );
+}

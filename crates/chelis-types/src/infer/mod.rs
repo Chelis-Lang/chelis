@@ -206,9 +206,9 @@ use validate_core_transform::*;
 use vmap_extent::*;
 
 pub use checked::{
-    CheckedLocalTensorAscription, CheckedProgram, FunctionSignatureInference, InferResult,
-    InferStats, LocalAscriptionAxisClaim, LocalAscriptionId, LocalTensorAscriptionOrigin,
-    ParamSignatureInference, SignatureInferenceMetadata, compose_local_tensor_ascriptions,
+    CheckedLocalAscription, CheckedProgram, FunctionSignatureInference, InferResult, InferStats,
+    LocalAscriptionAxisClaim, LocalAscriptionComposition, LocalAscriptionId, LocalAscriptionOrigin,
+    ParamSignatureInference, SignatureInferenceMetadata, compose_local_ascriptions,
 };
 pub use program::{
     build_compiled_library_context, build_compiled_library_context_with_base,

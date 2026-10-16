@@ -556,6 +556,7 @@ fn serde_rejects_duplicate_core_and_extension_entries_in_json_and_binary() {
     #[derive(serde::Serialize)]
     struct Entries {
         entries: Vec<(String, Wire)>,
+        checked_binding_owner: Option<String>,
     }
     for key in ["doc", "custom", "span_file"] {
         let value = if key == "doc" {
@@ -569,6 +570,7 @@ fn serde_rejects_duplicate_core_and_extension_entries_in_json_and_binary() {
         let entry = (key.to_string(), value);
         let single = Entries {
             entries: vec![entry.clone()],
+            checked_binding_owner: None,
         };
         assert!(
             serde_json::from_slice::<chelis_deep::Metadata>(&serde_json::to_vec(&single).unwrap())
@@ -580,6 +582,7 @@ fn serde_rejects_duplicate_core_and_extension_entries_in_json_and_binary() {
         );
         let duplicate = Entries {
             entries: vec![entry.clone(), entry],
+            checked_binding_owner: None,
         };
         for error in [
             serde_json::from_slice::<chelis_deep::Metadata>(
@@ -633,5 +636,66 @@ fn unknown_effect_diagnostics_preserve_the_kind_at_text_and_serde_ingress() {
     assert!(
         !wrong_owner.contains("unknown effect kind"),
         "{wrong_owner}"
+    );
+}
+
+#[test]
+fn checked_binding_occurrence_is_private_clone_and_serde_transport() {
+    use chelis_deep::{Atom, Expr, Metadata, Span};
+    let mut wire = serde_json::to_value(Metadata::default()).unwrap();
+    wire["checked_binding_owner"] = serde_json::json!("local-ascription:7");
+    let owned: Metadata = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        serde_json::to_value(&owned).unwrap()["checked_binding_owner"],
+        "local-ascription:7"
+    );
+    assert_eq!(
+        owned,
+        Metadata::default(),
+        "internal occurrence identity is not author syntax equality"
+    );
+    let copied = owned.clone();
+    let decoded: Metadata = bincode::deserialize(&bincode::serialize(&copied).unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap()["checked_binding_owner"],
+        "local-ascription:7"
+    );
+    let expr = Expr::node(
+        chelis_deep::DeepTag::Lit,
+        owned,
+        vec![Expr::Atom(Atom::Bool(true), Span::new(0, 0))],
+        Span::new(0, 0),
+    );
+    assert!(
+        !chelis_deep::printer::print_expr(&expr).contains("local-ascription"),
+        "text does not publish checked authority"
+    );
+}
+
+#[test]
+fn author_extension_cannot_set_the_private_checked_binding_occurrence() {
+    let source = "(lit {checked_binding_owner: \"local-ascription:7\"} true)";
+    let parsed = chelis_deep::parser::parse_str(source).expect("extension data is valid source");
+    let wire = serde_json::to_value(&parsed).unwrap();
+    fn private_tokens(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Object(map) => {
+                usize::from(
+                    map.get("checked_binding_owner")
+                        .is_some_and(serde_json::Value::is_string),
+                ) + map.values().map(private_tokens).sum::<usize>()
+            }
+            serde_json::Value::Array(values) => values.iter().map(private_tokens).sum(),
+            _ => 0,
+        }
+    }
+    assert_eq!(
+        private_tokens(&wire),
+        0,
+        "opaque extension data is not compiler authority"
+    );
+    assert!(
+        chelis_deep::printer::print_expr(&parsed[0]).contains("checked_binding_owner"),
+        "author data remains opaque data"
     );
 }

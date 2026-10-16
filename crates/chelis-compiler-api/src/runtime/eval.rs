@@ -1895,22 +1895,7 @@ impl<'a> EvalContext<'a> {
         // evaluate last. Recursive calls establish their own result and the
         // outer form either replaces it or transparently returns it.
         self.result_producer = None;
-        let mut value = self.eval_expr_inner(expr)?;
-        // An explicit callable binding adapts the supplied value. Retain its
-        // invocation obligations independently of the producer's identity;
-        // copies and captured values carry both through the existing carrier.
-        if value.invocation_contracts().is_some()
-            && let ExprCarrier::DecodedNode(_, metadata, _) = expr.carrier()
-            && metadata.surf_binding_type().is_some_and(|origin| {
-                *origin.value() == chelis_deep::annotations::BindingTypeOrigin::Explicit
-            })
-            && let Some(authored) = metadata.ty().map(|ty| ty.expression())
-        {
-            let contract = normalize_authored_entry_type(authored, self.session.as_ref())?;
-            if checked_function_children(&contract).is_some() {
-                value.retain_invocation_contract(authored.clone());
-            }
-        }
+        let value = self.eval_expr_inner(expr)?;
         if !self
             .result_producer
             .as_ref()
@@ -3379,6 +3364,31 @@ impl<'a> EvalContext<'a> {
                 // A selected App consumes its route before evaluating args.
                 // Any unsupported initializer continuation remains suspended.
                 self.take_forwarding_cursor();
+                let mut value = value;
+                if let Some(owner) = lowering
+                    .as_ref()
+                    .map(|context| context.callable_binding_ascription(binding.initializer))
+                    .transpose()
+                    .map_err(|error| error.to_string())?
+                    .flatten()
+                {
+                    let contract = normalize_authored_entry_type(
+                        owner.authored_type(),
+                        self.session.as_ref(),
+                    )?;
+                    if checked_function_children(&contract).is_none() {
+                        return Err(
+                            "checked callable source owner lacks a complete signature".into()
+                        );
+                    }
+                    if value.invocation_contracts().is_none() {
+                        return Err(
+                            "checked callable source owner produced a non-callable value"
+                                .to_owned(),
+                        );
+                    }
+                    value.retain_invocation_contract(contract);
+                }
                 let result_producer = self.result_producer.take();
                 self.binding_types.insert(name.to_string(), static_ty);
                 self.bindings

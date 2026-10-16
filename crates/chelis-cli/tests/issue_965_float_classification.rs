@@ -957,9 +957,15 @@ fn runtime_selected_predicates_reach_the_target_callable_fence() {
                 let checked: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
                 assert_eq!(checked["score"], 1.0);
                 assert_eq!(checked["errors"], serde_json::json!([]));
-                if !tensor {
-                    assert!(evaluate(&source).contains(&format!("result = {}", flag == reverse)));
-                }
+                let expected = if tensor {
+                    format!(
+                        "result = tensor(shape=[2], data=[{0}, {0}])",
+                        flag == reverse
+                    )
+                } else {
+                    format!("result = {}", flag == reverse)
+                };
+                assert!(evaluate(&source).contains(&expected));
                 let built = Command::cargo_bin("chelis")
                     .unwrap()
                     .args(["build", "--target", "c", "--emit-c"])
@@ -1007,9 +1013,1218 @@ fn repeated_predicate_choices_keep_the_closed_callable_route() {
                 native.contains(&format!("borrowed_result = {expected}")),
                 "{native}"
             );
-            if !tensor {
-                assert_eq!(native, evaluate(&source));
+            assert_eq!(native, evaluate(&source));
+        }
+    }
+}
+
+/// [04-INF-9]/[05-OP-20..22]: runtime function selection preserves the
+/// complete Bool result relation on each explicitly enumerated surface.
+#[test]
+fn runtime_selected_predicates_evaluate_every_float_surface() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for reverse in [false, true] {
+            let choice = if reverse {
+                "if flag then is_finite else is_nan"
+            } else {
+                "if flag then is_nan else is_finite"
+            };
+            for (shape, input, nan_mask, finite_mask) in [
+                (
+                    "",
+                    format!("reshape(to_tensor([div(0.0{dtype},0.0{dtype})]), [])"),
+                    "[true]",
+                    "[false]",
+                ),
+                (
+                    "5,",
+                    format!(
+                        "to_tensor([div(0.0{dtype},0.0{dtype}),div(1.0{dtype},0.0{dtype}),0.0{dtype},-0.0{dtype},1.0{dtype}])"
+                    ),
+                    "[true, false, false, false, false]",
+                    "[false, false, true, true, true]",
+                ),
+                (
+                    "1,5,",
+                    format!(
+                        "reshape(to_tensor([div(0.0{dtype},0.0{dtype}),div(1.0{dtype},0.0{dtype}),0.0{dtype},-0.0{dtype},1.0{dtype}]),[1i64,5i64])"
+                    ),
+                    "[true, false, false, false, false]",
+                    "[false, false, true, true, true]",
+                ),
+                ("0,", format!("to_tensor([],{dtype})"), "[]", "[]"),
+            ] {
+                let source = format!(
+                    "def selected(flag: bool, x: tensor[{shape}{dtype}]) -> tensor[{shape}bool] = {{\n f = {choice}\n g = f\n g(x)\n}}\nleft = selected(true,{input})\nright = selected(false,{input})\n"
+                );
+                let evaluated = evaluate_json(&source);
+                assert_runtime_callable_c_fence(&source);
+                for (root, flag) in [("left", true), ("right", false)] {
+                    let mask = if flag != reverse {
+                        nan_mask
+                    } else {
+                        finite_mask
+                    };
+                    let dimensions = match shape {
+                        "" => vec![],
+                        "5," => vec![5],
+                        "1,5," => vec![1, 5],
+                        _ => vec![0],
+                    };
+                    let value = &evaluated["roots"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|value| value["name"] == root)
+                        .unwrap()["value"];
+                    assert_eq!(value["type"], "tensor", "{source}\n{evaluated}");
+                    assert_eq!(value["value"]["shape"], serde_json::json!(dimensions));
+                    let mask: serde_json::Value = serde_json::from_str(mask).unwrap();
+                    assert_eq!(
+                        value["value"]["data"],
+                        serde_json::json!({"dtype":"bool","values":mask})
+                    );
+                }
+            }
+            let scalar = format!(
+                "def selected(flag: bool, x: {dtype}) -> bool = {{\n f = {choice}\n f(x)\n}}\nnan_left = selected(true,div(0.0{dtype},0.0{dtype}))\nnan_right = selected(false,div(0.0{dtype},0.0{dtype}))\nfinite_left = selected(true,-0.0{dtype})\nfinite_right = selected(false,-0.0{dtype})\n"
+            );
+            let evaluated = evaluate(&scalar);
+            assert_runtime_callable_c_fence(&scalar);
+            assert!(
+                evaluated.contains(&format!("nan_left = {}", !reverse)),
+                "{evaluated}"
+            );
+            assert!(
+                evaluated.contains(&format!("nan_right = {reverse}")),
+                "{evaluated}"
+            );
+            assert!(
+                evaluated.contains(&format!("finite_left = {reverse}")),
+                "{evaluated}"
+            );
+            assert!(
+                evaluated.contains(&format!("finite_right = {}", !reverse)),
+                "{evaluated}"
+            );
+        }
+    }
+}
+
+#[test]
+fn runtime_callable_eval_preserves_named_functions_aliases_and_borrowing() {
+    let source = r#"
+def left(x: tensor[2,f32]) -> tensor[2,f32] = abs(x)
+def right(x: tensor[2,f32]) -> tensor[2,f32] = neg(x)
+def selected(flag: bool, x: tensor[2,f32]) -> tensor[2,f32] = {
+  f = if flag then left else right
+  alias = copy(f)
+  alias(x)
+}
+def borrowed(flag: bool, x: &tensor[2,f32]) -> tensor[2,bool] = {
+  f = if flag then is_nan else is_finite
+  alias = copy(f)
+  alias(x)
+}
+left_result = selected(true,to_tensor([1.0f32,-2.0f32]))
+right_result = selected(false,to_tensor([1.0f32,-2.0f32]))
+borrowed_result = borrowed(false,to_tensor([1.0f32,div(0.0f32,0.0f32)]))
+"#;
+    let evaluated = evaluate(source);
+    assert!(
+        evaluated.contains("left_result = tensor(shape=[2], data=[1.0, 2.0])"),
+        "{evaluated}"
+    );
+    assert!(
+        evaluated.contains("right_result = tensor(shape=[2], data=[-1.0, 2.0])"),
+        "{evaluated}"
+    );
+    assert!(
+        evaluated.contains("borrowed_result = tensor(shape=[2], data=[true, false])"),
+        "{evaluated}"
+    );
+}
+
+#[test]
+fn runtime_callable_rejects_invalid_contracts_before_execution() {
+    for source in [
+        "def bad(flag: bool, x: tensor[2,i32]) -> tensor[2,bool] = { f = if flag then is_nan else is_finite\n f(x) }\nresult = bad(true,to_tensor([1i32,2i32]))\n",
+        "def bad(flag: i32, x: tensor[2,f32]) -> tensor[2,bool] = { f = if flag then is_nan else is_finite\n f(x) }\nresult = bad(1i32,to_tensor([1.0f32,2.0f32]))\n",
+        "def bad(flag: bool, x: tensor[2,f32]) -> tensor[3,bool] = { f = if flag then is_nan else is_finite\n f(x) }\nresult = bad(true,to_tensor([1.0f32,2.0f32]))\n",
+        "def bad(flag: bool, x: tensor[2,f32]) -> tensor[2,bool] = { f = if flag then is_nan else abs\n f(x) }\nresult = bad(true,to_tensor([1.0f32,2.0f32]))\n",
+        "def bad(flag: bool, x: tensor[2,f32]) -> tensor[2,bool] = { is_nan = 1i32\n f = if flag then is_nan else is_finite\n f(x) }\nresult = bad(true,to_tensor([1.0f32,2.0f32]))\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_callable.ch");
+        std::fs::write(&path, source).unwrap();
+        let output = Command::cargo_bin("chelis")
+            .unwrap()
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "{source}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
+fn runtime_callable_selection_evaluates_actual_condition_and_body_once() {
+    for flag in [false, true] {
+        let source = format!(
+            r#"
+def condition(flag: bool) -> bool = {{
+  _ = print("condition")
+  flag
+}}
+def actual() -> tensor[2,f32] = {{
+  _ = print("actual")
+  to_tensor([1.0f32,div(0.0f32,0.0f32)])
+}}
+def left(x: tensor[2,f32]) -> tensor[2,bool] = {{
+  _ = print("left")
+  is_nan(x)
+}}
+def right(x: tensor[2,f32]) -> tensor[2,bool] = {{
+  _ = print("right")
+  is_finite(x)
+}}
+def selected(flag: bool, x: tensor[2,f32]) -> tensor[2,bool] = {{
+  f = if condition(flag) then left else right
+  alias = f
+  alias(x)
+}}
+result = selected({flag},actual())
+"#
+        );
+        let output = evaluate_json(&source);
+        let transcript = output["transcript"].as_array().unwrap();
+        assert_eq!(
+            transcript,
+            &vec![
+                serde_json::json!("actual"),
+                serde_json::json!("condition"),
+                serde_json::json!(if flag { "left" } else { "right" })
+            ],
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn runtime_callable_selection_does_not_retry_or_execute_the_untaken_body() {
+    let source = r#"
+def trap(x: tensor[2,f32]) -> tensor[2,bool] = {
+  _ = print("trap_once")
+  fail("selected_trap")
+}
+def safe(x: tensor[2,f32]) -> tensor[2,bool] = is_finite(x)
+def selected(flag: bool, x: tensor[2,f32]) -> tensor[2,bool] = {
+  f = if flag then trap else safe
+  f(x)
+}
+"#;
+    assert!(
+        evaluate(&format!(
+            "{source}\nresult = selected(false,to_tensor([1.0f32,2.0f32]))\n"
+        ))
+        .contains("result = tensor(shape=[2], data=[true, true])")
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trap.ch");
+    std::fs::write(
+        &path,
+        format!("{source}\nresult = selected(true,to_tensor([1.0f32,2.0f32]))\n"),
+    )
+    .unwrap();
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("selected_trap"));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout)
+            .matches("trap_once")
+            .count(),
+        1
+    );
+}
+
+fn assert_runtime_callable_c_fence(source: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("choice.ch");
+    let artifact = dir.path().join("choice.c");
+    std::fs::write(&path, source).unwrap();
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", "--target", "c", "--emit-c"])
+        .arg(path)
+        .arg("-o")
+        .arg(&artifact)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{source}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("chelis#879"), "{source}\n{error}");
+    assert!(!error.contains("chelis#730"), "{source}\n{error}");
+    assert!(!artifact.exists());
+}
+
+#[test]
+fn repeated_identity_choices_execute_in_eval_and_native_at_every_float_width() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        let source = format!(
+            r#"
+predicate = is_finite
+def selected(flag: bool, x: tensor[2,{dtype}]) -> tensor[2,bool] = {{
+  f = if flag then predicate else is_finite
+  alias = f
+  alias(x)
+}}
+left = selected(true,to_tensor([1.0{dtype},div(0.0{dtype},0.0{dtype})]))
+right = selected(false,to_tensor([1.0{dtype},div(0.0{dtype},0.0{dtype})]))
+"#
+        );
+        let evaluated = evaluate(&source);
+        for root in ["left", "right"] {
+            assert!(
+                evaluated.contains(&format!("{root} = tensor(shape=[2], data=[true, false])")),
+                "{evaluated}"
+            );
+        }
+        assert_eq!(
+            build_and_run(&source, &format!("same_identity_{dtype}")),
+            evaluated
+        );
+    }
+}
+
+/// spec/04 §4.7: a whole-choice callable ascription guards entry even when
+/// the enclosing signature permits arbitrary extents. Aliasing cannot erase it.
+#[test]
+fn runtime_callable_whole_choice_contract_guards_before_later_effects() {
+    for (binding, call) in [
+        ("", "f"),
+        ("alias = f", "alias"),
+        ("alias = copy(f)", "alias"),
+        ("alias = copy(copy(f))", "alias"),
+        ("alias: &tensor[2,f64] -> tensor[2,bool] = copy(f)", "alias"),
+        (
+            "first: &tensor[2,f64] -> tensor[2,bool] = copy(f)\n alias: &tensor[2,f64] -> tensor[2,bool] = copy(first)",
+            "alias",
+        ),
+    ] {
+        for flag in [false, true] {
+            for reverse in [false, true] {
+                let (left, right) = if reverse {
+                    ("is_finite", "is_nan")
+                } else {
+                    ("is_nan", "is_finite")
+                };
+                for width in [2, 3] {
+                    let values = if width == 2 {
+                        "1.0f64, 2.0f64"
+                    } else {
+                        "1.0f64, 2.0f64, 3.0f64"
+                    };
+                    let source = format!(
+                        r#"
+def run(flag: bool, x: tensor[*,f64]) -> tensor[*,bool] = {{
+  f: &tensor[2,f64] -> tensor[2,bool] = if flag then {left} else {right}
+  {binding}
+  {call}(x)
+}}
+result = run({flag},to_tensor([{values}]))
+after = print("after")
+"#
+                    );
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("whole_choice.ch");
+                    std::fs::write(&path, &source).unwrap();
+                    let check = Command::cargo_bin("chelis")
+                        .unwrap()
+                        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                        .arg("check")
+                        .arg(&path)
+                        .output()
+                        .unwrap();
+                    assert!(check.status.success(), "{source}\n{:?}", check);
+                    let output = Command::cargo_bin("chelis")
+                        .unwrap()
+                        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                        .args(["eval", "--file"])
+                        .arg(&path)
+                        .output()
+                        .unwrap();
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if width == 2 {
+                        assert!(output.status.success(), "{source}\n{stderr}");
+                        let expected = if flag != reverse {
+                            "[false, false]"
+                        } else {
+                            "[true, true]"
+                        };
+                        assert!(
+                            stdout.contains(&format!("data={expected}")),
+                            "{source}\n{stdout}"
+                        );
+                        assert_eq!(
+                            stdout.lines().filter(|line| *line == "after").count(),
+                            1,
+                            "{stdout}"
+                        );
+                    } else {
+                        assert!(!output.status.success(), "{source}\n{stdout}");
+                        assert!(stderr.contains("domain in load"), "{source}\n{stderr}");
+                        assert!(!stdout.contains("after"), "{source}\n{stdout}");
+                    }
+                }
             }
         }
+    }
+}
+
+/// Aliases normalize through the host session; selected branch obligations and
+/// independently authored choice result obligations remain cumulative.
+#[test]
+fn runtime_callable_choice_retains_branch_and_result_contracts() {
+    for mode in ["aliases", "branches", "result"] {
+        for flag in [false, true] {
+            for reverse in [false, true] {
+                let (left, right) = if reverse {
+                    ("is_finite", "is_nan")
+                } else {
+                    ("is_nan", "is_finite")
+                };
+                let (prefix, signature) = match mode {
+                    "aliases" => (String::new(), "&Pair -> Mask"),
+                    "branches" => (
+                        format!(
+                            "left: &Pair -> tensor[*,bool] = {left}\n right: &Pair -> tensor[*,bool] = {right}\n"
+                        ),
+                        "&tensor[*,f64] -> Mask",
+                    ),
+                    _ => (String::new(), "&tensor[*,f64] -> Mask"),
+                };
+                let choice = if mode == "branches" {
+                    "if flag then left else right".to_string()
+                } else {
+                    format!("if flag then {left} else {right}")
+                };
+                for width in [2, 3] {
+                    let values = if width == 2 {
+                        "1.0f64, 2.0f64"
+                    } else {
+                        "1.0f64, 2.0f64, 3.0f64"
+                    };
+                    let source = format!(
+                        r#"
+type Pair = tensor[2,f64]
+type Mask = tensor[2,bool]
+def run(flag: bool, x: tensor[*,f64]) -> tensor[*,bool] = {{
+  {prefix}
+  f: {signature} = {choice}
+  alias = copy(copy(f))
+  alias(x)
+}}
+result = run({flag},to_tensor([{values}]))
+after = print("after")
+"#
+                    );
+                    if width == 2 {
+                        let output = evaluate(&source);
+                        assert_eq!(
+                            output.lines().filter(|line| *line == "after").count(),
+                            1,
+                            "{output}"
+                        );
+                    } else {
+                        let dir = tempfile::tempdir().unwrap();
+                        let path = dir.path().join("branch_result.ch");
+                        std::fs::write(&path, &source).unwrap();
+                        let check = Command::cargo_bin("chelis")
+                            .unwrap()
+                            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                            .arg("check")
+                            .arg(&path)
+                            .output()
+                            .unwrap();
+                        assert!(check.status.success(), "{source}\n{check:?}");
+                        let output = Command::cargo_bin("chelis")
+                            .unwrap()
+                            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                            .args(["eval", "--file"])
+                            .arg(path)
+                            .output()
+                            .unwrap();
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        assert!(!output.status.success(), "{source}\n{output:?}");
+                        let op = if mode == "result" {
+                            if flag != reverse {
+                                "is_nan"
+                            } else {
+                                "is_finite"
+                            }
+                        } else {
+                            "load"
+                        };
+                        assert!(
+                            stderr.contains(&format!("domain in {op}")),
+                            "{source}\n{stderr}"
+                        );
+                        assert!(!String::from_utf8_lossy(&output.stdout).contains("after"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// [04-INF-9], Deep let/block values and [05-OP-20..21]: lexical return
+/// composition cannot depend on redundant metadata or an unrelated IO effect.
+#[test]
+fn runtime_callable_block_results_preserve_selected_identity() {
+    for explicit in [false, true] {
+        for nested_copy in [false, true] {
+            for reverse in [false, true] {
+                for flag in [false, true] {
+                    let signature = if explicit {
+                        ": &tensor[2,f64] -> tensor[2,bool]"
+                    } else {
+                        ""
+                    };
+                    let tail = if nested_copy {
+                        "copy(copy(local))"
+                    } else {
+                        "local"
+                    };
+                    let (left, right) = if reverse {
+                        ("is_finite", "is_nan")
+                    } else {
+                        ("is_nan", "is_finite")
+                    };
+                    let source = format!(
+                        r#"
+def run(flag: bool, x: tensor[2,f64]) -> tensor[2,bool] = {{
+  f{signature} = if flag then {{ local = {left}
+    {tail} }} else {{ local = {right}
+    {tail} }}
+  alias = copy(f)
+  alias(x)
+}}
+result = run({flag},to_tensor([div(0.0f64,0.0f64),-0.0f64]))
+"#
+                    );
+                    let output = evaluate(&source);
+                    let expected = if flag != reverse {
+                        "[true, false]"
+                    } else {
+                        "[false, true]"
+                    };
+                    assert!(
+                        output.contains(&format!("result = tensor(shape=[2], data={expected})")),
+                        "{source}\n{output}"
+                    );
+                    assert_runtime_callable_c_fence(&source);
+                }
+            }
+        }
+    }
+}
+
+/// Run a checked runtime-shape fixture with an independent mask/trap oracle.
+fn assert_callable_copy_contract(
+    source: &str,
+    trap: Option<&str>,
+    mask: &str,
+    entry: Option<&str>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(if source.trim_start().starts_with('(') {
+        "copy_contract.dp"
+    } else {
+        "copy_contract.ch"
+    });
+    std::fs::write(&path, source).unwrap();
+    let check = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(check.status.success(), "{source}\n{check:?}");
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).expect("check JSON");
+    assert_eq!(report["score"].as_f64(), Some(1.0), "{source}\n{report}");
+    assert_eq!(
+        report["errors"],
+        serde_json::json!([]),
+        "{source}\n{report}"
+    );
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Some(trap) = trap {
+        assert!(!output.status.success(), "{source}\n{stdout}");
+        assert!(stderr.contains(trap), "{source}\n{stderr}");
+        assert!(!stdout.contains("after"), "{source}\n{stdout}");
+        if trap == "domain in load" {
+            assert!(
+                !stdout.contains("_enter"),
+                "input contract precedes body IO: {source}\n{stdout}"
+            );
+        }
+    } else {
+        assert!(output.status.success(), "{source}\n{stderr}");
+        assert!(
+            stdout.contains(mask),
+            "independent Bool mask: {source}\n{stdout}"
+        );
+        assert_eq!(
+            stdout.lines().filter(|line| *line == "after").count(),
+            1,
+            "{stdout}"
+        );
+        if let Some(entry) = entry {
+            assert_eq!(
+                stdout.lines().filter(|line| *line == entry).count(),
+                1,
+                "{stdout}"
+            );
+            assert_eq!(
+                stdout
+                    .lines()
+                    .filter(|line| line.ends_with("_enter"))
+                    .count(),
+                1,
+                "{stdout}"
+            );
+        }
+    }
+}
+
+/// [04-INF-9]/4.7/5.6: a Copy's own input/result claim must survive;
+/// no outer signature or earlier adapter may accidentally enforce it instead.
+#[test]
+fn runtime_callable_copy_independent_input_and_result_contracts() {
+    for input_claim in [true, false] {
+        for operand in ["f", "copy(f)", "copy(copy(f))"] {
+            for flag in [false, true] {
+                for reverse in [false, true] {
+                    let (left, right) = if reverse {
+                        ("is_finite", "is_nan")
+                    } else {
+                        ("is_nan", "is_finite")
+                    };
+                    for width in [2, 3] {
+                        let (input, result) = if input_claim { ("2", "*") } else { ("*", "2") };
+                        let values = if width == 2 {
+                            "1.0f64,2.0f64"
+                        } else {
+                            "1.0f64,2.0f64,3.0f64"
+                        };
+                        let source = format!(
+                            "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {{\n f = if flag then {left} else {right}\n g: &tensor[{input}, f64] -> tensor[{result}, bool] = {operand}\n wide: &tensor[*, f64] -> tensor[*, bool] = copy(copy(g))\n wide(x)\n}}\nresult = run({flag},to_tensor([{values}]))\nafter = print(\"after\")\n"
+                        );
+                        let predicate = if flag { left } else { right };
+                        let trap = (width == 3).then(|| {
+                            if input_claim {
+                                "domain in load"
+                            } else if predicate == "is_nan" {
+                                "domain in is_nan"
+                            } else {
+                                "domain in is_finite"
+                            }
+                        });
+                        let mask = if predicate == "is_nan" {
+                            "data=[false, false]"
+                        } else {
+                            "data=[true, true]"
+                        };
+                        assert_callable_copy_contract(&source, trap, mask, None);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Two independently authored axes remain cumulative through widening copies.
+#[test]
+fn runtime_callable_copy_rank_two_cumulative_contracts() {
+    for flag in [false, true] {
+        for reverse in [false, true] {
+            let (left, right) = if reverse {
+                ("is_finite", "is_nan")
+            } else {
+                ("is_nan", "is_finite")
+            };
+            for (rows, columns) in [(2, 3), (2, 4), (3, 3), (3, 4)] {
+                let row = format!("[{}]", vec!["1.0f64"; columns].join(","));
+                let values = vec![row; rows].join(",");
+                let source = format!(
+                    "def run(flag: bool, x: tensor[*, *, f64]) -> tensor[*, *, bool] = {{\n f: &tensor[2, *, f64] -> tensor[*, *, bool] = if flag then {left} else {right}\n g: &tensor[*, 3, f64] -> tensor[*, *, bool] = copy(f)\n wide: &tensor[*, *, f64] -> tensor[*, *, bool] = copy(copy(g))\n wide(x)\n}}\nresult = run({flag},to_tensor([{values}]))\nafter = print(\"after\")\n"
+                );
+                let mask = if flag != reverse {
+                    "shape=[2, 3], data=[false, false, false, false, false, false]"
+                } else {
+                    "shape=[2, 3], data=[true, true, true, true, true, true]"
+                };
+                assert_callable_copy_contract(
+                    &source,
+                    ((rows, columns) != (2, 3)).then_some("domain in load"),
+                    mask,
+                    None,
+                );
+            }
+        }
+    }
+}
+
+/// An outer copied input obligation precedes selected-body IO, even when an
+/// inner result obligation would eventually trap at the classifier instead.
+#[test]
+fn runtime_callable_copy_input_guards_before_selected_body_effects() {
+    for flag in [false, true] {
+        for reverse in [false, true] {
+            let (left, right) = if reverse {
+                ("right", "left")
+            } else {
+                ("left", "right")
+            };
+            for width in [2, 3] {
+                let values = if width == 2 {
+                    "1.0f64,2.0f64"
+                } else {
+                    "1.0f64,2.0f64,3.0f64"
+                };
+                let source = format!(
+                    "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {{\n left = fn (z: tensor[*, f64]) -> {{\n _ = print(\"left_enter\")\n is_nan(z)\n }}\n right = fn (z: tensor[*, f64]) -> {{\n _ = print(\"right_enter\")\n is_finite(z)\n }}\n f: tensor[*, f64] -> tensor[2, bool] = if flag then {left} else {right}\n wide: tensor[*, f64] -> tensor[*, bool] = copy(f)\n g: tensor[2, f64] -> tensor[*, bool] = copy(copy(wide))\n g(x)\n}}\nresult = run({flag},to_tensor([{values}]))\nafter = print(\"after\")\n"
+                );
+                let selected_left = flag != reverse;
+                assert_callable_copy_contract(
+                    &source,
+                    (width == 3).then_some("domain in load"),
+                    if selected_left {
+                        "data=[false, false]"
+                    } else {
+                        "data=[true, true]"
+                    },
+                    Some(if selected_left {
+                        "left_enter"
+                    } else {
+                        "right_enter"
+                    }),
+                );
+            }
+        }
+    }
+}
+
+/// Unannotated copies still preserve static identity and supported native routes.
+#[test]
+fn runtime_callable_copy_unannotated_static_native_control() {
+    let source = "f = is_nan\ng = copy(copy(f))\nresult = g(to_tensor([1.0f64,2.0f64]))\nafter = print(\"after\")\n";
+    assert_callable_copy_contract(source, None, "data=[false, false]", None);
+    let evaluated = evaluate(source);
+    assert_eq!(build_and_run(source, "unannotated_copy_static"), evaluated);
+}
+
+/// Produce public Deep authoring with one binding's optional Surf marker
+/// independently absent, explicit, or inferred. The type syntax is unchanged.
+fn callable_deep_binding_origin(
+    source: &str,
+    origin: Option<chelis_deep::annotations::BindingTypeOrigin>,
+) -> String {
+    fn rewrite(
+        expr: &chelis_deep::Expr,
+        origin: Option<chelis_deep::annotations::BindingTypeOrigin>,
+    ) -> chelis_deep::Expr {
+        let chelis_deep::Expr::Node(node, span) = expr else {
+            return expr.clone();
+        };
+        let mut children: Vec<_> = node
+            .children_slice()
+            .iter()
+            .map(|child| rewrite(child, origin))
+            .collect();
+        if node.tag() == chelis_deep::DeepTag::Bind {
+            for pair in children.as_chunks_mut::<2>().0 {
+                if matches!(&pair[0], chelis_deep::Expr::Atom(chelis_deep::Atom::Name(name), _) if name == "g")
+                {
+                    let chelis_deep::Expr::Node(value, value_span) = &pair[1] else {
+                        panic!("binding initializer")
+                    };
+                    let mut metadata = value.meta().clone();
+                    metadata.remove(chelis_deep::annotations::MetadataKey::SurfBindingType);
+                    if let Some(origin) = origin {
+                        metadata.replace(chelis_deep::annotations::MetadataValue::SurfBindingType(
+                            chelis_deep::annotations::Spanned::new(origin, *value_span),
+                        ));
+                    }
+                    pair[1] = chelis_deep::Expr::node(
+                        value.tag(),
+                        metadata,
+                        value.children_slice().to_vec(),
+                        *value_span,
+                    );
+                }
+            }
+        }
+        chelis_deep::Expr::node(node.tag(), node.meta().clone(), children, *span)
+    }
+    let deep = chelis_surf::desugar::desugar_program(
+        &chelis_surf::parser::parse_str(source).expect("Surf fixture parses"),
+    )
+    .expect("desugars");
+    chelis_deep::printer::print_canonical(
+        &deep
+            .iter()
+            .map(|expr| rewrite(expr, origin))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn assert_deep_callable_binding_contract(input_claim: bool) {
+    use chelis_deep::annotations::BindingTypeOrigin;
+    for origin in [
+        None,
+        Some(BindingTypeOrigin::Explicit),
+        Some(BindingTypeOrigin::Inferred),
+    ] {
+        for operand in ["f", "copy(copy(f))"] {
+            for width in [2, 3] {
+                let (input, result) = if input_claim { ("2", "*") } else { ("*", "2") };
+                let values = if width == 2 {
+                    "1.0f64,2.0f64"
+                } else {
+                    "1.0f64,2.0f64,3.0f64"
+                };
+                let source = format!(
+                    "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {{\n f = if flag then is_nan else is_finite\n g: &tensor[{input}, f64] -> tensor[{result}, bool] = {operand}\n g(x)\n}}\nresult = run(true,to_tensor([{values}]))\nafter = print(\"after\")\n"
+                );
+                let deep = callable_deep_binding_origin(&source, origin);
+                let trap = (width == 3 && origin != Some(BindingTypeOrigin::Inferred)).then_some(
+                    if input_claim {
+                        "domain in load"
+                    } else {
+                        "domain in is_nan"
+                    },
+                );
+                let mask = if width == 2 {
+                    "data=[false, false]"
+                } else {
+                    "data=[false, false, false]"
+                };
+                assert_callable_copy_contract(&deep, trap, mask, None);
+            }
+        }
+    }
+}
+
+/// Deep author constraints have the same entry semantics without a Surf marker.
+#[test]
+fn runtime_callable_deep_origin_input_contract() {
+    assert_deep_callable_binding_contract(true);
+}
+
+/// Result obligations remain independent of input guards and source spelling.
+#[test]
+fn runtime_callable_deep_origin_result_contract() {
+    assert_deep_callable_binding_contract(false);
+}
+
+/// Retained adapters carry closed operation identity through ownership lowering;
+/// both branch values agree, so this requires no general first-class C ABI.
+#[test]
+fn runtime_callable_ascribed_copy_same_identity_native() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for operand in ["copy(f)", "copy(copy(f))"] {
+            let source = format!(
+                "def run(flag: bool, x: tensor[2, {dtype}]) -> tensor[2, bool] = {{\n f = if flag then is_finite else is_finite\n g: &tensor[2, {dtype}] -> tensor[2, bool] = {operand}\n g(x)\n}}\nleft = run(true,to_tensor([1.0{dtype},div(0.0{dtype},0.0{dtype})]))\nright = run(false,to_tensor([1.0{dtype},div(0.0{dtype},0.0{dtype})]))\n"
+            );
+            let evaluated = evaluate(&source);
+            for name in ["left", "right"] {
+                assert!(
+                    evaluated.contains(&format!("{name} = tensor(shape=[2], data=[true, false])")),
+                    "{source}\n{evaluated}"
+                );
+            }
+            assert_eq!(
+                build_and_run(&source, &format!("ascribed_same_{dtype}")),
+                evaluated
+            );
+        }
+    }
+}
+
+/// Restoring static operation identity cannot discard the adapter's guard.
+#[test]
+fn runtime_callable_ascribed_copy_same_identity_native_false_input() {
+    for operand in ["copy(f)", "copy(copy(f))"] {
+        let source = format!(
+            "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {{\n f = if flag then is_finite else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = {operand}\n g(x)\n}}\nresult = run(false,to_tensor([1.0f64,2.0f64,3.0f64]))\nafter = print(\"after\")\n"
+        );
+        assert_callable_copy_contract(&source, Some("domain in load"), "", None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("same_false.ch");
+        let output = dir.path().join("native");
+        std::fs::write(&path, &source).unwrap();
+        let built = Command::cargo_bin("chelis")
+            .unwrap()
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .arg("build")
+            .arg(&path)
+            .args(["--target", "c", "--output"])
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(built.status.success(), "{source}\n{built:?}");
+        let run = std::process::Command::new(output.join("same_false"))
+            .output()
+            .unwrap();
+        assert!(!run.status.success(), "{source}\n{run:?}");
+        assert!(
+            String::from_utf8_lossy(&run.stderr).contains("domain in load"),
+            "{source}\n{run:?}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&run.stdout).contains("after"),
+            "{source}\n{run:?}"
+        );
+    }
+}
+
+/// A copied selected value keeps one defining contract authority at a closed join.
+#[test]
+fn runtime_callable_copy_shared_authority_join_native() {
+    for flag in [true, false] {
+        let source = format!(
+            "def select(flag: bool) -> bool = {{ _ = print(\"select\")\n flag }}\ndef run(flag: bool, x: tensor[2, f64]) -> tensor[2, bool] = {{\n f: &tensor[2, f64] -> tensor[2, bool] = is_finite\n g = if select(flag) then copy(f) else copy(f)\n g(x)\n}}\nresult = run({flag},to_tensor([1.0f64,div(0.0f64,0.0f64)]))\n"
+        );
+        let evaluated = evaluate(&source);
+        assert_eq!(evaluated.matches("select").count(), 1, "{evaluated}");
+        assert!(evaluated.contains("data=[true, false]"), "{evaluated}");
+        assert_eq!(build_and_run(&source, "shared_authority"), evaluated);
+    }
+}
+
+/// Equal authored syntax cannot choose between independently formed authorities.
+#[test]
+fn runtime_callable_copy_distinct_authority_join_is_typed_unsupported() {
+    let source = "def run(flag: bool, x: tensor[2, f64]) -> tensor[2, bool] = {\n left: &tensor[2, f64] -> tensor[2, bool] = is_finite\n right: &tensor[2, f64] -> tensor[2, bool] = is_finite\n g = if flag then copy(left) else copy(right)\n g(x)\n}\nresult = run(false,to_tensor([1.0f64,2.0f64]))\n";
+    assert!(evaluate(source).contains("data=[true, true]"));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("distinct_authority.ch");
+    std::fs::write(&path, source).unwrap();
+    let built = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("build")
+        .arg(&path)
+        .args(["--target", "c", "--output"])
+        .arg(dir.path().join("out"))
+        .output()
+        .unwrap();
+    assert!(!built.status.success(), "{built:?}");
+    let error = String::from_utf8_lossy(&built.stderr);
+    assert!(error.contains("chelis#879"), "{error}");
+    assert!(
+        !error.contains("unknown callee") && !error.contains("chelis#730"),
+        "{error}"
+    );
+}
+
+/// Native lowering consumes the same binding-owned Deep contract as Eval.
+#[test]
+fn runtime_callable_copy_deep_owner_native_guards() {
+    use chelis_deep::annotations::BindingTypeOrigin;
+    for origin in [
+        None,
+        Some(BindingTypeOrigin::Explicit),
+        Some(BindingTypeOrigin::Inferred),
+    ] {
+        for input_claim in [true, false] {
+            for width in [2, 3] {
+                let (input, result) = if input_claim { ("2", "*") } else { ("*", "2") };
+                let values = if width == 2 {
+                    "1.0f64,2.0f64"
+                } else {
+                    "1.0f64,2.0f64,3.0f64"
+                };
+                let source = format!(
+                    "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {{\n f = if flag then is_finite else is_finite\n g: &tensor[{input}, f64] -> tensor[{result}, bool] = copy(copy(f))\n g(x)\n}}\nresult = run(false,to_tensor([{values}]))\nafter = print(\"after\")\n"
+                );
+                let deep = callable_deep_binding_origin(&source, origin);
+                let trap = (width == 3 && origin != Some(BindingTypeOrigin::Inferred)).then_some(
+                    if input_claim {
+                        "domain in load"
+                    } else {
+                        "domain in is_finite"
+                    },
+                );
+                let mask = if width == 2 {
+                    "data=[true, true]"
+                } else {
+                    "data=[true, true, true]"
+                };
+                assert_callable_copy_contract(&deep, trap, mask, None);
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("deep_owner.dp");
+                std::fs::write(&path, &deep).unwrap();
+                let output = dir.path().join("out");
+                let built = Command::cargo_bin("chelis")
+                    .unwrap()
+                    .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                    .arg("build")
+                    .arg(&path)
+                    .args(["--target", "c", "--output"])
+                    .arg(&output)
+                    .output()
+                    .unwrap();
+                assert!(
+                    built.status.success(),
+                    "{origin:?} input={input_claim} width={width}\n{built:?}"
+                );
+                let run = std::process::Command::new(output.join("deep_owner"))
+                    .output()
+                    .unwrap();
+                let stdout = String::from_utf8_lossy(&run.stdout);
+                let stderr = String::from_utf8_lossy(&run.stderr);
+                if let Some(trap) = trap {
+                    assert!(
+                        !run.status.success(),
+                        "{origin:?} input={input_claim} width={width}\n{run:?}"
+                    );
+                    assert!(stderr.contains(trap), "{stderr}");
+                    assert!(!stdout.contains("after"), "{stdout}");
+                } else {
+                    assert!(run.status.success(), "{run:?}");
+                    assert!(stdout.contains(mask), "{stdout}");
+                    assert_eq!(
+                        stdout.lines().filter(|line| *line == "after").count(),
+                        1,
+                        "{stdout}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// [04-INF-9]: numeric and host callable consumers share checked source ownership.
+#[test]
+fn numeric_callable_deep_bindings_preserve_entry_and_result_contracts() {
+    use chelis_deep::annotations::BindingTypeOrigin;
+    for origin in [
+        None,
+        Some(BindingTypeOrigin::Explicit),
+        Some(BindingTypeOrigin::Inferred),
+    ] {
+        for input_claim in [true, false] {
+            for producer in ["is_finite", "copy(copy(is_finite))"] {
+                for width in [2, 3] {
+                    let (input, result) = if input_claim { ("2", "*") } else { ("*", "2") };
+                    let values = vec!["1.0f64"; width].join(",");
+                    let source = format!(
+                        "def run(x: tensor[*,f64]) -> tensor[*,bool] = {{\n g: &tensor[{input},f64] -> tensor[{result},bool] = {producer}\n g(x)\n}}\nresult = run(to_tensor([{values}]))\nafter = print(\"after\")\n"
+                    );
+                    let deep = callable_deep_binding_origin(&source, origin);
+                    let trap = (width == 3 && origin != Some(BindingTypeOrigin::Inferred))
+                        .then_some(if input_claim {
+                            "domain in load"
+                        } else {
+                            "domain in is_finite"
+                        });
+                    let mask = if width == 2 {
+                        "data=[true, true]"
+                    } else {
+                        "data=[true, true, true]"
+                    };
+                    assert_callable_copy_contract(&deep, trap, mask, None);
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("numeric_deep_owner.dp");
+                    std::fs::write(&path, &deep).unwrap();
+                    let output = dir.path().join("out");
+                    let built = Command::cargo_bin("chelis")
+                        .unwrap()
+                        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                        .arg("build")
+                        .arg(&path)
+                        .args(["--target", "c", "--output"])
+                        .arg(&output)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        built.status.success(),
+                        "{origin:?}, {producer}, input={input_claim}, width={width}: {built:?}"
+                    );
+                    let native = std::process::Command::new(output.join("numeric_deep_owner"))
+                        .output()
+                        .unwrap();
+                    let stdout = String::from_utf8_lossy(&native.stdout);
+                    let stderr = String::from_utf8_lossy(&native.stderr);
+                    if let Some(trap) = trap {
+                        assert!(
+                            !native.status.success(),
+                            "{origin:?}, {producer}, input={input_claim}, width={width}: {native:?}"
+                        );
+                        assert!(stderr.contains(trap), "{stderr}");
+                        assert!(!stdout.contains("after"), "{stdout}");
+                    } else {
+                        assert!(native.status.success(), "{native:?}");
+                        assert!(stdout.contains(mask), "{stdout}");
+                        assert_eq!(
+                            stdout.lines().filter(|line| *line == "after").count(),
+                            1,
+                            "{stdout}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn assert_copied_host_contract_native(source: &str, trap: bool, expected: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("copied_host_contract.ch");
+    std::fs::write(&path, source).unwrap();
+    let checked = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{source}\n{checked:?}");
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
+    assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+    let evaluated = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let output = dir.path().join("out");
+    let built = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("build")
+        .arg(&path)
+        .args(["--target", "c", "--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{source}\n{built:?}");
+    let native = std::process::Command::new(output.join("copied_host_contract"))
+        .output()
+        .unwrap();
+    for result in [&evaluated, &native] {
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        if trap {
+            assert!(!result.status.success(), "{source}\n{result:?}");
+            assert!(stderr.contains("numeric trap: domain"), "{stderr}");
+            if stderr.contains("input `arg0[0]`") {
+                assert!(
+                    stderr.contains("input `arg0[0]` axis 0 expected 2, got 3"),
+                    "{stderr}"
+                );
+                assert!(stderr.contains("domain in load at i64"), "{stderr}");
+            } else {
+                assert!(stderr.contains("extent `2`"), "{stderr}");
+            }
+            assert!(!stdout.contains("after-copied-host"), "{stdout}");
+        } else {
+            assert!(result.status.success(), "{source}\n{result:?}");
+            assert!(stdout.contains(expected), "{stdout}");
+            assert_eq!(
+                stdout
+                    .lines()
+                    .filter(|line| *line == "after-copied-host")
+                    .count(),
+                1,
+                "{stdout}"
+            );
+        }
+    }
+    if !trap {
+        assert_eq!(native.stdout, evaluated.stdout);
+    }
+}
+
+/// Host-only Copy inputs retain nested tensor entry obligations.
+#[test]
+fn runtime_callable_copy_host_nested_entry_native() {
+    for operand in ["copy(f)", "copy(copy(f))"] {
+        for width in [2, 3] {
+            let elements = vec!["1.0f32"; width].join(",");
+            let source = format!(
+                "def run(x: List[tensor[*, f32]]) -> i64 = {{\n f: &List[tensor[2, f32]] -> i64 = len\n g = {operand}\n g(x)\n}}\nresult = run([to_tensor([{elements}])])\nafter = print(\"after-copied-host\")\n"
+            );
+            assert_copied_host_contract_native(&source, width == 3, "result = 1");
+        }
+    }
+}
+
+/// Copied projecting builtins retain direct and nested result obligations.
+#[test]
+fn runtime_callable_copy_host_nested_result_native() {
+    for nested in [false, true] {
+        let (input, result) = if nested {
+            ("List[List[tensor[*, f32]]]", "List[tensor[2, f32]]")
+        } else {
+            ("List[tensor[*, f32]]", "tensor[2, f32]")
+        };
+        let outer_result = if nested {
+            "List[tensor[*, f32]]"
+        } else {
+            "tensor[*, f32]"
+        };
+        for width in [2, 3] {
+            let elements = vec!["1.0f32"; width].join(",");
+            let value = if nested {
+                format!("[[to_tensor([{elements}])]]")
+            } else {
+                format!("[to_tensor([{elements}])]")
+            };
+            let source = format!(
+                "def run(x: {input}) -> {outer_result} = {{\n f: &{input} -> i64 -> {result} = index\n g = copy(copy(f))\n g(x, 0i64)\n}}\nresult = run({value})\nafter = print(\"after-copied-host\")\n"
+            );
+            assert_copied_host_contract_native(&source, width == 3, "shape=[2]");
+        }
+    }
+}
+
+/// Forming/copying/forwarding an uninvoked callback creates no observation.
+#[test]
+fn runtime_callable_copy_host_uninvoked_contracts_native() {
+    for (operation, signature) in [
+        ("len", "&List[tensor[2, f32]] -> i64"),
+        ("index", "&List[tensor[*, f32]] -> i64 -> tensor[2, f32]"),
+    ] {
+        let source = format!(
+            "def keep(h: ({signature}), x: List[tensor[*, f32]]) -> i64 = len(x)\ndef run(x: List[tensor[*, f32]]) -> i64 = {{\n f: {signature} = {operation}\n g = copy(copy(f))\n keep(g, x)\n}}\nresult = run([to_tensor([1.0f32, 2.0f32, 3.0f32])])\nafter = print(\"after-copied-host\")\n"
+        );
+        assert_copied_host_contract_native(&source, false, "result = 1");
     }
 }

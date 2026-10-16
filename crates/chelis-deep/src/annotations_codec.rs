@@ -389,10 +389,12 @@ pub(crate) enum WireExpr {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WireMetadata {
     pub(crate) entries: Vec<(String, WireExpr)>,
+    pub(crate) checked_binding_owner: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WireMetaExpr {
     pub(crate) entries: Vec<(String, WireExpr)>,
+    pub(crate) checked_binding_owner: Option<String>,
     pub(crate) expr: Box<WireExpr>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -428,7 +430,11 @@ impl WireExpr {
             }
             Self::Map(v, span) => RawExpr::Map(v.into_raw(), span),
             Self::MetaExpr(v, span) => RawExpr::MetaExpr {
-                entries: WireMetadata { entries: v.entries }.into_raw(),
+                entries: WireMetadata {
+                    entries: v.entries,
+                    checked_binding_owner: v.checked_binding_owner,
+                }
+                .into_raw(),
                 expr: Box::new(v.expr.into_raw()),
                 span,
             },
@@ -469,6 +475,7 @@ impl WireExpr {
                 crate::MetaExpr {
                     metadata: WireMetadata {
                         entries: meta.entries,
+                        checked_binding_owner: meta.checked_binding_owner,
                     }
                     .into_metadata()?,
                     expr: Box::new(meta.expr.into_ast(key)?),
@@ -533,6 +540,7 @@ impl WireMetadata {
                 metadata.extensions_mut().insert(key, data)?;
             }
         }
+        metadata.set_checked_binding_owner(self.checked_binding_owner);
         Ok(metadata)
     }
 }
@@ -675,10 +683,12 @@ impl Serialize for crate::MetaExpr {
         #[derive(Serialize)]
         struct Prefix<'a> {
             entries: Vec<(String, WireExpr)>,
+            checked_binding_owner: Option<String>,
             expr: &'a Expr,
         }
         Prefix {
             entries: WireMetadata::from_metadata(&self.metadata).entries,
+            checked_binding_owner: self.metadata.checked_binding_owner().map(str::to_owned),
             expr: &self.expr,
         }
         .serialize(serializer)
@@ -689,12 +699,14 @@ impl<'de> Deserialize<'de> for crate::MetaExpr {
         #[derive(Deserialize)]
         struct Prefix {
             entries: Vec<(String, WireExpr)>,
+            checked_binding_owner: Option<String>,
             expr: Box<Expr>,
         }
         let prefix = Prefix::deserialize(d)?;
         Ok(Self {
             metadata: WireMetadata {
                 entries: prefix.entries,
+                checked_binding_owner: prefix.checked_binding_owner,
             }
             .into_metadata()
             .map_err(serde::de::Error::custom)?,
@@ -738,6 +750,7 @@ fn binder_wire(v: &PropertyBinder) -> WireExpr {
         BinderSpelling::Prefix => WireExpr::MetaExpr(
             WireMetaExpr {
                 entries: WireMetadata::from_metadata(v.metadata()).entries,
+                checked_binding_owner: v.metadata().checked_binding_owner().map(str::to_owned),
                 expr: Box::new(symbol(&v.name)),
             },
             v.span(),
@@ -762,7 +775,10 @@ impl WireMetadata {
                 .map(|(k, v)| (k.to_string(), WireExpr::ExtensionData(v.clone()))),
         );
         entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-        Self { entries }
+        Self {
+            entries,
+            checked_binding_owner: meta.checked_binding_owner().map(str::to_owned),
+        }
     }
 }
 impl WireExpr {
@@ -791,6 +807,7 @@ impl WireExpr {
             ),
             V::DtypeBounds(v) => Self::Map(
                 WireMetadata {
+                    checked_binding_owner: None,
                     entries: v
                         .bounds()
                         .map(|(k, v)| {
@@ -882,6 +899,7 @@ impl WireExpr {
             }
             RawExpr::Map(entries, span) => Self::Map(
                 WireMetadata {
+                    checked_binding_owner: None,
                     entries: entries
                         .iter()
                         .map(|(k, v)| (k.clone(), Self::from_raw_data(v)))
@@ -895,6 +913,7 @@ impl WireExpr {
                 span,
             } => Self::MetaExpr(
                 WireMetaExpr {
+                    checked_binding_owner: None,
                     entries: entries
                         .iter()
                         .map(|(k, v)| (k.clone(), Self::from_raw_data(v)))
@@ -915,7 +934,7 @@ impl WireExpr {
     pub(crate) fn from_ast(root: &Expr) -> Self {
         /// A carrier whose children are being converted.
         enum Pending {
-            MetaExpr(Vec<(String, WireExpr)>, Span),
+            MetaExpr(WireMetadata, Span),
             Node(DeepTag, WireMetadata, usize, Span),
             BareList(usize, Span),
             UnknownForm(String, WireMetadata, usize, Span),
@@ -935,8 +954,8 @@ impl WireExpr {
                         values.push(Self::Map(WireMetadata::from_metadata(v), *span));
                     }
                     Expr::MetaExpr(v, span) => {
-                        let entries = WireMetadata::from_metadata(&v.metadata).entries;
-                        steps.push(Step::Finish(Pending::MetaExpr(entries, *span)));
+                        let metadata = WireMetadata::from_metadata(&v.metadata);
+                        steps.push(Step::Finish(Pending::MetaExpr(metadata, *span)));
                         steps.push(Step::Enter(&v.expr));
                     }
                     Expr::Node(v, span) => {
@@ -967,11 +986,12 @@ impl WireExpr {
                 },
                 Step::Finish(pending) => {
                     let value = match pending {
-                        Pending::MetaExpr(entries, span) => {
+                        Pending::MetaExpr(metadata, span) => {
                             let expr = values.pop().expect("a MetaExpr body was converted");
                             Self::MetaExpr(
                                 WireMetaExpr {
-                                    entries,
+                                    entries: metadata.entries,
+                                    checked_binding_owner: metadata.checked_binding_owner,
                                     expr: Box::new(expr),
                                 },
                                 span,

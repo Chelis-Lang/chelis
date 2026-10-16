@@ -97,7 +97,8 @@ impl CachePayload for crate::LibraryContext {
     // V25: raw origins retain their own quantified dtype restrictions.
     // V26 (#3130): Deep 0.20 removes Pipe and SurfPipeStage enum variants.
     // V28 carries mandatory rank-body evidence and its library-proof digest.
-    const FORMAT_VERSION: u32 = 28;
+    // V29 combines rank evidence with checked callable occurrence metadata.
+    const FORMAT_VERSION: u32 = 29;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -148,7 +149,8 @@ impl CachePayload for crate::StdLibContext {
     // and the branch's V40 encoded different payloads.
     // V42 (#3130): Deep 0.20 removes Pipe and SurfPipeStage enum variants.
     // V44 carries mandatory rank-body evidence and its library-proof digest.
-    const FORMAT_VERSION: u32 = 44;
+    // V45 combines rank evidence with checked callable occurrence metadata.
+    const FORMAT_VERSION: u32 = 45;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 
@@ -271,9 +273,8 @@ pub(crate) fn lowered_library_payload_matches(
                 == sorted_btree_map_bytes(expected.program_signatures())?
             && sorted_btree_map_bytes(cached.program_types())?
                 == sorted_btree_map_bytes(expected.program_types())?
-            && bincode::serialize(cached.local_tensor_ascriptions())
-                .map_err(|error| error.to_string())?
-                == bincode::serialize(expected.local_tensor_ascriptions())
+            && bincode::serialize(cached.local_ascriptions()).map_err(|error| error.to_string())?
+                == bincode::serialize(expected.local_ascriptions())
                     .map_err(|error| error.to_string())?
             && sorted_btree_map_bytes(cached.lowered_names())?
                 == sorted_btree_map_bytes(expected.lowered_names())?,

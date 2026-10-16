@@ -464,7 +464,9 @@ fn unused_exported_key_callable_values_reject_before_public_c_abi() {
             detail.contains("C host public function result")
                 || detail.contains("a host value cannot become a tensor root")
                 || (source.contains("def exported() = split_key")
-                    && detail.contains("not supported by IR evaluation as a value")),
+                    && (detail.contains("not supported by IR evaluation as a value")
+                        || (detail.contains("chelis#879")
+                            && detail.contains("returned function value")))),
             "{source}\n{error:?}"
         );
     }

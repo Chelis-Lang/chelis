@@ -455,13 +455,11 @@ pub(super) fn infer_let(
                 let shape_checkpoint = product.deferred_shape_checkpoint();
                 let literal_pattern_checkpoint = product.deferred_literal_pattern_checkpoint();
                 let contract_checkpoint = product.admission_contract_checkpoint();
-                let mut rhs_type_metadata_resolution = stamped_parts(rhs_expr)
-                    .and_then(|(_, meta, _)| {
-                        let authored = meta
-                            .surf_binding_type()
-                            .is_none_or(|origin| *origin.value() == BindingTypeOrigin::Explicit);
-                        authored.then(|| meta.ty().map(|value| value.expression()))?
-                    })
+                // Only the original source binding owns authorship. ABI
+                // metadata produced later never re-enters this query.
+                let authored_binding = source_authored_binding(rhs_expr);
+                let mut rhs_type_metadata_resolution = authored_binding
+                    .map(|(_, authored)| authored)
                     .map(|declared_ty_expr| {
                         match resolve_deep_type_with_diagnostic_owner(
                             declared_ty_expr,
@@ -489,16 +487,7 @@ pub(super) fn infer_let(
                     None,
                 );
                 let rhs_type_before_ascription = subst.apply(&expr_ty);
-                let local_ascription_origin = match stamped_parts(rhs_expr)
-                    .and_then(|(_, meta, _)| meta.surf_binding_type())
-                    .map(|origin| *origin.value())
-                {
-                    Some(BindingTypeOrigin::Explicit) => {
-                        Some(LocalTensorAscriptionOrigin::SurfExplicit)
-                    }
-                    Some(BindingTypeOrigin::Inferred) => None,
-                    None => Some(LocalTensorAscriptionOrigin::DeepTypeMetadata),
-                };
+                let local_ascription_origin = authored_binding.map(|(origin, _)| origin);
                 let mut checked_local_ascription = None;
 
                 // chelis#159: block-scoped `let name: T = expr` desugars
@@ -538,6 +527,14 @@ pub(super) fn infer_let(
                     if check_opaque_literal_ascription(rhs_expr, &declared_ty, adt_reg, errors) {
                         declared_ty
                     } else if product.defer_result_type_constraint(&expr_ty, &declared_ty, subst) {
+                        if let Some(origin) = local_ascription_origin
+                            && matches!(declared_ty, Type::Fn(..))
+                        {
+                            // Compatibility was checked by the deferred owner;
+                            // final substitution/totality freezes its full type.
+                            checked_local_ascription =
+                                Some((origin, declared_ty_expr.clone(), declared_ty.clone()));
+                        }
                         expr_ty
                     } else {
                         match unify(&expr_ty, &declared_ty, subst) {
@@ -606,8 +603,9 @@ pub(super) fn infer_let(
                     expr_ty
                 };
                 if let Some((origin, authored_type, declared_type)) = checked_local_ascription {
-                    product.record_local_tensor_ascription(
+                    product.record_local_ascription(
                         origin,
+                        rhs_expr,
                         name,
                         bind_children[i].span(),
                         authored_type.span(),

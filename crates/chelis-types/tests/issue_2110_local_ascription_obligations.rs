@@ -4,7 +4,7 @@ use chelis_surf::parser::parse_str;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::types::{Dim, Type};
 use chelis_types::{
-    CheckedProgram, LocalTensorAscriptionOrigin, build_compiled_library_context, check_ir_program,
+    CheckedProgram, LocalAscriptionOrigin, build_compiled_library_context, check_ir_program,
     check_ir_with_context, check_linearity,
 };
 
@@ -36,18 +36,15 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
 }
 "#;
     let checked = checked_surf(source);
-    let [ascription] = checked.local_tensor_ascriptions() else {
+    let [ascription] = checked.local_ascriptions() else {
         panic!(
             "expected one local tensor ascription, got {:?}",
-            checked.local_tensor_ascriptions()
+            checked.local_ascriptions()
         );
     };
 
     assert_eq!(ascription.id().get(), 0);
-    assert_eq!(
-        ascription.origin(),
-        LocalTensorAscriptionOrigin::SurfExplicit
-    );
+    assert_eq!(ascription.origin(), LocalAscriptionOrigin::SurfExplicit);
     assert_eq!(ascription.declaration_name(), Some("f"));
     assert_eq!(ascription.binding_name(), "y");
     assert_eq!(source_at(source, ascription.binding_span()), "y");
@@ -115,16 +112,13 @@ const DEEP_RUNTIME_LOCAL_ASCRIPTION: &str = r#"
 fn hand_authored_deep_type_metadata_is_an_explicit_local_ascription() {
     let checked = check_deep(DEEP_RUNTIME_LOCAL_ASCRIPTION)
         .unwrap_or_else(|result| panic!("Deep type check failed: {:?}", result.errors));
-    let [ascription] = checked.local_tensor_ascriptions() else {
+    let [ascription] = checked.local_ascriptions() else {
         panic!(
             "hand-authored Deep metadata must create one obligation: {:?}",
-            checked.local_tensor_ascriptions()
+            checked.local_ascriptions()
         );
     };
-    assert_eq!(
-        ascription.origin(),
-        LocalTensorAscriptionOrigin::DeepTypeMetadata
-    );
+    assert_eq!(ascription.origin(), LocalAscriptionOrigin::DeepTypeMetadata);
     assert_eq!(ascription.binding_name(), "y");
     assert_eq!(
         ascription.declared_type(),
@@ -191,7 +185,7 @@ def f(x: tensor[*, *, f32]) -> tensor[*, *, f32] = {
 }
 "#,
     );
-    let [ascription] = checked.local_tensor_ascriptions() else {
+    let [ascription] = checked.local_ascriptions() else {
         panic!("expected one local tensor ascription");
     };
     let claims = ascription.outstanding_claims();
@@ -213,7 +207,7 @@ def f() -> f32 = {
 "#,
     );
     assert!(
-        checked.local_tensor_ascriptions().is_empty(),
+        checked.local_ascriptions().is_empty(),
         "ordinary inferred `type` metadata is not an authored local tensor ascription"
     );
 }
@@ -229,7 +223,7 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
 }
 "#,
     );
-    let [ascription] = checked.local_tensor_ascriptions() else {
+    let [ascription] = checked.local_ascriptions() else {
         panic!("expected one local tensor ascription");
     };
     assert_eq!(
@@ -262,10 +256,10 @@ def f(choice: Choice, x: tensor[*, f32]) -> tensor[*, f32] =
   }
 "#,
     );
-    let [ascription] = checked.local_tensor_ascriptions() else {
+    let [ascription] = checked.local_ascriptions() else {
         panic!(
             "the authored match-arm binding must create one checked obligation: {:?}",
-            checked.local_tensor_ascriptions()
+            checked.local_ascriptions()
         );
     };
     assert_eq!(ascription.binding_name(), "y");
@@ -288,7 +282,7 @@ def f() -> tensor[*, f32] = {
 }
 "#,
     );
-    let [ascription] = agreeing.local_tensor_ascriptions() else {
+    let [ascription] = agreeing.local_ascriptions() else {
         panic!("expected agreeing ascription provenance");
     };
     assert!(
@@ -328,30 +322,21 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
 "#,
     );
     assert_eq!(
-        checked.clone().local_tensor_ascriptions(),
-        checked.local_tensor_ascriptions()
+        checked.clone().local_ascriptions(),
+        checked.local_ascriptions()
     );
 
     let bytes = bincode::serialize(&checked).expect("CheckedProgram serialization");
     let decoded: CheckedProgram =
         bincode::deserialize(&bytes).expect("CheckedProgram deserialization");
-    assert_eq!(
-        decoded.local_tensor_ascriptions(),
-        checked.local_tensor_ascriptions()
-    );
+    assert_eq!(decoded.local_ascriptions(), checked.local_ascriptions());
 
     let effects = checked
         .try_with_effect_annotations(checked.annotated_exprs().to_vec())
         .expect("effects-only rewrite");
-    assert_eq!(
-        effects.local_tensor_ascriptions(),
-        checked.local_tensor_ascriptions()
-    );
+    assert_eq!(effects.local_ascriptions(), checked.local_ascriptions());
     let linearity = check_linearity(&effects).expect("linearity check");
-    assert_eq!(
-        linearity.local_tensor_ascriptions(),
-        checked.local_tensor_ascriptions()
-    );
+    assert_eq!(linearity.local_ascriptions(), checked.local_ascriptions());
 }
 
 #[test]
@@ -389,7 +374,7 @@ def application_f(x: tensor[*, f32]) -> tensor[*, f32] = {
     let composed = CheckedProgram::compose(&library_checked, &application_checked)
         .expect("proof-bound checked programs compose");
 
-    let ascriptions = composed.local_tensor_ascriptions();
+    let ascriptions = composed.local_ascriptions();
     assert_eq!(ascriptions.len(), 2);
     assert_eq!(ascriptions[0].declaration_name(), Some("library_f"));
     assert_eq!(ascriptions[1].declaration_name(), Some("application_f"));
@@ -399,5 +384,596 @@ def application_f(x: tensor[*, f32]) -> tensor[*, f32] = {
         ascriptions[0].id(),
         ascriptions[1].id(),
         "composition must explicitly separate independently checked ID domains"
+    );
+}
+
+// [03-META-1], [04-INF-9], and spec/04 §4.7: callable bindings retain
+// their complete authored claims in the same checker-owned source ledger.
+fn callable_owner_source(name: &str, operand: &str) -> String {
+    format!(
+        "def {name}(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {{\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = {operand}\n g(x)\n}}\n"
+    )
+}
+
+fn callable_owner_origin(
+    expr: &chelis_deep::Expr,
+    origin: Option<chelis_deep::annotations::BindingTypeOrigin>,
+    stamp_operand_abi: bool,
+) -> chelis_deep::Expr {
+    use chelis_deep::annotations::{MetadataKey, MetadataValue, Spanned};
+    use chelis_deep::{DeepTag, Expr};
+    let Expr::Node(node, span) = expr else {
+        return expr.clone();
+    };
+    let mut children: Vec<_> = node
+        .children_slice()
+        .iter()
+        .map(|child| callable_owner_origin(child, origin, stamp_operand_abi))
+        .collect();
+    if node.tag() == DeepTag::Bind {
+        for pair in children.as_chunks_mut::<2>().0 {
+            if matches!(&pair[0], Expr::Atom(chelis_deep::Atom::Name(name), _) if name == "g") {
+                let Expr::Node(rhs, rhs_span) = &pair[1] else {
+                    panic!("fixture RHS")
+                };
+                let mut metadata = rhs.meta().clone();
+                metadata.remove(MetadataKey::SurfBindingType);
+                if let Some(origin) = origin {
+                    metadata.replace(MetadataValue::SurfBindingType(Spanned::new(
+                        origin, *rhs_span,
+                    )));
+                }
+                let mut rhs_children = rhs.children_slice().to_vec();
+                if stamp_operand_abi {
+                    let Expr::Node(operand, operand_span) = &rhs_children[0] else {
+                        panic!("fixture operand")
+                    };
+                    let mut operand_meta = operand.meta().clone();
+                    operand_meta.replace(MetadataValue::Type(
+                        metadata.ty().expect("source type").clone(),
+                    ));
+                    operand_meta.remove(MetadataKey::SurfBindingType);
+                    rhs_children[0] = Expr::node(
+                        operand.tag(),
+                        operand_meta,
+                        operand.children_slice().to_vec(),
+                        *operand_span,
+                    );
+                }
+                pair[1] = Expr::node(rhs.tag(), metadata, rhs_children, *rhs_span);
+            }
+        }
+    }
+    Expr::node(node.tag(), node.meta().clone(), children, *span)
+}
+
+#[test]
+fn callable_owner_distinguishes_deep_surf_and_inferred_binding_metadata() {
+    use chelis_deep::annotations::BindingTypeOrigin;
+    for origin in [
+        None,
+        Some(BindingTypeOrigin::Explicit),
+        Some(BindingTypeOrigin::Inferred),
+    ] {
+        for operand in ["f", "copy(copy(f))"] {
+            let source = callable_owner_source("run", operand);
+            let source_deep =
+                desugar_program(&parse_str(&source).expect("Surf parse")).expect("desugar");
+            let deep: Vec<_> = source_deep
+                .iter()
+                .map(|expr| callable_owner_origin(expr, origin, false))
+                .collect();
+            let checked = check_ir_program(&deep).expect("checked callable source");
+            let records = checked.local_ascriptions();
+            if origin == Some(BindingTypeOrigin::Inferred) {
+                assert!(
+                    records.is_empty(),
+                    "inferred ABI is not independent authorship: {records:?}"
+                );
+            } else {
+                let [record] = records else {
+                    panic!("one callable source owner, got {records:?}")
+                };
+                assert_eq!(record.binding_name(), "g");
+                assert_eq!(record.declaration_name(), Some("run"));
+                assert_eq!(
+                    record.origin(),
+                    if origin.is_none() {
+                        LocalAscriptionOrigin::DeepTypeMetadata
+                    } else {
+                        LocalAscriptionOrigin::SurfExplicit
+                    }
+                );
+                assert!(
+                    matches!(record.declared_type(), Type::Fn(_, _)),
+                    "complete Fn type: {record:?}"
+                );
+                assert!(print_expr(record.authored_type()).contains("(d-lit {} 2)"));
+                assert!(
+                    record.outstanding_claims().is_empty(),
+                    "callable frame is not a tensor axis claim"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn callable_owner_does_not_promote_nonbinding_none_origin_abi_metadata() {
+    use chelis_deep::annotations::BindingTypeOrigin;
+    let source = callable_owner_source("run", "copy(f)");
+    let deep = desugar_program(&parse_str(&source).expect("Surf parse")).expect("desugar");
+    let deep: Vec<_> = deep
+        .iter()
+        .map(|expr| callable_owner_origin(expr, Some(BindingTypeOrigin::Inferred), true))
+        .collect();
+    let checked = check_ir_program(&deep).expect("checked expression ABI stamp");
+    assert!(
+        checked.local_ascriptions().is_empty(),
+        "a None-origin stamp outside a binding owner cannot author a frame"
+    );
+}
+
+#[test]
+fn callable_owner_retains_result_only_and_nested_adapter_sources_once() {
+    let checked = checked_surf(
+        "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[*, f64] -> tensor[2, bool] = copy(f)\n h: &tensor[2, f64] -> tensor[*, bool] = copy(copy(g))\n h(x)\n}\n",
+    );
+    let records = checked.local_ascriptions();
+    assert_eq!(
+        records.len(),
+        2,
+        "one owner per independent adapter: {records:?}"
+    );
+    assert_eq!(
+        records.iter().map(|r| r.binding_name()).collect::<Vec<_>>(),
+        ["g", "h"]
+    );
+    assert_ne!(records[0].id(), records[1].id());
+    assert!(
+        matches!(records[0].declared_type(), Type::Fn(_, result) if matches!(result.as_ref(), Type::Tensor(dims, _) if dims == &[Dim::Lit(2)]))
+    );
+}
+
+#[test]
+fn callable_owner_recursive_inference_keeps_one_record_per_source_binding() {
+    let source = "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n if flag then g(x) else run(true, x)\n}\n";
+    for _ in 0..2 {
+        let checked = checked_surf(source);
+        let records = checked.local_ascriptions();
+        assert_eq!(
+            records.len(),
+            1,
+            "replay/close cannot append duplicate frames: {records:?}"
+        );
+        assert_eq!(records[0].binding_name(), "g");
+        assert_eq!(records[0].id().get(), 0);
+    }
+}
+
+#[test]
+fn callable_owner_serialization_preserves_source_and_full_claims() {
+    let checked = checked_surf(&callable_owner_source("run", "copy(copy(f))"));
+    assert_eq!(
+        checked.local_ascriptions().len(),
+        1,
+        "callable ledger must exist before serialization"
+    );
+    let encoded = bincode::serialize(&checked).expect("encode checked program");
+    let decoded: CheckedProgram = bincode::deserialize(&encoded).expect("decode checked program");
+    assert_eq!(decoded.local_ascriptions(), checked.local_ascriptions());
+    assert_eq!(bincode::serialize(&decoded).unwrap(), encoded);
+}
+
+#[test]
+fn callable_owner_proof_bound_composition_remaps_ids_and_replaces_declarations() {
+    let library_deep =
+        desugar_program(&parse_str(&callable_owner_source("helper", "copy(f)")).unwrap()).unwrap();
+    let (context, library) = build_compiled_library_context(&library_deep).expect("library checks");
+    assert_eq!(
+        library.local_ascriptions().len(),
+        1,
+        "library callable owner"
+    );
+    let new_deep =
+        desugar_program(&parse_str(&callable_owner_source("entry", "f")).unwrap()).unwrap();
+    let entry = check_ir_with_context(&context, &new_deep).expect("entry checks");
+    let composed = CheckedProgram::compose(&library, &entry).expect("proof-bound compose");
+    let records = composed.local_ascriptions();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| r.declaration_name())
+            .collect::<Vec<_>>(),
+        [Some("helper"), Some("entry")]
+    );
+    assert_ne!(
+        records[0].id(),
+        records[1].id(),
+        "independent artifact ID domains"
+    );
+    fn owners(value: &serde_json::Value, output: &mut std::collections::BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(token)) = map.get("checked_binding_owner") {
+                    output.insert(token.clone());
+                }
+                for child in map.values() {
+                    owners(child, output);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    owners(child, output);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut tokens = std::collections::BTreeSet::new();
+    owners(
+        &serde_json::to_value(composed.annotated_exprs()).unwrap(),
+        &mut tokens,
+    );
+    assert_eq!(
+        tokens,
+        records
+            .iter()
+            .map(|record| format!("local-ascription:{}", record.id().get()))
+            .collect(),
+        "AST tokens and records use the same composition offset"
+    );
+
+    let replacement_deep =
+        desugar_program(&parse_str(&callable_owner_source("helper", "copy(copy(f))")).unwrap())
+            .unwrap();
+    let replacement =
+        check_ir_with_context(&context, &replacement_deep).expect("replacement checks");
+    let composed = CheckedProgram::compose(&library, &replacement).expect("replacement compose");
+    let [record] = composed.local_ascriptions() else {
+        panic!("shadowed source owner must be removed")
+    };
+    assert_eq!(record.declaration_name(), Some("helper"));
+    assert_eq!(record.binding_name(), "g");
+}
+
+fn zero_callable_source_spans(expr: &chelis_deep::Expr) -> chelis_deep::Expr {
+    use chelis_deep::{Expr, Span};
+    let zero = Span::new(0, 0);
+    fn metadata(meta: &chelis_deep::Metadata) -> chelis_deep::Metadata {
+        let mut meta = meta.clone();
+        meta.remove(chelis_deep::annotations::MetadataKey::Span);
+        if let Some(ty) = meta.ty() {
+            let syntax = zero_callable_source_spans(ty.expression());
+            meta.replace(chelis_deep::annotations::MetadataValue::Type(
+                chelis_deep::annotations::TypeSyntax::try_new(syntax).unwrap(),
+            ));
+        }
+        if let Some(origin) = meta.surf_binding_type() {
+            let origin = *origin.value();
+            meta.replace(chelis_deep::annotations::MetadataValue::SurfBindingType(
+                chelis_deep::annotations::Spanned::new(origin, chelis_deep::Span::new(0, 0)),
+            ));
+        }
+        meta
+    }
+    match expr {
+        Expr::Atom(atom, _) => Expr::Atom(atom.clone(), zero),
+        Expr::Map(meta, _) => Expr::Map(metadata(meta), zero),
+        Expr::Node(node, _) => Expr::node(
+            node.tag(),
+            metadata(node.meta()),
+            node.children_slice()
+                .iter()
+                .map(zero_callable_source_spans)
+                .collect(),
+            zero,
+        ),
+        Expr::BareList(items, _) => {
+            Expr::BareList(items.iter().map(zero_callable_source_spans).collect(), zero)
+        }
+        _ => panic!("fixture uses only canonical stamped syntax"),
+    }
+}
+
+#[test]
+fn callable_owner_distinct_nested_bindings_ignore_equal_source_spans() {
+    let source = "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n inner = { g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n g(x) }\n g(x)\n}\n";
+    let deep = desugar_program(&parse_str(source).unwrap()).unwrap();
+    let deep: Vec<_> = deep.iter().map(zero_callable_source_spans).collect();
+    let checked = check_ir_program(&deep).expect("zero spans are valid source provenance");
+    let records = checked.local_ascriptions();
+    assert_eq!(
+        records.len(),
+        2,
+        "distinct original occurrences cannot collapse: {records:?}"
+    );
+    assert_eq!(records[0].binding_name(), "g");
+    assert_eq!(records[1].binding_name(), "g");
+    assert_eq!(records[0].binding_span(), records[1].binding_span());
+    assert_eq!(records[0].initializer_span(), records[1].initializer_span());
+    assert_eq!(records[0].authored_type(), records[1].authored_type());
+    assert_ne!(records[0].id(), records[1].id());
+    let wire = serde_json::to_value(&checked).unwrap();
+    fn tokens(value: &serde_json::Value, output: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(token)) = map.get("checked_binding_owner") {
+                    output.push(token.clone());
+                }
+                for child in map.values() {
+                    tokens(child, output);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    tokens(child, output);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut owners = Vec::new();
+    tokens(&wire["annotated_exprs"], &mut owners);
+    owners.sort();
+    owners.dedup();
+    assert_eq!(
+        owners.len(),
+        2,
+        "checked AST retains both occurrence tokens"
+    );
+}
+
+#[test]
+fn callable_owner_source_supplied_token_cannot_forge_checked_authority() {
+    use chelis_deep::annotations::BindingTypeOrigin;
+    let source = callable_owner_source("run", "copy(f)");
+    let deep = desugar_program(&parse_str(&source).unwrap()).unwrap();
+    let deep: Vec<_> = deep
+        .iter()
+        .map(|expr| callable_owner_origin(expr, Some(BindingTypeOrigin::Inferred), false))
+        .collect();
+    let mut wire = serde_json::to_value(&deep).unwrap();
+    fn forge(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.contains_key("entries") {
+                    map.insert(
+                        "checked_binding_owner".into(),
+                        serde_json::Value::String("local-ascription:0".into()),
+                    );
+                }
+                for child in map.values_mut() {
+                    forge(child);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    forge(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    forge(&mut wire);
+    let forged: Vec<chelis_deep::Expr> = serde_json::from_value(wire).expect("source AST decodes");
+    let checked = check_ir_program(&forged)
+        .expect("source token cannot substitute for authored type metadata");
+    assert!(
+        checked.local_ascriptions().is_empty(),
+        "source supplied IDs confer no checked authority"
+    );
+    let wire = serde_json::to_value(checked.annotated_exprs()).unwrap();
+    assert!(
+        !wire.to_string().contains("local-ascription:0"),
+        "checker must clear forged source tokens"
+    );
+}
+
+#[test]
+fn callable_owner_checked_rewrite_rejects_missing_or_forged_occurrence() {
+    let checked = checked_surf(&callable_owner_source("run", "copy(f)"));
+    assert_eq!(
+        checked.local_ascriptions().len(),
+        1,
+        "real source owner required"
+    );
+    for replacement in [
+        serde_json::Value::Null,
+        serde_json::json!("local-ascription:999"),
+    ] {
+        let mut wire = serde_json::to_value(checked.annotated_exprs()).unwrap();
+        fn rewrite(value: &mut serde_json::Value, replacement: &serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if map
+                        .get("checked_binding_owner")
+                        .is_some_and(serde_json::Value::is_string)
+                    {
+                        map.insert("checked_binding_owner".into(), replacement.clone());
+                    }
+                    for child in map.values_mut() {
+                        rewrite(child, replacement);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for child in values {
+                        rewrite(child, replacement);
+                    }
+                }
+                _ => {}
+            }
+        }
+        rewrite(&mut wire, &replacement);
+        let forged = serde_json::from_value(wire).expect("structural AST transport");
+        assert!(
+            checked.try_with_effect_annotations(forged).is_err(),
+            "semantic AST equality cannot authorize a wrong occurrence"
+        );
+    }
+}
+
+#[test]
+fn callable_owner_checked_rewrite_rejects_duplicate_occurrence_authority() {
+    let checked = checked_surf(
+        "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n h: &tensor[*, f64] -> tensor[2, bool] = copy(g)\n h(x)\n}\n",
+    );
+    assert_eq!(checked.local_ascriptions().len(), 2);
+    let mut wire = serde_json::to_value(checked.annotated_exprs()).unwrap();
+    fn duplicate(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map
+                    .get("checked_binding_owner")
+                    .is_some_and(serde_json::Value::is_string)
+                {
+                    map.insert(
+                        "checked_binding_owner".into(),
+                        serde_json::json!("local-ascription:0"),
+                    );
+                }
+                for child in map.values_mut() {
+                    duplicate(child);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    duplicate(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    duplicate(&mut wire);
+    let duplicate = serde_json::from_value(wire).expect("structural AST transport");
+    assert!(
+        checked.try_with_effect_annotations(duplicate).is_err(),
+        "two original bindings cannot claim one occurrence"
+    );
+}
+
+#[test]
+fn callable_owner_effect_reannotation_accepts_new_derived_effect_containers() {
+    use chelis_deep::annotations::{EffectSet, MetadataValue};
+    let checked = checked_surf(&callable_owner_source("run", "copy(f)"));
+    let mut annotated = checked.annotated_exprs().to_vec();
+    fn insert_effects(expr: &mut chelis_deep::Expr) -> bool {
+        let chelis_deep::Expr::Node(node, span) = expr else {
+            return false;
+        };
+        let mut metadata = node.meta().clone();
+        let mut children = node.children_slice().to_vec();
+        let inserted = if node.tag() == chelis_deep::DeepTag::Fn {
+            metadata.replace(MetadataValue::Effects(EffectSet::new(
+                chelis_deep::Metadata::default(),
+                vec![],
+                *span,
+            )));
+            true
+        } else {
+            children.iter_mut().any(insert_effects)
+        };
+        *expr = chelis_deep::Expr::node(node.tag(), metadata, children, *span);
+        inserted
+    }
+    assert!(annotated.iter_mut().any(insert_effects));
+    assert!(
+        checked.try_with_effect_annotations(annotated).is_ok(),
+        "derived effect containers must preserve unchanged occurrence authority"
+    );
+}
+
+#[test]
+fn callable_owner_effect_reannotation_rejects_swapped_equal_span_owners() {
+    let source = "def run(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n inner = { g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n g(x) }\n g(x)\n}\n";
+    let deep = desugar_program(&parse_str(source).unwrap()).unwrap();
+    let deep: Vec<_> = deep.iter().map(zero_callable_source_spans).collect();
+    let checked = check_ir_program(&deep).unwrap();
+    let records = checked.local_ascriptions();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].binding_name(), records[1].binding_name());
+    assert_eq!(records[0].initializer_span(), records[1].initializer_span());
+    let tokens = [
+        records[0].id().checked_owner_token(),
+        records[1].id().checked_owner_token(),
+    ];
+    let mut wire = serde_json::to_value(checked.annotated_exprs()).unwrap();
+    fn swap(value: &mut serde_json::Value, tokens: &[String; 2]) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(token)) = map.get_mut("checked_binding_owner")
+                {
+                    if token == &tokens[0] {
+                        *token = tokens[1].clone();
+                    } else if token == &tokens[1] {
+                        *token = tokens[0].clone();
+                    }
+                }
+                for child in map.values_mut() {
+                    swap(child, tokens);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    swap(child, tokens);
+                }
+            }
+            _ => {}
+        }
+    }
+    swap(&mut wire, &tokens);
+    let swapped = serde_json::from_value(wire).unwrap();
+    assert!(
+        checked.try_with_effect_annotations(swapped).is_err(),
+        "equal source spans and syntax cannot authorize exchanging occurrence owners"
+    );
+}
+
+#[test]
+fn callable_owner_effect_reannotation_rejects_moved_real_owner() {
+    let checked = checked_surf(&callable_owner_source("run", "copy(f)"));
+    let token = checked.local_ascriptions()[0].id().checked_owner_token();
+    let mut wire = serde_json::to_value(checked.annotated_exprs()).unwrap();
+    fn clear(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map
+                    .get("checked_binding_owner")
+                    .is_some_and(serde_json::Value::is_string)
+                {
+                    map.insert("checked_binding_owner".into(), serde_json::Value::Null);
+                }
+                for child in map.values_mut() {
+                    clear(child);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    clear(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn attach(value: &mut serde_json::Value, token: &str) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.contains_key("entries") {
+                    map.insert("checked_binding_owner".into(), serde_json::json!(token));
+                    return true;
+                }
+                map.values_mut().any(|child| attach(child, token))
+            }
+            serde_json::Value::Array(values) => values.iter_mut().any(|child| attach(child, token)),
+            _ => false,
+        }
+    }
+    clear(&mut wire);
+    assert!(attach(&mut wire, &token));
+    let moved = serde_json::from_value(wire).unwrap();
+    assert!(
+        checked.try_with_effect_annotations(moved).is_err(),
+        "a real occurrence token cannot move to another metadata position"
     );
 }

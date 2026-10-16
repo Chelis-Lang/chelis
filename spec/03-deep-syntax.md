@@ -26,6 +26,14 @@ Every Deep AST node is a 3-tuple:
 
 ### 1.1 Metadata
 
+Checked artifacts retain compiler-owned binding occurrence identity separately
+from author metadata and source spans. Identity is assigned from source
+occurrences, survives checked-tree cloning and serialization, and follows the
+same remapping as its checked obligation during artifact composition. Author
+metadata, including opaque extension data, cannot supply or override that
+identity. Source spans report provenance; equal spans do not identify bindings.
+
+
 The meta map carries compiler-relevant annotations. An agent MAY include metadata to constrain inference, or MAY write `{}` everywhere and let the compiler fill it in.
 
 Metadata keys use the same identifier character set as user-defined Deep
