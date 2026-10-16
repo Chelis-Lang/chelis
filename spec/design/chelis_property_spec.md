@@ -814,8 +814,9 @@ property of this rule.
 
 The guarantee this rule establishes is exactly one direction of parity: a
 counterexample Tier C would find can no longer be suppressed by an
-over-the-reals proof, so `auto` never reports a pass where `fuzz-only` reports
-a refutation. It is not a claim that `auto` and `fuzz-only` agree on every
+over-the-reals proof, so an `auto` solver proof never reports a pass where
+`fuzz-only` reports a refutation. An induction green is outside it, for the
+reason above. It is not a claim that `auto` and `fuzz-only` agree on every
 input or exit code — a Tier C run that errors or establishes nothing leaves
 `auto` reporting its proof while `fuzz-only` reports that failure, which is the
 intended asymmetry. The check also does not change what Tier C can find:
@@ -832,7 +833,7 @@ Plain text renders the disclosure in place of a sample ratio an over-the-reals
 proof does not have:
 
 ```text
-property: cancel_is_one -- proven_modulo_real_arithmetic (proved over the reals; machine arithmetic corroborated on 100 samples)
+property: sq_nonneg -- proven_modulo_real_arithmetic (proved over the reals; machine arithmetic corroborated on 100 samples)
 property: guarded -- proven_modulo_real_arithmetic (proved over the reals; machine arithmetic unchecked: <reason>)
 obligation: invariant:Probability:scale -- proved (smt; proved over the reals; machine arithmetic corroborated on 100 samples)
 ```

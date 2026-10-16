@@ -107,10 +107,11 @@ property: sq_nonneg -- proven_modulo_real_arithmetic (proved over the reals; mac
 What this check can find is bounded by what the sampler generates; it does not
 promise that every machine counterexample is reachable. What it does establish
 is one direction: a counterexample sampling would find can no longer be hidden
-by a proof, so `auto` does not report a pass where `--tier fuzz-only` reports a
-failure. The two tiers still differ in the other direction. When sampling
-errors or establishes nothing, `auto` reports the proof it has and
-`--tier fuzz-only` reports that failure.
+by a solver proof, so `auto` does not report such a pass where `--tier
+fuzz-only` reports a failure. An induction green is outside it, as above. The
+two tiers still differ in the other direction. When sampling errors or
+establishes nothing, `auto` reports the proof it has and `--tier fuzz-only`
+reports that failure.
 
 Checking the proof costs the sample budget, so proving a module whose
 properties all pass takes roughly as long as the solver and the sampler
