@@ -16044,7 +16044,12 @@ impl<'program> LowerCtx<'program> {
                     None,
                 )),
             };
-        for (claim, prepared, witnesses, signature, activation, refinements) in result_claims {
+        // Entry witnesses were prepared outer to inner; result contracts run
+        // as nested invocations return, inner to outer, with each frame's
+        // defining-scope evidence and axis order intact.
+        for (claim, prepared, witnesses, signature, activation, refinements) in
+            result_claims.into_iter().rev()
+        {
             self.bindings.restore_witnesses(witnesses);
             self.signature_witnesses = signature;
             self.activation_witnesses = activation;

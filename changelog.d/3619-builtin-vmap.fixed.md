@@ -42,3 +42,6 @@ after operand agreement and operation controls; builtin selection preserves
 the selected value's original producer.
 Tuple-bound aliases retain whole callable values through nested construction,
 copying and projection; typed builtin formals remain executable collection callbacks.
+Independent result frames check in nested invocation return order on Eval and C.
+Sequential host bindings avoid a lowering call frame per binding while retaining
+their source scope and result boundaries.

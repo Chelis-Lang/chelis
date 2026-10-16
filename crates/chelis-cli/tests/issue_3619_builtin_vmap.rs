@@ -1704,6 +1704,97 @@ fn retained_host_builtin_result_frames_survive_selection_and_unused_callbacks() 
 }
 
 #[test]
+fn retained_result_frames_check_inner_before_outer_on_return() {
+    // Independent axes keep both contracts admissible. A 4x4 result violates
+    // both: the inner invocation must finish before the outer one returns.
+    for (rows, columns, failed_axis) in [
+        (2, 3, None),
+        (2, 4, Some(1)),
+        (4, 3, Some(0)),
+        (4, 4, Some(0)),
+    ] {
+        let row = format!("[{}]", vec!["1.0f32"; columns].join(","));
+        let matrix = vec![row; rows].join(",");
+        for operation in ["index", "neg", "vmap"] {
+            let prefix = match operation {
+                "index" => {
+                    "def invoke(h: (&List[tensor[*,*,f32]] -> i64 -> tensor[*,3,f32]), x: List[tensor[*,*,f32]]) -> tensor[*,*,f32] = h(x,0i64)\n\
+             def run(x: tensor[*,*,f32]) -> tensor[*,*,f32] ! {IO} = {\n\
+             _=print(\"before-probe\")\n\
+             narrow: (&List[tensor[*,*,f32]] -> i64 -> tensor[2,*,f32]) = index\n\
+             wide: (&List[tensor[*,*,f32]] -> i64 -> tensor[*,*,f32]) = narrow\n\
+             invoke(wide,[x])\n}\n"
+                }
+                "neg" => {
+                    "def invoke(h: (&tensor[*,*,f32] -> tensor[*,3,f32]), x: tensor[*,*,f32]) -> tensor[*,*,f32] = h(x)\n\
+             def run(x: tensor[*,*,f32]) -> tensor[*,*,f32] ! {IO} = {\n\
+             _=print(\"before-probe\")\n\
+             narrow: (&tensor[*,*,f32] -> tensor[2,*,f32]) = neg\n\
+             wide: (&tensor[*,*,f32] -> tensor[*,*,f32]) = narrow\n\
+             invoke(wide,x)\n}\n"
+                }
+                "vmap" => {
+                    "def run(x: tensor[*,*,*,f32]) -> tensor[*,*,*,f32] ! {IO} = {\n\
+             _=print(\"before-probe\")\n\
+             narrow: (&tensor[*,*,f32] -> tensor[2,*,f32]) = neg\n\
+             wide: (&tensor[*,*,f32] -> tensor[*,3,f32]) = narrow\n\
+             vmap(wide)(x)\n}\n"
+                }
+                _ => unreachable!(),
+            };
+            let input = if operation == "vmap" {
+                format!("[[{matrix}]]")
+            } else {
+                format!("[{matrix}]")
+            };
+            let source =
+                format!("{prefix}result=run(to_tensor({input}))\nafter=print(\"after-probe\")");
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("result_order.ch");
+            std::fs::write(&path, source).unwrap();
+            let eval = Command::cargo_bin("chelis")
+                .unwrap()
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .args(["eval", "--file"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            let out = dir.path().join("out");
+            Command::cargo_bin("chelis")
+                .unwrap()
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .arg("build")
+                .arg(&path)
+                .args(["--target", "c", "--output"])
+                .arg(&out)
+                .assert()
+                .success();
+            let native = std::process::Command::new(out.join("result_order"))
+                .output()
+                .unwrap();
+            if let Some(axis) = failed_axis {
+                let axis = axis + usize::from(operation == "vmap");
+                let producer = if operation == "index" { "load" } else { "neg" };
+                for output in [&eval, &native] {
+                    assert!(!output.status.success(), "{output:?}");
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    assert!(
+                        stderr.contains(&format!("numeric trap: domain in {producer} at i64")),
+                        "{stderr}"
+                    );
+                    assert!(stderr.contains(&format!("axis {axis}")), "{stderr}");
+                    assert_eq!(output.stdout, b"before-probe\n");
+                }
+            } else {
+                assert!(eval.status.success(), "{eval:?}");
+                assert!(native.status.success(), "{native:?}");
+                assert_eq!(eval.stdout, native.stdout);
+            }
+        }
+    }
+}
+
+#[test]
 fn retained_builtin_control_preconditions_precede_result_extent() {
     for (operation, signature, controls) in [
         (

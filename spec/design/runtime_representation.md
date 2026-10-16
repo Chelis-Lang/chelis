@@ -1143,6 +1143,11 @@ actual's producer tree instead of introducing a declaration-interface load.
 Host tuple construction, copying and projection retain the complete callable
 leaf at its constructor position. Typed collection callbacks reify that leaf's
 ordered invocation frames through the shared application owner on every call.
+Entry contracts execute from outer frame to inner frame; result contracts unwind
+from inner frame to outer frame. Each frame retains its own declaration order
+and defining-scope witnesses on both evaluator and numeric lowering paths.
+Sequential host binding tails lower in one traversal while retaining each
+source layer's lexical scope, forwarding position and result wrapper.
 Admitted shape-identity numeric calls check operand agreement and operation control
 preconditions before their result extents and element kernels, consuming each
 extent obligation once. Runtime callable choices preserve their typed target

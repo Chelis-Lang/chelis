@@ -8991,70 +8991,52 @@ fn lower_host_expr_kind(
                 let mut scoped = scope.clone();
                 let mut bindings = Vec::new();
                 let checked_lowering = cached_subexpr_lowering_context(program);
-                let flattened = sequential_host_let_chain(expr, program, scope);
-                let flattened_regions = if let Some(chain) = flattened.as_ref() {
-                    checked_lowering.local_ascription_binding_regions(
-                        &chain.bind_expr,
-                        tensor_helpers.declaration_name.as_deref(),
-                    )
-                } else {
-                    Vec::new()
-                };
-                let crosses_nested_let = flattened.as_ref().is_some_and(|chain| {
-                    flattened_regions.iter().any(|region| {
-                        let producer_layer =
-                            chain.bindings[region.producer_binding_index() / 2].layer;
-                        region
-                            .ascription_binding_indices()
+                // A sequential tail chain is one lowering traversal. Keep
+                // each layer's scope, forwarding position and result wrapper,
+                // but do not consume a Rust call frame per source binding.
+                let (let_bindings, bind_expr, body_expr, nested_layers) =
+                    if let Some(chain) = sequential_host_let_chain(expr, program, scope) {
+                        (
+                            chain.bindings,
+                            Cow::Owned(chain.bind_expr),
+                            chain.body,
+                            Some(chain.layers),
+                        )
+                    } else {
+                        let bind_first = kids.first().ok_or_else(|| {
+                            host_expr_lowering_error(expr, "a `let` node has no bindings")
+                        })?;
+                        let bind_list = as_node(bind_first).ok_or_else(|| {
+                            host_expr_lowering_error(expr, "a `let` node has malformed bindings")
+                        })?;
+                        if bind_list.tag() != DeepTag::Bind {
+                            return Err(host_expr_lowering_error(
+                                expr,
+                                "a `let` node has malformed bindings",
+                            ));
+                        }
+                        let bind_span = bind_first.span_id();
+                        let current = bind_list
+                            .children_slice()
+                            .as_chunks::<2>()
+                            .0
                             .iter()
-                            .any(|index| chain.bindings[*index / 2].layer != producer_layer)
-                    })
-                });
-
-                let (let_bindings, bind_expr, body_expr, nested_layers) = if crosses_nested_let {
-                    let chain =
-                        flattened.expect("cross-layer region requires a flattened let chain");
-                    (
-                        chain.bindings,
-                        Cow::Owned(chain.bind_expr),
-                        chain.body,
-                        Some(chain.layers),
-                    )
-                } else {
-                    let bind_first = kids.first().ok_or_else(|| {
-                        host_expr_lowering_error(expr, "a `let` node has no bindings")
-                    })?;
-                    let bind_list = as_node(bind_first).ok_or_else(|| {
-                        host_expr_lowering_error(expr, "a `let` node has malformed bindings")
-                    })?;
-                    if bind_list.tag() != DeepTag::Bind {
-                        return Err(host_expr_lowering_error(
-                            expr,
-                            "a `let` node has malformed bindings",
-                        ));
-                    }
-                    let bind_span = bind_first.span_id();
-                    let current = bind_list
-                        .children_slice()
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|pair| SequentialHostLetBinding {
-                            binding: &pair[0],
-                            initializer: &pair[1],
-                            bind_span,
-                            layer: 0,
-                        })
-                        .collect();
-                    (
-                        current,
-                        Cow::Borrowed(bind_first),
-                        kids.get(1).ok_or_else(|| {
-                            host_expr_lowering_error(expr, "a `let` node has no body")
-                        })?,
-                        None,
-                    )
-                };
+                            .map(|pair| SequentialHostLetBinding {
+                                binding: &pair[0],
+                                initializer: &pair[1],
+                                bind_span,
+                                layer: 0,
+                            })
+                            .collect();
+                        (
+                            current,
+                            Cow::Borrowed(bind_first),
+                            kids.get(1).ok_or_else(|| {
+                                host_expr_lowering_error(expr, "a `let` node has no body")
+                            })?,
+                            None,
+                        )
+                    };
                 let local_regions = checked_lowering
                     .local_ascription_binding_regions(
                         bind_expr.as_ref(),

@@ -3904,7 +3904,7 @@ impl<'a> EvalContext<'a> {
         if EvalCallStackFrame::budget_exhausted() {
             return Err("evaluation stack budget exhausted during a function call".to_owned());
         }
-        let mut formal_claims = Vec::new();
+        let mut result_frames = Vec::new();
         if let Some(contracts) = callable.invocation_contracts() {
             for authored_contract in contracts {
                 let normalized =
@@ -3959,10 +3959,19 @@ impl<'a> EvalContext<'a> {
                     &args,
                 )?;
                 let claim = Self::with_named_result_axes(claim, Some(result), &witnesses, None)?;
-                formal_claims.extend(claim);
-                formal_claims.extend(self.nested_result_claim(result, &witnesses)?);
+                let mut frame = Vec::new();
+                frame.extend(claim);
+                frame.extend(self.nested_result_claim(result, &witnesses)?);
+                result_frames.push(frame);
             }
         }
+        // Entry contracts run outer to inner above. Results unwind the same
+        // invocation stack, retaining declaration order within each frame.
+        let mut formal_claims = result_frames
+            .into_iter()
+            .rev()
+            .flatten()
+            .collect::<Vec<_>>();
         formal_claims.extend_from_slice(claims);
         self.apply_resolved_callable_with_arg_types_impl(
             callable,
