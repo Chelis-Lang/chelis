@@ -3460,13 +3460,20 @@ impl ConstraintSamplingPlan {
             let draw = match candidates.get(attempt) {
                 Some(candidate) => *candidate,
                 None => {
-                    let (low, high) = self
-                        .resolve(name, self.domains[name], &values)
-                        .map(|(window_lower, window_upper)| {
-                            (window_lower.max(lower), window_upper.min(upper))
-                        })
-                        .filter(|(low, high)| low <= high)
-                        .unwrap_or((lower, upper));
+                    // The window is always inside the admissible range: the
+                    // synthesis narrows the same guards, and `resolve` applies
+                    // the same predecessor and reserve adjustments to both. So
+                    // no intersection is needed here -- an attempt that fails
+                    // to resolve a window has an *empty* one, which is the
+                    // case the admissible range covers. The invariant is
+                    // asserted rather than assumed, because a future change to
+                    // the window synthesis could break it silently.
+                    let window = self.resolve(name, self.domains[name], &values);
+                    debug_assert!(
+                        window.is_none_or(|(low, high)| low >= lower && high <= upper),
+                        "the proposal window for `{name}` escaped its admissible range"
+                    );
+                    let (low, high) = window.unwrap_or((lower, upper));
                     if low == high {
                         low
                     } else {

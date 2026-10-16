@@ -445,6 +445,31 @@ where x >= 0.0f64, x <= 1.0f64:
     );
 }
 
+/// Negative zero, interior to the guard. The shipped
+/// `issue_3636_negative_zero_is_proposed` test guards `x >= 0.0`, where
+/// `push(-min_positive_subnormal)` clamps up one ulp onto `-0.0` and so
+/// reintroduces it without the zeros class. An interior guard has no such
+/// route, so only `push(-0.0)` proposes it here.
+#[test]
+fn issue_3636_interior_negative_zero_is_proposed() {
+    let source = "module Edge.InteriorNegativeZero
+def subject(x: f64) -> f64 = (1.0f64 / x)
+@property positive_recip forall(x: f64)
+where x >= -1.0f64, x <= 1.0f64:
+  ((x != 0.0f64) || (subject(x) > 0.0f64))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert_eq!(witness, 0.0, "{record:#}");
+    assert!(
+        witness.is_sign_negative(),
+        "only negative zero refutes this: {record:#}"
+    );
+}
+
 /// A magnitude between the uniform proposal window and `f64::MAX`. The
 /// property is true at every edge point *except* the ladder rungs inside
 /// `(1e20, 1e40)`: `±f64::MAX`, the zeros, the subnormals and the small
@@ -651,10 +676,14 @@ fn issue_3636_partially_ordered_and_f32_order_guards_are_sampled() {
     }
 }
 
-/// Positive parity for the fallback: an ordered pair must still *reach* the
-/// extremes, not merely avoid erroring. `hi - lo` exceeds `1e292` only when
-/// both binders are near an IEEE extremum, which the proposal window's width
-/// of 20 cannot produce.
+/// An ordered pair must still *reach* the extremes, not merely avoid
+/// erroring. `hi - lo` exceeds `1e292` only when both binders are near an
+/// IEEE extremum, which the proposal window's width of 20 cannot produce.
+///
+/// This pins the schedule, not the window fallback: the refuting pair is
+/// `lo = -MAX`, `hi = next_up(-MAX)` at attempt 0, whose difference is the
+/// ulp at that magnitude, so it is found before any attempt reaches the
+/// fallback. The three tests above are what pin the fallback.
 #[test]
 fn issue_3636_binder_order_guard_reaches_extreme_magnitudes() {
     let source = "module Edge.OrderExtreme

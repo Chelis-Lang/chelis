@@ -347,6 +347,14 @@ window admits no value, given the predecessors already drawn, draws from its
 admissible range instead. Only an empty *admissible* range means the guards
 leave no representable sample, and only that reports `unsupported`.
 
+Where the window does admit a value it is always inside the admissible range,
+because the synthesis narrows the same guards and both ranges take the same
+predecessor and reserve adjustments. The fallback therefore needs no
+intersection: an unresolvable window is an empty one, which is exactly the
+case the admissible range covers. That invariant is asserted in debug builds
+rather than assumed, since a later change to the window synthesis could break
+it with no visible symptom.
+
 One known limitation: because every binder indexes its schedule by the same
 attempt ordinal, a guard the typed-generator lane can only enforce by
 rejection discards the other binders' candidates at the same ordinals. A
