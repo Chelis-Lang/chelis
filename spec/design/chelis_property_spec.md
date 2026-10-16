@@ -253,7 +253,8 @@ inputs must produce the same sample sequence.
 
 For a guarded property whose binders are all `f32`/`f64`, Tier C derives a
 sampling domain from conjunctions of scalar interval and binder-order
-comparisons (`<`, `<=`, `>`, `>=`). Constant bounds propagate through binder
+comparisons (`<`, `<=`, `>`, `>=`), plus `binder != literal` exclusions.
+Constant bounds propagate through binder
 orders before sampling, so narrow guards such as
 `0.99 < alpha1 < alpha2 < 1.0` are generated in-domain rather than discovered
 by rejection from `[-10, 10]`. Explicit bounds are not clipped to that legacy
@@ -265,13 +266,161 @@ reserve enough representable values for their remaining successors. The
 construction and its random choices are seed-deterministic. A one-sided finite
 interval chooses its missing endpoint within the binder dtype's finite range;
 the synthesis clamps at `f32::MAX`/`f64::MAX` rather than overflowing near an
-IEEE extremum. An empty interval,
+IEEE extremum. A `binder != literal` guard keeps the binder's interval and
+records the excluded value; a draw that lands on an excluded value moves to
+the nearest representable neighbour still inside the interval. An empty interval,
 an interval with too few representable values for its strict order chain,
-cyclic ordering, disjunction, equality, arithmetic operand other than unary
+an exclusion that empties a singleton interval,
+cyclic ordering, disjunction, equality, `!=` between two binders,
+arithmetic operand other than unary
 literal negation, function predicate, or other unsupported guard shape is
 `status:"unsupported"` (exit `2`) under `fuzz-only`; it cannot fall through to
 a green empirical verdict. Non-scalar guarded properties retain their existing
 typed generator and rejection behavior.
+
+### The edge schedule (chelis#3636)
+
+Which points a tier proposes decides what it can refute, and a draw taken
+uniformly over an interval visits no exact representable singularity. Such a
+draw alone cannot refute `1/(x+1) - 1/x` being infinite at `x = -1.0` strictly
+inside `-2 < x < -0.5`, nor `x * x` overflowing at a magnitude outside the
+`[-10, 10]` window, so it yields `fuzz_validated` for properties that fail at
+ordinary inputs inside their own guards.
+
+Tier C therefore proposes a **deterministic edge set before any random
+draw**, in both the constraint-directed and the typed-generator lanes. The
+run's zero-based attempt ordinal indexes the schedule: attempt `i` proposes
+the binder's edge candidate `i`, and attempts past the end of the list fall
+back to a random draw over the proposal window. The schedule governs only
+which points inside the guards are chosen; the window's width is chelis#644.
+
+Each binder's candidates are generated in this order, deduplicated by bit
+pattern, and kept only where the dtype represents them inside the
+**admissible range** — the guards clamped to the dtype's finite range, which
+for an unguarded binder is `±MAX` rather than the proposal window:
+
+1. the interval's lower and upper endpoints. For a binder the guards leave
+   unbounded on a side, that endpoint is the dtype's finite extremum, so this
+   class is what reaches `±MAX`;
+2. their adjacent representable neighbours. Under a strict guard the endpoint
+   already *is* the neighbour, so the two classes coincide there and only a
+   non-strict guard distinguishes them;
+3. for each `!=` exclusion, the excluded value's two neighbours;
+4. `0.0` and `-0.0` (distinct: `1/0.0` and `1/-0.0` differ in sign);
+5. `±` the smallest positive subnormal (not `MIN_POSITIVE`: `1.0/MIN_POSITIVE`
+   is finite at both widths, so only the subnormal reaches overflow);
+6. the small integers `±1`, `±2`, `±3`, `±10`;
+7. a fixed ladder of decade magnitudes, geometric in both directions from
+   `1e1` and ending at the `f64` extremes: `1e1, 1e3, 1e9, 1e27, 1e81, 1e243,
+   1e308` and `1e-1, 1e-3, 1e-9, 1e-27, 1e-81, 1e-243, 1e-308, 1e-323`, each
+   taken with both signs. The rungs are correctly rounded literals, not
+   `10f64.powi(e)`, which drifts from the decade at 7 of those 15 rungs and
+   returns exactly `0.0` for `powi(-323)`. `1e-323` is the floor because
+   `1e-324` rounds to zero even as a literal. A rung outside a narrower
+   dtype's range clamps onto that range's extremum and is then dropped as a
+   duplicate of the endpoint, so no rung contributes an infinity.
+
+An integer binder in the typed-generator lane has its own schedule: the ends
+of the width's fuzz range, `0`, `±1`, `±2`, and each end's inward neighbour.
+Widening that range is chelis#644.
+
+The ladder is a fixed list and not a log-uniform random draw, so "this
+magnitude class is covered" stays a claim a test can pin rather than a
+probability. Nothing in the schedule depends on the seed: a property refuted
+at an edge point is refuted under every seed, and a budget smaller than the
+schedule spends what it has on the earliest classes rather than on uniform
+draws. The schedule is part of the sample sequence, so a run remains
+reproducible for a given seed and inputs.
+
+Edge candidates are proposals, filtered exactly as random ones are: the
+precondition still runs, so a rejected edge point is a rejected sample and
+consumes its attempt. `rejected_samples` counts every attempt that produced no
+accepted sample, which includes an attempt whose draw could not be resolved as
+well as one whose draw the precondition refused; `accepted_samples` plus
+`rejected_samples` equals `attempted_samples` in every record.
+
+Because the schedule reads the admissible range while the random draw prefers
+the narrower proposal window, an order predecessor can be drawn from outside
+its successor's window: `forall(lo, hi) where lo < hi` can put `lo` at a
+magnitude the window's width cannot reach, after which `hi`'s window admits
+nothing. **The window is a preference, not a constraint.** A binder whose
+window admits no value, given the predecessors already drawn, draws from its
+admissible range instead.
+
+An empty *admissible* range is a different matter. Whether it is a fact about
+the attempt or about the property decides the verdict, and **that is observed
+rather than predicted.** Nothing in the plan's shape decides it: a binder
+pinned onto a `!=`-excluded value by its order predecessor recovers on the
+next attempt only if the predecessor can itself take another value, which
+depends on *its* guards and predecessors transitively. A rule reading one
+level of that graph gets the pinned-predecessor case wrong.
+
+So a draw that yields no value reports only that, carrying its reason, and the
+attempt is rejected. When the budget ends with fewer accepted samples than
+requested, the run reports:
+
+- `status:"unsupported"`, with the recorded reason, when **no attempt in the
+  whole budget ever placed every binder and at least one reported that it
+  could not**. The guards admit nothing. Both halves are required: a budget
+  that permitted no attempt at all yields no evidence either way, and claiming
+  unsupportability from zero attempts would be a stronger statement than the
+  run can support.
+- `status:"error"` with the exhausted-generator reason when some draw did
+  succeed. The domain is sampleable and the budget ran out -- a guard the
+  proposal window starves (chelis#644) reaches this, and calling it
+  unsupported would claim its guards admit nothing when they do.
+
+A binder the typed generator cannot sample at all, such as a tensor outside
+rank 1 or 2, is the one terminal case that is *not* an observation: the
+sampler knows it from the binder's type, reports it immediately, and so
+records `attempted_samples: 0`.
+
+Derivation-time emptiness checks remain, and reporting
+`attempted_samples: 0` is their entire purpose: the sampling loop reaches the
+same verdict for the shapes they miss, only after spending the budget.
+
+Where the window does admit a value it is always inside the admissible range,
+because the synthesis narrows the same guards and both ranges take the same
+predecessor and reserve adjustments. The fallback therefore needs no
+intersection: an unresolvable window is an empty one, which is exactly the
+case the admissible range covers. That invariant is asserted in debug builds
+rather than assumed, since a later change to the window synthesis could break
+it with no visible symptom.
+
+One known limitation: because every binder indexes its schedule by the same
+attempt ordinal, a guard the typed-generator lane can only enforce by
+rejection discards the other binders' candidates at the same ordinals. A
+property with an `i32` binder guarded `n > 0` loses the float binder's
+candidates at the attempts whose integer candidate is non-positive. The lane
+still proposes the rest of each schedule.
+
+No remedy is available for that example today: the constraint-directed lane
+admits a property only when every binder is `f32`/`f64`, so a property with an
+`i32` binder cannot enter it. Widening that lane to mixed binders would be the
+fix.
+
+The shared ordinal has a second, larger consequence: **for several binders the
+schedule visits only the diagonal of the edge grid.** Binders with equal
+ranges take the same candidate index at every scheduled attempt, so
+`forall(x: f64, y: f64) where x > 0.0f64, y > 0.0f64` never pairs a large `x`
+with a tiny `y`, and a property false only at such a pair -- `x / y` being
+finite, for instance -- still reports `fuzz_validated`. That is chelis#3636's
+own defect surviving for multi-binder properties.
+
+A per-binder cursor is nonetheless not the fix, and the reason is budget
+rather than reproducibility: an index derived from `attempt` is a pure
+function of `attempt`, so a mixed-radix odometer would be exactly as
+reproducible and as seed-independent. It would, however, hold the slowest
+binder at one candidate for a whole cycle. The unguarded `f64` schedule is 44
+candidates long, so at the default 100 samples the diagonal gives every binder
+all 44 of its own classes while covering 44 of 1936 pairs, and an odometer
+gives the slowest binder 3 of 44 while covering 100 of 1936. Full grid
+coverage needs 1936 attempts. No reindexing makes the off-diagonal class
+impossible within a budget linear in the schedule length; it only chooses
+which vanishing fraction of the grid to spend the budget on, and the diagonal
+spends it on the per-binder classes this schedule exists to reach. Closing the
+multi-binder case needs a budget policy, not an index policy; chelis#3697 owns
+that question.
 
 The shared Tier-C runner is enabled in every normal CLI build, including a
 build without the `smt` feature, and is also the Tide implementation. Solver
@@ -284,6 +433,12 @@ The authoritative chelis#977 acceptance oracle is:
 cargo test -p chelis-cli --test issue_977_constraint_fuzz
 cargo test -p chelis-tide --test mcp issue_977_tide_and_cli_match
 cargo test -p chelis-cli --features smt --test issue_977_constraint_fuzz
+```
+
+The chelis#3636 edge-schedule oracle is:
+
+```sh
+cargo nextest run -p chelis-cli --test issue_3636_edge_sampling
 ```
 
 V1 reports the first deterministic counterexample. Shrinking is deferred.

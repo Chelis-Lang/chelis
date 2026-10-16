@@ -1890,3 +1890,40 @@ fn issue_977_tide_and_cli_match_exhausted_sampling_evidence() {
     assert_eq!(cli["rejected_samples"], 0);
     assert_eq!(cli["samples"], 0);
 }
+
+/// chelis#3636: Tide shares the Tier-C sampler, so the edge schedule's
+/// admissible-range candidates reach it too. An unbounded binder-order guard
+/// puts a predecessor outside its successor's proposal window, and the
+/// successor must fall back to its admissible range rather than report
+/// `unsupported`.
+///
+/// This runs at `fuzz-only` deliberately. The other ordered-binder fixture in
+/// this file uses `smt-only`, which never enters the sampler, so it cannot
+/// see a Tier-C regression at all.
+#[test]
+fn issue_3636_tide_samples_an_unbounded_binder_order_guard() {
+    let source = "module Risk.Order\n\
+                  @property width_positive forall(lo: f64, hi: f64) where lo < hi:\n  \
+                  (hi - lo) > 0.0f64\n";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":3636,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf", "source":source, "tier":"fuzz-only"
+        }}
+    }))
+    .expect("prove response");
+    let record = response["result"]["structuredContent"]["properties"][0].clone();
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(
+        record["sampling_method"], "constraint_directed",
+        "{record:#}"
+    );
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    assert_eq!(record["rejected_samples"], 0, "{record:#}");
+    assert_eq!(
+        response["result"]["structuredContent"]["summary"]["unsupported"], 0,
+        "{response:#}"
+    );
+}

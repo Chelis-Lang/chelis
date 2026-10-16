@@ -39,9 +39,14 @@ properties and dispatches them through three verification tiers:
   real arithmetic, polynomial bounds, and, where the solver handles them,
   transcendental expressions.
 
-- **Tier C (Fuzz):** Randomized property-based testing with seeded PRNG.
-  Statistical validation when Tier A is inconclusive and Tier B times out or is
-  not amenable.
+- **Tier C (Fuzz):** Property-based testing with a seeded PRNG, preceded by a
+  deterministic edge schedule: each binder's guard endpoints and their adjacent
+  doubles, the neighbours of a `!=` guard's excluded value, both zeros, the
+  smallest subnormals, `±MAX`, the small integers, and a ladder of decade
+  magnitudes. Those points are proposed before any random draw and do not
+  depend on the seed, so a property refuted at one is refuted under every seed
+  (chelis#3636). Empirical validation when Tier A is inconclusive and Tier B
+  times out or is not amenable; a pass is `fuzz_validated`, never `proven`.
 
 - **COMPOSE:** Folds each proof with the producer/contract assumptions it
   depends on. Result JSON carries the weakest-badge `composite_verdict` token,

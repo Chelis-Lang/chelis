@@ -64,8 +64,8 @@ fn prepared_surf_samples_preserve_monolithic_guards_predicates_and_shrinking() {
             ))
         };
         let mut rng = Lcg::new(0);
-        for _ in 0..8 {
-            let sample = sample_property(&property, &mut rng).unwrap();
+        for attempt in 0..8 {
+            let sample = sample_property(&property, &mut rng, attempt).unwrap();
             for precondition in [true, false] {
                 assert_eq!(
                     eval_surf_sample(&library, &property, &roots, &sample, precondition),
@@ -1386,9 +1386,21 @@ fn assert_assumptions_are_tiered(outcome: &PropertyOutcome) -> usize {
 /// A green fuzz property whose `where` precondition drives the
 /// `fuzz_precondition_assumptions` discharge site: the pass carries one
 /// `preconditions:*` assumption that must be tiered.
+///
+/// The body must hold at every `f32` the guard admits, because the subject
+/// here is the assumption's tier stamp and not the property's content. The
+/// original body was `x + 1.0 > x`, which `f32` first falsifies at `x = 2^24`,
+/// where the ulp becomes `2.0` and adding exactly half of it ties to even.
+/// Through `[2^24, 2^25)` it alternates with the mantissa parity --
+/// `16777216` absorbs, `16777218` rounds up -- and from `2^25` upward the ulp
+/// exceeds `2.0` and every representable value absorbs. Tier C passed it
+/// only because the sampler never proposed a magnitude that large (chelis#3636);
+/// `x * 2.0 > x` is total over the guard, overflowing to `inf` at `f32::MAX`
+/// rather than absorbing. The absorption itself is now covered by
+/// `issue_3636_f32_absorption_at_large_magnitudes_is_refuted`.
 const GREEN_FUZZ_PRECONDITION_PROPERTY: &str = "module M
 @property guarded forall(x: f32) where x > 0.0:
-  (x + 1.0 > x)
+  (x * 2.0 > x)
 ";
 
 #[test]
@@ -2187,4 +2199,91 @@ fn issue3635_integer_witness_bound_is_the_width_not_the_fuzz_window() {
         "the reason quotes i8's actual range: {reason}"
     );
     witness_sample(&[param("n", "i8")], &serde_json::json!({"n": 127})).expect("127 fits i8");
+}
+
+// --- chelis#3636: the proposal window stays narrow -----------------------
+
+/// The edge schedule reads a binder's *admissible* range while a
+/// post-schedule random draw reads the narrower *proposal window*. That
+/// distinction is the change's scope boundary: widening the window is
+/// chelis#644, not this. Nothing observable through the CLI can see it, so it
+/// is pinned here.
+///
+/// `x > 0.0f64` leaves the upper side unbounded, so the admissible range runs
+/// to `f64::MAX` while the window synthesis anchors 20 wide at the guard. A
+/// draw taken past the end of the schedule must land in the window.
+#[test]
+fn issue_3636_post_schedule_draw_stays_inside_the_proposal_window() {
+    use crate::solver::{CmpOp, SmtExpr};
+
+    let precondition = SmtExpr::Cmp(
+        CmpOp::Gt,
+        Box::new(SmtExpr::Var("x".to_string())),
+        Box::new(SmtExpr::RealLit(0.0)),
+    );
+    let plan = ConstraintSamplingPlan::derive(
+        [("x".to_string(), FloatKind::F64)],
+        std::slice::from_ref(&precondition),
+    )
+    .expect("a one-sided f64 guard is sampleable");
+
+    // The window the derivation chose, and the admissible range the schedule
+    // reads, must actually differ -- otherwise this test proves nothing.
+    let window = plan.domains["x"];
+    let range = plan.ranges["x"];
+    assert_eq!(window.lower.value, 0.0);
+    assert_eq!(window.upper.value, 20.0, "the historical 20-wide window");
+    assert_eq!(range.upper.value, f64::MAX, "the admissible range");
+
+    let schedule = float_edge_candidates(
+        FloatKind::F64,
+        FloatKind::F64.lower_value(range.lower.value, range.lower.strict),
+        FloatKind::F64.upper_value(range.upper.value, range.upper.strict),
+        &[],
+    );
+    assert!(
+        schedule.iter().any(|value| *value > 20.0),
+        "the schedule must leave the window, or the two ranges are not distinct"
+    );
+
+    // Every attempt past the schedule is a random draw, and every one of
+    // them belongs to the window.
+    let mut rng = Lcg::new(7);
+    for attempt in schedule.len()..schedule.len() + 64 {
+        let drawn = plan
+            .sample(&mut rng, attempt)
+            .expect("the guard admits samples")["x"];
+        assert!(
+            drawn > 0.0 && drawn <= 20.0,
+            "attempt {attempt} drew {drawn}, outside the proposal window (0, 20]"
+        );
+    }
+}
+
+/// The same binder inside the schedule: those attempts are expected to leave
+/// the window, which is what makes the test above a boundary and not a cap.
+#[test]
+fn issue_3636_scheduled_attempts_may_leave_the_proposal_window() {
+    use crate::solver::{CmpOp, SmtExpr};
+
+    let precondition = SmtExpr::Cmp(
+        CmpOp::Gt,
+        Box::new(SmtExpr::Var("x".to_string())),
+        Box::new(SmtExpr::RealLit(0.0)),
+    );
+    let plan = ConstraintSamplingPlan::derive(
+        [("x".to_string(), FloatKind::F64)],
+        std::slice::from_ref(&precondition),
+    )
+    .expect("a one-sided f64 guard is sampleable");
+
+    let mut rng = Lcg::new(7);
+    let outside = (0..48)
+        .filter_map(|attempt| plan.sample(&mut rng, attempt).ok())
+        .filter(|values| values["x"] > 20.0)
+        .count();
+    assert!(
+        outside > 0,
+        "the schedule must propose magnitudes the window cannot reach"
+    );
 }
