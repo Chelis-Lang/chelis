@@ -633,14 +633,21 @@ def width(lo: f64, hi: f64) -> f64 = (hi - lo)
 where lo < hi:
   (width(lo, hi) > 0.0f64)
 ";
-    for tier in ["fuzz-only", "auto"] {
-        let (code, record) = prove_at_tier(source, "100", "0", tier);
-        assert_eq!(code, 0, "{tier}: {record:#}");
-        assert_eq!(record["status"], "passed", "{tier}: {record:#}");
-        assert_eq!(record["accepted_samples"], 100, "{tier}: {record:#}");
-        assert_eq!(record["attempted_samples"], 100, "{tier}: {record:#}");
-        assert_eq!(record["rejected_samples"], 0, "{tier}: {record:#}");
-    }
+    let (code, record) = prove_at_tier(source, "100", "0", "fuzz-only");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    assert_eq!(record["attempted_samples"], 100, "{record:#}");
+    assert_eq!(record["rejected_samples"], 0, "{record:#}");
+
+    // `auto` reaches the same sampler, but its sample counts are not
+    // build-portable: without the `smt` feature it falls through to Tier C
+    // and accepts 100 samples, while with the feature the solver proves this
+    // over the reals and reports zero. Assert only what both builds share --
+    // that it is not the `unsupported` this shape used to report.
+    let (code, record) = prove_at_tier(source, "100", "0", "auto");
+    assert_eq!(code, 0, "auto: {record:#}");
+    assert_eq!(record["status"], "passed", "auto: {record:#}");
 }
 
 /// The same shape as a four-binder chain, where every successor inherits a
@@ -1034,4 +1041,167 @@ fn issue_3636_samplable_tensor_rank_still_samples() {
     assert_eq!(code, 0, "{record:#}");
     assert_eq!(record["status"], "passed", "{record:#}");
     assert_eq!(record["accepted_samples"], 8, "{record:#}");
+}
+
+// --- the verdict is observed, not predicted -----------------------------
+//
+// Whether a failed draw is a fact about the property cannot be read off the
+// plan's shape. "This binder has an order predecessor" is not "this binder
+// varies between attempts": the predecessor can itself be pinned by its own
+// constant guards, in which case every attempt hands the successor the same
+// bound and the failure recurs forever. So nothing predicts it. The loop
+// records whether any attempt in the whole budget placed every binder, and
+// decides from that.
+
+/// A binder emptied by a `!=` pair, behind a predecessor that is itself
+/// pinned to one value. `derive` cannot see it: the interval holds two
+/// values, so the singleton check does not fire. Every attempt fails
+/// identically, so the guards admit nothing and the verdict is `unsupported`.
+#[test]
+fn issue_3636_pinned_predecessor_emptying_a_domain_reports_unsupported() {
+    let source = "module Edge.PinnedPred
+@property pinned_pred forall(x: f64, y: f64)
+where x >= 1.0f64, x <= 1.0f64, y >= x, y <= 1.0000000000000002f64, y != 1.0f64, y != 1.0000000000000002f64:
+  (y == y)
+";
+    for seed in ["0", "1", "99"] {
+        let (code, record) = prove(source, "8", seed);
+        assert_eq!(code, 2, "seed {seed}: must be unsupported: {record:#}");
+        assert_eq!(record["status"], "unsupported", "seed {seed}: {record:#}");
+        assert!(
+            record["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no representable sample"),
+            "seed {seed}: the reason must name the guards: {record:#}"
+        );
+        assert_ne!(
+            record["composite_verdict"], "fuzz_validated",
+            "seed {seed}: {record:#}"
+        );
+    }
+}
+
+/// The control that discriminates the observation itself. This property is
+/// satisfiable, most draws succeed, and *one* attempt is unresolvable -- and
+/// the budget is capped one attempt short of the sample target, so the run
+/// exhausts with 99 accepted samples and one unresolved draw. Reporting
+/// `unsupported` here would claim the guards admit nothing about a property
+/// that just produced 99 valid samples. Only "did *any* draw succeed", not
+/// "was *any* draw unresolved", separates this from the pinned-predecessor
+/// case above.
+#[test]
+fn issue_3636_an_unresolved_attempt_among_successes_is_still_exhaustion() {
+    let source = "module Edge.MixedExhaust
+@property order_ne_nonstrict forall(x: f64, y: f64)
+where x > 0.0f64, y >= x, y <= 2.0f64, y != 2.0f64:
+  ((y >= x) && (y <= 2.0f64))
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("mixed.ch");
+    std::fs::write(&path, source).expect("write fixture");
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "100",
+            "--max-attempts",
+            "100",
+            "--seed",
+            "0",
+        ])
+        .output()
+        .expect("run prove");
+    let record = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|value| value["kind"] == "property")
+        .unwrap_or_else(|| {
+            panic!(
+                "property record: {}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        });
+    assert_eq!(output.status.code(), Some(3), "{record:#}");
+    assert_eq!(record["status"], "error", "{record:#}");
+    assert!(
+        record["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("generator exhausted"),
+        "draws succeeded, so this is exhaustion: {record:#}"
+    );
+    assert!(
+        record["accepted_samples"].as_u64().unwrap_or_default() >= 1,
+        "{record:#}"
+    );
+    assert!(
+        record["rejected_samples"].as_u64().unwrap_or_default() >= 1,
+        "an unresolved attempt must be present, or this pins nothing: {record:#}"
+    );
+}
+
+/// The control that keeps the observation honest in the other direction. This
+/// property IS satisfiable and its draws DO succeed; the precondition simply
+/// rejects most of them, because the integer proposal range is far wider than
+/// the guard (chelis#644). Exhausting the budget here is a genuine
+/// exhaustion, and reporting `unsupported` for it would be a false claim that
+/// the guards admit nothing.
+#[test]
+fn issue_3636_a_starved_guard_is_exhaustion_not_unsupported() {
+    let source = "module Edge.Starved
+@property starved forall(x: f64, n: i32)
+where n > 0, n < 3:
+  (n > 0)
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("starved.ch");
+    std::fs::write(&path, source).expect("write fixture");
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "8",
+            "--max-attempts",
+            "40",
+            "--seed",
+            "0",
+        ])
+        .output()
+        .expect("run prove");
+    let record = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|value| value["kind"] == "property")
+        .unwrap_or_else(|| {
+            panic!(
+                "property record: {}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        });
+    assert_eq!(output.status.code(), Some(3), "{record:#}");
+    assert_eq!(record["status"], "error", "{record:#}");
+    assert!(
+        record["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("generator exhausted"),
+        "a satisfiable guard must exhaust, not report unsupported: {record:#}"
+    );
+    assert!(
+        record["accepted_samples"].as_u64().unwrap_or_default() > 0,
+        "the draws did succeed; only the guard rejected them: {record:#}"
+    );
 }

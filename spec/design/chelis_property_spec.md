@@ -347,28 +347,33 @@ nothing. **The window is a preference, not a constraint.** A binder whose
 window admits no value, given the predecessors already drawn, draws from its
 admissible range instead.
 
-An empty *admissible* range is a different matter, and which verdict it earns
-depends on whether it is a fact about the attempt or about the property. A
-draw that yields no value reports which:
+An empty *admissible* range is a different matter. Whether it is a fact about
+the attempt or about the property decides the verdict, and **that is observed
+rather than predicted.** Nothing in the plan's shape decides it: a binder
+pinned onto a `!=`-excluded value by its order predecessor recovers on the
+next attempt only if the predecessor can itself take another value, which
+depends on *its* guards and predecessors transitively. A rule reading one
+level of that graph gets the pinned-predecessor case wrong.
 
-- **Local to the attempt.** A binder that inherits an order predecessor's
-  value can be pinned by the value that predecessor happened to take -- onto a
-  singleton a `!=` guard excludes, for instance, because a non-strict order
-  edge reserves no spacing. The attempt is rejected and the run continues; a
-  later attempt draws a different predecessor.
-- **A fact about the property.** A binder with no order predecessor has a
-  fixed admissible range, so the same failure recurs on every attempt. So does
-  a binder the typed generator cannot sample at all, such as a tensor outside
-  rank 1 or 2. Both are terminal and report `status:"unsupported"` with the
-  reason that names the cause.
+So a draw that yields no value reports only that, carrying its reason, and the
+attempt is rejected. When the budget ends with fewer accepted samples than
+requested, the run reports:
 
-The two are distinguished in the error the sampler returns, not inferred at
-the routing site. That matters because inferring it requires the derivation to
-predict every terminal case before any draw, and a case it fails to predict
-reaches the exhausted-generator verdict (exit `3`) instead of `unsupported`
-(exit `2`) -- which this document requires for every unsupportable shape.
-Derivation-time checks remain, because deciding before any draw reports
-`attempted_samples: 0`, but they are no longer what makes the verdict correct.
+- `status:"unsupported"`, with the recorded reason, when **no attempt in the
+  whole budget ever placed every binder**. The guards admit nothing.
+- `status:"error"` with the exhausted-generator reason when some draw did
+  succeed. The domain is sampleable and the budget ran out -- a guard the
+  proposal window starves (chelis#644) reaches this, and calling it
+  unsupported would claim its guards admit nothing when they do.
+
+A binder the typed generator cannot sample at all, such as a tensor outside
+rank 1 or 2, is the one terminal case that is *not* an observation: the
+sampler knows it from the binder's type, reports it immediately, and so
+records `attempted_samples: 0`.
+
+Derivation-time emptiness checks remain, and reporting
+`attempted_samples: 0` is their entire purpose: the sampling loop reaches the
+same verdict for the shapes they miss, only after spending the budget.
 
 Where the window does admit a value it is always inside the admissible range,
 because the synthesis narrows the same guards and both ranges take the same

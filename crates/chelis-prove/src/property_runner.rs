@@ -3071,10 +3071,11 @@ impl FloatKind {
 /// defect chelis#3636's review rounds found three times, in both directions.
 #[derive(Debug, Clone, PartialEq)]
 enum SamplingError {
-    /// This attempt produced nothing; a later one may succeed. A binder whose
-    /// admissible range depends on an order predecessor can be pinned by the
-    /// value that predecessor happened to take.
-    Unresolvable,
+    /// This attempt produced nothing. Whether that is a fact about the
+    /// property is **not** decided here: it is observed, by whether any
+    /// attempt in the whole budget ever produced a value. The reason travels
+    /// with the error so the exhaustion report can state it.
+    Unresolvable(String),
     /// The property cannot be sampled at all, whatever the attempt. Terminal.
     Unsupported(String),
 }
@@ -3388,11 +3389,15 @@ impl ConstraintSamplingPlan {
                 .unwrap_or(0);
             reserve_depth.insert(name.clone(), depth);
         }
-        // Emptiness the guards themselves imply must be decided here, before
-        // any draw, because a sampling failure mid-run is only ever treated
-        // as a rejected attempt. Two shapes qualify: a strict order chain
-        // with too few representable values to space its successors, and a
-        // `!=` that removes the only value an interval admits.
+        // Emptiness provable from the guards alone is decided here, before any
+        // draw, so that the record can report `attempted_samples: 0` -- which
+        // is the whole reason these checks exist, since the sampling loop
+        // reaches the same verdict for anything they miss. Two shapes are
+        // provable: a strict order chain with too few representable values to
+        // space its successors, and a `!=` that removes the only value an
+        // interval admits. The emptiness neither can see -- a `!=` pair
+        // covering a two-value interval, or a binder pinned by a pinned
+        // predecessor -- is observed by the loop instead.
         for (name, range) in &ranges {
             let kind = kinds[name];
             let lower = kind.lower_value(range.lower.value, range.lower.strict);
@@ -3468,22 +3473,21 @@ impl ConstraintSamplingPlan {
         for name in &self.topo {
             let kind = self.kinds[name];
             let excluded = &self.excluded[name];
-            // A binder with no order predecessor has a fixed admissible
-            // range, so a failure here recurs on every attempt and is
-            // terminal. One that inherits a predecessor's value can be pinned
-            // by that value alone, and the next attempt may differ.
-            let terminal = || {
-                if self.incoming.get(name).is_none_or(Vec::is_empty) {
-                    SamplingError::Unsupported(format!(
-                        "inconsistent scalar guards leave `{name}` with no representable sample"
-                    ))
-                } else {
-                    SamplingError::Unresolvable
-                }
+            // This attempt may fail to place `name`. Whether that is a fact
+            // about the property is not predictable from the plan's shape:
+            // "has an order predecessor" is not the same as "varies between
+            // attempts", because the predecessor can itself be pinned by its
+            // own constant guards. So no prediction is made here -- the
+            // attempt reports that it produced nothing, and the loop decides
+            // from what the whole budget observed.
+            let unresolvable = || {
+                SamplingError::Unresolvable(format!(
+                    "inconsistent scalar guards leave `{name}` with no representable sample"
+                ))
             };
             let (lower, upper) = self
                 .resolve(name, self.ranges[name], &values)
-                .ok_or_else(terminal)?;
+                .ok_or_else(unresolvable)?;
             let candidates = float_edge_candidates(kind, lower, upper, excluded);
             // Once the schedule is spent the draw is a random one, preferring
             // the narrower proposal window (chelis#644 owns its width). The
@@ -3518,7 +3522,7 @@ impl ConstraintSamplingPlan {
             let value = kind
                 .round_into_domain(draw, lower, upper)
                 .and_then(|value| nudge_off_excluded(kind, value, lower, upper, excluded))
-                .ok_or_else(terminal)?;
+                .ok_or_else(unresolvable)?;
             values.insert(name.clone(), value);
         }
         Ok(values)
@@ -3761,6 +3765,10 @@ fn prove_surf_property_fuzz(
 
     let mut accepted = 0usize;
     let mut attempts = 0usize;
+    // Observed, not predicted: whether any attempt ever placed every binder,
+    // and the reason the most recent one could not.
+    let mut drew_a_value = false;
+    let mut unresolved: Option<String> = None;
     while accepted < samples_needed && attempts < max_attempts {
         attempts += 1;
         let sample = match &constraint_plan {
@@ -3768,16 +3776,26 @@ fn prove_surf_property_fuzz(
             None => sample_property(property, &mut rng, attempts - 1),
         };
         // One attempt failing to produce a value is not the same fact as the
-        // guards admitting none. An edge candidate can pin an order successor
-        // onto a value a `!=` guard excludes, or onto a singleton, and later
-        // attempts are unaffected -- so this is a rejected attempt, not a
-        // terminal verdict. Emptiness the guards really imply is caught by
-        // `ConstraintSamplingPlan::derive`, before any draw.
+        // guards admitting none, and which one it is cannot be read off the
+        // plan: an edge candidate can pin an order successor onto a value a
+        // `!=` guard excludes, and whether a later attempt differs depends on
+        // whether the *predecessor* can take another value -- transitively.
+        // So nothing decides it here. The attempt records that it produced
+        // nothing, and the loop's exhaustion arm decides from whether any
+        // attempt in the whole budget ever succeeded.
         let sample = match sample {
-            Ok(sample) => sample,
-            // Local to this attempt: a rejection, and the run continues.
-            Err(SamplingError::Unresolvable) => continue,
-            // A fact about the property: terminal, with its own reason.
+            Ok(sample) => {
+                drew_a_value = true;
+                sample
+            }
+            // The attempt produced nothing. Record why and keep going: the
+            // loop decides afterwards whether no attempt ever succeeded.
+            Err(SamplingError::Unresolvable(reason)) => {
+                unresolved = Some(reason);
+                continue;
+            }
+            // Not a prediction: the sampler knows this property's binders
+            // cannot be sampled at all, whatever the attempt.
             Err(SamplingError::Unsupported(reason)) => {
                 return unsupported(&property.name, seed, reason).with_sampling(
                     sampling_method,
@@ -3830,6 +3848,20 @@ fn prove_surf_property_fuzz(
     }
 
     if accepted < samples_needed {
+        // No attempt in the whole budget placed every binder, so the guards
+        // admit nothing and the verdict is `unsupported` rather than an
+        // exhausted generator. This is the observation the plan's shape
+        // cannot predict: a binder pinned by a pinned predecessor fails on
+        // every attempt, and a binder with no predecessor at all is only the
+        // easiest case of that. A run whose draws succeeded and whose
+        // preconditions rejected them is a genuine exhaustion (chelis#644).
+        if !drew_a_value && let Some(reason) = unresolved {
+            return unsupported(&property.name, seed, reason).with_sampling(
+                sampling_method,
+                attempts,
+                accepted,
+            );
+        }
         return error(
             &property.name,
             seed,
@@ -5242,6 +5274,10 @@ fn prove_deep_property(
 
     let mut accepted = 0usize;
     let mut attempts = 0usize;
+    // Observed, not predicted: whether any attempt ever placed every binder,
+    // and the reason the most recent one could not.
+    let mut drew_a_value = false;
+    let mut unresolved: Option<String> = None;
     while accepted < samples_needed && attempts < max_attempts {
         attempts += 1;
         let sample = match &constraint_plan {
@@ -5253,10 +5289,18 @@ fn prove_deep_property(
         // As in the Surf lane: an unresolvable attempt is rejected, not
         // terminal (chelis#3636 round 2).
         let sample = match sample {
-            Ok(sample) => sample,
-            // Local to this attempt: a rejection, and the run continues.
-            Err(SamplingError::Unresolvable) => continue,
-            // A fact about the property: terminal, with its own reason.
+            Ok(sample) => {
+                drew_a_value = true;
+                sample
+            }
+            // The attempt produced nothing. Record why and keep going: the
+            // loop decides afterwards whether no attempt ever succeeded.
+            Err(SamplingError::Unresolvable(reason)) => {
+                unresolved = Some(reason);
+                continue;
+            }
+            // Not a prediction: the sampler knows this property's binders
+            // cannot be sampled at all, whatever the attempt.
             Err(SamplingError::Unsupported(reason)) => {
                 return unsupported(&property.name, seed, reason).with_sampling(
                     sampling_method,
@@ -5309,6 +5353,20 @@ fn prove_deep_property(
     }
 
     if accepted < samples_needed {
+        // No attempt in the whole budget placed every binder, so the guards
+        // admit nothing and the verdict is `unsupported` rather than an
+        // exhausted generator. This is the observation the plan's shape
+        // cannot predict: a binder pinned by a pinned predecessor fails on
+        // every attempt, and a binder with no predecessor at all is only the
+        // easiest case of that. A run whose draws succeeded and whose
+        // preconditions rejected them is a genuine exhaustion (chelis#644).
+        if !drew_a_value && let Some(reason) = unresolved {
+            return unsupported(&property.name, seed, reason).with_sampling(
+                sampling_method,
+                attempts,
+                accepted,
+            );
+        }
         return error(
             &property.name,
             seed,
