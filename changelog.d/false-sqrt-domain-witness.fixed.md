@@ -12,7 +12,7 @@ the body is false is a definite `failed` with no `real_arithmetic` qualifier; a
 witness the evaluation rejects keeps the `unsupported` result, which now names
 why. `unsupported` stays reserved for an obligation nothing decided.
 
-The `arith_model` JSON field follows the `real_arithmetic` qualifier it mirrors
-rather than the proof tier, so it is absent from a solver-tier result decided in
-machine arithmetic. See
-[#3635](https://github.com/Chelis-Lang/chelis/issues/3635).
+An integer binder's witness is bounded by its declared width's representable
+range rather than by the fuzz sampler's `[-1000, 1000]` window, so a guard
+admitting `n > 4000i32` confirms at 4001 instead of reporting it unrepresentable.
+See [#3635](https://github.com/Chelis-Lang/chelis/issues/3635).

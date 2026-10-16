@@ -142,7 +142,7 @@ record is greater than zero and inspect each record:
 | `proof_tier` | The method associated with the result, such as `fuzz` or `smt`. On an unsupported result, it can name an attempted path; `none` means no method was selected. |
 | `composite_verdict` and `qualifiers` | The strength and limits of a passing or failing result. |
 | `samples`, `sampling_method`, and sample counts | Evidence for a sampled result; accepted, attempted, and rejected counts appear when sampling details apply. |
-| `arith_model` | `real` means the solver checked real arithmetic. It mirrors the `real_arithmetic` qualifier, so it is absent from a result that does not carry that qualifier. |
+| `arith_model` | `real` means the solver checked real arithmetic. |
 
 A custom build that omits `proof_tier` cannot establish a formal method from its JSON; use
 `--capabilities`, `samples`, and the verdict to understand its limits.

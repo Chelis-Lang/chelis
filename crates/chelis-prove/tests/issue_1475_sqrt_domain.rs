@@ -696,3 +696,35 @@ def k() -> f64 = sqrt(0.0f64 - 1.0f64)
         "the binder is admitted by its own guards even though it is irrelevant: {counterexample}"
     );
 }
+
+#[test]
+fn issue3635_an_integer_witness_outside_the_fuzz_window_still_confirms() {
+    crate::support::isolate();
+    // A witness is an EXHIBITED input, not a drawn sample, so it is bounded by
+    // the width's representable range rather than by the `[-1000, 1000]` fuzz
+    // convenience window of `integer_fuzz_bounds`. The first version of this
+    // lane declined `n = 4001` as "not representable at i32" -- which it is --
+    // and `int_sample` would then have clamped it to 1000, evaluating an input
+    // the guards exclude.
+    let source = r#"module M
+def k(x: f64) -> f64 = sqrt(x)
+
+@property k_int_side forall(x: f64, n: i32) where x > -1.0f64, x < 2.0f64, n > 4000i32, n < 5000i32:
+  (k(x) >= 0.0f64)
+"#;
+    let outcome = run_one(source, "smt-only", 0);
+
+    assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:?}");
+    let counterexample = outcome
+        .counterexample
+        .as_ref()
+        .unwrap_or_else(|| panic!("a confirmed witness is reported: {outcome:?}"));
+    let n = counterexample["n"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("`n` is an integer: {counterexample}"));
+    assert!(
+        (4001..5000).contains(&n),
+        "the witness is evaluated where the guards admit it, not clamped to the fuzz window: \
+         {counterexample}"
+    );
+}

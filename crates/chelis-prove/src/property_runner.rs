@@ -3674,16 +3674,24 @@ fn witness_value(
             let raw = value
                 .as_i64()
                 .ok_or_else(|| format!("`{name}`'s domain witness is not an integer"))?;
-            let (lo, hi) = crate::opaque::int_sample_bounds(type_name)
-                .expect("is_int_width implies int_sample_bounds");
+            // The bound is the width's REPRESENTABLE range, not
+            // `int_sample_bounds`/`integer_fuzz_bounds`, which clamps to the
+            // [-1000, 1000] fuzz convenience window. A witness is an exhibited
+            // input, not a drawn sample, so a guard admitting `n > 4000i32`
+            // must confirm at 4001 rather than decline it as unrepresentable
+            // -- which it is not.
+            let (lo, hi) = Prim::parse_name(type_name)
+                .and_then(|prim| prim.integer_range())
+                .ok_or_else(|| {
+                    format!("`{name}`'s declared type {type_name} has no integer range")
+                })?;
             if raw < lo || raw > hi {
-                // `int_sample` clamps; a clamped witness is a DIFFERENT input
-                // from the one the solver exhibited, so decline instead.
                 return Err(format!(
-                    "`{name}`'s domain witness {raw} is not representable at {type_name}"
+                    "`{name}`'s domain witness {raw} is outside {type_name}'s representable range \
+                     [{lo}, {hi}]"
                 ));
             }
-            Ok(int_sample(name, type_name, raw))
+            Ok(int_sample_exact(name, type_name, raw))
         }
         TypeExpr::Named(type_name, _) if type_name == "f32" || type_name == "f64" => {
             let raw = value
@@ -4520,7 +4528,16 @@ fn bool_sample(name: &str, value: bool) -> SampleValue {
 fn int_sample(name: &str, type_name: &str, value: i64) -> SampleValue {
     let (lo, hi) =
         crate::opaque::int_sample_bounds(type_name).expect("int shrink only uses int widths");
-    let value = value.clamp(lo, hi);
+    int_sample_exact(name, type_name, value.clamp(lo, hi))
+}
+
+/// Build an integer sample at exactly `value`, with no clamping.
+///
+/// [`int_sample`] clamps into the `[-1000, 1000]` fuzz window, which is right
+/// for a drawn or shrunk sample and wrong for an EXHIBITED one: a solver
+/// witness of 4001 under a `n > 4000i32` guard must be evaluated at 4001, not
+/// silently moved to 1000 (chelis#3635). The caller owns the range check.
+fn int_sample_exact(name: &str, type_name: &str, value: i64) -> SampleValue {
     let lit = Expr::Lit(Literal::Int(value), chelis_deep::Span::new(0, 0));
     let surf_expr = if type_name == "i32" {
         lit

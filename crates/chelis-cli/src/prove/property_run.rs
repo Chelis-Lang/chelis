@@ -362,17 +362,10 @@ fn emit(
             value["attempted_samples"] = json!(outcome.attempted_samples);
             value["rejected_samples"] = json!(outcome.rejected_samples);
         }
-        // `arith_model` is the legacy MIRROR of the `real_arithmetic`
-        // qualifier (chelis#422), so it follows that qualifier rather than the
-        // tier. Every deductive-tier verdict carries it -- except a Tier B
-        // record whose verdict rests on a concrete machine evaluation instead
-        // of on the solver's over-the-reals decision (chelis#3635), where
-        // mirroring a caveat the qualifier set does not carry would contradict
-        // the published badge.
-        if outcome
-            .disclosed_qualifiers()
-            .contains(&chelis_prove::discharge::Qualifier::RealArith.as_str())
-        {
+        if matches!(
+            outcome.proof_tier,
+            PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon
+        ) {
             value["arith_model"] = json!("real");
         }
         if let Some(evidence) = &outcome.induction_evidence {

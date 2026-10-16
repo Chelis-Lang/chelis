@@ -80,7 +80,15 @@ pub fn recombine_split_discharges(discharges: &[Discharge]) -> Result<Discharge,
     // Rule 2: any Error/Timeout/Unknown dominates
     for d in discharges {
         match d.result() {
-            TierBResult::Error(_) | TierBResult::Timeout | TierBResult::Unknown => {
+            // chelis#3635: a false `sqrt` domain obligation decides nothing
+            // about the recombined goal, so it dominates here exactly as the
+            // other non-decisions do. Without this arm it fell through the
+            // wildcard below into the all-proved tail and was returned as a
+            // PROOF with `"recombination": "all_proved"`.
+            TierBResult::Error(_)
+            | TierBResult::Timeout
+            | TierBResult::Unknown
+            | TierBResult::DomainDisproved { .. } => {
                 return Discharge::new(
                     Soundness::Untrusted,
                     QualifierSet::new(),
@@ -127,6 +135,50 @@ mod tests {
             serde_json::json!({"test": true}),
         )
         .expect("test discharge must be constructible")
+    }
+
+    /// chelis#3635: a false `sqrt` domain obligation must DOMINATE the
+    /// recombination, exactly as the other non-decisions do.
+    ///
+    /// The variant was initially matched by neither rule, so it fell through
+    /// the `_ => {}` wildcard into the all-proved tail and came back as
+    /// `TierBResult::Proved` with evidence `"recombination": "all_proved"` --
+    /// a goal nothing decided, published as a proof. Both the alone and mixed
+    /// cases are asserted, because the mixed one is what a real split produces.
+    #[test]
+    fn issue3635_a_false_domain_obligation_dominates_the_recombination() {
+        let domain_disproved = || {
+            make_discharge(
+                Soundness::Untrusted,
+                &[],
+                TierBResult::DomainDisproved {
+                    reason: "the domain obligation is false".to_string(),
+                    witness: serde_json::json!({"x": -1.0}),
+                },
+            )
+        };
+
+        for discharges in [
+            vec![domain_disproved()],
+            vec![
+                make_discharge(Soundness::SoundApproximate, &[], TierBResult::Proved),
+                domain_disproved(),
+            ],
+        ] {
+            let count = discharges.len();
+            let recombined =
+                recombine_split_discharges(&discharges).expect("recombination is constructible");
+            assert!(
+                matches!(recombined.result(), TierBResult::DomainDisproved { .. }),
+                "a false domain obligation is not a proof (sub_count {count}): {:?}",
+                recombined.result()
+            );
+            assert_eq!(
+                recombined.evidence()["recombination"],
+                serde_json::json!("error_dominates"),
+                "the evidence must not read `all_proved` (sub_count {count})"
+            );
+        }
     }
 
     fn make_conjunctive_goal(conjunct_count: usize) -> Goal {
