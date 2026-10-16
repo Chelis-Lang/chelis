@@ -13488,3 +13488,116 @@ int main() {{
         }
     }
 }
+
+/// An inverse reshape's Shape carrier observes the forward restamp. It
+/// cannot redeclare that restamp from a later point in the same computation.
+#[test]
+fn restored_shape_keeps_the_forward_extent_and_independent_mismatch_guard() {
+    for independent in [false, true] {
+        let mut dag = Dag::new();
+        let decl = dag.declare("restored-shape");
+        let named = |name: &str| TensorType {
+            dims: vec![DimInfo::Named(name.into(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            named("m"),
+            None,
+        );
+        let restamp = dag.add_node(decl, RiscOp::Neg, vec![x], named("n"), None);
+        let extent = dag.add_node(
+            decl,
+            RiscOp::Shape { axis: 0 },
+            vec![restamp],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        let copied = dag.add_node(
+            decl,
+            RiscOp::Copy,
+            vec![extent],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        let restored = dag.add_node(
+            decl,
+            RiscOp::Reshape {
+                new_shape: vec![chelis_ir::dag::RtDim::Node(1)],
+            },
+            vec![restamp, copied],
+            named("n"),
+            None,
+        );
+        dag.add_root(restored);
+        if independent {
+            let witness = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "independent".into(),
+                },
+                vec![],
+                named("n"),
+                None,
+            );
+            let sum = dag.add_node(decl, RiscOp::Add, vec![restored, witness], named("n"), None);
+            dag.set_roots(vec![sum]);
+        }
+        let generated = codegen(&dag, "restored_shape")
+            .expect("a shape observation cannot create a later declaration");
+        let witness_extent = if independent { 3 } else { 2 };
+        let inputs = if independent { "x, witness" } else { "x" };
+        let count = if independent { 2 } else { 1 };
+        let harness = format!(
+            r#"
+#include "chelis_runtime.h"
+void restored_shape(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t x_shape[] = {{2}}, witness_shape[] = {{{witness_extent}}};
+    chelis_tensor *x = chelis_alloc(1, x_shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *write = chelis_tensor_begin_write(x);
+    chelis_fill_scalar(write, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT64_C(0x3F800000)));
+    chelis_tensor_end_write(write);
+    chelis_tensor *witness = chelis_alloc(1, witness_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *inputs[] = {{{inputs}}}, *outputs[1] = {{NULL}};
+    restored_shape(inputs, {count}, outputs, 1);
+    if (chelis_tensor_shape(outputs[0], 0) != 2) return 4;
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != 2) return 5;
+    for (int64_t i = 0; i < out.count; ++i)
+        if (((const float *)out.data)[i] != -1.0f) return 6;
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(x); chelis_tensor_release(witness);
+    return 0;
+}}
+"#
+        );
+        let result = checked_indexing_run(&generated.c_source, &harness);
+        if independent {
+            assert!(
+                !result.status.success(),
+                "an independent mismatched binder must trap"
+            );
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(
+                stderr.contains("numeric trap: domain in neg at i64"),
+                "{stderr}"
+            );
+            assert!(stderr.contains("extent `n`"), "{stderr}");
+        } else {
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+}

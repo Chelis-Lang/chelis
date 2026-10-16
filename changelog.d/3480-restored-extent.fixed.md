@@ -1,0 +1,1 @@
+C builds retain the forward extent declaration when a gradient restores a tensor shape through metadata reads, allowing convolution and reshape gradients to compose without a later adjoint redeclaring the extent.
