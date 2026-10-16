@@ -3960,6 +3960,7 @@ impl<'a> EvalContext<'a> {
                 )?;
                 let claim = Self::with_named_result_axes(claim, Some(result), &witnesses, None)?;
                 formal_claims.extend(claim);
+                formal_claims.extend(self.nested_result_claim(result, &witnesses)?);
             }
         }
         formal_claims.extend_from_slice(claims);
@@ -4337,27 +4338,7 @@ impl<'a> EvalContext<'a> {
                     // derivation keeps their nominal dimension arguments.
                     let nested_claim = match (&active_declaration, &return_type) {
                         (Some(_), Some(authored)) => {
-                            self.nested_claim_pattern(authored)?.and_then(|pattern| {
-                                let node = pattern.nested_root()?;
-                                let binders = named_result_witnesses
-                                    .iter()
-                                    .filter_map(|(name, source, size)| {
-                                        Some((
-                                            name.clone(),
-                                            source.clone(),
-                                            i64::try_from(*size).ok()?,
-                                        ))
-                                    })
-                                    .collect::<Vec<_>>();
-                                Some(
-                                    NestedResultClaim {
-                                        pattern,
-                                        node,
-                                        binders: Arc::new(binders),
-                                    }
-                                    .claim(),
-                                )
-                            })
+                            self.nested_result_claim(authored, &named_result_witnesses)?
                         }
                         _ => None,
                     };
@@ -4583,6 +4564,38 @@ impl<'a> EvalContext<'a> {
             cache: &self.claim_patterns,
         }
         .pattern(authored)
+    }
+
+    /// Derive one nested result frame from the authored signature and this
+    /// invocation's first entry witnesses. Named and adapted callables share
+    /// the same pattern, ordering and producer-aware obligation carrier.
+    fn nested_result_claim(
+        &self,
+        authored: &Expr,
+        witnesses: &[(String, NamedResultSource, usize)],
+    ) -> Result<Option<DeclaredResultClaim>, String> {
+        let Some(pattern) = self.nested_claim_pattern(authored)? else {
+            return Ok(None);
+        };
+        let Some(node) = pattern.nested_root() else {
+            return Ok(None);
+        };
+        let binders = witnesses
+            .iter()
+            .map(|(name, source, size)| {
+                let size = i64::try_from(*size)
+                    .map_err(|_| "invocation extent exceeds the exact i64 range".to_owned())?;
+                Ok((name.clone(), source.clone(), size))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Some(
+            NestedResultClaim {
+                pattern,
+                node,
+                binders: Arc::new(binders),
+            }
+            .claim(),
+        ))
     }
 
     fn check_declared_result_claim(
