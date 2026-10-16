@@ -183,11 +183,16 @@ pub fn anonymous_axis_names(dag: &Dag, id: NodeId) -> Option<Vec<AnonymousAxisNa
                 .collect(),
         );
     }
-    if matches!(node.op, RiscOp::RuntimeRecurrence(_)) {
+    if matches!(
+        node.op,
+        RiscOp::RuntimeRecurrence(_) | RiscOp::RuntimeRecurrenceAdjoint { .. }
+    ) {
         // A fold's first input is its source List, whose length says nothing
         // about the final accumulator extent. Follow the operation's axis
         // sources: a variable fold state gets a fresh result identity, while
-        // scan's leading axis still reads the source length.
+        // scan's leading axis still reads the source length. An adjoint
+        // instead takes its extent from the selected differentiated input,
+        // not the forward result in its first slot.
         return Some(by_source(true));
     }
     if !movement_alters_extents(&node.op)

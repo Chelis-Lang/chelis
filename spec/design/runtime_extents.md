@@ -289,6 +289,14 @@ as ordinary graph import already remaps node references. A fresh call
 instantiation is distinct from copying a graph for an optimization: the latter
 preserves the same logical bindings and remaps its node references only.
 
+Runtime recurrence callbacks own private graphs. Their symbolic result-axis
+names do not declare caller extents: tensor and column recurrence lowering
+publish unknown state-result axes anonymously, and the existing axis-source
+pass assigns their identities after graph transformations. Callback entry and
+result witnesses remain inside the callback; enclosing call/result witnesses
+remain outside it. A recurrence adjoint derives each output axis from its
+selected differentiated input, never from the forward recurrence result.
+
 #### C2.3 Axis contract and independent evidence
 
 Each lowered axis retains BOTH its computed extent source and all outstanding
