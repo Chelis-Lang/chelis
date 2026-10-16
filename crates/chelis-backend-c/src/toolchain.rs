@@ -1393,21 +1393,23 @@ mod tests {
                 Verdict::Harmless => {
                     result.unwrap_or_else(|error| panic!("{name} ({extra}), {carried}: {error}"));
                     let plain = wrapper(dir.path(), "plain-cc", "");
+                    let checked = canary_kernels(program);
                     assert_eq!(
-                        canary_assembly(&hostile, &flags, dir.path()),
-                        canary_assembly(&plain, &flags, dir.path()),
-                        "{name} ({extra}) is accepted, so it must not change the canary's code"
+                        canary_assembly(&hostile, &flags, dir.path(), &checked),
+                        canary_assembly(&plain, &flags, dir.path(), &checked),
+                        "{name} ({extra}) is accepted, so it must not change the code of the canary for {carried}"
                     );
                 }
             }
         }
     }
 
-    /// The canary's units compiled to assembly by `compiler`, in unit order.
+    /// The units of the canary that checks `kernels`, compiled to assembly by
+    /// `compiler`, in unit order.
     #[cfg(unix)]
-    fn canary_assembly(compiler: &str, flags: &[String], dir: &Path) -> String {
+    fn canary_assembly(compiler: &str, flags: &[String], dir: &Path, kernels: &[Kernel]) -> String {
         let mut assembly = String::new();
-        for (index, unit) in canary_units(&Kernel::ALL).iter().enumerate() {
+        for (index, unit) in canary_units(kernels).iter().enumerate() {
             let source = dir.join(format!("canary-assembly-{index}.c"));
             let output = dir.join(format!("canary-assembly-{index}.s"));
             std::fs::write(&source, unit).unwrap();
@@ -1504,7 +1506,12 @@ mod tests {
     fn canary_calls_no_c_library_roundeven() {
         let dir = tempfile::tempdir().unwrap();
         let toolchain = test_toolchain(CodegenRequirements::default());
-        let assembly = canary_assembly(&toolchain.compiler, &toolchain.compile_flags, dir.path());
+        let assembly = canary_assembly(
+            &toolchain.compiler,
+            &toolchain.compile_flags,
+            dir.path(),
+            &Kernel::ALL,
+        );
         assert_eq!(roundeven_reference(&assembly), None);
     }
 

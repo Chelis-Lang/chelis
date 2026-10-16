@@ -345,9 +345,9 @@ reach their integer bit arithmetic. The runtime, the evaluator, and generated C'
 conversion helpers check their rows instead (§8, test 15).
 
 **Accepted flags.** The check accepts a flag exactly when the compiler passes the macro
-checks and the canary built with the flag reproduces every obligation row; the wrapper
-tests assert that rule, and assert byte-identical canary assembly only for flags that
-change no instruction on either clang or gcc. `-fassociative-math` alone (clang and gcc
+checks and the canary built with the flag reproduces each of its rows. The wrapper tests
+assert that rule. They assert byte-identical canary assembly only for flags that change
+no instruction on either clang or gcc. `-fassociative-math` alone (clang and gcc
 reassociate only once signed zeros and trapping are also given up) and
 `-fexcess-precision=fast` on SSE2 and AArch64 (where `FLT_EVAL_METHOD` is 0) change no
 instruction. `-fno-trapping-math` (status flags are unobservable and the profile installs
