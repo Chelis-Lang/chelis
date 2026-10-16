@@ -1136,11 +1136,23 @@ installs no target entry or result obligation.
 Prepared actuals retain their physical value, exact static facts and constructor
 geometry through the invocation boundary. Authored axis identities and obligations
 remain distinct from physical extents, including zero and equal-sized axes.
+Splicing a mapped parameter preserves the row graph's exact axis view on an
+administrative Copy carrier when the caller uses different axis names. The
+view changes neither precision nor known physical extents; operand-bound
+primitives keep their input and result metadata aligned across the boundary.
 Kernel admission consumes that complete invocation evidence; a body requiring
 runtime host control keeps its host execution boundary.
 Resolved builtin identity selects the same execution-lane policy at direct and
 aliased applications. A branch join retains a static callable only when both
 alternatives carry the same operation and complete ordered contract frames.
+Static callable actual preparation carries both that identity and the complete
+executable producer expression. Every retained invocation stages all actuals in
+written order in the caller's scope before entry checks or the callee body,
+including unused callable actuals. Copying, selection and tuple projection keep
+the producer's effects, traps and unselected tuple siblings. Resolving a static
+identity does not authorize discarding its evaluation. Preparing a callable
+value does not execute the callable's entry or result contracts; those belong
+to invocation of that value.
 
 A callable adapter retains its complete registry-normalized authored signature,
 including independent input and result obligations. Result-only signatures do

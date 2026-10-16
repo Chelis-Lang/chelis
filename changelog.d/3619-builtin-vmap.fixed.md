@@ -50,3 +50,7 @@ alias-only cycles. Direct and aliased builtins share execution-lane ownership;
 static callable admission preserves independent host-control requirements.
 Mapped rows retain authored axis identity independently of physical extents,
 and repeated branch identities retain their complete invocation frames.
+Retained calls evaluate complete static callable producers once in written
+argument order, including effects and traps in unused actuals. Mapped parameter
+axis views preserve operand-bound primitives' physical type agreement when
+splicing supplied rows.

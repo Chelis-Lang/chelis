@@ -16545,7 +16545,7 @@ impl<'program> LowerCtx<'program> {
                 )
             });
         let remap = self
-            .splice_dag(&specialized_vmapped, &arg_map)
+            .splice_vmapped_dag(&specialized_vmapped, &arg_map, &param_names)
             .unwrap_or_else(|message| {
                 raise_fatal_lowering_error(
                     format!("internal `vmap` splice correspondence failed: {message}"),
@@ -17043,6 +17043,62 @@ impl<'program> LowerCtx<'program> {
             out_ty,
             self.current_span_id.clone(),
         )
+    }
+
+    /// A row parameter's authored axis identity is a view of the supplied
+    /// physical value. Keep that view at substitution rather than replacing a
+    /// Load with a differently named operand beneath same-shape primitives.
+    fn splice_vmapped_dag(
+        &mut self,
+        dag: &Dag,
+        arg_map: &UnordMap<String, NodeId>,
+        params: &[String],
+    ) -> Result<UnordMap<NodeId, NodeId>, String> {
+        let mut viewed_args = arg_map.clone();
+        for node in dag.nodes() {
+            let RiscOp::Load { name } = &node.op else {
+                continue;
+            };
+            if !params.iter().any(|param| param == name.as_str()) {
+                continue;
+            }
+            let actual = *viewed_args
+                .get(name.as_str())
+                .ok_or_else(|| format!("mapped parameter {name} has no prepared actual"))?;
+            let actual_ty = &self
+                .dag
+                .get(actual)
+                .ok_or_else(|| format!("mapped parameter {name} has no physical value"))?
+                .output_type;
+            if actual_ty == &node.output_type {
+                continue;
+            }
+            let extent = |dim: &DimInfo| match dim {
+                DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => Some(*size),
+                DimInfo::Named(_, None) => None,
+            };
+            if actual_ty.precision != node.output_type.precision
+                || actual_ty.dims.len() != node.output_type.dims.len()
+                || actual_ty
+                    .dims
+                    .iter()
+                    .zip(&node.output_type.dims)
+                    .any(|(actual, view)| extent(actual) != extent(view))
+            {
+                return Err(format!(
+                    "mapped parameter {name} axis view changes its physical type"
+                ));
+            }
+            let view = self.dag.add_node(
+                self.owner(),
+                RiscOp::Copy,
+                vec![actual],
+                node.output_type.clone(),
+                node.span_id.clone(),
+            );
+            viewed_args.insert(name.as_str().to_owned(), view);
+        }
+        self.splice_dag(dag, &viewed_args)
     }
 
     fn splice_dag(
@@ -27018,6 +27074,74 @@ mod fused_zero_tests {
         .unwrap();
         assert_eq!(values[&selected[0]].to_f64_lossy_vec(), [3.0, 3.0]);
         assert_eq!(values[&selected[1]].to_f64_lossy_vec(), [5.0, 5.0]);
+    }
+
+    #[test]
+    fn mapped_parameter_axis_views_preserve_physical_type_and_operand_agreement() {
+        for (precision, dims, admitted) in [
+            (Prim::F32, vec![DimInfo::Lit(3)], true),
+            (Prim::F32, vec![DimInfo::Lit(4)], false),
+            (Prim::F64, vec![DimInfo::Lit(3)], false),
+            (
+                Prim::F32,
+                vec![DimInfo::Named("runtime".into(), None)],
+                false,
+            ),
+        ] {
+            let mut ctx = context();
+            let actual_ty = TensorType { dims, precision };
+            let actual = ctx.dag.add_node(
+                ctx.owner(),
+                RiscOp::Load {
+                    name: "actual".into(),
+                },
+                vec![],
+                actual_ty.clone(),
+                None,
+            );
+            let mut row = Dag::new();
+            row.inherit_declarations(&ctx.dag);
+            let view_ty = TensorType {
+                dims: vec![DimInfo::Named("row".into(), Some(3))],
+                precision: Prim::F32,
+            };
+            let param = row.add_node(
+                ctx.owner(),
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                view_ty.clone(),
+                None,
+            );
+            let scan = row.add_node(
+                ctx.owner(),
+                RiscOp::Cumsum {
+                    axis: 0,
+                    direction: crate::dag::ScanDirection::Increasing,
+                },
+                vec![param],
+                view_ty.clone(),
+                None,
+            );
+            let args = [("x".to_owned(), actual)].into_iter().collect();
+            let mapped = ctx.splice_vmapped_dag(&row, &args, &["x".to_owned()]);
+            assert_eq!(mapped.is_ok(), admitted, "{mapped:?}");
+            assert_eq!(ctx.dag.get(actual).unwrap().output_type, actual_ty);
+            if let Ok(mapped) = mapped {
+                let view = ctx.dag.get(mapped[&param]).unwrap();
+                assert!(matches!(view.op, RiscOp::Copy));
+                assert_eq!(view.inputs, vec![actual]);
+                assert_eq!(view.output_type, view_ty);
+                ctx.dag.add_root(mapped[&scan]);
+                assert!(crate::verify::verify(&ctx.dag).is_empty());
+                let values = eval_tensor_roots_with_strict(&ctx.dag, &[mapped[&scan]], |_| {
+                    Some(value(&[3], Prim::F32, &[1.0, 2.0, 3.0]))
+                })
+                .unwrap();
+                assert_eq!(values[&mapped[&scan]].to_f64_lossy_vec(), [1.0, 3.0, 6.0]);
+            } else {
+                assert_eq!(ctx.dag.nodes().len(), 1, "a refused view adds no nodes");
+            }
+        }
     }
 
     fn parsed(source: &str) -> Expr {

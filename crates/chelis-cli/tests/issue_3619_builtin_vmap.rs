@@ -1944,3 +1944,163 @@ result = selected({flag},to_tensor([1.0f32,2.0f32]))
         assert!(!out.join("distinct_frames.c").exists());
     }
 }
+
+/// Spec/03 §4.4: resolving a static callable actual retains its complete eager
+/// producer, in written order, even when the callee never invokes it.
+#[test]
+fn callable_actual_producers_execute_once_in_argument_order() {
+    for route in ["named", "polymorphic", "inline"] {
+        for used in [false, true] {
+            for actual in [
+                "if choose(true) then f else f",
+                "copy(if choose(false) then f else f)",
+                "(f, mark(\"actual\")).0",
+            ] {
+                // An unused callback's contradictory result contract must not run.
+                let (extent, result_ty, body, result) = if used {
+                    (2, "bool", "h(x)", "true, true")
+                } else {
+                    (3, "f32", "x", "1.0, 2.0")
+                };
+                let precision = if route == "polymorphic" { "p" } else { "f32" };
+                let binder = if route == "polymorphic" {
+                    "[p: Float]"
+                } else {
+                    ""
+                };
+                let return_precision = if used { "bool" } else { precision };
+                let params = format!(
+                    "before: i32, h: (&tensor[*,{precision}] -> tensor[*,bool]), after: i32, x: tensor[*,{precision}]"
+                );
+                let callee = if route == "inline" {
+                    format!("(fn ({params}) -> {{\n_ = print(\"inside\")\n{body}\n}})")
+                } else {
+                    "invoke".to_owned()
+                };
+                let source = format!(
+                    r#"
+def mark(label: string) -> i32 ! {{IO}} = {{
+  _ = print(label)
+  0i32
+}}
+def choose(flag: bool) -> bool ! {{IO}} = {{
+  _ = mark("actual")
+  flag
+}}
+def invoke{binder}({params}) -> tensor[*,{return_precision}] ! {{IO}} = {{
+  _ = print("inside")
+  {body}
+}}
+def main() -> tensor[*,{result_ty}] ! {{IO}} = {{
+  f: (&tensor[*,f32] -> tensor[{extent},bool]) = is_finite
+  {callee}(mark("before"), {actual}, mark("after"), to_tensor([1.0f32,2.0f32]))
+}}
+result = main()
+"#
+                );
+                let (dir, path) = canonical_contract_program(&source, "callable_actual_order");
+                let evaluated = Command::cargo_bin("chelis")
+                    .unwrap()
+                    .args(["eval", "--file"])
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                let out = dir.path().join("native");
+                Command::cargo_bin("chelis")
+                    .unwrap()
+                    .arg("build")
+                    .arg(&path)
+                    .args(["--target", "c", "--output"])
+                    .arg(&out)
+                    .assert()
+                    .success();
+                let native = std::process::Command::new(out.join("callable_actual_order"))
+                    .output()
+                    .unwrap();
+                let expected = format!(
+                    "before\nactual\nafter\ninside\nresult = tensor(shape=[2], data=[{result}])\n"
+                );
+                for output in [&evaluated, &native] {
+                    assert!(output.status.success(), "{output:?}");
+                    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+                    assert!(output.stderr.is_empty(), "{output:?}");
+                }
+            }
+        }
+    }
+}
+
+/// Spec/03 §4.4: a trap in an unused callable actual stops later actuals and the body.
+#[test]
+fn unused_callable_actual_traps_stop_later_arguments() {
+    for route in ["named", "polymorphic", "inline"] {
+        for actual in [
+            "if choose(zero) then f else f",
+            "copy(if choose(zero) then f else f)",
+            "(f, trunc_div(1i32,zero)).0",
+        ] {
+            let precision = if route == "polymorphic" { "p" } else { "f32" };
+            let binder = if route == "polymorphic" {
+                "[p: Float]"
+            } else {
+                ""
+            };
+            let params = format!(
+                "before: i32, h: (&tensor[*,{precision}] -> tensor[*,bool]), after: i32, x: tensor[*,{precision}]"
+            );
+            let callee = if route == "inline" {
+                format!("(fn ({params}) -> {{\n_ = print(\"inside\")\nx\n}})")
+            } else {
+                "invoke".to_owned()
+            };
+            let source = format!(
+                r#"
+def mark(label: string) -> i32 ! {{IO}} = {{
+  _ = print(label)
+  0i32
+}}
+def choose(zero: i32) -> bool = {{
+  _ = trunc_div(1i32,zero)
+  true
+}}
+def invoke{binder}({params}) -> tensor[*,{precision}] ! {{IO}} = {{
+  _ = print("inside")
+  x
+}}
+def main(zero: i32) -> tensor[*,f32] ! {{IO}} = {{
+  f: (&tensor[*,f32] -> tensor[3,bool]) = is_finite
+  {callee}(mark("before"), {actual}, mark("after"), to_tensor([1.0f32,2.0f32]))
+}}
+result = main(0i32)
+"#
+            );
+            let (dir, path) = canonical_contract_program(&source, "callable_actual_trap");
+            let evaluated = Command::cargo_bin("chelis")
+                .unwrap()
+                .args(["eval", "--file"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            let out = dir.path().join("native");
+            Command::cargo_bin("chelis")
+                .unwrap()
+                .arg("build")
+                .arg(&path)
+                .args(["--target", "c", "--output"])
+                .arg(&out)
+                .assert()
+                .success();
+            let native = std::process::Command::new(out.join("callable_actual_trap"))
+                .output()
+                .unwrap();
+            for output in [&evaluated, &native] {
+                assert!(!output.status.success(), "{output:?}");
+                assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("division by zero"),
+                    "{output:?}"
+                );
+            }
+        }
+    }
+}

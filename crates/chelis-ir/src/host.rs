@@ -15963,8 +15963,45 @@ struct ActualizedRetainedHostContract {
 
 #[derive(Default)]
 struct RetainedHostPreparation {
-    actuals: Option<Vec<Option<HostExpr>>>,
+    actuals: Option<Vec<PreparedRetainedActual>>,
     body_authority: Option<RetainedBodyLoweringAuthority>,
+}
+
+/// Static identity is authority for application, never a substitute for
+/// evaluating the expression which produces the callable value.
+enum PreparedRetainedActual {
+    Payload(HostExpr),
+    Builtin {
+        producer: HostExpr,
+        callable: StaticBuiltinValue,
+    },
+    /// Ordinary function syntax uses the existing inlining owner. It has no
+    /// first-class host ABI; this variant does not admit a computed closure.
+    CallableSyntax,
+}
+
+fn prepare_retained_actual(
+    actual: &Expr,
+    callable: bool,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+) -> Result<PreparedRetainedActual, crate::lower::LowerDiagnostic> {
+    if callable {
+        if let Some(callable) = resolve_host_builtin_value(actual, program, scope, tensor_helpers)?
+        {
+            let producer = lower_host_expr(actual, program, scope, tensor_helpers)?;
+            let producer = force_host_expr_type(
+                producer,
+                HostTypeTerm::CheckedBuiltinCallable(callable.checked_identity()),
+            );
+            Ok(PreparedRetainedActual::Builtin { producer, callable })
+        } else {
+            Ok(PreparedRetainedActual::CallableSyntax)
+        }
+    } else {
+        lower_host_expr(actual, program, scope, tensor_helpers).map(PreparedRetainedActual::Payload)
+    }
 }
 
 /// Callee-owned authority starts after caller payload preparation and ends
@@ -16523,9 +16560,8 @@ fn solve_checked_dimensions(
 }
 
 /// Lower every executable actual exactly once in the caller's type context.
-/// Callable values remain syntax because the host IR has no first-class
-/// function carrier; the retained invocation substitutes them directly after
-/// reifying their authored formal contract.
+/// Static builtin values keep their complete executable producer beside their
+/// application authority. Ordinary function syntax retains its inlining owner.
 fn prepare_retained_payload_actuals(
     expr: &Expr,
     name: &str,
@@ -16533,7 +16569,7 @@ fn prepare_retained_payload_actuals(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<Vec<Option<HostExpr>>, crate::lower::LowerDiagnostic> {
+) -> Result<Vec<PreparedRetainedActual>, crate::lower::LowerDiagnostic> {
     let app_args = as_node(expr)
         .and_then(|app| app.children_slice().split_first().map(|(_, args)| args))
         .ok_or_else(|| host_expr_lowering_error(expr, "retained invocation lost its actuals"))?;
@@ -16556,11 +16592,7 @@ fn prepare_retained_payload_actuals(
             let callable = decode_expanded_host_type_expr(program, authored)
                 .is_some_and(|term| matches!(term, HostTypeTerm::Fn(..)))
                 || matches!(fallback.ty, HostTypeTerm::Fn(..));
-            if callable {
-                Ok(None)
-            } else {
-                lower_host_expr(actual, program, scope, tensor_helpers).map(Some)
-            }
+            prepare_retained_actual(actual, callable, program, scope, tensor_helpers)
         })
         .collect()
 }
@@ -17187,12 +17219,15 @@ fn lower_named_retained_host_invocation(
             .iter()
             .zip(app_args)
             .map(|(prepared, actual)| {
-                let prepared_ty = prepared.as_ref().map(host_expr_type).unwrap_or_else(|| {
-                    // Callable values are not executable payloads. Their
-                    // checked type is the only representation evidence needed
-                    // to instantiate a nested precision variable.
-                    expr_host_type(actual, program, scope)
-                });
+                let prepared_ty = match prepared {
+                    PreparedRetainedActual::Payload(value) => host_expr_type(value),
+                    PreparedRetainedActual::Builtin { .. }
+                    | PreparedRetainedActual::CallableSyntax => {
+                        // Logical signature evidence instantiates the formal;
+                        // the physical builtin descriptor does not replace it.
+                        expr_host_type(actual, program, scope)
+                    }
+                };
                 checked_tensor_actual_type(actual, program, &prepared_ty).unwrap_or(prepared_ty)
             })
             .collect::<Vec<_>>();
@@ -17265,9 +17300,9 @@ fn lower_named_retained_host_invocation(
     })
 }
 
-/// Evaluate payload actuals once in caller order, then execute the complete
-/// entry plan before the substituted body. Callable actuals remain syntax,
-/// wrapped in their formal checked adapter when that formal owns entry guards.
+/// Evaluate all prepared actual producers once in caller order, then execute
+/// the complete entry plan before the substituted body. Callable application
+/// authority travels separately from the eagerly retained producer value.
 fn lower_retained_host_invocation(
     expr: &Expr,
     invocation: RetainedHostInvocation<'_>,
@@ -17277,7 +17312,7 @@ fn lower_retained_host_invocation(
     tensor_helpers: &mut TensorHelperSink,
     preparation: RetainedHostPreparation,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
-    let mut prepared_actuals = preparation.actuals;
+    let prepared_actuals = preparation.actuals;
     let mut body_authority =
         preparation
             .body_authority
@@ -17308,6 +17343,28 @@ fn lower_retained_host_invocation(
             "retained invocation argument count differs from its signature",
         ));
     }
+    let prepared_actuals = match prepared_actuals {
+        Some(actuals) if actuals.len() == args.len() => actuals,
+        Some(_) => {
+            return Err(host_expr_lowering_error(
+                expr,
+                "retained invocation lost prepared actual alignment",
+            ));
+        }
+        None => args
+            .iter()
+            .zip(invocation.params)
+            .enumerate()
+            .map(|(index, (arg, formal))| {
+                let callable = matches!(formal.ty, HostTypeTerm::Fn(..))
+                    || invocation
+                        .callable_contracts
+                        .get(index)
+                        .is_some_and(Option::is_some);
+                prepare_retained_actual(arg, callable, program, scope, tensor_helpers)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     let mut reserved = scope
         .to_sorted()
         .into_iter()
@@ -17324,16 +17381,26 @@ fn lower_retained_host_invocation(
     let mut observation_positions = Vec::new();
     let mut list_observations = Vec::new();
     let mut payload_slots = Vec::new();
-    for (index, (arg, formal)) in args.iter().zip(invocation.params).enumerate() {
-        if let Some(contract) = invocation
+    for (index, ((arg, formal), actual)) in args
+        .iter()
+        .zip(invocation.params)
+        .zip(prepared_actuals)
+        .enumerate()
+    {
+        let contract = invocation
             .callable_contracts
             .get(index)
-            .and_then(Option::as_ref)
-        {
-            if let Some(value) = resolve_host_builtin_value(arg, program, scope, tensor_helpers)? {
-                let contract = actualize_callable_invocation_contract(contract, &formal.ty)
+            .and_then(Option::as_ref);
+        let value = match actual {
+            PreparedRetainedActual::Builtin { producer, callable } => {
+                let contract = contract
+                    .map(|contract| actualize_callable_invocation_contract(contract, &formal.ty))
+                    .transpose()
                     .map_err(|error| host_expr_lowering_error(expr, error))?;
-                let value = value.with_outer_contract(contract.clone());
+                let value = match contract.as_ref() {
+                    Some(contract) => callable.with_outer_contract(contract.clone()),
+                    None => callable,
+                };
                 let mut serial = 0;
                 let fresh = loop {
                     let fresh = format!("__chelis_retained_callable_{index}_{serial}");
@@ -17342,26 +17409,35 @@ fn lower_retained_host_invocation(
                     }
                     serial += 1;
                 };
-                bind_host_local(
-                    &mut local_scope,
-                    fresh.clone(),
-                    HostTypeTerm::CheckedBuiltinCallable(value.checked_identity()),
-                );
+                let ty = HostTypeTerm::CheckedBuiltinCallable(value.checked_identity());
+                bindings.push(HostBinding {
+                    name: fresh.clone(),
+                    display_name: None,
+                    display_roots: Vec::new(),
+                    ty: ty.clone(),
+                    value: producer,
+                });
+                bind_host_local(&mut local_scope, fresh.clone(), ty);
                 local_scope.insert(builtin_payload_origin_key(&fresh), HostTypeTerm::Unit);
                 body_authority.builtin_values.insert(fresh.clone(), value);
+                let signature = contract
+                    .as_ref()
+                    .map(|contract| contract.signature().clone())
+                    .or_else(|| host_type_syntax(&formal.ty, *span));
                 substitutions.insert(
                     formal.name.clone(),
                     Expr::node(
                         DeepTag::Var,
-                        callable_type_metadata(Some(contract.signature())),
+                        callable_type_metadata(signature.as_ref()),
                         vec![Expr::Atom(Atom::Name(fresh), *span)],
                         *span,
                     ),
                 );
-            } else {
-                substitutions.insert(
-                    formal.name.clone(),
-                    retain_callable_invocation_contract(
+                continue;
+            }
+            PreparedRetainedActual::CallableSyntax => {
+                let syntax = match contract {
+                    Some(contract) => retain_callable_invocation_contract(
                         arg,
                         &formal.ty,
                         contract,
@@ -17370,32 +17446,12 @@ fn lower_retained_host_invocation(
                         *span,
                     )
                     .map_err(|error| host_expr_lowering_error(expr, error))?,
-                );
+                    None => arg.clone(),
+                };
+                substitutions.insert(formal.name.clone(), syntax);
+                continue;
             }
-            continue;
-        }
-        if matches!(formal.ty, HostTypeTerm::Fn(..)) {
-            substitutions.insert(formal.name.clone(), arg.clone());
-            continue;
-        }
-        let value = match prepared_actuals
-            .as_mut()
-            .and_then(|prepared| prepared.get_mut(index))
-            .and_then(Option::take)
-        {
-            Some(value) => value,
-            None if prepared_actuals.is_none() => {
-                lower_host_expr(arg, program, scope, tensor_helpers)?
-            }
-            None => {
-                return Err(host_expr_lowering_error(
-                    expr,
-                    format!(
-                        "retained payload `{}` was not prepared exactly once",
-                        formal.name
-                    ),
-                ));
-            }
+            PreparedRetainedActual::Payload(value) => value,
         };
         // chelis#3153: the staged actual is typed from the lowered value's own
         // type, but a context-fixed nullary actual such as a bare `[]` carries
