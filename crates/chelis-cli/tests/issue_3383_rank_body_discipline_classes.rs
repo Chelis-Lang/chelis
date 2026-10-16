@@ -175,7 +175,6 @@ fn observation_and_assertion_builtins_run_in_a_rank_polymorphic_body() {
 fn an_untracked_builtin_is_still_rejected_and_named_by_the_property() {
     for (call, op) in [
         ("permute(x, 1, 0)", "permute"),
-        ("reshape(x, [2i64, 3i64])", "reshape"),
         ("cumsum(x, 0i32)", "cumsum"),
     ] {
         let source = format!("def bad[r](x: tensor[..r, f32]) -> tensor[..r, f32] = {call}\n");
@@ -191,6 +190,26 @@ fn an_untracked_builtin_is_still_rejected_and_named_by_the_property() {
             "{op}: the rejection names the property, not a shape claim: {messages:?}"
         );
     }
+    // Concrete reshape already violates the authored opaque-rank binder;
+    // inference rejects it before the complete-body evidence pass.
+    let json = check_json(
+        "def bad[r](x: tensor[..r, f32]) -> tensor[..r, f32] = reshape(x, [2i64, 3i64])\n",
+    );
+    assert!(
+        json["errors"]
+            .as_array()
+            .expect("errors array")
+            .iter()
+            .any(|error| {
+                error["kind"].as_str() == Some("DimensionMismatch")
+                    && error["message"].as_str().is_some_and(|message| {
+                        message.contains("was narrowed to concrete shape [2, 3]")
+                            && message.contains("[04-INF-6]")
+                    })
+            }),
+        "reshape must retain its rank-rigidity rejection: {json}"
+    );
+    assert!(json["score"].as_f64().is_some_and(|score| score < 1.0));
     // A builtin that returns a value holding no tensor is not inert: Inert is
     // exactly a unit result, the operand returned, or no return. Its
     // rejection states that rule and makes no transposition claim.

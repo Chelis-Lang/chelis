@@ -32,6 +32,16 @@ pub(super) struct TopLevelReference {
     pub(super) kind: TopLevelReferenceKind,
 }
 
+/// One application's lexical target, resolved by the declaration graph's
+/// existing scope walk. Addresses are session-local AST occurrence keys.
+#[derive(Clone, Debug)]
+pub(super) enum ResolvedApplication {
+    Definition(usize),
+    Unshadowed(String),
+    Local(String),
+    Computed,
+}
+
 /// One canonical syntactic reference graph for top-level inference.
 ///
 /// Vertices are name-keyed top-level `def`s. `item_references` additionally
@@ -54,6 +64,8 @@ pub(super) struct TopLevelReferenceGraph {
     pub(super) outgoing: Vec<Vec<TopLevelReference>>,
     pub(super) item_references: Vec<Vec<TopLevelReference>>,
     pub(super) complete: bool,
+    pub(super) applications: UnordMap<usize, ResolvedApplication>,
+    pub(super) external_references: Vec<BTreeMap<String, TopLevelReferenceKind>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +164,7 @@ impl TopLevelReferenceGraph {
         let mut graph = Self {
             definition_vertex_by_item: vec![None; items.len()],
             item_references: vec![Vec::new(); items.len()],
+            external_references: vec![BTreeMap::new(); items.len()],
             complete: true,
             ..Self::default()
         };
@@ -210,7 +223,16 @@ impl TopLevelReferenceGraph {
             }
             let mut references = BTreeSet::new();
             let mut bound = Vec::new();
-            collect_top_level_references(expr, &graph.vertex_by_name, &mut bound, &mut references);
+            let mut external_references = BTreeMap::new();
+            collect_top_level_references(
+                expr,
+                &graph.vertex_by_name,
+                &mut bound,
+                &mut references,
+                &mut graph.applications,
+                &mut external_references,
+            );
+            graph.external_references[item_index] = external_references;
 
             // [04-INF-4]: the literal self-reference of an explicitly typed
             // external input is its declaration spelling, not an eager edge.
@@ -716,23 +738,51 @@ fn collect_top_level_references(
     vertex_by_name: &UnordMap<String, usize>,
     bound: &mut Vec<UnordSet<String>>,
     references: &mut BTreeSet<TopLevelReference>,
+    applications: &mut UnordMap<usize, ResolvedApplication>,
+    external_references: &mut BTreeMap<String, TopLevelReferenceKind>,
 ) {
     stack_guard!("collect_top_level_references", expr);
     match expr {
         deep::Expr::Atom(_, _) => {}
         deep::Expr::Map(map, _) => {
             map.visit_syntax(&mut |_, value| {
-                collect_top_level_references(value, vertex_by_name, bound, references);
+                collect_top_level_references(
+                    value,
+                    vertex_by_name,
+                    bound,
+                    references,
+                    applications,
+                    external_references,
+                );
             });
         }
         // Metadata describes the expression; it is not executed as part of a
         // top-level initializer. The stamped expression itself still is.
-        deep::Expr::MetaExpr(meta, _) => {
-            collect_top_level_references(&meta.expr, vertex_by_name, bound, references)
-        }
+        deep::Expr::MetaExpr(meta, _) => collect_top_level_references(
+            &meta.expr,
+            vertex_by_name,
+            bound,
+            references,
+            applications,
+            external_references,
+        ),
         deep::Expr::Node(node, _) => match node.tag() {
             DeepTag::App => {
                 let kids = node.children_slice();
+                let target = match kids.first().and_then(var_name_expr) {
+                    Some(name) if is_bound_name(name, bound) => {
+                        ResolvedApplication::Local(name.to_string())
+                    }
+                    Some(name) => match vertex_by_name.get(name) {
+                        Some(vertex) => ResolvedApplication::Definition(*vertex),
+                        None => ResolvedApplication::Unshadowed(name.to_string()),
+                    },
+                    None => ResolvedApplication::Computed,
+                };
+                if let ResolvedApplication::Unshadowed(name) = &target {
+                    external_references.insert(name.clone(), TopLevelReferenceKind::Apply);
+                }
+                applications.insert(expr_key(expr), target);
                 if let Some(callee) = kids.first().and_then(var_name_expr)
                     && vertex_by_name.contains_key(callee)
                     && !is_bound_name(callee, bound)
@@ -742,10 +792,24 @@ fn collect_top_level_references(
                         kind: TopLevelReferenceKind::Apply,
                     });
                 } else if let Some(callee) = kids.first() {
-                    collect_top_level_references(callee, vertex_by_name, bound, references);
+                    collect_top_level_references(
+                        callee,
+                        vertex_by_name,
+                        bound,
+                        references,
+                        applications,
+                        external_references,
+                    );
                 }
                 for argument in kids.iter().skip(1) {
-                    collect_top_level_references(argument, vertex_by_name, bound, references);
+                    collect_top_level_references(
+                        argument,
+                        vertex_by_name,
+                        bound,
+                        references,
+                        applications,
+                        external_references,
+                    );
                 }
             }
             DeepTag::Var => {
@@ -757,6 +821,12 @@ fn collect_top_level_references(
                         target: vertex_by_name[name],
                         kind: TopLevelReferenceKind::Read,
                     });
+                } else if let Some(name) = node.children_slice().first().and_then(symbol_name)
+                    && !is_bound_name(name, bound)
+                {
+                    external_references
+                        .entry(name.to_string())
+                        .or_insert(TopLevelReferenceKind::Read);
                 }
             }
             DeepTag::Fn => {
@@ -770,7 +840,14 @@ fn collect_top_level_references(
                     );
                     // [04-INF-7]: nested lambda bodies are part of the eager
                     // syntactic reference set even if the closure is stored.
-                    collect_top_level_references(&kids[1], vertex_by_name, bound, references);
+                    collect_top_level_references(
+                        &kids[1],
+                        vertex_by_name,
+                        bound,
+                        references,
+                        applications,
+                        external_references,
+                    );
                     bound.pop();
                 }
             }
@@ -791,6 +868,8 @@ fn collect_top_level_references(
                             vertex_by_name,
                             bound,
                             references,
+                            applications,
+                            external_references,
                         );
                         if let Some(name) = symbol_name(&bind_kids[index]) {
                             bound
@@ -801,17 +880,38 @@ fn collect_top_level_references(
                         index += 2;
                     }
                 }
-                collect_top_level_references(&kids[1], vertex_by_name, bound, references);
+                collect_top_level_references(
+                    &kids[1],
+                    vertex_by_name,
+                    bound,
+                    references,
+                    applications,
+                    external_references,
+                );
                 bound.pop();
             }
             DeepTag::Match => {
                 let kids = node.children_slice();
                 if let Some(scrutinee) = kids.first() {
-                    collect_top_level_references(scrutinee, vertex_by_name, bound, references);
+                    collect_top_level_references(
+                        scrutinee,
+                        vertex_by_name,
+                        bound,
+                        references,
+                        applications,
+                        external_references,
+                    );
                 }
                 for arm in kids.iter().skip(1) {
                     let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
-                        collect_top_level_references(arm, vertex_by_name, bound, references);
+                        collect_top_level_references(
+                            arm,
+                            vertex_by_name,
+                            bound,
+                            references,
+                            applications,
+                            external_references,
+                        );
                         continue;
                     };
                     let Some(pattern) = arm_kids.first() else {
@@ -823,25 +923,53 @@ fn collect_top_level_references(
                             .collect(),
                     );
                     for scoped in arm_kids.iter().skip(1) {
-                        collect_top_level_references(scoped, vertex_by_name, bound, references);
+                        collect_top_level_references(
+                            scoped,
+                            vertex_by_name,
+                            bound,
+                            references,
+                            applications,
+                            external_references,
+                        );
                     }
                     bound.pop();
                 }
             }
             _ => {
                 for child in node.children_slice() {
-                    collect_top_level_references(child, vertex_by_name, bound, references);
+                    collect_top_level_references(
+                        child,
+                        vertex_by_name,
+                        bound,
+                        references,
+                        applications,
+                        external_references,
+                    );
                 }
             }
         },
         deep::Expr::BareList(elements, _) => {
             for child in elements {
-                collect_top_level_references(child, vertex_by_name, bound, references);
+                collect_top_level_references(
+                    child,
+                    vertex_by_name,
+                    bound,
+                    references,
+                    applications,
+                    external_references,
+                );
             }
         }
         deep::Expr::UnknownForm(data) => {
             for child in &data.children {
-                collect_top_level_references(child, vertex_by_name, bound, references);
+                collect_top_level_references(
+                    child,
+                    vertex_by_name,
+                    bound,
+                    references,
+                    applications,
+                    external_references,
+                );
             }
         }
     }

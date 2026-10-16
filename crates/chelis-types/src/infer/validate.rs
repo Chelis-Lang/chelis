@@ -56,9 +56,13 @@ pub(super) fn validate_semantic_program(
     type_env: &IrTypeEnv,
     top_level_references: &TopLevelReferenceGraph,
     selector_context: &SelectorCallableContext,
+    rank_context: &RankBodyContext,
     product: &InferenceProduct,
     errors: &mut DiagnosticSink<'_>,
-) {
+) -> RankBodyContext {
+    // Rank-body diagnostics remain independent, but reusable evidence requires
+    // successful inference rather than a partially stamped rejected product.
+    let inference_succeeded = errors.is_empty();
     top_level_references.report_initialization_errors(errors);
     super::representable_extent::validate_representable_tensor_types(exprs, product, errors);
     validate_core_transform_fragment(exprs, errors);
@@ -87,6 +91,14 @@ pub(super) fn validate_semantic_program(
             errors,
         );
     }
+    validate_rank_bodies(
+        exprs,
+        product,
+        top_level_references,
+        rank_context,
+        inference_succeeded,
+        errors,
+    )
 }
 
 /// Yield each top-level declaration, flattening through a `(module {} name ...)`

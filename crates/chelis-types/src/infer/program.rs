@@ -195,7 +195,6 @@ fn sweep_recursive_collection_contracts(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    user_def_names: &UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
     declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
 ) {
@@ -290,7 +289,6 @@ fn sweep_recursive_collection_contracts(
                 None,
                 Some(recursion::RecursiveExpected::Published(expected)),
                 true,
-                user_def_names,
                 declared_signatures,
                 declaration_diagnostic_owner,
             ) {
@@ -401,6 +399,7 @@ fn bind_library_products(
         checked.exprs(),
         context_library_proof_id,
         selector_context_digest,
+        type_env.inner().rank_bodies.digest(),
     );
     type_env.bind_library_proof(proof_id);
     checked.bind_library_proof(proof_id);
@@ -486,7 +485,6 @@ pub(super) fn infer_program_with_product_in_session(
     // Second pass: infer def bodies. Same module-descent rationale as the
     // declaration pass — without it, the entire HM checker is a no-op on
     // module-wrapped programs.
-    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
     let external_input_types = collect_literal_external_input_types(&items);
@@ -630,7 +628,6 @@ pub(super) fn infer_program_with_product_in_session(
                     .get(&declaration_index)
                     .map(recursion::RecursiveExpected::Provisional),
                 cyclic,
-                &user_def_names,
                 &declared_signatures,
                 declaration_diagnostic_owner,
             ) {
@@ -701,7 +698,6 @@ pub(super) fn infer_program_with_product_in_session(
                     &mut subst,
                     &adt_reg,
                     errors,
-                    &user_def_names,
                     &declared_signatures,
                     &declaration_diagnostic_owners,
                 );
@@ -726,6 +722,7 @@ pub(super) fn infer_program_with_product_in_session(
         &semantic_type_env,
         &top_level_references,
         &SelectorCallableContext::default(),
+        &RankBodyContext::default(),
         &product,
         errors,
     );
@@ -809,11 +806,12 @@ pub(crate) fn build_type_env_from_library_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_semantic_program(
+    let mut rank_bodies = validate_semantic_program(
         library_exprs,
         &library_ir,
         &product.top_level_references,
         &SelectorCallableContext::default(),
+        &RankBodyContext::default(),
         &product,
         errors,
     );
@@ -874,8 +872,14 @@ pub(crate) fn build_type_env_from_library_in_session(
     }
     let selector_callables =
         extend_selector_callable_context(&library_annotated, &SelectorCallableContext::default());
+    if let Err(message) =
+        rank_bodies.bind_checked_declarations(&library_annotated, &library_ir_annotated)
+    {
+        errors.push(internal_owner_stamp_error(message));
+        return Err(stats);
+    }
 
-    Ok(TypeEnv::from_inner(TypeEnvInner {
+    let mut type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
         var_gen: state.var_gen,
         subst: state.subst,
@@ -883,8 +887,16 @@ pub(crate) fn build_type_env_from_library_in_session(
         ir_types: library_ir_annotated,
         library_def_names,
         selector_callables,
+        rank_bodies,
         opacity: state.opacity,
-    }))
+    });
+    type_env.bind_library_proof(LibraryProofId::for_library(
+        &library_annotated,
+        None,
+        selector_callable_context_digest(&type_env.inner().selector_callables),
+        type_env.inner().rank_bodies.digest(),
+    ));
+    Ok(type_env)
 }
 
 /// Combined library-build helper: run the IR pipeline ONCE over the
@@ -952,11 +964,12 @@ pub(crate) fn build_compiled_library_context_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_semantic_program(
+    let mut rank_bodies = validate_semantic_program(
         library_exprs,
         &library_ir,
         &product.top_level_references,
         &SelectorCallableContext::default(),
+        &RankBodyContext::default(),
         &product,
         errors,
     );
@@ -1003,6 +1016,12 @@ pub(crate) fn build_compiled_library_context_in_session(
     let library_ir_annotated = build_ir_type_env(&library_annotated);
     let selector_callables =
         extend_selector_callable_context(&library_annotated, &SelectorCallableContext::default());
+    if let Err(message) =
+        rank_bodies.bind_checked_declarations(&library_annotated, &library_ir_annotated)
+    {
+        errors.push(internal_owner_stamp_error(message));
+        return Err(stats);
+    }
 
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
@@ -1012,6 +1031,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         ir_types: library_ir_annotated.clone(),
         library_def_names,
         selector_callables,
+        rank_bodies,
         opacity: state.opacity,
     });
 
@@ -1117,11 +1137,12 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_semantic_program(
+    let mut rank_bodies = validate_semantic_program(
         library_exprs,
         &combined_ir,
         &product.top_level_references,
         &base.inner().selector_callables,
+        &base.inner().rank_bodies,
         &product,
         errors,
     );
@@ -1177,6 +1198,13 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
             .or_insert_with(|| ty.clone());
     }
 
+    if let Err(message) =
+        rank_bodies.bind_checked_declarations(&library_annotated, &combined_ir_annotated)
+    {
+        errors.push(internal_owner_stamp_error(message));
+        return Err(stats);
+    }
+
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
         var_gen: state.var_gen,
@@ -1185,6 +1213,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         ir_types: combined_ir_annotated,
         library_def_names,
         selector_callables,
+        rank_bodies,
         opacity: state.opacity,
     });
 
@@ -1320,6 +1349,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
         &combined_ir,
         &product.top_level_references,
         &context.inner().selector_callables,
+        &context.inner().rank_bodies,
         &product,
         errors,
     );
@@ -1465,6 +1495,7 @@ pub(crate) fn infer_ir_program_in_session(
         &type_env,
         &product.top_level_references,
         &SelectorCallableContext::default(),
+        &RankBodyContext::default(),
         &product,
         errors,
     );
@@ -1550,7 +1581,6 @@ pub(super) fn infer_ir_program_with_state(
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
         .unwrap_or(false);
-    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
     // PP9 uses the same two bounded prebind capabilities at both entries:
@@ -1705,7 +1735,6 @@ pub(super) fn infer_ir_program_with_state(
                     .get(&declaration_index)
                     .map(recursion::RecursiveExpected::Provisional),
                 cyclic,
-                &user_def_names,
                 &declared_signatures,
                 declaration_diagnostic_owner,
             ) {
@@ -1779,7 +1808,6 @@ pub(super) fn infer_ir_program_with_state(
                     &mut state.subst,
                     &state.adt_reg,
                     errors,
-                    &user_def_names,
                     &declared_signatures,
                     &declaration_diagnostic_owners,
                 );

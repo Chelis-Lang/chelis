@@ -96,7 +96,8 @@ impl CachePayload for crate::LibraryContext {
     // V24: result-origin schemes also carry scalar/tensor key relations.
     // V25: raw origins retain their own quantified dtype restrictions.
     // V26 (#3130): Deep 0.20 removes Pipe and SurfPipeStage enum variants.
-    const FORMAT_VERSION: u32 = 26;
+    // V28 carries mandatory rank-body evidence and its library-proof digest.
+    const FORMAT_VERSION: u32 = 28;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -146,7 +147,8 @@ impl CachePayload for crate::StdLibContext {
     // capture/cotangent operations to RiscOp's bincode layout. Main's V36
     // and the branch's V40 encoded different payloads.
     // V42 (#3130): Deep 0.20 removes Pipe and SurfPipeStage enum variants.
-    const FORMAT_VERSION: u32 = 42;
+    // V44 carries mandatory rank-body evidence and its library-proof digest.
+    const FORMAT_VERSION: u32 = 44;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

@@ -88,6 +88,7 @@ use crate::unify::Subst;
 pub struct LibraryProofId {
     digest: [u8; 32],
     selector_context_digest: [u8; 32],
+    rank_context_digest: [u8; 32],
 }
 
 impl LibraryProofId {
@@ -95,9 +96,10 @@ impl LibraryProofId {
         annotated_exprs: &[deep::Expr],
         context: Option<Self>,
         selector_context_digest: [u8; 32],
+        rank_context_digest: [u8; 32],
     ) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(b"chelis-library-proof-v1");
+        hasher.update(b"chelis-library-proof-v2");
         if let Some(context) = context {
             hasher.update([1]);
             hasher.update(context.digest);
@@ -108,9 +110,11 @@ impl LibraryProofId {
         hasher.update((canonical.len() as u64).to_le_bytes());
         hasher.update(canonical.as_bytes());
         hasher.update(selector_context_digest);
+        hasher.update(rank_context_digest);
         Self {
             digest: hasher.finalize().into(),
             selector_context_digest,
+            rank_context_digest,
         }
     }
 }
@@ -147,7 +151,8 @@ pub struct TypeEnv {
 // v10 combines those origins with scalar/tensor key-operation relations.
 // Neither scalar-only v9 nor origin-free key-relation v7 snapshots can be reused.
 // v11 separates raw-origin restrictions from the solved public signature.
-const TYPE_ENV_FORMAT_VERSION: u32 = 11;
+// v13 transports declaration-owned rank body evidence and its dependencies.
+const TYPE_ENV_FORMAT_VERSION: u32 = 13;
 
 #[derive(Serialize)]
 struct TypeEnvWireRef<'a> {
@@ -186,6 +191,19 @@ impl<'de> Deserialize<'de> for TypeEnv {
             .subst
             .validate_dimension_labels(&wire.inner.var_gen)
             .map_err(serde::de::Error::custom)?;
+        wire.inner
+            .rank_bodies
+            .validate(&wire.inner.ir_types)
+            .map_err(serde::de::Error::custom)?;
+        let valid_rank_proof = match wire.library_proof_id {
+            Some(proof) => proof.rank_context_digest == wire.inner.rank_bodies.digest(),
+            None => wire.inner.rank_bodies.is_empty(),
+        };
+        if !valid_rank_proof {
+            return Err(serde::de::Error::custom(
+                "rank body evidence does not match its library proof",
+            ));
+        }
         Ok(Self {
             inner: wire.inner,
             library_proof_id: wire.library_proof_id,
@@ -219,6 +237,9 @@ pub(crate) struct TypeEnvInner {
     /// accepted from the library source. Contextual `grad` validation seeds
     /// its structural resolver from this snapshot.
     pub(crate) selector_callables: crate::infer::SelectorCallableContext,
+    /// Checked body evidence and exact dependency ownership for §4.5.3.
+    /// Mandatory on the wire: absence cannot mean a verified empty body.
+    pub(crate) rank_bodies: crate::infer::RankBodyContext,
     /// Checker-enforced opacity metadata (RFC D-CHECK): per-module
     /// export sets, binding -> module attribution, and producer text,
     /// accumulated across the library and new-code phases. Defaults
@@ -260,6 +281,7 @@ impl TypeEnv {
                 ir_types: BTreeMap::new(),
                 library_def_names: UnordSet::new(),
                 selector_callables: crate::infer::SelectorCallableContext::default(),
+                rank_bodies: crate::infer::RankBodyContext::default(),
                 opacity: crate::opacity::OpacityModuleMeta::default(),
             }),
             library_proof_id: None,
@@ -325,8 +347,14 @@ impl TypeEnv {
     pub fn matches_checked_program(&self, program: &crate::CheckedProgram) -> bool {
         let selector_context_digest =
             crate::infer::selector_callable_context_digest(&self.inner.selector_callables);
-        self.library_proof_id
-            .is_some_and(|proof| proof.selector_context_digest == selector_context_digest)
+        self.library_proof_id.is_some_and(|proof| {
+            proof.selector_context_digest == selector_context_digest
+                && proof.rank_context_digest == self.inner.rank_bodies.digest()
+        }) && self
+            .inner
+            .rank_bodies
+            .validate(&self.inner.ir_types)
+            .is_ok()
             && self.library_proof_id == program.library_proof_id()
             && self.inner.ir_types.eq(program.type_env())
     }
@@ -345,7 +373,7 @@ mod tests {
         wire.as_object_mut().unwrap().remove("result_origin");
         assert!(serde_json::from_value::<Scheme>(wire).is_err());
         let mut wire = serde_json::to_value(TypeEnv::empty()).unwrap();
-        for version in [6, 7, 8, 9, 10] {
+        for version in [6, 7, 8, 9, 10, 11, 12] {
             wire["format_version"] = serde_json::json!(version);
             assert!(serde_json::from_value::<TypeEnv>(wire.clone()).is_err());
         }
