@@ -42,6 +42,7 @@ pub mod engine_registry;
 pub mod from_property_spec;
 pub mod graph_extract;
 pub mod inlineability;
+pub mod machine_arith;
 pub mod obligation_engine;
 pub mod obligations;
 pub mod opaque;

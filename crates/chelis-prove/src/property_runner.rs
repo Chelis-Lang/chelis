@@ -154,6 +154,10 @@ pub struct PropertyOutcome {
     pub induction_evidence: Option<InductionEvidence>,
     /// Exact external-engine report, including hull, reason, tree and request binding.
     pub engine_evidence: Option<serde_json::Value>,
+    /// The machine-arithmetic check `auto` runs after an over-the-reals green
+    /// (chelis#3634). `None` when no check was attempted: an explicitly
+    /// selected tier, or a verdict whose base is not over the reals.
+    pub machine_arithmetic: Option<crate::machine_arith::MachineArithmeticCheck>,
 }
 
 impl PropertyOutcome {
@@ -229,6 +233,7 @@ impl PropertyOutcome {
             rejected_samples: 0,
             induction_evidence: None,
             engine_evidence: None,
+            machine_arithmetic: None,
         }
     }
 
@@ -299,6 +304,24 @@ impl PropertyOutcome {
             ),
             None => Vec::new(),
         }
+    }
+
+    /// Whether this record's PUBLISHED caveats disclose that its green was
+    /// decided over the reals. Such a decision rules out a real counterexample
+    /// only, so chelis#3634's `auto` lane owes it a machine-arithmetic
+    /// refutation search. Read off `disclosed_qualifiers` -- the same array the
+    /// record publishes -- so the lane and the disclosure cannot disagree.
+    pub fn discloses_real_arithmetic(&self) -> bool {
+        self.disclosed_qualifiers()
+            .contains(&crate::discharge::Qualifier::RealArith.as_str())
+    }
+
+    pub(super) fn with_machine_arithmetic(
+        mut self,
+        check: crate::machine_arith::MachineArithmeticCheck,
+    ) -> Self {
+        self.machine_arithmetic = Some(check);
+        self
     }
 
     fn append_assumptions(&mut self, assumptions: Vec<AssumptionRecord>) {
@@ -917,7 +940,26 @@ fn prove_surf_property(
             options,
             seed,
         ) {
-            outcome.append_assumptions(contract_assumptions);
+            outcome.append_assumptions(contract_assumptions.clone());
+            // chelis#3634: a Tier B green is a decision over the REALS, so it
+            // rules out no machine-arithmetic counterexample. `auto` runs Tier C
+            // against it as a refutation search; a concrete counterexample wins,
+            // and nothing else can lower the proof.
+            if crate::machine_arith::corroboration_required(
+                &options.tier,
+                outcome.display_status() == "passed",
+                &outcome.disclosed_qualifiers(),
+            ) {
+                let mut probe =
+                    prove_surf_property_fuzz(decls, property, options, seed, semantic_program);
+                // The probe can become the published record, so it carries the
+                // same contract assumptions the Tier C fall-through below
+                // attaches. Without this a refutation under `auto` would
+                // publish an empty `assumptions` array where `fuzz-only`
+                // publishes the contract's discharge.
+                probe.append_assumptions(contract_assumptions);
+                return crate::machine_arith::resolve_property(outcome, probe);
+            }
             return outcome;
         }
         if options.tier == "smt-only" {
@@ -5221,6 +5263,17 @@ fn prove_deep_property(
 
     if options.tier == "auto" || options.tier == "smt-only" {
         if let Some(outcome) = try_deep_tier_b(exprs, property, options, seed) {
+            // chelis#3634: a Tier B green on a Deep property is the same
+            // over-the-reals decision the Surf lane makes, so `auto` owes it the
+            // same machine-arithmetic refutation search.
+            if crate::machine_arith::corroboration_required(
+                &options.tier,
+                outcome.display_status() == "passed",
+                &outcome.disclosed_qualifiers(),
+            ) {
+                let probe = prove_deep_property_fuzz(exprs, property, options, seed);
+                return crate::machine_arith::resolve_property(outcome, probe);
+            }
             return outcome;
         }
         if options.tier == "smt-only" {
@@ -5238,6 +5291,18 @@ fn prove_deep_property(
         }
     }
 
+    prove_deep_property_fuzz(exprs, property, options, seed)
+}
+
+/// Tier C for a Deep property: the sampling lane `prove_deep_property` falls
+/// through to, extracted so chelis#3634's `auto` corroboration can run the same
+/// search against a Tier B green without duplicating it.
+fn prove_deep_property_fuzz(
+    exprs: &[DeepExpr],
+    property: &DeepProperty,
+    options: &PropertyRunOptions,
+    seed: u64,
+) -> PropertyOutcome {
     let samples_needed = if options.samples != 100 {
         options.samples
     } else {

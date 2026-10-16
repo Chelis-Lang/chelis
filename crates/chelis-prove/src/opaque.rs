@@ -536,10 +536,13 @@ pub(crate) fn finite_exact_constant(value: ScalarValue) -> Option<f64> {
 /// dotted path prefix of the binder value, the binder's fields (so `sum`
 /// over a tensor field expands to the right number of scalar terms), the
 /// resolved in-module constant environment, and the defining program (so a
-/// module constant lowers with its DECLARED numeric type, U2). `exprs` is
-/// empty when no module is available (the concrete-eval-only test callers),
-/// in which case a constant defaults to `Real` -- harmless because concrete
-/// evaluation is sort-agnostic.
+/// module constant lowers with its DECLARED numeric type, U2). An empty
+/// `exprs` defaults every constant to `Real`, which is NOT harmless on the
+/// concrete-eval path: `concrete_eval::align_literal_widths` declines an
+/// `(F64, Int32|Int64)` pair, so a `Real` bound against an integer field
+/// compares false for every value. That is chelis#3651, and it is why
+/// `lower_predicate_flattened` takes the defining program as a required
+/// argument. Pass `&[]` only where the predicate references no constant.
 struct LowerCtx<'a> {
     binder: &'a str,
     prefix: &'a str,
@@ -701,31 +704,21 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
     }
 }
 
-/// Lower an invariant predicate to an [`SmtExpr`] over a *flattened*
-/// binder: a field projection `(access (var binder) field)` becomes
-/// `SmtExpr::Var("<prefix>.field")`, dotted for nesting; `sum` over a
-/// literal-shape tensor field expands to a sum of its per-element vars
-/// (`<prefix>.field.0 + ... + <prefix>.field.N-1`); in-module constants
-/// resolve through `consts`. Returns `None` if any node is outside the
-/// lowerable fragment (the caller then falls back to Tier C).
+/// Lower an invariant predicate to a flattened [`SmtExpr`] over
+/// `<prefix>.<field>` variables, with in-module constant references resolved
+/// through `consts` and typed from the defining program `exprs`. Returns
+/// `None` if any node is outside the lowerable grammar.
 ///
-/// `prefix` is the dotted path of the binder value (e.g. `"p"` at top
-/// level, `"p.inner"` for a nested record binder).
+/// `exprs` is MANDATORY, and that is the chelis#3651 fix. A constant's sort
+/// comes from its declaration (`const_declared_numeric_type`), so without the
+/// module every constant lowered as `RealLit` -- including an integer one. The
+/// Tier C validation path used an `exprs`-free wrapper and so compared an
+/// `Int`-sorted integer field against a `RealLit` bound, which evaluated false
+/// for every value: an obligation whose invariant did integer arithmetic on a
+/// module constant was reported failed with a counterexample that satisfies it.
+/// A caller with no module passes `&[]` deliberately; there is no wrapper that
+/// drops it silently.
 pub fn lower_predicate_flattened(
-    inv: &OpaqueInvariant,
-    prefix: &str,
-    consts: &ConstEnv,
-) -> Option<SmtExpr> {
-    lower_predicate_flattened_in(inv, prefix, consts, &[])
-}
-
-/// Like [`lower_predicate_flattened`] but with the defining program `exprs`
-/// available, so a module constant lowers with its DECLARED numeric type
-/// (U2). The `exprs`-free entry point above defaults a constant to `Real`
-/// (sound for the concrete-eval-only callers); the cvc5 precondition path
-/// (`tier_b_lower::lower_obligation`) passes the real module so an int
-/// constant against an int field is a sound integer comparison.
-pub fn lower_predicate_flattened_in(
     inv: &OpaqueInvariant,
     prefix: &str,
     consts: &ConstEnv,
@@ -1211,7 +1204,7 @@ pub fn generate_binder(
     budget: usize,
 ) -> Result<GeneratedBinder, GenerationFailure> {
     // Lower the predicate once over the binder name as prefix.
-    let predicate = lower_predicate_flattened_in(inv, &inv.binder, consts, module.exprs);
+    let predicate = lower_predicate_flattened(inv, &inv.binder, consts, module.exprs);
 
     // Tier 1: rejection sampling. The accepted count is definitionally 0
     // at the starvation point (we return early on the first accept), so

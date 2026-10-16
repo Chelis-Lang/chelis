@@ -4148,3 +4148,346 @@ def k(x: f64) -> f64 = sqrt(x)
     assert!(x < 0.0, "{record}");
     assert!((-1.0..2.0).contains(&x), "{record}");
 }
+
+// --- chelis#3634: `auto` corroborates an over-the-reals green in binary64 ---
+//
+// A Tier B decision is made over the reals, so it rules out a real
+// counterexample and nothing else. `auto` used to stop there, which made the
+// DEFAULT tier weaker than `--tier fuzz-only` on the same file: a property true
+// over the reals and false in binary64 was reported `passed`. These tests pin
+// the three ways the machine-arithmetic refutation search can resolve.
+//
+// `CHELIS_PROVE_TEST_FORCE_SMT_RESULT=proved` supplies the Tier B green without
+// cvc5, so the lane is covered in the default build too. The forced seam also
+// forces the non-vacuity probe, so these fixtures carry no preconditions (a
+// guarded fixture would force `assumptions are unsatisfiable`); the
+// `#[cfg(feature = "smt")]` test below runs the issue's guarded reproduction
+// against the real solver.
+
+/// Run `chelis prove` on `source` with the forced Tier B result, returning
+/// (exit code, stdout).
+fn prove_with_forced_smt(source: &str, extra: &[&str], forced: &str) -> (Option<i32>, Vec<u8>) {
+    let dir = write_prop(source);
+    let mut cmd = Command::cargo_bin("chelis").expect("binary");
+    cmd.env("CHELIS_PROVE_TEST_FORCE_SMT_RESULT", forced)
+        .arg("prove")
+        .arg(dir.path().join("prop.ch"));
+    for arg in extra {
+        cmd.arg(arg);
+    }
+    let output = cmd.output().expect("run prove");
+    (output.status.code(), output.stdout)
+}
+
+#[test]
+fn issue_3634_auto_reports_a_binary64_counterexample_to_an_over_reals_proof_as_a_failure() {
+    let (code, stdout) = prove_with_forced_smt(
+        r#"
+@property always_positive forall(x: f64):
+  (x > 0.0f64)
+"#,
+        &["--json"],
+        "proved",
+    );
+    assert_eq!(code, Some(1), "a refuted property exits 1: {stdout:?}");
+    let props = property_records(&stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let prop = &props[0];
+    assert_eq!(prop["status"], "failed", "{prop}");
+    assert_eq!(
+        prop["composite_verdict"], "failed",
+        "a concrete machine counterexample is DEFINITE, not reals-hedged: {prop}"
+    );
+    assert_eq!(prop["proof_tier"], "fuzz", "{prop}");
+    assert!(
+        prop.get("counterexample").is_some(),
+        "the refutation carries its witness: {prop}"
+    );
+    assert_eq!(prop["machine_arithmetic"]["status"], "refuted", "{prop}");
+    assert_eq!(
+        prop["machine_arithmetic"]["real_arithmetic_verdict"], "proven_modulo_real_arithmetic",
+        "the record names the green the counterexample displaced: {prop}"
+    );
+    assert!(
+        prop["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("refuted in machine arithmetic"),
+        "the failure says why a proof did not prevent it: {prop}"
+    );
+}
+
+#[test]
+fn issue_3634_auto_corroboration_leaves_a_true_over_reals_proof_unchanged() {
+    let (code, stdout) = prove_with_forced_smt(
+        r#"
+@property sq_nonneg forall(x: f64):
+  ((x * x) >= 0.0f64)
+"#,
+        &["--json"],
+        "proved",
+    );
+    assert_eq!(code, Some(0), "stdout={stdout:?}");
+    let props = property_records(&stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let prop = &props[0];
+    assert_eq!(prop["status"], "passed", "{prop}");
+    assert_eq!(
+        prop["composite_verdict"], "proven_modulo_real_arithmetic",
+        "sampling is not exhaustive, so it never promotes the badge: {prop}"
+    );
+    assert_eq!(
+        prop["qualifiers"],
+        serde_json::json!(["real_arithmetic"]),
+        "the machine-arithmetic gap stays disclosed: {prop}"
+    );
+    assert_eq!(prop["proof_tier"], "smt", "{prop}");
+    assert_eq!(prop["samples"], 0, "an SMT proof takes no samples: {prop}");
+    assert_eq!(
+        prop["machine_arithmetic"]["status"], "corroborated",
+        "{prop}"
+    );
+    assert_eq!(
+        prop["machine_arithmetic"]["samples"], 100,
+        "the default sample budget was spent on the refutation search: {prop}"
+    );
+}
+
+#[test]
+fn issue_3634_an_explicitly_selected_tier_is_not_widened_into_a_second_one() {
+    // `smt-only` asked for the deductive verdict alone. It keeps the green that
+    // `auto` now refutes, and records no machine-arithmetic check at all -- an
+    // absent field means "not attempted", never "nothing found".
+    let (code, stdout) = prove_with_forced_smt(
+        r#"
+@property always_positive forall(x: f64):
+  (x > 0.0f64)
+"#,
+        &["--tier", "smt-only", "--json"],
+        "proved",
+    );
+    assert_eq!(code, Some(0), "stdout={stdout:?}");
+    let props = property_records(&stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "passed", "{}", props[0]);
+    assert!(
+        props[0].get("machine_arithmetic").is_none(),
+        "smt-only must not run the check: {}",
+        props[0]
+    );
+}
+
+#[test]
+fn issue_3634_plain_text_discloses_the_reals_proof_instead_of_a_zero_sample_ratio() {
+    // `0/0 passed` read as a sample count rather than as a proof that takes no
+    // samples, which is the half of chelis#3634 a reader sees first.
+    let source = r#"
+@property sq_nonneg forall(x: f64):
+  ((x * x) >= 0.0f64)
+"#;
+    let (code, stdout) = prove_with_forced_smt(source, &[], "proved");
+    let text = String::from_utf8_lossy(&stdout).to_string();
+    assert_eq!(code, Some(0), "{text}");
+    assert!(
+        text.contains(
+            "property: sq_nonneg -- proven_modulo_real_arithmetic (proved over the reals; machine arithmetic corroborated on 100 samples)"
+        ),
+        "auto discloses what it checked: {text}"
+    );
+    assert!(
+        !text.contains("0/0 passed"),
+        "the misleading sample ratio is gone: {text}"
+    );
+
+    // Negative parity: under `smt-only` nothing was checked in binary64, and the
+    // render says exactly that rather than claiming a corroboration.
+    let (code, stdout) = prove_with_forced_smt(source, &["--tier", "smt-only"], "proved");
+    let text = String::from_utf8_lossy(&stdout).to_string();
+    assert_eq!(code, Some(0), "{text}");
+    assert!(
+        text.contains(
+            "property: sq_nonneg -- proven_modulo_real_arithmetic (proved over the reals; machine arithmetic unchecked)"
+        ),
+        "an unchecked green does not claim a corroboration: {text}"
+    );
+    assert!(!text.contains("0/0 passed"), "{text}");
+}
+
+// The issue's own reproduction, against the real solver: both properties hold
+// over the reals and fail in binary64 (`1/(x+1)` and `1/x` round to the same
+// value near 1e99; `x + 1.0` rounds back to `x` near 1e17). `auto` reported
+// both `passed` while `fuzz-only` refuted both on the same file. `auto` must now
+// agree with `fuzz-only`.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_3634_auto_agrees_with_fuzz_only_on_the_reported_reproduction() {
+    let source = r#"
+def inacc(x: f64) -> f64 = ((1.0f64 / (x + 1.0f64)) - (1.0f64 / x))
+def cancel(x: f64) -> f64 = ((x + 1.0f64) - x)
+@property inacc_negative forall(x: f64) where x > 0.0f64, x < 1e100f64:
+  (inacc(x) < 0.0f64)
+@property cancel_is_one forall(x: f64) where x > 0.0f64, x < 1e100f64:
+  (cancel(x) > 0.5f64)
+"#;
+    let dir = write_prop(source);
+    let path = dir.path().join("prop.ch");
+    for tier in ["auto", "fuzz-only"] {
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["prove", path.to_str().unwrap(), "--tier", tier, "--json"])
+            .output()
+            .expect("run prove");
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{tier} must refute both properties: stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let props = property_records(&output.stdout);
+        assert_eq!(props.len(), 2, "{tier} records: {props:?}");
+        for prop in &props {
+            assert_eq!(prop["status"], "failed", "{tier}: {prop}");
+            assert!(
+                prop.get("counterexample").is_some(),
+                "{tier} failure carries its witness: {prop}"
+            );
+        }
+    }
+}
+
+// chelis#3634: the Deep property lane makes the same over-the-reals decision as
+// the Surf lane, and its Tier C tail is a shared function both the fall-through
+// and the refutation search call. Pin both directions on a `.dp` input so a
+// future change to either caller cannot silently drop the check.
+#[test]
+fn issue_3634_the_deep_lane_is_corroborated_and_refuted_like_the_surf_lane() {
+    for (predicate, expected_status, expected_check, exit) in [
+        ("x == x", "passed", "corroborated", 0),
+        ("x > 0.0", "failed", "refuted", 1),
+    ] {
+        let dir = write_prop(&format!(
+            "@property deep_check forall(x: f32):\n  {predicate}\n"
+        ));
+        let deep = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["deep", dir.path().join("prop.ch").to_str().unwrap()])
+            .output()
+            .expect("desugar");
+        assert!(deep.status.success(), "{deep:?}");
+        let path = dir.path().join("prop.dp");
+        std::fs::write(&path, deep.stdout).expect("write deep");
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_PROVE_TEST_FORCE_SMT_RESULT", "proved")
+            .args(["prove", path.to_str().unwrap(), "--tier", "auto", "--json"])
+            .output()
+            .expect("run prove");
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{predicate}: stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let props = property_records(&output.stdout);
+        assert_eq!(props.len(), 1, "{predicate}: {props:?}");
+        let prop = &props[0];
+        assert_eq!(prop["status"], expected_status, "{predicate}: {prop}");
+        assert_eq!(
+            prop["machine_arithmetic"]["status"], expected_check,
+            "{predicate}: {prop}"
+        );
+        if expected_check == "corroborated" {
+            assert_eq!(prop["proof_tier"], "smt", "{predicate}: {prop}");
+            assert_eq!(prop["samples"], 0, "{predicate}: {prop}");
+            assert_eq!(
+                prop["composite_verdict"], "proven_modulo_real_arithmetic",
+                "{predicate}: {prop}"
+            );
+        } else {
+            assert_eq!(prop["proof_tier"], "fuzz", "{predicate}: {prop}");
+            assert_eq!(prop["composite_verdict"], "failed", "{predicate}: {prop}");
+            assert!(prop.get("counterexample").is_some(), "{predicate}: {prop}");
+        }
+    }
+}
+
+// chelis#3634 (P2-1): a refutation under `auto` becomes the published record, so
+// it must carry the same contract assumptions `--tier fuzz-only` publishes. It
+// used to publish an empty `assumptions` array, losing the contract's discharge
+// evidence on exactly the records a reader inspects most closely.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_3634_a_refutation_publishes_the_same_assumptions_as_fuzz_only() {
+    let source = r#"
+def cancel(x: f64) -> f64 = ((x + 1.0f64) - x)
+@property cancel_is_one forall(x: f64) where x > 0.0f64, x < 1e100f64:
+  (cancel(x) > 0.5f64)
+  with contract = "std.exp.zero"
+"#;
+    let dir = write_prop(source);
+    let path = dir.path().join("prop.ch");
+    let mut published: Vec<(String, Vec<String>)> = Vec::new();
+    for tier in ["auto", "fuzz-only"] {
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["prove", path.to_str().unwrap(), "--tier", tier, "--json"])
+            .output()
+            .expect("run prove");
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{tier} must refute: stdout={}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let props = property_records(&output.stdout);
+        assert_eq!(props.len(), 1, "{tier}: {props:?}");
+        let mut names: Vec<String> = props[0]["assumptions"]
+            .as_array()
+            .expect("assumptions array")
+            .iter()
+            .map(|record| record["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        names.sort();
+        assert!(
+            names.iter().any(|name| name == "std.exp.zero"),
+            "{tier} must publish the contract's discharge: {}",
+            props[0]
+        );
+        published.push((tier.to_string(), names));
+    }
+    assert_eq!(
+        published[0].1, published[1].1,
+        "auto and fuzz-only must publish the same assumption set on the same refutation"
+    );
+}
+
+// chelis#3634 (P2-2): the refutation reports the fuzz tier after Tier B DECIDED,
+// so `failure_summary` must not claim the tier fell back. A record whose own
+// `machine_arithmetic` field says a proof was displaced cannot also say the
+// solver failed to reach one.
+#[test]
+fn issue_3634_a_refutation_is_not_reported_as_a_tier_degradation() {
+    let (code, stdout) = prove_with_forced_smt(
+        r#"
+@property always_positive forall(x: f64):
+  (x > 0.0f64)
+"#,
+        &["--json"],
+        "proved",
+    );
+    assert_eq!(code, Some(1), "stdout={stdout:?}");
+    let props = property_records(&stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    let prop = &props[0];
+    assert_eq!(prop["machine_arithmetic"]["status"], "refuted", "{prop}");
+    assert!(
+        prop["failure_summary"].get("degradation").is_none(),
+        "an escalation is not a degradation: {prop}"
+    );
+    // The honest fields are still there: the summary names the tier that
+    // produced the counterexample and the tier that was requested.
+    assert_eq!(prop["failure_summary"]["actual_tier"], "fuzz", "{prop}");
+    assert_eq!(prop["failure_summary"]["requested_tier"], "auto", "{prop}");
+}

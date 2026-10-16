@@ -7,6 +7,11 @@ fn f32_value(value: f64) -> ScalarValue {
     scalar_from_f64("prove-test", Prim::F32, value).expect("valid f32 test value")
 }
 
+fn i64_value(value: i64) -> ScalarValue {
+    chelis_types::dtype_semantics::scalar_from_i64("prove-test", Prim::Int64, value)
+        .expect("valid i64 test value")
+}
+
 /// Desugar a Surf module string to Deep for collection tests.
 fn deep_of(surf: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(surf).expect("parse surf");
@@ -144,7 +149,7 @@ def make(a: f32, b: f32) -> Poly = Poly { a, b }
 fn lowers_linear_predicate_to_flattened_smt() {
     let exprs = deep_of(PROB);
     let inv = &collect_opaque_invariants(&exprs)[0];
-    let smt = lower_predicate_flattened(inv, "p", &ConstEnv::new()).expect("lowerable");
+    let smt = lower_predicate_flattened(inv, "p", &ConstEnv::new(), &exprs).expect("lowerable");
     // The lowered form must reference the flattened var "p.value".
     let s = format!("{smt:?}");
     assert!(s.contains("p.value"), "expected flattened var, got {s}");
@@ -156,7 +161,7 @@ fn flattened_predicate_validates_with_concrete_eval() {
     use chelis_unord::UnordMap;
     let exprs = deep_of(PROB);
     let inv = &collect_opaque_invariants(&exprs)[0];
-    let smt = lower_predicate_flattened(inv, "p", &ConstEnv::new()).expect("lowerable");
+    let smt = lower_predicate_flattened(inv, "p", &ConstEnv::new(), &exprs).expect("lowerable");
     let mut env = UnordMap::new();
     env.insert("p.value".to_string(), f32_value(0.5));
     assert!(
@@ -172,6 +177,56 @@ fn flattened_predicate_validates_with_concrete_eval() {
     assert!(
         !eval_bool(&smt, &env, &chelis_std_bundle::EMBEDDED_RUNTIME),
         "-0.1 violates 0<=v"
+    );
+}
+
+// chelis#3651: an int-typed module constant inside an invariant predicate must
+// be lowered from its DECLARATION, on the concrete-eval validation path as well
+// as the cvc5 precondition path. The validation path used to drop the defining
+// program, so the constant lowered as a `RealLit`, the comparison mixed Real
+// with the Int-sorted field var, and the predicate evaluated FALSE for every
+// value -- `chelis prove --tier fuzz-only` reported such an obligation failed
+// with a counterexample that satisfies the invariant. `exprs` is now a required
+// argument, so no caller can drop it silently.
+#[test]
+fn chelis_3651_int_module_constant_arithmetic_lowers_and_evaluates_as_integers() {
+    use crate::concrete_eval::eval_bool;
+    use chelis_unord::UnordMap;
+    let surf = "module M.IntBound
+@opaque
+@invariant(p) p.value >= bound - 2i64
+type LargeInt =
+  | LargeInt { value: i64 }
+bound = 3i64
+def make(x: i64) -> LargeInt = LargeInt { value: x }
+";
+    let exprs = deep_of(surf);
+    let inv = &collect_opaque_invariants(&exprs)[0];
+    let mut consts = ConstEnv::new();
+    consts.insert("bound".to_string(), 3.0);
+    let smt = lower_predicate_flattened(inv, "p", &consts, &exprs).expect("lowerable");
+    let rendered = format!("{smt:?}");
+    assert!(
+        rendered.contains("IntLit"),
+        "an i64 constant lowers as an integer literal: {rendered}"
+    );
+    assert!(
+        !rendered.contains("RealLit"),
+        "no RealLit against an Int-sorted field var: {rendered}"
+    );
+
+    // The invariant is `value >= 1`. Positive and negative parity on the
+    // evaluated predicate, which is what the Tier C validation path reads.
+    let mut env = UnordMap::new();
+    env.insert("p.value".to_string(), i64_value(1));
+    assert!(
+        eval_bool(&smt, &env, &chelis_std_bundle::EMBEDDED_RUNTIME),
+        "1 satisfies `value >= bound - 2` with bound = 3"
+    );
+    env.insert("p.value".to_string(), i64_value(0));
+    assert!(
+        !eval_bool(&smt, &env, &chelis_std_bundle::EMBEDDED_RUNTIME),
+        "0 violates `value >= bound - 2` with bound = 3"
     );
 }
 
@@ -191,7 +246,8 @@ def make(w: tensor[3, f32]) -> Simplex = Simplex { weights: w }
     let inv = &collect_opaque_invariants(&exprs)[0];
     let mut consts = ConstEnv::new();
     consts.insert("eps".to_string(), 0.001);
-    let smt = lower_predicate_flattened(inv, "p", &consts).expect("lowerable with sum+const");
+    let smt =
+        lower_predicate_flattened(inv, "p", &consts, &exprs).expect("lowerable with sum+const");
     let s = format!("{smt:?}");
     assert!(s.contains("p.weights.0"), "expected expanded sum: {s}");
     assert!(s.contains("p.weights.2"), "expected all 3 elements: {s}");
@@ -233,7 +289,7 @@ def make(x: i32) -> Counter = Counter { n: x }
     consts.insert("lo".to_string(), 0.0);
     // The cvc5 precondition path passes the defining program, so the
     // constant lowers with its declared type via the shared resolver.
-    let smt = lower_predicate_flattened_in(inv, "c", &consts, &exprs).expect("lowerable");
+    let smt = lower_predicate_flattened(inv, "c", &consts, &exprs).expect("lowerable");
     let s = format!("{smt:?}");
     assert!(
         s.contains("IntLit"),
@@ -257,7 +313,7 @@ def make(w: tensor[3, f32]) -> Simplex = Simplex { weights: w }
     let exprs = deep_of(surf);
     let inv = &collect_opaque_invariants(&exprs)[0];
     // No `eps` in the const env => not lowerable (falls to Tier C).
-    assert!(lower_predicate_flattened(inv, "p", &ConstEnv::new()).is_none());
+    assert!(lower_predicate_flattened(inv, "p", &ConstEnv::new(), &exprs).is_none());
 }
 
 #[test]
@@ -298,7 +354,7 @@ def make(x: f32) -> Probability = Probability { value: x }
     let exprs = deep_of(surf);
     let inv = &collect_opaque_invariants(&exprs)[0];
     let consts = ConstEnv::new();
-    let pred = lower_predicate_flattened(inv, &inv.binder, &consts);
+    let pred = lower_predicate_flattened(inv, &inv.binder, &consts, &exprs);
 
     // A finite value that satisfies `!= 0.5` is accepted.
     let mut ok = BTreeMap::new();

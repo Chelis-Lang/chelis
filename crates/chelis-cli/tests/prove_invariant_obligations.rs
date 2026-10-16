@@ -795,3 +795,159 @@ fn unmodelable_string_field_type_is_not_a_silent_pass() {
         "the rejection must be surfaced as an error record: {records:?}"
     );
 }
+
+// chelis#3651: Tier C validation lowered an in-module constant in the invariant
+// predicate without its declaration, so an int-typed constant became a real and
+// the comparison against the Int-sorted field was false for EVERY value. An
+// obligation that holds was reported failed, with a counterexample that
+// satisfies the invariant -- `--tier fuzz-only` reported it on 0.19.4, and
+// chelis#3634's `auto` corroboration would have promoted it to the default tier.
+#[test]
+fn chelis_3651_tier_c_does_not_invent_a_counterexample_from_an_int_module_constant() {
+    // `bound - 2i64` is 1, so the invariant is `value >= 1`, and `make` returns
+    // `Some` only for `x >= 1`: there is no counterexample. Sweep the producer
+    // guard so a pass cannot be the sampler simply missing a narrow window.
+    for guard in ["1i64", "2i64", "3i64", "4i64"] {
+        let source = format!(
+            "module Stats.IntegerBound
+export (make)
+@opaque
+@invariant(p) p.value >= bound - 2i64
+type LargeInt =
+  | LargeInt {{ value: i64 }}
+bound = 3i64
+def make(x: i64) -> Option[LargeInt] =
+  if x >= {guard} then Some(LargeInt {{ value: x }}) else None
+"
+        );
+        for tier in ["fuzz-only", "auto"] {
+            let (code, records) = prove_json(&source, &["--tier", tier]);
+            let ob = obligations(&records)[0];
+            assert_eq!(
+                ob["status"], "passed",
+                "guard {guard} at {tier} has no counterexample: {ob}"
+            );
+            assert!(
+                ob.get("counterexample").is_none(),
+                "guard {guard} at {tier} must not invent a witness: {ob}"
+            );
+            assert_eq!(code, 0, "guard {guard} at {tier}: {records:#?}");
+        }
+    }
+}
+
+// Negative parity for the same fixture: a producer that CAN emit a violating
+// value must still be refuted at Tier C, with a witness that really violates
+// the invariant. The fix types the constant; it does not disarm the sampler.
+#[test]
+fn chelis_3651_a_real_int_constant_violation_is_still_refuted_with_its_witness() {
+    let source = "module Stats.IntegerBound
+export (make)
+@opaque
+@invariant(p) p.value >= bound - 2i64
+type LargeInt =
+  | LargeInt { value: i64 }
+bound = 3i64
+def make(x: i64) -> Option[LargeInt] =
+  if x >= (0i64 - 5i64) then Some(LargeInt { value: x }) else None
+";
+    let (code, records) = prove_json(source, &["--tier", "fuzz-only"]);
+    assert_eq!(code, 1, "a genuine violation exits 1: {records:#?}");
+    let ob = obligations(&records)[0];
+    assert_eq!(ob["status"], "failed", "{ob}");
+    // Read whichever single key the witness carries (the fuzz tier names the
+    // producer parameter, the SMT tier uses the positional placeholder).
+    let witness = ob["counterexample"]
+        .as_object()
+        .and_then(|map| map.values().next())
+        .map(|value| match value {
+            Value::String(text) => text.parse::<i64>().expect("integer witness"),
+            other => other.as_i64().expect("integer witness"),
+        })
+        .expect("a refutation carries one producer input");
+    assert!(
+        witness < 1,
+        "the witness must really violate `value >= bound - 2` (= 1): {ob}"
+    );
+}
+
+// chelis#3634: a derived obligation's SMT discharge is over the reals too, so
+// `auto` corroborates it in binary64 and records the result on the obligation
+// record. Positive direction: a true obligation keeps its SMT proof verbatim and
+// gains the corroboration; `smt-only` is not widened into a second tier.
+#[test]
+fn chelis_3634_auto_corroborates_a_derived_obligation_and_smt_only_does_not() {
+    let source = "module Stats.Prob
+export (clamp_prob)
+@opaque
+@invariant(p) p.value >= 0.0 && p.value <= 1.0
+type Probability =
+  | Probability { value: f32 }
+def clamp_prob(x: f32) -> Probability =
+  Probability { value: if x >= 0.0 then (if x <= 1.0 then x else 1.0) else 0.0 }
+";
+    let (code, records) = prove_json(source, &["--tier", "auto"]);
+    assert_eq!(code, 0, "{records:#?}");
+    let ob = obligations(&records)[0];
+    assert_eq!(ob["status"], "passed", "{ob}");
+    assert_eq!(
+        ob["proof_tier"], "smt",
+        "the SMT proof stands; corroboration does not move the tier: {ob}"
+    );
+    assert_eq!(
+        ob["composite_verdict"], "proven_modulo_real_arithmetic",
+        "sampling is not exhaustive, so it never promotes the badge: {ob}"
+    );
+    assert_eq!(ob["machine_arithmetic"]["status"], "corroborated", "{ob}");
+    assert_eq!(
+        ob["machine_arithmetic"]["real_arithmetic_verdict"], "proven_modulo_real_arithmetic",
+        "{ob}"
+    );
+
+    let (code, records) = prove_json(source, &["--tier", "smt-only"]);
+    assert_eq!(code, 0, "{records:#?}");
+    let ob = obligations(&records)[0];
+    assert_eq!(ob["status"], "passed", "{ob}");
+    assert!(
+        ob.get("machine_arithmetic").is_none(),
+        "an explicitly selected tier runs no check: {ob}"
+    );
+}
+
+// Negative direction for the obligation lane: an invariant that holds over the
+// reals but not in binary64. `f32` rounding makes `x + 1.0e-7` equal `x` at
+// x = 1.0, so the produced value is not strictly greater than its input, and
+// `auto` must report the obligation failed rather than keeping the SMT proof.
+#[test]
+fn chelis_3634_a_binary32_counterexample_refutes_a_derived_obligation_under_auto() {
+    let source = "module Stats.Bump
+export (bump)
+@opaque
+@invariant(p) p.value > p.origin
+type Bumped =
+  | Bumped { value: f32, origin: f32 }
+def bump(x: f32) -> Bumped = Bumped { value: (x + 0.0000001), origin: x }
+";
+    let (smt_code, smt_records) = prove_json(source, &["--tier", "smt-only"]);
+    assert_eq!(
+        smt_code, 0,
+        "over the reals the obligation is true: {smt_records:#?}"
+    );
+    assert_eq!(obligations(&smt_records)[0]["status"], "passed");
+
+    let (code, records) = prove_json(source, &["--tier", "auto"]);
+    assert_eq!(code, 1, "auto must not keep a refuted green: {records:#?}");
+    let ob = obligations(&records)[0];
+    assert_eq!(ob["status"], "failed", "{ob}");
+    assert_eq!(
+        ob["composite_verdict"], "failed",
+        "a concrete machine witness is a definite failure, not reals-hedged: {ob}"
+    );
+    assert_eq!(ob["proof_tier"], "fuzz", "{ob}");
+    assert!(ob.get("counterexample").is_some(), "{ob}");
+    assert_eq!(ob["machine_arithmetic"]["status"], "refuted", "{ob}");
+    assert_eq!(
+        ob["machine_arithmetic"]["real_arithmetic_verdict"], "proven_modulo_real_arithmetic",
+        "the record names the green the counterexample displaced: {ob}"
+    );
+}

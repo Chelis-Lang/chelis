@@ -290,6 +290,12 @@ fn emit(outcome: &ObligationOutcome, options: &ProveOptions<'_>) {
         if outcome.proof_tier == ObligationTier::Smt {
             value["arith_model"] = json!("real");
         }
+        // chelis#3634: what `auto`'s machine-arithmetic refutation search
+        // established against an over-the-reals green. Absent when no check was
+        // attempted.
+        if let Some(check) = &outcome.machine_arithmetic {
+            value["machine_arithmetic"] = json!(check);
+        }
         if let Some(cx) = &outcome.counterexample {
             value["counterexample"] = cx.clone();
             value["shrink_steps"] = json!(outcome.shrink_steps);
@@ -300,13 +306,19 @@ fn emit(outcome: &ObligationOutcome, options: &ProveOptions<'_>) {
         println!("{value}");
     } else {
         match outcome.status {
-            ObligationStatus::Passed => {
-                println!(
+            ObligationStatus::Passed => match &outcome.machine_arithmetic {
+                Some(check) => println!(
+                    "obligation: {} -- proved ({}; {})",
+                    outcome.name,
+                    outcome.proof_tier.as_str(),
+                    check.disclosure()
+                ),
+                None => println!(
                     "obligation: {} -- proved ({})",
                     outcome.name,
                     outcome.proof_tier.as_str()
-                )
-            }
+                ),
+            },
             ObligationStatus::Failed => println!(
                 "obligation failure: {} ({} counterexample)",
                 outcome.name,

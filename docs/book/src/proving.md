@@ -50,19 +50,73 @@ The `--tier` values select how a property is checked:
 
 | Tier | Method | What a pass establishes |
 |---|---|---|
-| `auto` (default) | Type checking first. Then induction when the property calls a recursive function, otherwise the SMT solver. Sampling when neither applies. | Whatever the method named in `proof_tier` establishes. |
+| `auto` (default) | Type checking first. Then induction when the property calls a recursive function, otherwise the SMT solver. Sampling when neither applies, and again after a solver proof, to look for a counterexample the real-arithmetic model cannot see. | Whatever the method named in `proof_tier` establishes, and, for a solver proof, whatever `machine_arithmetic` reports about machine arithmetic. |
 | `smt-only` | The SMT solver, over real numbers. | The property for every input satisfying the `where` preconditions, in real arithmetic. |
 | `induction-only` | Induction on one integer argument of a recursive function: the solver proves a concrete base case and a symbolic step case. | As `smt-only`: every input, in real arithmetic. Both cases must be proved; either failing or being vacuous leaves the property unproved. |
 | `fuzz-only` | A fixed set of edge inputs, then seeded random sampling. The edge inputs are each binder's guard endpoints and their adjacent values, the neighbours of a `!=` guard's excluded value, both zeros, the smallest positive subnormals, the largest finite values of the type, small integers, and a ladder of decade magnitudes. Every input, edge or random, must satisfy the preconditions. | The property held on every sampled input, and nothing about the others. |
 
 An unknown tier is a usage error before discovery or verification. With
 `auto`, an SMT proof reports zero samples even when `--samples` was supplied;
-the sample count and seed apply when sampling runs.
+the sample count and seed apply when sampling runs, including the
+machine-arithmetic search described below, whose own count is reported
+separately in `machine_arithmetic`.
 
 The edge inputs do not depend on the seed, so a property refuted at one is
 refuted under every seed. They are proposed first, so a budget smaller than
 the edge set spends all of it on edge inputs and draws nothing at random; raise
 `--samples` to add random draws on top.
+
+## A solver proof is checked again in machine arithmetic
+
+The solver decides a property over the real numbers, so it rules out a real
+counterexample and nothing else. A property can be true over the reals and
+false in binary64: `(x + 1.0f64) - x > 0.5f64` holds over the reals and fails
+at `x = 1e17f64`, where `x + 1.0f64` rounds back to `x`.
+
+`--tier auto` therefore does not stop at a solver proof. It samples the
+property, or the derived producer obligation, afterwards, looking only for a
+counterexample, and reports the result in the additive `machine_arithmetic`
+field:
+
+- `"status":"refuted"`: sampling found a concrete machine counterexample. The
+  record is `"status":"failed"` with `"composite_verdict":"failed"` and carries
+  the counterexample. A machine value is a definite refutation, so it replaces
+  the proof.
+- `"status":"corroborated"`: every sampled input satisfied the property. The
+  proof stands exactly as the solver produced it: the verdict is still
+  `proven_modulo_real_arithmetic` and `real_arithmetic` is still in
+  `qualifiers`, because sampling is not exhaustive.
+- `"status":"unchecked"`: sampling established nothing (an input the generator
+  cannot produce, or preconditions it could not satisfy), with a `reason`. The
+  proof is unchanged; a sampler limit is not evidence about the property.
+
+The field is absent when no such check ran. An explicitly requested tier is
+never widened into a second one, so `--tier smt-only` and `--tier
+induction-only` run no check. An induction proof carries none either, and
+neither does a result conditional on an asserted axiom such as
+`clarabel.qp.ideal_optimality`, which idealizes the float solver on purpose:
+sampling there would contradict the assumption you declared, not the proof.
+
+In plain text an `auto` run prints the disclosure rather than a sample ratio a
+proof does not have:
+
+```text
+property: sq_nonneg -- proven_modulo_real_arithmetic (proved over the reals; machine arithmetic corroborated on 100 samples)
+```
+
+What this check can find is bounded by what the sampler generates; it does not
+promise that every machine counterexample is reachable. What it does establish
+is one direction: a counterexample sampling would find can no longer be hidden
+by a solver proof, so `auto` does not report such a pass where `--tier
+fuzz-only` reports a failure. An induction green is outside it, as above. The
+two tiers still differ in the other direction. When sampling errors or
+establishes nothing, `auto` reports the proof it has and `--tier fuzz-only`
+reports that failure.
+
+Checking the proof costs the sample budget, so proving a module whose
+properties all pass takes roughly as long as the solver and the sampler
+together. Use `--tier smt-only` to pay for the solver alone; that run reports
+the machine-arithmetic question as unchecked rather than answering it.
 
 Induction applies to a recursion on an integer such as this bond valuation,
 which recurses on `n` down to a base case at `n <= 0`:
@@ -148,6 +202,7 @@ record is greater than zero and inspect each record:
 | `composite_verdict` and `qualifiers` | The strength and limits of a passing or failing result. |
 | `samples`, `sampling_method`, and sample counts | Evidence for a sampled result; accepted, attempted, and rejected counts appear when sampling details apply. |
 | `arith_model` | `real` means the solver checked real arithmetic. |
+| `machine_arithmetic` | For a solver proof under `auto`: whether sampling in machine arithmetic `refuted`, `corroborated`, or left the proof `unchecked`. Absent when no such check ran. |
 
 A custom build that omits `proof_tier` cannot establish a formal method from its JSON; use
 `--capabilities`, `samples`, and the verdict to understand its limits.
@@ -155,7 +210,9 @@ A custom build that omits `proof_tier` cannot establish a formal method from its
 A sampled `passed` result is empirical (`composite_verdict: "fuzz_validated"`); it does not
 establish the property for every input. A solver result over `real` arithmetic does not
 establish identical behavior for IEEE floating-point execution. For example,
-`proven_modulo_real_arithmetic` records that limitation. A proof involving a sampled assumption
+`proven_modulo_real_arithmetic` records that limitation, and under `auto` the
+`machine_arithmetic` field records what sampling in machine arithmetic found
+about it. A proof involving a sampled assumption
 may have further qualifications. Read the complete verdict and `qualifiers`, even when the
 exit code is `0`.
 

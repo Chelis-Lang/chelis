@@ -122,6 +122,15 @@ impl CompositeVerdict {
         }
     }
 
+    /// Whether this badge is a GREEN one: a point in the `(soundness,
+    /// qualifier_set)` lattice rather than one of the terminal outcomes off it.
+    /// Derived from [`CompositeVerdict::guarantee`] so a badge added to the
+    /// enum is classified by its own lattice element, never by a second list
+    /// that can fall out of step with this one.
+    pub fn is_green(self) -> bool {
+        matches!(self.guarantee(), VerdictGuarantee::Green { .. })
+    }
+
     /// The lattice element this badge stands for: a green badge is a point in
     /// the `(soundness, qualifier_set)` lattice; the three non-green badges are
     /// terminal outcomes off that lattice (WI-6). This is the inverse of

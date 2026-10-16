@@ -591,6 +591,12 @@ fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value
     ) {
         value["arith_model"] = json!("real");
     }
+    // chelis#3634: the machine-arithmetic check `auto` runs after an
+    // over-the-reals green travels on the tide surface too, so a tide prove and
+    // a CLI prove agree on what was checked in binary64.
+    if let Some(check) = &o.machine_arithmetic {
+        value["machine_arithmetic"] = json!(check);
+    }
     if let Some(evidence) = &o.induction_evidence {
         value["induction"] = json!(evidence);
     }
@@ -639,6 +645,10 @@ fn obligation_to_json(o: chelis_prove::obligation_engine::ObligationOutcome) -> 
     }
     if o.proof_tier == chelis_prove::obligation_engine::ObligationTier::Smt {
         value["arith_model"] = json!("real");
+    }
+    // chelis#3634: same additive disclosure on the obligation records.
+    if let Some(check) = &o.machine_arithmetic {
+        value["machine_arithmetic"] = json!(check);
     }
     if let Some(cx) = o.counterexample {
         value["counterexample"] = cx;

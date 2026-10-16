@@ -752,6 +752,95 @@ Tier C is a constructor-probe lane over a producer's arguments rather than an
 evaluation of typed property binders, so a false domain obligation there is
 still reported unsupported.
 
+### `auto` corroborates an over-the-reals green in machine arithmetic
+
+A Tier B decision is made over the reals, so it rules out a real
+counterexample and nothing else. A property can be true over the reals and
+false in binary64: `(x + 1.0f64) - x > 0.5f64` holds over the reals and fails
+at `x = 1e17f64`, where `x + 1.0` rounds back to `x`. A tier that stops at such
+a green reports `passed` on a property `--tier fuzz-only` refutes on the same
+file, which would make the default tier weaker than sampling alone.
+
+Under `--tier auto` an over-the-reals green is therefore **not terminal**. The
+runner additionally runs Tier C over the same property or derived obligation as
+a **refutation search** and reports what it established in the additive
+`machine_arithmetic` object:
+
+- **A Tier C counterexample replaces the green.** The record is
+  `status:"failed"` with `composite_verdict:"failed"` — definite, not
+  reals-hedged, because the witness is a concrete machine value, not a
+  real-arithmetic model — at `proof_tier:"fuzz"`, carrying the counterexample,
+  a `reason` naming why a proof did not prevent it, and
+  `machine_arithmetic:{"status":"refuted", ...}` naming the over-the-reals
+  verdict the refutation displaces.
+- **A clean Tier C run corroborates the green without strengthening it.** The
+  Tier B result stands unchanged — same `status`, `proof_tier:"smt"`,
+  `samples:0`, same `composite_verdict`, same `qualifiers` — and carries
+  `machine_arithmetic:{"status":"corroborated","samples":N}`. Sampling is not
+  exhaustive, so corroboration never drops the `real_arithmetic` qualifier or
+  promotes the badge.
+- **A Tier C run that cannot sample leaves the green exactly as it was**, with
+  `machine_arithmetic:{"status":"unchecked","reason":...}` (a binder Tier C
+  cannot generate, invariant-binder starvation, precondition exhaustion). A
+  sampler limitation never degrades a proof.
+
+The rule applies to `{kind:"property"}` and `{kind:"obligation"}` records
+alike. A refutation search is only as good as Tier C's own verdict, which is
+why an invariant predicate is always lowered from its defining program, on the
+concrete-eval validation path as well as the solver path: a module constant
+lowered without its declaration would compare against an integer-sorted field
+as a real, and the false counterexample that produces would displace a correct
+proof.
+
+The lane is keyed on the record's own published `qualifiers` array, not on a
+verdict token, so a future badge that discloses the same gap inherits the
+corroboration without a second list to keep in step, and the lane can never
+disagree with the disclosure it acts on. A green is corroborated when
+`qualifiers` contains `real_arithmetic` and does **not** contain `axiom`: an
+asserted axiom is a user-declared assumption the concrete evaluator does not
+honor — `clarabel.qp.ideal_optimality` idealizes the float solver away on
+purpose — so Tier C there would refute the axiom rather than the derivation,
+and the conditional green stands. A `fuzz`-qualified CONTRACT is not an
+idealization and does not exempt its base.
+
+`machine_arithmetic` is **absent** when no check was attempted: under
+`--tier smt-only`, `--tier induction-only` and `--tier beacon-only` (an
+explicitly selected tier is never widened), and for a green whose base is not
+over the reals. `auto`'s induction lane is terminal by its own contract
+(chelis#978: an accepted induction plan does not trail into a finite fuzz
+sample), so an induction green carries no check even though it discloses
+`real_arithmetic`. Extending the check to that lane is residual work, not a
+property of this rule.
+
+The guarantee this rule establishes is exactly one direction of parity: a
+counterexample Tier C would find can no longer be suppressed by an
+over-the-reals proof, so an `auto` solver proof never reports a pass where
+`fuzz-only` reports a refutation. An induction green is outside it, for the
+reason above. It is not a claim that `auto` and `fuzz-only` agree on every
+input or exit code — a Tier C run that errors or establishes nothing leaves
+`auto` reporting its proof while `fuzz-only` reports that failure, which is the
+intended asymmetry. The check also does not change what Tier C can find:
+whether a given machine counterexample is reachable is a property of the
+sampler (chelis#3636).
+
+`auto` therefore spends the sample budget after every over-the-reals proof, so
+proving an all-green module costs roughly the sum of the deductive and sampling
+tiers rather than the deductive tier alone. `--tier smt-only` is the way to pay
+only for the proof, at the cost of reporting the machine-arithmetic question as
+unchecked.
+
+Plain text renders the disclosure in place of a sample ratio an over-the-reals
+proof does not have:
+
+```text
+property: sq_nonneg -- proven_modulo_real_arithmetic (proved over the reals; machine arithmetic corroborated on 100 samples)
+property: guarded -- proven_modulo_real_arithmetic (proved over the reals; machine arithmetic unchecked: <reason>)
+obligation: invariant:Probability:scale -- proved (smt; proved over the reals; machine arithmetic corroborated on 100 samples)
+```
+
+A sample ratio is reserved for a result that took samples: `0/0 passed` reads
+as a count of zero out of zero rather than as a proof that takes none.
+
 ## Relationship To `chelis test`
 
 `chelis test` remains the deterministic assertion runner for `Std.Test`.
