@@ -4988,6 +4988,11 @@ disposition = "packages"
 packages = ["chelis-cli"]
 
 [[path_rule]]
+prefix = "examples/grad_consumption.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
 prefix = "examples/grad_bitwise.ch"
 disposition = "packages"
 packages = ["chelis-cli"]

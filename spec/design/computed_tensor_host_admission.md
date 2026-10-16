@@ -58,6 +58,30 @@ different shape or infer a precision from the first element. A static route
 remains valid only when its proof of representability survives graph rewrites;
 if a rewrite changes that proof, routing is recomputed before emission.
 
+A tensor helper captures scalar and tensor values. Lexical ADTs, containers,
+strings and mapped files retain typed opaque bindings during numeric lowering.
+These bindings represent caller values that have already been evaluated; they
+carry no numeric graph node. Specialization can forward or ignore them, including
+an unused argument excluded from a gradient's `wrt` selection. Argument transport
+retains the recursive tuple/ADT tree and rebases only its real numeric leaves;
+it does not demand cotangent leaves. Target selection decides cotangent
+requirements separately, including opaque leaves nested inside that tree. Reading
+their payload or exporting them as numeric results requires the host lane.
+Known discrete fixed shapes reconstruct unit cotangents from their checked type;
+floating payloads and containers requiring runtime lengths or tags retain host
+reconstruction. The caller retains eager argument effects and traps even
+when specialization ignores the value.
+
+Keeping these bindings in numeric name resolution prevents a missing lexical
+value from resolving to a same-spelled top-level initializer. The boundary uses
+an exhaustive carrier classification: incomplete numeric types and checked
+callables retain their inference and specialization routes rather than becoming
+opaque payloads. Ordinary, traced and runtime-controlled tensor helpers use the
+same binding representation. This preserves the value of a computed aggregate
+when a later helper reads its fields;
+[`grad_consumption.ch`](../../examples/grad_consumption.ch) exercises distinct
+cotangents and their primal in the same program.
+
 The implementation should replace `UncarriableWalk::concat_input_fact`'s
 syntax-based `Unknown` arm for computed tensor expressions with this checked
 producer fact. It should not broaden the class by routing every `concat`
