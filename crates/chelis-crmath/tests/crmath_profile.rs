@@ -6,6 +6,7 @@
 //! in Rust and this crate's kernels compute, that each row is sensitive to the rewrite
 //! it witnesses, and that the canary reports every planted error.
 
+use chelis_crmath::c_source::Kernel;
 use chelis_crmath::profile::{
     Class, Obligation, Output, PRIMITIVES, Row, canary_driver, canary_input, canary_mismatches,
     canary_rows, describe, rows, storage_midpoint_inputs, storage_reference,
@@ -181,10 +182,68 @@ fn every_primitive_covers_its_value_classes() {
 fn every_obligation_has_a_canary_row() {
     for obligation in Obligation::ALL {
         assert!(
-            canary_rows().any(|row| row.obligation == obligation),
+            canary_rows(&Kernel::ALL).any(|row| row.obligation == obligation),
             "no C canary row witnesses {obligation}"
         );
+        // Code outside the kernels can break every other obligation, so the canary
+        // of a program that carries no kernel still witnesses each of them.
+        if obligation != Obligation::CorrectRounding {
+            assert!(
+                canary_rows(&[]).any(|row| row.obligation == obligation),
+                "the canary without kernels has no row for {obligation}"
+            );
+        }
     }
+}
+
+/// Each kernel is the kernel of exactly one primitive: its function at its width.
+#[test]
+fn each_kernel_belongs_to_one_primitive_of_its_width() {
+    for kernel in Kernel::ALL {
+        let owners: Vec<String> = PRIMITIVES
+            .iter()
+            .filter(|primitive| primitive.kernel() == Some(kernel))
+            .map(|primitive| {
+                format!(
+                    "{}{}",
+                    primitive.name,
+                    if primitive.width == 32 { "f" } else { "" }
+                )
+            })
+            .collect();
+        assert_eq!(owners, [kernel.section_name()], "{kernel:?}");
+    }
+}
+
+/// The canary of a kernel set runs every row without a kernel and the rows of
+/// exactly those kernels. Its driver names no other kernel's entry.
+#[test]
+fn a_kernel_set_selects_its_kernel_rows_and_every_other_row() {
+    let without_kernels = canary_rows(&[]).count();
+    let entries = |driver: &str| -> Vec<Kernel> {
+        Kernel::ALL
+            .into_iter()
+            .filter(|kernel| driver.contains(&format!("{}(", kernel.entry())))
+            .collect()
+    };
+    assert!(entries(&canary_driver(&[])).is_empty());
+    assert!(canary_rows(&[]).all(|row| !row.primitive.c.unwrap().contains("chelis_cr_")));
+    let mut kernel_rows = 0;
+    for kernel in Kernel::ALL {
+        let set = [kernel];
+        assert_eq!(entries(&canary_driver(&set)), set);
+        let rows = canary_rows(&set).count();
+        assert!(rows > without_kernels, "{kernel:?} has no canary row");
+        assert_eq!(canary_input(&set).lines().count(), rows);
+        kernel_rows += rows - without_kernels;
+    }
+    let two = [Kernel::ExpF32, Kernel::PowF64];
+    assert_eq!(entries(&canary_driver(&two)), two);
+    assert_eq!(
+        without_kernels + kernel_rows,
+        canary_rows(&Kernel::ALL).count(),
+        "the kernels' rows partition the kernel rows"
+    );
 }
 
 /// Each row is sensitive to the failure it witnesses: computing it the way the
@@ -227,7 +286,7 @@ fn rows_detect_the_rewrite_they_witness() {
 
 #[test]
 fn canary_driver_dispatches_every_c_primitive() {
-    let driver = canary_driver();
+    let driver = canary_driver(&Kernel::ALL);
     for primitive in PRIMITIVES {
         let branch = format!(
             "strcmp(name, \"{}\") == 0 && width == {}",
@@ -247,22 +306,33 @@ fn canary_driver_dispatches_every_c_primitive() {
             "{primitive}: only the storage conversions have no C lane"
         );
     }
-    assert_eq!(canary_driver(), driver, "generation is deterministic");
-    assert_eq!(canary_input().lines().count(), canary_rows().count());
+    assert_eq!(
+        canary_driver(&Kernel::ALL),
+        driver,
+        "generation is deterministic"
+    );
+    assert_eq!(
+        canary_input(&Kernel::ALL).lines().count(),
+        canary_rows(&Kernel::ALL).count()
+    );
 }
 
 fn expected_output() -> String {
-    canary_rows()
+    canary_rows(&Kernel::ALL)
         .map(|row| format!("{:x}\n", row.expected))
         .collect()
 }
 
 #[test]
 fn canary_comparison_accepts_the_table_and_reports_each_planted_error() {
-    assert!(canary_mismatches(&expected_output()).unwrap().is_empty());
-    let count = canary_rows().count();
-    for (index, row) in canary_rows().enumerate().step_by(97) {
-        let planted: String = canary_rows()
+    assert!(
+        canary_mismatches(&Kernel::ALL, &expected_output())
+            .unwrap()
+            .is_empty()
+    );
+    let count = canary_rows(&Kernel::ALL).count();
+    for (index, row) in canary_rows(&Kernel::ALL).enumerate().step_by(97) {
+        let planted: String = canary_rows(&Kernel::ALL)
             .enumerate()
             .map(|(other, row)| {
                 let bits = if other == index {
@@ -273,7 +343,7 @@ fn canary_comparison_accepts_the_table_and_reports_each_planted_error() {
                 format!("{bits:x}\n")
             })
             .collect();
-        let reported = canary_mismatches(&planted).unwrap();
+        let reported = canary_mismatches(&Kernel::ALL, &planted).unwrap();
         assert_eq!(reported.len(), 1, "{row}");
         assert!(std::ptr::eq(reported[0].row, row));
         let description = describe(&reported);
@@ -289,10 +359,10 @@ fn canary_comparison_accepts_the_table_and_reports_each_planted_error() {
         .map(|line| format!("{line}\n"))
         .collect();
     assert!(
-        canary_mismatches(&short).is_err(),
+        canary_mismatches(&Kernel::ALL, &short).is_err(),
         "a missing line is an error"
     );
-    assert!(canary_mismatches(&format!("{}zz\n", expected_output())).is_err());
+    assert!(canary_mismatches(&Kernel::ALL, &format!("{}zz\n", expected_output())).is_err());
     assert!(count > 2000, "{count} canary rows");
 }
 

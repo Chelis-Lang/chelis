@@ -205,6 +205,7 @@ fn compiler_failure_and_missing_product_preserve_previous_artifact() {
         &toolchain.compiler,
         &toolchain.compile_flags,
         &toolchain.link_flags,
+        &[],
     )
     .unwrap()
     .path;
@@ -608,6 +609,7 @@ fn c_build_ignores_compiler_environment_and_refuses_profile_changing_wrapper() {
         &toolchain.compiler,
         &toolchain.compile_flags,
         &toolchain.link_flags,
+        &[],
     )
     .unwrap()
     .path;
@@ -647,6 +649,7 @@ fn real_compiler() -> std::path::PathBuf {
         &toolchain.compiler,
         &toolchain.compile_flags,
         &toolchain.link_flags,
+        &[],
     )
     .unwrap()
     .path
@@ -730,6 +733,52 @@ fn canary_refusal_publishes_nothing_built_beside_it() {
         .map(|entry| entry.path())
         .collect();
     assert!(scratch.is_empty(), "{scratch:?}");
+}
+
+/// chelis#3712: the floating-point canary of a build checks the kernels that the
+/// program calls and the sentinel kernel, binary64 `log`, and no other kernel.
+/// The driver unit defines the entry of each checked kernel. So a wrapper that
+/// cannot compile a canary unit with one entry's `#define` refuses exactly the
+/// builds whose canary checks that kernel.
+#[cfg(unix)]
+#[test]
+fn the_canary_checks_the_program_kernels_and_the_sentinel() {
+    let dir = tempdir().unwrap();
+    let integer = dir.path().join("answer.ch");
+    fs::write(&integer, "answer = add(20i64, 22i64)\n").unwrap();
+    let growth = dir.path().join("growth.ch");
+    fs::write(&growth, "y = exp(cast(0.3, f32))\n").unwrap();
+    let real = real_compiler();
+    for (file, entry, refused) in [
+        (&growth, "chelis_cr_expf", true),
+        (&integer, "chelis_cr_expf", false),
+        (&integer, "chelis_cr_log", true),
+        (&growth, "chelis_cr_sinf", false),
+    ] {
+        let compiler = dir.path().join(format!("no-{entry}-cc"));
+        executable_script(
+            &compiler,
+            &format!(
+                "for arg in \"$@\"; do\n\
+                 case \"$arg\" in *chelis-compiler-canary*.c) \
+                 grep -q '#define {entry} ' \"$arg\" && exit 1;; esac\n\
+                 done\nexec '{}' \"$@\"",
+                real.display()
+            ),
+        );
+        // Name the case first: a failed assertion panics before any later line.
+        eprintln!("case: {} with {entry}, refused {refused}", file.display());
+        let built = build(file, &dir.path().join("out"))
+            .env("CHELIS_CC", &compiler)
+            .assert();
+        if refused {
+            built.failure().stderr(predicate::str::contains(
+                "did not build the floating-point canary",
+            ));
+        } else {
+            built.success();
+        }
+    }
 }
 
 /// One float storage width of the NaN finalization oracle: its Surf name, C

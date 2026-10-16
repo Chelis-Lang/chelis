@@ -83,11 +83,19 @@ impl NativeBuild {
         // compiler, and the build publishes it only for an accepted compiler.
         let build = || self.build_product(&archiver, &artifact);
         let built = if self.target == "c" {
+            // The canary checks the kernels that these units carry.
+            let mut kernels = Vec::new();
+            for source in &self.sources {
+                kernels.extend(chelis_backend_c::called_kernels(&fs::read_to_string(
+                    source,
+                )?));
+            }
             let (identity, built) = chelis_backend_c::toolchain::verify_compiler_during(
                 &self.compiler.to_string_lossy(),
                 self.version_probe.as_ref(),
                 &self.compile_flags,
                 &self.link_flags,
+                &kernels,
                 build,
             )
             .map_err(|error| match error {

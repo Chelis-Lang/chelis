@@ -9,8 +9,10 @@
 
 use chelis_crmath::c_source::{Kernel, kernel_text};
 
-/// The kernels whose entries `source` names, in amalgamation order.
-fn called_kernels(source: &str) -> Vec<Kernel> {
+/// The kernels whose entries `source` names, in amalgamation order. For a linked
+/// unit, these are the kernels it carries, so a build checks its compiler for them
+/// ([`crate::toolchain::verify_compiler`]).
+pub fn called_kernels(source: &str) -> Vec<Kernel> {
     let mut called = Vec::new();
     for word in source.split(|c: char| !(c == '_' || c.is_ascii_alphanumeric())) {
         if let Some(kernel) = Kernel::from_entry(word)

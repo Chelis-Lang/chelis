@@ -12,6 +12,7 @@ pub mod integer_float;
 pub mod memory;
 pub mod toolchain;
 
+pub use crmath_kernels::called_kernels;
 pub use generated_header::{GeneratedDeclaration, GeneratedHeader, GeneratedHeaderError};
 pub use host_emit::host_builtin_nan_inventory;
 
