@@ -3,6 +3,121 @@ mod common;
 use assert_cmd::Command;
 use common::build_and_run;
 
+/// Spec/04 §4.7 and spec/06: refinement and observation keep the same
+/// tensor and axis when a mapped parameter receives an axis view.
+#[test]
+fn mapped_unit_refinements_preserve_observation_and_layout() {
+    for unit_axis in 0..2 {
+        for mapped_axis in 0..3 {
+            let (dims, unit_physical) = if unit_axis == 0 {
+                ("unit,n", usize::from(mapped_axis == 0))
+            } else {
+                ("n,unit", if mapped_axis == 2 { 1 } else { 2 })
+            };
+            for valid in [true, false] {
+                let mut shape = [2; 3];
+                shape[unit_physical] = if valid { 1 } else { 2 };
+                let mut next = 0;
+                let input = (0..shape[0])
+                    .map(|_| {
+                        format!(
+                            "[{}]",
+                            (0..shape[1])
+                                .map(|_| {
+                                    format!(
+                                        "[{}]",
+                                        (0..shape[2])
+                                            .map(|_| {
+                                                next += 1;
+                                                format!("{next}.0f32")
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(",")
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let result_dims = if unit_axis == 0 { "3,n" } else { "n,3" };
+                let mapping = if mapped_axis == 0 {
+                    "vmap(row)".to_owned()
+                } else {
+                    format!("vmap(row,axis={mapped_axis})")
+                };
+                let source = format!(
+                    "def row[n](x: tensor[{dims},f32]) -> tensor[{result_dims},f32] = expand(x,{unit_axis}i32,3i64)\ndef main() = {mapping}(to_tensor([{input}]))\n"
+                );
+                let (dir, path) = canonical_contract_program(&source, "mapped_unit");
+                let evaluated = Command::cargo_bin("chelis")
+                    .unwrap()
+                    .args(["eval", "--file"])
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                let out = dir.path().join("native");
+                Command::cargo_bin("chelis")
+                    .unwrap()
+                    .arg("build")
+                    .arg(&path)
+                    .args(["--target", "c", "--output"])
+                    .arg(&out)
+                    .assert()
+                    .success();
+                let native = std::process::Command::new(out.join("mapped_unit"))
+                    .output()
+                    .unwrap();
+                for output in [&evaluated, &native] {
+                    assert_eq!(
+                        output.status.success(),
+                        valid,
+                        "unit={unit_axis} mapped={mapped_axis}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    if !valid {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        assert!(stderr.contains("claimed = 1"), "{stderr}");
+                        assert!(
+                            stderr.contains(&format!("x axis {unit_physical} = 2")),
+                            "{stderr}"
+                        );
+                    }
+                }
+                if valid {
+                    assert_eq!(native.stdout, evaluated.stdout);
+                    let mut result_shape = shape;
+                    result_shape[unit_physical] = 3;
+                    let mut expected = Vec::new();
+                    for i in 0..result_shape[0] {
+                        for j in 0..result_shape[1] {
+                            for k in 0..result_shape[2] {
+                                let mut source_index = [i, j, k];
+                                source_index[unit_physical] = 0;
+                                let value = (source_index[0] * shape[1] + source_index[1])
+                                    * shape[2]
+                                    + source_index[2]
+                                    + 1;
+                                expected.push(format!("{value}.0"));
+                            }
+                        }
+                    }
+                    let expected = format!(
+                        "tensor(shape={result_shape:?}, data=[{}])",
+                        expected.join(", ")
+                    );
+                    assert!(
+                        String::from_utf8_lossy(&native.stdout).contains(&expected),
+                        "{}",
+                        String::from_utf8_lossy(&native.stdout)
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn evaluate(source: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("builtin_vmap.ch");

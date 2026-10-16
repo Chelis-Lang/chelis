@@ -1,5 +1,13 @@
 # Runtime Extents: values, claims, and their witnesses
 
+Ordinary `vmap` argument substitution carries the physical caller value together with
+its canonical parameter layout. Caller observations read the physical value
+and axis. A checked unit refinement consumes that same observation and value,
+refines only the observed axis, and then transports the refined value through
+the parameter layout. Axis-name views preserve physical extents and do not
+borrow another tensor's refinement witness. Shape reads follow the same
+layout correspondence back to the physical source.
+
 **Status:** IN PROGRESS. Slice A and Slice B's mechanisms have landed, and
 every non-deferred row of the recorded phase-A and phase-B corpus is at an exit
 state: `runtime_extent_oracle.py --phase final` passes on the host lanes, with

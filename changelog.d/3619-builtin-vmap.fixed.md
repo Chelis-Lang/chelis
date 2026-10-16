@@ -54,3 +54,5 @@ Retained calls evaluate complete static callable producers once in written
 argument order, including effects and traps in unused actuals. Mapped parameter
 axis views preserve operand-bound primitives' physical type agreement when
 splicing supplied rows.
+Ordinary mapped argument layouts retain physical observation sources and transport checked
+unit refinements with their own witnesses before restoring parameter axis views.

@@ -9180,6 +9180,81 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
     }
 }
 
+fn same_physical_tensor_type(actual: &TensorType, view: &TensorType) -> bool {
+    let extent = |dim: &DimInfo| match dim {
+        DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => Some(*size),
+        DimInfo::Named(_, None) => None,
+    };
+    actual.precision == view.precision
+        && actual.dims.len() == view.dims.len()
+        && actual
+            .dims
+            .iter()
+            .zip(&view.dims)
+            .all(|(actual, view)| extent(actual) == extent(view))
+}
+
+/// The compiler's parameter layout and its physical caller value form one
+/// substitution. Observations use the physical frame; refinements return
+/// through these exact layout steps into the parameter frame.
+struct MappedArgumentLayout {
+    physical: NodeId,
+    canonical: NodeId,
+    steps: Vec<crate::dag::DagNode>,
+}
+
+impl MappedArgumentLayout {
+    fn new(dag: &Dag, physical: NodeId, canonical: NodeId) -> Result<Self, String> {
+        let mut current = canonical;
+        let mut steps = Vec::new();
+        while current != physical {
+            let node = dag.get(current).ok_or("mapped layout node is missing")?;
+            let input = *node
+                .inputs
+                .first()
+                .ok_or("mapped layout input is missing")?;
+            let input_rank = dag
+                .get(input)
+                .ok_or("mapped layout operand is missing")?
+                .output_type
+                .dims
+                .len();
+            match node.op {
+                RiscOp::Copy | RiscOp::Permute { .. } => {}
+                RiscOp::Expand { .. } if node.output_type.dims.len() == input_rank + 1 => {}
+                _ => return Err("mapped argument layout contains a non-layout operation".into()),
+            }
+            steps.push(node.clone());
+            current = input;
+        }
+        steps.reverse();
+        Ok(Self {
+            physical,
+            canonical,
+            steps,
+        })
+    }
+
+    fn physical_axis(&self, mut axis: usize) -> Result<usize, String> {
+        for step in self.steps.iter().rev() {
+            match &step.op {
+                RiscOp::Copy => {}
+                RiscOp::Permute { axes } => {
+                    axis = *axes.get(axis).ok_or("mapped observation axis is missing")?
+                }
+                RiscOp::Expand { axis: inserted, .. } => {
+                    if axis == *inserted {
+                        return Err("a synthesized batch axis has no caller row observation".into());
+                    }
+                    axis -= usize::from(axis > *inserted);
+                }
+                _ => unreachable!("validated layout"),
+            }
+        }
+        Ok(axis)
+    }
+}
+
 /// chelis#2371 / chelis#2383: why a direct `fail(...)`'s message cannot become
 /// an [05-OP-68] abort identity.
 ///
@@ -16545,7 +16620,7 @@ impl<'program> LowerCtx<'program> {
                 )
             });
         let remap = self
-            .splice_vmapped_dag(&specialized_vmapped, &arg_map, &param_names)
+            .splice_vmapped_dag(&specialized_vmapped, &arg_map, &param_names, actual_args)
             .unwrap_or_else(|message| {
                 raise_fatal_lowering_error(
                     format!("internal `vmap` splice correspondence failed: {message}"),
@@ -16553,13 +16628,6 @@ impl<'program> LowerCtx<'program> {
                     self.current_span_id.clone(),
                 )
             });
-        self.restore_vmapped_entry_witness_axes(
-            &specialized_vmapped,
-            &remap,
-            &param_names,
-            actual_args,
-            axis,
-        );
         let mut flattened = root_value
             .flatten_nodes()
             .into_iter()
@@ -17053,6 +17121,7 @@ impl<'program> LowerCtx<'program> {
         dag: &Dag,
         arg_map: &UnordMap<String, NodeId>,
         params: &[String],
+        physical_args: &[NodeId],
     ) -> Result<UnordMap<NodeId, NodeId>, String> {
         let mut viewed_args = arg_map.clone();
         for node in dag.nodes() {
@@ -17073,18 +17142,7 @@ impl<'program> LowerCtx<'program> {
             if actual_ty == &node.output_type {
                 continue;
             }
-            let extent = |dim: &DimInfo| match dim {
-                DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => Some(*size),
-                DimInfo::Named(_, None) => None,
-            };
-            if actual_ty.precision != node.output_type.precision
-                || actual_ty.dims.len() != node.output_type.dims.len()
-                || actual_ty
-                    .dims
-                    .iter()
-                    .zip(&node.output_type.dims)
-                    .any(|(actual, view)| extent(actual) != extent(view))
-            {
+            if !same_physical_tensor_type(actual_ty, &node.output_type) {
                 return Err(format!(
                     "mapped parameter {name} axis view changes its physical type"
                 ));
@@ -17098,13 +17156,95 @@ impl<'program> LowerCtx<'program> {
             );
             viewed_args.insert(name.as_str().to_owned(), view);
         }
-        self.splice_dag(dag, &viewed_args)
+        let layouts = self.mapped_argument_layouts(&viewed_args, params, physical_args)?;
+        self.splice_dag_with_layouts(dag, &viewed_args, &layouts)
+    }
+
+    fn mapped_argument_layouts(
+        &self,
+        args: &UnordMap<String, NodeId>,
+        params: &[String],
+        physical_args: &[NodeId],
+    ) -> Result<UnordMap<String, MappedArgumentLayout>, String> {
+        if params.len() != physical_args.len() {
+            return Err("mapped argument layout arity differs from its physical arguments".into());
+        }
+        params
+            .iter()
+            .zip(physical_args)
+            .map(|(name, physical)| {
+                let canonical = *args
+                    .get(name.as_str())
+                    .ok_or("mapped parameter has no canonical argument")?;
+                Ok((
+                    name.clone(),
+                    MappedArgumentLayout::new(&self.dag, *physical, canonical)?,
+                ))
+            })
+            .collect()
+    }
+
+    fn transport_mapped_refinement(
+        &mut self,
+        layout: &MappedArgumentLayout,
+        refined: NodeId,
+        target: &TensorType,
+        owner: Owner,
+        span: Option<String>,
+    ) -> Result<NodeId, String> {
+        let mut current = refined;
+        for step in &layout.steps {
+            let mut ty = self
+                .dag
+                .get(current)
+                .ok_or("mapped refinement is missing")?
+                .output_type
+                .clone();
+            let mut inputs = step.inputs.clone();
+            inputs[0] = current;
+            match &step.op {
+                // A name view has no data layout. Apply the complete checked
+                // parameter view after replaying the physical layout below.
+                RiscOp::Copy => continue,
+                RiscOp::Permute { axes } => ty = permuted_tensor_type(&ty, axes),
+                RiscOp::Expand { axis, .. } => {
+                    ty.dims.insert(*axis, step.output_type.dims[*axis].clone())
+                }
+                _ => unreachable!("validated layout"),
+            }
+            current = self
+                .dag
+                .add_node(owner, step.op.clone(), inputs, ty, span.clone());
+        }
+        let actual = &self
+            .dag
+            .get(current)
+            .ok_or("mapped refinement layout is missing")?
+            .output_type;
+        if !same_physical_tensor_type(actual, target) {
+            return Err("mapped refinement view changes its physical type".into());
+        }
+        if actual != target {
+            current = self
+                .dag
+                .add_node(owner, RiscOp::Copy, vec![current], target.clone(), span);
+        }
+        Ok(current)
     }
 
     fn splice_dag(
         &mut self,
         dag: &Dag,
         arg_map: &UnordMap<String, NodeId>,
+    ) -> Result<UnordMap<NodeId, NodeId>, String> {
+        self.splice_dag_with_layouts(dag, arg_map, &UnordMap::new())
+    }
+
+    fn splice_dag_with_layouts(
+        &mut self,
+        dag: &Dag,
+        arg_map: &UnordMap<String, NodeId>,
+        layouts: &UnordMap<String, MappedArgumentLayout>,
     ) -> Result<UnordMap<NodeId, NodeId>, String> {
         let mut remap = UnordMap::<NodeId, NodeId>::new();
         for node in dag.nodes() {
@@ -17134,7 +17274,7 @@ impl<'program> LowerCtx<'program> {
                     }
                 }
                 op => {
-                    let inputs = node
+                    let mut inputs = node
                         .inputs
                         .iter()
                         .map(|id| {
@@ -17154,13 +17294,88 @@ impl<'program> LowerCtx<'program> {
                         .owner
                         .try_remap_with(|activation| remap.get(&activation).copied())
                         .map_err(|message| format!("source node {:?}: {message}", node.id))?;
-                    let new_id = self.dag.add_node(
-                        owner,
-                        op.clone(),
-                        inputs,
-                        node.output_type.clone(),
-                        node.span_id.clone(),
-                    );
+                    let mut op = op.clone();
+                    let mut output_type = node.output_type.clone();
+                    let mut refined_layout = None;
+                    match &mut op {
+                        RiscOp::ExtentWitness {
+                            site: crate::dag::ExtentWitnessSite::Caller,
+                            parameter,
+                            axis: RtAxis::Lit(axis),
+                            ..
+                        } => {
+                            if let Some(layout) = layouts.get(parameter.as_str())
+                                && inputs.first() == Some(&layout.canonical)
+                            {
+                                let physical_axis = layout.physical_axis(
+                                    usize::try_from(*axis)
+                                        .map_err(|_| "negative mapped witness axis")?,
+                                )?;
+                                inputs[0] = layout.physical;
+                                *axis = i32::try_from(physical_axis)
+                                    .map_err(|_| "mapped witness axis overflow")?;
+                            }
+                        }
+                        RiscOp::Shape { axis } => {
+                            if let Some(layout) = layouts
+                                .to_sorted()
+                                .into_iter()
+                                .map(|(_, layout)| layout)
+                                .find(|layout| inputs.first() == Some(&layout.canonical))
+                            {
+                                *axis = layout.physical_axis(*axis)?;
+                                inputs[0] = layout.physical;
+                            }
+                        }
+                        RiscOp::CheckedUnitAxis { axis } => {
+                            let witness = self
+                                .dag
+                                .get(*inputs.get(1).ok_or("mapped unit witness is missing")?)
+                                .ok_or("mapped unit witness node is missing")?;
+                            let RiscOp::ExtentWitness {
+                                axis: observed_axis,
+                                ..
+                            } = witness.op
+                            else {
+                                return Err("mapped unit refinement has no extent witness".into());
+                            };
+                            let physical = *witness
+                                .inputs
+                                .first()
+                                .ok_or("mapped unit observation has no tensor")?;
+                            if inputs[0] != physical || *axis != observed_axis {
+                                let layout = layouts
+                                    .to_sorted()
+                                    .into_iter()
+                                    .map(|(_, layout)| layout)
+                                    .find(|layout| {
+                                        layout.canonical == inputs[0] && layout.physical == physical
+                                    })
+                                    .ok_or("mapped unit refinement lost its argument layout")?;
+                                inputs[0] = physical;
+                                *axis = observed_axis;
+                                output_type = self
+                                    .dag
+                                    .get(physical)
+                                    .ok_or("mapped unit tensor is missing")?
+                                    .output_type
+                                    .clone();
+                                let RtAxis::Lit(observed) = observed_axis;
+                                *output_type
+                                    .dims
+                                    .get_mut(
+                                        usize::try_from(observed)
+                                            .map_err(|_| "negative mapped unit axis")?,
+                                    )
+                                    .ok_or("mapped unit axis is missing")? = DimInfo::Lit(1);
+                                refined_layout = Some(layout);
+                            }
+                        }
+                        _ => {}
+                    }
+                    let new_id =
+                        self.dag
+                            .add_node(owner, op, inputs, output_type, node.span_id.clone());
                     if let Some(reusable_input) = node.reusable_input
                         && let Some(mapped_input) = remap.get(&reusable_input)
                     {
@@ -17189,7 +17404,23 @@ impl<'program> LowerCtx<'program> {
                                 node.id
                             )
                         })?;
-                    new_id
+                    if let Some(layout) = refined_layout {
+                        let view = self.transport_mapped_refinement(
+                            layout,
+                            new_id,
+                            &node.output_type,
+                            owner,
+                            node.span_id.clone(),
+                        )?;
+                        // The value view retains the complete checked node,
+                        // including its shape and result-claim dependencies.
+                        if view != new_id {
+                            self.dag.add_shape_dep(view, new_id);
+                        }
+                        view
+                    } else {
+                        new_id
+                    }
                 }
             };
             remap.insert(node.id, new_id);
@@ -27123,7 +27354,7 @@ mod fused_zero_tests {
                 None,
             );
             let args = [("x".to_owned(), actual)].into_iter().collect();
-            let mapped = ctx.splice_vmapped_dag(&row, &args, &["x".to_owned()]);
+            let mapped = ctx.splice_vmapped_dag(&row, &args, &["x".to_owned()], &[actual]);
             assert_eq!(mapped.is_ok(), admitted, "{mapped:?}");
             assert_eq!(ctx.dag.get(actual).unwrap().output_type, actual_ty);
             if let Ok(mapped) = mapped {
