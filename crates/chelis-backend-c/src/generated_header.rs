@@ -1378,6 +1378,8 @@ fn validate_generated_include_set(source: &str) -> Result<(), GeneratedHeaderErr
     const ALLOWED_INCLUDES: &[&str] = &[
         "\"chelis_blas.h\"",
         "\"chelis_runtime.h\"",
+        // Included only in a unit that calls one of its helpers (chelis#3704).
+        "\"chelis_simd.h\"",
         "<assert.h>",
         // ISO C; the correctly rounded kernels read FLT_EVAL_METHOD (chelis#2957).
         "<float.h>",
