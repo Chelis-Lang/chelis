@@ -177,3 +177,97 @@ fn signatureless_helper_retains_assigned_abi_order() {
         assert_load_order_after_rebuilding(&dag, &["a", "z"]);
     }
 }
+
+/// [04-INF-9]/[05-OP-20..22]: a lexical runtime callable has no DAG
+/// representation. Select host execution before visiting either value arm.
+#[test]
+fn runtime_callable_values_are_host_before_lowering() {
+    for choice in [
+        "if flag then is_nan else is_finite",
+        "if flag then is_finite else is_nan",
+        "if flag then known else is_finite",
+    ] {
+        for alias in ["f(x)", "{ g = f\n g(x) }", "{ g = copy(f)\n g(x) }"] {
+            let source = format!(
+                "def selected(flag: bool, x: tensor[2,f32]) -> tensor[2,bool] = {{\n known = is_nan\n f = {choice}\n {alias}\n}}\n"
+            );
+            assert_eq!(decision(&source, "selected"), Ok(false), "{source}");
+        }
+    }
+}
+
+/// The host disposition must not consume ordinary tensor conditionals or
+/// statically resolved builtin aliases, which already have a DAG identity.
+#[test]
+fn static_callable_and_tensor_conditionals_keep_the_kernel_route() {
+    for body in [
+        "{ f = is_finite\n f(x) }",
+        "{ y = if flag then is_finite(x) else is_nan(x)\n y }",
+    ] {
+        let source =
+            format!("def selected(flag: bool, x: tensor[2,f32]) -> tensor[2,bool] = {body}\n");
+        assert_eq!(decision(&source, "selected"), Ok(true), "{source}");
+    }
+}
+
+/// Deep sequential let / [04-INF-9]: sparse checked lexical arm nodes retain
+/// their result evidence before a numeric graph can encounter control flow.
+#[test]
+fn lexical_block_callable_choices_select_host_before_numeric_lowering() {
+    for explicit in [false, true] {
+        for nested_copy in [false, true] {
+            for reverse in [false, true] {
+                let signature = if explicit {
+                    ": &tensor[2,f64] -> tensor[2,bool]"
+                } else {
+                    ""
+                };
+                let tail = if nested_copy {
+                    "copy(copy(local))"
+                } else {
+                    "local"
+                };
+                let (left, right) = if reverse {
+                    ("is_finite", "is_nan")
+                } else {
+                    ("is_nan", "is_finite")
+                };
+                let source = format!(
+                    "def run(flag: bool, x: tensor[2,f64]) -> tensor[2,bool] = {{\n f{signature} = if flag then {{ local = {left}\n {tail} }} else {{ local = {right}\n {tail} }}\n alias = copy(f)\n alias(x)\n}}\n"
+                );
+                assert_eq!(decision(&source, "run"), Ok(false), "{source}");
+            }
+        }
+    }
+}
+
+/// A lexical block is not itself a reason to leave an ordinary tensor kernel.
+#[test]
+fn lexical_block_tensor_choices_preserve_kernel_admission() {
+    let source = "def run(flag: bool, x: tensor[2,f64]) -> tensor[2,f64] = {\n y = if flag then { local = abs(x)\n local } else { local = neg(x)\n local }\n y\n}\n";
+    assert_eq!(decision(source, "run"), Ok(true));
+}
+
+/// A checked noncallable declaration reference is a Load. Its lazy host
+/// initializer is not inlined into the consuming numerical kernel.
+#[test]
+fn captured_checked_tensor_value_is_a_kernel_load_boundary() {
+    let source = "weights: tensor[2, f32] = { _ = print(\"initialize\")\n to_tensor([1.0f32,2.0f32]) }\ndef run(x: tensor[2, f32]) -> tensor[2, f32] = add(x, weights)\n";
+    assert_eq!(decision(source, "run"), Ok(true));
+}
+
+/// A real called function executes its body in the call; host effects are
+/// not hidden merely because its result is a noncallable tensor.
+#[test]
+fn captured_load_boundary_does_not_erase_inline_function_body_effects() {
+    let source = "def helper(x: tensor[2, f32]) -> tensor[2, f32] ! { IO } = { _ = print(\"enter\")\n add(x,x) }\ndef run(x: tensor[2, f32]) -> tensor[2, f32] ! { IO } = helper(x)\n";
+    assert_eq!(decision(source, "run"), Ok(false));
+}
+
+/// A declaration whose value is a runtime callable must retain its host
+/// selection/formation boundary; a non-Fn syntax root cannot bypass it.
+#[test]
+fn captured_load_boundary_does_not_admit_runtime_callable_initializers() {
+    let source = "flag = true\npredicate: &tensor[2, f32] -> tensor[2, bool] = { _ = print(\"form\")\n if flag then is_nan else is_finite }\ndef run(x: tensor[2, f32]) -> tensor[2, bool] = predicate(x)\n";
+    assert_eq!(decision(source, "run"), Ok(false));
+}

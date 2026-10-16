@@ -864,7 +864,7 @@ pub struct LoweredLibrary {
     /// This field intentionally has no serde default: a cache written before
     /// the obligation carrier existed cannot prove that an absent list means
     /// there were no authored claims.
-    local_tensor_ascriptions: Vec<chelis_types::CheckedLocalTensorAscription>,
+    local_ascriptions: Vec<chelis_types::CheckedLocalAscription>,
     /// Library linearity metadata. Forwarded so cross-DAG reuse hints can
     /// be re-applied if needed.
     linearity: LinearityInfo,
@@ -914,8 +914,8 @@ impl LoweredLibrary {
 
     /// Return the checked local tensor-ascription obligations owned by the
     /// retained library definitions.
-    pub fn local_tensor_ascriptions(&self) -> &[chelis_types::CheckedLocalTensorAscription] {
-        &self.local_tensor_ascriptions
+    pub fn local_ascriptions(&self) -> &[chelis_types::CheckedLocalAscription] {
+        &self.local_ascriptions
     }
 
     /// Return the immutable linearity metadata.
@@ -1082,7 +1082,7 @@ fn lower_program_to_library_inner(
         program_signatures.clone(),
         program.linearity().clone(),
     );
-    ctx.local_tensor_ascriptions = Arc::new(program.local_tensor_ascriptions().to_vec());
+    ctx.local_ascriptions = Arc::new(program.local_ascriptions().to_vec());
     ctx.constructor_layouts = Arc::new(ConstructorLayouts::from_registry(program.adt_registry()));
     #[cfg(feature = "lowering-trace")]
     {
@@ -1185,7 +1185,7 @@ fn lower_program_to_library_inner(
         program_defs,
         program_signatures,
         program_types,
-        local_tensor_ascriptions: program.local_tensor_ascriptions().to_vec(),
+        local_ascriptions: program.local_ascriptions().to_vec(),
         linearity: program.linearity().clone(),
         lowered_names,
         rootless_defs: ctx.rootless_defs,
@@ -1464,7 +1464,41 @@ fn lower_program_with_context_inner(
     // new-code wins, mirroring monolithic lowering of `library + new`.
     let new_definitions = collect_top_level_defs(new_program.exprs());
     let replaced_definitions = new_definitions.keys().cloned().collect::<BTreeSet<_>>();
-    let mut program_defs = library.program_defs.clone();
+    let composition = chelis_types::compose_local_ascriptions(
+        &library.local_ascriptions,
+        new_program.local_ascriptions(),
+        &replaced_definitions,
+    )
+    .unwrap_or_else(|| {
+        raise_fatal_lowering_error(
+            "checked binding identity space overflowed during contextual lowering",
+            None,
+            None,
+        )
+    });
+    let incoming_exprs = composition
+        .incoming_exprs(new_program.exprs())
+        .unwrap_or_else(|| {
+            raise_fatal_lowering_error("unowned incoming checked binding occurrence", None, None)
+        });
+    let mut program_defs = library
+        .program_defs
+        .iter()
+        .map(|(name, body)| {
+            let mut rewritten = composition
+                .library_exprs(std::slice::from_ref(body))
+                .unwrap_or_else(|| {
+                    raise_fatal_lowering_error(
+                        "unowned library checked binding occurrence",
+                        None,
+                        None,
+                    )
+                });
+            (name.clone(), rewritten.remove(0))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let library_defs = program_defs.clone();
+    let new_definitions = collect_top_level_defs(&incoming_exprs);
     for (name, body) in new_definitions {
         program_defs.insert(name, body);
     }
@@ -1485,19 +1519,7 @@ fn lower_program_with_context_inner(
     ctx.constructor_layouts = Arc::new(ConstructorLayouts::from_registry(
         new_program.adt_registry(),
     ));
-    let local_tensor_ascriptions = chelis_types::compose_local_tensor_ascriptions(
-        &library.local_tensor_ascriptions,
-        new_program.local_tensor_ascriptions(),
-        &replaced_definitions,
-    )
-    .unwrap_or_else(|| {
-        raise_fatal_lowering_error(
-            "local tensor-ascription identity space overflowed during contextual lowering",
-            None,
-            None,
-        )
-    });
-    ctx.local_tensor_ascriptions = Arc::new(local_tensor_ascriptions);
+    ctx.local_ascriptions = Arc::new(composition.into_records());
 
     // Seed the lowering ctx with the cloned library DAG and the library's
     // name -> NodeId bindings. Library drops are terminal markers for the
@@ -1543,8 +1565,7 @@ fn lower_program_with_context_inner(
         })
         .collect::<Vec<_>>();
     for (name, decl) in library_values {
-        let trapping = library
-            .program_defs
+        let trapping = library_defs
             .get(&name)
             .filter(|_| may_trap[decl.0 as usize])
             .map(|initializer| {
@@ -1568,14 +1589,14 @@ fn lower_program_with_context_inner(
     // it again for each unnamed item made lowering a file cost the square of
     // its size (chelis#3144).
     let mut new_program_lowering = None;
-    for_each_top_level_item(new_program.exprs(), &mut |expr| {
+    for_each_top_level_item(&incoming_exprs, &mut |expr| {
         if top_level_expr_name(expr).and_then(|name| lowered_names.get(name).copied()) == Some(true)
             || (top_level_expr_name(expr).is_none()
                 && top_level_expr_is_lowered_with_names(
                     expr,
                     new_type_env,
                     new_program_lowering.get_or_insert_with(|| {
-                        top_level_lowering_map(new_program.exprs(), new_type_env)
+                        top_level_lowering_map(&incoming_exprs, new_type_env)
                     }),
                 ))
         {
@@ -1754,7 +1775,7 @@ pub struct SubexprLoweringContext {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
-    local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
+    local_ascriptions: Arc<Vec<chelis_types::CheckedLocalAscription>>,
     /// See [`LowerCtx::constructor_layouts`].
     constructor_layouts: Arc<ConstructorLayouts>,
     tensor_specialization: TensorCallsiteSpecialization,
@@ -1861,6 +1882,10 @@ impl SubexprLoweringContext {
             return self.builtin_value(actual);
         }
         Ok(None)
+    }
+
+    pub fn local_ascriptions(&self) -> &[chelis_types::CheckedLocalAscription] {
+        &self.local_ascriptions
     }
 
     /// This context for a host lane that claims a site naming a
@@ -2002,10 +2027,19 @@ impl SubexprLoweringContext {
     /// Interpreted host control selects an `if`/`match` arm before this method
     /// is reached. Planning only the selected arm's bind list preserves the
     /// rule that an untaken arm creates no obligation.
+    /// Query one checked callable binding owner. ABI stamps on arbitrary
+    /// expressions never participate in source authorship.
+    pub fn callable_binding_ascription(
+        &self,
+        initializer: &Expr,
+    ) -> Result<Option<&chelis_types::CheckedLocalAscription>, LowerDiagnostic> {
+        checked_callable_binding_ascription(&self.local_ascriptions, initializer)
+    }
+
     pub fn local_ascription_binding_regions(
         &self,
         bindings: &Expr,
-        declaration_name: Option<&str>,
+        _declaration_name: Option<&str>,
     ) -> Vec<LocalAscriptionBindingRegion> {
         let bind_kids = match bindings.carrier() {
             ExprCarrier::DecodedNode(DeepTag::Bind, _, children) => children,
@@ -2032,14 +2066,9 @@ impl SubexprLoweringContext {
                 continue;
             };
             let matching_ids = self
-                .local_tensor_ascriptions
+                .local_ascriptions
                 .iter()
                 .filter(|ascription| !ascription.outstanding_claims().is_empty())
-                .filter(|ascription| {
-                    declaration_name.is_none_or(|declaration_name| {
-                        ascription.declaration_name() == Some(declaration_name)
-                    })
-                })
                 .filter(|ascription| {
                     LowerCtx::local_ascription_matches_binding(
                         ascription,
@@ -2129,7 +2158,7 @@ impl SubexprLoweringContext {
         }
         let mut claims = Vec::new();
         for ascription in self
-            .local_tensor_ascriptions
+            .local_ascriptions
             .iter()
             .filter(|ascription| region.ascription_ids.contains(&ascription.id().get()))
         {
@@ -2185,7 +2214,7 @@ impl SubexprLoweringContext {
         &self,
         region: &LocalAscriptionBindingRegion,
     ) -> Vec<LocalAscriptionNamedSite> {
-        self.local_tensor_ascriptions
+        self.local_ascriptions
             .iter()
             .filter(|ascription| region.ascription_ids.contains(&ascription.id().get()))
             .flat_map(|ascription| {
@@ -2240,8 +2269,8 @@ impl SubexprLoweringContext {
             .copied()
             .collect::<BTreeSet<_>>();
         let mut context = self.clone();
-        context.local_tensor_ascriptions = Arc::new(
-            self.local_tensor_ascriptions
+        context.local_ascriptions = Arc::new(
+            self.local_ascriptions
                 .iter()
                 .filter(|ascription| selected.contains(&ascription.id().get()))
                 .cloned()
@@ -2249,6 +2278,32 @@ impl SubexprLoweringContext {
         );
         context
     }
+}
+
+/// Resolve callable authorship once for numeric, host and interpreted consumers.
+/// Only the checker's occurrence token and ledger classify source authority;
+/// optional Surf provenance and inferred ABI metadata are not consumer inputs.
+fn checked_callable_binding_ascription<'a>(
+    ledger: &'a [chelis_types::CheckedLocalAscription],
+    initializer: &Expr,
+) -> Result<Option<&'a chelis_types::CheckedLocalAscription>, LowerDiagnostic> {
+    let Some((_, metadata, _)) = stamped_parts(initializer) else {
+        return Ok(None);
+    };
+    let Some(token) = metadata.checked_binding_owner() else {
+        return Ok(None);
+    };
+    let id = chelis_types::LocalAscriptionId::from_checked_owner_token(token);
+    let mut matching = ledger.iter().filter(|record| Some(record.id()) == id);
+    let record = matching.next();
+    if record.is_none() || matching.next().is_some() {
+        return Err(LowerDiagnostic::new(
+            "unowned or ambiguous checked binding occurrence",
+            Some(initializer.span()),
+            initializer.span_id().map(str::to_owned),
+        ));
+    }
+    Ok(record.filter(|record| record.is_callable()))
 }
 
 pub(crate) fn prepare_subexpr_lowering_context(
@@ -2277,7 +2332,7 @@ pub(crate) fn prepare_subexpr_lowering_context(
         program_types: Arc::new(program_types),
         program_defs,
         program_signatures,
-        local_tensor_ascriptions: Arc::new(Vec::new()),
+        local_ascriptions: Arc::new(Vec::new()),
         constructor_layouts: Arc::default(),
         tensor_specialization: TensorCallsiteSpecialization::default(),
         activation_record: ActivationRecord::Nothing,
@@ -2291,7 +2346,7 @@ pub(crate) fn prepare_checked_subexpr_lowering_context(
 ) -> SubexprLoweringContext {
     let mut context =
         prepare_subexpr_lowering_context(program.type_env(), program_defs, program_signatures);
-    context.local_tensor_ascriptions = Arc::new(program.local_tensor_ascriptions().to_vec());
+    context.local_ascriptions = Arc::new(program.local_ascriptions().to_vec());
     context.constructor_layouts =
         Arc::new(ConstructorLayouts::from_registry(program.adt_registry()));
     context
@@ -2579,7 +2634,7 @@ pub(crate) fn try_lower_staged_host_region(
         );
         // The staged region is this graph's only declaration.
         ctx.decl = Some(ctx.dag.declare(""));
-        ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
+        ctx.local_ascriptions = context.local_ascriptions.clone();
         ctx.constructor_layouts = context.constructor_layouts.clone();
         ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
         ctx.activation_record = context.activation_record;
@@ -2735,7 +2790,7 @@ fn lower_subexpr_program_inner_impl(
             .insert(name.clone(), CallableExpr::Builtin(value.clone()));
     }
     ctx.decl = Some(ctx.dag.declare(""));
-    ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
+    ctx.local_ascriptions = context.local_ascriptions.clone();
     ctx.constructor_layouts = context.constructor_layouts.clone();
     ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
     ctx.activation_record = context.activation_record;
@@ -5370,7 +5425,7 @@ impl DimBinderRoles {
     /// signature in `signatures`; empty when it has none.
     pub fn of_ascription(
         signatures: &BTreeMap<String, Expr>,
-        ascription: &chelis_types::CheckedLocalTensorAscription,
+        ascription: &chelis_types::CheckedLocalAscription,
     ) -> Self {
         match ascription.declaration_name() {
             Some(name) => Self::of_declaration(signatures, name),
@@ -5741,7 +5796,7 @@ fn def_is_lowered(
         // identity as a lexical binding; a projected closure is host-served.
         if (types.function_typed_defs.contains(name)
             || LowerCtx::type_expr_is_fn(types.declared_type(name)))
-            && !LowerabilityBindings::default().static_callable(body, top_level_defs)
+            && !LowerabilityBindings::default().dag_callable_template(body, top_level_defs)
         {
             return false;
         }
@@ -5816,12 +5871,39 @@ struct LowerabilityBindings {
     names: UnordSet<String>,
     host_calls: UnordSet<String>,
     unresolved_callables: UnordSet<String>,
-    supplied_unresolved_formals: Option<Vec<bool>>,
+    supplied_formals: Option<Vec<SuppliedCallable>>,
     inside_vmap: bool,
     unresolved_vmap: std::rc::Rc<Cell<bool>>,
 }
 
+/// What a call site supplies to a declaration's callable formal. The callee
+/// is analyzed under the actual's own fact, never the formal's signature.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SuppliedCallable {
+    /// A literal template the numeric resolver can specialize.
+    Template,
+    /// A forwarded incoming formal: the eventual call site decides.
+    Unresolved,
+    /// A computed, projected or host-only value: applying it needs the host.
+    Host,
+}
+
 impl LowerabilityBindings {
+    fn supplied_callable(
+        &self,
+        actual: &Expr,
+        declarations: &BTreeMap<String, Expr>,
+    ) -> SuppliedCallable {
+        match (
+            self.dag_callable_template(actual, declarations),
+            self.unresolved_callable_value(actual),
+        ) {
+            (true, false) => SuppliedCallable::Template,
+            (true, true) => SuppliedCallable::Unresolved,
+            (false, _) => SuppliedCallable::Host,
+        }
+    }
+
     fn bind(&mut self, name: String, callable: bool) {
         self.unresolved_callables.remove(&name);
         self.names.insert(name.clone());
@@ -5838,7 +5920,11 @@ impl LowerabilityBindings {
             .any(|name| self.unresolved_callables.contains(name))
     }
 
-    fn static_callable(&self, mut expr: &Expr, declarations: &BTreeMap<String, Expr>) -> bool {
+    fn dag_callable_template(
+        &self,
+        mut expr: &Expr,
+        declarations: &BTreeMap<String, Expr>,
+    ) -> bool {
         loop {
             match stamped_parts(expr) {
                 Some((DeepTag::Fn, _, _)) => return true,
@@ -5847,11 +5933,13 @@ impl LowerabilityBindings {
                         if self.names.contains(name) {
                             !self.host_calls.contains(name)
                         } else {
-                            declarations.contains_key(name) || BUILTIN_NAMES.contains(&name)
+                            declarations.contains_key(name)
+                                || (BUILTIN_NAMES.contains(&name)
+                                    && !crate::host::builtin_requires_host_execution(name))
                         }
                     });
                 }
-                Some((DeepTag::Grad | DeepTag::Vmap, _, kids)) => {
+                Some((DeepTag::Copy | DeepTag::Grad | DeepTag::Vmap, _, kids)) => {
                     let Some(inner) = kids.first() else {
                         return false;
                     };
@@ -5918,10 +6006,10 @@ fn expr_depends_on_nonlowerable_name(
     } {
         if tag == DeepTag::Var
             && bound_names.inside_vmap
-            && kids
-                .first()
-                .and_then(symbol_name)
-                .is_some_and(|name| bound_names.unresolved_callables.contains(name))
+            && kids.first().and_then(symbol_name).is_some_and(|name| {
+                bound_names.unresolved_callables.contains(name)
+                    || bound_names.host_calls.contains(name)
+            })
         {
             bound_names.unresolved_vmap.set(true);
             return true;
@@ -5976,10 +6064,7 @@ fn expr_depends_on_nonlowerable_name(
             let supplied = kids
                 .iter()
                 .skip(1)
-                .map(|arg| {
-                    bound_names.unresolved_callable_value(arg)
-                        || !bound_names.static_callable(arg, top_level_defs)
-                })
+                .map(|arg| bound_names.supplied_callable(arg, top_level_defs))
                 .collect::<Vec<_>>();
             if has_callable_formals && visiting.insert(name.clone()) {
                 // Supplying a static callable resolves the template's
@@ -5990,7 +6075,7 @@ fn expr_depends_on_nonlowerable_name(
                     return true;
                 }
                 let scoped = LowerabilityBindings {
-                    supplied_unresolved_formals: Some(supplied),
+                    supplied_formals: Some(supplied),
                     unresolved_vmap: bound_names.unresolved_vmap.clone(),
                     ..LowerabilityBindings::default()
                 };
@@ -6026,12 +6111,16 @@ fn expr_depends_on_nonlowerable_name(
         // when their producing projection has no checked type annotation.
         if tag == DeepTag::App
             && let Some(callee) = kids.first()
-            && (callable_ref_name(callee)
-                .is_some_and(|name| bound_names.host_calls.contains(&name))
-                || !matches!(
-                    callee.tag(),
-                    Some(DeepTag::Var | DeepTag::Fn | DeepTag::Grad | DeepTag::Vmap)
-                ))
+            && (callable_ref_name(callee).is_some_and(|name| {
+                bound_names.host_calls.contains(&name)
+                    || (!bound_names.names.contains(&name)
+                        && !top_level_defs.contains_key(&name)
+                        && crate::host::builtin_requires_host_execution(&name)
+                        && !is_static_to_tensor_literal(expr))
+            }) || !matches!(
+                callee.tag(),
+                Some(DeepTag::Var | DeepTag::Fn | DeepTag::Grad | DeepTag::Vmap)
+            ))
         {
             return true;
         }
@@ -6099,7 +6188,7 @@ fn expr_depends_on_nonlowerable_name(
         }
         if tag == DeepTag::Fn {
             let mut scoped = bound_names.clone();
-            let supplied_unresolved_formals = scoped.supplied_unresolved_formals.take();
+            let supplied_formals = scoped.supplied_formals.take();
             if let Some(params) = kids.first() {
                 let params_kids = match params.carrier() {
                     ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children,
@@ -6111,17 +6200,26 @@ fn expr_depends_on_nonlowerable_name(
                     | ExprCarrier::MetadataExpression(_) => return true,
                 };
                 for (index, param) in params_kids.iter().enumerate() {
-                    let unresolved = extract_param_type(expr, index)
+                    let callable_formal = extract_param_type(expr, index)
                         .and_then(strip_transparent_type_wrappers)
-                        .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn))
-                        && supplied_unresolved_formals
-                            .as_ref()
-                            .is_none_or(|actuals| actuals.get(index) == Some(&true));
+                        .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn));
+                    // A standalone template's formal awaits its call site; a
+                    // supplied formal takes exactly the actual's fact.
+                    let supplied = match &supplied_formals {
+                        None => SuppliedCallable::Unresolved,
+                        Some(actuals) => actuals
+                            .get(index)
+                            .copied()
+                            .unwrap_or(SuppliedCallable::Template),
+                    };
                     let mut names = UnordSet::new();
                     collect_param_bound_names(param, &mut names);
                     for name in names.into_sorted() {
-                        scoped.bind(name.clone(), true);
-                        if unresolved {
+                        scoped.bind(
+                            name.clone(),
+                            !callable_formal || supplied != SuppliedCallable::Host,
+                        );
+                        if callable_formal && supplied != SuppliedCallable::Template {
                             scoped.unresolved_callables.insert(name);
                         }
                     }
@@ -6166,7 +6264,7 @@ fn expr_depends_on_nonlowerable_name(
                     }
                     if let Some(name) = symbol_name(&binding_kids[index]) {
                         let callable =
-                            scoped.static_callable(&binding_kids[index + 1], top_level_defs);
+                            scoped.dag_callable_template(&binding_kids[index + 1], top_level_defs);
                         let unresolved = scoped.unresolved_callable_value(&binding_kids[index + 1]);
                         scoped.bind(name.to_string(), callable);
                         if unresolved {
@@ -9380,7 +9478,7 @@ struct LowerCtx<'program> {
     literal_result_claim_ownership: LiteralResultClaimOwnership,
     /// Checker-owned authored local tensor ascriptions. This is intentionally
     /// separate from ordinary inferred expression `type` metadata.
-    local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
+    local_ascriptions: Arc<Vec<chelis_types::CheckedLocalAscription>>,
     /// Which binders the host lane executing this graph's ascription regions
     /// records when an activation starts, and so claims a site naming one
     /// against. `chelis eval` records every parameter-carried binder, List
@@ -9631,7 +9729,7 @@ impl<'program> LowerCtx<'program> {
             activation_witnesses: Vec::new(),
             signature_is_authored: false,
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
-            local_tensor_ascriptions: Arc::new(Vec::new()),
+            local_ascriptions: Arc::new(Vec::new()),
             activation_record: ActivationRecord::Nothing,
             local_ascription_tokens: Vec::new(),
             branch_path_condition: None,
@@ -10251,7 +10349,7 @@ impl<'program> LowerCtx<'program> {
         shadowed: &[String],
         argument_callables: &[(String, CallableExpr)],
     ) -> UnordMap<String, NodeId> {
-        subctx.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
+        subctx.local_ascriptions = self.local_ascriptions.clone();
         subctx.activation_record = self.activation_record;
         // A free `Load` the transformed body keeps is spliced into this graph
         // unchanged, so it must not take one of this graph's input names.
@@ -11183,7 +11281,7 @@ impl<'program> LowerCtx<'program> {
         scratch.constructor_layouts = Arc::clone(&self.constructor_layouts);
         scratch.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
         scratch.decl = Some(scratch.dag.declare(name));
-        scratch.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
+        scratch.local_ascriptions = self.local_ascriptions.clone();
         scratch.activation_record = self.activation_record;
         scratch.program_value_verdicts = self.program_value_verdicts.clone();
         // `catch_lowering` clears the panic-output suppression on exit; an
@@ -12742,7 +12840,7 @@ impl<'program> LowerCtx<'program> {
                             self.local_ascription_tokens
                                 .iter()
                                 .find_map(|(id, claims)| {
-                                    self.local_tensor_ascriptions
+                                    self.local_ascriptions
                                         .iter()
                                         .find(|ascription| ascription.id().get() == *id)
                                         .filter(|ascription| {
@@ -12835,7 +12933,7 @@ impl<'program> LowerCtx<'program> {
             .map(str::to_string)
             .or_else(|| self.declaration_name_for_body(body));
         let ascriptions = self
-            .local_tensor_ascriptions
+            .local_ascriptions
             .iter()
             .filter(|ascription| {
                 declaration_name.as_deref().is_none_or(|current| {
@@ -12887,9 +12985,9 @@ impl<'program> LowerCtx<'program> {
 
     fn body_contains_local_ascription(
         body: &Expr,
-        ascription: &chelis_types::CheckedLocalTensorAscription,
+        ascription: &chelis_types::CheckedLocalAscription,
     ) -> bool {
-        fn contains(expr: &Expr, ascription: &chelis_types::CheckedLocalTensorAscription) -> bool {
+        fn contains(expr: &Expr, ascription: &chelis_types::CheckedLocalAscription) -> bool {
             match expr.carrier() {
                 ExprCarrier::DecodedNode(DeepTag::Fn, _, _) => false,
                 ExprCarrier::DecodedNode(tag, _, children) => {
@@ -12932,7 +13030,7 @@ impl<'program> LowerCtx<'program> {
     /// first axis and claimed by the rest.
     fn resolve_local_ascription_claims(
         &mut self,
-        ascription: &chelis_types::CheckedLocalTensorAscription,
+        ascription: &chelis_types::CheckedLocalAscription,
         pending: LocalAscriptionClaimTokens,
         owner: NodeId,
         binding: &str,
@@ -13017,7 +13115,7 @@ impl<'program> LowerCtx<'program> {
     /// remain stable across calls with different ranks.
     fn realized_local_ascription_axis(
         &self,
-        ascription: &chelis_types::CheckedLocalTensorAscription,
+        ascription: &chelis_types::CheckedLocalAscription,
         axis: usize,
     ) -> usize {
         let slots = tensor_formal_dim_slots(ascription.authored_type())
@@ -13054,7 +13152,7 @@ impl<'program> LowerCtx<'program> {
     /// where its initializer lowers.
     fn local_claim_awaits_first_site(
         &self,
-        ascription: &chelis_types::CheckedLocalTensorAscription,
+        ascription: &chelis_types::CheckedLocalAscription,
         claim: &chelis_types::LocalAscriptionAxisClaim,
     ) -> bool {
         if !matches!(
@@ -13085,7 +13183,7 @@ impl<'program> LowerCtx<'program> {
 
     fn discard_local_ascription_tokens_in(&mut self, body: &Expr) {
         let discarded = self
-            .local_tensor_ascriptions
+            .local_ascriptions
             .iter()
             .filter(|ascription| Self::body_contains_local_ascription(body, ascription))
             .map(|ascription| ascription.id().get())
@@ -13095,24 +13193,15 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn local_ascription_matches_binding(
-        ascription: &chelis_types::CheckedLocalTensorAscription,
-        binding_name: &str,
-        binding: &Expr,
+        ascription: &chelis_types::CheckedLocalAscription,
+        _binding_name: &str,
+        _binding: &Expr,
         initializer: &Expr,
     ) -> bool {
-        ascription.binding_name() == binding_name
-            && (Self::expr_has_source_span(binding, ascription.binding_span())
-                || Self::expr_has_source_span(initializer, ascription.initializer_span())
-                || match initializer.carrier() {
-                    ExprCarrier::DecodedNode(_, metadata, _) => metadata
-                        .surf_binding_type()
-                        .is_some_and(|origin| origin.span() == ascription.ascription_span()),
-                    ExprCarrier::StructuralList(_)
-                    | ExprCarrier::UndecodableHead(_, _, _)
-                    | ExprCarrier::Atom(_)
-                    | ExprCarrier::MetadataMap(_)
-                    | ExprCarrier::MetadataExpression(_) => false,
-                })
+        stamped_parts(initializer)
+            .and_then(|(_, metadata, _)| metadata.checked_binding_owner())
+            .and_then(chelis_types::LocalAscriptionId::from_checked_owner_token)
+            == Some(ascription.id())
     }
 
     /// Remove an authored local claim from the initializer's physical shape.
@@ -13163,22 +13252,8 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    fn expr_has_source_span(expr: &Expr, target: Span) -> bool {
-        fn source_range(source: &str) -> Option<(usize, usize)> {
-            let range = source.strip_prefix("surf:")?;
-            let (start, end) = range.split_once("..")?;
-            Some((start.parse().ok()?, end.parse().ok()?))
-        }
-
-        expr.span() == target
-            || expr.span_id().is_some_and(|source| {
-                source_range(source)
-                    .is_some_and(|(start, end)| (start, end) == (target.offset, target.end()))
-            })
-    }
-
     fn local_ascription_claim_label(
-        ascription: &chelis_types::CheckedLocalTensorAscription,
+        ascription: &chelis_types::CheckedLocalAscription,
         axis: usize,
         claim: &chelis_types::LocalAscriptionAxisClaim,
     ) -> String {
@@ -13221,7 +13296,7 @@ impl<'program> LowerCtx<'program> {
 
     fn local_ascription_claim_token(
         &mut self,
-        ascription: &chelis_types::CheckedLocalTensorAscription,
+        ascription: &chelis_types::CheckedLocalAscription,
         claim: &chelis_types::LocalAscriptionAxisClaim,
     ) -> NodeId {
         let label = Self::local_ascription_claim_label(ascription, claim.axis(), claim);
@@ -13314,7 +13389,7 @@ impl<'program> LowerCtx<'program> {
     fn validate_local_ascription_token_ownership(&self) {
         for (ascription_id, claims) in &self.local_ascription_tokens {
             let Some(ascription) = self
-                .local_tensor_ascriptions
+                .local_ascriptions
                 .iter()
                 .find(|ascription| ascription.id().get() == *ascription_id)
             else {
@@ -13856,18 +13931,31 @@ impl<'program> LowerCtx<'program> {
         ty: &TensorType,
         app_span: Span,
     ) -> LoweredValue {
-        let nodes = args
-            .iter()
-            .map(|arg| self.lower_expr_node(arg, "builtin value argument"))
-            .collect::<Vec<_>>();
+        let mut nodes = Vec::with_capacity(args.len());
+        let mut facts = Vec::with_capacity(args.len());
+        for arg in args {
+            let shape = self
+                .resolve_shape_binding_source(arg)
+                .map(|source| self.pin_free_names(&source, false));
+            let static_size = self.fold_static_size(arg);
+            let witnesses = self.binding_witnesses_for_expr(arg).cloned();
+            nodes.push(self.lower_expr_node(arg, "builtin value argument"));
+            facts.push(ValueFacts {
+                shape,
+                static_size,
+                witnesses,
+                ..ValueFacts::default()
+            });
+        }
         let saved = self.capture_scope();
         let names = nodes
             .iter()
+            .zip(facts)
             .enumerate()
-            .map(|(index, node)| {
+            .map(|(index, (node, facts))| {
                 let name = format!("__chelis_builtin_actual_{}_{}", node.0, index);
                 self.bindings
-                    .insert(name.clone(), LoweredValue::Node(*node));
+                    .insert_with_facts(name.clone(), LoweredValue::Node(*node), facts);
                 name
             })
             .collect::<Vec<_>>();
@@ -14162,11 +14250,13 @@ impl<'program> LowerCtx<'program> {
 
     fn callable_binding_expr(&self, expr: &Expr) -> Option<CallableExpr> {
         let mut callable = self.resolve_callable_expr(expr)?;
-        let (_, metadata, _) = stamped_parts(expr)?;
-        if metadata.surf_binding_type().is_some_and(|origin| {
-            *origin.value() == chelis_deep::annotations::BindingTypeOrigin::Explicit
-        }) && let Some(authored) = metadata.ty().map(|ty| ty.expression())
-            && let Some(contract) = self.normalize_callable_contract(authored, expr.span())
+        let owner = checked_callable_binding_ascription(&self.local_ascriptions, expr)
+            .unwrap_or_else(|diagnostic| {
+                raise_fatal_lowering_error(diagnostic.message, diagnostic.span, diagnostic.span_id)
+            });
+        if let Some(owner) = owner
+            && let Some(contract) =
+                self.normalize_callable_contract(owner.authored_type(), expr.span())
             && let CallableExpr::Builtin(value) = &mut callable
         {
             value.retain_outer_contract(contract);
@@ -28386,7 +28476,7 @@ mod tests {
             program_types: Arc::new(BTreeMap::new()),
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
-            local_tensor_ascriptions: Arc::new(Vec::new()),
+            local_ascriptions: Arc::new(Vec::new()),
             constructor_layouts: Arc::default(),
             tensor_specialization: TensorCallsiteSpecialization::default(),
             activation_record: ActivationRecord::Nothing,
@@ -28710,7 +28800,7 @@ mod tests {
         );
     }
 
-    fn local_ascription_fixture() -> (chelis_types::CheckedLocalTensorAscription, Expr) {
+    fn local_ascription_fixture() -> (chelis_types::CheckedLocalAscription, Expr) {
         let declarations = chelis_surf::parser::parse_str(
             "def f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
              y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
@@ -28724,7 +28814,7 @@ mod tests {
         )
         .unwrap_or_else(|report| panic!("fixture type check failed: {:?}", report.errors));
         let ascription = checked
-            .local_tensor_ascriptions()
+            .local_ascriptions()
             .first()
             .expect("fixture records one local ascription")
             .clone();
@@ -28755,7 +28845,7 @@ mod tests {
             program_types: Arc::new(BTreeMap::new()),
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
-            local_tensor_ascriptions: Arc::new(vec![ascription.clone()]),
+            local_ascriptions: Arc::new(vec![ascription.clone()]),
             constructor_layouts: Arc::default(),
             tensor_specialization: TensorCallsiteSpecialization::default(),
             activation_record: ActivationRecord::Nothing,

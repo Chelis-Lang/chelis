@@ -612,6 +612,19 @@
       "expected": [
         "authored_ascriptions_inside_match_arms_reach_the_checked_program",
         "authored_wildcard_is_preserved_without_manufacturing_a_claim",
+        "callable_owner_checked_rewrite_rejects_duplicate_occurrence_authority",
+        "callable_owner_checked_rewrite_rejects_missing_or_forged_occurrence",
+        "callable_owner_distinct_nested_bindings_ignore_equal_source_spans",
+        "callable_owner_distinguishes_deep_surf_and_inferred_binding_metadata",
+        "callable_owner_does_not_promote_nonbinding_none_origin_abi_metadata",
+        "callable_owner_effect_reannotation_accepts_new_derived_effect_containers",
+        "callable_owner_effect_reannotation_rejects_moved_real_owner",
+        "callable_owner_effect_reannotation_rejects_swapped_equal_span_owners",
+        "callable_owner_proof_bound_composition_remaps_ids_and_replaces_declarations",
+        "callable_owner_recursive_inference_keeps_one_record_per_source_binding",
+        "callable_owner_retains_result_only_and_nested_adapter_sources_once",
+        "callable_owner_serialization_preserves_source_and_full_claims",
+        "callable_owner_source_supplied_token_cannot_forge_checked_authority",
         "checked_library_composition_preserves_both_identity_domains",
         "checker_owned_ascription_survives_clone_serialization_and_checker_rewrites",
         "claimed_axes_remain_in_authored_axis_order",
@@ -734,6 +747,7 @@
         "mode": "all"
       },
       "expected": [
+        "callable_binding_cache_roundtrips_preserve_complete_owner_and_composition",
         "composed_sources_with_equal_local_names_and_offsets_lower_their_own_identities",
         "contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers",
         "stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations"

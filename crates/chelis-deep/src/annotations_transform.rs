@@ -585,6 +585,7 @@ impl Metadata {
         for (key, value) in self.extensions().iter() {
             result.extensions_mut().insert(key.into(), value.clone())?;
         }
+        result.set_checked_binding_owner(self.checked_binding_owner().map(str::to_owned));
         Ok(result)
     }
 

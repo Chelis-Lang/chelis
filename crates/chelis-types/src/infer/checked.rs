@@ -132,7 +132,10 @@ pub(super) struct InferenceProduct {
     /// ordinary inferred `type` metadata that annotation writes on every
     /// checked expression. Lowering consumes this checker-owned carrier at
     /// the matching `let` before aliases can erase the authored boundary.
-    local_tensor_ascriptions: Vec<CheckedLocalTensorAscription>,
+    local_ascriptions: Vec<CheckedLocalAscription>,
+    /// Pre-annotation source owners, never reconstructed from ABI metadata.
+    source_binding_owners: UnordMap<usize, LocalAscriptionId>,
+    ascription_record_indices: UnordMap<LocalAscriptionId, usize>,
     /// Exact top-level declaration currently being inferred. This is source
     /// provenance for local ascriptions, not an inferred type fact: composed
     /// checked units may reuse the same byte offsets, so spans alone cannot
@@ -351,11 +354,24 @@ impl FinalOwnerType {
     }
 }
 
+pub(super) fn source_authored_binding(
+    expr: &deep::Expr,
+) -> Option<(LocalAscriptionOrigin, &deep::Expr)> {
+    let (_, metadata, _) = stamped_parts(expr)?;
+    let origin = match metadata.surf_binding_type().map(|origin| *origin.value()) {
+        Some(BindingTypeOrigin::Explicit) => LocalAscriptionOrigin::SurfExplicit,
+        Some(BindingTypeOrigin::Inferred) => return None,
+        None => LocalAscriptionOrigin::DeepTypeMetadata,
+    };
+    Some((origin, metadata.ty()?.expression()))
+}
+
 impl InferenceProduct {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn record_local_tensor_ascription(
+    pub(super) fn record_local_ascription(
         &mut self,
-        origin: LocalTensorAscriptionOrigin,
+        origin: LocalAscriptionOrigin,
+        initializer: &deep::Expr,
         binding_name: &str,
         binding_span: Span,
         ascription_span: Span,
@@ -365,32 +381,138 @@ impl InferenceProduct {
         rhs_type_before_ascription: &Type,
         errors: &mut DiagnosticSink<'_>,
     ) {
-        let Some(outstanding_claims) =
+        let claims = if matches!(declared_type, Type::Fn(..)) {
+            LocalAscriptionClaims::Callable
+        } else if let Some(axes) =
             outstanding_local_ascription_claims(&declared_type, rhs_type_before_ascription)
-        else {
+        {
+            LocalAscriptionClaims::Tensor(axes)
+        } else {
             return;
         };
-        let Ok(raw_id) = u64::try_from(self.local_tensor_ascriptions.len()) else {
-            errors.push(CheckError::new(
-                CheckErrorKind::Other,
-                "local tensor-ascription identity space exhausted".to_string(),
-                vec!["Rejecting rather than aliasing two authored local bindings".to_string()],
+        let Some(id) = self
+            .source_binding_owners
+            .get(&expr_key(initializer))
+            .copied()
+        else {
+            errors.push(internal_owner_stamp_error(
+                "ascription lacks its original source occurrence".into(),
             ));
             return;
         };
-        self.local_tensor_ascriptions
-            .push(CheckedLocalTensorAscription {
-                id: LocalAscriptionId(raw_id),
-                origin,
-                declaration_name: self.active_declaration_name.clone(),
-                binding_name: binding_name.to_string(),
-                binding_span,
-                ascription_span,
-                initializer_span,
-                authored_type,
-                declared_type,
-                outstanding_claims,
-            });
+        let authored_type = match map_binding_owner_tokens(&authored_type, &mut |_| Ok(None)) {
+            Ok(authored) => authored,
+            Err(error) => {
+                errors.push(internal_owner_stamp_error(error.0));
+                return;
+            }
+        };
+        if let Some(index) = self.ascription_record_indices.get(&id).copied() {
+            let existing = &mut self.local_ascriptions[index];
+            existing.declared_type = declared_type;
+            existing.claims = claims;
+            return;
+        }
+        self.ascription_record_indices
+            .insert(id, self.local_ascriptions.len());
+        self.local_ascriptions.push(CheckedLocalAscription {
+            id,
+            origin,
+            declaration_name: self.active_declaration_name.clone(),
+            binding_name: binding_name.to_string(),
+            binding_span,
+            ascription_span,
+            initializer_span,
+            authored_type,
+            declared_type,
+            claims,
+        });
+    }
+
+    pub(super) fn binding_ascription(&self, expr: &deep::Expr) -> Option<&CheckedLocalAscription> {
+        let id = self.source_binding_owners.get(&expr_key(expr))?;
+        let index = self.ascription_record_indices.get(id)?;
+        self.local_ascriptions.get(*index)
+    }
+
+    pub(super) fn callable_binding_ascription(
+        &self,
+        expr: &deep::Expr,
+    ) -> Option<&CheckedLocalAscription> {
+        self.binding_ascription(expr)
+            .filter(|record| record.is_callable())
+    }
+
+    pub(super) fn register_source_binding_occurrences(
+        &mut self,
+        exprs: &[deep::Expr],
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        fn visit(
+            expr: &deep::Expr,
+            product: &mut InferenceProduct,
+            errors: &mut DiagnosticSink<'_>,
+        ) {
+            stack_guard!("register_source_binding_occurrences", expr);
+            if let Some((DeepTag::Bind, _, pairs)) = stamped_parts(expr) {
+                for pair in pairs.as_chunks::<2>().0 {
+                    let initializer = &pair[1];
+                    if source_authored_binding(initializer).is_some()
+                        && !product
+                            .source_binding_owners
+                            .contains_key(&expr_key(initializer))
+                    {
+                        let Ok(id) = u64::try_from(product.source_binding_owners.len()) else {
+                            errors.push(internal_owner_stamp_error(
+                                "source binding identity space exhausted".into(),
+                            ));
+                            return;
+                        };
+                        product
+                            .source_binding_owners
+                            .insert(expr_key(initializer), LocalAscriptionId(id));
+                    }
+                    visit(initializer, product, errors);
+                }
+                if let Some((_, metadata, _)) = stamped_parts(expr) {
+                    metadata.visit_expressions(&mut |child, _| visit(child, product, errors));
+                }
+                return;
+            }
+            match expr {
+                deep::Expr::Node(node, _) => {
+                    for child in node.children_slice() {
+                        visit(child, product, errors);
+                    }
+                    node.meta()
+                        .visit_expressions(&mut |child, _| visit(child, product, errors));
+                }
+                deep::Expr::MetaExpr(meta, _) => {
+                    visit(&meta.expr, product, errors);
+                    meta.metadata
+                        .visit_expressions(&mut |child, _| visit(child, product, errors));
+                }
+                deep::Expr::BareList(children, _) => {
+                    for child in children {
+                        visit(child, product, errors);
+                    }
+                }
+                deep::Expr::UnknownForm(data) => {
+                    for child in &data.children {
+                        visit(child, product, errors);
+                    }
+                    data.meta
+                        .visit_expressions(&mut |child, _| visit(child, product, errors));
+                }
+                deep::Expr::Map(meta, _) => {
+                    meta.visit_expressions(&mut |child, _| visit(child, product, errors))
+                }
+                deep::Expr::Atom(..) => {}
+            }
+        }
+        for expr in exprs {
+            visit(expr, self, errors);
+        }
     }
 
     /// chelis#1801: record the fresh dimension variables one scheme
@@ -988,6 +1110,11 @@ impl InferenceProduct {
             // the semantic name view; the reusable Env/Subst retains IDs.
             owner.ty = subst.semantic_type(&owner.ty);
         }
+        for record in &mut self.local_ascriptions {
+            if record.is_callable() {
+                record.declared_type = subst.semantic_type(&record.declared_type);
+            }
+        }
     }
 
     pub(super) fn owner_type(
@@ -1413,6 +1540,15 @@ pub(super) fn collect_defsig_param_types(
 pub struct LocalAscriptionId(u64);
 
 impl LocalAscriptionId {
+    pub fn checked_owner_token(self) -> String {
+        format!("local-ascription:{}", self.0)
+    }
+
+    pub fn from_checked_owner_token(token: &str) -> Option<Self> {
+        let id = Self(token.strip_prefix("local-ascription:")?.parse().ok()?);
+        (id.checked_owner_token() == token).then_some(id)
+    }
+
     pub fn get(self) -> u64 {
         self.0
     }
@@ -1424,7 +1560,7 @@ impl LocalAscriptionId {
 /// metadata remains an authored contract rather than being confused with
 /// compiler-inferred Surf metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum LocalTensorAscriptionOrigin {
+pub enum LocalAscriptionOrigin {
     SurfExplicit,
     DeepTypeMetadata,
 }
@@ -1446,7 +1582,7 @@ impl LocalAscriptionAxisClaim {
     }
 }
 
-/// Exact checker-owned record of an authored local tensor ascription.
+/// Exact checker-owned record of an authored local tensor or callable ascription.
 ///
 /// The authored Deep type remains distinct from the checked type so wildcard
 /// spelling and source structure cannot be reconstructed from ordinary
@@ -1454,9 +1590,9 @@ impl LocalAscriptionAxisClaim {
 /// agreement was not statically proved from the RHS before ascription
 /// unification.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CheckedLocalTensorAscription {
+pub struct CheckedLocalAscription {
     id: LocalAscriptionId,
-    origin: LocalTensorAscriptionOrigin,
+    origin: LocalAscriptionOrigin,
     declaration_name: Option<String>,
     binding_name: String,
     binding_span: Span,
@@ -1464,15 +1600,21 @@ pub struct CheckedLocalTensorAscription {
     initializer_span: Span,
     authored_type: deep::Expr,
     declared_type: Type,
-    outstanding_claims: Vec<LocalAscriptionAxisClaim>,
+    claims: LocalAscriptionClaims,
 }
 
-impl CheckedLocalTensorAscription {
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+enum LocalAscriptionClaims {
+    Tensor(Vec<LocalAscriptionAxisClaim>),
+    Callable,
+}
+
+impl CheckedLocalAscription {
     pub fn id(&self) -> LocalAscriptionId {
         self.id
     }
 
-    pub fn origin(&self) -> LocalTensorAscriptionOrigin {
+    pub fn origin(&self) -> LocalAscriptionOrigin {
         self.origin
     }
 
@@ -1505,7 +1647,18 @@ impl CheckedLocalTensorAscription {
     }
 
     pub fn outstanding_claims(&self) -> &[LocalAscriptionAxisClaim] {
-        &self.outstanding_claims
+        match &self.claims {
+            LocalAscriptionClaims::Tensor(axes) => axes,
+            LocalAscriptionClaims::Callable => &[],
+        }
+    }
+
+    pub fn is_callable(&self) -> bool {
+        matches!(self.claims, LocalAscriptionClaims::Callable)
+    }
+
+    pub fn callable_authored_type(&self) -> Option<&deep::Expr> {
+        self.is_callable().then_some(&self.authored_type)
     }
 
     /// Clone this checked obligation into an identity domain above an earlier
@@ -1518,17 +1671,180 @@ impl CheckedLocalTensorAscription {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct BindingOwnerRewriteError(pub(super) String);
+impl From<chelis_deep::metadata::MetadataError> for BindingOwnerRewriteError {
+    fn from(error: chelis_deep::metadata::MetadataError) -> Self {
+        Self(error.to_string())
+    }
+}
+
+type BindingOwnerRewrite<'a> =
+    dyn FnMut(Option<&str>) -> Result<Option<String>, BindingOwnerRewriteError> + 'a;
+
+pub(super) fn map_binding_owner_tokens(
+    expr: &deep::Expr,
+    rewrite: &mut BindingOwnerRewrite<'_>,
+) -> Result<deep::Expr, BindingOwnerRewriteError> {
+    rewrite_binding_owner_expr(expr, &std::cell::RefCell::new(rewrite))
+}
+
+fn rewrite_binding_owner_metadata(
+    meta: &deep::Metadata,
+    rewrite: &std::cell::RefCell<&mut BindingOwnerRewrite<'_>>,
+) -> Result<deep::Metadata, BindingOwnerRewriteError> {
+    let mut mapped = meta.try_map_expressions_with_annotations(
+        &mut |child, _| rewrite_binding_owner_expr(child, rewrite),
+        &mut |mut metadata, _| {
+            let token = (rewrite.borrow_mut())(metadata.checked_binding_owner())?;
+            metadata.set_checked_binding_owner(token);
+            Ok::<_, BindingOwnerRewriteError>(metadata)
+        },
+    )?;
+    let token = (rewrite.borrow_mut())(meta.checked_binding_owner())?;
+    mapped.set_checked_binding_owner(token);
+    Ok(mapped)
+}
+
+fn rewrite_binding_owner_expr(
+    expr: &deep::Expr,
+    rewrite: &std::cell::RefCell<&mut BindingOwnerRewrite<'_>>,
+) -> Result<deep::Expr, BindingOwnerRewriteError> {
+    stack_guard!(
+        "rewrite_binding_owner_expr",
+        expr,
+        Err(BindingOwnerRewriteError(
+            "binding owner rewrite exhausted stack budget".into()
+        ))
+    );
+    Ok(match expr {
+        deep::Expr::Atom(..) => expr.clone(),
+        deep::Expr::Map(meta, span) => {
+            deep::Expr::Map(rewrite_binding_owner_metadata(meta, rewrite)?, *span)
+        }
+        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
+            deep::MetaExpr {
+                metadata: rewrite_binding_owner_metadata(&meta.metadata, rewrite)?,
+                expr: Box::new(rewrite_binding_owner_expr(&meta.expr, rewrite)?),
+            },
+            *span,
+        ),
+        deep::Expr::Node(node, span) => deep::Expr::node(
+            node.tag(),
+            rewrite_binding_owner_metadata(node.meta(), rewrite)?,
+            node.children_slice()
+                .iter()
+                .map(|child| rewrite_binding_owner_expr(child, rewrite))
+                .collect::<Result<_, _>>()?,
+            *span,
+        ),
+        deep::Expr::BareList(children, span) => deep::Expr::BareList(
+            children
+                .iter()
+                .map(|child| rewrite_binding_owner_expr(child, rewrite))
+                .collect::<Result<_, _>>()?,
+            *span,
+        ),
+        deep::Expr::UnknownForm(data) => deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
+            head: data.head.clone(),
+            meta: rewrite_binding_owner_metadata(&data.meta, rewrite)?,
+            children: data
+                .children
+                .iter()
+                .map(|child| rewrite_binding_owner_expr(child, rewrite))
+                .collect::<Result<_, _>>()?,
+            span: data.span,
+        })),
+    })
+}
+
+pub(super) fn source_metadata_without_binding_owners(
+    meta: &deep::Metadata,
+    errors: &mut DiagnosticSink<'_>,
+) -> deep::Metadata {
+    match rewrite_binding_owner_metadata(meta, &std::cell::RefCell::new(&mut |_| Ok(None))) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            errors.push(internal_owner_stamp_error(error.0));
+            meta.clone()
+        }
+    }
+}
+
+/// One composition authority remaps checked records and their AST attachments.
+pub struct LocalAscriptionComposition {
+    records: Vec<CheckedLocalAscription>,
+    incoming_offset: u64,
+    library_ids: BTreeSet<LocalAscriptionId>,
+    retained_ids: BTreeSet<LocalAscriptionId>,
+    incoming_ids: BTreeSet<LocalAscriptionId>,
+}
+impl LocalAscriptionComposition {
+    pub fn into_records(self) -> Vec<CheckedLocalAscription> {
+        self.records
+    }
+
+    pub fn library_exprs(&self, expressions: &[deep::Expr]) -> Option<Vec<deep::Expr>> {
+        expressions
+            .iter()
+            .map(|expr| {
+                map_binding_owner_tokens(expr, &mut |token| {
+                    let Some(token) = token else { return Ok(None) };
+                    let id =
+                        LocalAscriptionId::from_checked_owner_token(token).ok_or_else(|| {
+                            BindingOwnerRewriteError("malformed library binding owner token".into())
+                        })?;
+                    if !self.library_ids.contains(&id) {
+                        return Err(BindingOwnerRewriteError(
+                            "unowned library binding occurrence".into(),
+                        ));
+                    }
+                    Ok(self.retained_ids.contains(&id).then(|| token.to_owned()))
+                })
+                .ok()
+            })
+            .collect()
+    }
+
+    pub fn incoming_exprs(&self, expressions: &[deep::Expr]) -> Option<Vec<deep::Expr>> {
+        expressions
+            .iter()
+            .map(|expr| {
+                map_binding_owner_tokens(expr, &mut |token| {
+                    let Some(token) = token else { return Ok(None) };
+                    let id =
+                        LocalAscriptionId::from_checked_owner_token(token).ok_or_else(|| {
+                            BindingOwnerRewriteError(
+                                "malformed incoming binding owner token".into(),
+                            )
+                        })?;
+                    if !self.incoming_ids.contains(&id) {
+                        return Err(BindingOwnerRewriteError(
+                            "unowned incoming binding occurrence".into(),
+                        ));
+                    }
+                    let id = LocalAscriptionId(id.0.checked_add(self.incoming_offset).ok_or_else(
+                        || BindingOwnerRewriteError("binding identity composition overflow".into()),
+                    )?);
+                    Ok(Some(id.checked_owner_token()))
+                })
+                .ok()
+            })
+            .collect()
+    }
+}
+
 /// Compose checker-owned local obligations across independently checked units.
 ///
 /// A replacement definition owns the active body for its declaration name, so
 /// obligations attached to the shadowed library body are unreachable and must
 /// not participate in source-span selection. Retained records keep their
 /// identities; new-code records move above that retained identity domain.
-pub fn compose_local_tensor_ascriptions(
-    library: &[CheckedLocalTensorAscription],
-    new_code: &[CheckedLocalTensorAscription],
+pub fn compose_local_ascriptions(
+    library: &[CheckedLocalAscription],
+    new_code: &[CheckedLocalAscription],
     replaced_definitions: &BTreeSet<String>,
-) -> Option<Vec<CheckedLocalTensorAscription>> {
+) -> Option<LocalAscriptionComposition> {
     let mut composed = library
         .iter()
         .filter(|ascription| {
@@ -1545,7 +1861,17 @@ pub fn compose_local_tensor_ascriptions(
     for ascription in new_code {
         composed.push(ascription.with_id_offset(new_code_id_offset)?);
     }
-    Some(composed)
+    Some(LocalAscriptionComposition {
+        retained_ids: composed
+            .iter()
+            .take(composed.len() - new_code.len())
+            .map(|record| record.id)
+            .collect(),
+        library_ids: library.iter().map(|record| record.id).collect(),
+        incoming_ids: new_code.iter().map(|record| record.id).collect(),
+        records: composed,
+        incoming_offset: new_code_id_offset,
+    })
 }
 
 fn tensor_dims(ty: &Type) -> Option<&[Dim]> {
@@ -1602,7 +1928,7 @@ pub struct InferStats {
 pub struct CheckedProgram {
     annotated_exprs: Vec<deep::Expr>,
     type_env: BTreeMap<String, deep::Expr>,
-    local_tensor_ascriptions: Vec<CheckedLocalTensorAscription>,
+    local_ascriptions: Vec<CheckedLocalAscription>,
     linearity: LinearityInfo,
     signature_inference: SignatureInferenceMetadata,
     type_headers: TypeResolutionEnv,
@@ -1628,7 +1954,7 @@ impl CheckedProgram {
         Self {
             annotated_exprs,
             type_env,
-            local_tensor_ascriptions: Vec::new(),
+            local_ascriptions: Vec::new(),
             linearity: LinearityInfo::default(),
             signature_inference: SignatureInferenceMetadata::default(),
             type_headers: TypeResolutionEnv::default(),
@@ -1664,8 +1990,8 @@ impl CheckedProgram {
         &self.type_env
     }
 
-    pub fn local_tensor_ascriptions(&self) -> &[CheckedLocalTensorAscription] {
-        &self.local_tensor_ascriptions
+    pub fn local_ascriptions(&self) -> &[CheckedLocalAscription] {
+        &self.local_ascriptions
     }
 
     pub fn linearity(&self) -> &LinearityInfo {
@@ -1732,7 +2058,7 @@ impl CheckedProgram {
     ///   `_with_context` builder, so this just back-fills any
     ///   library-only entries.
     /// - `linearity`: the two `reusable_inputs_by_offset` maps merged.
-    /// - `local_tensor_ascriptions`: library records followed by new-code
+    /// - `local_ascriptions`: library records followed by new-code
     ///   records whose artifact-local identities are remapped above the
     ///   library's identity domain.
     /// - `signature_inference`: the two `functions` maps merged,
@@ -1749,11 +2075,6 @@ impl CheckedProgram {
         {
             return None;
         }
-        let mut annotated_exprs =
-            Vec::with_capacity(library.annotated_exprs.len() + new_code.annotated_exprs.len());
-        annotated_exprs.extend(library.annotated_exprs.iter().cloned());
-        annotated_exprs.extend(new_code.annotated_exprs.iter().cloned());
-
         let mut type_env = new_code.type_env.clone();
         for (name, ty) in &library.type_env {
             type_env.entry(name.clone()).or_insert_with(|| ty.clone());
@@ -1771,11 +2092,14 @@ impl CheckedProgram {
                     .map(str::to_owned)
             })
             .collect::<BTreeSet<_>>();
-        let local_tensor_ascriptions = compose_local_tensor_ascriptions(
-            &library.local_tensor_ascriptions,
-            &new_code.local_tensor_ascriptions,
+        let composition = compose_local_ascriptions(
+            &library.local_ascriptions,
+            &new_code.local_ascriptions,
             &replaced_definitions,
         )?;
+        let mut annotated_exprs = composition.library_exprs(&library.annotated_exprs)?;
+        annotated_exprs.extend(composition.incoming_exprs(&new_code.annotated_exprs)?);
+        let local_ascriptions = composition.into_records();
 
         let mut signature_inference = library.signature_inference.clone();
         for (name, sig) in &new_code.signature_inference.functions {
@@ -1807,7 +2131,7 @@ impl CheckedProgram {
         Some(Self {
             annotated_exprs,
             type_env,
-            local_tensor_ascriptions,
+            local_ascriptions,
             linearity,
             signature_inference,
             type_headers,
@@ -1844,7 +2168,11 @@ pub(super) fn finalize_checked_program(
     let checked = CheckedProgram {
         annotated_exprs,
         type_env,
-        local_tensor_ascriptions: product.local_tensor_ascriptions.clone(),
+        local_ascriptions: {
+            let mut records = product.local_ascriptions.clone();
+            records.sort_by_key(|record| record.id().get());
+            records
+        },
         linearity: LinearityInfo::default(),
         signature_inference,
         type_headers: product.type_headers.clone(),
@@ -1871,15 +2199,131 @@ pub(super) fn validate_checked_program_totality(
         checked.annotated_exprs(),
     ));
     traces.extend(local_ascription_invariant_traces(
-        checked.local_tensor_ascriptions(),
+        checked.local_ascriptions(),
     ));
+    traces.extend(binding_owner_invariant_traces(checked));
     traces.extend(totality_invariant_traces(checked.signature_inference()));
     if !traces.is_empty() {
         errors.push(totality_violation_error(&traces));
     }
 }
 
-fn local_ascription_invariant_traces(ascriptions: &[CheckedLocalTensorAscription]) -> Vec<String> {
+fn binding_owner_invariant_traces(checked: &CheckedProgram) -> Vec<String> {
+    let mut traces = Vec::new();
+    let mut attachments = BTreeMap::<LocalAscriptionId, usize>::new();
+    for expr in checked.annotated_exprs() {
+        if let Err(error) = map_binding_owner_tokens(expr, &mut |token| {
+            if let Some(token) = token {
+                let id = LocalAscriptionId::from_checked_owner_token(token).ok_or_else(|| {
+                    BindingOwnerRewriteError("malformed checked binding occurrence".into())
+                })?;
+                *attachments.entry(id).or_default() += 1;
+            }
+            Ok(token.map(str::to_owned))
+        }) {
+            traces.push(error.0);
+        }
+    }
+    let records = checked
+        .local_ascriptions()
+        .iter()
+        .map(|record| (record.id(), record))
+        .collect::<BTreeMap<_, _>>();
+    let mut bound = BTreeSet::new();
+    fn visit(
+        expr: &deep::Expr,
+        declaration: Option<&str>,
+        records: &BTreeMap<LocalAscriptionId, &CheckedLocalAscription>,
+        bound: &mut BTreeSet<LocalAscriptionId>,
+        traces: &mut Vec<String>,
+    ) {
+        stack_guard!("binding_owner_invariant_traces", expr);
+        let declaration = match stamped_parts(expr) {
+            Some((DeepTag::Def, _, children)) => children.first().and_then(symbol_name),
+            _ => declaration,
+        };
+        if let Some((DeepTag::Bind, _, pairs)) = stamped_parts(expr) {
+            for pair in pairs.as_chunks::<2>().0 {
+                let Some((_, metadata, _)) = stamped_parts(&pair[1]) else {
+                    continue;
+                };
+                let Some(token) = metadata.checked_binding_owner() else {
+                    continue;
+                };
+                let Some(id) = LocalAscriptionId::from_checked_owner_token(token) else {
+                    continue;
+                };
+                match records.get(&id) {
+                    Some(record)
+                        if record.binding_name() == symbol_name(&pair[0]).unwrap_or("")
+                            && record.declaration_name() == declaration =>
+                    {
+                        if !bound.insert(id) {
+                            traces
+                                .push(format!("duplicate checked binding occurrence {}", id.get()));
+                        }
+                    }
+                    _ => traces.push(format!(
+                        "checked binding occurrence {} has no matching defining owner",
+                        id.get()
+                    )),
+                }
+            }
+        }
+        match expr {
+            deep::Expr::Node(node, _) => {
+                for child in node.children_slice() {
+                    visit(child, declaration, records, bound, traces);
+                }
+                node.meta().visit_expressions(&mut |child, _| {
+                    visit(child, declaration, records, bound, traces)
+                });
+            }
+            deep::Expr::MetaExpr(meta, _) => {
+                visit(&meta.expr, declaration, records, bound, traces);
+                meta.metadata.visit_expressions(&mut |child, _| {
+                    visit(child, declaration, records, bound, traces)
+                });
+            }
+            deep::Expr::BareList(children, _) => {
+                for child in children {
+                    visit(child, declaration, records, bound, traces);
+                }
+            }
+            deep::Expr::Map(meta, _) => meta.visit_expressions(&mut |child, _| {
+                visit(child, declaration, records, bound, traces)
+            }),
+            deep::Expr::UnknownForm(data) => {
+                for child in &data.children {
+                    visit(child, declaration, records, bound, traces);
+                }
+                data.meta.visit_expressions(&mut |child, _| {
+                    visit(child, declaration, records, bound, traces)
+                });
+            }
+            deep::Expr::Atom(..) => {}
+        }
+    }
+    for expr in checked.annotated_exprs() {
+        visit(expr, None, &records, &mut bound, &mut traces);
+    }
+    for id in records.keys() {
+        if attachments.get(id) != Some(&1) || !bound.contains(id) {
+            traces.push(format!(
+                "checked binding occurrence {} must attach to exactly one initializer",
+                id.get()
+            ));
+        }
+    }
+    for id in attachments.keys() {
+        if !records.contains_key(id) {
+            traces.push(format!("unowned checked binding occurrence {}", id.get()));
+        }
+    }
+    traces
+}
+
+fn local_ascription_invariant_traces(ascriptions: &[CheckedLocalAscription]) -> Vec<String> {
     let mut traces = Vec::new();
     let mut ids = BTreeSet::new();
     for ascription in ascriptions {
@@ -1905,6 +2349,15 @@ fn local_ascription_invariant_traces(ascriptions: &[CheckedLocalTensorAscription
                 ascription.id.get()
             ));
         }
+        if ascription.is_callable() {
+            if !matches!(ascription.declared_type, Type::Fn(..)) {
+                traces.push(format!(
+                    "local callable-ascription {} lacks a complete function type",
+                    ascription.id.get()
+                ));
+            }
+            continue;
+        }
         let Some(declared_dims) = tensor_dims(&ascription.declared_type) else {
             traces.push(format!(
                 "local tensor-ascription {} does not carry a tensor type",
@@ -1913,7 +2366,7 @@ fn local_ascription_invariant_traces(ascriptions: &[CheckedLocalTensorAscription
             continue;
         };
         let mut previous_axis = None;
-        for claim in &ascription.outstanding_claims {
+        for claim in ascription.outstanding_claims() {
             if previous_axis.is_some_and(|axis| claim.axis <= axis) {
                 traces.push(format!(
                     "local tensor-ascription {} claims are not in authored axis order",
@@ -2006,7 +2459,7 @@ pub(crate) fn checked_program_with_effect_annotations_in_session(
     let checked = CheckedProgram {
         annotated_exprs,
         type_env: original.type_env.clone(),
-        local_tensor_ascriptions: original.local_tensor_ascriptions.clone(),
+        local_ascriptions: original.local_ascriptions.clone(),
         linearity: original.linearity.clone(),
         signature_inference: original.signature_inference.clone(),
         type_headers: original.type_headers.clone(),
@@ -2023,7 +2476,20 @@ pub(super) fn effects_only_rewrite_matches(
     original: &[deep::Expr],
     candidate: &[deep::Expr],
 ) -> bool {
+    fn owners(expressions: &[deep::Expr]) -> Option<Vec<Option<String>>> {
+        let mut owners = Vec::new();
+        for expr in expressions {
+            let normalized = expression_without_derived_effects(expr).ok()?;
+            map_binding_owner_tokens(&normalized, &mut |token| {
+                owners.push(token.map(str::to_owned));
+                Ok(token.map(str::to_owned))
+            })
+            .ok()?;
+        }
+        Some(owners)
+    }
     original.len() == candidate.len()
+        && owners(original).is_some_and(|before| owners(candidate).as_ref() == Some(&before))
         && original
             .iter()
             .zip(candidate)

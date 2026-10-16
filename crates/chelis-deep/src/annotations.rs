@@ -517,6 +517,22 @@ impl MacroSource {
     }
 }
 
+impl Metadata {
+    /// Internal checked-artifact provenance, never author metadata authority.
+    pub fn checked_binding_owner(&self) -> Option<&str> {
+        self.storage.as_ref()?.checked_binding_owner.as_deref()
+    }
+
+    /// The checker replaces source-supplied provenance before publication.
+    pub fn set_checked_binding_owner(&mut self, owner: Option<String>) {
+        if self.checked_binding_owner() == owner.as_deref() {
+            return;
+        }
+        std::sync::Arc::make_mut(self.storage.get_or_insert_with(Default::default))
+            .checked_binding_owner = owner;
+    }
+}
+
 macro_rules! core_inventory {
     ($($variant:ident, $getter:ident, $payload:ty, $key:literal;)+) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -594,6 +610,8 @@ core_inventory! {
 struct Storage {
     core: Vec<MetadataValue>,
     extensions: ExtensionMap,
+    // Checked artifact provenance, outside the public metadata vocabulary.
+    checked_binding_owner: Option<String>,
 }
 
 // Counted receipt for the shared-storage promise (chelis#2117).
@@ -622,6 +640,7 @@ impl Clone for Storage {
         Self {
             core: self.core.clone(),
             extensions: self.extensions.clone(),
+            checked_binding_owner: self.checked_binding_owner.clone(),
         }
     }
 }

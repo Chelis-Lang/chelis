@@ -16,10 +16,10 @@ fn dependency_source() -> &'static str {
 }
 
 fn assert_one_checked_obligation(program: &CheckedProgram) {
-    let [ascription] = program.local_tensor_ascriptions() else {
+    let [ascription] = program.local_ascriptions() else {
         panic!(
             "cached/composed checked program must retain one local obligation: {:?}",
-            program.local_tensor_ascriptions()
+            program.local_ascriptions()
         );
     };
     assert_eq!(ascription.binding_name(), "y");
@@ -94,15 +94,15 @@ fn contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers
         .expect("dependency composes");
     let lowered = pipeline::lower_library(dependency.checked_library())
         .expect("dependency library lowers through the production carrier");
-    let [dependency_ascription] = dependency.library_checked().local_tensor_ascriptions() else {
+    let [dependency_ascription] = dependency.library_checked().local_ascriptions() else {
         panic!(
             "dependency must retain its authored local obligation: {:?}",
-            dependency.library_checked().local_tensor_ascriptions()
+            dependency.library_checked().local_ascriptions()
         );
     };
     assert_eq!(
-        lowered.raw().local_tensor_ascriptions(),
-        dependency.library_checked().local_tensor_ascriptions(),
+        lowered.raw().local_ascriptions(),
+        dependency.library_checked().local_ascriptions(),
         "the production lowered-library carrier must retain the checked obligations"
     );
 
@@ -210,10 +210,10 @@ fn composed_sources_with_equal_local_names_and_offsets_lower_their_own_identitie
 
     let composed = CheckedProgram::compose(dependency.library_checked(), &checked_application)
         .expect("checked library and application compose");
-    let [application_ascription] = composed.local_tensor_ascriptions() else {
+    let [application_ascription] = composed.local_ascriptions() else {
         panic!(
             "the replacement definition must own the only reachable obligation: {:?}",
-            composed.local_tensor_ascriptions()
+            composed.local_ascriptions()
         );
     };
     assert_eq!(application_ascription.binding_name(), "y");
@@ -250,4 +250,59 @@ fn composed_sources_with_equal_local_names_and_offsets_lower_their_own_identitie
         1,
         "the selected application token has one initializer owner"
     );
+}
+
+#[test]
+fn callable_binding_cache_roundtrips_preserve_complete_owner_and_composition() {
+    let source = "def helper(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = {\n f = if flag then is_nan else is_finite\n g: &tensor[2, f64] -> tensor[*, bool] = copy(f)\n g(x)\n}\ndef rank_helper[r](x: tensor[..r, f64]) -> tensor[..r, f64] = neg(x)\n";
+    let declarations = parse_str(source).expect("source parses");
+    let stdlib = build_stdlib_context(&declarations).expect("stdlib checks");
+    let stdlib_decoded: StdLibContext =
+        bincode::deserialize(&bincode::serialize(&stdlib).unwrap()).expect("stdlib decode");
+    let empty = build_stdlib_context(&[]).expect("empty stdlib");
+    let dependency = build_library_context(&empty, &declarations)
+        .expect("dependency checks")
+        .expect("dependency context");
+    let dependency_decoded: LibraryContext =
+        bincode::deserialize(&bincode::serialize(&dependency).unwrap()).expect("dependency decode");
+    for checked in [
+        stdlib_decoded.library_checked(),
+        dependency_decoded.library_checked(),
+    ] {
+        let [record] = checked.local_ascriptions() else {
+            panic!("one callable source owner survives cache")
+        };
+        assert!(record.is_callable());
+        assert_eq!(record.binding_name(), "g");
+        assert_eq!(record.declaration_name(), Some("helper"));
+        assert!(record.outstanding_claims().is_empty());
+    }
+    assert!(
+        stdlib_decoded
+            .type_env()
+            .matches_checked_program(stdlib_decoded.library_checked())
+    );
+    assert!(
+        dependency_decoded
+            .type_env()
+            .matches_checked_program(dependency_decoded.library_checked())
+    );
+    let entry = desugar_program(
+        &parse_str(
+            "def entry(flag: bool, x: tensor[*, f64]) -> tensor[*, bool] = helper(flag, x)\ndef rank_entry[s](x: tensor[..s, f64]) -> tensor[..s, f64] = rank_helper(x)\n",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let checked =
+        check_ir_with_context(dependency_decoded.type_env(), &entry).expect("entry checks");
+    let composed = CheckedProgram::compose(dependency_decoded.library_checked(), &checked)
+        .expect("proof-bound compose");
+    assert_eq!(
+        composed.local_ascriptions(),
+        dependency_decoded.library_checked().local_ascriptions()
+    );
+    let session = chelis_ir::host::HostLoweringSession::new(&composed);
+    let lowering = session.checked_subexpr_lowering_context();
+    assert_eq!(lowering.local_ascriptions().len(), 1);
 }

@@ -1087,6 +1087,145 @@ operation identity; it cannot relabel an alternative with the first branch's
 descriptor. The private C ABI projection rejects this function value under
 chelis#879. Repeated alternatives collapse to the same closed operation.
 
+Tensor-DAG admission analyzes lexical expression results compositionally. Its
+single traversal returns both the first host-representation reason and the
+result's facts. A callability fact distinguishes unknown, proven callable,
+proven noncallable and inconsistent evidence. A separate disposition distinguishes
+an unresolved value, a static numeric callable template, a static host template
+and a runtime callable choice. A canonical host-only template retains its required
+execution lane through aliases and Copy. Formation alone does not request host
+execution; invoking that template does. Runtime choices keep their existing host
+value disposition and never manufacture numeric realizability.
+The existing lexical pre-lane admission and host fact owner share one canonical
+builtin execution predicate; static identity alone does not establish DAG
+realizability. Existing statically materializable tensor literals retain their
+numeric lowering owner; dynamic List conversion retains host execution. An
+unused callable actual does not charge an invocation lane.
+Host realizability does not exclude an operation's numeric IR implementation:
+`shape`, `tensor_to_scalar`, statically representable `concat`, and explicit
+`drop` retain their existing lowering owners. The shared admission visit retains recursive tuple callability facts
+through the same aliases, copies, block tails and conditional products. Checked
+parameter and declaration tuple types supply callability evidence without producer
+identity. A static template stays numeric only through an alias, Copy or
+transform of it; a callable selected by a tuple projection or a lexical block
+result requires the host invocation consumer, and so does a transform of such a
+value. Formation alone adds no invocation guard, and numeric tuple projections
+retain their DAG owner. A declaration call analyzes the callee under each
+actual's own facts, and those facts key the completed declaration context, so a
+host-selected actual reaching a callable formal keeps host invocation; the lexical
+pre-lane admission binds such a formal as a host callee in the same way. Private product types retain each closed callable's physical descriptor
+through nesting and contextual type conformance; those descriptors establish no
+invocation authority. One conditional-result owner joins closed callable leaves
+by operation identity at each product position, whichever spelling produced
+them; distinct operations retain the existing checked-choice carrier in that
+field, so an unresolved projected call reaches the typed target capability
+boundary. A retained callable formal keeps its
+checked function signature alongside the whole builtin value.
+Neither fact supplies closed operation identity, execution authority or an entry
+receipt; those remain with the checked expressions and invocation owners.
+
+Sequential `let` initializers extend the same admission scope used by their tail;
+a `block` returns its last expression's facts. Transparent wrappers, whole-value
+aliases and copies preserve facts without requiring redundant stamps on
+compiler-produced lexical nodes. Existing pattern bindings retain their lexical
+shadowing and whole-value alias semantics; an unknown aggregate does not prove
+facts about its destructured fields. Declaration references resolve in declaration
+scope through the canonical generated-label owner, independently of caller
+shadows. Completed declaration contexts and cycle cutoffs remain shared with the
+admission walk rather than a second recursive callable prewalk.
+
+A checked callable conditional, including a neutral checked relation with
+positive lexical evidence in both arms, produces a runtime callable value. Missing
+required outer control evidence or contradictory/noncallable evidence cannot
+justify host admission. A static lambda or transform template remains distinct
+from a runtime choice; a function type alone does not resolve an unknown generic
+parameter's representation. Ordinary tensor-valued conditionals and supported
+static kernels keep their routes. Both Eval and C-host consume this decision
+before numeric lowering; neither retries a failed DAG in the interpreter.
+
+Host evaluation uses the existing checked callable and invocation contracts. The
+expression formation boundary attaches explicit callable binding contracts to
+the selected RuntimeValue independently of canonical operation identity,
+normalizing authored aliases through HostLoweringSession. Copies and captures
+retain these contracts alongside selected branch obligations; input claims guard
+entry and result claims guard the producing operation. Transparent normalization
+may erase a value-identity wrapper only when the wrapper contributes no
+independently authored invocation obligation. An explicitly ascribed function
+`copy` retains its checked expression boundary, original type syntax, binding
+origin and source span around its annotated operand. Nested boundaries remain
+independent: copying outer metadata onto the operand's single type slot would
+overwrite a different contract. Unannotated function copies may normalize to
+their operands. Callable identity resolution and contract transport consume the
+same retained boundaries; resolving an operation never discharges an adapter's
+input or result obligation. Named functions and callable adapter frames derive
+nested result obligations through the same claim pattern owner using the
+invocation's entry witnesses. Authored binding provenance has one metadata
+query at the checker input boundary: a present type with no Surf-origin marker
+is Deep-authored, Explicit is Surf-authored, and Inferred contributes no
+independent authored claim. The query is binding-context specific; an inferred
+ABI stamp on an arbitrary checked expression cannot become an authored
+constraint. Checker-owned binding records retain original syntax, source
+identity and defining scope separately from the inferred ABI. Annotation,
+Eval formation and parameter adaptation, and host/numeric lowering consume
+that same provenance rather than reinterpreting optional origin markers.
+The checked local-ascription ledger owns both tensor-axis claims and complete
+callable claims under one artifact-local identity domain. A callable claim is
+retained even when its input needs no runtime guard. Final substitution closes
+its checked type; inference replay reuses its source owner. Binding-owner
+lookup, rather than arbitrary expression metadata, attaches a callable frame
+once after its initializer evaluates. Numeric binding formation and the host
+and interpreted consumers share one checked-owner resolver. A carried token
+with no unique ledger record is rejected, never reconstructed from ABI metadata.
+Source owners survive checked-library
+serialization and proof-bound composition, with replaced declarations removed
+and incoming identities remapped. Each checked initializer carries its opaque
+compiler-owned occurrence token outside author-visible metadata keys. Source
+input cannot supply authority; annotation clears unowned tokens and stamps
+only records established by the original binding owner. Distinct lexical
+occurrences remain distinct when every source span is equal. Original input
+traversal allocates identities before inference schedules declarations; transient
+expression addresses only locate those original occurrences during replay.
+Private Metadata storage and its checked-artifact codec retain the token while
+text and semantic equality omit it. Checked totality validates one initializer
+attachment per record; effects-only rewrites compare the attachments explicitly
+on the same effects-stripped structural representation used by their semantic
+comparison. Adding a derived effects container cannot move a source owner.
+One composition owner rewrites both AST attachments and records with the same
+offset and removes replaced authority. All persisted containers of this changed
+Deep representation invalidate their encoding: TypeEnv, CompiledContext,
+LibraryContext and StdLibContext. Public source projections carry no private
+checked authority. A missing ledger never means an empty claim chain.
+
+A closed callable value transports its operation identity and ordered invocation
+frames together through aliases, copies and lexical branch joins. Only a bare,
+lexically resolved builtin producer starts an empty frame chain. A logical
+function type or operation descriptor cannot reconstruct an adapted value with
+empty contracts. The logical invocation signature stays in those frames while
+the closed physical descriptor survives host aliases, Copy and conformance.
+Ownership copies the checked nonheap descriptor; invocation lowers through the
+whole-value helper owner, whose entry/result guards consume each frame before
+the operation. An arbitrary logical Function cannot gain closed producer authority
+or callback status through Copy. A closed branch join retains one whole value
+only for the same canonical operation with shared Arc frame-chain authority, or
+with both chains empty. Equal signature syntax does not identify an activation.
+The original conditional still evaluates its condition and selected branch once.
+Distinct operations or independently adapted authorities keep the target-specific
+function-value rejection when no supported selected-value representation exists.
+
+Kernel admission distinguishes a checked noncallable declaration value read
+from an inline function-body application. The former is a Load boundary: its
+initializer runs under its existing lazy declaration owner, outside the
+consuming kernel. Admission does not import that initializer's host effects
+into the kernel body. Callable or unresolved declaration values retain their
+existing formation/application analysis; non-Fn syntax alone is no admission
+proof. Ordinary Let and Var nodes need no ABI stamp: the admission walk borrows
+the normalized checked declaration-type lookup from its HostLoweringSession,
+using the same canonical identity as its definition map. Reference and
+initializer evidence may contradict that authority but cannot manufacture it;
+inconsistent evidence rejects admission, and unresolved declarations retain full
+analysis. One admission outcome owner carries this distinction alongside callable
+facts, without a copied type map, second declaration traversal or initialization retry.
+
 Genuine host operands and borrowed callbacks retain `HostBuiltinIdentity` and
 instantiate the same-surface, same-axis Bool relation at their application.
 Enclosing values use the existing direct-call lowering path; concrete type and
@@ -1144,7 +1283,8 @@ Kernel admission consumes that complete invocation evidence; a body requiring
 runtime host control keeps its host execution boundary.
 Resolved builtin identity selects the same execution-lane policy at direct and
 aliased applications. A branch join retains a static callable only when both
-alternatives carry the same operation and complete ordered contract frames.
+alternatives carry the same operation and one shared ordered contract-frame
+authority.
 Static callable actual preparation carries both that identity and the complete
 executable producer expression. Every retained invocation stages all actuals in
 written order in the caller's scope before entry checks or the callee body,
@@ -1165,14 +1305,18 @@ frame at a time through the same retained invocation owner, preserving nested
 entry and result observations; only the remaining bare value reaches an
 identity-only builtin expression. Builtin selection carries each evaluated
 actual's producer tree instead of introducing a declaration-interface load.
-Host tuple construction, copying and projection retain the complete callable
-leaf at its constructor position. Typed collection callbacks reify that leaf's
-ordered invocation frames through the shared application owner on every call.
+Host tuple construction, copying, projection, sequential bindings and block
+results retain the complete callable leaf at its constructor position; unknown
+leaves establish no producer. Typed collection callbacks reify that leaf's
+ordered invocation frames through the shared application owner on every call. A
+frameless static value takes its lexical binding's checked callback signature; an
+unannotated alias without one retains its existing rejection.
 Entry contracts execute from outer frame to inner frame; result contracts unwind
 from inner frame to outer frame. Each frame retains its own declaration order
 and defining-scope witnesses on both evaluator and numeric lowering paths.
 Sequential host binding tails lower in one traversal while retaining each
-source layer's lexical scope, forwarding position and result wrapper.
+source layer's lexical scope, binding occurrences, forwarding position and result
+wrapper.
 Admitted shape-identity numeric calls check operand agreement and operation control
 preconditions before their result extents and element kernels, consuming each
 extent obligation once. Runtime callable choices preserve their typed target

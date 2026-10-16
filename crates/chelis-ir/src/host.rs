@@ -1167,6 +1167,28 @@ enum HostBuiltinPayload {
 }
 
 impl HostBuiltinPayload {
+    /// A closed join keeps a leaf only when both alternatives share its one
+    /// authority; product geometry joins field by field.
+    fn try_join(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Callable(left), Self::Callable(right)) => {
+                left.try_join(right).map(Self::Callable)
+            }
+            (Self::Tuple(left), Self::Tuple(right)) if left.len() == right.len() => {
+                Some(Self::Tuple(
+                    left.iter()
+                        .zip(right)
+                        .map(|(left, right)| match (left, right) {
+                            (Some(left), Some(right)) => left.try_join(right),
+                            _ => None,
+                        })
+                        .collect(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
     fn representation(&self, logical: HostTypeTerm) -> HostTypeTerm {
         match (self, logical) {
             (Self::Callable(value), _) => {
@@ -3586,6 +3608,26 @@ fn lower_host_program_with_execution(
         // one def's parameters and outputs (Nautilus Bug 3c). Emit a host
         // wrapper per def in that case so each gets its own C symbol.
         let is_fn_body = body.tag() == Some(DeepTag::Fn);
+        if c_execution_lane
+            && is_fn_body
+            && lookup_declared_fn_type(program, name)
+                .is_some_and(|(_, result)| matches!(result, HostTypeTerm::Fn(..)))
+            && let Some(signature) = host_def_signature(name, body, ty_expr.as_ref(), program)
+            && resolve_host_builtin_value(
+                &signature.body_expr,
+                program,
+                &signature.scope,
+                &TensorHelperSink::new(false),
+            )?
+            .is_some()
+        {
+            // A bare closed descriptor is not the function-valued result ABI.
+            // Runtime choices retain their existing ABI-selection diagnostic.
+            return Err(host_callable_capability_error(
+                body,
+                "a returned function value has no C host ABI representation",
+            ));
+        }
         let has_any_host_lane_def = lowered_names.values().any(|lowered| !*lowered);
         let has_callable_params = lookup_declared_fn_type(program, name)
             .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostTypeTerm::Fn(..))));
@@ -4986,8 +5028,10 @@ pub(crate) fn body_form_the_dag_cannot_carry(
     admit_dropout: bool,
 ) -> Option<String> {
     let defs = cached_program_defs(program);
+    let declaration_type = |name: &str| lookup_declared_host_type(program, name);
     let mut walk = UncarriableWalk {
         defs: &defs,
+        declaration_type: &declaration_type,
         active: UnordSet::new(),
         completed: UnordMap::new(),
         cycle_cutoff: false,
@@ -5001,6 +5045,8 @@ pub(crate) fn body_form_the_dag_cannot_carry(
                     (
                         param.name.clone(),
                         AdmissionBinding {
+                            tuple: CallableProductFacts::from_type(&param.ty).tuple,
+                            callable: CallableFacts::from_parameter(Some(&param.ty)),
                             constructor: false,
                             concat: ConcatInputFact::from_type(&param.ty),
                         },
@@ -5052,10 +5098,11 @@ fn contains_computed_callable_application(expr: &Expr) -> bool {
     }
 }
 
-/// Lexical scopes retain constructor scrutinees (chelis#520 D1) and checked
-/// concat producer facts. Neither class evaluates arbitrary tensor expressions.
+/// Lexical scopes retain constructor scrutinees, checked concat producers,
+/// and callable representation evidence. None evaluates arbitrary expressions.
 struct UncarriableWalk<'a> {
     defs: &'a BTreeMap<String, Expr>,
+    declaration_type: &'a dyn Fn(&str) -> Option<HostTypeTerm>,
     active: UnordSet<String>,
     completed: UnordMap<String, Vec<CompletedAdmission>>,
     cycle_cutoff: bool,
@@ -5067,11 +5114,246 @@ struct UncarriableWalk<'a> {
 
 struct CompletedAdmission {
     inputs: Vec<AdmissionBinding>,
+    outcome: AdmissionOutcome,
+}
+
+/// Callability evidence and representation disposition are independent.
+/// Neither carries operation identity, invocation contracts or entry authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CallabilityEvidence {
+    #[default]
+    Unknown,
+    Callable,
+    NonCallable,
+    Inconsistent,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CallableDisposition {
+    #[default]
+    Unresolved,
+    StaticTemplate,
+    /// A closed template whose canonical implementation requires host execution.
+    HostTemplate,
+    /// A callable selected by a form the numeric resolver cannot specialize
+    /// (a tuple projection or a lexical block result) needs the host consumer;
+    /// no static target is proved.
+    HostProjection,
+    RuntimeValue,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CallableFacts {
+    evidence: CallabilityEvidence,
+    disposition: CallableDisposition,
+}
+
+impl CallableFacts {
+    const UNKNOWN: Self = Self {
+        evidence: CallabilityEvidence::Unknown,
+        disposition: CallableDisposition::Unresolved,
+    };
+    const NONCALLABLE: Self = Self {
+        evidence: CallabilityEvidence::NonCallable,
+        disposition: CallableDisposition::Unresolved,
+    };
+    const INCONSISTENT: Self = Self {
+        evidence: CallabilityEvidence::Inconsistent,
+        disposition: CallableDisposition::Unresolved,
+    };
+    const UNRESOLVED: Self = Self {
+        evidence: CallabilityEvidence::Callable,
+        disposition: CallableDisposition::Unresolved,
+    };
+    const STATIC: Self = Self {
+        evidence: CallabilityEvidence::Callable,
+        disposition: CallableDisposition::StaticTemplate,
+    };
+    const HOST_TEMPLATE: Self = Self {
+        evidence: CallabilityEvidence::Callable,
+        disposition: CallableDisposition::HostTemplate,
+    };
+    const HOST_PROJECTION: Self = Self {
+        evidence: CallabilityEvidence::Callable,
+        disposition: CallableDisposition::HostProjection,
+    };
+    const RUNTIME: Self = Self {
+        evidence: CallabilityEvidence::Callable,
+        disposition: CallableDisposition::RuntimeValue,
+    };
+
+    fn checked_type(ty: Option<&HostTypeTerm>) -> CallabilityEvidence {
+        match ty {
+            Some(
+                HostTypeTerm::Fn(..)
+                | HostTypeTerm::CheckedBuiltinCallable(_)
+                | HostTypeTerm::CheckedCallableChoice(_),
+            ) => CallabilityEvidence::Callable,
+            Some(HostTypeTerm::TypeVariable(_) | HostTypeTerm::InferenceVariable(_)) | None => {
+                CallabilityEvidence::Unknown
+            }
+            Some(_) => CallabilityEvidence::NonCallable,
+        }
+    }
+
+    /// The numeric resolver specializes a static template only through an
+    /// alias, Copy or transform of it. A lexical block result is a selected
+    /// value, so a static template leaving one keeps only host invocation.
+    fn through_lexical_result(self) -> Self {
+        match self.disposition {
+            CallableDisposition::StaticTemplate | CallableDisposition::HostTemplate => {
+                Self::HOST_PROJECTION
+            }
+            _ => self,
+        }
+    }
+
+    fn from_parameter(ty: Option<&HostTypeTerm>) -> Self {
+        match Self::checked_type(ty) {
+            CallabilityEvidence::Callable => Self::UNRESOLVED,
+            CallabilityEvidence::NonCallable => Self::NONCALLABLE,
+            _ => Self::UNKNOWN,
+        }
+    }
+
+    fn constrain(self, ty: Option<&HostTypeTerm>) -> Self {
+        match (self.evidence, Self::checked_type(ty)) {
+            (CallabilityEvidence::Callable, CallabilityEvidence::NonCallable)
+            | (CallabilityEvidence::NonCallable, CallabilityEvidence::Callable) => {
+                Self::INCONSISTENT
+            }
+            (CallabilityEvidence::Unknown, CallabilityEvidence::NonCallable) => Self::NONCALLABLE,
+            _ => self,
+        }
+    }
+
+    fn checked_choice(ty: Option<&HostTypeTerm>, branches: &[Self]) -> Self {
+        let checked = Self::checked_type(ty);
+        let required = matches!(
+            ty,
+            Some(
+                HostTypeTerm::Fn(..)
+                    | HostTypeTerm::CheckedBuiltinCallable(_)
+                    | HostTypeTerm::CheckedCallableChoice(_)
+                    | HostTypeTerm::TypeVariable(_)
+                    | HostTypeTerm::InferenceVariable(_)
+            )
+        );
+        let any_callable = branches
+            .iter()
+            .any(|fact| fact.evidence == CallabilityEvidence::Callable);
+        let any_noncallable = branches
+            .iter()
+            .any(|fact| fact.evidence == CallabilityEvidence::NonCallable);
+        if branches
+            .iter()
+            .any(|fact| fact.evidence == CallabilityEvidence::Inconsistent)
+            || (any_callable && any_noncallable)
+            || (checked == CallabilityEvidence::Callable && any_noncallable)
+            || (checked == CallabilityEvidence::NonCallable && any_callable)
+        {
+            return Self::INCONSISTENT;
+        }
+        if !branches.is_empty()
+            && branches
+                .iter()
+                .all(|fact| fact.evidence == CallabilityEvidence::NonCallable)
+        {
+            return Self::NONCALLABLE;
+        }
+        if required
+            && !branches.is_empty()
+            && branches
+                .iter()
+                .all(|fact| fact.evidence == CallabilityEvidence::Callable)
+        {
+            Self::RUNTIME
+        } else {
+            Self::UNKNOWN
+        }
+    }
+}
+
+/// Structural callability facts carry no producer identity or invocation authority.
+/// Sharing keeps nested tuple aliases cheap and independent of optional ABI stamps.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct CallableProductFacts {
+    callable: CallableFacts,
+    tuple: Option<Arc<[Self]>>,
+}
+
+impl CallableProductFacts {
+    fn from_type(ty: &HostTypeTerm) -> Self {
+        let _stack_frame = HostLowerStackFrame::enter();
+        Self {
+            callable: CallableFacts::from_parameter(Some(ty)),
+            tuple: match ty {
+                HostTypeTerm::Tuple(fields) => Some(fields.iter().map(Self::from_type).collect()),
+                _ => None,
+            },
+        }
+    }
+
+    fn join(&self, other: &Self) -> Self {
+        let _stack_frame = HostLowerStackFrame::enter();
+        let callable = match (self.callable.evidence, other.callable.evidence) {
+            (CallabilityEvidence::Callable, CallabilityEvidence::Callable) => {
+                CallableFacts::UNRESOLVED
+            }
+            (CallabilityEvidence::NonCallable, CallabilityEvidence::NonCallable) => {
+                CallableFacts::NONCALLABLE
+            }
+            (CallabilityEvidence::Inconsistent, _)
+            | (_, CallabilityEvidence::Inconsistent)
+            | (CallabilityEvidence::Callable, CallabilityEvidence::NonCallable)
+            | (CallabilityEvidence::NonCallable, CallabilityEvidence::Callable) => {
+                CallableFacts::INCONSISTENT
+            }
+            _ => CallableFacts::UNKNOWN,
+        };
+        let tuple = match (&self.tuple, &other.tuple) {
+            (Some(left), Some(right)) if Arc::ptr_eq(left, right) => Some(left.clone()),
+            (Some(left), Some(right)) if left.len() == right.len() => Some(
+                left.iter()
+                    .zip(right.iter())
+                    .map(|(left, right)| left.join(right))
+                    .collect(),
+            ),
+            _ => None,
+        };
+        Self { callable, tuple }
+    }
+}
+
+#[derive(Clone, Default)]
+struct AdmissionOutcome {
+    tuple: Option<Arc<[CallableProductFacts]>>,
     reason: Option<String>,
+    callable: CallableFacts,
+}
+
+impl AdmissionOutcome {
+    fn value(callable: CallableFacts) -> Self {
+        Self {
+            reason: None,
+            callable,
+            tuple: None,
+        }
+    }
+
+    fn host(reason: impl Into<String>, callable: CallableFacts) -> Self {
+        Self {
+            reason: Some(reason.into()),
+            callable,
+            tuple: None,
+        }
+    }
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
 struct AdmissionBinding {
+    tuple: Option<Arc<[CallableProductFacts]>>,
+    callable: CallableFacts,
     constructor: bool,
     concat: ConcatInputFact,
 }
@@ -5099,6 +5381,11 @@ impl ConcatInputFact {
 }
 
 impl UncarriableWalk<'_> {
+    #[cfg(test)]
+    fn callable_admission(&mut self, expr: &Expr) -> CallableFacts {
+        self.analyze_expr(expr).callable
+    }
+
     fn bound(&self, name: &str) -> Option<bool> {
         self.scopes
             .iter()
@@ -5269,68 +5556,256 @@ impl UncarriableWalk<'_> {
     }
 
     fn expr(&mut self, expr: &Expr) -> Option<String> {
-        match expr {
-            Expr::Atom(Atom::Str(_), _) => {
-                Some("a string literal, which has no numeric IR constant (chelis#856)".to_string())
-            }
-            Expr::Atom(_, _) | Expr::Map(_, _) => None,
-            Expr::MetaExpr(meta, _) => self.expr(&meta.expr),
-            Expr::Node(node, _) => self.node(node),
-            Expr::BareList(elems, _) => elems.iter().find_map(|elem| self.expr(elem)),
-            Expr::UnknownForm(data) => data.children.iter().find_map(|child| self.expr(child)),
+        self.analyze_expr(expr).reason
+    }
+
+    fn checked_value(expr: &Expr) -> CallableFacts {
+        match CallableFacts::checked_type(expr_type(expr).as_ref()) {
+            CallabilityEvidence::Callable => CallableFacts::RUNTIME,
+            CallabilityEvidence::NonCallable => CallableFacts::NONCALLABLE,
+            _ => CallableFacts::UNKNOWN,
         }
     }
 
-    fn node(&mut self, node: &Node) -> Option<String> {
+    /// One result per lexical visit: no recursive callable prewalk precedes
+    /// the representation walk. Original expressions retain every contract.
+    fn analyze_expr(&mut self, expr: &Expr) -> AdmissionOutcome {
+        let mut outcome = match expr {
+            Expr::Atom(Atom::Str(_), _) => AdmissionOutcome::host(
+                "a string literal, which has no numeric IR constant (chelis#856)",
+                CallableFacts::NONCALLABLE,
+            ),
+            Expr::Atom(_, _) | Expr::Map(_, _) => AdmissionOutcome::default(),
+            Expr::MetaExpr(meta, _) => self.analyze_expr(&meta.expr),
+            Expr::Node(node, _) => self.analyze_node(expr, node),
+            Expr::BareList(elems, _) => AdmissionOutcome {
+                tuple: None,
+                reason: self.children_reason(elems.iter()),
+                callable: CallableFacts::UNKNOWN,
+            },
+            Expr::UnknownForm(data) => AdmissionOutcome {
+                tuple: None,
+                reason: self.children_reason(data.children.iter()),
+                callable: CallableFacts::UNKNOWN,
+            },
+        };
+        outcome.callable = outcome.callable.constrain(expr_type(expr).as_ref());
+        if outcome.reason.is_none() && outcome.callable == CallableFacts::RUNTIME {
+            outcome.reason = Some(
+                "a runtime function value, whose checked callable contract requires host execution rather than a tensor-DAG value".to_string(),
+            );
+        }
+        if outcome.reason.is_none()
+            && outcome.callable.evidence == CallabilityEvidence::Inconsistent
+        {
+            outcome.reason = Some(
+                "inconsistent checked callable evidence has no tensor-DAG admission proof"
+                    .to_string(),
+            );
+        }
+        outcome
+    }
+
+    fn children_reason<'e>(&mut self, children: impl Iterator<Item = &'e Expr>) -> Option<String> {
+        let mut reason = None;
+        for child in children {
+            let outcome = self.analyze_expr(child);
+            if reason.is_none() {
+                reason = outcome.reason;
+            }
+        }
+        reason
+    }
+
+    fn bind_pattern(
+        &mut self,
+        pattern: &Expr,
+        callable: CallableFacts,
+        tuple: Option<Arc<[CallableProductFacts]>>,
+        constructor: bool,
+        concat: ConcatInputFact,
+    ) {
+        let mut names = UnordSet::new();
+        collect_binder_names(pattern, &mut names);
+        let mut aliases = UnordSet::new();
+        collect_whole_value_aliases(pattern, &mut aliases);
+        if let Some(scope) = self.scopes.last_mut() {
+            for name in names.into_sorted() {
+                let whole = aliases.contains(&name);
+                scope.insert(
+                    name,
+                    AdmissionBinding {
+                        tuple: if whole { tuple.clone() } else { None },
+                        callable: if whole {
+                            callable
+                        } else {
+                            CallableFacts::UNKNOWN
+                        },
+                        constructor,
+                        concat: if whole {
+                            concat.clone()
+                        } else {
+                            ConcatInputFact::Unknown
+                        },
+                    },
+                );
+            }
+        }
+    }
+
+    fn analyze_node(&mut self, expr: &Expr, node: &Node) -> AdmissionOutcome {
         let kids = node.children_slice();
         match node.tag() {
             DeepTag::Var => {
-                let name = kids.first().and_then(symbol_name)?;
-                if self.bound(name).is_some()
-                    || BUILTIN_NAMES.contains(&name)
-                    || (self.admit_dropout && name == "dropout")
-                    || name.chars().next().is_some_and(char::is_uppercase)
-                {
-                    return None;
+                let Some(name) = kids.first().and_then(symbol_name) else {
+                    return AdmissionOutcome::default();
+                };
+                if let Some(binding) = self.scopes.iter().rev().find_map(|scope| scope.get(name)) {
+                    let mut outcome = AdmissionOutcome::value(binding.callable);
+                    outcome.tuple = binding.tuple.clone();
+                    return outcome;
                 }
                 let resolved = LoadStoreName::top_level_source_for_label(name)
                     .expect("qualified source name is compiler-created");
                 let declaration = resolved.as_deref().unwrap_or(name);
-                match self.defs.get(declaration) {
-                    // A callee inlines into the kernel, so its body is walked
-                    // under its own parameters; a value binding becomes a
-                    // `Load` and carries nothing.
-                    Some(def_body) => self.def(declaration, def_body, None),
-                    None => Some(format!(
+                if let Some(body) = self.defs.get(declaration) {
+                    if !stamped_parts(body).is_some_and(|(tag, _, _)| tag == DeepTag::Fn) {
+                        // Let and Var deliberately lack ABI stamps. Only the
+                        // checked defining declaration can establish a Load;
+                        // use the same canonical owner as the definition map.
+                        let ty = (self.declaration_type)(declaration);
+                        let declared = CallableFacts::from_parameter(ty.as_ref());
+                        let evidence = declared
+                            .constrain(expr_type(body).as_ref())
+                            .constrain(expr_type(expr).as_ref());
+                        if evidence.evidence == CallabilityEvidence::Inconsistent {
+                            return AdmissionOutcome::host(
+                                "contradictory checked declaration and reference callability",
+                                evidence,
+                            );
+                        }
+                        if declared.evidence == CallabilityEvidence::NonCallable
+                            && evidence.evidence == CallabilityEvidence::NonCallable
+                        {
+                            // Lazy initializer effects belong to its declaration,
+                            // outside the kernel consuming the loaded value.
+                            let mut outcome = AdmissionOutcome::value(CallableFacts::NONCALLABLE);
+                            outcome.tuple = ty
+                                .as_ref()
+                                .and_then(|ty| CallableProductFacts::from_type(ty).tuple);
+                            return outcome;
+                        }
+                    }
+                    let mut outcome = self.analyze_def(declaration, body, None);
+                    if stamped_parts(body).is_some_and(|(tag, _, _)| tag == DeepTag::Fn) {
+                        // A checked nonfunction surface can name a nullary value
+                        // thunk, not its defining function object.
+                        outcome.callable =
+                            match CallableFacts::checked_type(expr_type(expr).as_ref()) {
+                                CallabilityEvidence::NonCallable => CallableFacts::NONCALLABLE,
+                                _ => CallableFacts::STATIC,
+                            };
+                    }
+                    return outcome;
+                }
+                if chelis_types::builtin_decl(name).is_some() {
+                    let callable = if builtin_requires_host_execution(name) {
+                        CallableFacts::HOST_TEMPLATE
+                    } else {
+                        CallableFacts::STATIC
+                    };
+                    return AdmissionOutcome::value(callable);
+                }
+                if BUILTIN_NAMES.contains(&name)
+                    || (self.admit_dropout && name == "dropout")
+                    || name.chars().next().is_some_and(char::is_uppercase)
+                {
+                    return AdmissionOutcome::value(CallableFacts::from_parameter(
+                        expr_type(expr).as_ref(),
+                    ));
+                }
+                AdmissionOutcome::host(
+                    format!(
                         "the name `{name}`, which is neither a parameter nor a definition \
-                         of this program (a library definition under a compiled context)"
-                    )),
+                     of this program (a library definition under a compiled context)"
+                    ),
+                    CallableFacts::UNKNOWN,
+                )
+            }
+            DeepTag::Copy | DeepTag::Borrow => {
+                let mut outcome = AdmissionOutcome::default();
+                for (index, child) in kids.iter().enumerate() {
+                    let child = self.analyze_expr(child);
+                    if outcome.reason.is_none() {
+                        outcome.reason = child.reason;
+                    }
+                    if index == 0 {
+                        outcome.callable = child.callable;
+                        outcome.tuple = child.tuple;
+                    }
+                }
+                if kids.len() != 1 {
+                    outcome.callable = CallableFacts::UNKNOWN;
+                    outcome.tuple = None;
+                }
+                outcome
+            }
+            DeepTag::If => {
+                let mut reason = None;
+                let mut branches = Vec::new();
+                let mut products = Vec::new();
+                for (index, child) in kids.iter().enumerate() {
+                    let outcome = self.analyze_expr(child);
+                    if reason.is_none() {
+                        reason = outcome.reason;
+                    }
+                    if index > 0 {
+                        branches.push(outcome.callable);
+                        products.push(CallableProductFacts {
+                            callable: outcome.callable,
+                            tuple: outcome.tuple,
+                        });
+                    }
+                }
+                AdmissionOutcome {
+                    tuple: if let [left, right] = products.as_slice() {
+                        left.join(right).tuple
+                    } else {
+                        None
+                    },
+                    reason,
+                    callable: if kids.len() == 3 {
+                        CallableFacts::checked_choice(expr_type(expr).as_ref(), &branches)
+                    } else {
+                        CallableFacts::UNKNOWN
+                    },
                 }
             }
+            DeepTag::Block => {
+                let mut outcome = AdmissionOutcome::value(Self::checked_value(expr));
+                for child in kids {
+                    let child = self.analyze_expr(child);
+                    if outcome.reason.is_none() {
+                        outcome.reason = child.reason;
+                    }
+                    outcome.callable = child.callable.through_lexical_result();
+                    outcome.tuple = child.tuple;
+                }
+                outcome
+            }
             DeepTag::App => {
-                // A C tensor helper can only call a direct named/local
-                // callable, an inline lambda, or a transform form that the
-                // host lowerer recognizes in callee position.  A computed
-                // callee such as `(pick(h))(x)` is a first-class function
-                // value: admitting it to the helper path erases the
-                // application and can return `x` unchanged (#1951). Keep it
-                // on the host path, where the existing unspellable callable
-                // marker reaches the C ABI's typed #879 rejection before
-                // artifact emission.
+                // Computed callees retain the existing C879 fence rather than
+                // being erased by tensor helper beta reduction (#1951).
                 if let Some(callee) = kids.first() {
                     let callee_tag = stamped_parts(callee).map(|(tag, _, _)| tag);
-                    let recognized_callee = matches!(
+                    let recognized = matches!(
                         callee_tag,
                         Some(DeepTag::Var | DeepTag::Fn | DeepTag::Grad | DeepTag::Vmap)
-                    ) || matches!(
-                        callee,
-                        Expr::UnknownForm(data) if data.head == "vmap-grad"
-                    );
-                    if !recognized_callee {
-                        return Some(
-                            "an application whose callee is a computed function value, which \
-                             the C host ABI rejects rather than erasing (chelis#1951)"
-                                .to_string(),
+                    ) || matches!(callee, Expr::UnknownForm(data) if data.head == "vmap-grad");
+                    if !recognized {
+                        return AdmissionOutcome::host(
+                            "an application whose callee is a computed function value, which the C host ABI rejects rather than erasing (chelis#1951)",
+                            Self::checked_value(expr),
                         );
                     }
                 }
@@ -5340,51 +5815,54 @@ impl UncarriableWalk<'_> {
                     && self.bound(name).is_none()
                     && !self.defs.contains_key(name)
                 {
-                    if HOST_ONLY_BUILTINS.contains(&name) {
-                        return Some(format!(
-                            "the builtin `{name}`, which has no tensor-DAG lowering"
-                        ));
+                    if builtin_requires_host_execution(name)
+                        && !crate::lower::is_static_to_tensor_literal(expr)
+                    {
+                        return AdmissionOutcome::host(
+                            format!("the builtin `{name}`, which has no tensor-DAG lowering"),
+                            Self::checked_value(expr),
+                        );
                     }
-                    // [05-OP-62]: the static Pad+Add concat lowerer cannot
-                    // sum an input's runtime width. Decide Host before a
-                    // kernel is selected, preserving the real List operation.
                     if name == "concat"
                         && kids.len() == 3
                         && self.concat_requires_host(&kids[1], &kids[2])
                     {
-                        return Some("tensor concat whose checked producer geometry has no static representation (chelis#2373)".to_string());
+                        return AdmissionOutcome::host(
+                            "tensor concat whose checked producer geometry has no static representation (chelis#2373)",
+                            Self::checked_value(expr),
+                        );
                     }
                     if name.starts_with("reduce_window_")
                         && kids[1..]
                             .iter()
                             .skip(1)
-                            .any(|list_arg| !is_literal_int_list(list_arg))
+                            .any(|arg| !is_literal_int_list(arg))
                     {
-                        return Some(format!(
-                            "`{name}` with a non-literal window or stride list, which the \
-                             compiled lowering does not carry (chelis#1058)"
-                        ));
-                    }
-                    if name == "pad" && kids.get(3).is_some_and(|fill| !is_static_scalar(fill)) {
-                        return Some(
-                            "`pad` with a fill value that does not resolve statically \
-                             (chelis#776)"
-                                .to_string(),
+                        return AdmissionOutcome::host(
+                            format!(
+                                "`{name}` with a non-literal window or stride list, which the compiled lowering does not carry (chelis#1058)"
+                            ),
+                            Self::checked_value(expr),
                         );
                     }
-                    // A bare name handed directly to a builtin that the program
-                    // does not define is a dimension name (a named axis of a
-                    // reduction or `expand`, spec/04-type-system.md section
-                    // 4.5.3), which the lowering resolves against the operand;
-                    // the checker has already bound every value name. A callee
-                    // that is neither a builtin nor a definition is walked as a
-                    // name and reported as unresolvable.
+                    if name == "pad" && kids.get(3).is_some_and(|fill| !is_static_scalar(fill)) {
+                        return AdmissionOutcome::host(
+                            "`pad` with a fill value that does not resolve statically (chelis#776)",
+                            Self::checked_value(expr),
+                        );
+                    }
+                    // Bare unbound arguments in builtin position can be named
+                    // dimensions; preserve the existing typed axis boundary.
                     if BUILTIN_NAMES.contains(&name) || (self.admit_dropout && name == "dropout") {
-                        return kids
-                            .iter()
-                            .skip(1)
-                            .filter(|kid| !is_bare_lowercase_var(kid))
-                            .find_map(|kid| self.expr(kid));
+                        return AdmissionOutcome {
+                            tuple: None,
+                            reason: self.children_reason(
+                                kids.iter()
+                                    .skip(1)
+                                    .filter(|kid| !is_bare_lowercase_var(kid)),
+                            ),
+                            callable: Self::checked_value(expr),
+                        };
                     }
                 }
                 if let Some((DeepTag::Var, _, callee)) = kids.first().and_then(stamped_parts)
@@ -5392,176 +5870,273 @@ impl UncarriableWalk<'_> {
                     && self.bound(name).is_none()
                     && let Some(body) = self.defs.get(name)
                 {
-                    // Resolve every actual in the caller before any callee
-                    // formal shadows it; two calls can carry different widths.
-                    if let Some(found) = kids.iter().skip(1).find_map(|arg| self.expr(arg)) {
-                        return Some(found);
+                    // The callee is analyzed under each actual's own facts:
+                    // a projected or host-only value reaching a callable
+                    // formal keeps the disposition it had at the call site.
+                    let mut reason = None;
+                    let mut actuals = Vec::new();
+                    for arg in kids.iter().skip(1) {
+                        let outcome = self.analyze_expr(arg);
+                        if reason.is_none() {
+                            reason = outcome.reason;
+                        }
+                        actuals.push(AdmissionBinding {
+                            tuple: outcome.tuple,
+                            callable: outcome.callable,
+                            constructor: false,
+                            concat: self.concat_input_fact(arg),
+                        });
                     }
-                    let actuals = kids
-                        .iter()
-                        .skip(1)
-                        .map(|arg| self.concat_input_fact(arg))
-                        .collect();
-                    return self.def(name, body, Some(actuals));
+                    let declaration = self.analyze_def(name, body, Some(actuals));
+                    return AdmissionOutcome {
+                        tuple: None,
+                        reason: reason.or(declaration.reason),
+                        callable: Self::checked_value(expr),
+                    };
                 }
-                kids.iter().find_map(|kid| self.expr(kid))
+                let mut reason = None;
+                for (index, child) in kids.iter().enumerate() {
+                    let outcome = self.analyze_expr(child);
+                    if reason.is_none() {
+                        reason = outcome.reason;
+                    }
+                    if index == 0 && reason.is_none() {
+                        reason = match outcome.callable.disposition {
+                            CallableDisposition::HostTemplate => Some("a retained static host callable, which has no numeric DAG implementation".into()),
+                            CallableDisposition::HostProjection => Some("a projected callable whose complete value requires the host invocation owner".into()),
+                            _ => None,
+                        };
+                    }
+                }
+                AdmissionOutcome {
+                    tuple: None,
+                    reason,
+                    callable: Self::checked_value(expr),
+                }
             }
             DeepTag::Fn => {
-                let params = kids
-                    .first()
-                    .map_or_else(Vec::new, fn_param_names)
-                    .into_iter()
-                    .map(|name| (name, AdmissionBinding::default()))
-                    .collect();
-                self.scopes.push(params);
-                let found = kids.get(1).and_then(|body| self.expr(body));
+                self.scopes
+                    .push(admission_parameters(kids, None).into_iter().collect());
+                let reason = kids
+                    .get(1)
+                    .map(|body| self.analyze_expr(body))
+                    .and_then(|outcome| outcome.reason);
                 self.scopes.pop();
-                found
+                AdmissionOutcome {
+                    tuple: None,
+                    reason,
+                    callable: CallableFacts::STATIC,
+                }
+            }
+            DeepTag::Grad | DeepTag::Vmap => {
+                // A transform specializes its target statically; a target
+                // that only the host can invoke keeps the transform there.
+                let mut reason = None;
+                for (index, child) in kids.iter().enumerate() {
+                    let outcome = self.analyze_expr(child);
+                    if reason.is_none() {
+                        reason = outcome.reason;
+                    }
+                    if index == 0 && reason.is_none() {
+                        reason = matches!(
+                            outcome.callable.disposition,
+                            CallableDisposition::HostTemplate | CallableDisposition::HostProjection
+                        )
+                        .then(|| {
+                            "a transform of a callable whose complete value requires the host invocation owner".to_owned()
+                        });
+                    }
+                }
+                AdmissionOutcome {
+                    tuple: None,
+                    reason,
+                    callable: CallableFacts::STATIC,
+                }
             }
             DeepTag::Let => {
                 self.scopes.push(UnordMap::new());
-                let mut found = None;
+                let mut outcome = AdmissionOutcome::default();
                 if let Some(bindings) = kids.first().and_then(as_node)
                     && bindings.tag() == DeepTag::Bind
                 {
-                    let binding_kids = bindings.children_slice();
-                    let mut index = 0;
-                    while index + 1 < binding_kids.len() {
-                        found = found.or_else(|| self.expr(&binding_kids[index + 1]));
-                        let static_ctor = is_static_constructor(&binding_kids[index + 1], self);
-                        // Only a whole-value alias inherits a whole-value fact;
-                        // this walk does not project tuple/list destructuring.
-                        let concat = if symbol_name(&binding_kids[index]).is_some() {
-                            self.concat_input_fact(&binding_kids[index + 1])
-                        } else {
-                            ConcatInputFact::Unknown
-                        };
-                        let mut bound = UnordSet::new();
-                        collect_binder_names(&binding_kids[index], &mut bound);
-                        if let Some(scope) = self.scopes.last_mut() {
-                            for name in bound.into_sorted() {
-                                scope.insert(
-                                    name,
-                                    AdmissionBinding {
-                                        constructor: static_ctor,
-                                        concat: concat.clone(),
-                                    },
-                                );
-                            }
+                    let bindings = bindings.children_slice();
+                    for pair in bindings.as_chunks::<2>().0 {
+                        let initializer = self.analyze_expr(&pair[1]);
+                        if outcome.reason.is_none() {
+                            outcome.reason = initializer.reason;
                         }
-                        index += 2;
+                        let constructor = is_static_constructor(&pair[1], self);
+                        let concat = self.concat_input_fact(&pair[1]);
+                        self.bind_pattern(
+                            &pair[0],
+                            initializer.callable,
+                            initializer.tuple,
+                            constructor,
+                            concat,
+                        );
                     }
                 }
-                let found = found.or_else(|| kids.get(1).and_then(|body| self.expr(body)));
+                if let Some(body) = kids.get(1) {
+                    let tail = self.analyze_expr(body);
+                    if outcome.reason.is_none() {
+                        outcome.reason = tail.reason;
+                    }
+                    outcome.callable = tail.callable.through_lexical_result();
+                    outcome.tuple = tail.tuple;
+                }
                 self.scopes.pop();
-                found
+                outcome
+            }
+            DeepTag::TupleGet => {
+                let Some(base) = kids.first() else {
+                    return AdmissionOutcome::default();
+                };
+                let base = self.analyze_expr(base);
+                let reason = base
+                    .reason
+                    .or_else(|| self.children_reason(kids.iter().skip(1)));
+                let selected = kids
+                    .get(1)
+                    .and_then(crate::lower::extract_int_axis)
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| base.tuple.as_ref()?.get(index).cloned());
+                let mut outcome = AdmissionOutcome::value(Self::checked_value(expr));
+                outcome.reason = reason;
+                if let Some(selected) = selected {
+                    outcome.callable =
+                        if selected.callable.evidence == CallabilityEvidence::Callable {
+                            // Numeric callable resolution has no product projection owner.
+                            // Formation is inert; only invocation requires the host lane.
+                            CallableFacts::HOST_PROJECTION
+                        } else {
+                            selected.callable
+                        };
+                    outcome.tuple = selected.tuple;
+                }
+                outcome
             }
             DeepTag::Access => {
-                let base = kids.first()?;
-                if let Some(found) = self.expr(base) {
-                    return Some(found);
+                let Some(base) = kids.first() else {
+                    return AdmissionOutcome::default();
+                };
+                let reason = self.analyze_expr(base).reason;
+                AdmissionOutcome {
+                    tuple: None,
+                    reason: reason.or_else(|| (!is_static_constructor(base, self)).then(||
+                        "a field projection on a runtime record value, which IR lowering resolves only for a compile-time-known record construction".to_string())),
+                    callable: Self::checked_value(expr),
                 }
-                if !is_static_constructor(base, self) {
-                    return Some(
-                        "a field projection on a runtime record value, which IR lowering \
-                         resolves only for a compile-time-known record construction"
-                            .to_string(),
-                    );
-                }
-                None
             }
             DeepTag::Match => {
-                let scrutinee = kids.first()?;
-                if let Some(found) = self.expr(scrutinee) {
-                    return Some(found);
-                }
-                if !is_static_constructor(scrutinee, self) {
-                    return Some(
-                        "a `match` on a runtime scrutinee, which IR lowering resolves only \
-                         for a compile-time-known constructor value (chelis#618)"
-                            .to_string(),
-                    );
-                }
+                let Some(scrutinee) = kids.first() else {
+                    return AdmissionOutcome::default();
+                };
+                let scrutinee_outcome = self.analyze_expr(scrutinee);
+                let mut reason = scrutinee_outcome.reason.or_else(|| (!is_static_constructor(scrutinee, self)).then(||
+                    "a `match` on a runtime scrutinee, which IR lowering resolves only for a compile-time-known constructor value (chelis#618)".to_string()));
+                let mut branches = Vec::new();
                 for arm in kids.iter().skip(1) {
                     let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
                         continue;
                     };
-                    let mut bound = UnordSet::new();
+                    self.scopes.push(UnordMap::new());
                     if let Some(pattern) = arm_kids.first() {
-                        collect_binder_names(pattern, &mut bound);
+                        self.bind_pattern(
+                            pattern,
+                            scrutinee_outcome.callable,
+                            None,
+                            false,
+                            ConcatInputFact::Unknown,
+                        );
                     }
-                    self.scopes.push(
-                        bound
-                            .into_sorted()
-                            .into_iter()
-                            .map(|n| (n, AdmissionBinding::default()))
-                            .collect(),
-                    );
-                    let found = arm_kids.iter().skip(1).find_map(|kid| self.expr(kid));
+                    let mut result = CallableFacts::UNKNOWN;
+                    for child in arm_kids.iter().skip(1) {
+                        let outcome = self.analyze_expr(child);
+                        if reason.is_none() {
+                            reason = outcome.reason;
+                        }
+                        result = outcome.callable;
+                    }
+                    branches.push(result);
                     self.scopes.pop();
-                    if found.is_some() {
-                        return found;
-                    }
                 }
-                None
+                AdmissionOutcome {
+                    tuple: None,
+                    reason,
+                    callable: CallableFacts::checked_choice(expr_type(expr).as_ref(), &branches),
+                }
             }
-            _ => kids.iter().find_map(|kid| self.expr(kid)),
+            DeepTag::Tuple => {
+                let mut outcome = AdmissionOutcome::value(CallableFacts::NONCALLABLE);
+                let mut fields = Vec::with_capacity(kids.len());
+                for child in kids {
+                    let child = self.analyze_expr(child);
+                    if outcome.reason.is_none() {
+                        outcome.reason = child.reason;
+                    }
+                    fields.push(CallableProductFacts {
+                        callable: child.callable,
+                        tuple: child.tuple,
+                    });
+                }
+                outcome.tuple = Some(fields.into());
+                outcome
+            }
+            DeepTag::Lit | DeepTag::Record => AdmissionOutcome {
+                tuple: None,
+                reason: self.children_reason(kids.iter()),
+                callable: CallableFacts::NONCALLABLE,
+            },
+            _ => AdmissionOutcome {
+                tuple: None,
+                reason: self.children_reason(kids.iter()),
+                callable: Self::checked_value(expr),
+            },
         }
     }
 
+    #[cfg(test)]
     fn def(
         &mut self,
         name: &str,
         body: &Expr,
         actuals: Option<Vec<ConcatInputFact>>,
     ) -> Option<String> {
-        let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(body) else {
-            return None;
-        };
+        let actuals = actuals.map(|actuals| {
+            actuals
+                .into_iter()
+                .map(|concat| AdmissionBinding {
+                    concat,
+                    ..AdmissionBinding::default()
+                })
+                .collect()
+        });
+        self.analyze_def(name, body, actuals).reason
+    }
+
+    /// Supplied actual facts are part of the completed-context key, so two
+    /// call sites with different callable dispositions never share a result.
+    fn analyze_def(
+        &mut self,
+        name: &str,
+        body: &Expr,
+        actuals: Option<Vec<AdmissionBinding>>,
+    ) -> AdmissionOutcome {
         if self.active.contains(name) {
             self.cycle_cutoff = true;
-            return None;
+            return AdmissionOutcome::default();
         }
-        let params: Vec<_> = fn_kids
-            .first()
-            .map_or_else(Vec::new, fn_param_names)
-            .into_iter()
-            .enumerate()
-            .map(|(index, param)| {
-                let concat = match &actuals {
-                    Some(actuals) => actuals
-                        .get(index)
-                        .cloned()
-                        .unwrap_or(ConcatInputFact::Unknown),
-                    None => fn_kids
-                        .first()
-                        .and_then(stamped_parts)
-                        .and_then(|(_, _, params)| params.get(index))
-                        .and_then(param_host_type)
-                        .map(|ty| ConcatInputFact::from_type(&ty))
-                        .unwrap_or(ConcatInputFact::Unknown),
-                };
-                (
-                    param,
-                    AdmissionBinding {
-                        constructor: false,
-                        concat,
-                    },
-                )
-            })
-            .collect();
-        // A callee runs under only these resolved bindings. The definition
-        // table and evaluation mode are invariant for this walk; free names
-        // resolve there, never in the caller's discarded lexical scopes.
-        // Compare exact facts (including constructor status), not a wildcard
-        // join or a name-only visited bit that conflates distinct actuals.
+        let function = stamped_parts(body).filter(|(tag, _, _)| *tag == DeepTag::Fn);
+        let params = function.map_or_else(Vec::new, |(_, _, kids)| {
+            admission_parameters(kids, actuals.as_deref())
+        });
         let inputs: Vec<_> = params.iter().map(|(_, binding)| binding.clone()).collect();
         if let Some(completed) = self
             .completed
             .get(name)
             .and_then(|contexts| contexts.iter().find(|context| context.inputs == inputs))
         {
-            return completed.reason.clone();
+            return completed.outcome.clone();
         }
         self.active.insert(name.to_string());
         let enclosing_cutoff = std::mem::replace(&mut self.cycle_cutoff, false);
@@ -5569,24 +6144,124 @@ impl UncarriableWalk<'_> {
         {
             self.def_visits += 1;
         }
+        // A declaration never inherits the caller's lexical bindings. The
+        // same canonical owner and exact-input cache serve aliases and calls.
         let saved = std::mem::replace(&mut self.scopes, vec![params.into_iter().collect()]);
-        let found = fn_kids.get(1).and_then(|fn_body| self.expr(fn_body));
+        let outcome = match function {
+            // Stamped Fn nodes have exactly params and body: Node validates
+            // arity at construction and transactional replacement boundaries.
+            Some((_, _, kids)) => self.analyze_expr(&kids[1]),
+            None => self.analyze_expr(body),
+        };
         self.scopes = saved;
         self.active.remove(name);
-        // A cycle-truncated traversal depends on the active stack and is not
-        // a completed context. Propagate that fact through its ancestors.
         if !self.cycle_cutoff {
             self.completed
                 .entry(name.to_string())
                 .or_default()
                 .push(CompletedAdmission {
                     inputs,
-                    reason: found.clone(),
+                    outcome: outcome.clone(),
                 });
         }
         self.cycle_cutoff |= enclosing_cutoff;
-        found
+        outcome
     }
+}
+
+fn admission_parameters(
+    kids: &[Expr],
+    actuals: Option<&[AdmissionBinding]>,
+) -> Vec<(String, AdmissionBinding)> {
+    kids.first()
+        .map_or_else(Vec::new, fn_param_names)
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let ty = kids
+                .first()
+                .and_then(stamped_parts)
+                .and_then(|(_, _, params)| params.get(index))
+                .and_then(param_host_type);
+            let declared = AdmissionBinding {
+                tuple: ty
+                    .as_ref()
+                    .and_then(|ty| CallableProductFacts::from_type(ty).tuple),
+                callable: CallableFacts::from_parameter(ty.as_ref()),
+                constructor: false,
+                concat: ty
+                    .as_ref()
+                    .map(ConcatInputFact::from_type)
+                    .unwrap_or(ConcatInputFact::Unknown),
+            };
+            let binding = match actuals {
+                None => declared,
+                // An actual with evidence supplies the formal's facts; the
+                // checked formal type may only contradict them, never add.
+                // A missing actual supplies no evidence and no concat fact.
+                Some(actuals) => match actuals.get(index).cloned() {
+                    None => AdmissionBinding {
+                        concat: ConcatInputFact::Unknown,
+                        ..declared
+                    },
+                    Some(actual) => AdmissionBinding {
+                        callable: if actual.callable.evidence == CallabilityEvidence::Unknown {
+                            declared.callable
+                        } else {
+                            actual.callable.constrain(ty.as_ref())
+                        },
+                        tuple: actual.tuple.or(declared.tuple),
+                        constructor: false,
+                        concat: actual.concat,
+                    },
+                },
+            };
+            (name, binding)
+        })
+        .collect()
+}
+
+/// Existing whole-value pattern aliases inherit facts; destructured children
+/// do not inherit their aggregate's callability or geometry.
+fn collect_whole_value_aliases(pattern: &Expr, out: &mut UnordSet<String>) {
+    if let Some(name) = symbol_name(pattern) {
+        out.insert(name.to_string());
+        return;
+    }
+    if let Expr::MetaExpr(meta, _) = pattern {
+        collect_whole_value_aliases(&meta.expr, out);
+        return;
+    }
+    if let Some((tag, _, kids)) = stamped_parts(pattern) {
+        match tag {
+            DeepTag::PatVar | DeepTag::Var => {
+                if let Some(name) = kids.first().and_then(symbol_name) {
+                    out.insert(name.to_string());
+                }
+            }
+            DeepTag::PatAs => {
+                if let Some(name) = kids.first().and_then(symbol_name) {
+                    out.insert(name.to_string());
+                }
+                if let Some(inner) = kids.get(1) {
+                    collect_whole_value_aliases(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether a canonical builtin needs the host execution lane. Callers resolve
+/// lexical bindings and program declarations before consulting builtin policy.
+pub(crate) fn builtin_requires_host_execution(name: &str) -> bool {
+    chelis_types::builtin_decl(name).is_some_and(|declaration| {
+        declaration.realizability == chelis_types::Realizability::HostOnly
+            // Host realizability does not exclude an existing numeric IR
+            // implementation. These operations lower their scalar/shape
+            // observations directly; concat's geometry is checked at the call.
+            && !matches!(name, "shape" | "tensor_to_scalar" | "concat" | "drop")
+    }) || HOST_ONLY_BUILTINS.contains(&name)
 }
 
 /// Builtins the kernel lowering has no arm for: the lowerer's own host-side
@@ -6429,17 +7104,9 @@ fn try_lower_prepared_named_call_helper(
     if expr_reaches_list_entry(expr, program) {
         return None;
     }
-    let params = scope
-        .to_sorted()
-        .into_iter()
-        .map(|(name, ty)| HostParam {
-            name: name.clone(),
-            ty: ty.clone(),
-        })
-        .collect::<Vec<_>>();
-    if body_form_the_dag_cannot_carry(program, expr, &params, false).is_some() {
-        return None;
-    }
+    // This owner proves closed actual geometry before consuming the body.
+    // A declaration-only host admission result cannot decide that proof:
+    // runtime List formals may have closed literal actuals at this call.
     let mut context = cached_subexpr_lowering_context(program)
         .with_builtin_values(helpers.builtin_values.clone());
     for specialization in &helpers.tensor_specializations {
@@ -8562,6 +9229,21 @@ fn retain_local_nested_ascription(
     initializer: &Expr,
     program: &HostLoweringSession<'_>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let checked = cached_subexpr_lowering_context(program);
+    if let Some(owner) = checked.callable_binding_ascription(initializer)? {
+        let authored = owner.authored_type();
+        let ty = decode_expanded_host_type_expr(program, authored)
+            .filter(|ty| matches!(ty, HostTypeTerm::Fn(..)))
+            .ok_or_else(|| {
+                host_expr_lowering_error(
+                    initializer,
+                    "checked callable ascription lacks its logical signature",
+                )
+            })?;
+        // Logical obligations live in the whole value's ordered frames.
+        // Its checked physical descriptor must survive an independent adapter.
+        return Ok(force_host_expr_type(value, ty));
+    }
     let Some((_, metadata, _)) = stamped_parts(initializer) else {
         return Ok(value);
     };
@@ -8573,18 +9255,6 @@ fn retain_local_nested_ascription(
     let Some(authored) = metadata.ty().map(|ty| ty.expression().clone()) else {
         return Ok(value);
     };
-    // The authored function ascription selects a concrete callable ABI;
-    // the producer's checked builtin identity remains independently intact.
-    // Unascribed values keep their static descriptor for transform lowering.
-    if let Some(ty) = decode_expanded_host_type_expr(program, &authored)
-        && matches!(ty, HostTypeTerm::Fn(..))
-        && !matches!(
-            host_expr_type(&value),
-            HostTypeTerm::CheckedCallableChoice(_)
-        )
-    {
-        return Ok(force_host_expr_type(value, ty));
-    }
     let Some(pattern) = nested_claim_pattern(program, &authored)
         .map_err(|error| claim_pattern_refusal(initializer, error))?
     else {
@@ -8723,6 +9393,27 @@ fn host_expr_lowering_error(
     .fatal()
 }
 
+fn host_callable_capability_error(
+    expr: &Expr,
+    detail: impl Into<String>,
+) -> crate::lower::LowerDiagnostic {
+    let unsupported = chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Construct("closed callable invocation".into()),
+        detail.into(),
+        chelis_types::unsupported::Stage::Lowering,
+        chelis_types::unimplemented_rejection!(
+            879,
+            "C host execution requires one selected whole callable authority"
+        ),
+    );
+    crate::lower::LowerDiagnostic::new(
+        unsupported.to_string(),
+        Some(expr.span()),
+        expr.span_id().map(str::to_owned),
+    )
+    .fatal()
+}
+
 fn malformed_host_authority(
     construct: &str,
 ) -> (String, chelis_types::unsupported::RejectionAuthority) {
@@ -8767,11 +9458,12 @@ fn lower_host_expr_kind(
                 .map(|child| lower_host_expr(child, program, scope, tensor_helpers))
                 .collect::<Result<Vec<_>, _>>()?;
             let ty = expr_host_type(expr, program, scope);
-            let ty = if ty.is_unresolved() {
-                HostTypeTerm::Tuple(items.iter().map(host_expr_type).collect())
-            } else {
-                ty
-            };
+            // Children carry physical descriptors and checked-choice fields;
+            // a static payload additionally fixes each closed leaf it proves.
+            let ty = retain_callable_product_type(
+                ty,
+                &HostTypeTerm::Tuple(items.iter().map(host_expr_type).collect()),
+            );
             let tuple = HostExpr::new(HostExprKind::Tuple(items, ty.clone()));
             match resolve_host_builtin_payload(expr, program, scope, tensor_helpers)? {
                 Some(payload) => force_host_expr_type(tuple, payload.representation(ty)),
@@ -8822,28 +9514,45 @@ fn lower_host_expr_kind(
                 .and_then(symbol_name)
                 .ok_or_else(|| host_expr_lowering_error(expr, "a `var` node has no symbol"))?
                 .to_string();
-            let ty = expr_host_type(expr, program, scope);
+            let logical_ty = expr_host_type(expr, program, scope);
+            let ty = scope.get(&name).map_or_else(
+                || logical_ty.clone(),
+                |physical| retain_callable_product_type(logical_ty.clone(), physical),
+            );
             // An unshadowed key operation in value position is a checked
             // callable, not a lexical C variable. Keep its registered
             // operation identity in host IR so a later alias or shadow
             // cannot change what it calls. The backend materializes the
             // corresponding capture-free function pointer from this node.
-            if !scope.contains_key(&name)
-                && let Some(op) = cached_resolved_builtin_values(program)
-                    .get(&name)
-                    .map(StaticBuiltinValue::checked_identity)
-                    .or_else(|| {
-                        program
-                            .def_named(&name)
-                            .is_none()
-                            .then(|| CheckedBuiltinCallable::from_symbol(&name))
-                            .flatten()
-                    })
-            {
+            let static_operation = tensor_helpers
+                .builtin_values
+                .get(&name)
+                .filter(|_| scope.contains_key(&builtin_payload_origin_key(&name)))
+                .map(StaticBuiltinValue::checked_identity)
+                .or_else(|| {
+                    if scope.contains_key(&name) {
+                        return None;
+                    }
+                    cached_resolved_builtin_values(program)
+                        .get(&name)
+                        .map(StaticBuiltinValue::checked_identity)
+                        .or_else(|| {
+                            program
+                                .def_named(&name)
+                                .is_none()
+                                .then(|| CheckedBuiltinCallable::from_symbol(&name))
+                                .flatten()
+                        })
+                });
+            if let Some(op) = static_operation {
                 return Ok(HostExpr::new(HostExprKind::Builtin {
                     name: op.into(),
                     args: Vec::new(),
-                    ty: HostTypeTerm::CheckedBuiltinCallable(op),
+                    ty: if checked_key_scalar_callback(op, &ty) {
+                        ty
+                    } else {
+                        HostTypeTerm::CheckedBuiltinCallable(op)
+                    },
                 }));
             }
             if name == "Nil" {
@@ -8917,21 +9626,16 @@ fn lower_host_expr_kind(
                 expected_ty,
             )?;
             let explicit_ty = expr_host_type(expr, program, scope);
-            let ty = if let Some(joined) = HostTypeTerm::checked_callable_join([
-                host_expr_type(&then_expr),
-                host_expr_type(&else_expr),
-            ]) {
-                joined
-            } else if explicit_ty.is_unresolved() {
-                let then_ty = host_expr_type(&then_expr);
-                if then_ty.is_unresolved() {
-                    host_expr_type(&else_expr)
-                } else {
-                    then_ty
-                }
-            } else {
+            let then_ty = host_expr_type(&then_expr);
+            let else_ty = host_expr_type(&else_expr);
+            let logical = if !explicit_ty.is_unresolved() {
                 explicit_ty
+            } else if then_ty.is_unresolved() {
+                else_ty.clone()
+            } else {
+                then_ty.clone()
             };
+            let ty = conditional_result_type(logical, &[then_ty, else_ty]);
             HostExpr::new(HostExprKind::If {
                 cond: Box::new(lower_host_expr(&kids[0], program, scope, tensor_helpers)?),
                 then_expr: Box::new(then_expr),
@@ -9187,11 +9891,10 @@ fn lower_host_expr_kind(
                         for (layer, layer_bindings) in
                             layers.into_iter().zip(nested_bindings.drain(..)).rev()
                         {
-                            let ty = if layer.explicit_ty.is_unresolved() {
-                                host_expr_type(&body)
-                            } else {
-                                layer.explicit_ty
-                            };
+                            let ty = retain_callable_product_type(
+                                layer.explicit_ty,
+                                &host_expr_type(&body),
+                            );
                             let mut nested = HostExpr::new(HostExprKind::Let {
                                 bindings: layer_bindings,
                                 body: Box::new(body),
@@ -9208,11 +9911,7 @@ fn lower_host_expr_kind(
                         HostExpr::new(HostExprKind::Let {
                             bindings,
                             body: Box::new(body.clone()),
-                            ty: if explicit_ty.is_unresolved() {
-                                host_expr_type(&body)
-                            } else {
-                                explicit_ty
-                            },
+                            ty: retain_callable_product_type(explicit_ty, &host_expr_type(&body)),
                         })
                     },
                 )
@@ -9394,11 +10093,7 @@ fn lower_host_expr_kind(
             )?;
             let inner_ty = host_expr_type(&inner);
             let explicit = expr_host_type(expr, program, scope);
-            let ty = if explicit.is_unresolved() {
-                inner_ty
-            } else {
-                explicit
-            };
+            let ty = retain_callable_product_type(explicit, &inner_ty);
             HostExpr::new(HostExprKind::Builtin {
                 name: "copy".into(),
                 args: vec![inner],
@@ -10540,14 +11235,15 @@ fn lower_match_host_expr(
         )?);
     }
     let explicit = expr_host_type(match_expr, program, scope);
-    let result_ty = if let Some(joined) =
-        HostTypeTerm::checked_callable_join(arms.iter().map(|arm| host_expr_type(&arm.body)))
-    {
-        joined
-    } else if explicit.is_unresolved() {
-        arms.iter()
-            .map(|arm| host_expr_type(&arm.body))
+    let arm_types = arms
+        .iter()
+        .map(|arm| host_expr_type(&arm.body))
+        .collect::<Vec<_>>();
+    let logical = if explicit.is_unresolved() {
+        arm_types
+            .iter()
             .find(|ty| !ty.is_unresolved())
+            .cloned()
             .or_else(|| expected_ty.cloned())
             .ok_or_else(|| {
                 host_expr_lowering_error(match_expr, "a match has no concretely typed arm body")
@@ -10555,6 +11251,7 @@ fn lower_match_host_expr(
     } else {
         explicit
     };
+    let result_ty = conditional_result_type(logical, &arm_types);
     // The decision below draws its scrutinee, payload and field names only
     // now, and a match nested in an arm drew its own names from a separate
     // supply that could not see these. A shared name lets the nested binder
@@ -12094,11 +12791,10 @@ fn lower_tuple_get_host_expr(
         lower_host_expr(&kids[1], program, scope, tensor_helpers)?,
     ];
     let explicit_ty = expr_host_type(tuple_get_expr, program, scope);
-    let ty = if explicit_ty.is_unresolved() {
-        infer_builtin_host_type("tuple-get", &args).unwrap_or_else(fresh_host_inference)
-    } else {
-        explicit_ty
-    };
+    let ty = retain_callable_product_type(
+        explicit_ty,
+        &infer_builtin_host_type("tuple-get", &args).unwrap_or_else(fresh_host_inference),
+    );
     Ok(HostExpr::new(HostExprKind::Builtin {
         name: "tuple-get".into(),
         args,
@@ -14207,6 +14903,19 @@ fn lower_app_host_expr(
             }
         })
         .to_string();
+    if host_lexically_binds(scope, &name)
+        && let Some(value) = resolve_host_builtin_value(&kids[0], program, scope, tensor_helpers)?
+    {
+        return lower_closed_host_application(
+            app_expr,
+            list,
+            value.checked_identity(),
+            program,
+            scope,
+            tensor_helpers,
+            expected_ty,
+        );
+    }
     let has_definition = program.def_named(&name).is_some();
     match callee::resolve_application(
         name,
@@ -14267,17 +14976,39 @@ fn resolve_host_builtin_payload(
     scope: &UnordMap<String, HostTypeTerm>,
     helpers: &TensorHelperSink,
 ) -> Result<Option<HostBuiltinPayload>, crate::lower::LowerDiagnostic> {
-    let mut payload = resolve_host_builtin_payload_inner(expr, program, scope, helpers)?;
-    if let Some((_, metadata, _)) = stamped_parts(expr)
-        && metadata.surf_binding_type().is_some_and(|origin| {
-            *origin.value() == chelis_deep::annotations::BindingTypeOrigin::Explicit
-        })
-        && let Some(authored) = metadata.ty().map(|ty| ty.expression())
-        && let Some(contract) = callable_formal_contract(program, authored)
-            .map_err(|message| host_expr_lowering_error(expr, message))?
-        && let Some(HostBuiltinPayload::Callable(value)) = &mut payload
+    resolve_host_builtin_payload_in_scope(
+        expr,
+        program,
+        scope,
+        &helpers.builtin_values,
+        &helpers.builtin_tuples,
+    )
+}
+
+/// The checked binding-occurrence ledger is the only source of an authored
+/// adapter frame; optional Surf provenance and ABI stamps are not inputs.
+fn resolve_host_builtin_payload_in_scope(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    values: &BTreeMap<String, StaticBuiltinValue>,
+    tuples: &BTreeMap<String, Vec<Option<HostBuiltinPayload>>>,
+) -> Result<Option<HostBuiltinPayload>, crate::lower::LowerDiagnostic> {
+    let mut payload = resolve_host_builtin_payload_inner(expr, program, scope, values, tuples)?;
+    if let Some(owner) =
+        cached_subexpr_lowering_context(program).callable_binding_ascription(expr)?
     {
-        value.retain_outer_contract(contract);
+        let contract = callable_formal_contract(program, owner.authored_type())
+            .map_err(|message| host_expr_lowering_error(expr, message))?
+            .ok_or_else(|| {
+                host_expr_lowering_error(
+                    expr,
+                    "checked callable owner lacks its whole invocation contract",
+                )
+            })?;
+        if let Some(HostBuiltinPayload::Callable(value)) = &mut payload {
+            value.retain_outer_contract(contract);
+        }
     }
     Ok(payload)
 }
@@ -14286,14 +15017,17 @@ fn resolve_host_builtin_payload_inner(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
-    helpers: &TensorHelperSink,
+    values: &BTreeMap<String, StaticBuiltinValue>,
+    tuples: &BTreeMap<String, Vec<Option<HostBuiltinPayload>>>,
 ) -> Result<Option<HostBuiltinPayload>, crate::lower::LowerDiagnostic> {
+    let resolve =
+        |expr| resolve_host_builtin_payload_in_scope(expr, program, scope, values, tuples);
     if let Some((tag, _, children)) = stamped_parts(expr) {
         match tag {
             DeepTag::Var => {
                 if let Some(name) = children.first().and_then(symbol_name)
                     && scope.contains_key(&builtin_payload_origin_key(name))
-                    && let Some(values) = helpers.builtin_tuples.get(name)
+                    && let Some(values) = tuples.get(name)
                 {
                     return Ok(Some(HostBuiltinPayload::Tuple(values.clone())));
                 }
@@ -14301,7 +15035,7 @@ fn resolve_host_builtin_payload_inner(
             DeepTag::Tuple => {
                 let values = children
                     .iter()
-                    .map(|child| resolve_host_builtin_payload(child, program, scope, helpers))
+                    .map(resolve)
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(values
                     .iter()
@@ -14320,9 +15054,7 @@ fn resolve_host_builtin_payload_inner(
                 else {
                     return Ok(None);
                 };
-                let Some(HostBuiltinPayload::Tuple(values)) =
-                    resolve_host_builtin_payload(tuple, program, scope, helpers)?
-                else {
+                let Some(HostBuiltinPayload::Tuple(values)) = resolve(tuple)? else {
                     return Ok(None);
                 };
                 return Ok(values.get(index).cloned().flatten());
@@ -14334,7 +15066,68 @@ fn resolve_host_builtin_payload_inner(
                         "checked callable Copy lacks its single value",
                     ));
                 };
-                return resolve_host_builtin_payload(actual, program, scope, helpers);
+                return resolve(actual);
+            }
+            DeepTag::Let => {
+                // A block result is the value of its tail under the block's
+                // own sequential bindings, which shadow the enclosing payloads.
+                let [bindings, body] = children else {
+                    return Err(host_expr_lowering_error(
+                        expr,
+                        "checked callable Let lacks its bindings or body",
+                    ));
+                };
+                let Some((DeepTag::Bind, _, bindings)) = stamped_parts(bindings) else {
+                    return Err(host_expr_lowering_error(
+                        expr,
+                        "checked callable Let has malformed bindings",
+                    ));
+                };
+                let (bindings, remainder) = bindings.as_chunks::<2>();
+                if !remainder.is_empty() {
+                    return Err(host_expr_lowering_error(
+                        expr,
+                        "checked callable Let has an incomplete binding",
+                    ));
+                }
+                let mut scope = scope.clone();
+                let mut values = values.clone();
+                let mut tuples = tuples.clone();
+                for [binding, initializer] in bindings {
+                    let name = symbol_name(binding).ok_or_else(|| {
+                        host_expr_lowering_error(expr, "checked callable binding lacks its name")
+                    })?;
+                    let payload = resolve_host_builtin_payload_in_scope(
+                        initializer,
+                        program,
+                        &scope,
+                        &values,
+                        &tuples,
+                    )?;
+                    let ty = expr_host_type(initializer, program, &scope);
+                    bind_host_local(&mut scope, name.to_owned(), ty);
+                    values.remove(name);
+                    tuples.remove(name);
+                    match payload {
+                        Some(HostBuiltinPayload::Callable(value)) => {
+                            values.insert(name.to_owned(), value);
+                        }
+                        Some(HostBuiltinPayload::Tuple(fields)) => {
+                            tuples.insert(name.to_owned(), fields);
+                        }
+                        None => continue,
+                    }
+                    scope.insert(builtin_payload_origin_key(name), HostTypeTerm::Unit);
+                }
+                return resolve_host_builtin_payload_in_scope(
+                    body, program, &scope, &values, &tuples,
+                );
+            }
+            DeepTag::Block => {
+                return match children.last() {
+                    Some(tail) => resolve(tail),
+                    None => Ok(None),
+                };
             }
             DeepTag::If => {
                 let [_, then_expr, else_expr] = children else {
@@ -14343,23 +15136,46 @@ fn resolve_host_builtin_payload_inner(
                         "checked callable choice lacks its branches",
                     ));
                 };
-                let then_value = resolve_host_builtin_value(then_expr, program, scope, helpers)?;
-                let else_value = resolve_host_builtin_value(else_expr, program, scope, helpers)?;
-                if let (Some(then_value), Some(else_value)) = (then_value, else_value)
-                    && then_value.operation() == else_value.operation()
-                    && then_value.contracts().len() == else_value.contracts().len()
-                    && then_value
-                        .contracts()
-                        .iter()
-                        .zip(else_value.contracts())
-                        .all(|(left, right)| {
-                            left.authored() == right.authored()
-                                && left.signature() == right.signature()
-                        })
-                {
-                    return Ok(Some(HostBuiltinPayload::Callable(then_value)));
+                // Only one shared authority survives a join; equal syntax
+                // from independent adapters does not select either frame.
+                return Ok(match (resolve(then_expr)?, resolve(else_expr)?) {
+                    (Some(then_value), Some(else_value)) => then_value.try_join(&else_value),
+                    _ => None,
+                });
+            }
+            DeepTag::Match => {
+                // The same join as `if`, over every arm body. Pattern binders
+                // shadow enclosing payloads inside their own arm.
+                let mut joined: Option<Option<HostBuiltinPayload>> = None;
+                for arm in children.iter().skip(1) {
+                    let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
+                        return Err(host_expr_lowering_error(
+                            expr,
+                            "checked callable choice has a malformed arm",
+                        ));
+                    };
+                    let [pattern, _, body] = arm_kids else {
+                        return Err(host_expr_lowering_error(
+                            expr,
+                            "checked callable choice arm lacks its body",
+                        ));
+                    };
+                    let mut binders = UnordSet::new();
+                    collect_binder_names(pattern, &mut binders);
+                    let mut arm_scope = scope.clone();
+                    for name in binders.into_sorted() {
+                        bind_host_local(&mut arm_scope, name, HostTypeTerm::Unit);
+                    }
+                    let value = resolve_host_builtin_payload_in_scope(
+                        body, program, &arm_scope, values, tuples,
+                    )?;
+                    joined = Some(match (joined, value) {
+                        (None, value) => value,
+                        (Some(Some(left)), Some(right)) => left.try_join(&right),
+                        _ => None,
+                    });
                 }
-                return Ok(None);
+                return Ok(joined.flatten());
             }
             _ => {}
         }
@@ -14372,7 +15188,7 @@ fn resolve_host_builtin_payload_inner(
         return Ok(None);
     }
     let value = cached_subexpr_lowering_context(program)
-        .with_builtin_values(helpers.builtin_values.clone())
+        .with_builtin_values(values.clone())
         .builtin_value(expr)
         .map_err(|message| host_expr_lowering_error(expr, message))?;
     Ok(value.map(HostBuiltinPayload::Callable))
@@ -14409,9 +15225,9 @@ fn lower_closed_host_application(
         let value =
             resolve_host_builtin_value(&list.children_slice()[0], program, scope, tensor_helpers)?
                 .ok_or_else(|| {
-                    host_expr_lowering_error(
+                    host_callable_capability_error(
                         app_expr,
-                        "chelis#879: static builtin application lacks its checked invocation value",
+                        "static builtin application lacks one selected invocation authority",
                     )
                 })?;
         let (helper, helper_scope, bindings) = hoist_host_lane_tensor_bindings(
@@ -14448,9 +15264,9 @@ fn lower_closed_host_application(
     let value =
         resolve_host_builtin_value(&list.children_slice()[0], program, scope, tensor_helpers)?
             .ok_or_else(|| {
-                host_expr_lowering_error(
+                host_callable_capability_error(
                     app_expr,
-                    "chelis#879: static builtin application lacks its checked invocation value",
+                    "static builtin application lacks one selected invocation authority",
                 )
             })?;
     if let Some((contract, remaining)) = value.split_outer_contract() {
@@ -19811,6 +20627,40 @@ fn host_fn_signature(ty: &HostTypeTerm) -> Option<(Vec<HostTypeTerm>, HostTypeTe
     }
 }
 
+/// Existing capture-free key callback ABIs have no dimension obligations.
+/// Keep their checked function-pointer representation through lexical aliases;
+/// tensor signatures retain the complete builtin value and its claim frames.
+fn checked_key_scalar_callback(operation: CheckedBuiltinCallable, ty: &HostTypeTerm) -> bool {
+    let HostTypeTerm::Fn(parameters, result) = ty else {
+        return false;
+    };
+    use HostPrecisionTerm::Concrete;
+    use HostTypeTerm::Scalar;
+    match (operation, parameters.as_slice(), result.as_ref()) {
+        (
+            CheckedBuiltinCallable::FromSeed,
+            [Scalar(Concrete(Prim::Int64))],
+            Scalar(Concrete(Prim::Key)),
+        )
+        | (
+            CheckedBuiltinCallable::FoldIn,
+            [Scalar(Concrete(Prim::Key)), Scalar(Concrete(Prim::Int64))],
+            Scalar(Concrete(Prim::Key)),
+        ) => true,
+        (
+            CheckedBuiltinCallable::Split,
+            [Scalar(Concrete(Prim::Key))],
+            HostTypeTerm::Tuple(halves),
+        ) => {
+            matches!(
+                halves.as_slice(),
+                [Scalar(Concrete(Prim::Key)), Scalar(Concrete(Prim::Key))]
+            )
+        }
+        _ => false,
+    }
+}
+
 fn top_level_fn_is_type_polymorphic(program: &HostLoweringSession<'_>, name: &str) -> bool {
     if let Some(cached) = program.facts.type_polymorphic.borrow().get(name).copied() {
         return cached;
@@ -20393,57 +21243,79 @@ fn lower_host_callback(
             let Some(name) = list.children_slice().first().and_then(symbol_name) else {
                 return Ok(None);
             };
-            // A retained formal owns a complete callable value even when its
+            // A static builtin value owns its complete invocation even when its
             // executable binding uses the closed builtin discriminator. Reify
-            // the invocation through the ordinary application owner so every
-            // frame, including result-only frames, runs on each callback call.
-            if let Some(value) = resolve_host_builtin_value(expr, program, scope, tensor_helpers)?
-                && let Some(contract) = value.contracts().first()
-            {
-                let signature = decode_host_type(contract.signature())
-                    .map_err(|error| host_expr_lowering_error(expr, error.to_string()))?;
-                let Some((param_tys, ret_ty)) = host_fn_signature(&signature) else {
-                    return Err(host_expr_lowering_error(
-                        expr,
-                        "retained callback lacks its complete function signature",
-                    ));
-                };
-                let callee = match callee::resolve_value(name.to_owned(), scope) {
-                    HostAppCallee::Lexical(lexical) => lexical.callee(),
-                    HostAppCallee::Program(program) => program.callee(),
-                };
-                let mut params = positional_host_params(param_tys, &callee);
-                for param in &mut params {
-                    while scope.contains_key(&param.name)
-                        || tensor_helpers.builtin_values.contains_key(&param.name)
-                        || tensor_helpers.builtin_tuples.contains_key(&param.name)
-                    {
-                        param.name.push('_');
+            // the call through the ordinary application owner so every frame,
+            // including result-only frames, runs on each callback call. A value
+            // without retained frames takes its lexical binding's signature.
+            if let Some(value) = resolve_host_builtin_value(expr, program, scope, tensor_helpers)? {
+                let retained = match value.contracts().first() {
+                    Some(contract) => {
+                        let signature = decode_host_type(contract.signature())
+                            .map_err(|error| host_expr_lowering_error(expr, error.to_string()))?;
+                        let Some((param_tys, ret_ty)) = host_fn_signature(&signature) else {
+                            return Err(host_expr_lowering_error(
+                                expr,
+                                "retained callback lacks its complete function signature",
+                            ));
+                        };
+                        let (authored, result) = parse_fn_type_expr_parts(contract.signature())
+                            .expect("normalized whole callable signature");
+                        Some((param_tys, ret_ty, Some((authored, result))))
                     }
-                }
-                let (authored, result) = parse_fn_type_expr_parts(contract.signature())
-                    .expect("normalized whole callable signature");
-                let application =
-                    synthesize_callable_application(expr, &params, Some(&authored), Some(&result));
-                let mut callback_scope = scope.clone();
-                for parameter in &params {
-                    bind_host_local(
-                        &mut callback_scope,
-                        parameter.name.clone(),
-                        parameter.ty.clone(),
-                    );
-                }
-                let body = lower_host_expr(&application, program, &callback_scope, tensor_helpers)?;
-                return Ok(Some(HostCallback {
-                    stationary_accumulator: None,
-                    accumulator_delta: None,
-                    accumulator_composition: None,
-                    kind: HostCallbackKind::Inline {
-                        params,
-                        body: Box::new(body),
+                    None => match callee::resolve_value(name.to_owned(), scope) {
+                        HostAppCallee::Lexical(lexical) => host_fn_signature(lexical.binding())
+                            .map(|(param_tys, ret_ty)| (param_tys, ret_ty, None)),
+                        HostAppCallee::Program(_) => None,
                     },
-                    ret_ty,
-                }));
+                };
+                if let Some((param_tys, ret_ty, authored)) = retained {
+                    let callee = match callee::resolve_value(name.to_owned(), scope) {
+                        HostAppCallee::Lexical(lexical) => lexical.callee(),
+                        HostAppCallee::Program(program) => program.callee(),
+                    };
+                    let mut params = positional_host_params(param_tys, &callee);
+                    for param in &mut params {
+                        while scope.contains_key(&param.name)
+                            || program.def_named(&param.name).is_some()
+                            || tensor_helpers.builtin_values.contains_key(&param.name)
+                            || tensor_helpers.builtin_tuples.contains_key(&param.name)
+                        {
+                            param.name.push('_');
+                        }
+                    }
+                    let application = synthesize_callable_application(
+                        expr,
+                        &params,
+                        authored.as_ref().map(|(authored, _)| authored.as_slice()),
+                        authored.as_ref().map(|(_, result)| result),
+                    );
+                    let mut callback_scope = scope.clone();
+                    for parameter in &params {
+                        bind_host_local(
+                            &mut callback_scope,
+                            parameter.name.clone(),
+                            parameter.ty.clone(),
+                        );
+                    }
+                    let body = lower_host_expr_with_expected(
+                        &application,
+                        program,
+                        &callback_scope,
+                        tensor_helpers,
+                        Some(&ret_ty),
+                    )?;
+                    return Ok(Some(HostCallback {
+                        stationary_accumulator: None,
+                        accumulator_delta: None,
+                        accumulator_composition: None,
+                        kind: HostCallbackKind::Inline {
+                            params,
+                            body: Box::new(body),
+                        },
+                        ret_ty,
+                    }));
+                }
             }
             // A lexical binding shadows every definition of its spelling, so
             // its own function type is the only signature this callback may
@@ -23820,6 +24692,77 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
     }
 }
 
+/// One owner for a conditional's result representation. Closed callable
+/// leaves join by operation identity at each product position, whichever
+/// spelling produced them; distinct operations keep the checked-choice
+/// carrier, and every other position keeps the checked logical type.
+fn conditional_result_type(logical: HostTypeTerm, branches: &[HostTypeTerm]) -> HostTypeTerm {
+    let _stack_frame = HostLowerStackFrame::enter();
+    let branches = branches
+        .iter()
+        .filter(|ty| !matches!(ty, HostTypeTerm::Never))
+        .collect::<Vec<_>>();
+    if let Some(joined) =
+        HostTypeTerm::checked_callable_join(branches.iter().map(|ty| (*ty).clone()))
+    {
+        return joined;
+    }
+    let HostTypeTerm::Tuple(fields) = &logical else {
+        return logical;
+    };
+    let columns = branches
+        .iter()
+        .map(|ty| match ty {
+            HostTypeTerm::Tuple(items) if items.len() == fields.len() => Some(items),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    match columns {
+        Some(columns) if !columns.is_empty() => HostTypeTerm::Tuple(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| {
+                    let column = columns
+                        .iter()
+                        .map(|items| items[index].clone())
+                        .collect::<Vec<_>>();
+                    conditional_result_type(field.clone(), &column)
+                })
+                .collect(),
+        ),
+        _ => logical,
+    }
+}
+
+/// Keep private callable descriptors through product formation and projection.
+/// Data fields still use their checked logical type. This records physical
+/// representation only; invocation authority stays in the whole-value ledger.
+fn retain_callable_product_type(logical: HostTypeTerm, physical: &HostTypeTerm) -> HostTypeTerm {
+    let _stack_frame = HostLowerStackFrame::enter();
+    match (&logical, physical) {
+        (
+            HostTypeTerm::Fn(..) | HostTypeTerm::CheckedCallableChoice(_),
+            HostTypeTerm::CheckedBuiltinCallable(_) | HostTypeTerm::CheckedCallableChoice(_),
+        ) => physical.clone(),
+        (HostTypeTerm::Tuple(expected), HostTypeTerm::Tuple(actual))
+            if expected.len() == actual.len() =>
+        {
+            HostTypeTerm::Tuple(
+                expected
+                    .iter()
+                    .zip(actual)
+                    .map(|(expected, actual)| {
+                        retain_callable_product_type(expected.clone(), actual)
+                    })
+                    .collect(),
+            )
+        }
+        _ if logical.is_unresolved() => physical.clone(),
+        _ => logical,
+    }
+}
+
 /// Give `expr` the checked type `ty` and carry the checked context down to
 /// every subexpression (chelis#2599). A child whose type the parent fixes
 /// receives that type. Any other child is conformed by
@@ -23827,18 +24770,9 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
 /// parameter types beneath `len(...)` or a fold seed beneath a callback, still
 /// reaches a bare `None` or `[]` whose type only that context fixes.
 fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
-    // A join's alternatives are distinct checked contracts. Context may
-    // specialize data, but must never retag one operation as another.
-    if matches!(ty, HostTypeTerm::CheckedCallableChoice(_)) {
-        let own = host_expr_type(&expr);
-        if matches!(
-            own,
-            HostTypeTerm::CheckedBuiltinCallable(_) | HostTypeTerm::CheckedCallableChoice(_)
-        ) && own != ty
-        {
-            return force_host_expr_type(expr, own);
-        }
-    }
+    // Logical invocation signatures do not replace a closed value's physical
+    // descriptor. Context may specialize data, never retag a selected operation.
+    let ty = retain_callable_product_type(ty, &host_expr_type(&expr));
     let HostExpr {
         kind,
         span_id,
@@ -26889,6 +27823,31 @@ mod tests {
     }
 
     #[test]
+    fn callable_conformance_preserves_physical_descriptor_beside_logical_contract() {
+        let operation = CheckedBuiltinCallable::from_symbol("is_finite").unwrap();
+        let physical = HostTypeTerm::CheckedBuiltinCallable(operation);
+        let value = HostExpr::new(HostExprKind::Builtin {
+            name: operation.into(),
+            args: Vec::new(),
+            ty: physical.clone(),
+        });
+        let logical = HostTypeTerm::Fn(
+            vec![HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F64,
+            })],
+            Box::new(HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::Bool,
+            })),
+        );
+        assert_eq!(
+            host_expr_type(&force_host_expr_type(value, logical)),
+            physical
+        );
+    }
+
+    #[test]
     fn checked_callable_join_preserves_branch_identity_through_conformance() {
         let nan = CheckedBuiltinCallable::from_symbol("is_nan").unwrap();
         let finite = CheckedBuiltinCallable::from_symbol("is_finite").unwrap();
@@ -27548,6 +28507,7 @@ mod tests {
             };
             let mut walk = UncarriableWalk {
                 defs: &defs,
+                declaration_type: &no_declaration_type,
                 active: UnordSet::new(),
                 completed: UnordMap::new(),
                 cycle_cutoff: false,
@@ -27556,6 +28516,8 @@ mod tests {
                 scopes: vec![UnordMap::from([(
                     "x".to_string(),
                     AdmissionBinding {
+                        tuple: None,
+                        callable: CallableFacts::UNKNOWN,
                         constructor: false,
                         concat: ConcatInputFact::Tensor(tensor.clone()),
                     },
@@ -27625,12 +28587,15 @@ mod tests {
         let scope = UnordMap::from([(
             "x".to_string(),
             AdmissionBinding {
+                tuple: None,
+                callable: CallableFacts::UNKNOWN,
                 constructor: false,
                 concat: ConcatInputFact::Tensor(tensor),
             },
         )]);
         let mut walk = UncarriableWalk {
             defs: &defs,
+            declaration_type: &no_declaration_type,
             active: UnordSet::new(),
             completed: UnordMap::new(),
             cycle_cutoff: false,
@@ -27662,6 +28627,7 @@ mod tests {
         let defs = BTreeMap::new();
         let mut walk = UncarriableWalk {
             defs: &defs,
+            declaration_type: &no_declaration_type,
             active: UnordSet::new(),
             completed: UnordMap::new(),
             cycle_cutoff: false,
@@ -27670,6 +28636,8 @@ mod tests {
             scopes: vec![UnordMap::from([(
                 "xs".to_string(),
                 AdmissionBinding {
+                    tuple: None,
+                    callable: CallableFacts::UNKNOWN,
                     constructor: false,
                     concat: ConcatInputFact::List(vec![ConcatInputFact::Tensor(TensorType {
                         dims: vec![DimInfo::Lit(2), DimInfo::Named("width".to_string(), None)],
@@ -27715,15 +28683,506 @@ mod tests {
         }
     }
 
+    fn no_declaration_type(_: &str) -> Option<HostTypeTerm> {
+        None
+    }
+
     fn admission_test_walk(defs: &BTreeMap<String, Expr>) -> UncarriableWalk<'_> {
         UncarriableWalk {
             defs,
+            declaration_type: &no_declaration_type,
             active: UnordSet::new(),
             completed: UnordMap::new(),
             cycle_cutoff: false,
             def_visits: 0,
             admit_dropout: false,
             scopes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn captured_load_admission_requires_checked_noncallability() {
+        let body =
+            parse_one_expr("(block {} (app {} (var {} print) (lit {} \"initialize\")) (lit {} 1))");
+        let defs = BTreeMap::from([("captured".to_owned(), body)]);
+        let mut walk = admission_test_walk(&defs);
+        // An unresolved reference has no proof that its value is a numeric
+        // capture; syntax alone cannot turn it into a Load boundary.
+        let reference = parse_one_expr("(var {} captured)");
+        assert!(walk.expr(&reference).is_some());
+        let callable = parse_one_expr("(var {type: (t-fn {} (t-prim {} i32))} captured)");
+        assert!(walk.expr(&callable).is_some());
+        let noncallable = parse_one_expr("(var {type: (t-prim {} i32)} captured)");
+        assert!(
+            walk.expr(&noncallable).is_some(),
+            "a reference stamp cannot supply missing checked declaration authority"
+        );
+    }
+
+    #[test]
+    fn captured_load_admission_uses_checked_declaration_for_unstamped_reference() {
+        let program = surf_check(
+            "captured: tensor[2, f32] = { _ = print(\"initialize\")\n to_tensor([1.0f32,2.0f32]) }\n",
+        );
+        let session = HostLoweringSession::new(&program);
+        let defs = cached_program_defs(&session);
+        assert!(
+            expr_type(&defs["captured"]).is_none(),
+            "Let carries no ABI stamp"
+        );
+        assert!(matches!(
+            lookup_declared_host_type(&session, "captured"),
+            Some(HostTypeTerm::Tensor(_))
+        ));
+        let reference = parse_one_expr("(var {} captured)");
+        assert!(
+            expr_type(&reference).is_none(),
+            "ordinary Var nodes have no ABI stamp"
+        );
+        assert!(
+            body_form_the_dag_cannot_carry(&session, &reference, &[], false).is_none(),
+            "checked declaration values form a Load boundary"
+        );
+    }
+
+    #[test]
+    fn captured_load_admission_rejects_contradictory_declaration_reference_evidence() {
+        let program = surf_check("number = to_tensor([1.0f32,2.0f32])\ncaptured = is_nan\n");
+        let session = HostLoweringSession::new(&program);
+        let declared = lookup_declared_type_expr(&session, "number").unwrap();
+        let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+            chelis_deep::annotations::TypeSyntax::try_new(declared).unwrap(),
+        ));
+        let reference = Expr::node(
+            DeepTag::Var,
+            metadata,
+            vec![Expr::Atom(
+                Atom::Name("captured".into()),
+                chelis_deep::Span::new(0, 0),
+            )],
+            chelis_deep::Span::new(0, 0),
+        );
+        let declaration = lookup_declared_host_type(&session, "captured");
+        let reference_type = expr_type(&reference);
+        let defs = cached_program_defs(&session);
+        assert!(
+            body_form_the_dag_cannot_carry(&session, &reference, &[], false).is_some(),
+            "a callable declaration cannot be admitted as a noncallable capture: declaration={declaration:?}, reference={reference_type:?}, body={:?}",
+            stamped_parts(&defs["captured"]).map(|(tag, _, _)| tag)
+        );
+    }
+
+    #[test]
+    fn captured_load_admission_retains_checked_callable_initializers() {
+        let program = surf_check("captured = if true then is_nan else is_finite\n");
+        let session = HostLoweringSession::new(&program);
+        let defs = cached_program_defs(&session);
+        assert_eq!(
+            CallableFacts::checked_type(expr_type(&defs["captured"]).as_ref()),
+            CallabilityEvidence::Callable
+        );
+        let reference = parse_one_expr("(var {} captured)");
+        let mut walk = admission_test_walk(&defs);
+        assert!(
+            walk.expr(&reference).is_some(),
+            "a checked callable initializer still requires admission"
+        );
+    }
+
+    #[test]
+    fn callable_admission_required_nullary_body_retains_scope_and_cache() {
+        let defs = BTreeMap::from([
+            (
+                "predicate".to_string(),
+                parse_one_expr("(fn {} (params {}) (var {} is_nan))"),
+            ),
+            (
+                "number".to_string(),
+                parse_one_expr("(fn {} (params {}) (lit {} 7))"),
+            ),
+        ]);
+        let mut walk = admission_test_walk(&defs);
+        walk.scopes.push(UnordMap::from_iter([(
+            "is_nan".to_string(),
+            AdmissionBinding {
+                tuple: None,
+                callable: CallableFacts::NONCALLABLE,
+                ..AdmissionBinding::default()
+            },
+        )]));
+        for _ in 0..2 {
+            let predicate = walk.analyze_def("predicate", &defs["predicate"], None);
+            assert!(predicate.reason.is_none());
+            assert_eq!(predicate.callable, CallableFacts::STATIC);
+            let number = walk.analyze_def("number", &defs["number"], None);
+            assert!(number.reason.is_none());
+            assert_eq!(number.callable, CallableFacts::NONCALLABLE);
+            assert_eq!(
+                walk.scopes[0]["is_nan"].callable,
+                CallableFacts::NONCALLABLE
+            );
+            assert!(walk.active.is_empty());
+        }
+        assert_eq!(
+            walk.def_visits, 2,
+            "each complete nullary body is analyzed once"
+        );
+        assert_eq!(walk.completed["predicate"].len(), 1);
+        assert_eq!(walk.completed["number"].len(), 1);
+        assert!(!walk.cycle_cutoff);
+    }
+
+    #[test]
+    fn callable_admission_preserves_repeated_closed_relation_branches() {
+        let program = surf_check(
+            "alias = is_finite\ndef selected(flag: bool, x: tensor[2,f32]) -> tensor[2,bool] = {\n f = if flag then alias else is_finite\n f(x)\n}\n",
+        );
+        let session = HostLoweringSession::new(&program);
+        let defs = cached_program_defs(&session);
+        let signature = host_def_signature("selected", &defs["selected"], None, &session).unwrap();
+        let (_, _, body) = stamped_parts(&signature.body_expr).unwrap();
+        let (_, _, bindings) = stamped_parts(&body[0]).unwrap();
+        let mut walk = admission_test_walk(&defs);
+        let choice = &bindings[1];
+        assert_eq!(
+            walk.callable_admission(choice),
+            CallableFacts::RUNTIME,
+            "choice: {choice:#?}\ndefs: {defs:#?}"
+        );
+    }
+
+    #[test]
+    fn callable_admission_requires_consistent_checked_control_metadata() {
+        let defs = BTreeMap::new();
+        let mut walk = admission_test_walk(&defs);
+        for (source, expected) in [
+            (
+                "(if {} (lit {} true) (var {} is_nan) (var {} is_finite))",
+                CallableFacts::UNKNOWN,
+            ),
+            (
+                "(if {type: (t-fn {} (t-prim {} f32) (t-prim {} bool))} (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} f32)} 2.0))",
+                CallableFacts::INCONSISTENT,
+            ),
+        ] {
+            let expression = parse_one_expr(source);
+            assert_eq!(walk.callable_admission(&expression), expected, "{source}");
+            assert_eq!(
+                walk.expr(&expression).is_some(),
+                expected == CallableFacts::INCONSISTENT,
+                "inconsistent checked evidence must retain a host refusal: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn callable_admission_static_tensor_literals_keep_existing_dag_owner() {
+        for (source, expected) in [
+            (
+                "def run() -> tensor[2, f64] = to_tensor([-0.0f64, 1.0000000000000002f64])\n",
+                true,
+            ),
+            (
+                "def run(x: List[f64]) -> tensor[*, f64] = to_tensor(x)\n",
+                false,
+            ),
+        ] {
+            let program = surf_check(source);
+            let session = HostLoweringSession::new(&program);
+            let defs = cached_program_defs(&session);
+            assert_eq!(
+                crate::lower::top_level_lowering_map(program.exprs(), program.type_env())["run"],
+                expected,
+                "{source}"
+            );
+            let mut walk = admission_test_walk(&defs);
+            assert_eq!(
+                walk.def("run", &defs["run"], None).is_none(),
+                expected,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_product_admission_keeps_numeric_projection_and_host_callable_owner() {
+        for (source, numeric) in [
+            (
+                "def run(x: tensor[2,f32]) -> tensor[2,f32] = { pair = (x, neg(x))\n (first, second) = copy(pair)\n first }\n",
+                true,
+            ),
+            (
+                "def run(x: tensor[*,f64]) -> tensor[*,bool] = { f: &tensor[2,f64] -> tensor[*,bool] = is_finite\n (g,n) = (copy(f),1i64)\n g(x) }\n",
+                false,
+            ),
+            (
+                "def run(x: tensor[3,f64]) -> tensor[3,f64] = { f: &tensor[2,f64] -> tensor[*,bool] = is_finite\n (g,n) = (copy(f),1i64)\n neg(x) }\n",
+                true,
+            ),
+        ] {
+            let program = surf_check(source);
+            let map = crate::lower::top_level_lowering_map(program.exprs(), program.type_env());
+            assert_eq!(map.get("run"), Some(&numeric), "{source}: {map:?}");
+            let session = HostLoweringSession::new(&program);
+            let kernel =
+                host_def_kernel(&session, "run").expect("the selected lane lowers without retry");
+            assert_eq!(kernel.is_some(), numeric, "{source}");
+        }
+    }
+
+    #[test]
+    fn callable_admission_host_realizability_preserves_numeric_ir_owners() {
+        for (source, expected) in [
+            (
+                "def run(x: tensor[rows, f32], y: tensor[cols, f32]) -> tensor[rows, *, f32] = insert(x, 1i32, shape(y, 0i32))\n",
+                true,
+            ),
+            (
+                "def run(x: tensor[f32]) -> tensor[f32] = scalar_to_tensor(tensor_to_scalar(x))\n",
+                true,
+            ),
+            (
+                "def run(x: tensor[2, f32], y: tensor[3, f32]) -> tensor[5, f32] = concat([x, y], 0i32)\n",
+                true,
+            ),
+            (
+                "def run(x: tensor[2, f32]) -> tensor[2, f32] = { y = neg(x)\n _ = drop(x)\n y }\n",
+                true,
+            ),
+            ("def run(x: List[f32]) -> i64 = len(x)\n", false),
+        ] {
+            let program = surf_check(source);
+            let session = HostLoweringSession::new(&program);
+            let defs = cached_program_defs(&session);
+            let mut walk = admission_test_walk(&defs);
+            assert_eq!(
+                walk.def("run", &defs["run"], None).is_none(),
+                expected,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn callable_admission_host_only_top_level_numeric_projection_refuses_invocation() {
+        for source in [
+            "def run(x: List[f32]) -> i64 = { f = len\n g = copy(copy(f))\n g(x) }\n",
+            "def run(x: List[f32]) -> f32 = { f = index\n g = copy(copy(f))\n g(x, 0i64) }\n",
+            "def keep(h: (&List[f32] -> i64), x: List[f32]) -> i64 = len(x)\ndef run(x: List[f32]) -> i64 = keep(len, x)\n",
+        ] {
+            let program = surf_check(source);
+            let session = HostLoweringSession::new(&program);
+            let defs = cached_program_defs(&session);
+            assert!(
+                !crate::lower::expr_is_dag_lowerable(&defs["run"], &program),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn callable_admission_host_only_top_level_projection_keeps_unused_and_shadowed_values() {
+        for body in [
+            "{ f = len\n g = copy(f)\n add(x, x) }",
+            "{ f = neg\n g = copy(copy(f))\n g(x) }",
+            "{ len = neg\n g = copy(len)\n g(x) }",
+        ] {
+            let program = surf_check(&format!(
+                "def run(x: tensor[2, f32]) -> tensor[2, f32] = {body}\n"
+            ));
+            let session = HostLoweringSession::new(&program);
+            let defs = cached_program_defs(&session);
+            assert!(
+                crate::lower::expr_is_dag_lowerable(&defs["run"], &program),
+                "{body}"
+            );
+        }
+        let program = surf_check(
+            "def keep(h: (&List[f32] -> i64), x: tensor[2, f32]) -> tensor[2, f32] = add(x, x)\ndef run(x: tensor[2, f32]) -> tensor[2, f32] = keep(len, x)\n",
+        );
+        let session = HostLoweringSession::new(&program);
+        let defs = cached_program_defs(&session);
+        assert!(crate::lower::expr_is_dag_lowerable(&defs["run"], &program));
+    }
+
+    #[test]
+    fn callable_admission_host_only_copy_invocation_retains_execution_lane() {
+        for operation in ["len", "index"] {
+            let source = if operation == "len" {
+                "def run(x: List[f32]) -> i64 = { f = len\n g = copy(copy(f))\n g(x) }\n"
+            } else {
+                "def run(x: List[f32]) -> f32 = { f = index\n g = copy(copy(f))\n g(x, 0i64) }\n"
+            };
+            let program = surf_check(source);
+            let session = HostLoweringSession::new(&program);
+            let defs = cached_program_defs(&session);
+            let mut walk = admission_test_walk(&defs);
+            assert!(
+                walk.def("run", &defs["run"], None).is_some(),
+                "a copied {operation} invocation requires its host implementation"
+            );
+        }
+    }
+
+    #[test]
+    fn callable_admission_host_only_joins_never_manufacture_numeric_templates() {
+        for choice in [
+            "if flag then len else len",
+            "if flag then len else (fn (v: List[f32]) -> 7i64)",
+        ] {
+            let program = surf_check(&format!(
+                "def run(flag: bool, x: List[f32]) -> i64 = {{ f = {choice}\n g = copy(f)\n g(x) }}\n"
+            ));
+            let session = HostLoweringSession::new(&program);
+            let defs = cached_program_defs(&session);
+            let mut walk = admission_test_walk(&defs);
+            assert!(walk.def("run", &defs["run"], None).is_some(), "{choice}");
+        }
+    }
+
+    #[test]
+    fn callable_admission_host_only_unused_values_do_not_exclude_numeric_kernel() {
+        for body in [
+            "{ f = len\n g = copy(f)\n add(x, x) }",
+            "{ f = neg\n g = copy(copy(f))\n g(x) }",
+        ] {
+            let program = surf_check(&format!(
+                "def run(x: tensor[2, f32]) -> tensor[2, f32] = {body}\n"
+            ));
+            let session = HostLoweringSession::new(&program);
+            let defs = cached_program_defs(&session);
+            let mut walk = admission_test_walk(&defs);
+            assert!(walk.def("run", &defs["run"], None).is_none(), "{body}");
+        }
+        let defs = BTreeMap::new();
+        let mut walk = admission_test_walk(&defs);
+        walk.scopes.push(UnordMap::from_iter([(
+            "len".into(),
+            AdmissionBinding {
+                tuple: None,
+                callable: CallableFacts::NONCALLABLE,
+                ..AdmissionBinding::default()
+            },
+        )]));
+        let shadowed = walk.analyze_expr(&parse_one_expr("(var {} len)"));
+        assert!(shadowed.reason.is_none());
+        assert_eq!(shadowed.callable, CallableFacts::NONCALLABLE);
+    }
+
+    #[test]
+    fn callable_admission_retains_alias_and_copy_dispositions() {
+        let defs = BTreeMap::from([("global".to_string(), parse_one_expr("(var {} is_nan)"))]);
+        let mut walk = admission_test_walk(&defs);
+        walk.scopes.push(UnordMap::from([
+            (
+                "f".to_string(),
+                AdmissionBinding {
+                    tuple: None,
+                    callable: CallableFacts::RUNTIME,
+                    ..AdmissionBinding::default()
+                },
+            ),
+            (
+                "is_nan".to_string(),
+                AdmissionBinding {
+                    tuple: None,
+                    callable: CallableFacts::NONCALLABLE,
+                    ..AdmissionBinding::default()
+                },
+            ),
+        ]));
+        for source in ["(var {} f)", "(copy {} (var {} f))"] {
+            assert_eq!(
+                walk.callable_admission(&parse_one_expr(source)),
+                CallableFacts::RUNTIME
+            );
+        }
+        assert_eq!(
+            walk.callable_admission(&parse_one_expr("(var {} is_nan)")),
+            CallableFacts::NONCALLABLE
+        );
+        assert_eq!(
+            walk.callable_admission(&parse_one_expr("(var {} global)")),
+            CallableFacts::STATIC
+        );
+    }
+
+    #[test]
+    fn callable_admission_composes_sparse_lexical_tail_evidence() {
+        let defs = BTreeMap::new();
+        let mut walk = admission_test_walk(&defs);
+        for source in [
+            "(let {} (bind {} local (var {} is_nan)) (var {} local))",
+            "(block {} (lit {} true) (let {} (bind {} local (var {} is_nan)) (copy {} (copy {} (var {} local)))))",
+            "(block {} (grad {} (fn {} (params {} x) (var {} x))))",
+            "(block {} (vmap {} (fn {} (params {} x) (var {} x))))",
+        ] {
+            // Callable evidence composes through the tail; a block result is
+            // a selected value the numeric resolver cannot specialize.
+            assert_eq!(
+                walk.callable_admission(&parse_one_expr(source)),
+                CallableFacts::HOST_PROJECTION,
+                "{source}"
+            );
+        }
+        assert_eq!(
+            walk.callable_admission(&parse_one_expr(
+                "(copy {} (copy {} (vmap {} (fn {} (params {} x) (var {} x)))))"
+            )),
+            CallableFacts::STATIC,
+            "aliases, copies and transforms keep the static template"
+        );
+    }
+
+    #[test]
+    fn callable_admission_declaration_formals_take_each_actuals_facts() {
+        let program = surf_check(
+            "def use(h: (&tensor[2,f64] -> tensor[2,bool]), x: tensor[2,f64]) -> tensor[2,bool] = h(x)\n",
+        );
+        let defs = cached_program_defs(&HostLoweringSession::new(&program));
+        let mut walk = admission_test_walk(&defs);
+        let call = |actual: &str| {
+            parse_one_expr(&format!("(app {{}} (var {{}} use) {actual} (var {{}} x))"))
+        };
+        walk.scopes.push(UnordMap::from([(
+            "x".to_string(),
+            AdmissionBinding::default(),
+        )]));
+        let alias = call("(var {} is_finite)");
+        let projected = call("(tuple-get {} (tuple {} (var {} is_finite) (lit {} 1)) (lit {} 0))");
+        let block = call("(let {} (bind {} h (var {} is_finite)) (var {} h))");
+        assert!(
+            walk.expr(&alias).is_none(),
+            "a static template stays numeric"
+        );
+        assert!(
+            walk.expr(&projected).is_some(),
+            "a projected actual keeps host invocation"
+        );
+        assert!(
+            walk.expr(&block).is_some(),
+            "a block-result actual keeps host invocation"
+        );
+        assert!(
+            walk.expr(&alias).is_none(),
+            "distinct actual facts never share a completed declaration context"
+        );
+        assert_eq!(walk.completed["use"].len(), 2);
+    }
+
+    #[test]
+    fn callable_admission_unknown_declarations_and_cycles_prove_nothing() {
+        let defs = BTreeMap::from([
+            ("left".to_string(), parse_one_expr("(var {} right)")),
+            ("right".to_string(), parse_one_expr("(var {} left)")),
+        ]);
+        let mut walk = admission_test_walk(&defs);
+        for source in ["(var {} missing)", "(var {} left)"] {
+            assert_eq!(
+                walk.callable_admission(&parse_one_expr(source)),
+                CallableFacts::UNKNOWN,
+                "{source}"
+            );
         }
     }
 
@@ -27800,6 +29259,8 @@ mod tests {
             walk.scopes = vec![UnordMap::from([(
                 "global".to_string(),
                 AdmissionBinding {
+                    tuple: None,
+                    callable: CallableFacts::UNKNOWN,
                     constructor,
                     concat: ConcatInputFact::Unknown,
                 },
@@ -28476,7 +29937,8 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
         let session = HostLoweringSession::new(&checked);
         let (_, body) = session.def_named("finite").unwrap();
         let mut signature = host_def_signature("finite", body, None, &session).unwrap();
-        let operation = CheckedBuiltinCallable::FloatClassify(chelis_types::FloatClassify::Finite);
+        let value = StaticBuiltinValue::resolve_bare("is_finite").unwrap();
+        let operation = value.checked_identity();
         signature.scope.insert(
             "is_finite".into(),
             HostTypeTerm::CheckedBuiltinCallable(operation),
@@ -28492,7 +29954,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
                 &signature.scope,
                 &expected,
                 &context,
-                Some(StaticBuiltinValue::resolve_bare("is_finite").unwrap()),
+                Some(value.clone()),
             )
             .is_some()
         );
@@ -28505,7 +29967,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
                 &expected,
                 true,
                 Some(&context),
-                Some(StaticBuiltinValue::resolve_bare("is_finite").unwrap()),
+                Some(value.clone()),
             )
             .is_some()
         );

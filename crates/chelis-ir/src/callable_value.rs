@@ -42,6 +42,15 @@ impl<C: CallableContractFrame> ResolvedBuiltinValue<C> {
         })
     }
 
+    /// A closed join can retain one immutable authority only when both
+    /// alternatives already share it. Bare producers have no frame authority.
+    pub fn try_join(&self, other: &Self) -> Option<Self> {
+        (self.operation == other.operation
+            && ((self.contracts.is_empty() && other.contracts.is_empty())
+                || Arc::ptr_eq(&self.contracts, &other.contracts)))
+        .then(|| self.clone())
+    }
+
     pub fn operation(&self) -> chelis_types::AdmittedBuiltin {
         self.operation
     }
@@ -195,6 +204,42 @@ mod tests {
         assert!(value.contracts().is_empty());
         assert!(ResolvedBuiltinValue::<Expr>::resolve_bare("print").is_none());
         assert!(ResolvedBuiltinValue::<Expr>::resolve_bare("not_a_builtin").is_none());
+    }
+
+    #[test]
+    fn closed_join_retains_only_one_shared_contract_authority() {
+        let signature = function_contract("(t-tensor {} (d-lit {} 2) (t-prim {} bool))");
+        let first = ResolvedBuiltinValue::resolve_bare("is_finite")
+            .unwrap()
+            .with_outer_contract(signature.clone());
+        let copied = first.clone();
+        let joined = first
+            .try_join(&copied)
+            .expect("Copy preserves the whole authority");
+        assert_eq!(joined.operation(), first.operation());
+        assert_eq!(joined.contracts().len(), 1);
+        assert!(Arc::ptr_eq(&joined.contracts, &first.contracts));
+        let independently_adapted = ResolvedBuiltinValue::resolve_bare("is_finite")
+            .unwrap()
+            .with_outer_contract(signature);
+        assert!(
+            first.try_join(&independently_adapted).is_none(),
+            "equal syntax does not select one of two activated authorities"
+        );
+        assert!(
+            first
+                .try_join(&ResolvedBuiltinValue::resolve_bare("is_nan").unwrap())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn closed_join_accepts_same_bare_operation_and_rejects_distinct_operations() {
+        let first = ResolvedBuiltinValue::<Expr>::resolve_bare("is_finite").unwrap();
+        let second = ResolvedBuiltinValue::<Expr>::resolve_bare("is_finite").unwrap();
+        assert!(first.try_join(&second).unwrap().contracts().is_empty());
+        let different = ResolvedBuiltinValue::<Expr>::resolve_bare("is_nan").unwrap();
+        assert!(first.try_join(&different).is_none());
     }
 
     #[test]

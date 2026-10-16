@@ -447,6 +447,48 @@ mod tests {
     }
 
     #[test]
+    fn fn_required_body_is_validated_at_every_boundary() {
+        let params = Expr::Node(
+            Box::new(Node::new(DeepTag::Params, Metadata::default(), vec![])),
+            sp(),
+        );
+        let mut node = Node::try_new(
+            DeepTag::Fn,
+            Metadata::default(),
+            vec![params.clone(), int(7)],
+        )
+        .expect("a nullary fn has params and a required body");
+        assert_eq!(node.expr_child(1), &int(7));
+        let original = node.clone();
+        for result in [
+            Node::try_new(DeepTag::Fn, Metadata::default(), vec![params.clone()]),
+            node.try_replace_children(vec![params])
+                .map(|()| node.clone()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(NodeError::ArityViolation {
+                    tag: DeepTag::Fn,
+                    actual: 1,
+                    ..
+                })
+            ));
+        }
+        assert_eq!(
+            node, original,
+            "invalid replacement preserves the required body"
+        );
+        let error = crate::parser::parse_str("(fn {} (params {}))")
+            .expect_err("the parser cannot produce a body-less stamped fn");
+        assert!(error.to_string().contains("wrong child count for `fn`"));
+        let valid = crate::parser::parse_str("(fn {} (params {}) (lit {} 7))");
+        assert!(
+            valid.is_ok(),
+            "a valid nullary fn remains accepted: {valid:?}"
+        );
+    }
+
+    #[test]
     fn try_new_rejects_wrong_arity() {
         // Var requires exactly 1 child.
         let result = Node::try_new(

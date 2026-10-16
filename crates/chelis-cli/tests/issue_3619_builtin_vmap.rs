@@ -361,10 +361,12 @@ def data() -> tensor[2,2,f32] ! {IO} = {
 def keep_work(h: (&tensor[2,f32] -> tensor[2,f32]), x: tensor[2,f32]) -> tensor[2,f32] = neg(x)
 x = data()
 result = vmap(f)(x)
-kept = keep_work(abs,to_tensor([1.0f32,2.0f32]))
+kept = keep_work({ _ = print("callable-once")
+ abs },to_tensor([1.0f32,2.0f32]))
 "#;
     let evaluated = evaluate(source);
     assert_eq!(evaluated.matches("operand-once").count(), 1, "{evaluated}");
+    assert_eq!(evaluated.matches("callable-once").count(), 1, "{evaluated}");
     assert!(
         evaluated.contains("kept = tensor(shape=[2], data=[-1.0, -2.0])"),
         "{evaluated}"
@@ -373,6 +375,49 @@ kept = keep_work(abs,to_tensor([1.0f32,2.0f32]))
         build_and_run(source, "builtin_vmap_eager_and_unused"),
         evaluated
     );
+}
+
+/// Even an unused static callable argument evaluates its producer before the call.
+#[test]
+fn static_callable_actuals_preserve_eager_prefix_traps() {
+    let source = r#"
+def keep_work(h: (&tensor[2,f32] -> tensor[2,f32]), x: tensor[2,f32]) -> tensor[2,f32] = neg(x)
+result = keep_work({ _ = abs(-9223372036854775808i64)
+ neg },to_tensor([1.0f32,2.0f32]))
+after = print("after-prefix-trap")
+"#;
+    let (dir, path) = canonical_contract_program(source, "static_callable_prefix_trap");
+    let evaluated = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let built = Command::cargo_bin("chelis")
+        .unwrap()
+        .arg("build")
+        .arg(&path)
+        .args(["--target", "c", "--output"])
+        .arg(dir.path().join("out"))
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{:?}", built);
+    let native = std::process::Command::new(dir.path().join("out/static_callable_prefix_trap"))
+        .output()
+        .unwrap();
+    for output in [evaluated, native] {
+        assert!(!output.status.success(), "{:?}", output);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            text.contains("numeric trap: overflow in abs at i64"),
+            "{text}"
+        );
+        assert!(!text.contains("after-prefix-trap"), "{text}");
+    }
 }
 
 #[test]
@@ -1123,6 +1168,167 @@ result = run(to_tensor([{row}]))
         );
         if width == 2 {
             assert_eq!(native.stdout, evaluated.stdout);
+        }
+    }
+}
+
+/// A product projection keeps the complete callable owner in both execution lanes.
+#[test]
+fn callable_product_projections_preserve_eval_native_entry_guards() {
+    for binding in [
+        "(g, n) = (copy(f), 1i64)",
+        "pair = ((copy(f), 1i64), 2i64)\n ((g, n), other) = copy(pair)",
+        "pair = (copy(f), 1i64)\n selected = if true then copy(pair) else copy(pair)\n (g, n) = selected",
+        "pair = { copied = (copy(f), 1i64)\n copied }\n (g, n) = copy(pair)",
+    ] {
+        for width in [2, 3] {
+            let row = vec!["1.0f64"; width].join(",");
+            let source = format!(
+                r#"
+def run(x: tensor[*,f64]) -> tensor[*,bool] = {{
+ f: &tensor[2,f64] -> tensor[*,bool] = is_finite
+ {binding}
+ g(x)
+}}
+result = run(to_tensor([{row}]))
+after = print("after-tuple")
+"#
+            );
+            let (dir, path) = canonical_contract_program(&source, "callable_product_guard");
+            let evaluated = Command::cargo_bin("chelis")
+                .unwrap()
+                .args(["eval", "--file"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            let built = Command::cargo_bin("chelis")
+                .unwrap()
+                .arg("build")
+                .arg(&path)
+                .args(["--target", "c", "--output"])
+                .arg(dir.path().join("out"))
+                .output()
+                .unwrap();
+            assert!(
+                built.status.success(),
+                "{binding}, width {width}: {built:?}"
+            );
+            let native = std::process::Command::new(dir.path().join("out/callable_product_guard"))
+                .output()
+                .unwrap();
+            if width == 2 {
+                assert!(evaluated.status.success(), "{:?}", evaluated);
+                assert!(native.status.success(), "{:?}", native);
+                assert_eq!(native.stdout, evaluated.stdout);
+                assert_eq!(
+                    String::from_utf8_lossy(&native.stdout)
+                        .matches("after-tuple")
+                        .count(),
+                    1
+                );
+            } else {
+                for output in [evaluated, native] {
+                    assert!(!output.status.success(), "{:?}", output);
+                    let text = format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert!(
+                        text.contains("numeric trap: domain in load at i64"),
+                        "{text}"
+                    );
+                    assert!(!text.contains("after-tuple"), "{text}");
+                }
+            }
+        }
+    }
+}
+
+/// Physical descriptors do not establish one authority for independent adapters.
+#[test]
+fn callable_product_joins_do_not_invent_invocation_authority() {
+    for choose_left in [true, false] {
+        let source = format!(
+            r#"
+def run(flag: bool, x: tensor[*,f64]) -> tensor[*,bool] = {{
+ left: &tensor[2,f64] -> tensor[*,bool] = is_finite
+ right: &tensor[2,f64] -> tensor[*,bool] = is_finite
+ pair = if flag then (copy(left), 1i64) else (copy(right), 1i64)
+ (g, n) = copy(pair)
+ g(x)
+}}
+result = run({choose_left}, to_tensor([1.0f64,1.0f64]))
+after = print("after-tuple")
+"#
+        );
+        let (dir, path) = canonical_contract_program(&source, "callable_product_choice");
+        let evaluated = Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["eval", "--file"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(evaluated.status.success(), "{evaluated:?}");
+        let output = dir.path().join("out");
+        let built = Command::cargo_bin("chelis")
+            .unwrap()
+            .arg("build")
+            .arg(&path)
+            .args(["--target", "c", "--output"])
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(!built.status.success(), "{built:?}");
+        let error = String::from_utf8_lossy(&built.stderr);
+        assert!(error.contains("chelis#879"), "{error}");
+        assert!(!output.join("callable_product_choice").exists());
+    }
+}
+
+/// Different operations in a product retain a typed target capability boundary.
+#[test]
+fn callable_product_distinct_operations_keep_typed_c_rejection() {
+    for (choose_left, mask) in [(true, "[false, true]"), (false, "[true, false]")] {
+        for binding in [
+            "pair = if flag then (copy(left), 1i64) else (copy(right), 2i64)\n (g,n) = copy(pair)",
+            "pair = if flag then ((copy(left), 1i64), 3i64) else ((copy(right), 2i64), 4i64)\n ((g,n),other) = copy(pair)",
+        ] {
+            let source = format!(
+                r#"
+def run(flag: bool, x: tensor[2,f64]) -> tensor[2,bool] = {{
+ left: &tensor[2,f64] -> tensor[2,bool] = is_nan
+ right: &tensor[2,f64] -> tensor[2,bool] = is_finite
+ {binding}
+ g(x)
+}}
+result = run({choose_left}, to_tensor([1.0f64,div(0.0f64,0.0f64)]))
+"#
+            );
+            let (dir, path) = canonical_contract_program(&source, "callable_product_distinct");
+            let evaluated = Command::cargo_bin("chelis")
+                .unwrap()
+                .args(["eval", "--file"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(evaluated.status.success(), "{evaluated:?}");
+            let text = String::from_utf8_lossy(&evaluated.stdout);
+            assert!(text.contains(&format!("data={mask}")), "{text}");
+            let output = dir.path().join("out");
+            let built = Command::cargo_bin("chelis")
+                .unwrap()
+                .arg("build")
+                .arg(&path)
+                .args(["--target", "c", "--output"])
+                .arg(&output)
+                .output()
+                .unwrap();
+            assert!(!built.status.success(), "{built:?}");
+            let error = String::from_utf8_lossy(&built.stderr);
+            assert!(error.contains("chelis#879"), "{error}");
+            assert!(!error.contains("ownership lowering"), "{error}");
+            assert!(!output.join("callable_product_distinct").exists());
         }
     }
 }
@@ -2218,4 +2424,388 @@ result = main(0i32)
             }
         }
     }
+}
+
+/// One generated program and the outcome both lanes must reach.
+struct CallableMatrixCase {
+    name: String,
+    source: String,
+    expect: CallableMatrixExpect,
+}
+
+enum CallableMatrixExpect {
+    /// Eval and the executed C binary agree on status, stdout and trap class;
+    /// a trapping cell names the violated claim `extent 2` at this axis suffix.
+    Agree {
+        trap: Option<&'static str>,
+        stdout: Vec<&'static str>,
+    },
+    /// Eval succeeds with exactly this stdout; no C artifact is built.
+    EvalOnly { stdout: String },
+    /// The C build refuses with this typed diagnostic and leaves no artifact.
+    BuildRefuses { marker: &'static str },
+    /// The checker rejects a cell no source spelling can express.
+    CheckRejects { marker: &'static str },
+}
+
+fn run_callable_matrix_case(case: &CallableMatrixCase) -> Result<(), String> {
+    let chelis = assert_cmd::cargo_bin!("chelis");
+    let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let path = dir.path().join(format!("{}.ch", case.name));
+    std::fs::write(&path, &case.source).map_err(|error| error.to_string())?;
+    let run = |args: &[&str]| {
+        std::process::Command::new(chelis)
+            .args(args)
+            .arg(&path)
+            .output()
+            .map_err(|error| error.to_string())
+    };
+    let formatted = run(&["fmt", "--inplace"])?;
+    if !formatted.status.success() {
+        return Err(format!("fmt: {formatted:?}"));
+    }
+    let text = |output: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+    let trap_class = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .find(|line| line.starts_with("numeric trap:"))
+            .map(str::to_owned)
+    };
+    if let CallableMatrixExpect::CheckRejects { marker } = &case.expect {
+        let checked = run(&["check"])?;
+        return (!checked.status.success() && text(&checked).contains(marker))
+            .then_some(())
+            .ok_or_else(|| format!("check accepted or lost `{marker}`: {}", text(&checked)));
+    }
+    let out = dir.path().join("out");
+    let build = || {
+        std::process::Command::new(chelis)
+            .arg("build")
+            .arg(&path)
+            .args(["--target", "c", "--output"])
+            .arg(&out)
+            .output()
+            .map_err(|error| error.to_string())
+    };
+    match &case.expect {
+        CallableMatrixExpect::Agree { trap, stdout } => {
+            let evaluated = run(&["eval", "--file"])?;
+            let built = build()?;
+            if !built.status.success() {
+                return Err(format!("C build failed: {}", text(&built)));
+            }
+            let native = std::process::Command::new(out.join(&case.name))
+                .output()
+                .map_err(|error| error.to_string())?;
+            if evaluated.status.success() != native.status.success()
+                || evaluated.stdout != native.stdout
+                || trap_class(&evaluated) != trap_class(&native)
+            {
+                return Err(format!(
+                    "lanes disagree\neval: {}\nnative: {}",
+                    text(&evaluated),
+                    text(&native)
+                ));
+            }
+            if evaluated.status.success() == trap.is_some()
+                || trap_class(&evaluated).is_some() != trap.is_some()
+            {
+                return Err(format!("unexpected outcome: {}", text(&evaluated)));
+            }
+            // The lanes spell the observed actual differently; the claim, its
+            // required extent, the observed axis and extent are shared.
+            if let Some(axis) = trap {
+                for output in [&evaluated, &native] {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !stderr.lines().any(|line| {
+                        line.contains("extent `2`: claimed = 2, ") && line.ends_with(axis)
+                    }) {
+                        return Err(format!("trap lost the claimed extent `{axis}`: {stderr}"));
+                    }
+                }
+            }
+            let printed = String::from_utf8_lossy(&evaluated.stdout);
+            match stdout.iter().find(|line| !printed.contains(*line)) {
+                Some(missing) => Err(format!("missing `{missing}` in {printed}")),
+                None => Ok(()),
+            }
+        }
+        CallableMatrixExpect::EvalOnly { stdout } => {
+            let evaluated = run(&["eval", "--file"])?;
+            (evaluated.status.success() && String::from_utf8_lossy(&evaluated.stdout) == *stdout)
+                .then_some(())
+                .ok_or_else(|| format!("eval: {}", text(&evaluated)))
+        }
+        CallableMatrixExpect::BuildRefuses { marker } => {
+            let built = build()?;
+            let detail = text(&built);
+            if built.status.success()
+                || !detail.contains(marker)
+                || detail.contains("chelis#730")
+                || out.join(&case.name).exists()
+            {
+                return Err(format!("C build: {detail}"));
+            }
+            Ok(())
+        }
+        CallableMatrixExpect::CheckRejects { .. } => unreachable!("handled above"),
+    }
+}
+
+/// Spec/04 §4.7 and spec/06 §3: a callable's producer form never changes
+/// what its consumer computes. Every expressible producer x consumer x
+/// operation-kind cell agrees between Eval and the executed C binary at a
+/// passing and a contract-violating width; a distinct-operation product
+/// join evaluates correctly and keeps the typed C capability boundary.
+#[test]
+fn callable_producer_consumer_matrix_agrees_between_eval_and_native() {
+    // `{b}` is the producer's source value. A pattern binding desugars to
+    // tuple projection; a block result is a selected value.
+    let producers = [
+        ("alias", "g = {b}"),
+        ("copy", "g = copy({b})"),
+        ("block", "g = {\n  h = {b}\n  h\n }"),
+        ("projection", "g = ({b}, 1i64).0"),
+        ("nested", "g = ((({b}, 1i64), 2i64).0).0"),
+        ("pattern", "(g, m) = ({b}, 1i64)"),
+        ("shared_join", "g = if c then {b} else {b}"),
+        (
+            "shared_match",
+            "g = match 1i64 with {\n  | 0 => {b}\n  | _ => {b}\n }",
+        ),
+    ];
+    let tensor_consumers = [
+        ("local", "x: tensor[*,f64]", "tensor[*,bool]", "g(x)"),
+        ("decl", "x: tensor[*,f64]", "tensor[*,bool]", "use_t(g, x)"),
+        (
+            "vmap",
+            "x: tensor[*,*,f64]",
+            "tensor[*,*,bool]",
+            "vmap(g)(x)",
+        ),
+    ];
+    let key_consumers = [
+        ("local", "key", "g(9i64)"),
+        ("decl", "key", "use_k(g, 9i64)"),
+        ("vmap", "tensor[*,key]", "vmap(g)(to_tensor([9i64, 10i64]))"),
+        ("map", "List[key]", "map(g, [9i64, 10i64])"),
+    ];
+    let row = |width: usize| {
+        let mut values = vec!["1.0f64"; width - 1];
+        values.push("div(0.0f64,0.0f64)");
+        format!("to_tensor([{}])", values.join(","))
+    };
+    let rows = |width: usize| {
+        let row = vec!["1.0f64"; width].join(",");
+        format!("to_tensor([[{row}],[{row}]])")
+    };
+    let tensor_program = |binding: &str, consumers: &[(&str, &str, &str, &str)], width| {
+        let mut lines = vec![
+            "def use_t(h: (&tensor[*,f64] -> tensor[*,bool]), x: tensor[*,f64]) -> tensor[*,bool] = h(x)"
+                .to_owned(),
+        ];
+        for (consumer, param, result, body) in consumers {
+            lines.push(format!(
+                "def run_{consumer}(c: bool, {param}) -> {result} = {{\n f: (&tensor[2,f64] -> tensor[*,bool]) = is_finite\n {binding}\n {body}\n}}"
+            ));
+        }
+        for (consumer, ..) in consumers {
+            let actual = if *consumer == "vmap" {
+                rows(width)
+            } else {
+                row(width)
+            };
+            lines.push(format!("out_{consumer} = run_{consumer}(true, {actual})"));
+        }
+        lines.join("\n") + "\n"
+    };
+    let key_program = |binding: &str, consumers: &[(&str, &str, &str)], ascribed: bool| {
+        let prelude = if ascribed {
+            " k: (i64 -> key) = key_from_seed\n"
+        } else {
+            ""
+        };
+        let mut lines = vec!["def use_k(mk: i64 -> key, n: i64) -> key = mk(n)".to_owned()];
+        for (consumer, result, body) in consumers {
+            lines.push(format!(
+                "def run_{consumer}(c: bool) -> {result} = {{\n{prelude} {binding}\n {body}\n}}"
+            ));
+        }
+        for (consumer, ..) in consumers {
+            lines.push(format!("out_{consumer} = run_{consumer}(true)"));
+        }
+        lines.join("\n") + "\n"
+    };
+    let mut cases = Vec::new();
+    for (producer, template) in producers {
+        let binding = template.replace("{b}", "f");
+        cases.push(CallableMatrixCase {
+            name: format!("tensor_{producer}_w2"),
+            source: tensor_program(&binding, &tensor_consumers, 2),
+            expect: CallableMatrixExpect::Agree {
+                trap: None,
+                stdout: vec![
+                    "out_local = tensor(shape=[2], data=[true, false])",
+                    "out_decl = tensor(shape=[2], data=[true, false])",
+                    "out_vmap = tensor(shape=[2, 2], data=[true, true, true, true])",
+                ],
+            },
+        });
+        // A violated input contract stops its program, so each consumer
+        // gets its own program at the violating width.
+        for consumer in tensor_consumers {
+            cases.push(CallableMatrixCase {
+                name: format!("tensor_{producer}_{}_w3", consumer.0),
+                source: tensor_program(&binding, &[consumer], 3),
+                expect: CallableMatrixExpect::Agree {
+                    trap: Some(if consumer.0 == "vmap" {
+                        " axis 1 = 3"
+                    } else {
+                        " axis 0 = 3"
+                    }),
+                    stdout: Vec::new(),
+                },
+            });
+        }
+        // An ascribed key value is not a vmap target (its formal is a
+        // scalar); the bare builtin is. Unannotated values are no C loop
+        // callback, and a bare key join instantiates a generic at `key`.
+        let key_lines = |consumers: &[(&str, &str, &str)]| {
+            consumers
+                .iter()
+                .map(|(consumer, ..)| match *consumer {
+                    "vmap" => "out_vmap = tensor(shape=[2], data=[key(0000000000000009), key(000000000000000a)])",
+                    "map" => "out_map = [key(0000000000000009), key(000000000000000a)]",
+                    "local" => "out_local = key(0000000000000009)",
+                    _ => "out_decl = key(0000000000000009)",
+                })
+                .collect::<Vec<_>>()
+        };
+        let ascribed = [key_consumers[0], key_consumers[1], key_consumers[3]];
+        cases.push(CallableMatrixCase {
+            name: format!("key_ascribed_{producer}"),
+            source: key_program(&template.replace("{b}", "k"), &ascribed, true),
+            expect: CallableMatrixExpect::Agree {
+                trap: None,
+                stdout: key_lines(&ascribed),
+            },
+        });
+        let bare = [key_consumers[0], key_consumers[1], key_consumers[2]];
+        cases.push(CallableMatrixCase {
+            name: format!("key_bare_{producer}"),
+            source: key_program(&template.replace("{b}", "key_from_seed"), &bare, false),
+            expect: if producer.starts_with("shared_") {
+                CallableMatrixExpect::CheckRejects {
+                    marker: "key-carrying type `key`",
+                }
+            } else {
+                CallableMatrixExpect::Agree {
+                    trap: None,
+                    stdout: key_lines(&bare),
+                }
+            },
+        });
+    }
+    // Cells no spelling can express: a borrowed tensor callable is not a
+    // by-value `map` callback, and an ascribed scalar key callable is not a
+    // vmap target. No second `i64 -> key` operation exists to join.
+    cases.push(CallableMatrixCase {
+        name: "tensor_map_rejected".into(),
+        source: "def run(x: tensor[*,f64]) -> List[tensor[*,bool]] = {\n f: (&tensor[2,f64] -> tensor[*,bool]) = is_finite\n map(f, [x, x])\n}\nout = run(to_tensor([1.0f64,2.0f64]))\n".into(),
+        expect: CallableMatrixExpect::CheckRejects {
+            marker: "tensor[*, f64] vs &tensor[2, f64]",
+        },
+    });
+    cases.push(CallableMatrixCase {
+        name: "key_ascribed_vmap_rejected".into(),
+        source: "def run() -> tensor[*,key] = {\n k: (i64 -> key) = key_from_seed\n vmap(k)(to_tensor([9i64, 10i64]))\n}\nout = run()\n".into(),
+        expect: CallableMatrixExpect::CheckRejects {
+            marker: "tensor[2, i64] vs i64",
+        },
+    });
+    // Distinct operations joined through a product: bare builtin leaves form
+    // the same checked-choice carrier as copied or ascribed ones.
+    // Both joins select `is_nan` with `m = 1` at run time.
+    let distinct_joins = [
+        (
+            "join",
+            "pair = if c then (is_nan, 1i64) else (is_finite, 2i64)\n (g, m) = pair",
+        ),
+        (
+            "match",
+            "pair = match 1i64 with {\n  | 0 => (is_finite, 2i64)\n  | _ => (is_nan, 1i64)\n }\n (g, m) = pair",
+        ),
+    ];
+    for (form, distinct) in distinct_joins {
+        let mut joined = tensor_program(distinct, &tensor_consumers, 2);
+        joined.push_str(&format!(
+            "def run_unused(c: bool) -> i64 = {{\n {distinct}\n m\n}}\nout_unused = run_unused(true)\n"
+        ));
+        cases.push(CallableMatrixCase {
+            name: format!("tensor_distinct_{form}_eval"),
+            source: joined,
+            expect: CallableMatrixExpect::EvalOnly {
+                stdout: "out_local = tensor(shape=[2], data=[false, true])\n\
+                         out_decl = tensor(shape=[2], data=[false, true])\n\
+                         out_vmap = tensor(shape=[2, 2], data=[false, false, false, false])\n\
+                         out_unused = 1\n"
+                    .into(),
+            },
+        });
+        for consumer in tensor_consumers {
+            cases.push(CallableMatrixCase {
+                name: format!("tensor_distinct_{form}_{}", consumer.0),
+                source: tensor_program(distinct, &[consumer], 2),
+                // The mapped route keeps the existing transform rejection
+                // rather than #879 (residual); every route refuses without an
+                // artifact.
+                expect: CallableMatrixExpect::BuildRefuses {
+                    marker: if consumer.0 == "vmap" {
+                        "can't lower these defs"
+                    } else {
+                        "chelis#879"
+                    },
+                },
+            });
+        }
+        cases.push(CallableMatrixCase {
+            name: format!("tensor_distinct_{form}_unused"),
+            source: format!("def run(c: bool) -> i64 = {{\n {distinct}\n m\n}}\nout = run(true)\n"),
+            expect: CallableMatrixExpect::BuildRefuses {
+                marker: "chelis#879",
+            },
+        });
+    }
+    let workers = std::thread::available_parallelism().map_or(4, |count| count.get().min(8));
+    let failures = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for chunk in cases.chunks(cases.len().div_ceil(workers)) {
+            let failures = &failures;
+            scope.spawn(move || {
+                for case in chunk {
+                    if let Err(error) = run_callable_matrix_case(case) {
+                        failures
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}: {error}", case.name));
+                    }
+                }
+            });
+        }
+    });
+    let mut failures = failures.into_inner().unwrap();
+    failures.sort();
+    assert!(
+        failures.is_empty(),
+        "{} of {} cells failed:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n\n")
+    );
 }

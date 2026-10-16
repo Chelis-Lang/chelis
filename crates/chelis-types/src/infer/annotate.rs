@@ -336,7 +336,9 @@ pub(super) fn annotate_expr_with_scope(
         deep::Expr::Atom(_, _) => expr.clone(),
         // Metadata values are source/compiler context, not runtime children
         // owned by expression inference. Preserve them verbatim.
-        deep::Expr::Map(map, span) => deep::Expr::Map(map.clone(), *span),
+        deep::Expr::Map(map, span) => {
+            deep::Expr::Map(source_metadata_without_binding_owners(map, errors), *span)
+        }
         deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
             deep::MetaExpr {
                 expr: Box::new(annotate_expr_with_scope(
@@ -345,19 +347,26 @@ pub(super) fn annotate_expr_with_scope(
                     annotation_context,
                     errors,
                 )),
-                metadata: meta.metadata.clone(),
+                metadata: source_metadata_without_binding_owners(&meta.metadata, errors),
             },
             *span,
         ),
         deep::Expr::Node(node, span) => {
             let tag = node.tag();
             let children = node.children_slice();
-            // spec/04 section 8.2: the copy of a function value is that value.
-            // A function is immutable, so sharing it is its copy, and no
-            // downstream callable resolver ever meets a `copy` around one.
-            if tag == DeepTag::Copy
+            // A function copy preserves value identity (section 8.2), but an
+            // independently authored adapter also owns invocation obligations
+            // ([04-INF-9], section 4.7). Keep that boundary and its original
+            // syntax; replacing the operand's metadata would erase its contract.
+            let function_copy = tag == DeepTag::Copy
+                && matches!(
+                    product.owner_type(expr, "copy node", errors),
+                    Some(Type::Fn(..))
+                );
+            let authored_callable_boundary = product.callable_binding_ascription(expr).is_some();
+            if function_copy
+                && !authored_callable_boundary
                 && let [operand] = children
-                && let Some(Type::Fn(..)) = product.owner_type(expr, "copy node", errors)
             {
                 return annotate_expr_with_scope(operand, product, annotation_context, errors);
             }
@@ -426,13 +435,25 @@ pub(super) fn annotate_expr_with_scope(
                     }
                 })
                 .collect();
-            let meta = annotated_node_meta_with_override(
-                tag,
-                node.meta(),
-                expr,
-                fn_ty_override,
-                product,
-                errors,
+            let meta = if authored_callable_boundary {
+                // The resolved type was already checked. Its ABI stamp cannot
+                // replace the independent authored input/result claim syntax.
+                node.meta().clone()
+            } else {
+                annotated_node_meta_with_override(
+                    tag,
+                    node.meta(),
+                    expr,
+                    fn_ty_override,
+                    product,
+                    errors,
+                )
+            };
+            let mut meta = source_metadata_without_binding_owners(&meta, errors);
+            meta.set_checked_binding_owner(
+                product
+                    .binding_ascription(expr)
+                    .map(|record| record.id().checked_owner_token()),
             );
             deep::Expr::node(tag, meta, annotated_children, *span)
         }
@@ -471,7 +492,13 @@ pub(super) fn annotate_child_for_role(
         | ChildStampRole::Selector
         | ChildStampRole::EffectHandler
         | ChildStampRole::Binder
-        | ChildStampRole::Type => child.clone(),
+        | ChildStampRole::Type => match map_binding_owner_tokens(child, &mut |_| Ok(None)) {
+            Ok(child) => child,
+            Err(error) => {
+                errors.push(internal_owner_stamp_error(error.0));
+                child.clone()
+            }
+        },
     }
 }
 
@@ -639,6 +666,13 @@ pub(super) fn annotate_fn_children(
     // back through expression annotation would misreport every valid stamped
     // parameter as `UnknownForm`. Malformed params are rejected by
     // the primary parameter owner, exactly once, through the session sink.
+    let annotated_params = match map_binding_owner_tokens(&annotated_params, &mut |_| Ok(None)) {
+        Ok(params) => params,
+        Err(error) => {
+            errors.push(internal_owner_stamp_error(error.0));
+            annotated_params
+        }
+    };
     let mut result = vec![annotated_params];
     if let Some(body) = kids.get(1) {
         result.push(annotate_child_for_role(
@@ -679,16 +713,17 @@ fn annotate_declared_fn_child(
         .owner_type(declaration_expr, "declared function", errors)
         .unwrap_or(inferred_fn_ty);
 
+    let metadata = annotated_node_meta_with_override(
+        DeepTag::Fn,
+        metadata,
+        child,
+        Some(fn_ty),
+        product,
+        errors,
+    );
     Some(deep::Expr::node(
         DeepTag::Fn,
-        annotated_node_meta_with_override(
-            DeepTag::Fn,
-            metadata,
-            child,
-            Some(fn_ty),
-            product,
-            errors,
-        ),
+        source_metadata_without_binding_owners(&metadata, errors),
         annotated_children,
         child.span(),
     ))
