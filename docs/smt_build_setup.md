@@ -98,6 +98,38 @@ The full workflow restores the `smt-smt-build` cargo cache family that
 so the optional lane reuses the cvc5 build cache and does not cold-build cvc5
 before reaching its proof steps.
 
+### c-earchin ecosystem canary
+
+The scheduled `ecosystem-drift.yml` toolchain enables `distribution`, the
+release feature bundle with SMT, the sealed runtime and the Clarabel provider.
+Its cvc5 source build uses the release prerequisites, transient-fetch retry
+wrapper, and 75-minute build budget. Before uploading the toolchain, the job
+requires boolean `smt_available=true` from the staged compiler and runs
+`.github/scripts/verify_release_smt.py --clarabel --tarball chelis-head-toolchain.tar.gz`.
+That extracted-artifact probe requires actual cvc5 discharge, native Surf
+requirement attribution, stale-source rejection, and native Clarabel checks.
+The cvc5 recipe links its solver and GMP archives statically; the toolchain follows the release tarball
+layout without a separate solver executable or solver shared-library payload.
+
+The c-earchin lane installs its locked Python environment with uv and runs
+its scripts through `.venv/bin/python`. It explicitly exports `CHELIS_BIN`
+to that HEAD executable before compiling the translator or running its Python
+acceptance runner.
+After repinning the throwaway shell tree, `chelis reef update chelis-std
+--offline` in the root and integration consumer refreshes the carried runtime
+identity through the supported resolver. Other locked packages retain their
+locked candidates; remote discovery remains disabled.
+
+The lane runs the Rust build, tests, Clippy and formatter, vocabulary and
+consumer compiler checks, negative diagnostics, and both Reef builds. It runs
+`scripts/check_examples.py --regenerate` in the throwaway checkout because the
+release golden manifests include the released stdlib's hashes. This mode still
+requires deterministic repeated generation, conforming implementation proofs,
+native requirement attribution, and attributed failures for every implementation
+mutant, including the scalar-type matrix. The shell's pinned release gate owns
+exact comparison with the committed golden files. This canary evidence covers
+the c-earchin lane; it does not certify the other ecosystem lanes.
+
 The required `smt-build` job realizes the `ci-smt` Devenv profile only on the
 self-hosted runner, which substitutes it from the private Nix cache:
 `nix/ci-cvc5.nix` builds the locked CVC5 1.3.1, GMP, CaDiCaL and LibPoly
