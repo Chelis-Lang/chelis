@@ -22,11 +22,15 @@ jobs:
     # A protected-runner startup failure must not leave main without checks.
     env:
       # Bound concurrent derivations and retain signature verification.
+      # Read the cvc5 tree and the crate builds that main and release runs
+      # push to the chelis-lang cache.
       NIX_CONFIG: |
         sandbox = true
         require-sigs = true
         max-jobs = 2
         cores = 0
+        extra-substituters = https://chelis-lang.cachix.org
+        extra-trusted-public-keys = chelis-lang.cachix.org-1:F4W65FQ7sunLoF2q6rzkWNTIBd3P/tJ/NFcv12OS9v8=
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -39,9 +43,11 @@ jobs:
         uses: ./.github/actions/vendor/ci/actions/reclaim-ubuntu-runner-disk
       - name: Set up portable Devenv
         uses: ./.github/actions/vendor/ci/actions/setup-devenv
+      # The base configuration is the one that `devenv test` uses. The ci
+      # profile adds OpenBLAS and the numeric cache, which no step here uses.
       - name: Activate the project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+        run: python scripts/ci_devenv.py --profile base
       - name: Verify the runner system
         run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "x86_64-linux", system'
       - name: Verify the Nix sandbox
@@ -72,6 +78,8 @@ jobs:
         require-sigs = true
         max-jobs = 1
         cores = 0
+        extra-substituters = https://chelis-lang.cachix.org
+        extra-trusted-public-keys = chelis-lang.cachix.org-1:F4W65FQ7sunLoF2q6rzkWNTIBd3P/tJ/NFcv12OS9v8=
     defaults:
       run:
         shell: chelis-ci-shell run {0}
@@ -83,7 +91,7 @@ jobs:
         uses: ./.github/actions/vendor/ci/actions/setup-devenv
       - name: Activate the project CI environment
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-        run: python scripts/ci_devenv.py
+        run: python scripts/ci_devenv.py --profile base
       - name: Verify the runner system
         run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "aarch64-darwin", system'
       - name: Verify the Nix sandbox

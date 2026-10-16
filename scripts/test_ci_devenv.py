@@ -26,6 +26,7 @@ class ProjectActivationTests(unittest.TestCase):
         self.path_output = self.root / "github-path"
         self.path_output.write_text("/existing/bin\n")
         self.devenv = self.root / "devenv"
+        self.calls = self.root / "devenv-calls"
         self.state = self.root / "state"
         self.environment = self.state / "venv"
         venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(self.environment)
@@ -39,7 +40,7 @@ class ProjectActivationTests(unittest.TestCase):
         )
         self.wrapper.chmod(0o700)
 
-    def activate(self, body):
+    def activate(self, body, profile="ci"):
         shell_environment = (
             f"export DEVENV_DOTFILE={shlex.quote(str(self.state))}\n"
             f"export DEVENV_STATE={shlex.quote(str(self.state))}\n"
@@ -51,12 +52,16 @@ class ProjectActivationTests(unittest.TestCase):
         )
         self.devenv.write_text(
             f"#!{sys.executable}\nimport pathlib, sys\n"
+            f"with open({str(self.calls)!r}, 'a') as log:\n"
+            "    log.write(' '.join(sys.argv[1:]) + '\\n')\n"
             "if 'print-dev-env' in sys.argv:\n"
             f"    print({shell_environment!r})\n"
             "    raise SystemExit(0)\n" + body
         )
         self.devenv.chmod(0o700)
-        return ci_devenv.activate(self.root, str(self.devenv), self.output, self.path_output)
+        return ci_devenv.activate(
+            self.root, str(self.devenv), self.output, self.path_output, profile=profile,
+        )
 
     def initialize_body(self):
         receipt = self.state / "load-exports"
@@ -90,6 +95,21 @@ class ProjectActivationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), str(self.environment))
+
+    def test_each_devenv_command_selects_the_requested_profile(self):
+        # `base` is the configuration that `devenv test` evaluates, so neither
+        # command may name a profile for it.
+        for profile, options in (("ci", "--no-tui --profile ci"), ("base", "--no-tui")):
+            with self.subTest(profile=profile):
+                self.calls.unlink(missing_ok=True)
+                self.assertEqual(self.activate(self.initialize_body(), profile=profile), 0)
+                self.assertEqual(
+                    self.calls.read_text().splitlines(),
+                    [
+                        f"{options} print-dev-env",
+                        f"{options} tasks run devenv:enterShell --mode before",
+                    ],
+                )
 
     def test_project_library_path_is_scoped_to_command_and_failure_propagates(self):
         command_file = self.root / "actions-command"

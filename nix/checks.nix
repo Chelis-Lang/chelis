@@ -206,6 +206,11 @@ let
           path = root + "/tests/corpus/lane_check";
         };
         cc = pkgs.stdenv.cc;
+        # The scope report records these derivations by path, and no step reads
+        # their outputs. A plain `drvPath` reference would make Nix realize
+        # every output in their build closures. On Linux, that built the full
+        # cvc5 package, which no cache holds.
+        recorded = drv: builtins.unsafeDiscardOutputDependency drv.drvPath;
       in
       pkgs.runCommand "chelis-lane-check"
         {
@@ -229,14 +234,14 @@ let
             --corpus ${corpus} \
             --flake-lock ${root}/flake.lock \
             --chelis ${packages.chelis} \
-            --chelis-drv ${packages.chelis.drvPath} \
+            --chelis-drv ${recorded packages.chelis} \
             --compiler ${cc} \
-            --compiler-drv ${cc.drvPath} \
-            --runtime-drv ${packages.chelis-runtime.drvPath} \
+            --compiler-drv ${recorded cc} \
+            --runtime-drv ${recorded packages.chelis-runtime} \
             --libc ${pkgs.glibc} \
-            --libc-drv ${pkgs.glibc.drvPath} \
+            --libc-drv ${recorded pkgs.glibc} \
             --math-provider ${pkgs.openblas} \
-            --math-provider-drv ${pkgs.openblas.drvPath} \
+            --math-provider-drv ${recorded pkgs.openblas} \
             --rustc ${built.toolchain}/bin/rustc \
             --build-target x86_64-unknown-linux-gnu \
             --output "$TMPDIR/proof-scope.json"
