@@ -2581,6 +2581,15 @@ reason = "the standing chelis-cli::parity target checks this exact example and c
 tracking_issue = "chelis#2377"
 
 [[path_rule]]
+prefix = "examples/vmap_builtin_targets.ch"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "chelis-cli::parity checks static builtin vmap targets and compares evaluator results with executed native C"
+tracking_issue = "chelis#3619"
+
+[[path_rule]]
 prefix = "examples/vmap_tensor_capture.ch"
 disposition = "owner"
 workflow = "ci.yml"

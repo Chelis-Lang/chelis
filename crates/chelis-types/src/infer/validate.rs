@@ -953,36 +953,58 @@ fn reject_unknown_metadata_forms(expr: &deep::Expr, errors: &mut DiagnosticSink<
 /// Lowering consumers use this boundary when they need the checker's
 /// alias-resolved ADT field types without reparsing authored declarations.
 pub fn type_to_deep_expr(ty: &Type) -> deep::Expr {
-    type_to_deep_expr_with(ty, stamped_node_expr)
+    type_to_deep_expr_with(ty, stamped_node_expr, None)
+        .expect("recovering type materialization is infallible")
+}
+
+/// Required aliases reject recovery types, and declaration-owned substitutions
+/// retain the actual checked syntax instead of reminting its variable names.
+pub(crate) fn type_to_deep_expr_with_arguments(
+    ty: &Type,
+    types: &UnordMap<TypeVar, deep::Expr>,
+    dimensions: &UnordMap<DimVar, deep::Expr>,
+) -> Result<deep::Expr, String> {
+    type_to_deep_expr_with(ty, stamped_node_expr, Some((types, dimensions)))
 }
 
 type NodeBuilder = fn(DeepTag, Vec<deep::Expr>) -> deep::Expr;
+type ActualSyntax<'a> = (
+    &'a UnordMap<TypeVar, deep::Expr>,
+    &'a UnordMap<DimVar, deep::Expr>,
+);
 
-fn type_to_deep_expr_with(ty: &Type, make_node: NodeBuilder) -> deep::Expr {
-    match ty {
+fn type_to_deep_expr_with(
+    ty: &Type,
+    make_node: NodeBuilder,
+    actuals: Option<ActualSyntax<'_>>,
+) -> Result<deep::Expr, String> {
+    let dimension = |dim: &Dim| match (dim, actuals) {
+        (Dim::Var(variable), Some((_, dimensions))) if dimensions.contains_key(variable) => {
+            dimensions[variable].clone()
+        }
+        _ => dim_to_deep_expr_with(dim, make_node),
+    };
+    Ok(match ty {
         Type::Prim(prim) => make_node(DeepTag::TPrim, vec![symbol_expr(prim.name())]),
         Type::Fn(args, ret) => {
-            let mut children: Vec<deep::Expr> = args
+            let mut children = args
                 .iter()
-                .map(|arg| type_to_deep_expr_with(arg, make_node))
-                .collect();
-            children.push(type_to_deep_expr_with(ret, make_node));
+                .map(|arg| type_to_deep_expr_with(arg, make_node, actuals))
+                .collect::<Result<Vec<_>, _>>()?;
+            children.push(type_to_deep_expr_with(ret, make_node, actuals)?);
             make_node(DeepTag::TFn, children)
         }
         Type::Ref(inner) => make_node(
             DeepTag::TRef,
-            vec![type_to_deep_expr_with(inner, make_node)],
+            vec![type_to_deep_expr_with(inner, make_node, actuals)?],
         ),
         Type::Tensor(dims, prec) => {
-            let mut children: Vec<deep::Expr> = dims
-                .iter()
-                .map(|dim| dim_to_deep_expr_with(dim, make_node))
-                .collect();
+            let mut children = dims.iter().map(dimension).collect::<Vec<_>>();
             children.push(match prec {
-                TensorPrec::Concrete(p) => type_to_deep_expr_with(&Type::Prim(*p), make_node),
-                TensorPrec::Var(v) => {
-                    make_node(DeepTag::TVar, vec![symbol_expr(&format!("t{}", v.0))])
+                TensorPrec::Concrete(p) => {
+                    type_to_deep_expr_with(&Type::Prim(*p), make_node, actuals)?
                 }
+                TensorPrec::Var(v) => type_to_deep_expr_with(&Type::Var(*v), make_node, actuals)?,
             });
             make_node(DeepTag::TTensor, children)
         }
@@ -990,29 +1012,38 @@ fn type_to_deep_expr_with(ty: &Type, make_node: NodeBuilder) -> deep::Expr {
             let mut children = vec![symbol_expr(name)];
             children.extend(
                 args.iter()
-                    .map(|arg| type_to_deep_expr_with(arg, make_node)),
+                    .map(|arg| type_to_deep_expr_with(arg, make_node, actuals))
+                    .collect::<Result<Vec<_>, _>>()?,
             );
             make_node(DeepTag::TAdt, children)
         }
         Type::KindedAdt(name, args) => {
             let mut children = vec![symbol_expr(name)];
-            children.extend(args.iter().map(|argument| match argument {
-                NominalArg::Type(ty) => type_to_deep_expr_with(ty, make_node),
-                NominalArg::Dimension(dim) => dim_to_deep_expr_with(dim, make_node),
-            }));
+            for argument in args {
+                children.push(match argument {
+                    NominalArg::Type(ty) => type_to_deep_expr_with(ty, make_node, actuals)?,
+                    NominalArg::Dimension(dim) => dimension(dim),
+                });
+            }
             make_node(DeepTag::TAdt, children)
         }
-        Type::Var(var) => make_node(DeepTag::TVar, vec![symbol_expr(&format!("t{}", var.0))]),
+        Type::Var(var) => match actuals.and_then(|(types, _)| types.get(var)) {
+            Some(actual) => actual.clone(),
+            None => make_node(DeepTag::TVar, vec![symbol_expr(&format!("t{}", var.0))]),
+        },
         Type::Tuple(types) => make_node(
             DeepTag::TTuple,
             types
                 .iter()
-                .map(|ty| type_to_deep_expr_with(ty, make_node))
-                .collect(),
+                .map(|ty| type_to_deep_expr_with(ty, make_node, actuals))
+                .collect::<Result<_, _>>()?,
         ),
         Type::Unit => make_node(DeepTag::TUnit, vec![]),
+        Type::Error(_) if actuals.is_some() => {
+            return Err("required alias contains a rejected checker type".into());
+        }
         Type::Error(_) => make_node(DeepTag::TVar, vec![symbol_expr("_")]),
-    }
+    })
 }
 
 fn dim_to_deep_expr_with(dim: &Dim, make_node: NodeBuilder) -> deep::Expr {

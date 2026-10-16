@@ -449,9 +449,9 @@ the region's language semantics.
 ### 3.1 Signature
 
 ```
-If   f : tensor[D, P] -> tensor[D', P]
+If   f : tensor[D, P] -> tensor[D', Q]
 Then vmap(f, axis=n) : tensor[D with batch inserted at n, P]
-                      -> tensor[D' with batch inserted at n, P]
+                      -> tensor[D' with batch inserted at n, Q]
 ```
 
 `vmap` takes a function that operates on a single example and produces a function that
@@ -528,29 +528,36 @@ keeps its vocabulary axis last after batching.
 ### 3.4 Type Rule
 
 ```
-      G |- f : tensor[D, P] -> tensor[D', P]
+      G |- f : tensor[D, P] -> tensor[D', Q]
       ---------------------------------------------------
       G |- vmap(f, axis=n) : tensor[D with batch inserted at n, P]
-                            -> tensor[D' with batch inserted at n, P]
+                            -> tensor[D' with batch inserted at n, Q]
 ```
 
 If `f` takes multiple arguments, each mapped tensor formal gains the batch dimension:
 
 ```
-      G |- f : (tensor[D1, P], tensor[D2, P]) -> tensor[D3, P]
+      G |- f : (tensor[D1, P1], tensor[D2, P2]) -> tensor[D3, Q]
       ---------------------------------------------------
-      G |- vmap(f) : (tensor[{batch} + D1, P], tensor[{batch} + D2, P])
-                             -> tensor[{batch} + D3, P]
+      G |- vmap(f) : (tensor[{batch} + D1, P1], tensor[{batch} + D2, P2])
+                             -> tensor[{batch} + D3, Q]
 ```
 
 A scalar `key` formal maps to a key tensor with the batch axis alone:
 
 ```
-      G |- f : (key, tensor[D, P]) -> tensor[D', P]
+      G |- f : (key, tensor[D, P]) -> tensor[D', Q]
       ---------------------------------------------------
       G |- vmap(f) : (tensor[{batch}, key], tensor[{batch} + D, P])
-                             -> tensor[{batch} + D', P]
+                             -> tensor[{batch} + D', Q]
 ```
+
+Each input retains its own precision, and each result leaf retains the row
+function's result precision. Batching performs no precision conversion; a
+Float classification or comparison therefore produces a Bool tensor. A
+statically resolved builtin function value follows the same rule as its
+equivalent explicitly typed function, retaining its whole checked operation
+contract under [04-INF-9].
 
 A lexical tensor capture is not an additional mapped argument. In the
 conceptual expansion in §3.2 it is loop-invariant, and its authored rank is

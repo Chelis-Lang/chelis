@@ -146,7 +146,7 @@ fn stage_callable_argument<'v>(
 ) -> Result<bool, String> {
     if !matches!(
         value,
-        RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }
+        RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. } | RuntimeValue::Builtin(_)
     ) {
         return Ok(false);
     }
@@ -576,6 +576,7 @@ impl<'a> EvalContext<'a> {
             placeholder_types: &mut placeholder_types,
             placeholder_tensors: &mut placeholder_tensors,
             bindings: Vec::new(),
+            builtin_values: BTreeMap::new(),
             staged: UnordMap::new(),
             fresh: 0,
             span,
@@ -599,6 +600,7 @@ impl<'a> EvalContext<'a> {
         app_children.extend(arg_exprs);
         let application = empty_node(DeepTag::App, app_children, span);
         let application = captures.convert(&application, &captured_env)?;
+        let builtin_values = captures.builtin_values;
         let capture_bindings = captures.bindings;
         let app_expr = if capture_bindings.is_empty() {
             application
@@ -687,6 +689,7 @@ impl<'a> EvalContext<'a> {
                 .with_adt_registry(&self.adt_registry)
             }
         });
+        let lowering = lowering.with_runtime_builtin_values(builtin_values)?;
         let lower_result = chelis_ir::lower::try_lower_subexpr_program_with_context_and_controls(
             &app_expr,
             scoped_types,
@@ -1388,6 +1391,7 @@ pub(crate) fn reset_staged_frame_values() {
 /// Frame values a transform's lowering reads, staged under fresh names
 /// (chelis#2619).
 struct FrameCaptures<'a> {
+    builtin_values: BTreeMap<String, chelis_ir::callable_value::ResolvedBuiltinValue<Expr>>,
     argument_count: usize,
     placeholder_names: &'a mut Vec<String>,
     placeholder_types: &'a mut Vec<TensorType>,
@@ -1500,6 +1504,11 @@ impl FrameCaptures<'_> {
                     Ok((expr, _, _)) => expr,
                     Err(_) => return Ok(None),
                 }
+            }
+            RuntimeValue::Builtin(value) => {
+                let name = self.fresh_name();
+                self.builtin_values.insert(name.clone(), value.clone());
+                return Ok(Some(name));
             }
             // A declaration's closure keeps reading top-level names.
             RuntimeValue::Closure {

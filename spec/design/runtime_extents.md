@@ -2305,6 +2305,16 @@ inner receipt during that one application, so recursive or unrelated calls
 cannot borrow it. Callable and capture resolution remain at the original call
 site. A mismatch disables reuse and retains complete checks.
 
+After eager actual preparation, an unobserved checked zero-field constructor
+needs no terminal value storage. The retained invocation owner derives demand
+from its body, entry guards, List observations and backward binding dependencies.
+It may discard that terminal constructor materialization while preserving every
+producer prefix, effect, trap and entry/result observation. The discard expression
+yields unit; it does not replace an unconstrained type argument or an ADT layout.
+A stored parameter remains stored under [04-ADT-1]. Observed constructors,
+payload-bearing variants and values needed by an entry or result claim retain
+their complete typed materialization and unresolved-type rejection.
+
 C retains the named invocation's staged payloads, formal ingress, signature
 entry and result claim scopes. The entry receipt validates immutable forwarding
 through the staged bindings, the exact original obligation and the lowered

@@ -220,6 +220,10 @@ pub enum RuntimeValue {
         field_names: Option<Vec<String>>,
     },
     MappedFile(Vec<u8>),
+    /// A statically admitted operation value. Its sealed token owns both the
+    /// canonical declaration and whole checked scheme; no closure source is
+    /// reconstructed and no caller binding can redirect the operation.
+    Builtin(chelis_ir::callable_value::ResolvedBuiltinValue<Expr>),
     Closure {
         /// Exact checked `(fn ...)` expression that produced this closure.
         /// Transform lowering reuses this carrier directly: rebuilding a
@@ -287,11 +291,12 @@ impl RuntimeValue {
                 invocation_contracts,
                 ..
             } => Some(invocation_contracts),
+            Self::Builtin(value) => Some(value.contracts()),
             _ => None,
         }
     }
 
-    fn invocation_contracts_mut(&mut self) -> Option<&mut Vec<Expr>> {
+    fn retain_invocation_contract(&mut self, contract: Expr) {
         match self {
             Self::Closure {
                 invocation_contracts,
@@ -300,8 +305,11 @@ impl RuntimeValue {
             | Self::Transform {
                 invocation_contracts,
                 ..
-            } => Some(invocation_contracts),
-            _ => None,
+            } => {
+                invocation_contracts.insert(0, contract);
+            }
+            Self::Builtin(value) => value.retain_outer_contract(contract),
+            _ => {}
         }
     }
 
@@ -1244,7 +1252,7 @@ fn leaf_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {
                 "MappedFile values are not serializable on machine-facing APIs".to_string(),
             );
         }
-        RuntimeValue::Closure { .. } => ExecutionValue::String {
+        RuntimeValue::Builtin(_) | RuntimeValue::Closure { .. } => ExecutionValue::String {
             value: "<closure>".to_string(),
         },
         RuntimeValue::Transform { kind, .. } => ExecutionValue::String {

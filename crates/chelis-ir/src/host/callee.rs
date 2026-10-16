@@ -197,7 +197,7 @@ pub(super) enum ResolvedHostApplication<'s> {
 pub(super) fn resolve_application<'s>(
     name: String,
     scope: &'s UnordMap<String, HostTypeTerm>,
-    declarations: &std::collections::BTreeMap<String, super::CheckedBuiltinCallable>,
+    declarations: &std::collections::BTreeMap<String, crate::callable_value::StaticBuiltinValue>,
     has_definition: bool,
 ) -> ResolvedHostApplication<'s> {
     match resolve(name, scope) {
@@ -214,14 +214,17 @@ pub(super) fn resolve_application<'s>(
             {
                 return ResolvedHostApplication::Program(callee);
             }
-            let operation = declarations.get(callee.name()).copied().or_else(|| {
-                (!has_definition)
-                    .then(|| super::CheckedBuiltinCallable::from_symbol(callee.name()))
-                    .flatten()
-                    .filter(|operation| {
-                        matches!(operation, super::CheckedBuiltinCallable::FloatClassify(_))
-                    })
-            });
+            let operation = declarations
+                .get(callee.name())
+                .map(crate::callable_value::StaticBuiltinValue::checked_identity)
+                .or_else(|| {
+                    (!has_definition)
+                        .then(|| super::CheckedBuiltinCallable::from_symbol(callee.name()))
+                        .flatten()
+                        .filter(|operation| {
+                            matches!(operation, super::CheckedBuiltinCallable::FloatClassify(_))
+                        })
+                });
             match operation {
                 Some(operation) => ResolvedHostApplication::Closed(operation),
                 None => ResolvedHostApplication::Program(callee),
@@ -240,7 +243,9 @@ mod checked_application_tests {
     fn closed_application_resolution_uses_producer_identity_and_lexical_precedence() {
         let finite = CheckedBuiltinCallable::from_symbol("is_finite").unwrap();
         let nan = CheckedBuiltinCallable::from_symbol("is_nan").unwrap();
-        let declarations = BTreeMap::from([("predicate".into(), finite), ("Some".into(), finite)]);
+        let value = crate::callable_value::StaticBuiltinValue::resolve_bare("is_finite").unwrap();
+        let declarations =
+            BTreeMap::from([("predicate".into(), value.clone()), ("Some".into(), value)]);
         let mut scope = UnordMap::new();
         assert!(
             matches!(resolve_application("predicate".into(), &scope, &declarations, false), ResolvedHostApplication::Closed(op) if op == finite)

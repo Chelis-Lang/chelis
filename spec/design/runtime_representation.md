@@ -1094,6 +1094,125 @@ ABI projection do not run a second transitive inference visitor. Known surface,
 precision, rank and extent contradictions remain errors. Authored result and
 local extent claim plans retain their identity and declaration order independently
 of the inferred ABI type. C ABI equality remains exact.
+The shared closed-callable descriptor projects operation identity from a resolved
+static builtin value. That value retains the whole-contract-admitted registry
+token and every independently authored normalized callable contract. Only bare
+builtin producer formation creates an empty contract chain. Global producer
+resolution inherits the complete value through aliases; declaration names and
+generated labels reference one resolved-value cache. Copies, lexical captures,
+local ascriptions and formal adapters preserve the complete contract chain.
+The checked registry owns alias argument binding by declaration TypeVar and
+DimVar identity and nominal kind/arity. Its type materializer retains actual
+checked argument syntax, reference wrappers and independent result members;
+required alias normalization rejects checker recovery types. Raw function
+syntax and actual argument metadata remain with their authored origin. The
+registry's stored Type::Fn body contains parameter/result structure; it does
+not reconstruct declaration metadata that is absent from that representation.
+Normalization constructs one strict nominal header context from the stored
+registry through the canonical type-resolution owner. Stored parameter kinds,
+arity and declaration-owned arguments must align before header construction;
+malformed records do not take a recovery default. Recursive normalization and
+canonical argument validation share this context. Provisional self/forward
+headers belong to declaration checking and cannot admit a name absent from the
+stored registry. Public registration and serialized registry reuse therefore
+retain the same alias transparency and ordinary nominal precedence.
+Logical callable types and ABI descriptors cannot reconstruct a contract-free
+execution value. Lexical bindings precede declaration and builtin resolution;
+a function signature never establishes operation identity.
+
+Executable named calls establish the actual definition's complete retained
+invocation boundary before a helper consumes its body. Eager actual preparation,
+entry claims on used and unused parameters, and independent result obligations
+belong to that boundary. A wider outer callable frame adds obligations without
+replacing the target's own signature. AST-only body substitution is evidence
+construction; an executable use carries the complete retained invocation and
+body authority before it can return a helper product. An uninvoked callback
+installs no target entry or result obligation.
+
+A callable adapter retains its complete registry-normalized authored signature,
+including independent input and result obligations. Result-only signatures do
+not depend on whether an entry plan emits guards. Retained invocation lowering
+resolves actuals in caller scope, then carries the adapted callable value in the
+callee's existing body authority; nested calls restore the enclosing authority.
+Host helpers and root applications consume that same value rather than rebuild
+it from an operation descriptor. Host-only builtin consumers peel one opaque
+frame at a time through the same retained invocation owner, preserving nested
+entry and result observations; only the remaining bare value reaches an
+identity-only builtin expression. Builtin selection carries each evaluated
+actual's producer tree instead of introducing a declaration-interface load.
+Admitted shape-identity numeric calls check operand agreement and operation control
+preconditions before their result extents and element kernels, consuming each
+extent obligation once. Runtime callable choices preserve their typed target
+boundary under ascription.
+
+A closed List's geometry belongs to its formed constructor value, never to
+its ordinary `List[a]` type or a saved producer expression. Whole-call
+preparation binds that exact value before the complete callable owner lowers
+its body; tensor materialization consumes the existing Cons spine and typed
+numeric leaves. The resulting private execution product keeps runtime List
+control descriptors and roots alongside its value roots and optional trace.
+An adapter that cannot execute those controls retains the complete host call.
+The shared trap-seed owner preserves discarded trapping actuals; pure,
+nontrapping unused values need no forced materialization. Standalone callee
+summaries cannot erase this call-site evidence or authorize body-only execution.
+Representation and admission read the resolved declaration's complete checked
+signature. Independently authored syntax retains its obligations; an omitted
+result's inference hole neither defines a generic ABI nor replaces that checked
+result.
+
+The retained body authority owns the call site's actualization of complete
+callable frames as well as payload parameters. The executable signature uses
+that callee's checked precision, rank and dimension substitutions; the original
+authored syntax remains the source of independent input and result obligations.
+A raw declaration binder is not executable metadata, and an ABI signature is
+not a replacement for an authored claim. Each invocation actualizes its own
+frame without mutating a cached declaration or borrowing another invocation's
+evidence. Tensor child provenance follows the same validated specialization's
+structural correspondence: literal axes, named anchors and precision nodes keep
+their authored metadata; each expanded rank axis inherits its authored spread's
+metadata and span. Static target identity and body remain distinct from those ordered
+frames: a concrete supplied callable specializes an unresolved transform formal,
+while a runtime selected actual retains the target's typed rejection. The
+pre-lane classification and retained body lowering use the same supplied-target
+facts; a template's standalone exclusion does not exclude its concrete caller.
+
+Entry checks precede the primitive and result checks belong to the returned
+producer. Ordinary expression bodies and admitted builtin bodies share the
+existing authored-result claim owner. Its literal result token remains separate
+from physical output-axis metadata and from each input obligation; same-shape
+operand agreement precedes its result guard and element kernel. Mapped Load
+types and producer result precision describe physical facts, never authored
+extent claims. Opaque invocation frames retain their defining scope authority
+when transported; capturing an enclosing dimension witness is a separate
+implementation gap under [#3517](https://github.com/Chelis-Lang/chelis/issues/3517).
+The enclosing binder's scope remains governed by [04-INF-6].
+A generic callable transform template has no standalone callable ABI when its
+transformed operand is an unresolved formal; concrete static applications
+specialize it through the ordered helper owner. Unused callable parameters do
+not exclude an otherwise executable kernel. Returned or computed callable
+observations retain the target's typed capability rejection.
+
+Static builtin transform targets use the registry's whole-contract-admitted
+`AdmittedBuiltin` token. The host evaluator captures this token as a builtin
+value; closure conversion supplies fresh lexical token bindings and authored
+higher-order invocation contracts to subexpression lowering. Operation identity
+never comes from a function signature or a caller's name lookup. A resolved
+`vmap` target is an authored function or an admitted builtin. Numeric-domain
+realizability selects the existing operation owner for the builtin's row body;
+both targets share the same axis canonicalization, entry witnesses, result
+claims, vectorizer and splice. Mapped Loads retain the supplied physical row
+types; formal instantiation, entry witnesses and result claims remain separate.
+An authored literal extent is a claim, never a physical ingress fact. Each result
+leaf keeps its own precision.
+Host-only row operations and general function-valued mapped arguments retain
+their separate capability boundaries. A bare `vmap(split_key)` has an unresolved
+checker row relation ([#3620](https://github.com/Chelis-Lang/chelis/issues/3620));
+the explicitly typed key-row lambda evaluates, but its tuple-valued C result
+boundary is unavailable ([#3621](https://github.com/Chelis-Lang/chelis/issues/3621)).
+Contextually typed empty tensor ingress can lose trailing axes in C
+([#1755](https://github.com/Chelis-Lang/chelis/issues/1755)). These boundaries do
+not change the operation, dtype, shape or ownership contracts.
+
 Key-only helper emission retains
 its separately registered `append_key_callable_helpers` owner and key execution
 controls. The classifier registrations bind to the executed all-width raw-bit
@@ -2414,3 +2533,10 @@ requires the stale-source diagnostic. This is the B1 source registration
 path: no immutable foundation identity, classifier, final-form authority,
 freeze digest or rejection rule changes. The full Phase 0 oracle must still
 classify the expanded source universe before landing.
+
+An unresolved transform template's internal host wrapper may be omitted when
+whole-program lowering has an actual specialized DAG function root. With a root
+manifest, the root's declaration identity must belong to the manifest's selected
+declarations. This authority does not change root observability, lane selection,
+or the exported ABI. Remaining host callers still undergo their own lowering
+and cannot acquire a callable target identity from another caller's specialization.

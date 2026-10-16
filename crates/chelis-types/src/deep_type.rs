@@ -172,6 +172,65 @@ pub(crate) struct TypeResolutionEnv {
 pub(crate) const NATIVE_NOMINAL_HEADERS: &[(&str, usize)] = &[("Dict", 2), ("String", 0)];
 
 impl TypeResolutionEnv {
+    /// Required normalization uses stored, complete declarations rather than
+    /// the provisional self/forward scope of a particular checker session.
+    pub(crate) fn for_normalization(registry: &AdtRegistry) -> Result<Self, String> {
+        fn validate_header(
+            name: &str,
+            parameters: &[String],
+            kinds: &[NominalParamKind],
+            arguments: &[NominalArg],
+            type_variables: &[TypeVar],
+        ) -> Result<(), String> {
+            if parameters.len() != kinds.len() || parameters.len() != arguments.len() {
+                return Err(format!(
+                    "stored nominal `{name}` has inconsistent parameter kind/arity alignment"
+                ));
+            }
+            let mut expected_type_variables = Vec::new();
+            for (kind, argument) in kinds.iter().zip(arguments) {
+                match (kind, argument) {
+                    (NominalParamKind::Type, NominalArg::Type(Type::Var(variable))) => {
+                        expected_type_variables.push(*variable);
+                    }
+                    (NominalParamKind::Dimension, NominalArg::Dimension(Dim::Var(_))) => {}
+                    _ => {
+                        return Err(format!(
+                            "stored nominal `{name}` has an invalid declaration parameter identity"
+                        ));
+                    }
+                }
+            }
+            if expected_type_variables != type_variables {
+                return Err(format!(
+                    "stored nominal `{name}` has inconsistent type parameter identities"
+                ));
+            }
+            Ok(())
+        }
+        for (name, definition) in &registry.defs {
+            validate_header(
+                name,
+                &definition.type_params,
+                &definition.param_kinds,
+                &definition.param_args,
+                &definition.param_vars,
+            )?;
+        }
+        for (name, definition) in &registry.aliases {
+            validate_header(
+                name,
+                &definition.params,
+                &definition.param_kinds,
+                &definition.param_args,
+                &definition.param_vars,
+            )?;
+        }
+        // The existing header constructor's recovering branches are
+        // unreachable after exact stored alignment has been established.
+        Ok(Self::from_registry(registry))
+    }
+
     pub(crate) fn from_registry(registry: &AdtRegistry) -> Self {
         let mut headers = Self::default();
         // Checker-native nominal surfaces that are typed structurally by

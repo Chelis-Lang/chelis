@@ -1,6 +1,7 @@
 mod callee;
 mod signature_entry;
 pub mod staged;
+use crate::callable_value::{NormalizedCallableContract, StaticBuiltinValue};
 use callee::HostAppCallee;
 pub use callee::{HostCallee, HostCalleeView};
 pub use signature_entry::{EntryContract, EntryPattern, SignatureEntryPlan};
@@ -39,10 +40,9 @@ thread_local! {
     // A checked Reef provider binding is installed only around one host
     // lowering. The source spelling alone never selects an external call.
     static NATIVE_PROVIDER_CALL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
-    // Tracks top-level callee names currently being inlined by
-    // `inline_top_level_host_call`. Prevents infinite specialization for
-    // recursive/mutually recursive definitions — the specialized body would
-    // re-encounter the same call and inline forever.
+    // Tracks declarations whose retained bodies are being lowered. A
+    // recursive or mutually recursive edge keeps its typed callee boundary
+    // rather than expanding the same declaration without bound.
     static INLINING_STACK: RefCell<UnordSet<String>> = RefCell::new(UnordSet::new());
     // The per-program memos that used to live here are fields of
     // `HostLoweringSession` (chelis#1835). The push/pop stacks stay: they
@@ -470,7 +470,7 @@ struct DefLaneFacts {
     call_graph: RefCell<Option<Arc<CallGraph>>>,
     /// Program-wide: every top-level definition body by name.
     program_defs: RefCell<Option<Arc<BTreeMap<String, Expr>>>>,
-    checked_builtin_callables: RefCell<Option<Arc<BTreeMap<String, CheckedBuiltinCallable>>>>,
+    resolved_builtin_values: RefCell<Option<Arc<BTreeMap<String, StaticBuiltinValue>>>>,
     /// Program-wide: the checker's effect row per definition.
     def_effect_rows: RefCell<Option<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>>,
     /// Program-wide: the subexpression lowering context kernel lowering reads.
@@ -493,7 +493,7 @@ struct DefLaneFacts {
 struct SharedProgramFacts {
     call_graph: OnceLock<Arc<CallGraph>>,
     program_defs: OnceLock<Arc<BTreeMap<String, Expr>>>,
-    checked_builtin_callables: OnceLock<Arc<BTreeMap<String, CheckedBuiltinCallable>>>,
+    resolved_builtin_values: OnceLock<Arc<BTreeMap<String, StaticBuiltinValue>>>,
     def_effect_rows: OnceLock<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>,
     dropout_reaching_defs: OnceLock<Arc<UnordSet<String>>>,
     tensor_helper_def_summaries: OnceLock<Arc<BTreeMap<String, TensorHelperDefSummary>>>,
@@ -747,6 +747,18 @@ impl<'program> HostLoweringSession<'program> {
             self.item_at(self.names().defs.resolve(name)?)?,
             DeepTag::Def,
         )
+    }
+
+    /// The complete checked signature of the declaration this reference
+    /// resolves to. Authored syntax separately owns invocation obligations;
+    /// its inference holes are not executable representation or admission.
+    fn checked_function_signature(&self, name: &str) -> Option<&'program Type> {
+        let (canonical, _) = self.def_named(name)?;
+        self.program
+            .signature_inference()
+            .functions
+            .get(canonical)
+            .map(|inference| &inference.checked_signature)
     }
 
     /// The authored `defsig` signature a reference spelled `name` resolves to.
@@ -1138,6 +1150,7 @@ struct TensorHelperSink {
     /// actuals are prepared before a frame is pushed, and nested invocations
     /// restore the enclosing frame on every ordinary Result path.
     tensor_specializations: Vec<crate::lower::TensorCallsiteSpecialization>,
+    builtin_values: BTreeMap<String, StaticBuiltinValue>,
     collect_trace: bool,
 }
 
@@ -1164,6 +1177,7 @@ impl TensorHelperSink {
             products: Vec::new(),
             declaration_name: None,
             tensor_specializations: Vec::new(),
+            builtin_values: BTreeMap::new(),
             collect_trace,
         }
     }
@@ -2909,8 +2923,33 @@ fn try_lower_compiled_program_with_lane_overrides(
         Err(diagnostic) if diagnostic.fatal => return Err(diagnostic),
         Err(_) => None,
     };
+    // Internal transform templates have no standalone callable ABI. Their
+    // omission requires an actual specialized function root, joined to the
+    // manifest's selected declaration when one is present. This evidence
+    // neither changes the manifest's lane nor creates an exported entry.
+    let specialized_function_entry = dag.as_ref().and_then(|dag| {
+        dag.roots().iter().find_map(|root| {
+            let owner = dag.get(*root)?.owner.decl;
+            let declaration = dag.declaration(owner);
+            (!declaration.value
+                && !declaration.name.is_empty()
+                && manifest.is_none_or(|manifest| {
+                    manifest
+                        .entries
+                        .iter()
+                        .any(|entry| entry.def_name == declaration.name)
+                }))
+            .then_some(owner)
+        })
+    });
     let (mut host_terms, execution) = crate::lower::catch_lowering_external(|| {
-        lower_host_program_with_execution(program, &lowered_names, c_execution_lane, collect_trace)
+        lower_host_program_with_execution(
+            program,
+            &lowered_names,
+            specialized_function_entry,
+            c_execution_lane,
+            collect_trace,
+        )
     })??;
     host_terms.adt_layouts = parameter_adt_layouts(program, &host_terms.functions);
     let host = resolve_host_program(host_terms).map_err(|error| {
@@ -3358,12 +3397,14 @@ fn lower_host_program(
     program: &HostLoweringSession<'_>,
     lowered_names: &BTreeMap<String, bool>,
 ) -> Result<HostProgram, crate::lower::LowerDiagnostic> {
-    lower_host_program_with_execution(program, lowered_names, false, false).map(|(host, _)| host)
+    lower_host_program_with_execution(program, lowered_names, None, false, false)
+        .map(|(host, _)| host)
 }
 
 fn lower_host_program_with_execution(
     program: &HostLoweringSession<'_>,
     lowered_names: &BTreeMap<String, bool>,
+    specialized_function_entry: Option<crate::dag::DeclId>,
     c_execution_lane: bool,
     collect_trace: bool,
 ) -> Result<(HostProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
@@ -3651,7 +3692,18 @@ fn lower_host_program_with_execution(
         // whole-program lowerer, so omit only this unusable generic wrapper.
         let call_site_only_vmap_grad =
             is_fn_body && has_callable_params && expr_contains_vmap_grad(body);
-        if skip_for_lowered || call_site_only_vmap_grad {
+        // A concrete DAG function entry is executable authority just as a
+        // host main is. Its specialized caller does not need a standalone
+        // ABI for the unresolved template; other host callers are still
+        // lowered and retain their own typed capability refusal.
+        let call_site_only_vmap = is_fn_body
+            && has_callable_params
+            && (program_emits_host_main || specialized_function_entry.is_some())
+            && crate::lower::function_has_unresolved_vmap_target(
+                body,
+                &cached_program_defs(program),
+            );
+        if skip_for_lowered || call_site_only_vmap_grad || call_site_only_vmap {
             continue;
         }
         // The wrapper emitter doesn't know every pattern the DAG-path
@@ -3756,6 +3808,15 @@ fn lower_host_program_with_execution(
                 && declared != &inferred_ty
             {
                 value = force_host_expr_type(value, declared.clone());
+            }
+            // Establish global value authority at its binding owner, alongside
+            // the physical scope entry. Later qualified lexical reads consume
+            // this complete value rather than reconstructing one from its type.
+            if let Some(builtin) = cached_resolved_builtin_values(program).get(name) {
+                global_tensor_helpers.builtin_values.insert(
+                    LoadStoreName::top_level(name).as_str().to_string(),
+                    builtin.clone(),
+                );
             }
             host.globals.push(HostBinding {
                 name: name.to_string(),
@@ -4529,7 +4590,7 @@ struct HostDefSignature {
     entry_claims: Result<Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>, String>,
     /// Per formal, the authored parameter types of a function-typed formal
     /// whose parameters nest claims, which every call through it owes.
-    callable_claims: Result<Vec<Option<Vec<Expr>>>, String>,
+    callable_contracts: Result<Vec<Option<NormalizedCallableContract>>, String>,
 }
 
 /// The nested claim pattern of an authored claim-source type, or `None` when
@@ -4583,23 +4644,11 @@ fn formal_nested_claims<'a>(
 /// The authored parameter types of a function-typed formal when any of them
 /// nests a claim: a call through the formal checks them on its arguments, as
 /// a lambda formal's declared type is checked (runtime_extents.md C6.5).
-fn callable_formal_claims(
+fn callable_formal_contract(
     program: &HostLoweringSession<'_>,
     formal: &Expr,
-) -> Result<Option<Vec<Expr>>, String> {
-    let Some((params, _)) = parse_fn_type_expr_parts(formal) else {
-        return Ok(None);
-    };
-    let host_params = params
-        .iter()
-        .enumerate()
-        .map(|(index, ty)| HostParam {
-            name: format!("arg{index}"),
-            ty: decode_expanded_host_type_expr(program, ty).unwrap_or_else(fresh_host_inference),
-        })
-        .collect::<Vec<_>>();
-    let claims = formal_nested_claims(program, params.iter().map(Some), &host_params)?;
-    Ok((!claims.is_empty()).then_some(params))
+) -> Result<Option<NormalizedCallableContract>, String> {
+    NormalizedCallableContract::from_authored(program.adt_registry(), formal)
 }
 
 /// A tensor-only helper drops List parameters that the body does not read.
@@ -6142,12 +6191,12 @@ fn host_def_signature(
         .map_or(Ok(Vec::new()), |(formals, _)| {
             formal_nested_claims(program, formals.iter().map(Some), &params)
         });
-    let callable_claims = authored_parts
+    let callable_contracts = authored_parts
         .as_ref()
         .map_or(Ok(Vec::new()), |(formals, _)| {
             formals
                 .iter()
-                .map(|formal| callable_formal_claims(program, formal))
+                .map(|formal| callable_formal_contract(program, formal))
                 .collect()
         });
     Some(HostDefSignature {
@@ -6158,7 +6207,7 @@ fn host_def_signature(
         body_expr: inline_local_callable_lets(&body_expr),
         result_claim,
         entry_claims,
-        callable_claims,
+        callable_contracts,
     })
 }
 
@@ -6325,6 +6374,76 @@ fn synthesize_callable_application(
 /// `lower_host_function` so that pure-tensor wrapper function bodies get a
 /// real C function definition even when downstream type metadata is
 /// missing on the reef'd deep AST's `app` nodes.
+/// Whole-call specialization for native closed List actuals. The lowerer
+/// prepares and consumes those actuals within one complete invocation; no
+/// already-executable HostExpr is replayed or reinterpreted as shape evidence.
+fn try_lower_prepared_named_call_helper(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    helpers: &mut TensorHelperSink,
+    expected: TensorType,
+) -> Option<HostExpr> {
+    if expr_reaches_list_entry(expr, program) {
+        return None;
+    }
+    let params = scope
+        .to_sorted()
+        .into_iter()
+        .map(|(name, ty)| HostParam {
+            name: name.clone(),
+            ty: ty.clone(),
+        })
+        .collect::<Vec<_>>();
+    if body_form_the_dag_cannot_carry(program, expr, &params, false).is_some() {
+        return None;
+    }
+    let mut context = cached_subexpr_lowering_context(program)
+        .with_builtin_values(helpers.builtin_values.clone());
+    for specialization in &helpers.tensor_specializations {
+        context = context.with_tensor_callsite_specialization(specialization.clone());
+    }
+    let product = lower_tensor_helper_with(expr, program, || {
+        crate::lower::try_lower_prepared_named_call(
+            expr,
+            collect_tensor_scope(program, scope, Some(expr)).into_sorted(),
+            &context,
+            &expected,
+            helpers.collect_trace,
+        )
+    })?;
+    #[cfg(feature = "lowering-trace")]
+    let (lowered, mut trace) = product.into_parts();
+    #[cfg(not(feature = "lowering-trace"))]
+    let (lowered,) = product.into_parts();
+    // Controlled products retain every descriptor and control root. This
+    // ordinary tensor adapter cannot execute that protocol; keep the complete
+    // host call rather than discarding controls or treating them as values.
+    if lowered.has_list_controls() {
+        return None;
+    }
+    let dag = remap_tensor_helper_dim_symbols(&lowered.dag, scope, &expected)
+        .unwrap_or_else(|diagnostic| crate::lower::raise_fatal_lowering_diagnostic(diagnostic));
+    if kernel_dag_loads_builtin(&dag, scope).is_some()
+        || !identity_tensor_helper_matches_expected(&dag, &expected, scope)
+    {
+        return None;
+    }
+    #[cfg(feature = "lowering-trace")]
+    if let Some(trace) = &mut trace {
+        trace.record_dimension_rebinding(&dag);
+    }
+    Some(finish_tensor_helper_product(
+        dag,
+        #[cfg(feature = "lowering-trace")]
+        trace,
+        program,
+        scope,
+        helpers,
+        expected,
+    ))
+}
+
 fn try_lower_tensor_helper_call(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
@@ -6361,7 +6480,7 @@ fn try_lower_tensor_helper_call_inner(
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
-    root_operation: Option<CheckedBuiltinCallable>,
+    root_operation: Option<StaticBuiltinValue>,
 ) -> Option<HostExpr> {
     if let Some((DeepTag::Var, _, kids)) = stamped_parts(expr)
         && let Some(name) = kids.first().and_then(symbol_name)
@@ -6385,7 +6504,8 @@ fn try_lower_tensor_helper_call_inner(
     });
     let active_dimensions = active_dim_subst();
     let specialized_context = (!tensor_helpers.tensor_specializations.is_empty()
-        || !active_dimensions.is_empty())
+        || !active_dimensions.is_empty()
+        || !tensor_helpers.builtin_values.is_empty())
     .then(|| {
         let mut context = lowering_context
             .cloned()
@@ -6393,7 +6513,9 @@ fn try_lower_tensor_helper_call_inner(
         for specialization in &tensor_helpers.tensor_specializations {
             context = context.with_tensor_callsite_specialization(specialization.clone());
         }
-        context.with_checked_dimensions(active_dimensions)
+        context
+            .with_builtin_values(tensor_helpers.builtin_values.clone())
+            .with_checked_dimensions(active_dimensions)
     });
     let Some(product) = lower_tensor_helper_product(
         expr,
@@ -6665,7 +6787,7 @@ fn lower_host_body_with_record_locals(
         body_expr: rewritten.clone(),
         result_claim: signature.result_claim.clone(),
         entry_claims: signature.entry_claims.clone(),
-        callable_claims: signature.callable_claims.clone(),
+        callable_contracts: signature.callable_contracts.clone(),
     };
     let body = match lower_def_body_kernel(program, &rewritten_signature, tensor_helpers)? {
         Some(kernel_call) => kernel_call,
@@ -6971,7 +7093,7 @@ fn lower_tensor_helper_dag(
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
     context: &crate::lower::SubexprLoweringContext,
-    root_operation: Option<CheckedBuiltinCallable>,
+    root_operation: Option<StaticBuiltinValue>,
 ) -> Option<crate::Dag> {
     let context = bind_tensor_helper_payloads(context.clone(), scope);
     lower_tensor_helper_with(expr, program, || {
@@ -7000,7 +7122,7 @@ fn lower_tensor_helper_product(
     expected: &TensorType,
     collect_trace: bool,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
-    root_operation: Option<CheckedBuiltinCallable>,
+    root_operation: Option<StaticBuiltinValue>,
 ) -> Option<LoweredTensorHelper> {
     #[cfg(not(feature = "lowering-trace"))]
     let _ = collect_trace;
@@ -7016,6 +7138,7 @@ fn lower_tensor_helper_product(
             .unwrap_or_else(|| cached_subexpr_lowering_context(program)),
         scope,
     );
+    // Host payload binding preserves the separately supplied whole callable values.
     #[cfg(feature = "lowering-trace")]
     if collect_trace {
         return lower_tensor_helper_with(expr, program, || {
@@ -8385,6 +8508,8 @@ fn sequential_host_let_chain<'expr>(
     })
 }
 
+/// An explicit local function ascription retains its concrete callable
+/// representation without selecting an identity from a runtime choice.
 /// An explicit local ascription whose type nests tensors below a tuple or
 /// nominal type keeps its claim on the initializer's producers
 /// (runtime_extents.md C6.5), after the enclosing claims. A binder axis of
@@ -8406,6 +8531,18 @@ fn retain_local_nested_ascription(
     let Some(authored) = metadata.ty().map(|ty| ty.expression().clone()) else {
         return Ok(value);
     };
+    // The authored function ascription selects a concrete callable ABI;
+    // the producer's checked builtin identity remains independently intact.
+    // Unascribed values keep their static descriptor for transform lowering.
+    if let Some(ty) = decode_expanded_host_type_expr(program, &authored)
+        && matches!(ty, HostTypeTerm::Fn(..))
+        && !matches!(
+            host_expr_type(&value),
+            HostTypeTerm::CheckedCallableChoice(_)
+        )
+    {
+        return Ok(force_host_expr_type(value, ty));
+    }
     let Some(pattern) = nested_claim_pattern(program, &authored)
         .map_err(|error| claim_pattern_refusal(initializer, error))?
     else {
@@ -8646,9 +8783,9 @@ fn lower_host_expr_kind(
             // cannot change what it calls. The backend materializes the
             // corresponding capture-free function pointer from this node.
             if !scope.contains_key(&name)
-                && let Some(op) = cached_checked_builtin_callables(program)
+                && let Some(op) = cached_resolved_builtin_values(program)
                     .get(&name)
-                    .copied()
+                    .map(StaticBuiltinValue::checked_identity)
                     .or_else(|| {
                         program
                             .def_named(&name)
@@ -8660,11 +8797,7 @@ fn lower_host_expr_kind(
                 return Ok(HostExpr::new(HostExprKind::Builtin {
                     name: op.into(),
                     args: Vec::new(),
-                    ty: if ty.is_unresolved() {
-                        HostTypeTerm::CheckedBuiltinCallable(op)
-                    } else {
-                        ty
-                    },
+                    ty: HostTypeTerm::CheckedBuiltinCallable(op),
                 }));
             }
             if name == "Nil" {
@@ -8804,6 +8937,9 @@ fn lower_host_expr_kind(
             })
         }
         Expr::Node(list, _) if list.tag() == DeepTag::Let => {
+            let caller_values = tensor_helpers.builtin_values.clone();
+            let lowered = (|| -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+                Ok({
             let mut forwarding = tensor_helpers.forwarding.take();
             let kids = list.children_slice();
             let mut scoped = scope.clone();
@@ -8906,6 +9042,9 @@ fn lower_host_expr_kind(
                 if let Some(name) = symbol_name(binding.binding) {
                     let initializer = binding.initializer;
                     let index = ordinal * 2;
+                    let builtin_value = resolve_host_builtin_value(
+                        initializer, program, &scoped, tensor_helpers,
+                    )?;
                     let selected = forwarding.as_ref().and_then(|target| {
                         if target.retained
                             || !target.plan.is_returned_invocation()
@@ -8963,6 +9102,11 @@ fn lower_host_expr_kind(
                         bindings.push(host_binding);
                     }
                     bind_host_local(&mut scoped, name.to_string(), bind_ty);
+                    if let Some(value) = builtin_value {
+                        tensor_helpers.builtin_values.insert(name.to_owned(), value);
+                    } else {
+                        tensor_helpers.builtin_values.remove(name);
+                    }
                 }
             }
             if let Some(target) = forwarding.as_mut() {
@@ -9015,6 +9159,10 @@ fn lower_host_expr_kind(
                     },
                 })
             }
+                })
+            })();
+            tensor_helpers.builtin_values = caller_values;
+            lowered?
         }
         Expr::Node(list, _) if list.tag() == DeepTag::TupleGet => {
             lower_tuple_get_host_expr(expr, list, program, scope, tensor_helpers)?
@@ -12122,7 +12270,7 @@ fn resolve_list_grad_shape_expr(
             }
         }
         if let Some(inlined) = beta_reduce_inline_host_call(&resolved)
-            .or_else(|| inline_top_level_host_call(&resolved, program, scope))
+            .or_else(|| reduce_named_host_call_for_shape_evidence(&resolved, program, scope))
         {
             resolved = inlined;
             continue;
@@ -14003,7 +14151,7 @@ fn lower_app_host_expr(
     match callee::resolve_application(
         name,
         scope,
-        &cached_checked_builtin_callables(program),
+        &cached_resolved_builtin_values(program),
         has_definition,
     ) {
         callee::ResolvedHostApplication::Closed(operation) => lower_closed_host_application(
@@ -14039,6 +14187,47 @@ fn lower_app_host_expr(
 /// Closed identity is fixed before lane selection. Tensor applications enter
 /// the same claim-aware helper owner as direct operations; only actual host
 /// operands/callbacks retain the host operation and its exact result relation.
+fn resolve_host_builtin_value(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    helpers: &TensorHelperSink,
+) -> Result<Option<StaticBuiltinValue>, crate::lower::LowerDiagnostic> {
+    if let Some((DeepTag::Var, _, children)) = stamped_parts(expr)
+        && let Some(name) = children.first().and_then(symbol_name)
+        && scope.contains_key(name)
+        && !helpers.builtin_values.contains_key(name)
+    {
+        return Ok(None);
+    }
+    let mut value = if let Some((DeepTag::Copy, _, children)) = stamped_parts(expr) {
+        let [actual] = children else {
+            return Err(host_expr_lowering_error(
+                expr,
+                "checked callable Copy lacks its single value",
+            ));
+        };
+        resolve_host_builtin_value(actual, program, scope, helpers)?
+    } else {
+        cached_subexpr_lowering_context(program)
+            .with_builtin_values(helpers.builtin_values.clone())
+            .builtin_value(expr)
+            .map_err(|message| host_expr_lowering_error(expr, message))?
+    };
+    if let Some((_, metadata, _)) = stamped_parts(expr)
+        && metadata.surf_binding_type().is_some_and(|origin| {
+            *origin.value() == chelis_deep::annotations::BindingTypeOrigin::Explicit
+        })
+        && let Some(authored) = metadata.ty().map(|ty| ty.expression())
+        && let Some(contract) = callable_formal_contract(program, authored)
+            .map_err(|message| host_expr_lowering_error(expr, message))?
+        && let Some(value) = &mut value
+    {
+        value.retain_outer_contract(contract);
+    }
+    Ok(value)
+}
+
 fn lower_closed_host_application(
     app_expr: &Expr,
     list: &Node,
@@ -14053,10 +14242,27 @@ fn lower_closed_host_application(
         .filter(|_| checked_ty.is_unresolved())
         .cloned()
         .unwrap_or(checked_ty);
-    if let CheckedBuiltinCallable::FloatClassify(_) = operation
-        && let HostTypeTerm::Tensor(tensor_ty) = &expected
+    let numeric_owner =
+        chelis_types::AdmittedBuiltin::resolve(operation.symbol()).is_some_and(|token| {
+            token.declaration().realizability != chelis_types::Realizability::HostOnly
+                && token
+                    .declaration()
+                    .capability
+                    .domains
+                    .contains(&chelis_types::BuiltinSemanticDomain::Numeric)
+        });
+    if let HostTypeTerm::Tensor(tensor_ty) = &expected
+        && numeric_owner
         && !should_keep_tensor_expr_in_host_lane(app_expr)
     {
+        let value =
+            resolve_host_builtin_value(&list.children_slice()[0], program, scope, tensor_helpers)?
+                .ok_or_else(|| {
+                    host_expr_lowering_error(
+                        app_expr,
+                        "chelis#879: static builtin application lacks its checked invocation value",
+                    )
+                })?;
         let (helper, helper_scope, bindings) = hoist_host_lane_tensor_bindings(
             app_expr,
             program,
@@ -14072,7 +14278,7 @@ fn lower_closed_host_application(
             tensor_helpers,
             tensor_ty.clone(),
             None,
-            Some(operation),
+            Some(value),
         ) {
             if bindings.is_empty() {
                 return Ok(value);
@@ -14084,6 +14290,117 @@ fn lower_closed_host_application(
                 ty,
             }));
         }
+    }
+    // Host-only consumers owe the same whole invocation frames as tensor
+    // helpers. Reify them through the existing retained invocation owner;
+    // an identity-only HostExpr::Builtin is legal only for a bare value.
+    let value =
+        resolve_host_builtin_value(&list.children_slice()[0], program, scope, tensor_helpers)?
+            .ok_or_else(|| {
+                host_expr_lowering_error(
+                    app_expr,
+                    "chelis#879: static builtin application lacks its checked invocation value",
+                )
+            })?;
+    if let Some((contract, remaining)) = value.split_outer_contract() {
+        let mut reserved = scope
+            .to_sorted()
+            .into_iter()
+            .map(|(name, _)| name.clone())
+            .collect::<UnordSet<_>>();
+        collect_deep_var_names(app_expr, &mut reserved);
+        let mut serial = 0;
+        let remaining_name = loop {
+            let name = format!("__chelis_closed_builtin_{serial}");
+            if reserved.insert(name.clone()) {
+                break name;
+            }
+            serial += 1;
+        };
+        let mut local_scope = scope.clone();
+        bind_host_local(
+            &mut local_scope,
+            remaining_name.clone(),
+            HostTypeTerm::CheckedBuiltinCallable(remaining.checked_identity()),
+        );
+        let actual = Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(
+                Atom::Name(remaining_name.clone()),
+                app_expr.span(),
+            )],
+            app_expr.span(),
+        );
+        let formal = decode_host_type(contract.signature())
+            .map_err(|error| host_expr_lowering_error(app_expr, error.to_string()))?;
+        let adapter = retain_callable_invocation_contract(
+            &actual,
+            &formal,
+            &contract,
+            0,
+            &mut reserved,
+            app_expr.span(),
+        )
+        .map_err(|error| host_expr_lowering_error(app_expr, error))?;
+        let function = as_node(&adapter).expect("retained callable adapter");
+        let declarations = as_node(&function.children_slice()[0]).expect("adapter parameters");
+        let body = &function.children_slice()[1];
+        let params = declarations
+            .children_slice()
+            .iter()
+            .map(|declaration| {
+                Ok(HostParam {
+                    name: param_name(declaration).ok_or_else(|| {
+                        host_expr_lowering_error(app_expr, "retained builtin formal lacks its name")
+                    })?,
+                    ty: param_host_type(declaration).ok_or_else(|| {
+                        host_expr_lowering_error(
+                            app_expr,
+                            "retained builtin formal lacks its checked type",
+                        )
+                    })?,
+                })
+            })
+            .collect::<Result<Vec<_>, crate::lower::LowerDiagnostic>>()?;
+        let (authored, result) = parse_fn_type_expr_parts(contract.signature())
+            .expect("normalized complete invocation signature");
+        let mut invocation = RetainedHostInvocation::new(&params, body);
+        invocation.entry_claims = formal_nested_claims(program, authored.iter().map(Some), &params)
+            .map_err(|error| claim_pattern_refusal(app_expr, error))?;
+        invocation.callable_contracts = authored
+            .iter()
+            .map(|formal| callable_formal_contract(program, formal))
+            .collect::<Result<_, _>>()
+            .map_err(|error| claim_pattern_refusal(app_expr, error))?;
+        let nested = nested_claim_pattern(program, &result)
+            .map_err(|error| claim_pattern_refusal(app_expr, error))?;
+        let result_type = decode_host_type(&result)
+            .map_err(|error| host_expr_lowering_error(app_expr, error.to_string()))?;
+        let tensor_result = match result_type {
+            HostTypeTerm::Tensor(ref tensor) => Some(tensor),
+            _ => None,
+        };
+        let saved = tensor_helpers.builtin_values.clone();
+        tensor_helpers
+            .builtin_values
+            .insert(remaining_name, remaining);
+        let lowered = lower_retained_host_invocation(
+            app_expr,
+            invocation,
+            Some(&expected),
+            program,
+            &local_scope,
+            tensor_helpers,
+            RetainedHostPreparation::default(),
+        );
+        tensor_helpers.builtin_values = saved;
+        return retain_nested_result_claim(
+            retain_actualized_result_claim(lowered?, tensor_result),
+            nested.as_ref(),
+            &params,
+            app_expr,
+        );
     }
     let args = list.children_slice()[1..]
         .iter()
@@ -14188,11 +14505,6 @@ fn lower_program_host_app(
         .and_then(host_fn_signature)
         .or_else(|| lookup_declared_fn_type(program, &name))
         .or_else(|| kids.first().and_then(expr_fn_type));
-    // Result claims belong to the callee's authored declaration. Keep that
-    // source separate from `fn_sig`: lexical and application metadata may
-    // carry an inferred/specialized result shape that must not manufacture a
-    // declaration-site obligation.
-    let declared_fn_sig = lookup_declared_fn_type(program, &name);
     // Ordinary lexical lookup precedes builtin callable routes. A
     // function-typed parameter named `round_to` or `map` is a call through
     // that parameter, not a builtin selected by spelling
@@ -14278,12 +14590,6 @@ fn lower_program_host_app(
             },
         }));
     }
-    // chelis#935/#936: specialize these bounded generic forms before any
-    // helper-summary probe attempts to lower their standalone generic body.
-    // The checked application metadata is the authoritative applied result
-    // type; source-level reconstruction is neither needed nor allowed.
-    let callee_is_nullary_generic_constructor_wrapper =
-        top_level_fn_is_nullary_generic_constructor_wrapper(program, &name);
     // Precision and rank polymorphism have dedicated tensor-aware
     // specialization paths below. A nested rank parameter also appears as a
     // stored ADT type variable, so the broad ordinary-generic predicate must
@@ -14295,39 +14601,6 @@ fn lower_program_host_app(
         .as_ref()
         .is_some_and(crate::lower::type_expr_has_rank_var)
         || top_level_fn_is_nested_rank_polymorphic(program, &name);
-    // chelis#1201: a NON-recursive ordinary-generic call is no longer
-    // inlined. Value-level inlining substitutes the argument expression over
-    // the parameter name and drops the parameter's declared type, so any
-    // generic-ADT term whose instantiation is only recoverable from those
-    // annotations reached lowering unresolved. Such a call now falls through
-    // to the same bounded monomorphization the recursive path uses, which
-    // keys on the checked type application instead of pasting syntax.
-    if callee_is_nullary_generic_constructor_wrapper
-        && let Some(specialized) = inline_top_level_host_call(app_expr, program, scope)
-    {
-        let pushed = push_inlining(&name, Some(app_expr));
-        let definitions = adt_constructor_definitions(program);
-        let specialized_ty =
-            canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
-        let lowered = lower_host_expr_with_expected(
-            &specialized,
-            program,
-            scope,
-            tensor_helpers,
-            (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
-        )
-        .map(|body| {
-            if specialized_ty.is_unresolved() {
-                body
-            } else {
-                force_host_expr_type(body, specialized_ty.clone())
-            }
-        });
-        if pushed {
-            pop_inlining(&name);
-        }
-        return lowered;
-    }
     if active_compiler_name == Some("Cons")
         && kids.len() == 3
         && let Some(items) = lower_list_literal_items(app_expr, program, scope, tensor_helpers)?
@@ -14745,26 +15018,6 @@ fn lower_program_host_app(
             ty,
         }));
     }
-    if let Some(tensor_ty) = helper_tensor_ty.clone()
-        && !callee_is_local_callable
-        && !has_callable_params
-        && !callee_has_stages
-        && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
-        && !helper_summary_rejects
-        && !reaches_list_entry
-        && !should_keep_tensor_expr_in_host_lane(app_expr)
-        && let Some(specialized) = inline_top_level_host_call(app_expr, program, scope)
-    {
-        let pushed = push_inlining(&name, Some(app_expr));
-        let lowered =
-            try_lower_tensor_helper_call(&specialized, program, scope, tensor_helpers, tensor_ty);
-        if pushed {
-            pop_inlining(&name);
-        }
-        if let Some(tensor_call) = lowered {
-            return Ok(tensor_call);
-        }
-    }
     // [04-TOT-2]: a checked tensor builtin runs in the tensor execution lane.
     // When an operand holds work that lane cannot represent, such as a
     // helper call beneath `sum` or a List `index` used as an `insert` size,
@@ -14773,7 +15026,7 @@ fn lower_program_host_app(
     // builtin over those typed values. The retry is accepted only when its
     // tensor DAG actually lowers. Elementwise operations already covered by
     // the C host loop keep that route (chelis#2734).
-    if let Some(tensor_ty) = helper_tensor_ty
+    if let Some(tensor_ty) = helper_tensor_ty.clone()
         && callee_is_builtin
         && (matches!(name.as_str(), "sum" | "insert")
             || (elementwise_function_of_operands(&name)
@@ -14820,38 +15073,68 @@ fn lower_program_host_app(
             }));
         }
     }
-    // WS-A8: if the callee is a polymorphic-precision sig, the host
-    // emitter elided its standalone definition (per the
-    // `type_expr_has_precision_var` skip in `lower_host_program`).
-    // Calling such a name in C produces an undefined-symbol link
-    // error; the only legal lowering is to inline the body at the
-    // call site so the precision is supplied from the call's
-    // concrete arg types. Force inlining for this case.
-    // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): the exact
-    // analogue of the precision case above. The host emitter elided the
-    // rank-poly callee's standalone definition (per the `type_expr_has_rank_var`
-    // skip in `lower_host_program`); calling such a name in C is an
-    // undefined-symbol link error. The only legal lowering is to inline the
-    // body at the call site so the rank var is monomorphized from the call's
-    // concrete arg shapes (via the DAG `tensor_rank_substitutions` path).
-    // chelis#935: a generic host function has no standalone C symbol.
-    // Inline it at a checked call site and materialize the application's
-    // concrete result type onto the specialized body. This is the ordinary
-    // type-variable analogue of the precision/rank specialization paths
-    // below, kept separate so those tensor-specific paths retain their own
-    // lowering rules.
-    if callee_is_polymorphic_precision || callee_is_polymorphic_rank {
+    // Representation and admission use the complete checker-owned signature
+    // of the resolved declaration. An authored partial signature may still
+    // contain its return inference hole; that hole is neither a generic ABI
+    // nor a reason to discard the checker's concrete result. The callable
+    // owner below continues to derive obligations from the authored syntax.
+    let checked_named_signature = program.checked_function_signature(&name);
+    let checked_named_fn_type = checked_named_signature
+        .map(type_to_deep_expr)
+        .as_ref()
+        .and_then(|ty| parse_expanded_fn_type_expr(program, ty));
+    let prepared_tensor_ty = helper_tensor_ty.clone().or_else(|| {
+        checked_named_fn_type.as_ref().and_then(|(_, result)| {
+            if let HostTypeTerm::Tensor(tensor) = result {
+                Some(tensor.clone())
+            } else {
+                None
+            }
+        })
+    });
+    // A standalone List ABI carries no closed producer geometry. Request
+    // the complete call owner over its actual formed values, rather than
+    // extracting an executable body or treating a definition summary as
+    // call-site evidence. Unknown/effectful List values keep host execution.
+    if let Some(tensor_ty) = prepared_tensor_ty
+        && !callee_is_builtin
+        && !callee_is_local_callable
+        && !has_callable_params
+        && checked_named_fn_type
+            .as_ref()
+            .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostTypeTerm::List(_))))
+        && !callee_has_stages
+        && !callee_is_polymorphic_precision
+        && !callee_is_polymorphic_rank
+        && !checked_named_signature.is_some_and(|signature| {
+            checker_type_has_stored_variable(
+                signature,
+                program.adt_registry(),
+                &mut UnordSet::new(),
+            )
+        })
+        && !top_level_fn_is_nested_rank_polymorphic(program, &name)
+        && !def_effect_row_forbids_kernel(program, &name)
+        && !reaches_list_entry
+        && !should_keep_tensor_expr_in_host_lane(app_expr)
+        && let Some(call) = try_lower_prepared_named_call_helper(
+            app_expr,
+            program,
+            scope,
+            tensor_helpers,
+            tensor_ty,
+        )
+    {
+        return Ok(call);
+    }
+    // A whole-call helper consumes the resolved declaration and its full
+    // contract. If that lowering is unavailable, the retained invocation
+    // owns specialization before the body can be consumed. Reducing only
+    // the body here would erase entry/result obligations (chelis#3629).
+    if has_callable_params || callee_is_polymorphic_precision || callee_is_polymorphic_rank {
         let definitions = adt_constructor_definitions(program);
         let specialized_ty =
             canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
-        // chelis#2152: compute the inlined body's checked substitution while
-        // the caller map is active, but do not activate it while payload
-        // actuals are prepared. The retained path completes this map from the
-        // prepared values and scopes it only around the callee body. A
-        // recursive form that cannot retain its boundary still uses this
-        // legacy substitution around the fallback body below.
-        let fallback_substitution =
-            inline_call_type_subst(&name, &kids[1..], &explicit_ty, program, scope);
         if let Some((retained, result_claim)) = lower_named_retained_host_invocation(
             app_expr,
             &name,
@@ -14866,82 +15149,11 @@ fn lower_program_host_app(
                 result_claim.as_ref(),
             ));
         }
-        // Recursive polymorphic forms cannot retain an inline body. Preserve
-        // the existing bounded-specialization/fail-closed fallthrough below.
-        if let Some(specialized) = inline_top_level_host_call(app_expr, program, scope) {
-            let _subst_guard = ActiveTypeSubstGuard::push(fallback_substitution);
-            let pushed = push_inlining(&name, Some(app_expr));
-            let lowered = lower_host_expr_with_expected(
-                &specialized,
-                program,
-                scope,
-                tensor_helpers,
-                (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
-            );
-            if pushed {
-                pop_inlining(&name);
-            }
-            return lowered;
-        }
     }
-    if has_callable_params
-        && let Some((retained, _)) = lower_named_retained_host_invocation(
-            app_expr,
-            &name,
-            &explicit_ty,
-            program,
-            scope,
-            tensor_helpers,
-            true,
-        )?
-    {
-        return Ok(retain_inlined_result_claim(
-            retained,
-            declared_fn_sig.as_ref(),
-        ));
-    }
-    if has_callable_params
-        && let Some(specialized) = inline_top_level_host_call(app_expr, program, scope)
-    {
-        let pushed = push_inlining(&name, Some(app_expr));
-        // PR #1215 review: thread the call's checked result type through the
-        // inlined body exactly as the precision/rank inline path above does.
-        // Plain lowering dropped it, so a generic ADT constructor in a
-        // callable-parameter callee's body — whose instantiation is only
-        // recoverable from the call-site result type — stayed unresolved and
-        // failed closed (`apply[a](f: (a) -> a, x: a) -> Box[a]`).
-        let definitions = adt_constructor_definitions(program);
-        let specialized_ty =
-            canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
-        let lowered = lower_host_expr_with_expected(
-            &specialized,
-            program,
-            scope,
-            tensor_helpers,
-            (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
-        );
-        if pushed {
-            pop_inlining(&name);
-        }
-        return lowered.map(|body| retain_inlined_result_claim(body, declared_fn_sig.as_ref()));
-    }
-    // chelis#1158: a recursive ordinary-generic function has no standalone
-    // C symbol and cannot be inlined (the call graph has a cycle). Compile
-    // it through bounded memoized monomorphization: one specialized
-    // definition per distinct checked type application, recursive edges
-    // preserved as calls to the owning specialized symbol. A call whose
-    // instantiation never resolves stays on the fail-closed [05-UNS]
-    // boundary below.
-    // chelis#1216: the same reasoning covers a recursive function generic
-    // over an ERASED ADT dimension (chelis#940's `Frame[n] -> Column[n] ->
-    // tensor[n, _]` shape). Its standalone definition is elided exactly like
-    // the rank-polymorphic case above, and the inline path that would
-    // normally specialize it refuses on the recursive edge, so without this
-    // the call falls through to a plain call to a symbol that was never
-    // emitted, carrying the ADT's own unresolved parameter variable. A true
-    // rank variable is deliberately NOT routed here: variable rank is
-    // monomorphized through the DAG `tensor_rank_substitutions` path, not by
-    // specializing on a checked type application.
+    // Ordinary generics retain the existing bounded, memoized typed callee
+    // boundary. This includes nullary wrappers whose checked result fixes
+    // their instantiation. Concrete non-generic calls keep their typed ABI
+    // entry below; neither route substitutes an executable body-only Expr.
     if top_level_fn_is_type_polymorphic(program, &name)
         || top_level_fn_is_nested_rank_polymorphic(program, &name)
     {
@@ -15603,10 +15815,11 @@ struct RetainedHostPreparation {
 /// Callee-owned authority starts after caller payload preparation and ends
 /// before the enclosing lowering resumes. All exits restore the caller frame.
 struct RetainedBodyLoweringAuthority {
-    declaration: String,
+    declaration: Option<String>,
     substitutions: Option<UnordMap<String, HostTypeTerm>>,
     dimensions: Option<UnordMap<String, DimInfo>>,
     specialization: Option<crate::lower::TensorCallsiteSpecialization>,
+    builtin_values: BTreeMap<String, StaticBuiltinValue>,
 }
 
 impl RetainedBodyLoweringAuthority {
@@ -15617,7 +15830,8 @@ impl RetainedBodyLoweringAuthority {
     ) -> R {
         let _types = self.substitutions.map(ActiveTypeSubstGuard::push);
         let _dimensions = self.dimensions.map(ActiveDimSubstGuard::push);
-        let caller = sink.declaration_name.replace(self.declaration);
+        let caller = std::mem::replace(&mut sink.declaration_name, self.declaration);
+        let caller_values = std::mem::replace(&mut sink.builtin_values, self.builtin_values);
         let depth = sink.tensor_specializations.len();
         if let Some(specialization) = self.specialization {
             sink.tensor_specializations.push(specialization);
@@ -15625,6 +15839,7 @@ impl RetainedBodyLoweringAuthority {
         let result = lower(sink);
         sink.tensor_specializations.truncate(depth);
         sink.declaration_name = caller;
+        sink.builtin_values = caller_values;
         result
     }
 }
@@ -15700,12 +15915,10 @@ fn actualize_retained_host_contract(
     // same actuals. Never merge this map into the active caller substitution:
     // a raw authored name such as `p` is not globally unique.
     let active_substitution = active_type_subst();
-    // `inline_call_type_subst` runs before effectful payload expressions have
-    // been lowered and can therefore see an unresolved block type. Complete
-    // the callee's checked namespace from the once-prepared actual types. The
-    // map begins with the caller bindings because substituted caller
-    // expressions still carry that namespace; checked callee identities are
-    // alpha-renamed and add only their own missing entries.
+    // Complete the callee's checked namespace from once-prepared actual
+    // types, including effectful block actuals. Caller substitutions remain
+    // separately in force because substituted caller expressions still name
+    // that namespace; checked callee identities are alpha-renamed.
     let mut checked_substitution = UnordMap::new();
     for (checked, actual) in checked_formals.iter().zip(actual_types) {
         if let Some(checked_term) = decode_expanded_host_type_expr(program, checked) {
@@ -16240,13 +16453,12 @@ struct RetainedHostInvocation<'a> {
     body: &'a Expr,
     contract: EntryContract<HostTypeTerm>,
     entry: SignatureEntryPlan,
-    callable_entries: Vec<bool>,
     name: Option<&'a str>,
     /// Per formal, the nested claim of its authored type (C6.5).
     entry_claims: Vec<Option<Arc<crate::claim_pattern::ClaimPattern>>>,
     /// Per formal, the authored parameter types of a function-typed formal
     /// whose parameters nest claims (C6.5).
-    callable_claims: Vec<Option<Vec<Expr>>>,
+    callable_contracts: Vec<Option<NormalizedCallableContract>>,
 }
 
 impl<'a> RetainedHostInvocation<'a> {
@@ -16261,55 +16473,14 @@ impl<'a> RetainedHostInvocation<'a> {
                 ty: ty.clone(),
             })
         }));
-        let callable_entries = params
-            .iter()
-            .map(|param| {
-                let HostTypeTerm::Fn(param_tys, result) = &param.ty else {
-                    return false;
-                };
-                let formals = param_tys
-                    .iter()
-                    .enumerate()
-                    .map(|(index, ty)| HostParam {
-                        name: format!("arg{index}"),
-                        ty: ty.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                let contract = EntryContract::from_params(&formals);
-                let entry = SignatureEntryPlan::new(param_tys.iter().enumerate().filter_map(
-                    |(index, ty)| {
-                        let HostTypeTerm::Tensor(ty) = ty else {
-                            return None;
-                        };
-                        Some(HostTensorInput {
-                            name: format!("arg{index}"),
-                            ty: ty.clone(),
-                        })
-                    },
-                ));
-                let named_result = match result.as_ref() {
-                    HostTypeTerm::Tensor(tensor) => tensor.dims.iter().any(|dim| {
-                        matches!(dim, DimInfo::Named(name, _) if contract.binders().contains(name))
-                    }),
-                    _ => false,
-                };
-                named_result
-                    || contract.formals().iter().any(|formal| {
-                        matches!(formal.pattern(), EntryPattern::List(_))
-                            && formal.pattern().has_extent_claim()
-                    })
-                    || !entry.guards().is_empty()
-            })
-            .collect();
         Self {
             params,
             body,
             contract,
             entry,
-            callable_entries,
             name: None,
             entry_claims: Vec::new(),
-            callable_claims: Vec::new(),
+            callable_contracts: vec![None; params.len()],
         }
     }
 }
@@ -16483,25 +16654,170 @@ fn host_type_syntax(ty: &HostTypeTerm, span: chelis_deep::Span) -> Option<Expr> 
     }
 }
 
-/// Reify a higher-order formal's entry contract around its supplied callable.
+/// Actualize only executable type/binder syntax while retaining the complete
+/// authored frame, including borrow wrappers, effects and source annotations.
+fn actualize_callable_invocation_contract(
+    contract: &NormalizedCallableContract,
+    formal: &HostTypeTerm,
+) -> Result<NormalizedCallableContract, String> {
+    fn attach_child_provenance(authored: &Expr, actualized: &Expr) -> Result<Expr, String> {
+        if let Expr::MetaExpr(meta, span) = authored {
+            return Ok(Expr::MetaExpr(
+                chelis_deep::ast::MetaExpr {
+                    metadata: meta.metadata.clone(),
+                    expr: Box::new(attach_child_provenance(&meta.expr, actualized)?),
+                },
+                *span,
+            ));
+        }
+        match (stamped_parts(authored), stamped_parts(actualized)) {
+            (Some((_, metadata, original)), Some((tag, _, realized)))
+                if original.len() == realized.len() =>
+            {
+                Ok(Expr::node(
+                    tag,
+                    metadata.clone(),
+                    original
+                        .iter()
+                        .zip(realized)
+                        .map(|(source, value)| attach_child_provenance(source, value))
+                        .collect::<Result<_, _>>()?,
+                    authored.span(),
+                ))
+            }
+            (None, None) => match (authored, actualized) {
+                (Expr::Atom(_, span), Expr::Atom(value, _)) => Ok(Expr::Atom(value.clone(), *span)),
+                _ => Err("tensor child provenance lost its checked syntax carrier".into()),
+            },
+            _ => Err("tensor child provenance lost structural correspondence".into()),
+        }
+    }
+
+    fn retain_metadata(authored: &Expr, actualized: &Expr) -> Result<Expr, String> {
+        if let Expr::MetaExpr(meta, span) = authored {
+            return Ok(Expr::MetaExpr(
+                chelis_deep::ast::MetaExpr {
+                    metadata: meta.metadata.clone(),
+                    expr: Box::new(retain_metadata(&meta.expr, actualized)?),
+                },
+                *span,
+            ));
+        }
+        let Some((tag, metadata, children)) = stamped_parts(authored) else {
+            return if matches!((authored, actualized), (Expr::Atom(left, _), Expr::Atom(right, _)) if left == right)
+            {
+                Ok(authored.clone())
+            } else {
+                Err("callable actualization changed a concrete type identity".into())
+            };
+        };
+        if tag == DeepTag::TRef {
+            let [inner] = children else {
+                return Err("callable reference lost its checked member".into());
+            };
+            return Ok(Expr::node(
+                tag,
+                metadata.clone(),
+                vec![retain_metadata(inner, actualized)?],
+                authored.span(),
+            ));
+        }
+        let Some((actualized_tag, _, actualized_children)) = stamped_parts(actualized) else {
+            return Err("callable actualization lost checked type syntax".into());
+        };
+        if tag == DeepTag::TTensor {
+            let HostTypeTerm::Tensor(actualized_type) = decode_host_type(actualized)
+                .map_err(|error| format!("invalid actualized callable tensor: {error}"))?
+            else {
+                // A still-generic invocation keeps its unresolved contract;
+                // the concrete lowering boundary owns the loud refusal.
+                if tag == actualized_tag && children == actualized_children {
+                    return Ok(authored.clone());
+                }
+                return Err(
+                    "callable tensor contract has no complete rank/precision actualization".into(),
+                );
+            };
+            let tensors = [Some(authored.clone())];
+            let specialization = crate::lower::tensor_callsite_specialization(
+                &tensors,
+                &tensors,
+                &[actualized_type],
+            )?;
+            let result = specialization.actualize_authored_tensor(authored)?;
+            let origins = specialization.authored_tensor_child_origins(authored)?;
+            let realized = host_type_syntax(&HostTypeTerm::Tensor(result), authored.span())
+                .ok_or_else(|| "actualized callable tensor cannot be reified".to_owned())?;
+            let (_, _, realized_children) = stamped_parts(&realized).expect("reified tensor");
+            if origins.len() != realized_children.len() {
+                return Err("tensor actualization lost source-child alignment".into());
+            }
+            let actualized_children = origins
+                .into_iter()
+                .zip(realized_children)
+                .map(|(origin, value)| {
+                    let source = children.get(origin).ok_or_else(|| {
+                        "tensor provenance refers outside its authored carrier".to_owned()
+                    })?;
+                    attach_child_provenance(source, value)
+                })
+                .collect::<Result<_, _>>()?;
+            return Ok(Expr::node(
+                tag,
+                metadata.clone(),
+                actualized_children,
+                authored.span(),
+            ));
+        }
+        if tag == DeepTag::TVar {
+            return Ok(Expr::node(
+                actualized_tag,
+                metadata.clone(),
+                actualized_children.to_vec(),
+                authored.span(),
+            ));
+        }
+        if tag != actualized_tag || children.len() != actualized_children.len() {
+            return Err("callable actualization lost positional type alignment".into());
+        }
+        Ok(Expr::node(
+            tag,
+            metadata.clone(),
+            children
+                .iter()
+                .zip(actualized_children)
+                .map(|(authored, actualized)| retain_metadata(authored, actualized))
+                .collect::<Result<_, _>>()?,
+            authored.span(),
+        ))
+    }
+    let realized = host_type_syntax(formal, contract.signature().span())
+        .ok_or_else(|| "callable formal has no checked executable type syntax".to_owned())?;
+    contract.with_executable_signature(retain_metadata(contract.signature(), &realized)?)
+}
+
+/// Reify a higher-order formal's whole invocation contract around its callable.
 ///
 /// The actual stays the adapter body's callee, so its own declaration still
 /// governs its body. The adapter carries the formal type which specialization
 /// would otherwise erase; ordinary inline-invocation lowering then evaluates
 /// payload actuals once, executes this formal entry plan, and only then calls
-/// the supplied function. A formal with no executable entry obligation needs
-/// no adapter.
-fn retain_callable_entry_contract(
+/// the supplied function. Result-only obligations survive even when entry
+/// produces no guards; wildcard contracts do not manufacture entry proofs.
+fn retain_callable_invocation_contract(
     actual: &Expr,
     formal: &HostTypeTerm,
-    authored: Option<&[Expr]>,
+    contract: &NormalizedCallableContract,
     formal_index: usize,
     reserved: &mut UnordSet<String>,
     span: chelis_deep::Span,
-) -> Expr {
+) -> Result<Expr, String> {
     let HostTypeTerm::Fn(param_tys, _) = formal else {
-        return actual.clone();
+        return Err("a callable invocation contract requires a function formal".into());
     };
+    let contract = actualize_callable_invocation_contract(contract, formal)?;
+    let (authored, result) = parse_fn_type_expr_parts(contract.signature())
+        .expect("normalized whole callable signature");
     let mut param_names = Vec::with_capacity(param_tys.len());
     for param_index in 0..param_tys.len() {
         let mut serial = 0;
@@ -16526,7 +16842,7 @@ fn retain_callable_entry_contract(
             // The authored parameter type keeps a nominal type's dimension
             // arguments, which the adapter's entry then claims.
             let type_syntax = authored
-                .and_then(|authored| authored.get(index))
+                .get(index)
                 .cloned()
                 .or_else(|| host_type_syntax(ty, span));
             Expr::BareList(
@@ -16549,23 +16865,20 @@ fn retain_callable_entry_contract(
             span,
         )
     }));
-    let ret_syntax = match formal {
-        HostTypeTerm::Fn(_, ret) => host_type_syntax(ret, span),
-        _ => None,
-    };
+    let ret_syntax = Some(result);
     let body = typed_host_syntax_node(
         DeepTag::App,
         callable_type_metadata(ret_syntax.as_ref()),
         call_children,
         span,
     );
-    let fn_syntax = host_type_syntax(formal, span);
-    typed_host_syntax_node(
+    let fn_syntax = Some(contract.signature().clone());
+    Ok(typed_host_syntax_node(
         DeepTag::Fn,
         callable_type_metadata(fn_syntax.as_ref()),
         vec![params, body],
         span,
-    )
+    ))
 }
 
 /// Executable beta reduction first retains actual evaluation and the lambda's
@@ -16642,6 +16955,17 @@ fn lower_inline_host_invocation(
     invocation.entry_claims =
         formal_nested_claims(program, declared.iter().map(Option::as_ref), &params)
             .map_err(|error| claim_pattern_refusal(expr, format!("lambda formal: {error}")))?;
+    invocation.callable_contracts = declared
+        .iter()
+        .map(|authored| {
+            authored
+                .as_ref()
+                .map(|authored| callable_formal_contract(program, authored))
+                .transpose()
+                .map(Option::flatten)
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|error| claim_pattern_refusal(expr, format!("lambda callable formal: {error}")))?;
     lower_retained_host_invocation(
         expr,
         invocation,
@@ -16748,17 +17072,10 @@ fn lower_named_retained_host_invocation(
         .entry_claims
         .clone()
         .map_err(|error| claim_pattern_refusal(expr, format!("`{name}` formal: {error}")))?;
-    invocation.callable_claims = signature
-        .callable_claims
+    invocation.callable_contracts = signature
+        .callable_contracts
         .clone()
         .map_err(|error| claim_pattern_refusal(expr, format!("`{name}` formal: {error}")))?;
-    for (entry, claims) in invocation
-        .callable_entries
-        .iter_mut()
-        .zip(&invocation.callable_claims)
-    {
-        *entry |= claims.is_some();
-    }
     lower_retained_host_invocation(
         expr,
         invocation,
@@ -16769,10 +17086,11 @@ fn lower_named_retained_host_invocation(
         RetainedHostPreparation {
             actuals: prepared_actuals.take(),
             body_authority: Some(RetainedBodyLoweringAuthority {
-                declaration: canonical.to_owned(),
+                declaration: Some(canonical.to_owned()),
                 substitutions: actualize_polymorphic_contract.then_some(body_substitution),
                 dimensions: actualize_polymorphic_contract.then_some(body_dimensions),
                 specialization: actualize_polymorphic_contract.then_some(tensor_specialization),
+                builtin_values: tensor_helpers.builtin_values.clone(),
             }),
         },
     )
@@ -16801,7 +17119,16 @@ fn lower_retained_host_invocation(
     preparation: RetainedHostPreparation,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let mut prepared_actuals = preparation.actuals;
-    let body_authority = preparation.body_authority;
+    let mut body_authority =
+        preparation
+            .body_authority
+            .unwrap_or_else(|| RetainedBodyLoweringAuthority {
+                declaration: tensor_helpers.declaration_name.clone(),
+                substitutions: None,
+                dimensions: None,
+                specialization: None,
+                builtin_values: tensor_helpers.builtin_values.clone(),
+            });
     let Expr::Node(call, span) = expr else {
         return Err(host_expr_lowering_error(
             expr,
@@ -16836,28 +17163,54 @@ fn lower_retained_host_invocation(
     let mut observations = Vec::new();
     let mut observation_positions = Vec::new();
     let mut list_observations = Vec::new();
-    for (index, ((arg, formal), callable_entry)) in args
-        .iter()
-        .zip(invocation.params)
-        .zip(&invocation.callable_entries)
-        .enumerate()
-    {
-        if *callable_entry {
-            let authored = invocation
-                .callable_claims
-                .get(index)
-                .and_then(Option::as_deref);
-            substitutions.insert(
-                formal.name.clone(),
-                retain_callable_entry_contract(
-                    arg,
-                    &formal.ty,
-                    authored,
-                    index,
-                    &mut reserved,
-                    *span,
-                ),
-            );
+    let mut payload_slots = Vec::new();
+    for (index, (arg, formal)) in args.iter().zip(invocation.params).enumerate() {
+        if let Some(contract) = invocation
+            .callable_contracts
+            .get(index)
+            .and_then(Option::as_ref)
+        {
+            if let Some(value) = resolve_host_builtin_value(arg, program, scope, tensor_helpers)? {
+                let contract = actualize_callable_invocation_contract(contract, &formal.ty)
+                    .map_err(|error| host_expr_lowering_error(expr, error))?;
+                let value = value.with_outer_contract(contract.clone());
+                let mut serial = 0;
+                let fresh = loop {
+                    let fresh = format!("__chelis_retained_callable_{index}_{serial}");
+                    if reserved.insert(fresh.clone()) {
+                        break fresh;
+                    }
+                    serial += 1;
+                };
+                bind_host_local(
+                    &mut local_scope,
+                    fresh.clone(),
+                    HostTypeTerm::CheckedBuiltinCallable(value.checked_identity()),
+                );
+                body_authority.builtin_values.insert(fresh.clone(), value);
+                substitutions.insert(
+                    formal.name.clone(),
+                    Expr::node(
+                        DeepTag::Var,
+                        callable_type_metadata(Some(contract.signature())),
+                        vec![Expr::Atom(Atom::Name(fresh), *span)],
+                        *span,
+                    ),
+                );
+            } else {
+                substitutions.insert(
+                    formal.name.clone(),
+                    retain_callable_invocation_contract(
+                        arg,
+                        &formal.ty,
+                        contract,
+                        index,
+                        &mut reserved,
+                        *span,
+                    )
+                    .map_err(|error| host_expr_lowering_error(expr, error))?,
+                );
+            }
             continue;
         }
         if matches!(formal.ty, HostTypeTerm::Fn(..)) {
@@ -16931,7 +17284,10 @@ fn lower_retained_host_invocation(
             display_roots: Vec::new(),
             ty: ty.clone(),
             value: HostExpr::new(HostExprKind::FormalIngress {
-                value: Box::new(HostExpr::new(HostExprKind::Var(actual_local, ty.clone()))),
+                value: Box::new(HostExpr::new(HostExprKind::Var(
+                    actual_local.clone(),
+                    ty.clone(),
+                ))),
                 ty: ty.clone(),
             }),
         });
@@ -16960,6 +17316,9 @@ fn lower_retained_host_invocation(
                 claim: Some(claim.clone()),
             });
         }
+        // These identities were minted by this preparation owner; no
+        // spelling heuristic identifies staged payloads later.
+        payload_slots.push((actual_local, formal_local.clone()));
         substitutions.insert(
             formal.name.clone(),
             Expr::node(
@@ -17017,15 +17376,13 @@ fn lower_retained_host_invocation(
             expected.as_ref().filter(|ty| !ty.is_unresolved()),
         )
     };
-    let lowered = match body_authority {
-        Some(authority) => authority.enter(tensor_helpers, lower),
-        None => lower(tensor_helpers),
-    };
+    let lowered = body_authority.enter(tensor_helpers, lower);
     if pushed {
         pop_inlining(invocation.name.expect("named invocation"));
     }
     let body = lowered?;
     let ty = host_expr_type(&body);
+    let bindings = retain_prepared_payload_storage(bindings, &body, &payload_slots, program);
     Ok(HostExpr::new(HostExprKind::RetainedInvocation {
         bindings,
         body: Box::new(body),
@@ -17034,9 +17391,96 @@ fn lower_retained_host_invocation(
     }))
 }
 
-/// Substitute a top-level callee's body at a call site whose lexical scope is
-/// `scope`, or `None` when the callee must stay an ordinary call.
-fn inline_top_level_host_call(
+/// A checked zero-field constructor has no payload to store when its
+/// result is unobserved. Discard only terminal materialization; every
+/// existing prefix remains executable. No ADT argument is substituted.
+fn discard_unobserved_nullary_result(
+    expr: &HostExpr,
+    program: &HostLoweringSession<'_>,
+) -> Option<HostExpr> {
+    let kind = match &expr.kind {
+        HostExprKind::AdtConstruct { ctor, fields, ty } if fields.is_empty() => {
+            let definition = lookup_adt_constructor_definition(program, ctor)?;
+            if !definition.is_nullary() {
+                return None;
+            }
+            // The existing constructor owner validates identity and arity;
+            // only its payload-free unresolved arguments may survive here.
+            definition.instantiate_nullary_term(ty).ok()?;
+            HostExprKind::Unit
+        }
+        HostExprKind::Let { bindings, body, .. } => HostExprKind::Let {
+            bindings: bindings.clone(),
+            body: Box::new(discard_unobserved_nullary_result(body, program)?),
+            ty: HostTypeTerm::Unit,
+        },
+        HostExprKind::RetainedInvocation { bindings, body, .. } => {
+            HostExprKind::RetainedInvocation {
+                bindings: bindings.clone(),
+                body: Box::new(discard_unobserved_nullary_result(body, program)?),
+                ty: HostTypeTerm::Unit,
+            }
+        }
+        // Result/entry observations and unknown producers require their
+        // actual typed value. They cannot authorize a discard projection.
+        _ => return None,
+    };
+    Some(HostExpr {
+        kind,
+        span_id: expr.span_id.clone(),
+        merged_spans: expr.merged_spans.clone(),
+    })
+}
+
+/// Complete body and guard/List observation dependencies decide storage
+/// demand after all actuals have been prepared and the entry has been built.
+fn retain_prepared_payload_storage(
+    bindings: Vec<HostBinding>,
+    body: &HostExpr,
+    payload_slots: &[(String, String)],
+    program: &HostLoweringSession<'_>,
+) -> Vec<HostBinding> {
+    let mut candidates = BTreeMap::new();
+    let mut ingresses = BTreeMap::new();
+    for (actual, formal) in payload_slots {
+        let Some(binding) = bindings.iter().find(|binding| binding.name == *actual) else {
+            continue;
+        };
+        if let Some(discarded) = discard_unobserved_nullary_result(&binding.value, program) {
+            candidates.insert(actual.clone(), discarded);
+            ingresses.insert(formal.clone(), actual.clone());
+        }
+    }
+    let mut live = UnordSet::new();
+    collect_host_var_names(body, &mut live);
+    let mut retained = Vec::with_capacity(bindings.len());
+    for mut binding in bindings.into_iter().rev() {
+        if !live.contains(&binding.name) {
+            if let Some(actual) = ingresses.get(&binding.name)
+                && matches!(&binding.value.kind, HostExprKind::FormalIngress { value, .. }
+                    if matches!(&value.kind, HostExprKind::Var(name, _) if name == actual))
+            {
+                // An unobserved ingress is only a pure forwarding edge from
+                // this owner's payload-free prepared value.
+                continue;
+            }
+            if let Some(discarded) = candidates.remove(&binding.name) {
+                binding.ty = HostTypeTerm::Unit;
+                binding.value = discarded;
+            }
+        }
+        // Even unused bindings execute. Their prefix effects/traps and
+        // SignatureEntry's tensor/List observations retain dependencies.
+        collect_host_var_names(&binding.value, &mut live);
+        retained.push(binding);
+    }
+    retained.reverse();
+    retained
+}
+
+/// Reduce a named call for nonexecuting structural shape evidence. Executable
+/// lowering retains the named invocation boundary before consuming its body.
+fn reduce_named_host_call_for_shape_evidence(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
@@ -17284,37 +17728,26 @@ fn lower_recursive_generic_call(
         }));
     }
 
-    // PR #1215 review: a NON-recursive top-level call whose instantiation
-    // never resolves (`pick[a, b](x: a, y: Box[b]) -> a` applied to `Empty`
-    // — `b` unconstrained, the parameter untouched) has the
-    // pre-specialization lowering available: guarded value-level inlining,
-    // with the call's checked result type threaded through like every other
-    // inline path. Two gates keep this strictly a top-level-call fallback:
-    // inside an in-progress specialization the [04-INF-2] per-slot
-    // completion above owns the semantics and a mutually-recursive
-    // cross-member edge must stay on the fail-closed residue below; and the
-    // inlining stack bounds recursion — a recursive body re-entering here
-    // finds its own name, `inline_top_level_host_call` returns `None`, and
-    // the edge falls through to the residue.
+    // A nonrecursive underconstrained call may retain its complete
+    // invocation without a concrete monomorphization key. In-progress
+    // recursive instantiations still use the per-slot completion above and
+    // retain the existing fail-closed cross-edge rule.
     let specializing = MONO_SPECIALIZATIONS.with(|state| !state.borrow().in_progress.is_empty());
-    if !specializing && let Some(specialized) = inline_top_level_host_call(app_expr, program, scope)
-    {
-        let pushed_canonical = push_inlining(&canonical_name, Some(app_expr));
-        let pushed_spelled = name != canonical_name && push_inlining(name, Some(app_expr));
-        let lowered = lower_host_expr_with_expected(
-            &specialized,
+    if !specializing
+        && let Some((retained, result_claim)) = lower_named_retained_host_invocation(
+            app_expr,
+            name,
+            &ret_ty,
             program,
             scope,
             tensor_helpers,
-            (!ret_ty.is_unresolved()).then_some(&ret_ty),
-        );
-        if pushed_spelled {
-            pop_inlining(name);
-        }
-        if pushed_canonical {
-            pop_inlining(&canonical_name);
-        }
-        return lowered;
+            true,
+        )?
+    {
+        return Ok(retain_actualized_result_claim(
+            retained,
+            result_claim.as_ref(),
+        ));
     }
 
     // Fail-closed residue: no concrete checked instantiation to key a
@@ -17821,52 +18254,6 @@ fn lower_mono_specialized_function(
         },
         products,
     })
-}
-
-/// Whether `name` has the narrow chelis#935 specialization shape: a
-/// zero-argument type-polymorphic function whose body is exactly a nullary
-/// generic ADT constructor. Broader generic functions keep their existing
-/// lowering path; eagerly inlining those can expand recursive library code
-/// exponentially.
-fn top_level_fn_is_nullary_generic_constructor_wrapper(
-    program: &HostLoweringSession<'_>,
-    name: &str,
-) -> bool {
-    let Some((params, ret)) = lookup_declared_fn_type(program, name) else {
-        return false;
-    };
-    if !params.is_empty() || !ret.is_unresolved() {
-        return false;
-    }
-    let Some(body) = program.def_named(name).map(|(_, body)| body) else {
-        return false;
-    };
-    let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(body) else {
-        return false;
-    };
-    if fn_kids
-        .first()
-        .and_then(as_node)
-        .is_none_or(|params| params.tag() != DeepTag::Params || !params.children_slice().is_empty())
-    {
-        return false;
-    }
-    let mut constructor = fn_kids.get(1);
-    while let Some(Expr::MetaExpr(meta, _)) = constructor {
-        constructor = Some(&meta.expr);
-    }
-    let Some((DeepTag::Var, _, var_kids)) = constructor.and_then(stamped_parts) else {
-        return false;
-    };
-    let Some(ctor_name) = var_kids.first().and_then(symbol_name) else {
-        return false;
-    };
-    // Predicate disposition (chelis#1271): an ambiguous constructor name
-    // answers `false`, which only declines this narrow specialization.
-    // The wrapper's body still lowers through the bare-variable path,
-    // which rejects the same ambiguity, so the program fails closed.
-    lookup_adt_constructor_definition(program, ctor_name)
-        .is_some_and(|definition| !definition.parameters.is_empty() && definition.is_nullary())
 }
 
 /// Every name this expression REFERENCES, as a `(var {} name)` node
@@ -21025,18 +21412,18 @@ fn expr_contains_vmap_grad(expr: &Expr) -> bool {
     }
 }
 
-fn cached_checked_builtin_callables(
+fn cached_resolved_builtin_values(
     program: &HostLoweringSession<'_>,
-) -> Arc<BTreeMap<String, CheckedBuiltinCallable>> {
+) -> Arc<BTreeMap<String, StaticBuiltinValue>> {
     program_fact(
-        &program.facts.checked_builtin_callables,
-        program
-            .shared
-            .map(|shared| &shared.checked_builtin_callables),
+        &program.facts.resolved_builtin_values,
+        program.shared.map(|shared| &shared.resolved_builtin_values),
         || {
-            Arc::new(crate::lower::checked_builtin_callable_bindings(
-                &cached_program_defs(program),
-            ))
+            program_subexpr_lowering_context(program)
+                .resolved_builtin_values()
+                .unwrap_or_else(|message| {
+                    crate::lower::raise_fatal_lowering_error(message, None, None)
+                })
         },
     )
 }
@@ -21702,18 +22089,7 @@ pub(crate) fn expr_host_type(
 /// spelling. Exact identity wins; a terminal fallback is valid only when it
 /// identifies one alias, matching the other linked-name lookups in this lane.
 fn resolve_host_type_alias<'a>(registry: &'a AdtRegistry, name: &str) -> Option<&'a TypeAliasDef> {
-    if let Some(alias) = registry.resolve_alias(name) {
-        return Some(alias);
-    }
-    if registry.lookup(name).is_some() {
-        return None;
-    }
-    let mut matches = registry
-        .aliases
-        .iter()
-        .filter_map(|(key, alias)| terminal_name_matches(key, name).then_some(alias));
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
+    registry.resolve_alias_named(name).map(|(_, alias)| alias)
 }
 
 /// Normalize checker-owned nominal argument kinds and expand aliases before
@@ -22616,14 +22992,21 @@ fn decode_expanded_host_type_expr(
     program: &HostLoweringSession<'_>,
     expr: &Expr,
 ) -> Option<HostTypeTerm> {
+    decode_expanded_host_type_expr_in_registry(program.adt_registry(), expr)
+}
+
+fn decode_expanded_host_type_expr_in_registry(
+    registry: &AdtRegistry,
+    expr: &Expr,
+) -> Option<HostTypeTerm> {
     if let Expr::MetaExpr(meta, _) = expr {
-        return decode_expanded_host_type_expr(program, &meta.expr);
+        return decode_expanded_host_type_expr_in_registry(registry, &meta.expr);
     }
     if let Some((DeepTag::TAdt, _, children)) = stamped_parts(expr)
         && let Some((name, arguments)) = children
             .split_first()
             .and_then(|(name, arguments)| symbol_name(name).map(|name| (name, arguments)))
-        && let Some(alias) = resolve_host_type_alias(program.adt_registry(), name)
+        && let Some(alias) = resolve_host_type_alias(registry, name)
         && alias.params.len() == arguments.len()
     {
         let parameter_kinds = if alias.param_kinds.len() == alias.params.len() {
@@ -22643,7 +23026,7 @@ fn decode_expanded_host_type_expr(
                 NominalParamKind::Type => {
                     type_substitutions.insert(
                         parameter.clone(),
-                        decode_expanded_host_type_expr(program, argument)?,
+                        decode_expanded_host_type_expr_in_registry(registry, argument)?,
                     );
                 }
                 NominalParamKind::Dimension => {
@@ -22667,14 +23050,11 @@ fn decode_expanded_host_type_expr(
             })
             .collect::<UnordMap<_, _>>();
         let body = rename_host_type_variables(
-            decode_host_type(&type_to_deep_expr(
-                &program.adt_registry().expand_aliases(&alias.body),
-            ))
-            .ok()?,
+            decode_host_type(&type_to_deep_expr(&registry.expand_aliases(&alias.body))).ok()?,
             &checker_parameter_names,
         );
-        return Some(expand_host_type_aliases(
-            program,
+        return Some(normalize_host_type(
+            registry,
             substitute_host_dimension_terms(
                 substitute_host_type_term(body, &type_substitutions),
                 &dimension_substitutions,
@@ -22683,44 +23063,22 @@ fn decode_expanded_host_type_expr(
     }
     decode_host_type(expr)
         .ok()
-        .map(|term| expand_host_type_aliases(program, term))
+        .map(|term| normalize_host_type(registry, term))
 }
 
 impl HostLoweringSession<'_> {
-    /// The checker-validated alias normalization used by host lowering, made
-    /// available to Eval's signature-entry path. In particular a nominal
-    /// dimension argument keeps its authored binder after substitution.
+    /// Normalize authored aliases without erasing their dimension binders.
     pub fn normalized_authored_entry_type(&self, expr: &Expr) -> Result<Expr, String> {
-        fn contains_alias(program: &HostLoweringSession<'_>, expr: &Expr) -> bool {
-            match expr {
-                Expr::MetaExpr(meta, _) => contains_alias(program, &meta.expr),
-                Expr::Node(node, _) => {
-                    (node.tag() == DeepTag::TAdt
-                        && node
-                            .children_slice()
-                            .first()
-                            .and_then(symbol_name)
-                            .is_some_and(|name| {
-                                resolve_host_type_alias(program.adt_registry(), name).is_some()
-                            }))
-                        || node
-                            .children_slice()
-                            .iter()
-                            .any(|child| contains_alias(program, child))
-                }
-                _ => false,
-            }
-        }
-        // Reifying a non-aliased type can erase the checker's synthetic
-        // dimension syntax. Such a type is already normalized.
-        if !contains_alias(self, expr) {
-            return Ok(expr.clone());
-        }
-        let term = decode_expanded_host_type_expr(self, expr)
-            .ok_or_else(|| "host runtime: could not normalize authored entry type".to_string())?;
-        host_type_syntax(&term, expr.span())
-            .ok_or_else(|| "host runtime: could not reify authored entry type".to_string())
+        normalize_authored_entry_type(self.adt_registry(), expr)
     }
+}
+
+/// One checked-registry alias rule for host, Eval and numeric invocation owners.
+pub(crate) fn normalize_authored_entry_type(
+    registry: &AdtRegistry,
+    expr: &Expr,
+) -> Result<Expr, String> {
+    registry.normalize_alias_syntax(expr)
 }
 
 fn parse_expanded_fn_type_expr(
@@ -25602,42 +25960,6 @@ fn declared_return_type_expr(exprs: &[Expr], name: &str) -> Option<Expr> {
     (!terminal_is_ambiguous).then_some(terminal_match).flatten()
 }
 
-/// The type substitution for a generic callee inlined at one call site
-/// (chelis#2152).
-///
-/// This is the inline counterpart of the substitution
-/// `lower_mono_specialized_function` pins for a monomorphized body. It is
-/// solved against the callee `fn` node's OWN recorded type, whose variables
-/// share the inlined body's namespace, and against the concrete argument and
-/// result types of this call.
-///
-/// It extends the enclosing substitution rather than replacing it. Inlining
-/// substitutes the caller's argument expressions into the body, and those
-/// still carry the CALLER's type variables, which only the enclosing
-/// substitution resolves. Existing bindings win over new ones, as in
-/// `solve_host_type_vars`.
-fn inline_call_type_subst(
-    name: &str,
-    args: &[Expr],
-    call_ty: &HostTypeTerm,
-    program: &HostLoweringSession<'_>,
-    scope: &UnordMap<String, HostTypeTerm>,
-) -> UnordMap<String, HostTypeTerm> {
-    let mut subst = active_type_subst();
-    let Some((_, fn_expr)) = program.def_named(name) else {
-        return subst;
-    };
-    let Some((generic_params, generic_ret)) = expr_fn_type(fn_expr) else {
-        return subst;
-    };
-    for (generic, arg) in generic_params.iter().zip(args.iter()) {
-        let actual = expr_host_type(arg, program, scope);
-        solve_host_type_vars(generic, &actual, &mut subst);
-    }
-    solve_host_type_vars(&generic_ret, call_ty, &mut subst);
-    subst
-}
-
 /// Result evidence for a result-only dtype binder: bind a precision variable,
 /// or a type variable standing for a scalar dtype, to the concrete dtype the
 /// call's result type holds at the same position, and nothing else. A type
@@ -25760,6 +26082,462 @@ fn solve_host_type_vars(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [04-INF-6], §4.7: actualize executable metadata without turning the
+    /// independently authored result claim into a physical argument fact.
+    #[test]
+    fn retained_callable_adapter_actualizes_its_whole_signature_per_invocation() {
+        let authored = deep_expr(
+            r#"(t-fn {eff: (effects {} IO), span: "callable-origin"}
+                (t-ref {span: "borrow-origin"}
+                    (t-tensor {} (d-name {} *) (t-var {} p)))
+                (t-tensor {span: "result-origin"} (d-lit {} 2) (t-var {} p)))"#,
+        );
+        let contract = NormalizedCallableContract::from_authored(
+            &chelis_types::adt::AdtRegistry::default(),
+            &authored,
+        )
+        .unwrap()
+        .unwrap();
+        let original = contract.signature().clone();
+        for precision in [Prim::F32, Prim::F64] {
+            let formal = HostTypeTerm::Fn(
+                vec![HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Named("*".into(), None)],
+                    precision,
+                })],
+                Box::new(HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision,
+                })),
+            );
+            let adapter = retain_callable_invocation_contract(
+                &deep_expr("(var {} abs)"),
+                &formal,
+                &contract,
+                0,
+                &mut UnordSet::new(),
+                authored.span(),
+            )
+            .unwrap();
+            let signature = checked_function_type_expr(&adapter).unwrap();
+            let (actualized_params, _) = parse_fn_type_expr_parts(&signature).unwrap();
+            let (authored_params, _) = parse_fn_type_expr_parts(&original).unwrap();
+            assert_eq!(actualized_params[0].tag(), Some(DeepTag::TRef));
+            assert_eq!(
+                as_node(&actualized_params[0]).unwrap().meta(),
+                as_node(&authored_params[0]).unwrap().meta(),
+                "borrow/source parameter metadata changed"
+            );
+            assert!(as_node(&original).unwrap().meta().eff().is_some());
+            assert_eq!(
+                as_node(&signature).unwrap().meta(),
+                as_node(&original).unwrap().meta(),
+                "authored effects/source metadata changed"
+            );
+            assert_eq!(decode_host_type(&signature).unwrap(), formal);
+            assert_eq!(
+                contract.signature(),
+                &original,
+                "cached authored frame changed"
+            );
+        }
+    }
+
+    /// [04-INF-6]: specializing a tensor's executable shape retains the
+    /// provenance of every independently authored child and expanded spread.
+    #[test]
+    fn retained_callable_actualization_keeps_tensor_child_provenance() {
+        let authored = deep_expr(
+            r#"(t-fn {eff: (effects {} IO), span: "callable-origin"}
+                (t-ref {span: "borrow-origin"}
+                    (t-tensor {span: "tensor-origin"}
+                        (d-lit {span: "literal-origin"} 2)
+                        (d-name {span: "anchor-origin"} anchor)
+                        (d-rank {span: "spread-origin"} rest)
+                        (t-var {span: "precision-origin"} p)))
+                (t-tensor {span: "result-origin"} (d-lit {} 2) (t-var {} p)))"#,
+        );
+        let contract = NormalizedCallableContract::from_authored(
+            &chelis_types::adt::AdtRegistry::default(),
+            &authored,
+        )
+        .unwrap()
+        .unwrap();
+        let (parameters, _) = parse_fn_type_expr_parts(contract.signature()).unwrap();
+        let (_, _, reference) = stamped_parts(&parameters[0]).unwrap();
+        let (_, _, original_children) = stamped_parts(&reference[0]).unwrap();
+        for precision in [Prim::F32, Prim::F64] {
+            let formal = HostTypeTerm::Fn(
+                vec![HostTypeTerm::Tensor(TensorType {
+                    dims: vec![
+                        DimInfo::Lit(2),
+                        DimInfo::Named("anchor".into(), None),
+                        DimInfo::Lit(3),
+                        DimInfo::Lit(4),
+                    ],
+                    precision,
+                })],
+                Box::new(HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision,
+                })),
+            );
+            let actualized = actualize_callable_invocation_contract(&contract, &formal).unwrap();
+            let (parameters, _) = parse_fn_type_expr_parts(actualized.signature()).unwrap();
+            let (_, _, reference) = stamped_parts(&parameters[0]).unwrap();
+            let (_, _, children) = stamped_parts(&reference[0]).unwrap();
+            assert_eq!(children.len(), 5);
+            for (axis, original) in [0, 1, 2, 2, 3].into_iter().enumerate() {
+                assert_eq!(
+                    as_node(&children[axis]).unwrap().meta(),
+                    as_node(&original_children[original]).unwrap().meta(),
+                    "actualized child {axis} lost authored provenance"
+                );
+            }
+            assert_eq!(actualized.authored(), contract.authored());
+            let HostTypeTerm::Fn(parameters, result) =
+                decode_host_type(actualized.signature()).unwrap()
+            else {
+                panic!("callable signature lost");
+            };
+            let HostTypeTerm::Tensor(input) = &parameters[0] else {
+                panic!("tensor input lost")
+            };
+            assert_eq!(input.dims.len(), 4);
+            assert_eq!(input.precision, precision);
+            assert_eq!(
+                *result,
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn retained_callable_actualization_refuses_missing_rank_correspondence() {
+        let authored = deep_expr(
+            "(t-fn {} (t-tensor {} (d-lit {} 2) (d-name {} anchor) (d-rank {} rest) (t-var {} p)) (t-tensor {} (d-lit {} 2) (t-var {} p)))",
+        );
+        let contract = NormalizedCallableContract::from_authored(
+            &chelis_types::adt::AdtRegistry::default(),
+            &authored,
+        )
+        .unwrap()
+        .unwrap();
+        let formal = HostTypeTerm::Fn(
+            vec![HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            })],
+            Box::new(HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            })),
+        );
+        assert!(
+            actualize_callable_invocation_contract(&contract, &formal).is_err(),
+            "missing anchor/rank evidence must not synthesize an executable frame"
+        );
+    }
+
+    /// §4.7 literal refutation is decided by the existing whole-call DAG
+    /// owner, after caller values are prepared and before body execution.
+    #[test]
+    fn whole_named_call_preserves_closed_list_value_shape() {
+        let program = surf_check(
+            "def g(a: List[f32], b: List[f32]) -> tensor[*, f32] = add(to_tensor(a), to_tensor(b))\n\
+             def main() -> tensor[*, f32] = g([1.0f32, 2.0f32], [3.0f32, 4.0f32])\n",
+        );
+        let session = HostLoweringSession::new(&program);
+        let (name, body) = session.def_named("main").unwrap();
+        let signature = host_def_signature(name, body, None, &session).unwrap();
+        let context = cached_subexpr_lowering_context(&session);
+        let dag = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
+            &signature.body_expr,
+            Vec::new(),
+            &context,
+            None,
+            false,
+            None,
+        )
+        .expect("a whole checked call must retain its closed List actual values");
+        assert!(kernel_dag_loads_builtin(&dag, &UnordMap::new()).is_none());
+        assert_eq!(
+            dag.get(dag.roots()[0]).unwrap().output_type.dims,
+            [DimInfo::Lit(2)]
+        );
+    }
+
+    #[test]
+    fn whole_named_call_refutes_conflicting_closed_list_values() {
+        let program = surf_check(
+            "def g(a: List[f32], b: List[f32]) -> tensor[*, f32] = add(to_tensor(a), to_tensor(b))\n\
+             def main() -> tensor[*, f32] = g([1.0f32, 2.0f32], [3.0f32, 4.0f32, 5.0f32])\n",
+        );
+        let session = HostLoweringSession::new(&program);
+        let (name, body) = session.def_named("main").unwrap();
+        let signature = host_def_signature(name, body, None, &session).unwrap();
+        let context = cached_subexpr_lowering_context(&session);
+        let error = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
+            &signature.body_expr,
+            Vec::new(),
+            &context,
+            None,
+            false,
+            None,
+        )
+        .expect_err("closed unequal List actuals must refute before execution");
+        assert!(error.fatal, "{error:?}");
+        assert!(error.is_dimension_mismatch(), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("DimensionMismatch: `add` argument 2, axis 0: expected 2, got 3"),
+            "{error:?}"
+        );
+    }
+
+    /// §4.7 applies to a complete call with an inferred result just as it
+    /// applies to a fully annotated definition. Parameter annotations do not
+    /// leave the result as an executable inference hole after checking.
+    #[test]
+    fn whole_named_call_inferred_result_keeps_literal_refutation() {
+        for (mismatch, right) in [
+            (false, "[3.0f32, 4.0f32]"),
+            (true, "[3.0f32, 4.0f32, 5.0f32]"),
+        ] {
+            let program = surf_check(&format!(
+                "def g(a: List[f32], b: List[f32]) = add(to_tensor(a), to_tensor(b))\n\
+                 before = print(\"before\")\n\
+                 out = g([1.0f32, 2.0f32], {right})\n"
+            ));
+            let session = HostLoweringSession::new(&program);
+            let lowered = top_level_lowering_map(program.exprs(), program.type_env());
+            let result = crate::lower::catch_lowering_external(|| {
+                lower_host_program_with_execution(&session, &lowered, None, true, false)
+            })
+            .and_then(|result| result);
+            if mismatch {
+                let error = match result {
+                    Err(error) => error,
+                    Ok(_) => panic!(
+                        "inferred call must refute; declared={:?}, checked={:?}",
+                        lookup_declared_fn_type(&session, "g"),
+                        session.signature_inference().functions.get("g")
+                    ),
+                };
+                assert!(error.fatal && error.is_dimension_mismatch(), "{error:?}");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("DimensionMismatch: `add` argument 2, axis 0: expected 2, got 3"),
+                    "{error:?}"
+                );
+            } else {
+                result.expect("agreeing inferred-result call remains executable");
+            }
+        }
+    }
+
+    /// [04-INF-6], §4.7: a pass-through body cannot replace the actual
+    /// definition's shared-row entry, even behind a wider callable formal.
+    #[test]
+    fn retained_definition_entry_precedes_body_only_helper_reduction() {
+        use crate::axis_sources::{
+            EntryExtentGuard, ExtentRecord, entry_extent_guards, witness_entry_obligations,
+        };
+        use crate::dag::{NodeId, RtAxis};
+        fn shared_rank(guards: &[EntryExtentGuard]) -> bool {
+            guards.iter().any(|guard| {
+                matches!(guard, EntryExtentGuard::Named {
+                claim, canonical: (NodeId(0), 1), observed: (NodeId(1), 1),
+            } if claim == "rest[0]")
+            })
+        }
+        fn rank_entries<T>(expr: &HostExpr<T>, output: &mut Vec<Vec<EntryExtentGuard>>) {
+            match &expr.kind {
+                HostExprKind::SignatureEntry {
+                    plan,
+                    args,
+                    positions,
+                    ..
+                } => {
+                    if shared_rank(plan.guards()) {
+                        assert_eq!(
+                            positions,
+                            &[0, 1],
+                            "both declaration positions are required"
+                        );
+                        assert_eq!(args.len(), 2, "unused input observation was dropped");
+                    }
+                    output.push(plan.guards().to_vec());
+                }
+                HostExprKind::RetainedInvocation { bindings, body, .. }
+                | HostExprKind::Let { bindings, body, .. } => {
+                    for binding in bindings {
+                        rank_entries(&binding.value, output);
+                    }
+                    rank_entries(body, output);
+                }
+                HostExprKind::ResultClaimScope { body, .. }
+                | HostExprKind::FormalIngress { value: body, .. }
+                | HostExprKind::ExtentSites { value: body, .. } => rank_entries(body, output),
+                _ => {}
+            }
+        }
+        for invoke in [false, true] {
+            for width in [2, 3] {
+                let call = if invoke { "f(value, ignored)" } else { "value" };
+                let row = vec!["1.0f64"; width].join(",");
+                let source = format!(
+                    "def first[rest, p: Float](value: tensor[extent, ..rest, p], ignored: tensor[extent, ..rest, p]) -> tensor[extent, ..rest, p] = value\n\
+                     def invoke[p: Float](f: tensor[*, *, p] -> tensor[*, *, p] -> tensor[*, *, p], value: tensor[*, *, p], ignored: tensor[*, *, p]) -> tensor[*, *, p] ! {{IO}} = {{\n\
+                     _ = print(\"caller-before\")\n\
+                     result = {call}\n\
+                     _ = print(\"caller-after\")\n\
+                     result\n}}\n\
+                     out = invoke(first, to_tensor([[1.0f64,2.0f64],[3.0f64,4.0f64],[5.0f64,6.0f64]]), to_tensor([[{row}],[{row}],[{row}]]))\n"
+                );
+                let program = surf_check(&source);
+                let realizability = chelis_effects::realizability::infer_realizability(
+                    &program,
+                    &[Prim::F32, Prim::Bool],
+                );
+                let manifest =
+                    chelis_effects::realizability::compute_root_manifest(&program, &realizability);
+                let (compiled, _) = try_lower_compiled_program_with_lane_overrides(
+                    &program,
+                    Some(&manifest),
+                    true,
+                    false,
+                )
+                .unwrap();
+                let mut plans = Vec::new();
+                let host = compiled.host.as_ref().unwrap();
+                for binding in &host.globals {
+                    rank_entries(&binding.value, &mut plans);
+                }
+                let mut rank_retained = plans.iter().any(|guards| shared_rank(guards));
+                let mut witness_plans = Vec::new();
+                for helper in &host.global_tensor_helpers {
+                    let guards = entry_extent_guards(&helper.dag);
+                    let mut obligations = Vec::new();
+                    for node in helper.dag.nodes() {
+                        // The ordinary C lane also retains these witnesses as
+                        // shape dependencies and emits Drop value edges. The
+                        // HIP prologue-only classification excludes value-used
+                        // witnesses; the shared input-read projection still
+                        // owns their ordered entry claims.
+                        if let Some(projected) = witness_entry_obligations(&helper.dag, node.id) {
+                            obligations.extend(projected);
+                        }
+                    }
+                    let rank_witness = obligations.iter().any(|obligation| {
+                        obligation.label == "rest[0]"
+                            && obligation.operation == "load"
+                            && matches!(&obligation.records, (
+                                ExtentRecord::Read { load: NodeId(0), axis: 1, parameter: first },
+                                ExtentRecord::Read { load: NodeId(1), axis: 1, parameter: second },
+                            ) if first == "value" && second == "ignored")
+                    });
+                    if shared_rank(&guards) || rank_witness {
+                        rank_retained = true;
+                        assert_eq!(helper.inputs.len(), 2, "both callable inputs are required");
+                        let mut reachable = BTreeSet::new();
+                        let mut pending = helper.dag.roots().to_vec();
+                        while let Some(id) = pending.pop() {
+                            if reachable.insert(id) {
+                                let node = helper.dag.get(id).unwrap();
+                                pending.extend(node.inputs.iter().copied());
+                                pending.extend(node.shape_deps.iter().copied());
+                                pending.extend(node.result_claim_deps.iter().copied());
+                            }
+                        }
+                        let ignored = helper.dag.nodes().iter().find(|node| matches!(
+                            &node.op, RiscOp::ExtentWitness {
+                                parameter, axis: RtAxis::Lit(1), claims, ..
+                            } if parameter == "ignored" && claims.iter().any(|claim| claim.claim == "rest[0]")
+                        )).expect("unused parameter's rank witness is required");
+                        assert!(
+                            reachable.contains(&ignored.id),
+                            "unused input witness is not retained"
+                        );
+                        assert!(
+                            reachable.contains(&NodeId(1)),
+                            "unused input dependency is not retained"
+                        );
+                    }
+                    plans.push(guards);
+                    witness_plans.extend(obligations);
+                }
+                if invoke {
+                    assert!(
+                        rank_retained,
+                        "invoked definition lost shared-row entry at width {width}: {plans:?}, {witness_plans:?}"
+                    );
+                } else {
+                    assert!(
+                        plans.iter().all(Vec::is_empty) && witness_plans.is_empty(),
+                        "an uninvoked callback manufactured obligations at width {width}: {plans:?}, {witness_plans:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// spec/06 §3: a concrete supplied target specializes a template even
+    /// when the template has no standalone transformed callable ABI.
+    #[test]
+    fn retained_callable_static_target_classifies_the_concrete_grad_caller() {
+        let program = surf_check(
+            "def apply(h: tensor[1, f32] -> tensor[1, f32], v: tensor[2, 1, f32]) -> tensor[2, 1, f32] = {\n a = to_tensor([100.0f32])\n vmap(h)(v)\n}\n\
+             def main() -> tensor[1, f32] = grad(fn (x: tensor[1, f32]) -> {\n a = mul(x, x)\n sum(sum(apply(fn (v: tensor[1, f32]) -> mul(v, a), insert(x, 0i32, 2i64)), 0i32), 0i32)\n})(to_tensor([5.0f32]))\n",
+        );
+        let lowered = top_level_lowering_map(program.exprs(), program.type_env());
+        assert_eq!(
+            lowered.get("apply"),
+            Some(&false),
+            "unresolved standalone template"
+        );
+        assert_eq!(
+            lowered.get("main"),
+            Some(&true),
+            "concrete lexical target was lost"
+        );
+        let compiled = try_lower_compiled_program(&program).unwrap();
+        assert!(
+            compiled
+                .host
+                .as_ref()
+                .is_none_or(|host| { host_program_unresolved_transform_sites(host).is_empty() }),
+            "a specialized DAG entry must not emit an unresolved template wrapper"
+        );
+        let realizability =
+            chelis_effects::realizability::infer_realizability(&program, &[Prim::F32, Prim::Bool]);
+        let manifest =
+            chelis_effects::realizability::compute_root_manifest(&program, &realizability);
+        let compiled = try_lower_compiled_program_with_manifest(&program, &manifest).unwrap();
+        assert!(
+            compiled
+                .host
+                .as_ref()
+                .is_none_or(|host| { host_program_unresolved_transform_sites(host).is_empty() }),
+            "manifest-selected specialized DAG entry must not emit an unresolved template wrapper"
+        );
+    }
+
+    #[test]
+    fn retained_callable_runtime_target_does_not_gain_static_transform_identity() {
+        let program = surf_check(
+            "def apply(h: tensor[1, f32] -> tensor[1, f32], v: tensor[2, 1, f32]) -> tensor[2, 1, f32] = vmap(h)(v)\n\
+             def selected(flag: bool, x: tensor[2, 1, f32]) -> tensor[2, 1, f32] = apply(if flag then (fn (v: tensor[1, f32]) -> neg(v)) else (fn (v: tensor[1, f32]) -> abs(v)), x)\n",
+        );
+        let lowered = top_level_lowering_map(program.exprs(), program.type_env());
+        assert_eq!(lowered.get("selected"), Some(&false));
+    }
 
     /// spec/04 §4.7: an invocation's result is an obligation, not evidence
     /// that specializes a recursive callee's own runtime extent witness.

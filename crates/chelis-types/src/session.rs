@@ -847,3 +847,56 @@ mod builtin_selection_tests {
         );
     }
 }
+
+/// Validate a checked nominal application using the canonical Deep type owner.
+/// Fresh resolver variables are validation-local and never materialize syntax:
+/// callers retain the original checked arguments and their defining identities.
+pub(crate) fn checked_alias_argument_kinds(
+    headers: &crate::deep_type::TypeResolutionEnv,
+    application: &chelis_deep::Expr,
+) -> Result<Vec<crate::types::NominalParamKind>, String> {
+    run_with_metadata(std::slice::from_ref(application), |sink| {
+        let mut variables = crate::types::VarGen::default();
+        let mut resolver = crate::deep_type::DeepTypeResolver::new(
+            crate::deep_type::TypeUseSite::CompilerMetadata,
+            crate::deep_type::BinderMode::TrustedCompilerMetadata,
+            headers,
+            &mut variables,
+            sink,
+        );
+        resolver
+            .resolve(application)
+            .map(|resolved| match resolved.into_type() {
+                crate::types::Type::Adt(_, arguments) => {
+                    vec![crate::types::NominalParamKind::Type; arguments.len()]
+                }
+                crate::types::Type::KindedAdt(_, arguments) => arguments
+                    .into_iter()
+                    .map(|argument| match argument {
+                        crate::types::NominalArg::Type(_) => crate::types::NominalParamKind::Type,
+                        crate::types::NominalArg::Dimension(_) => {
+                            crate::types::NominalParamKind::Dimension
+                        }
+                    })
+                    .collect(),
+                _ => unreachable!(
+                    "the canonical nominal application resolver produces a nominal type"
+                ),
+            })
+            .map_err(|_| InferStats {
+                typed_nodes: 0,
+                total_nodes: 0,
+            })
+    })
+    .map_err(|report| {
+        format!(
+            "invalid checked alias application: {}",
+            report
+                .errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })
+}

@@ -1551,7 +1551,15 @@ impl<'a> EvalContext<'a> {
         self.binding_types = saved_types;
         self.precision_bindings = saved_precisions;
         self.resolving_top_levels.pop();
-        let value = stamp_def_closure(value?, &resolved_name, &expr);
+        let mut value = stamp_def_closure(value?, &resolved_name, &expr);
+        if let RuntimeValue::Builtin(builtin) = &mut value
+            && let Some(signature) = self.declared_signatures.get(&resolved_name)
+        {
+            let normalized = normalize_authored_entry_type(signature, self.session.as_ref())?;
+            if checked_function_children(&normalized).is_some() {
+                builtin.retain_outer_contract(signature.clone());
+            }
+        }
         self.declaration_values.insert(resolved_name, value.clone());
         Ok(value)
     }
@@ -1887,7 +1895,22 @@ impl<'a> EvalContext<'a> {
         // evaluate last. Recursive calls establish their own result and the
         // outer form either replaces it or transparently returns it.
         self.result_producer = None;
-        let value = self.eval_expr_inner(expr)?;
+        let mut value = self.eval_expr_inner(expr)?;
+        // An explicit callable binding adapts the supplied value. Retain its
+        // invocation obligations independently of the producer's identity;
+        // copies and captured values carry both through the existing carrier.
+        if value.invocation_contracts().is_some()
+            && let ExprCarrier::DecodedNode(_, metadata, _) = expr.carrier()
+            && metadata.surf_binding_type().is_some_and(|origin| {
+                *origin.value() == chelis_deep::annotations::BindingTypeOrigin::Explicit
+            })
+            && let Some(authored) = metadata.ty().map(|ty| ty.expression())
+        {
+            let contract = normalize_authored_entry_type(authored, self.session.as_ref())?;
+            if checked_function_children(&contract).is_some() {
+                value.retain_invocation_contract(authored.clone());
+            }
+        }
         if !self
             .result_producer
             .as_ref()
@@ -2320,83 +2343,10 @@ impl<'a> EvalContext<'a> {
             self.result_producer = ResultProducer::interface_load(&value);
             return Ok(value);
         }
-        // The checked key operations are values as well as direct call
-        // heads. Capture the resolved operation now: a later lexical alias
-        // or shadow must not change which operation the callable invokes.
-        // The wrapper is compiler-owned and has no source-level body or
-        // captures. Its parameters and result come from the checked value
-        // type, never from a guessed scalar default.
-        if matches!(
-            name,
-            "key_from_seed"
-                | "split_key"
-                | "split_keys"
-                | "fold_in"
-                | "is_nan"
-                | "is_finite"
-                | "is_infinite"
-        ) && self.active_builtin_symbol(name)
+        if self.active_builtin_symbol(name)
+            && let Some(value) = chelis_ir::callable_value::ResolvedBuiltinValue::resolve_bare(name)
         {
-            // An unannotated checked alias can retain the closed operation
-            // relation without one selected `TFn` on this value node. Its
-            // identity and arity are fixed here; the checked application
-            // decides the scalar/tensor alternative from its arguments.
-            let signature = node.metadata.ty().map(|ty| ty.expression());
-            let types = signature.and_then(checked_function_children);
-            let (return_type, param_types) =
-                types
-                    .and_then(<[Expr]>::split_last)
-                    .map_or((None, Vec::new()), |(ret, params)| {
-                        (
-                            Some(ret.clone()),
-                            params.iter().cloned().map(Some).collect(),
-                        )
-                    });
-            let arity = if matches!(
-                name,
-                "key_from_seed" | "split_key" | "is_nan" | "is_finite" | "is_infinite"
-            ) {
-                1
-            } else {
-                2
-            };
-            let params = (0..arity)
-                .map(|index| format!("__chelis_key_arg_{index}"))
-                .collect::<Vec<_>>();
-            let span = node.expr.span();
-            let mut call = Vec::with_capacity(params.len() + 1);
-            call.push(Expr::node(
-                DeepTag::Var,
-                chelis_deep::Metadata::default(),
-                vec![Expr::Atom(Atom::Name(name.to_string()), span)],
-                span,
-            ));
-            call.extend(params.iter().map(|param| {
-                Expr::node(
-                    DeepTag::Var,
-                    chelis_deep::Metadata::default(),
-                    vec![Expr::Atom(Atom::Name(param.clone()), span)],
-                    span,
-                )
-            }));
-            let body = Expr::node(DeepTag::App, chelis_deep::Metadata::default(), call, span);
-            return Ok(RuntimeValue::Closure {
-                checked_function: Box::new(node.expr.clone()),
-                params,
-                param_types: if param_types.is_empty() {
-                    // bounded: the constructor arity
-                    vec![None; arity]
-                } else {
-                    param_types
-                },
-                return_type,
-                checked_signature: types.and_then(|_| signature.cloned()),
-                invocation_contracts: Box::default(),
-                body,
-                env: self.bindings.capture(),
-                precision_env: self.precision_bindings.clone(),
-                def_name: None,
-            });
+            return Ok(RuntimeValue::Builtin(value));
         }
         if name == "Nil" {
             return Ok(RuntimeValue::List(Vec::new().into()));
@@ -2695,129 +2645,19 @@ impl<'a> EvalContext<'a> {
                     )?;
                 }
             }
+            let shape_claims_checked = self.check_builtin_shape_claims(name, &args, claims)?;
             let builtin_result = match explicit_accumulator(node.metadata) {
                 Some(accumulator) => accumulated_builtin_value(name, &args, accumulator),
                 None => self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref()),
             };
-            // The checked builtin catalog owns the numeric operation set.
-            // Mixed-domain equality is trusted only for numeric arguments;
-            // recursive container comparison can include authored strings.
-            let trusted_numeric_source = chelis_types::builtin_decl(name).is_some_and(|decl| {
-                decl.capability.domains == [chelis_types::BuiltinSemanticDomain::Numeric]
-                    || (decl
-                        .capability
-                        .domains
-                        .contains(&chelis_types::BuiltinSemanticDomain::Numeric)
-                        && args.iter().all(|arg| {
-                            matches!(
-                                arg,
-                                RuntimeValue::Scalar(_)
-                                    | RuntimeValue::Tensor(_)
-                                    | RuntimeValue::Bool(_)
-                            )
-                        }))
-            }) || (name == "concat"
-                && matches!(args.first(), Some(RuntimeValue::List(parts)) if parts.iter().all(|part| matches!(part, RuntimeValue::Tensor(_)))))
-                // These run no callback and render every failure from their
-                // numeric arguments alone, never from an authored string, so
-                // a trap line in their failure is the runtime's own.
-                || matches!(
-                    name,
-                    "to_tensor"
-                        | "split"
-                        | "char_code"
-                        | "char_from_code"
-                        | "string_slice"
-                        | "mmap_read"
-                        | "mmap_tensor"
-                        | "mmap_text"
-                        | "mmap_sha256"
-                );
-            let value = if trusted_numeric_source {
-                self.mark_numeric_trap_from_trusted_result(builtin_result)?
-            } else {
-                builtin_result?
-            };
-            self.result_producer = match name {
-                "index" => args
-                    .get(1)
-                    .and_then(RuntimeValue::as_i64)
-                    .and_then(|index| usize::try_from(index).ok())
-                    .and_then(|index| {
-                        arg_producers
-                            .first()
-                            .and_then(Option::as_ref)
-                            .and_then(|producer| producer.child(index))
-                    })
-                    .filter(|producer| producer.matches_value(&value)),
-                "skip" => {
-                    let count = args.get(1).and_then(RuntimeValue::as_i64).ok_or_else(|| {
-                        "skip count disappeared after successful builtin evaluation".to_string()
-                    })?;
-                    if count < 0 {
-                        return Err(
-                            "negative skip count passed successful builtin evaluation".to_string()
-                        );
-                    }
-                    // On a target whose usize is narrower than i64, a valid
-                    // non-negative count that cannot convert is above every
-                    // addressable List length and therefore selects no suffix.
-                    let producer = match usize::try_from(count) {
-                        Ok(count) => arg_producers
-                            .first()
-                            .and_then(Option::as_ref)
-                            .and_then(|producer| producer.aggregate_suffix(count)),
-                        Err(_) => None,
-                    };
-                    producer.filter(|producer| producer.matches_value(&value))
-                }
-                // `take` is a selection: its prefix keeps each element's
-                // producer, as `skip`'s suffix does.
-                "take" => {
-                    let count = args.get(1).and_then(RuntimeValue::as_i64).ok_or_else(|| {
-                        "take count disappeared after successful builtin evaluation".to_string()
-                    })?;
-                    let producer = match usize::try_from(count) {
-                        Ok(count) => arg_producers
-                            .first()
-                            .and_then(Option::as_ref)
-                            .and_then(|producer| producer.aggregate_prefix(count)),
-                        // A count above every addressable length keeps the
-                        // whole List.
-                        Err(_) => arg_producers.first().cloned().flatten(),
-                    };
-                    producer.filter(|producer| producer.matches_value(&value))
-                }
-                // spec/04 section 4.7: a builtin produces every tensor held in
-                // the aggregate it returns.
-                _ if chelis_ir::host::produces_its_result(name)
-                    && !matches!(value, RuntimeValue::Tensor(_)) =>
-                {
-                    Some(ResultProducer::Uniform(name.to_string()))
-                }
-                _ => matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name)),
-            };
-            let producer = if name == "index" && !self.claims_are_vacuous(claims) {
-                self.result_producer
-                    .as_ref()
-                    .and_then(ResultProducer::operation)
-                    .ok_or_else(|| {
-                        "host runtime: pending result claim reached a tensor without producer provenance"
-                            .to_string()
-                    })?
-            } else {
-                self.result_producer
-                    .as_ref()
-                    .and_then(ResultProducer::operation)
-                    .unwrap_or(name)
-            }
-            .to_owned();
-            if name != "pad_sequences_to" {
-                for claim in claims {
-                    self.check_declared_result_claim(claim, &value, &producer)?;
-                }
-            }
-            return Ok(value);
+            return self.finish_builtin_application(
+                name,
+                &args,
+                arg_producers,
+                builtin_result,
+                claims,
+                shape_claims_checked,
+            );
         }
 
         // chelis#338 site B: a call to a top-level def whose body needs
@@ -2917,19 +2757,22 @@ impl<'a> EvalContext<'a> {
                 claims,
                 None,
                 Some(&mut inner),
+                Some(arg_producers),
             );
             let frame = &mut self.loop_compositions[index];
             frame.inner = Some(inner);
             frame.entered = result.is_ok();
             return result;
         }
-        self.apply_resolved_callable_under_result_claim(
+        self.apply_resolved_callable_under_result_claim_with_receipt(
             callable,
             args,
             &arg_type_exprs,
             result_type_expr.as_ref(),
             claims,
             None,
+            None,
+            Some(arg_producers),
         )
     }
 
@@ -3989,6 +3832,7 @@ impl<'a> EvalContext<'a> {
             None,
             Some(receipt),
             has_composition,
+            None,
         );
         if has_composition {
             let frame = self
@@ -4040,6 +3884,7 @@ impl<'a> EvalContext<'a> {
             claims,
             present,
             None,
+            None,
         )
     }
 
@@ -4053,6 +3898,7 @@ impl<'a> EvalContext<'a> {
         claims: &[DeclaredResultClaim],
         present: Option<&[bool]>,
         receipt: Option<&mut LoopEntryReceipt>,
+        arg_producers: Option<Vec<Option<ResultProducer>>>,
     ) -> Result<RuntimeValue, String> {
         let _stack_frame = EvalCallStackFrame::enter();
         if EvalCallStackFrame::budget_exhausted() {
@@ -4060,7 +3906,17 @@ impl<'a> EvalContext<'a> {
         }
         let mut formal_claims = Vec::new();
         if let Some(contracts) = callable.invocation_contracts() {
-            for contract in contracts {
+            for authored_contract in contracts {
+                let normalized =
+                    chelis_ir::callable_value::NormalizedCallableContract::from_authored(
+                        &self.adt_registry,
+                        authored_contract,
+                    )?
+                    .ok_or_else(|| {
+                        "retained invocation contract is not a checked function signature"
+                            .to_owned()
+                    })?;
+                let contract = normalized.signature();
                 let actualized = check_callable_invocation_contract(
                     contract,
                     &args,
@@ -4074,7 +3930,7 @@ impl<'a> EvalContext<'a> {
                 let Some((result, params)) =
                     checked_function_children(contract).and_then(<[Expr]>::split_last)
                 else {
-                    continue;
+                    return Err("normalized invocation contract lacks its result member".to_owned());
                 };
                 let mut witnesses = Vec::new();
                 for (path, ty, shape) in &actualized {
@@ -4116,6 +3972,7 @@ impl<'a> EvalContext<'a> {
             present,
             receipt,
             false,
+            arg_producers,
         )
     }
 
@@ -4130,6 +3987,7 @@ impl<'a> EvalContext<'a> {
         present: Option<&[bool]>,
         mut loop_entry: Option<&mut LoopEntryReceipt>,
         activate_forwarding: bool,
+        arg_producers: Option<Vec<Option<ResultProducer>>>,
     ) -> Result<RuntimeValue, String> {
         // A caller's first-site axes resolve in the caller's activation,
         // whose sites have all run by the time its callee produces the
@@ -4139,6 +3997,28 @@ impl<'a> EvalContext<'a> {
             .map(|claim| self.resolve_first_sites(claim))
             .collect::<Vec<_>>();
         match callable {
+            RuntimeValue::Builtin(value) => {
+                let operation = value.operation();
+                // A builtin value introduces no declaration interface. Its
+                // evaluated actuals retain their original producer trees.
+                // External/transform callers without expression observations
+                // supply only runtime interface values.
+                let arg_producers = arg_producers
+                    .unwrap_or_else(|| args.iter().map(ResultProducer::interface_load).collect());
+                let shape_claims_checked =
+                    self.check_builtin_shape_claims(operation.symbol(), &args, inherited_claims)?;
+                let value =
+                    self.eval_builtin(operation.symbol(), &args, arg_type_exprs, result_type_expr);
+                self.finish_builtin_application(
+                    operation.symbol(),
+                    &args,
+                    arg_producers,
+                    value,
+                    inherited_claims,
+                    shape_claims_checked,
+                )
+            }
+
             RuntimeValue::Closure {
                 checked_function: _,
                 params,
@@ -4423,15 +4303,18 @@ impl<'a> EvalContext<'a> {
                             .as_ref()
                             .filter(|ty| checked_function_children(ty).is_some())
                             .or_else(|| checked_params.and_then(|params| params.get(index)));
-                        if callable_contract
-                            .is_some_and(|ty| checked_function_children(ty).is_some())
-                            && let Some(invocation_contracts) = arg.invocation_contracts_mut()
+                        if let Some(contract) =
+                            callable_contract.filter(|ty| checked_function_children(ty).is_some())
                         {
-                            // This parameter is a new adapter around any
-                            // contracts the supplied callable already carries,
-                            // so its entry runs first at the eventual call.
-                            invocation_contracts
-                                .insert(0, callable_contract.expect("checked above").clone());
+                            let origin = match (declared.as_ref(), authored_callable.as_ref()) {
+                                (Some(origin), Some(normalized))
+                                    if checked_function_children(normalized).is_some() =>
+                                {
+                                    origin
+                                }
+                                _ => contract,
+                            };
+                            arg.retain_invocation_contract(origin.clone());
                         }
                         self.binding_types.insert(param.clone(), declared);
                         let producer = ResultProducer::interface_load(&arg);
@@ -4863,6 +4746,203 @@ impl<'a> EvalContext<'a> {
         Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
             IrTensorValue::from_storage(input.value.shape.clone(), storage),
         )))
+    }
+
+    /// Shape-identity operations know their result extent after operand
+    /// agreement, before their element kernel. The declaration catalog owns
+    /// this relation; direct calls and retained values share this boundary.
+    fn check_builtin_shape_claims(
+        &mut self,
+        name: &str,
+        args: &[RuntimeValue],
+        claims: &[DeclaredResultClaim],
+    ) -> Result<bool, String> {
+        if claims.is_empty()
+            || chelis_types::AdmittedBuiltin::resolve(name).is_none()
+            || chelis_types::shape_class(name) != Some(chelis_types::ShapeClass::Identity)
+        {
+            return Ok(false);
+        }
+        // Scalar control domains are operation preconditions. Validate them
+        // through the same prepared-operation owners before the result extent;
+        // these preparations allocate no result and consume no draw key.
+        let controls = (|| -> Result<(), String> {
+            match name {
+                "dropout" => {
+                    expect_key_arg(args, 0, name)?;
+                    let input = expect_tensor_arg(args, 1)?;
+                    let rate = expect_float_control(args, 2, name)?;
+                    chelis_types::PreparedDropout::new(input.value.storage(), rate)
+                        .map_err(|error| error.to_string())?;
+                }
+                "uniform_like" => {
+                    expect_key_arg(args, 0, name)?;
+                    let input = expect_tensor_arg(args, 1)?;
+                    let low = expect_float_control(args, 2, name)?;
+                    let high = expect_float_control(args, 3, name)?;
+                    prepare_uniform_like(&input, low, high)?;
+                }
+                _ => {}
+            }
+            Ok(())
+        })();
+        self.mark_numeric_trap_from_trusted_result(controls)?;
+        let mut shapes = args.iter().filter_map(|arg| match arg {
+            RuntimeValue::Tensor(tensor) if !tensor.value.shape.is_empty() => {
+                Some(tensor.value.shape.as_slice())
+            }
+            _ => None,
+        });
+        let Some(shape) = shapes.next() else {
+            return Ok(false);
+        };
+        for other in shapes {
+            if shape != other {
+                return self.mark_numeric_trap_from_trusted_result(Err(
+                    operand_shape_disagreement(name, shape, other),
+                ));
+            }
+        }
+        for claim in claims.iter().filter(|claim| claim.nested.is_none()) {
+            self.check_declared_shape_claim(claim, shape, name)?;
+        }
+        Ok(true)
+    }
+
+    /// Common resolved-operation result handling for direct calls and admitted
+    /// function values. The token route bypasses name lookup, but retains the
+    /// same failure channel, producer provenance and authored result claims.
+    fn finish_builtin_application(
+        &mut self,
+        name: &str,
+        args: &[RuntimeValue],
+        arg_producers: Vec<Option<ResultProducer>>,
+        builtin_result: Result<RuntimeValue, String>,
+        claims: &[DeclaredResultClaim],
+        shape_claims_checked: bool,
+    ) -> Result<RuntimeValue, String> {
+        // The checked builtin catalog owns the numeric operation set.
+        // Mixed-domain equality is trusted only for numeric arguments;
+        // recursive container comparison can include authored strings.
+        let trusted_numeric_source = chelis_types::builtin_decl(name).is_some_and(|decl| {
+            decl.capability.domains == [chelis_types::BuiltinSemanticDomain::Numeric]
+                || (decl
+                    .capability
+                    .domains
+                    .contains(&chelis_types::BuiltinSemanticDomain::Numeric)
+                    && args.iter().all(|arg| {
+                        matches!(
+                            arg,
+                            RuntimeValue::Scalar(_)
+                                | RuntimeValue::Tensor(_)
+                                | RuntimeValue::Bool(_)
+                        )
+                    }))
+        }) || (name == "concat"
+            && matches!(args.first(), Some(RuntimeValue::List(parts)) if parts.iter().all(|part| matches!(part, RuntimeValue::Tensor(_)))))
+            // These run no callback and render every failure from their
+            // numeric arguments alone, never from an authored string, so
+            // a trap line in their failure is the runtime's own.
+            || matches!(
+                name,
+                "to_tensor"
+                    | "split"
+                    | "char_code"
+                    | "char_from_code"
+                    | "string_slice"
+                    | "mmap_read"
+                    | "mmap_tensor"
+                    | "mmap_text"
+                    | "mmap_sha256"
+            );
+        let value = if trusted_numeric_source {
+            self.mark_numeric_trap_from_trusted_result(builtin_result)?
+        } else {
+            builtin_result?
+        };
+        self.result_producer = match name {
+            "index" => args
+                .get(1)
+                .and_then(RuntimeValue::as_i64)
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| {
+                    arg_producers
+                        .first()
+                        .and_then(Option::as_ref)
+                        .and_then(|producer| producer.child(index))
+                })
+                .filter(|producer| producer.matches_value(&value)),
+            "skip" => {
+                let count = args.get(1).and_then(RuntimeValue::as_i64).ok_or_else(|| {
+                    "skip count disappeared after successful builtin evaluation".to_string()
+                })?;
+                if count < 0 {
+                    return Err(
+                        "negative skip count passed successful builtin evaluation".to_string()
+                    );
+                }
+                // On a target whose usize is narrower than i64, a valid
+                // non-negative count that cannot convert is above every
+                // addressable List length and therefore selects no suffix.
+                let producer = match usize::try_from(count) {
+                    Ok(count) => arg_producers
+                        .first()
+                        .and_then(Option::as_ref)
+                        .and_then(|producer| producer.aggregate_suffix(count)),
+                    Err(_) => None,
+                };
+                producer.filter(|producer| producer.matches_value(&value))
+            }
+            // `take` is a selection: its prefix keeps each element's
+            // producer, as `skip`'s suffix does.
+            "take" => {
+                let count = args.get(1).and_then(RuntimeValue::as_i64).ok_or_else(|| {
+                    "take count disappeared after successful builtin evaluation".to_string()
+                })?;
+                let producer = match usize::try_from(count) {
+                    Ok(count) => arg_producers
+                        .first()
+                        .and_then(Option::as_ref)
+                        .and_then(|producer| producer.aggregate_prefix(count)),
+                    // A count above every addressable length keeps the
+                    // whole List.
+                    Err(_) => arg_producers.first().cloned().flatten(),
+                };
+                producer.filter(|producer| producer.matches_value(&value))
+            }
+            // spec/04 section 4.7: a builtin produces every tensor held in
+            // the aggregate it returns.
+            _ if chelis_ir::host::produces_its_result(name)
+                && !matches!(value, RuntimeValue::Tensor(_)) =>
+            {
+                Some(ResultProducer::Uniform(name.to_string()))
+            }
+            _ => matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name)),
+        };
+        let producer = if name == "index" && !self.claims_are_vacuous(claims) {
+            self.result_producer
+                .as_ref()
+                .and_then(ResultProducer::operation)
+                .ok_or_else(|| {
+                    "host runtime: pending result claim reached a tensor without producer provenance"
+                        .to_string()
+                })?
+        } else {
+            self.result_producer
+                .as_ref()
+                .and_then(ResultProducer::operation)
+                .unwrap_or(name)
+        }
+        .to_owned();
+        if name != "pad_sequences_to" {
+            for claim in claims
+                .iter()
+                .filter(|claim| !shape_claims_checked || claim.nested.is_some())
+            {
+                self.check_declared_result_claim(claim, &value, &producer)?;
+            }
+        }
+        Ok(value)
     }
 
     fn eval_builtin(
@@ -5518,7 +5598,9 @@ impl<'a> EvalContext<'a> {
                 // first apply.
                 if !matches!(
                     &callback,
-                    RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }
+                    RuntimeValue::Closure { .. }
+                        | RuntimeValue::Transform { .. }
+                        | RuntimeValue::Builtin(_)
                 ) {
                     return Err(format!(
                         "tensor_scan expects a callable second argument, got {callback:?}"
@@ -6985,6 +7067,8 @@ pub(super) fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Re
                     | (_, RuntimeValue::MappedFile(_))
                     | (RuntimeValue::Closure { .. }, _)
                     | (_, RuntimeValue::Closure { .. })
+                    | (RuntimeValue::Builtin(_), _)
+                    | (_, RuntimeValue::Builtin(_))
                     | (RuntimeValue::Transform { .. }, _)
                     | (_, RuntimeValue::Transform { .. }) => Err(
                         "[05-OP-36] equality does not admit functions or resource handles"

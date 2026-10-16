@@ -213,6 +213,7 @@ pub use program::{
     check_ir_with_signature_context, check_typed_program, infer_ir_program, infer_program,
 };
 pub use validate::type_to_deep_expr;
+pub(crate) use validate::type_to_deep_expr_with_arguments;
 
 pub(crate) use checked::checked_program_with_effect_annotations_in_session;
 #[cfg(test)]

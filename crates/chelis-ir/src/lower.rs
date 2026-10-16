@@ -2,6 +2,9 @@
 //!
 //! Walks the Deep AST and produces a flat DAG of RISC primitive nodes.
 
+use crate::callable_value::{
+    NormalizedCallableContract, StaticBuiltinValue as ResolvedBuiltinValue,
+};
 use chelis_unord::{UnordMap, UnordSet};
 use std::any::Any;
 use std::cell::Cell;
@@ -548,7 +551,7 @@ fn raise_lowering_error(
 /// site (Issue #197) so a non-differentiable op surfaces as a
 /// user-facing build error rather than as an undefined-symbol host
 /// call.
-fn raise_fatal_lowering_error(
+pub(crate) fn raise_fatal_lowering_error(
     message: impl Into<String>,
     span: Option<Span>,
     span_id: Option<String>,
@@ -1738,11 +1741,16 @@ pub(crate) struct TensorCallsiteSpecialization {
     claim_rank_substitutions: UnordMap<String, Vec<DimInfo>>,
 }
 
+type ResolvedBuiltinValueCache =
+    Arc<OnceLock<Result<Arc<BTreeMap<String, ResolvedBuiltinValue>>, String>>>;
+
 #[derive(Clone, Debug)]
 pub struct SubexprLoweringContext {
     /// Already evaluated lexical host values. They remain bound while a
     /// numeric region specializes calls, even when it never reads them.
     host_payloads: Arc<BTreeMap<String, crate::host_type_state::HostTypeTerm>>,
+    builtin_values: BTreeMap<String, ResolvedBuiltinValue>,
+    resolved_builtin_values: ResolvedBuiltinValueCache,
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
@@ -1781,6 +1789,80 @@ impl SubexprLoweringContext {
             ..self.clone()
         }
     }
+    /// Fresh lexical bindings to resolved builtin values supplied by the host
+    /// frame. Tokens were admitted at value formation, before caller shadows.
+    pub fn with_builtin_values(&self, values: BTreeMap<String, ResolvedBuiltinValue>) -> Self {
+        let mut context = self.clone();
+        // Bind the entire value under lexical scope precedence. There is no
+        // identity-only contribution to merge with a richer value.
+        context.builtin_values.extend(values);
+        context
+    }
+
+    pub fn with_runtime_builtin_values(
+        &self,
+        values: BTreeMap<String, crate::callable_value::ResolvedBuiltinValue<Expr>>,
+    ) -> Result<Self, String> {
+        let values = values
+            .into_iter()
+            .map(|(name, value)| {
+                value
+                    .try_map_contracts(|authored| {
+                        NormalizedCallableContract::from_authored(
+                            &self.constructor_layouts.type_registry,
+                            authored,
+                        )?
+                        .ok_or_else(|| {
+                            "runtime builtin contract is not a checked function signature"
+                                .to_owned()
+                        })
+                    })
+                    .map(|value| (name, value))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(self.with_builtin_values(values))
+    }
+
+    pub(crate) fn resolved_builtin_values(
+        &self,
+    ) -> Result<Arc<BTreeMap<String, ResolvedBuiltinValue>>, String> {
+        self.resolved_builtin_values
+            .get_or_init(|| {
+                resolved_builtin_producer_bindings(
+                    &self.program_defs,
+                    &self.program_signatures,
+                    &self.constructor_layouts.type_registry,
+                )
+                .map(Arc::new)
+            })
+            .clone()
+    }
+
+    pub(crate) fn builtin_value(
+        &self,
+        expr: &Expr,
+    ) -> Result<Option<ResolvedBuiltinValue>, String> {
+        if let Some(name) = callable_ref_name(expr) {
+            if let Some(value) = self.builtin_values.get(&name) {
+                return Ok(Some(value.clone()));
+            }
+            if let Some(value) = self.resolved_builtin_values()?.get(&name) {
+                return Ok(Some(value.clone()));
+            }
+            if !self.program_defs.contains_key(&name) {
+                return Ok(ResolvedBuiltinValue::resolve_bare(&name));
+            }
+            return Ok(None);
+        }
+        if let Some((DeepTag::Copy, _, children)) = stamped_parts(expr) {
+            let [actual] = children else {
+                return Err("checked callable Copy lacks its single value".to_owned());
+            };
+            return self.builtin_value(actual);
+        }
+        Ok(None)
+    }
+
     /// This context for a host lane that claims a site naming a
     /// parameter-carried binder against its own activation record.
     pub fn claiming_parameter_binders_at_activation(&self) -> Self {
@@ -1797,6 +1879,7 @@ impl SubexprLoweringContext {
     pub fn with_adt_registry(&self, registry: &chelis_types::adt::AdtRegistry) -> Self {
         Self {
             constructor_layouts: Arc::new(ConstructorLayouts::from_registry(registry)),
+            resolved_builtin_values: Arc::new(OnceLock::new()),
             ..self.clone()
         }
     }
@@ -2189,6 +2272,8 @@ pub(crate) fn prepare_subexpr_lowering_context(
     }
     SubexprLoweringContext {
         host_payloads: Arc::default(),
+        builtin_values: BTreeMap::new(),
+        resolved_builtin_values: Arc::new(OnceLock::new()),
         program_types: Arc::new(program_types),
         program_defs,
         program_signatures,
@@ -2228,6 +2313,7 @@ pub fn try_lower_subexpr_program_with_context_and_controls(
                 context,
                 None,
                 SubexprLoweringOptions {
+                    root: SubexprRoot::Expression,
                     root_operation: None,
                     include_list_controls: true,
                     // The scope is the ambient bindings this subexpression captured.
@@ -2278,6 +2364,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
         context,
         result_claim,
         SubexprLoweringOptions {
+            root: SubexprRoot::Expression,
             root_operation: None,
             include_list_controls: false,
             authored_signature,
@@ -2288,13 +2375,84 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
     )
 }
 
+/// A complete named invocation lowered over its own once-prepared actuals.
+/// The private graph cannot be substituted independently of this product.
+/// This is not a shape fact about a List type or a standalone callee summary.
+pub(crate) struct PreparedNamedCallHelper {
+    lowered: LoweredSubexprWithControls,
+    #[cfg(feature = "lowering-trace")]
+    trace: Option<crate::lowering_trace::HelperLoweringTrace>,
+}
+
+impl PreparedNamedCallHelper {
+    #[cfg(feature = "lowering-trace")]
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        LoweredSubexprWithControls,
+        Option<crate::lowering_trace::HelperLoweringTrace>,
+    ) {
+        (self.lowered, self.trace)
+    }
+
+    #[cfg(not(feature = "lowering-trace"))]
+    pub(crate) fn into_parts(self) -> (LoweredSubexprWithControls,) {
+        (self.lowered,)
+    }
+}
+
+/// Request the existing full call owner, not an extracted executable body.
+/// Admission is derived from the values that owner actually prepares.
+pub(crate) fn try_lower_prepared_named_call(
+    expr: &Expr,
+    scoped_bindings: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    expected: &TensorType,
+    collect_trace: bool,
+) -> Result<PreparedNamedCallHelper, LowerDiagnostic> {
+    #[cfg(feature = "lowering-trace")]
+    let collector = collect_trace.then(crate::lowering_trace::Collector::new_helper);
+    #[cfg(not(feature = "lowering-trace"))]
+    let _ = collect_trace;
+    assert_decode_once_at_boundary("prepared_named_call: expr", std::slice::from_ref(expr));
+    let (dag, value_root_count, list_checks, ordered_list_checks) =
+        catch_lowering(std::panic::AssertUnwindSafe(|| {
+            lower_subexpr_program_inner_impl(
+                expr,
+                scoped_bindings,
+                context,
+                Some(expected),
+                SubexprLoweringOptions {
+                    root: SubexprRoot::PreparedClosedListCall,
+                    root_operation: None,
+                    include_list_controls: true,
+                    authored_signature: false,
+                    literal_result_claim_ownership:
+                        LiteralResultClaimOwnership::AuthoredTensorHelper,
+                    #[cfg(feature = "lowering-trace")]
+                    trace: collector.clone(),
+                },
+            )
+        }))?;
+    Ok(PreparedNamedCallHelper {
+        lowered: LoweredSubexprWithControls {
+            dag,
+            value_root_count,
+            list_checks,
+            ordered_list_checks,
+        },
+        #[cfg(feature = "lowering-trace")]
+        trace: collector.map(|collector| collector.finish_helper()),
+    })
+}
+
 pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
     expr: &Expr,
     scoped_bindings: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     authored_signature: bool,
-    root_operation: Option<crate::host_type_state::CheckedBuiltinCallable>,
+    root_operation: Option<ResolvedBuiltinValue>,
 ) -> Result<Dag, LowerDiagnostic> {
     try_lower_subexpr_program_with_ordered_inputs_impl(
         expr,
@@ -2302,6 +2460,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
         context,
         result_claim,
         SubexprLoweringOptions {
+            root: SubexprRoot::Expression,
             root_operation,
             include_list_controls: false,
             authored_signature,
@@ -2327,6 +2486,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
         context,
         result_claim,
         SubexprLoweringOptions {
+            root: SubexprRoot::Expression,
             root_operation: None,
             include_list_controls: false,
             authored_signature,
@@ -2344,7 +2504,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     authored_signature: bool,
-    root_operation: Option<crate::host_type_state::CheckedBuiltinCallable>,
+    root_operation: Option<ResolvedBuiltinValue>,
 ) -> Result<(Dag, crate::lowering_trace::HelperLoweringTrace), LowerDiagnostic> {
     let collector = crate::lowering_trace::Collector::new_helper();
     let dag = try_lower_subexpr_program_with_ordered_inputs_impl(
@@ -2353,6 +2513,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
         context,
         result_claim,
         SubexprLoweringOptions {
+            root: SubexprRoot::Expression,
             root_operation,
             include_list_controls: false,
             authored_signature,
@@ -2420,6 +2581,7 @@ pub(crate) fn try_lower_staged_host_region(
         ctx.decl = Some(ctx.dag.declare(""));
         ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
         ctx.constructor_layouts = context.constructor_layouts.clone();
+        ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
         ctx.activation_record = context.activation_record;
         ctx.prec_substitutions = context
             .tensor_specialization
@@ -2516,10 +2678,17 @@ pub(crate) fn try_lower_staged_host_region(
 /// runtime list controls belong in this DAG, and whether the scope came from a
 /// signature someone wrote. Neither is recoverable from the expression, and
 /// passing them as bare positional booleans made the call sites unreadable.
+#[derive(Clone, Copy)]
+enum SubexprRoot {
+    Expression,
+    PreparedClosedListCall,
+}
+
 struct SubexprLoweringOptions {
+    root: SubexprRoot,
     /// Positive checked callee evidence for this root application only. The
     /// scope contains numeric operands, never callable pseudo-inputs.
-    root_operation: Option<crate::host_type_state::CheckedBuiltinCallable>,
+    root_operation: Option<ResolvedBuiltinValue>,
     include_list_controls: bool,
     /// See [`LowerCtx::signature_is_authored`].
     authored_signature: bool,
@@ -2547,6 +2716,7 @@ fn lower_subexpr_program_inner_impl(
     Vec<RuntimeListCheck>,
 ) {
     let SubexprLoweringOptions {
+        root,
         root_operation,
         include_list_controls,
         authored_signature,
@@ -2560,10 +2730,14 @@ fn lower_subexpr_program_inner_impl(
         context.program_signatures.clone(),
         LinearityInfo::default(),
     );
-    // The lowered expression is this graph's only declaration.
+    for (name, value) in &context.builtin_values {
+        ctx.local_callables
+            .insert(name.clone(), CallableExpr::Builtin(value.clone()));
+    }
     ctx.decl = Some(ctx.dag.declare(""));
     ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
     ctx.constructor_layouts = context.constructor_layouts.clone();
+    ctx.resolved_builtin_values = Arc::clone(&context.resolved_builtin_values);
     ctx.activation_record = context.activation_record;
     ctx.prec_substitutions = context
         .tensor_specialization
@@ -2619,12 +2793,17 @@ fn lower_subexpr_program_inner_impl(
     ctx.bindings.clear_witnesses();
     ctx.prepare_local_ascription_tokens(expr, None);
     ctx.declaration_root_claim = authored_signature;
-    let value = ctx.lower_expr_with_claim_and_operation(
-        expr,
-        result_claim,
-        authored_signature,
-        root_operation,
-    );
+    let value = match root {
+        SubexprRoot::Expression => ctx.lower_expr_with_claim_and_operation(
+            expr,
+            result_claim,
+            authored_signature,
+            root_operation,
+        ),
+        SubexprRoot::PreparedClosedListCall => {
+            ctx.lower_prepared_closed_list_named_call(expr, result_claim)
+        }
+    };
     ctx.validate_local_ascription_token_ownership();
     // chelis#1374/#1376: an exported kernel carries its own declared result
     // claim. Without this the obligation existed only on the inlining paths,
@@ -4058,6 +4237,31 @@ pub(crate) fn tensor_callsite_specialization(
 }
 
 impl TensorCallsiteSpecialization {
+    /// Source-child correspondence for the same validated rank expansion as
+    /// executable tensor actualization. Each synthesized spread axis inherits
+    /// its authored spread's provenance; precision keeps its own final child.
+    pub(crate) fn authored_tensor_child_origins(
+        &self,
+        authored: &Expr,
+    ) -> Result<Vec<usize>, String> {
+        let slots = tensor_formal_dim_slots(authored)
+            .ok_or_else(|| "tensor provenance has no authored tensor carrier".to_owned())?;
+        let mut origins = Vec::new();
+        for (index, slot) in slots.iter().enumerate() {
+            let width = match slot {
+                DimSlot::Spread(name) => self
+                    .claim_rank_substitutions
+                    .get(name)
+                    .ok_or_else(|| format!("tensor provenance has no rank evidence for `{name}`"))?
+                    .len(),
+                _ => 1,
+            };
+            origins.extend(std::iter::repeat_n(index, width));
+        }
+        origins.push(slots.len());
+        Ok(origins)
+    }
+
     /// Add precision evidence carried by non-tensor parameters of the same
     /// invocation. A scalar `p` can specialize a tensor result's element
     /// precision even when no tensor formal exists. Checked identities extend
@@ -5389,56 +5593,124 @@ impl<'a> TerminalIndex<'a> {
 /// generated global label when its declaration is resolved, rather than
 /// reconstructing operation identity from an encoded spelling at a call site.
 /// A function body or computed callable is not a capture-free builtin producer.
-pub(crate) fn checked_builtin_callable_bindings(
+fn resolve_builtin_producer_reference(
+    expr: &Expr,
     declarations: &BTreeMap<String, Expr>,
-) -> BTreeMap<String, crate::host_type_state::CheckedBuiltinCallable> {
-    let mut bindings = BTreeMap::new();
-    for (name, body) in declarations {
-        let mut expr = body;
-        let mut visited = UnordSet::new();
-        let operation = loop {
-            let Some(reference) = callable_ref_name(expr) else {
-                break None;
-            };
-            if !visited.insert(reference.clone()) {
-                break None;
-            }
-            if let Some(body) = declarations.get(&reference) {
-                expr = body;
-            } else {
-                break crate::host_type_state::CheckedBuiltinCallable::from_symbol(&reference);
-            }
+    signatures: &BTreeMap<String, Expr>,
+    registry: &chelis_types::adt::AdtRegistry,
+    values: &mut BTreeMap<String, Option<ResolvedBuiltinValue>>,
+    visiting: &mut UnordSet<String>,
+) -> Result<Option<ResolvedBuiltinValue>, String> {
+    if let Some((DeepTag::Copy, _, children)) = stamped_parts(expr) {
+        let [actual] = children else {
+            return Err("checked callable Copy lacks its single value".to_owned());
         };
-        if let Some(operation) = operation {
-            bindings.insert(name.clone(), operation);
-            bindings.insert(
-                LoadStoreName::top_level(name).as_str().to_string(),
-                operation,
-            );
-        }
+        return resolve_builtin_producer_reference(
+            actual,
+            declarations,
+            signatures,
+            registry,
+            values,
+            visiting,
+        );
     }
-    bindings
+    let Some(name) = callable_ref_name(expr) else {
+        return Ok(None);
+    };
+    if let Some(value) = values.get(&name) {
+        return Ok(value.clone());
+    }
+    if !visiting.insert(name.clone()) {
+        return Ok(None);
+    }
+    let result = if let Some(body) = declarations.get(&name) {
+        let mut value = resolve_builtin_producer_reference(
+            body,
+            declarations,
+            signatures,
+            registry,
+            values,
+            visiting,
+        )?;
+        if let Some(value) = &mut value
+            && let Some(authored) = signatures.get(&name)
+        {
+            let contract = NormalizedCallableContract::from_authored(registry, authored)?
+                .ok_or_else(|| {
+                    format!("builtin producer `{name}` has a non-callable authored signature")
+                })?;
+            value.retain_outer_contract(contract);
+        }
+        value
+    } else {
+        ResolvedBuiltinValue::resolve_bare(&name)
+    };
+    visiting.remove(&name);
+    values.insert(name, result.clone());
+    Ok(result)
 }
 
-/// Resolve only the closed predicate callable identities through declaration
-/// aliases. A callable carrier is host data; applying its static identity to
-/// a tensor does not depend on materializing that carrier as a DAG value.
-fn float_predicate_callable<'a>(
-    mut expr: &'a Expr,
-    declarations: &'a BTreeMap<String, Expr>,
-) -> Option<chelis_types::FloatClassify> {
-    let mut visited = UnordSet::new();
-    loop {
-        let name = callable_ref_name(expr)?;
-        if !visited.insert(name.clone()) {
-            return None;
+pub(crate) fn resolved_builtin_producer_bindings(
+    declarations: &BTreeMap<String, Expr>,
+    signatures: &BTreeMap<String, Expr>,
+    registry: &chelis_types::adt::AdtRegistry,
+) -> Result<BTreeMap<String, ResolvedBuiltinValue>, String> {
+    let mut values = BTreeMap::new();
+    for (name, body) in declarations {
+        if values.contains_key(name) {
+            continue;
         }
-        if let Some(body) = declarations.get(&name) {
-            expr = body;
-        } else {
-            return chelis_types::FloatClassify::from_name(&name);
+        let reference = Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name(name.clone()), body.span())],
+            body.span(),
+        );
+        resolve_builtin_producer_reference(
+            &reference,
+            declarations,
+            signatures,
+            registry,
+            &mut values,
+            &mut UnordSet::new(),
+        )?;
+    }
+    let mut bindings = BTreeMap::new();
+    for name in declarations.keys() {
+        if let Some(Some(value)) = values.remove(name) {
+            bindings.insert(
+                LoadStoreName::top_level(name).as_str().to_owned(),
+                value.clone(),
+            );
+            bindings.insert(name.clone(), value);
         }
     }
+    Ok(bindings)
+}
+
+/// Classification projects identity from the same producer resolver. It never
+/// manufactures an execution value from a function signature or descriptor.
+pub(crate) fn admitted_builtin_callable(
+    expr: &Expr,
+    declarations: &BTreeMap<String, Expr>,
+) -> Option<chelis_types::AdmittedBuiltin> {
+    resolve_builtin_producer_reference(
+        expr,
+        declarations,
+        &BTreeMap::new(),
+        &chelis_types::adt::AdtRegistry::default(),
+        &mut BTreeMap::new(),
+        &mut UnordSet::new(),
+    )
+    .unwrap_or_else(|message| raise_fatal_lowering_error(message, Some(expr.span()), None))
+    .map(|value| value.operation())
+}
+
+fn float_predicate_callable(
+    expr: &Expr,
+    declarations: &BTreeMap<String, Expr>,
+) -> Option<chelis_types::FloatClassify> {
+    chelis_types::FloatClassify::from_name(admitted_builtin_callable(expr, declarations)?.symbol())
 }
 
 fn def_is_lowered(
@@ -5459,7 +5731,9 @@ fn def_is_lowered(
     }
 
     let lowered = top_level_defs.get(name).is_some_and(|body| {
-        if float_predicate_callable(body, top_level_defs).is_some() {
+        // Static callable values have host carriers, not tensor roots. Their
+        // resolved identity can still specialize a numeric application.
+        if admitted_builtin_callable(body, top_level_defs).is_some() {
             return false;
         }
         // A declaration of function type can bind a computed function value,
@@ -5541,16 +5815,27 @@ fn unique_terminal_match<'a>(map: &'a BTreeMap<String, Expr>, name: &str) -> Opt
 struct LowerabilityBindings {
     names: UnordSet<String>,
     host_calls: UnordSet<String>,
+    unresolved_callables: UnordSet<String>,
+    supplied_unresolved_formals: Option<Vec<bool>>,
+    inside_vmap: bool,
+    unresolved_vmap: std::rc::Rc<Cell<bool>>,
 }
 
 impl LowerabilityBindings {
     fn bind(&mut self, name: String, callable: bool) {
+        self.unresolved_callables.remove(&name);
         self.names.insert(name.clone());
         if callable {
             self.host_calls.remove(&name);
         } else {
             self.host_calls.insert(name);
         }
+    }
+
+    fn unresolved_callable_value(&self, expression: &Expr) -> bool {
+        chelis_types::linearity::free_runtime_variables(expression)
+            .iter()
+            .any(|name| self.unresolved_callables.contains(name))
     }
 
     fn static_callable(&self, mut expr: &Expr, declarations: &BTreeMap<String, Expr>) -> bool {
@@ -5578,6 +5863,42 @@ impl LowerabilityBindings {
     }
 }
 
+/// A transform template needs the static identity supplied by an eventual
+/// callable actual. This reuses the pre-lane lexical admission walk; the
+/// signature alone never excludes a kernel whose callable formal is unused.
+pub(crate) fn function_has_unresolved_vmap_target(
+    function: &Expr,
+    declarations: &BTreeMap<String, Expr>,
+) -> bool {
+    let Some((DeepTag::Fn, _, children)) = stamped_parts(function) else {
+        return false;
+    };
+    let Some((DeepTag::Params, _, parameters)) = children.first().and_then(stamped_parts) else {
+        return false;
+    };
+    if !parameters.iter().enumerate().any(|(index, _)| {
+        extract_param_type(function, index)
+            .and_then(strip_transparent_type_wrappers)
+            .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn))
+    }) {
+        return false;
+    }
+    let bindings = LowerabilityBindings::default();
+    let empty = BTreeMap::new();
+    let bounds = BTreeMap::new();
+    let types = LowerabilityTypes::new(&empty, &bounds, UnordSet::new(), &empty);
+    let _ = expr_depends_on_nonlowerable_name(
+        function,
+        declarations,
+        &types,
+        &empty,
+        &mut BTreeMap::new(),
+        &mut UnordSet::new(),
+        &bindings,
+    );
+    bindings.unresolved_vmap.get()
+}
+
 fn expr_depends_on_nonlowerable_name(
     expr: &Expr,
     top_level_defs: &BTreeMap<String, Expr>,
@@ -5595,6 +5916,104 @@ fn expr_depends_on_nonlowerable_name(
         | ExprCarrier::MetadataMap(_)
         | ExprCarrier::MetadataExpression(_) => None,
     } {
+        if tag == DeepTag::Var
+            && bound_names.inside_vmap
+            && kids
+                .first()
+                .and_then(symbol_name)
+                .is_some_and(|name| bound_names.unresolved_callables.contains(name))
+        {
+            bound_names.unresolved_vmap.set(true);
+            return true;
+        }
+        if tag == DeepTag::Grad && bound_names.inside_vmap {
+            // Fused AD owns whether an unresolved call contributes to the
+            // differentiated output. A dead call can have a complete zero
+            // derivative; the pre-lane vmap scan must not replace that oracle.
+            let mut scoped = bound_names.clone();
+            scoped.inside_vmap = false;
+            return kids.iter().any(|child| {
+                expr_depends_on_nonlowerable_name(
+                    child,
+                    top_level_defs,
+                    types,
+                    type_env,
+                    cache,
+                    visiting,
+                    &scoped,
+                )
+            });
+        }
+        if tag == DeepTag::Vmap {
+            let mut scoped = bound_names.clone();
+            scoped.inside_vmap = true;
+            return kids.iter().any(|child| {
+                expr_depends_on_nonlowerable_name(
+                    child,
+                    top_level_defs,
+                    types,
+                    type_env,
+                    cache,
+                    visiting,
+                    &scoped,
+                )
+            });
+        }
+        // A forwarding transform template gets its unresolved callable facts
+        // from the actuals, not from every callable-shaped formal. Reuse this
+        // lexical walk across the declaration edge before lane selection.
+        if tag == DeepTag::App
+            && let Some(name) = kids.first().and_then(callable_ref_name)
+            && !bound_names.names.contains(&name)
+            && let Some(body) = top_level_defs.get(&name)
+            && body.tag() == Some(DeepTag::Fn)
+        {
+            let has_callable_formals = kids.iter().skip(1).enumerate().any(|(index, _)| {
+                extract_param_type(body, index)
+                    .and_then(strip_transparent_type_wrappers)
+                    .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn))
+            });
+            let supplied = kids
+                .iter()
+                .skip(1)
+                .map(|arg| {
+                    bound_names.unresolved_callable_value(arg)
+                        || !bound_names.static_callable(arg, top_level_defs)
+                })
+                .collect::<Vec<_>>();
+            if has_callable_formals && visiting.insert(name.clone()) {
+                let scoped = LowerabilityBindings {
+                    supplied_unresolved_formals: Some(supplied),
+                    unresolved_vmap: bound_names.unresolved_vmap.clone(),
+                    ..LowerabilityBindings::default()
+                };
+                let requires_host = expr_depends_on_nonlowerable_name(
+                    body,
+                    top_level_defs,
+                    types,
+                    type_env,
+                    cache,
+                    visiting,
+                    &scoped,
+                );
+                visiting.remove(&name);
+                // The standalone template's unresolved formal is not the
+                // supplied target at this call. Its body and eager actuals
+                // own the lane decision; runtime choices remain unresolved.
+                return requires_host
+                    || kids.iter().skip(1).any(|arg| {
+                        expr_depends_on_nonlowerable_name(
+                            arg,
+                            top_level_defs,
+                            types,
+                            type_env,
+                            cache,
+                            visiting,
+                            bound_names,
+                        )
+                    });
+            }
+        }
         // A local callee must retain a callable identity the numeric
         // resolver understands. Computed values keep host execution even
         // when their producing projection has no checked type annotation.
@@ -5666,13 +6085,14 @@ fn expr_depends_on_nonlowerable_name(
             && !bound_names.names.contains(name)
             && top_level_defs.contains_key(name)
         {
-            if float_predicate_callable(expr, top_level_defs).is_some() {
+            if admitted_builtin_callable(expr, top_level_defs).is_some() {
                 return false;
             }
             return !def_is_lowered(name, top_level_defs, types, type_env, cache, visiting);
         }
         if tag == DeepTag::Fn {
             let mut scoped = bound_names.clone();
+            let supplied_unresolved_formals = scoped.supplied_unresolved_formals.take();
             if let Some(params) = kids.first() {
                 let params_kids = match params.carrier() {
                     ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children,
@@ -5683,11 +6103,20 @@ fn expr_depends_on_nonlowerable_name(
                     | ExprCarrier::MetadataMap(_)
                     | ExprCarrier::MetadataExpression(_) => return true,
                 };
-                for param in params_kids {
+                for (index, param) in params_kids.iter().enumerate() {
+                    let unresolved = extract_param_type(expr, index)
+                        .and_then(strip_transparent_type_wrappers)
+                        .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn))
+                        && supplied_unresolved_formals
+                            .as_ref()
+                            .is_none_or(|actuals| actuals.get(index) == Some(&true));
                     let mut names = UnordSet::new();
                     collect_param_bound_names(param, &mut names);
                     for name in names.into_sorted() {
-                        scoped.bind(name, true);
+                        scoped.bind(name.clone(), true);
+                        if unresolved {
+                            scoped.unresolved_callables.insert(name);
+                        }
                     }
                 }
             }
@@ -5731,7 +6160,11 @@ fn expr_depends_on_nonlowerable_name(
                     if let Some(name) = symbol_name(&binding_kids[index]) {
                         let callable =
                             scoped.static_callable(&binding_kids[index + 1], top_level_defs);
+                        let unresolved = scoped.unresolved_callable_value(&binding_kids[index + 1]);
                         scoped.bind(name.to_string(), callable);
+                        if unresolved {
+                            scoped.unresolved_callables.insert(name.to_string());
+                        }
                     }
                     index += 2;
                 }
@@ -7652,14 +8085,20 @@ impl ResolvedFunction {
 }
 
 #[derive(Clone)]
+enum ResolvedVmapTarget {
+    Function(ResolvedFunction),
+    Builtin(ResolvedBuiltinValue),
+}
+
+#[derive(Clone)]
 enum CallableExpr {
     Plain(ResolvedFunction),
+    Builtin(ResolvedBuiltinValue),
     /// Closed operation carried through a checked value binding. The
     /// original operation identity is captured when the value is formed;
     /// an alias's spelling never selects the lowered primitive.
-    CheckedBuiltin(crate::host_type_state::CheckedBuiltinCallable),
     Vmap {
-        fn_expr: ResolvedFunction,
+        target: ResolvedVmapTarget,
         axis: usize,
     },
     VmapGrad {
@@ -7718,6 +8157,45 @@ fn is_bare_type_variable(mut expr: &Expr) -> bool {
 enum GradActual {
     Callable(CallableExpr),
     Value(LoweredValue),
+}
+
+#[derive(Clone, Copy)]
+enum PreparedCallRequirement {
+    Ordinary,
+    ClosedList,
+}
+
+struct CheckedCallableResult<'a> {
+    precision: Option<Prim>,
+    names: Option<&'a [Option<CheckedAxisName>]>,
+}
+
+/// The exact payloads formed in caller scope, consumed once by the complete
+/// callable owner. No source expression, name-keyed proof, or guessed length
+/// can replace a value in this record.
+struct PreparedCallableActual {
+    static_size: Option<i64>,
+    callable: Option<CallableExpr>,
+    value: Option<LoweredValue>,
+}
+
+struct PreparedCallableActuals(Vec<PreparedCallableActual>);
+
+impl PreparedCallableActuals {
+    fn admits_closed_list_call(&self) -> bool {
+        let mut closed_list = false;
+        for actual in &self.0 {
+            if actual.callable.is_some() {
+                return false;
+            }
+            match actual.value.as_ref() {
+                Some(LoweredValue::Node(_)) => {}
+                Some(value) if adt_cons_chain_values(value).is_some() => closed_list = true,
+                _ => return false,
+            }
+        }
+        closed_list
+    }
 }
 
 #[derive(Clone)]
@@ -7864,6 +8342,7 @@ impl AdtLayout {
 /// and host lowering orders record fields by (chelis#3230).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConstructorLayouts {
+    type_registry: Arc<chelis_types::adt::AdtRegistry>,
     constructors: BTreeMap<String, Vec<DeclaredConstructor>>,
 }
 
@@ -7891,7 +8370,10 @@ impl ConstructorLayouts {
                     });
             }
         }
-        Self { constructors }
+        Self {
+            constructors,
+            type_registry: Arc::new(registry.clone()),
+        }
     }
 
     /// The declarations `ctor` may name: those carrying the exact
@@ -8168,6 +8650,12 @@ pub struct LoweredSubexprWithControls {
 }
 
 impl LoweredSubexprWithControls {
+    /// Whether either execution protocol carries List controls that an
+    /// adapter must execute or preserve by retaining the complete host call.
+    pub(crate) fn has_list_controls(&self) -> bool {
+        !self.list_checks.is_empty() || !self.ordered_list_checks.is_empty()
+    }
+
     /// The graph whose roots contain value leaves followed by List controls.
     pub fn dag(&self) -> &Dag {
         &self.dag
@@ -8716,6 +9204,15 @@ enum FailMessage {
 /// is resolved where the ascription's initializer lowers.
 type LocalAscriptionClaimTokens = Vec<(usize, Option<NodeId>)>;
 
+/// Result requirements are captured in their declaring activation before the
+/// producer is lowered, then attached to that producer without re-emitting it.
+struct PreparedValueResultClaim {
+    requirements: Vec<(usize, String, NodeId, bool)>,
+    first_site_claims: Vec<(usize, String)>,
+    declaration_root: bool,
+    authored_result_claim: bool,
+}
+
 struct LowerCtx<'program> {
     host_program: Option<&'program crate::host::HostLoweringSession<'program>>,
     host_sources: Vec<crate::host::staged::HostSource>,
@@ -8844,7 +9341,7 @@ struct LowerCtx<'program> {
     local_callables: UnordMap<String, CallableExpr>,
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
-    checked_builtin_callables: BTreeMap<String, crate::host_type_state::CheckedBuiltinCallable>,
+    resolved_builtin_values: ResolvedBuiltinValueCache,
     program_signatures: Arc<BTreeMap<String, Expr>>,
     /// The checked program's declared constructor field orders, which
     /// record construction stores its slots in (chelis#3230). Empty when
@@ -9027,7 +9524,8 @@ impl<'program> LowerCtx<'program> {
         linearity: LinearityInfo,
     ) -> Self {
         let program_defs = program_defs.into();
-        let checked_builtin_callables = checked_builtin_callable_bindings(&program_defs);
+        let program_signatures = program_signatures.into();
+
         Self {
             host_program: None,
             host_sources: Vec::new(),
@@ -9061,8 +9559,8 @@ impl<'program> LowerCtx<'program> {
             local_callables: UnordMap::new(),
             program_types: program_types.into(),
             program_defs,
-            checked_builtin_callables,
-            program_signatures: program_signatures.into(),
+            resolved_builtin_values: Arc::new(OnceLock::new()),
+            program_signatures,
             constructor_layouts: Arc::default(),
             random_path_condition: None,
             if_branch_depth: 0,
@@ -9863,9 +10361,16 @@ impl<'program> LowerCtx<'program> {
         };
         match callable {
             CallableExpr::Plain(fn_expr) => CallableExpr::Plain(function(fn_expr)),
-            CallableExpr::CheckedBuiltin(operation) => CallableExpr::CheckedBuiltin(*operation),
-            CallableExpr::Vmap { fn_expr, axis } => CallableExpr::Vmap {
-                fn_expr: function(fn_expr),
+            CallableExpr::Builtin(operation) => CallableExpr::Builtin(operation.clone()),
+            CallableExpr::Vmap { target, axis } => CallableExpr::Vmap {
+                target: match target {
+                    ResolvedVmapTarget::Function(fn_expr) => {
+                        ResolvedVmapTarget::Function(function(fn_expr))
+                    }
+                    ResolvedVmapTarget::Builtin(operation) => {
+                        ResolvedVmapTarget::Builtin(operation.clone())
+                    }
+                },
                 axis: *axis,
             },
             CallableExpr::VmapGrad { fn_expr, wrt, axis } => CallableExpr::VmapGrad {
@@ -10594,6 +11099,7 @@ impl<'program> LowerCtx<'program> {
             LinearityInfo::default(),
         );
         scratch.constructor_layouts = Arc::clone(&self.constructor_layouts);
+        scratch.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
         scratch.decl = Some(scratch.dag.declare(name));
         scratch.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
         scratch.activation_record = self.activation_record;
@@ -11170,12 +11676,26 @@ impl<'program> LowerCtx<'program> {
         expr: &Expr,
         claim: Option<&TensorType>,
         authored_result_claim: bool,
-        operation: Option<crate::host_type_state::CheckedBuiltinCallable>,
+        operation: Option<ResolvedBuiltinValue>,
     ) -> LoweredValue {
+        let function = stamped_parts(expr).is_some_and(|(tag, _, _)| tag == DeepTag::Fn);
+        let prepared = self.prepare_value_result_claim(claim, authored_result_claim, function);
+        let result = self.lower_expr_unclaimed(expr, claim.filter(|_| function), operation);
+        self.attach_value_result_claim(result, prepared)
+    }
+
+    /// Authored result obligations belong to the produced value independently
+    /// of the expression or static callable that supplies it. Keep the same
+    /// producer-claim owner for ordinary bodies and admitted builtin bodies.
+    fn prepare_value_result_claim(
+        &mut self,
+        claim: Option<&TensorType>,
+        authored_result_claim: bool,
+        function: bool,
+    ) -> PreparedValueResultClaim {
         // Resolve in the declaring activation, BEFORE a nested helper can
         // install its own same-spelled binders. A function expression resolves
         // its declaration only after lower_fn has installed its parameters.
-        let function = stamped_parts(expr).is_some_and(|(tag, _, _)| tag == DeepTag::Fn);
         let declaration_root = std::mem::take(&mut self.declaration_root_claim);
         let requirements = claim
             .into_iter()
@@ -11211,7 +11731,25 @@ impl<'program> LowerCtx<'program> {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut result = self.lower_expr_unclaimed(expr, claim.filter(|_| function), operation);
+        PreparedValueResultClaim {
+            requirements,
+            first_site_claims,
+            declaration_root,
+            authored_result_claim,
+        }
+    }
+
+    fn attach_value_result_claim(
+        &mut self,
+        mut result: LoweredValue,
+        prepared: PreparedValueResultClaim,
+    ) -> LoweredValue {
+        let PreparedValueResultClaim {
+            requirements,
+            first_site_claims,
+            declaration_root,
+            authored_result_claim,
+        } = prepared;
         let start = self.invocation_witnesses.len();
         for (axis, label, required, literal) in requirements {
             if let Some(mut id) = result.as_single_node() {
@@ -11536,7 +12074,7 @@ impl<'program> LowerCtx<'program> {
         &mut self,
         expr: &Expr,
         claim: Option<&TensorType>,
-        operation: Option<crate::host_type_state::CheckedBuiltinCallable>,
+        operation: Option<ResolvedBuiltinValue>,
     ) -> LoweredValue {
         if operation.is_none()
             && let Some(value) = self.stage_host_value(expr, false)
@@ -11577,8 +12115,8 @@ impl<'program> LowerCtx<'program> {
                             self.current_span_id.clone(),
                         )
                     });
-                    self.lower_checked_builtin_app(
-                        operation,
+                    self.lower_builtin_value_app(
+                        &operation,
                         args,
                         &self.type_from_meta(node.meta()),
                         *span,
@@ -12102,7 +12640,7 @@ impl<'program> LowerCtx<'program> {
                         // expressions can then capture aliases through the
                         // same typed host carrier as other lexical values.
                         let value = self.stage_host_value(&bind_kids[i + 1], false).or_else(|| {
-                            if let CallableExpr::CheckedBuiltin(operation) = &callable {
+                            if let CallableExpr::Builtin(operation) = &callable {
                                 self.key_builtin_alias_value(&bind_kids[i + 1], operation.symbol())
                             } else {
                                 None
@@ -12932,7 +13470,7 @@ impl<'program> LowerCtx<'program> {
             && let Some(Expr::Atom(Atom::Name(func_name), _)) = func_kids.first()
             && !self.bindings.contains_key(func_name)
             && !self.program_defs.contains_key(func_name)
-            && !self.checked_builtin_callables.contains_key(func_name)
+            && !self.resolved_builtin_values().contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
             && !self.fn_typed_params.contains(func_name)
         {
@@ -13198,11 +13736,11 @@ impl<'program> LowerCtx<'program> {
                 checked_result_names,
                 inlining_name,
             )),
-            CallableExpr::CheckedBuiltin(operation) => {
-                Some(self.lower_checked_builtin_app(operation, args, ty, app_span))
+            CallableExpr::Builtin(operation) => {
+                Some(self.lower_builtin_value_app(&operation, args, ty, app_span))
             }
-            CallableExpr::Vmap { fn_expr, axis } => {
-                Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
+            CallableExpr::Vmap { target, axis } => {
+                Some(self.lower_vmap_callable_app(&target, axis, args, ty, app_span))
             }
             CallableExpr::VmapGrad { fn_expr, wrt, axis } => Some(
                 self.lower_vmap_grad_callable_app(&fn_expr, wrt.as_deref(), axis, args, app_span),
@@ -13224,6 +13762,43 @@ impl<'program> LowerCtx<'program> {
                 Some(self.mark_unresolved_callable_value(provisional))
             }
         }
+    }
+
+    fn lower_builtin_value_app(
+        &mut self,
+        operation: &ResolvedBuiltinValue,
+        args: &[Expr],
+        ty: &TensorType,
+        app_span: Span,
+    ) -> LoweredValue {
+        let nodes = args
+            .iter()
+            .map(|arg| self.lower_expr_node(arg, "builtin value argument"))
+            .collect::<Vec<_>>();
+        let saved = self.capture_scope();
+        let names = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                let name = format!("__chelis_builtin_actual_{}_{}", node.0, index);
+                self.bindings
+                    .insert(name.clone(), LoweredValue::Node(*node));
+                name
+            })
+            .collect::<Vec<_>>();
+        let types = nodes
+            .iter()
+            .map(|node| {
+                self.dag
+                    .get(*node)
+                    .expect("builtin actual")
+                    .output_type
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let result = self.lower_builtin_value_body(operation, &names, &types, ty, app_span);
+        self.replace_scope(saved);
+        result
     }
 
     fn mark_unresolved_callable_value(&mut self, value: LoweredValue) -> LoweredValue {
@@ -13348,14 +13923,6 @@ impl<'program> LowerCtx<'program> {
                 if let Some(callable) = local_callables.get(&name) {
                     return Some(callable.clone());
                 }
-                if !declaration
-                    && let Some(LoweredValue::Host {
-                        ty: crate::host_type_state::HostTypeTerm::CheckedBuiltinCallable(op),
-                        ..
-                    }) = self.bindings.get(&name)
-                {
-                    return Some(CallableExpr::CheckedBuiltin(*op));
-                }
                 // The innermost binding of the name wins (chelis#1949): a
                 // function-typed parameter is a callable, and a local value
                 // shadows a same-named top-level function, so it is no
@@ -13374,8 +13941,8 @@ impl<'program> LowerCtx<'program> {
                 {
                     return None;
                 }
-                if let Some(operation) = self.checked_builtin_callables.get(&name) {
-                    return Some(CallableExpr::CheckedBuiltin(*operation));
+                if let Some(value) = self.resolved_builtin_values().get(&name) {
+                    return Some(CallableExpr::Builtin(value.clone()));
                 }
                 if let Some(body) = self.program_defs.get(&name) {
                     let mut callable = self.resolve_callable_expr_inner(body, visited, true)?;
@@ -13391,8 +13958,17 @@ impl<'program> LowerCtx<'program> {
                     }
                     return Some(callable);
                 }
-                crate::host_type_state::CheckedBuiltinCallable::from_symbol(&name)
-                    .map(CallableExpr::CheckedBuiltin)
+                ResolvedBuiltinValue::resolve_bare(&name).map(CallableExpr::Builtin)
+            }
+            DeepTag::Copy => {
+                let [actual] = kids else {
+                    raise_malformed_deep(
+                        "checked callable Copy lacks its single value",
+                        Some(expr.span()),
+                        self.current_span_id.clone(),
+                    );
+                };
+                self.resolve_callable_expr_inner(actual, visited, declaration)
             }
             DeepTag::Vmap => {
                 // chelis#524: distinguish the documented `vmap` contract
@@ -13441,7 +14017,14 @@ impl<'program> LowerCtx<'program> {
                 }
                 self.resolve_callable_expr_inner(kids.first()?, visited, declaration)
                     .and_then(|inner| match inner {
-                        CallableExpr::Plain(fn_expr) => Some(CallableExpr::Vmap { fn_expr, axis }),
+                        CallableExpr::Plain(fn_expr) => Some(CallableExpr::Vmap {
+                            target: ResolvedVmapTarget::Function(fn_expr),
+                            axis,
+                        }),
+                        CallableExpr::Builtin(operation) => Some(CallableExpr::Vmap {
+                            target: ResolvedVmapTarget::Builtin(operation),
+                            axis,
+                        }),
                         CallableExpr::Vmap { .. } => None,
                         CallableExpr::VmapGrad { .. } => None,
                         CallableExpr::Grad { fn_expr, wrt } => {
@@ -13449,7 +14032,6 @@ impl<'program> LowerCtx<'program> {
                         }
                         // `vmap(parameter)` is G2 territory.
                         CallableExpr::Parameter { .. } => None,
-                        CallableExpr::CheckedBuiltin(_) => None,
                     })
             }
             DeepTag::Grad => self
@@ -13466,8 +14048,45 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    fn resolved_builtin_values(&self) -> &BTreeMap<String, ResolvedBuiltinValue> {
+        self.resolved_builtin_values
+            .get_or_init(|| {
+                resolved_builtin_producer_bindings(
+                    &self.program_defs,
+                    &self.program_signatures,
+                    &self.constructor_layouts.type_registry,
+                )
+                .map(Arc::new)
+            })
+            .as_ref()
+            .unwrap_or_else(|message| {
+                raise_fatal_lowering_error(message.clone(), None, self.current_span_id.clone())
+            })
+    }
+
+    fn normalize_callable_contract(
+        &self,
+        authored: &Expr,
+        span: Span,
+    ) -> Option<NormalizedCallableContract> {
+        NormalizedCallableContract::from_authored(&self.constructor_layouts.type_registry, authored)
+            .unwrap_or_else(|message| {
+                raise_fatal_lowering_error(message, Some(span), self.current_span_id.clone())
+            })
+    }
+
     fn callable_binding_expr(&self, expr: &Expr) -> Option<CallableExpr> {
-        self.resolve_callable_expr(expr)
+        let mut callable = self.resolve_callable_expr(expr)?;
+        let (_, metadata, _) = stamped_parts(expr)?;
+        if metadata.surf_binding_type().is_some_and(|origin| {
+            *origin.value() == chelis_deep::annotations::BindingTypeOrigin::Explicit
+        }) && let Some(authored) = metadata.ty().map(|ty| ty.expression())
+            && let Some(contract) = self.normalize_callable_contract(authored, expr.span())
+            && let CallableExpr::Builtin(value) = &mut callable
+        {
+            value.retain_outer_contract(contract);
+        }
+        Some(callable)
     }
 
     fn extract_grad_wrt_indices(&self, expr: &Expr) -> Option<Vec<usize>> {
@@ -13640,6 +14259,7 @@ impl<'program> LowerCtx<'program> {
             LinearityInfo::default(),
         );
         subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
+        subctx.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
         // The body is lowered on this declaration's behalf and spliced back
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
@@ -14411,6 +15031,62 @@ impl<'program> LowerCtx<'program> {
         });
     }
 
+    fn lower_prepared_closed_list_named_call(
+        &mut self,
+        expression: &Expr,
+        expected: Option<&TensorType>,
+    ) -> LoweredValue {
+        let Some((DeepTag::App, metadata, children)) = stamped_parts(expression) else {
+            self.reject_lowering_slice(
+                Some(expression),
+                "prepared call needs an application".into(),
+            );
+        };
+        let Some((callee, args)) = children.split_first() else {
+            self.reject_lowering_slice(Some(expression), "prepared call lost its callee".into());
+        };
+        let Some(CallableExpr::Plain(function)) = self.resolve_callable_expr(callee) else {
+            self.reject_lowering_slice(
+                Some(expression),
+                "prepared call needs a resolved declaration".into(),
+            );
+        };
+        let Some(name) = function.declaration_name.clone() else {
+            self.reject_lowering_slice(
+                Some(expression),
+                "prepared call has no declaration owner".into(),
+            );
+        };
+        let checked_precision = metadata
+            .ty()
+            .and_then(|ty| self.resolved_type_precision(ty.expression()));
+        let checked_names = metadata
+            .ty()
+            .and_then(|ty| Self::checked_axis_names(ty.expression(), &self.rank_substitutions));
+        let checked_type = self.type_from_meta(metadata);
+        let expected = expected.unwrap_or(&checked_type);
+        let saved_span = std::mem::replace(
+            &mut self.current_span_id,
+            expression.span_id().map(str::to_owned),
+        );
+        // Reuse the ordinary producer-claim protocol before preparing actuals.
+        let prepared_claim = self.prepare_value_result_claim(Some(expected), false, false);
+        let result = self.lower_plain_callable_app_with_requirement(
+            &function,
+            args,
+            expected,
+            CheckedCallableResult {
+                precision: checked_precision,
+                names: checked_names.as_deref(),
+            },
+            Some(name),
+            PreparedCallRequirement::ClosedList,
+        );
+        let result = self.attach_value_result_claim(result, prepared_claim);
+        self.current_span_id = saved_span;
+        result
+    }
+
     fn lower_plain_callable_app(
         &mut self,
         fn_expr: &ResolvedFunction,
@@ -14420,6 +15096,32 @@ impl<'program> LowerCtx<'program> {
         checked_result_names: Option<&[Option<CheckedAxisName>]>,
         inlining_name: Option<String>,
     ) -> LoweredValue {
+        self.lower_plain_callable_app_with_requirement(
+            fn_expr,
+            args,
+            expected_return_ty,
+            CheckedCallableResult {
+                precision: checked_result_precision,
+                names: checked_result_names,
+            },
+            inlining_name,
+            PreparedCallRequirement::Ordinary,
+        )
+    }
+
+    fn lower_plain_callable_app_with_requirement(
+        &mut self,
+        fn_expr: &ResolvedFunction,
+        args: &[Expr],
+        expected_return_ty: &TensorType,
+        checked_result: CheckedCallableResult<'_>,
+        inlining_name: Option<String>,
+        requirement: PreparedCallRequirement,
+    ) -> LoweredValue {
+        let CheckedCallableResult {
+            precision: checked_result_precision,
+            names: checked_result_names,
+        } = checked_result;
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable(
                 "function application",
@@ -14485,15 +15187,45 @@ impl<'program> LowerCtx<'program> {
         let mut actual_positions = Vec::new();
         // Prepare every actual in caller scope, in written order. Installing
         // a formal early can change the value or static fact of a later actual.
-        let actuals = args
-            .iter()
-            .map(|arg| {
-                let static_size = self.fold_static_size(arg);
-                let callable = self.resolve_callable_expr(arg);
-                let value = callable.is_none().then(|| self.lower_expr(arg));
-                (static_size, callable, value)
-            })
-            .collect::<Vec<_>>();
+        let actuals = PreparedCallableActuals(
+            args.iter()
+                .map(|arg| {
+                    let static_size = self.fold_static_size(arg);
+                    let callable = self.resolve_callable_expr(arg);
+                    let value = callable.is_none().then(|| self.lower_expr(arg));
+                    PreparedCallableActual {
+                        static_size,
+                        callable,
+                        value,
+                    }
+                })
+                .collect::<Vec<_>>(),
+        );
+        if matches!(requirement, PreparedCallRequirement::ClosedList) {
+            if args.len() != param_names.len() || !actuals.admits_closed_list_call() {
+                self.reject_lowering_slice(
+                    Some(fn_expr),
+                    "prepared call has no closed native List actuals".into(),
+                );
+            }
+            // Nested List tensor entry checks stay with the existing host
+            // contract owner. This product never licenses their omission.
+            let contract = crate::host::EntryContract::from_normalized_types(
+                &authored_param_type_exprs,
+                None,
+                &param_names,
+            )
+            .unwrap_or_else(|error| self.reject_lowering_slice(Some(fn_expr), error));
+            if contract.formals().iter().any(|formal| {
+                matches!(formal.pattern(), crate::host::EntryPattern::List(_))
+                    && formal.pattern().has_extent_claim()
+            }) {
+                self.reject_lowering_slice(
+                    Some(fn_expr),
+                    "prepared call retains a host List entry contract".into(),
+                );
+            }
+        }
         // chelis#2588: the body sees its own declaring scope, never the
         // caller's. The saved tables above restore the caller's scope below.
         let declaring_scope = self.declaring_scope(fn_expr);
@@ -14501,12 +15233,25 @@ impl<'program> LowerCtx<'program> {
         for (
             position,
             (
-                (((name, (static_size, callable, value)), param_ty), formal_expr),
+                (
+                    (
+                        (
+                            name,
+                            PreparedCallableActual {
+                                static_size,
+                                callable,
+                                value,
+                            },
+                        ),
+                        param_ty,
+                    ),
+                    formal_expr,
+                ),
                 authored_formal_expr,
             ),
         ) in param_names
             .iter()
-            .zip(actuals)
+            .zip(actuals.0)
             .zip(param_types)
             .zip(param_type_exprs.iter())
             .zip(authored_param_type_exprs.iter())
@@ -14537,7 +15282,14 @@ impl<'program> LowerCtx<'program> {
                 static_size,
                 ..ValueFacts::default()
             };
-            if let Some(callable) = callable {
+            if let Some(mut callable) = callable {
+                if let Some(authored) = authored_formal_expr.as_ref()
+                    && let Some(contract) =
+                        self.normalize_callable_contract(authored, authored.span())
+                    && let CallableExpr::Builtin(value) = &mut callable
+                {
+                    value.retain_outer_contract(contract);
+                }
                 self.bindings.replace_facts(name, facts);
                 match callable {
                     // Preserve structural incompleteness when an unresolved
@@ -15199,9 +15951,141 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    fn lower_builtin_value_body(
+        &mut self,
+        value: &ResolvedBuiltinValue,
+        parameters: &[String],
+        actual_types: &[TensorType],
+        result_type: &TensorType,
+        span: Span,
+    ) -> LoweredValue {
+        let saved_witnesses = self.bindings.witness_snapshot();
+        let saved_unit_refinements = self.local_unit_refinements.clone();
+        let saved_signature = self.signature_witnesses.clone();
+        let saved_activation = self.activation_witnesses.clone();
+        let saved_authored = self.signature_is_authored;
+        let saved_precisions = self.prec_substitutions.clone();
+        let saved_ranks = self.rank_substitutions.clone();
+        let saved_positions = self.dim_axis_positions.clone();
+        let start = self.invocation_witnesses.len();
+        let mut result_claims = Vec::new();
+        for frame in value.contracts() {
+            let contract = frame.signature();
+            let Some((DeepTag::TFn, _, types)) = stamped_parts(contract) else {
+                raise_malformed_deep(
+                    "builtin invocation contract is not a function type",
+                    Some(span),
+                    self.current_span_id.clone(),
+                );
+            };
+            let Some((result, formals)) = types.split_last() else {
+                raise_malformed_deep(
+                    "builtin invocation contract lacks a result",
+                    Some(span),
+                    self.current_span_id.clone(),
+                );
+            };
+            let formals = formals.iter().cloned().map(Some).collect::<Vec<_>>();
+            self.prec_substitutions
+                .merge(tensor_prec_substitutions(&formals, actual_types));
+            self.dim_axis_positions
+                .merge(tensor_dim_axis_positions(&formals, actual_types));
+            self.rank_substitutions.merge(activation_rank_substitutions(
+                &formals,
+                &formals,
+                actual_types,
+                &self.dim_axis_positions,
+            ));
+            let formal_types = formals
+                .iter()
+                .map(|formal| {
+                    Self::formal_param_type_for_call(
+                        formal.as_ref().expect("formal"),
+                        &self.prec_substitutions,
+                        &self.rank_substitutions,
+                    )
+                })
+                .collect::<Vec<_>>();
+            self.prepare_parameter_witnesses(
+                parameters,
+                &formal_types,
+                Some(&formals),
+                self.current_span_id.clone(),
+                true,
+            );
+            if let Some(result) = normalized_tensor_type_expr(result) {
+                let actualized = Self::type_from_type_expr_with_subst(
+                    result,
+                    &self.prec_substitutions,
+                    &self.rank_substitutions,
+                );
+                let claim =
+                    authored_tensor_claim_type(result, &actualized, &self.rank_substitutions)
+                        .unwrap_or_else(|message| {
+                            raise_fatal_lowering_error(
+                                message,
+                                Some(span),
+                                self.current_span_id.clone(),
+                            )
+                        });
+                let prepared = self.prepare_value_result_claim(Some(&claim), true, false);
+                result_claims.push((
+                    claim,
+                    prepared,
+                    self.bindings.witness_snapshot(),
+                    self.signature_witnesses.clone(),
+                    self.activation_witnesses.clone(),
+                    self.local_unit_refinements.clone(),
+                ));
+            }
+        }
+        let arguments = parameters
+            .iter()
+            .map(|name| {
+                Expr::node(
+                    DeepTag::Var,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name(name.clone()), span)],
+                    span,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut result =
+            match crate::host_type_state::CheckedBuiltinCallable::from_symbol(value.symbol()) {
+                Some(checked) => {
+                    self.lower_checked_builtin_app(checked, &arguments, result_type, span)
+                }
+                None => LoweredValue::Node(self.lower_builtin_app(
+                    value.symbol(),
+                    &arguments,
+                    result_type,
+                    span,
+                    None,
+                )),
+            };
+        for (claim, prepared, witnesses, signature, activation, refinements) in result_claims {
+            self.bindings.restore_witnesses(witnesses);
+            self.signature_witnesses = signature;
+            self.activation_witnesses = activation;
+            self.local_unit_refinements = refinements;
+            result = self.attach_value_result_claim(result, prepared);
+            self.preserve_declared_result(&result, &claim, None);
+        }
+        let result = self.retain_invocation_witnesses(result, start);
+        self.bindings.restore_witnesses(saved_witnesses);
+        self.local_unit_refinements = saved_unit_refinements;
+        self.signature_witnesses = saved_signature;
+        self.activation_witnesses = saved_activation;
+        self.signature_is_authored = saved_authored;
+        self.prec_substitutions = saved_precisions;
+        self.rank_substitutions = saved_ranks;
+        self.dim_axis_positions = saved_positions;
+        result
+    }
+
     fn lower_vmap_callable_app(
         &mut self,
-        fn_expr: &ResolvedFunction,
+        target: &ResolvedVmapTarget,
         axis: usize,
         args: &[Expr],
         _ty: &TensorType,
@@ -15211,7 +16095,7 @@ impl<'program> LowerCtx<'program> {
             .iter()
             .map(|arg| self.lower_expr_node(arg, "vmap arguments"))
             .collect();
-        self.lower_vmap_callable_with_nodes(fn_expr, axis, &actual_args, app_span, false)
+        self.lower_vmap_callable_with_nodes(target, axis, &actual_args, app_span, false)
     }
 
     fn restore_vmapped_entry_witness_axes(
@@ -15314,7 +16198,7 @@ impl<'program> LowerCtx<'program> {
 
     fn lower_vmap_callable_with_nodes(
         &mut self,
-        fn_expr: &ResolvedFunction,
+        target: &ResolvedVmapTarget,
         axis: usize,
         actual_args: &[NodeId],
         app_span: Span,
@@ -15324,9 +16208,48 @@ impl<'program> LowerCtx<'program> {
         if let Some(trace) = &self.trace {
             trace.boundary(crate::lowering_trace::BoundaryKind::Vmap);
         }
-        let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
-            return self.lower_unrepresentable("vmap", &[], expr_diagnostic_location(fn_expr));
+        if let ResolvedVmapTarget::Builtin(operation) = target {
+            let declaration = operation.declaration();
+            if declaration.realizability == chelis_types::Realizability::HostOnly
+                || !declaration
+                    .capability
+                    .domains
+                    .contains(&chelis_types::BuiltinSemanticDomain::Numeric)
+            {
+                return self.lower_unrepresentable(
+                    &format!(
+                        "vmap builtin `{}` has no numeric row-DAG owner",
+                        operation.symbol()
+                    ),
+                    &[],
+                    (Some(app_span), self.current_span_id.clone()),
+                );
+            }
+        }
+        let function = match target {
+            ResolvedVmapTarget::Function(function) => Some(function),
+            _ => None,
         };
+        let parts = function.and_then(|function| self.extract_fn_parts(function));
+        let param_names = match target {
+            ResolvedVmapTarget::Function(_) => match &parts {
+                Some((names, _)) => names.clone(),
+                None => {
+                    return self.lower_unrepresentable(
+                        "vmap",
+                        &[],
+                        (Some(app_span), self.current_span_id.clone()),
+                    );
+                }
+            },
+            ResolvedVmapTarget::Builtin(operation) => match &operation.scheme().body {
+                chelis_types::types::Type::Fn(parameters, _) => (0..parameters.len())
+                    .map(|index| format!("__chelis_vmap_builtin_arg_{index}"))
+                    .collect(),
+                _ => unreachable!("admission requires a function scheme"),
+            },
+        };
+        let location = (Some(app_span), self.current_span_id.clone());
         let actual_types: Vec<TensorType> = actual_args
             .iter()
             .map(|id| {
@@ -15340,12 +16263,29 @@ impl<'program> LowerCtx<'program> {
             parameter_types: param_types,
             rank_substitutions: vectorized_rank_substitutions,
             dim_axis_positions: vectorized_dim_axis_positions,
-        } = self.vectorized_parameter_instantiation(
-            fn_expr,
-            param_names.len(),
-            &actual_types,
-            axis,
-        );
+        } = if let Some(function) = function {
+            self.vectorized_parameter_instantiation(
+                function,
+                param_names.len(),
+                &actual_types,
+                axis,
+            )
+        } else {
+            VectorizedParameterInstantiation {
+                parameter_types: actual_types
+                    .iter()
+                    .map(|actual| {
+                        let mut row = actual.clone();
+                        if axis < row.dims.len() {
+                            row.dims.remove(axis);
+                        }
+                        row
+                    })
+                    .collect(),
+                rank_substitutions: UnordMap::new(),
+                dim_axis_positions: UnordMap::new(),
+            }
+        };
 
         let mut canonical_args = Vec::with_capacity(actual_args.len());
         // Actual argument types with the vmap `axis` permuted to the front
@@ -15383,7 +16323,7 @@ impl<'program> LowerCtx<'program> {
             return self.lower_unrepresentable(
                 "vmap with no tensor arguments",
                 &[],
-                expr_diagnostic_location(fn_expr),
+                location.clone(),
             );
         };
         self.claim_split_key_batch_extents(
@@ -15401,6 +16341,7 @@ impl<'program> LowerCtx<'program> {
             LinearityInfo::default(),
         );
         subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
+        subctx.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
         // The body is lowered on this declaration's behalf and spliced back
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
@@ -15420,7 +16361,14 @@ impl<'program> LowerCtx<'program> {
         // Subctx inherits the parent's current span so synthesized loads
         // for vmap's parameters carry the vmap-call's span.
         subctx.current_span_id = self.current_span_id.clone();
-        for (name, param_expr) in param_names.iter().zip(param_types.iter().cloned()) {
+        // Loads describe the supplied rows, independently of the authored
+        // row formal. Claim construction below compares that physical shape
+        // against the formal instead of assuming its literal extents at ingress.
+        for (name, actual) in param_names.iter().zip(&actual_types) {
+            let mut physical_row = actual.clone();
+            if axis < physical_row.dims.len() {
+                physical_row.dims.remove(axis);
+            }
             subctx.interface_loads.insert(name.clone());
             let load = subctx.dag.add_node(
                 subctx.owner(),
@@ -15428,7 +16376,7 @@ impl<'program> LowerCtx<'program> {
                     name: name.as_str().into(),
                 },
                 vec![],
-                param_expr,
+                physical_row,
                 subctx.current_span_id.clone(),
             );
             subctx
@@ -15438,8 +16386,9 @@ impl<'program> LowerCtx<'program> {
         // Keep mapped formal Loads before capture Loads in canonical order.
         // A symbolic batch lift can then read a formal's axis as its explicit
         // runtime extent witness.
-        let captured_bindings =
-            self.seed_subctx_with_declaring_scope(&mut subctx, fn_expr, &param_names, &[]);
+        let captured_bindings = function.map_or_else(UnordMap::new, |function| {
+            self.seed_subctx_with_declaring_scope(&mut subctx, function, &param_names, &[])
+        });
         // The vmapped body is spliced back at this position, so it runs under
         // the position's activation: a call in a runtime `if` arm reads the
         // arm's activation through a captured Load the splice resolves, which
@@ -15453,7 +16402,26 @@ impl<'program> LowerCtx<'program> {
                     || captured_bindings.contains_key(candidate)
             },
         );
-        let root_value = subctx.lower_resolved_body(fn_expr, &param_names, body);
+        let root_value = match target {
+            ResolvedVmapTarget::Function(function) => subctx.lower_resolved_body(
+                function,
+                &param_names,
+                parts.as_ref().expect("function parts").1,
+            ),
+            ResolvedVmapTarget::Builtin(operation) => {
+                let row_type = param_types
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(Self::default_type);
+                subctx.lower_builtin_value_body(
+                    operation,
+                    &param_names,
+                    &param_types,
+                    &row_type,
+                    app_span,
+                )
+            }
+        };
         for root in root_value.flatten_nodes() {
             subctx.dag.add_root(root);
         }
@@ -15505,8 +16473,8 @@ impl<'program> LowerCtx<'program> {
             Ok(dag) => dag,
             Err(message) => raise_lowering_error(
                 format!("`vmap` lowering failed: {message}"),
-                Some(body.span()),
-                body.span_id().map(ToOwned::to_owned),
+                Some(app_span),
+                self.current_span_id.clone(),
             ),
         };
 
@@ -15565,8 +16533,8 @@ impl<'program> LowerCtx<'program> {
             vectorized_root_map(&subctx.dag, &specialized_vmapped).unwrap_or_else(|message| {
                 raise_fatal_lowering_error(
                     format!("internal `vmap` root correspondence failed: {message}"),
-                    Some(body.span()),
-                    body.span_id().map(ToOwned::to_owned),
+                    Some(app_span),
+                    self.current_span_id.clone(),
                 )
             });
         let remap = self
@@ -15574,8 +16542,8 @@ impl<'program> LowerCtx<'program> {
             .unwrap_or_else(|message| {
                 raise_fatal_lowering_error(
                     format!("internal `vmap` splice correspondence failed: {message}"),
-                    Some(body.span()),
-                    body.span_id().map(ToOwned::to_owned),
+                    Some(app_span),
+                    self.current_span_id.clone(),
                 )
             });
         self.restore_vmapped_entry_witness_axes(
@@ -15596,8 +16564,8 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(|| {
                         raise_fatal_lowering_error(
                             "internal `vmap` result leaf has no spliced final root",
-                            Some(body.span()),
-                            body.span_id().map(ToOwned::to_owned),
+                            Some(app_span),
+                            self.current_span_id.clone(),
                         )
                     })
             })
@@ -15728,6 +16696,7 @@ impl<'program> LowerCtx<'program> {
             LinearityInfo::default(),
         );
         subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
+        subctx.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
         // The body is lowered on this declaration's behalf and spliced back
         // into it, so its nodes are this declaration's: the sub-graph shares
         // this graph's declarations and the splice keeps each node's `decl`.
@@ -18124,6 +19093,9 @@ impl<'program> LowerCtx<'program> {
             // helper extractor uses to reject the helper and force
             // host-lane routing for runtime-shaped to_tensor calls.
             "to_tensor" if args.len() == 1 => {
+                if let Some(node) = self.bound_list_tensor(&args[0], ty) {
+                    return node;
+                }
                 if self.allow_host_list_ad_rewrites
                     && let Some(node) = self.lower_host_list_to_tensor(&args[0], ty)
                 {
@@ -19672,13 +20644,18 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    fn bound_list_tensor(&mut self, expr: &Expr, ty: &TensorType) -> Option<NodeId> {
+        // The binding carries its once-formed native constructor value.
+        // Opaque host values and runtime List views have no closed Cons spine.
+        let value = bare_var_name(expr).and_then(|name| self.bindings.get(&name).cloned())?;
+        adt_cons_chain_values(&value)?;
+        self.staged_list_tensor(&value, Some(ty))
+    }
+
     fn lower_host_list_to_tensor(&mut self, expr: &Expr, ty: &TensorType) -> Option<NodeId> {
-        // A binding owns the already executed producer, including its callback
-        // captures and traps. Do not replay its saved expression at each use.
-        if let Some(value) = bare_var_name(expr).and_then(|name| self.bindings.get(&name).cloned())
-            && adt_cons_chain_values(&value).is_some()
-        {
-            return self.staged_list_tensor(&value, Some(ty));
+        // Consume the executed producer before considering AD producer syntax.
+        if let Some(node) = self.bound_list_tensor(expr, ty) {
+            return Some(node);
         }
         if self.is_tensor_list_expr(expr) {
             let value = self.lower_expr(expr);
@@ -19868,6 +20845,7 @@ impl<'program> LowerCtx<'program> {
             LinearityInfo::default(),
         );
         subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
+        subctx.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
         subctx.dag.inherit_declarations(&self.dag);
         subctx.activation_serial = Arc::clone(&self.activation_serial);
         subctx.decl = self.decl;
@@ -20017,6 +20995,7 @@ impl<'program> LowerCtx<'program> {
             LinearityInfo::default(),
         );
         subctx.constructor_layouts = Arc::clone(&self.constructor_layouts);
+        subctx.resolved_builtin_values = Arc::clone(&self.resolved_builtin_values);
         subctx.dag.inherit_declarations(&self.dag);
         subctx.activation_serial = Arc::clone(&self.activation_serial);
         subctx.decl = self.decl;
@@ -20421,7 +21400,7 @@ impl<'program> LowerCtx<'program> {
         {
             return Some(
                 self.lower_vmap_callable_with_nodes(
-                    &fn_expr,
+                    &ResolvedVmapTarget::Function(fn_expr.clone()),
                     0,
                     &[source_node],
                     callback.span(),
@@ -24571,8 +25550,7 @@ impl<'program> LowerCtx<'program> {
         LoweredValue::Tuple(
             kids.iter()
                 .map(|expr| {
-                    if let Some(CallableExpr::CheckedBuiltin(name)) =
-                        self.resolve_callable_expr(expr)
+                    if let Some(CallableExpr::Builtin(name)) = self.resolve_callable_expr(expr)
                         && let Some(staged) = self.key_builtin_alias_value(expr, name.symbol())
                     {
                         staged
@@ -26370,6 +27348,127 @@ mod tests {
     use super::*;
     use crate::verify;
 
+    #[test]
+    fn builtin_value_result_claim_retains_physical_producer_and_independent_guard() {
+        let contract = chelis_deep::parser::parse_str(
+            "(t-fn {} (t-ref {} (t-tensor {} (d-name {} *) (t-prim {} f64))) \
+             (t-tensor {} (d-lit {} 2) (t-prim {} bool)))",
+        )
+        .unwrap()
+        .remove(0);
+        let mut context = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        )
+        .declared_for_test();
+        let physical = TensorType {
+            dims: vec![DimInfo::Named("physical".into(), None)],
+            precision: Prim::F64,
+        };
+        let load = context.dag.add_node(
+            context.owner(),
+            RiscOp::Load { name: "row".into() },
+            vec![],
+            physical.clone(),
+            None,
+        );
+        context
+            .bindings
+            .insert("row".into(), LoweredValue::Node(load));
+        let operation = ResolvedBuiltinValue::resolve_bare("is_finite")
+            .unwrap()
+            .with_outer_contract(
+                NormalizedCallableContract::from_authored(
+                    &chelis_types::adt::AdtRegistry::default(),
+                    &contract,
+                )
+                .unwrap()
+                .unwrap(),
+            );
+        let result = context.lower_builtin_value_body(
+            &operation,
+            &["row".into()],
+            std::slice::from_ref(&physical),
+            &physical,
+            contract.span(),
+        );
+        let producer = context
+            .dag
+            .nodes()
+            .iter()
+            .rev()
+            .find(|node| {
+                matches!(
+                    node.op,
+                    RiscOp::FloatClassify(chelis_types::FloatClassify::Finite)
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            producer.output_type.dims, physical.dims,
+            "physical facts must not be replaced by the result claim: {producer:?}"
+        );
+        assert_eq!(producer.output_type.precision, Prim::Bool);
+        assert!(
+            producer.result_claim_deps.iter().any(|dependency| {
+                matches!(
+                    context.dag.get(*dependency).map(|node| &node.op),
+                    Some(RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        ..
+                    })
+                )
+            }),
+            "independent result requirement must reach its producer: {producer:?}; graph={:?}",
+            context.dag.nodes()
+        );
+        context.dag.add_root(result.expect_node("result"));
+        let dag = crate::optimize::dead_code_eliminate(&context.dag);
+        let errors = verify::verify(&dag);
+        assert!(errors.is_empty(), "{errors:?}; graph={:?}", dag.nodes());
+    }
+
+    #[test]
+    fn builtin_vmap_resolver_preserves_captured_and_shadowed_tokens() {
+        let mut context = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        for (name, operation) in [("neg", "abs"), ("capture", "neg")] {
+            context.local_callables.insert(
+                name.into(),
+                CallableExpr::Builtin(ResolvedBuiltinValue::resolve_bare(operation).unwrap()),
+            );
+            let expression =
+                chelis_deep::parser::parse_str(&format!("(vmap {{}} (var {{}} {name}))"))
+                    .unwrap()
+                    .remove(0);
+            let Some(CallableExpr::Vmap {
+                target: ResolvedVmapTarget::Builtin(value),
+                ..
+            }) = context.resolve_callable_expr(&expression)
+            else {
+                panic!("captured builtin token lost its static transform identity");
+            };
+            assert_eq!(value.symbol(), operation);
+        }
+        let expression = chelis_deep::parser::parse_str("(vmap {} (var {} is_finite))")
+            .unwrap()
+            .remove(0);
+        let Some(CallableExpr::Vmap {
+            target: ResolvedVmapTarget::Builtin(value),
+            ..
+        }) = context.resolve_callable_expr(&expression)
+        else {
+            panic!("checked predicate token lost its static transform identity");
+        };
+        assert_eq!(value.symbol(), "is_finite");
+    }
+
     /// chelis#3462: a checked call result transports a `d-name` whatever it
     /// looks like, `d1` included, and a `d-var` only when the activation bound
     /// it to a name a signature spelled, such as the caller's binder `n`. A
@@ -26837,7 +27936,6 @@ mod tests {
 
     #[test]
     fn checked_root_authority_preserves_actual_axes_without_callable_numeric_inputs() {
-        use crate::host_type_state::CheckedBuiltinCallable;
         let context = prepare_subexpr_lowering_context(
             &BTreeMap::new(),
             Arc::new(BTreeMap::new()),
@@ -26864,7 +27962,7 @@ mod tests {
                     &context,
                     None,
                     false,
-                    Some(CheckedBuiltinCallable::FloatClassify(kind)),
+                    Some(ResolvedBuiltinValue::resolve_bare(kind.name()).unwrap()),
                 )
                 .unwrap();
                 let root = dag.get(dag.roots()[0]).unwrap();
@@ -26921,6 +28019,8 @@ mod tests {
         .remove(0);
         let context = SubexprLoweringContext {
             host_payloads: Arc::default(),
+            builtin_values: BTreeMap::new(),
+            resolved_builtin_values: Arc::new(OnceLock::new()),
             program_types: Arc::new(BTreeMap::new()),
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
@@ -27288,6 +28388,8 @@ mod tests {
         };
         let context = SubexprLoweringContext {
             host_payloads: Arc::default(),
+            builtin_values: BTreeMap::new(),
+            resolved_builtin_values: Arc::new(OnceLock::new()),
             program_types: Arc::new(BTreeMap::new()),
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
