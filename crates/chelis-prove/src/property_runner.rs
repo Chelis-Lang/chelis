@@ -909,9 +909,14 @@ fn prove_surf_property(
                 return outcome;
             }
         };
-        if let Some(mut outcome) =
-            try_surf_tier_b(semantic, trusted_contract_decls, property, options, seed)
-        {
+        if let Some(mut outcome) = try_surf_tier_b(
+            semantic,
+            decls,
+            trusted_contract_decls,
+            property,
+            options,
+            seed,
+        ) {
             outcome.append_assumptions(contract_assumptions);
             return outcome;
         }
@@ -2472,6 +2477,11 @@ fn lower_surf_tier_b_pass(
 /// the solver timed out / errored).
 fn try_surf_tier_b(
     semantic: &SemanticSurfProgram,
+    // The AUTHORED declarations, for the one job chelis#3645 keeps with them
+    // rather than with the semantic view: concrete evaluation. Only the
+    // chelis#3635 domain-witness confirmation uses them here, and it runs the
+    // same evaluation a Tier C sample gets.
+    authored: &[Decl],
     trusted_contract_decls: &[Decl],
     property: &Property,
     options: &PropertyRunOptions,
@@ -2800,7 +2810,7 @@ fn try_surf_tier_b(
         // one), and an unconfirmed one reports exactly what it reported before
         // this lane existed.
         crate::tier_b::TierBResult::DomainDisproved { reason, witness } => {
-            match confirm_surf_domain_witness(decls, property, &witness) {
+            match confirm_surf_domain_witness(authored, property, &witness) {
                 DomainWitness::Confirmed(counterexample) => Some(PropertyOutcome::new(
                     property.name.clone(),
                     PropertyStatus::Failed,
