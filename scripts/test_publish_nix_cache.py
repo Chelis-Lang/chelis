@@ -300,6 +300,29 @@ class FlakeCacheContractTests(unittest.TestCase):
             "the trusted key must be the cache's Ed25519 public key, not a placeholder",
         )
 
+    def nix_config(self, job: str) -> dict[str, list[str]]:
+        """The settings in the `NIX_CONFIG` block of one native job."""
+        block = job_block(NIX_WORKFLOW.read_text(encoding="utf-8"), job)
+        self.assertIsNotNone(block, f"nix-packages.yml has no job {job}")
+        assert block is not None
+        match = re.search(r"\n      NIX_CONFIG: \|\n(?P<body>(?:        \S.*\n)+)", block)
+        self.assertIsNotNone(match, f"{job} sets no NIX_CONFIG")
+        assert match is not None
+        settings = {}
+        for line in match.group("body").splitlines():
+            name, _, value = line.strip().partition(" = ")
+            settings[name] = value.split()
+        return settings
+
+    def test_each_native_job_reads_the_cache_that_the_flake_trusts(self) -> None:
+        # A job with an old key refuses the cache's signatures and builds each
+        # path from source again, and no step fails.
+        for job in ("nix-linux-x86-64", "nix-darwin-arm64"):
+            with self.subTest(job=job):
+                settings = self.nix_config(job)
+                for setting in ("extra-substituters", "extra-trusted-public-keys"):
+                    self.assertEqual(settings.get(setting), self.flake_list(setting), setting)
+
 
 if __name__ == "__main__":
     unittest.main()

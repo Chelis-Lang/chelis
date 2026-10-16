@@ -30,6 +30,8 @@ Migrated Devenv-backed jobs reserve cold setup headroom without changing executi
 
 GitHub starts no workflow for a release that `GITHUB_TOKEN` publishes, so the `release` event never starts `nix-packages.yml`. After `release.yml` publishes a release, its `dispatch-nix-packages` job dispatches `nix-packages.yml` on the release tag. A maintainer can also dispatch `nix-packages.yml` on `main`. Only a run on `main` or on a `v*` tag pushes to the `chelis-lang` Cachix cache. It pushes the package outputs, the cvc5 tree, and the Rust crate builds. A dispatch on another branch pushes nothing.
 
+The two native Nix jobs activate the base Devenv configuration, which `devenv test` also uses, instead of the `ci` profile. That profile adds OpenBLAS and the numeric cache, and no step of these jobs uses them. The jobs also read the `chelis-lang` cache through `NIX_CONFIG`. So a run downloads the cvc5 tree and the crate builds of the last push from `main` or a tag. It builds only the paths that the cache does not hold.
+
 Rust policy and the native SMT feature lane retain total job timeouts of 75 and 90 minutes respectively. These are cold-build safety limits, not a measured performance result.
 
 GitHub-hosted runners run every job for ordinary pull-request and push events. `Fast Tests (Linux)` stays hosted; the warm pool host admits pull requests only against `main`. Explicit dispatches keep their existing route: `execution_target=self-hosted` requires an exact candidate SHA and a matching reviewed route on the runner host, and `github-hosted` dispatches stay hosted. The workflows grant no runner routing for ordinary events.
