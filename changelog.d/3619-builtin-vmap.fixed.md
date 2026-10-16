@@ -40,3 +40,5 @@ Host-only builtin invocation retains nested entry and result contracts through
 the shared callable owner. Host numeric result extents precede element traps
 after operand agreement and operation controls; builtin selection preserves
 the selected value's original producer.
+Tuple-bound aliases retain whole callable values through nested construction,
+copying and projection; typed builtin formals remain executable collection callbacks.

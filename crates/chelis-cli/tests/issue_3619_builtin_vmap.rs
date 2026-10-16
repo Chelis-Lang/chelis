@@ -998,8 +998,17 @@ result = run(to_tensor([{row}]))
             .arg(dir.path().join("out"))
             .output()
             .unwrap();
-        assert!(!built.status.success());
-        assert!(String::from_utf8_lossy(&built.stderr).contains("chelis#879"));
+        assert!(built.status.success(), "{built:?}");
+        let native = std::process::Command::new(dir.path().join("out/local_callable_io_claim"))
+            .output()
+            .unwrap();
+        assert_local_callable_contract_output(
+            &native,
+            (width == 3).then_some("numeric trap: domain in load at i64"),
+        );
+        if width == 2 {
+            assert_eq!(native.stdout, evaluated.stdout);
+        }
     }
 }
 
@@ -1618,66 +1627,78 @@ result=run(to_tensor([[1.0f32,2.0f32,3.0f32,4.0f32],[1.0f32,2.0f32,3.0f32,4.0f32
 
 #[test]
 fn retained_host_builtin_result_frames_survive_selection_and_unused_callbacks() {
-    for (input, result, nesting) in [
-        ("List[tensor[*,f32]]", "tensor[2,f32]", false),
-        ("List[List[tensor[*,f32]]]", "List[tensor[2,f32]]", true),
+    for body in [
+        "h(x,0i64)",
+        "{ pair = (h,0i64)\n alias = copy(pair)\n (selected,n) = alias\n selected(x,n) }",
     ] {
-        for width in [2, 3] {
-            let elements = vec!["1.0f32"; width].join(",");
-            let value = if nesting {
-                format!("[[to_tensor([{elements}])]]")
-            } else {
-                format!("[to_tensor([{elements}])]")
-            };
-            let outer_result = if nesting {
-                "List[tensor[*,f32]]"
-            } else {
-                "tensor[*,f32]"
-            };
-            let source = format!(
-                "def invoke(h: (&{input} -> i64 -> {result}), x: {input}) -> {outer_result} = h(x,0i64)\nresult=invoke(index,{value})\nafter=print(\"after-probe\")"
-            );
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("retained_host_result.ch");
-            std::fs::write(&path, &source).unwrap();
-            let eval = Command::cargo_bin("chelis")
-                .unwrap()
-                .env("CHELIS_STYLE_GATE_DISABLE", "1")
-                .args(["eval", "--file"])
-                .arg(&path)
-                .output()
-                .unwrap();
-            let out = dir.path().join("out");
-            Command::cargo_bin("chelis")
-                .unwrap()
-                .env("CHELIS_STYLE_GATE_DISABLE", "1")
-                .arg("build")
-                .arg(&path)
-                .args(["--target", "c", "--output"])
-                .arg(&out)
-                .assert()
-                .success();
-            let native = std::process::Command::new(out.join("retained_host_result"))
-                .output()
-                .unwrap();
-            if width == 2 {
-                assert!(eval.status.success(), "{eval:?}");
-                assert!(native.status.success(), "{native:?}");
-                assert_eq!(native.stdout, eval.stdout);
-            } else {
-                for output in [&eval, &native] {
-                    assert!(!output.status.success(), "{output:?}");
-                    assert!(
-                        String::from_utf8_lossy(&output.stderr).contains("numeric trap: domain"),
-                        "{output:?}"
-                    );
-                    assert!(!String::from_utf8_lossy(&output.stdout).contains("after-probe"));
+        for (input, result, nesting) in [
+            ("List[tensor[*,f32]]", "tensor[2,f32]", false),
+            ("List[List[tensor[*,f32]]]", "List[tensor[2,f32]]", true),
+        ] {
+            for width in [2, 3] {
+                let elements = vec!["1.0f32"; width].join(",");
+                let value = if nesting {
+                    format!("[[to_tensor([{elements}])]]")
+                } else {
+                    format!("[to_tensor([{elements}])]")
+                };
+                let outer_result = if nesting {
+                    "List[tensor[*,f32]]"
+                } else {
+                    "tensor[*,f32]"
+                };
+                let source = if body == "h(x,0i64)" {
+                    format!(
+                        "def invoke(h: (&{input} -> i64 -> {result}), x: {input}) -> {outer_result} = {body}\nresult=invoke(index,{value})\nafter=print(\"after-probe\")"
+                    )
+                } else {
+                    format!(
+                        "def invoke(x: {input}) -> {outer_result} ! {{IO}} = {{\n _=print(\"before-probe\")\n h: (&{input} -> i64 -> {result}) = index\n {body}\n}}\nresult=invoke({value})\nafter=print(\"after-probe\")"
+                    )
+                };
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("retained_host_result.ch");
+                std::fs::write(&path, &source).unwrap();
+                let eval = Command::cargo_bin("chelis")
+                    .unwrap()
+                    .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                    .args(["eval", "--file"])
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                let out = dir.path().join("out");
+                Command::cargo_bin("chelis")
+                    .unwrap()
+                    .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                    .arg("build")
+                    .arg(&path)
+                    .args(["--target", "c", "--output"])
+                    .arg(&out)
+                    .assert()
+                    .success();
+                let native = std::process::Command::new(out.join("retained_host_result"))
+                    .output()
+                    .unwrap();
+                if width == 2 {
+                    assert!(eval.status.success(), "{eval:?}");
+                    assert!(native.status.success(), "{native:?}");
+                    assert_eq!(native.stdout, eval.stdout);
+                } else {
+                    for output in [&eval, &native] {
+                        assert!(!output.status.success(), "{output:?}");
+                        assert!(
+                            String::from_utf8_lossy(&output.stderr)
+                                .contains("numeric trap: domain"),
+                            "{output:?}"
+                        );
+                        assert!(!String::from_utf8_lossy(&output.stdout).contains("after-probe"));
+                    }
                 }
+                let unused = format!(
+                    "def invoke(h: (&{input} -> i64 -> {result}), x: {input}) -> i64 = len(x)\nresult=invoke(index,{value})"
+                );
+                assert_native(&unused, &["result = 1"], "unused_retained_host_result");
             }
-            let unused = format!(
-                "def invoke(h: (&{input} -> i64 -> {result}), x: {input}) -> i64 = len(x)\nresult=invoke(index,{value})"
-            );
-            assert_native(&unused, &["result = 1"], "unused_retained_host_result");
         }
     }
 }

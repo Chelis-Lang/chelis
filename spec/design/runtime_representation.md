@@ -1140,6 +1140,9 @@ frame at a time through the same retained invocation owner, preserving nested
 entry and result observations; only the remaining bare value reaches an
 identity-only builtin expression. Builtin selection carries each evaluated
 actual's producer tree instead of introducing a declaration-interface load.
+Host tuple construction, copying and projection retain the complete callable
+leaf at its constructor position. Typed collection callbacks reify that leaf's
+ordered invocation frames through the shared application owner on every call.
 Admitted shape-identity numeric calls check operand agreement and operation control
 preconditions before their result extents and element kernels, consuming each
 extent obligation once. Runtime callable choices preserve their typed target

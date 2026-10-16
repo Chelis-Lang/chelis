@@ -376,11 +376,14 @@ fn callable_origin_key(name: &str) -> String {
     key
 }
 
-/// Bind a lexical host name. The private companion key records that a
-/// same-spelled top-level callable was visible before this binder; removing
-/// it makes the current scope's origin exact after shadowing.
+fn builtin_payload_origin_key(name: &str) -> String {
+    format!("@builtin{}", callable_origin_key(name))
+}
+
+/// Bind a lexical host name and invalidate inherited callable provenance.
 fn bind_host_local(scope: &mut UnordMap<String, HostTypeTerm>, name: String, ty: HostTypeTerm) {
     scope.remove(&callable_origin_key(&name));
+    scope.remove(&builtin_payload_origin_key(&name));
     scope.insert(name, ty);
 }
 
@@ -1151,7 +1154,40 @@ struct TensorHelperSink {
     /// restore the enclosing frame on every ordinary Result path.
     tensor_specializations: Vec<crate::lower::TensorCallsiteSpecialization>,
     builtin_values: BTreeMap<String, StaticBuiltinValue>,
+    builtin_tuples: BTreeMap<String, Vec<Option<HostBuiltinPayload>>>,
     collect_trace: bool,
+}
+
+/// Constructor geometry transports the complete leaf value. A projection
+/// selects that value; the projected function type is never identity evidence.
+#[derive(Clone, Debug)]
+enum HostBuiltinPayload {
+    Callable(StaticBuiltinValue),
+    Tuple(Vec<Option<HostBuiltinPayload>>),
+}
+
+impl HostBuiltinPayload {
+    fn representation(&self, logical: HostTypeTerm) -> HostTypeTerm {
+        match (self, logical) {
+            (Self::Callable(value), _) => {
+                HostTypeTerm::CheckedBuiltinCallable(value.checked_identity())
+            }
+            (Self::Tuple(values), HostTypeTerm::Tuple(types)) if values.len() == types.len() => {
+                HostTypeTerm::Tuple(
+                    values
+                        .iter()
+                        .zip(types)
+                        .map(|(value, ty)| {
+                            value
+                                .as_ref()
+                                .map_or(ty.clone(), |value| value.representation(ty))
+                        })
+                        .collect(),
+                )
+            }
+            (_, logical) => logical,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1178,6 +1214,7 @@ impl TensorHelperSink {
             declaration_name: None,
             tensor_specializations: Vec::new(),
             builtin_values: BTreeMap::new(),
+            builtin_tuples: BTreeMap::new(),
             collect_trace,
         }
     }
@@ -3813,6 +3850,11 @@ fn lower_host_program_with_execution(
             // the physical scope entry. Later qualified lexical reads consume
             // this complete value rather than reconstructing one from its type.
             if let Some(builtin) = cached_resolved_builtin_values(program).get(name) {
+                global_scope.insert(builtin_payload_origin_key(name), HostTypeTerm::Unit);
+                global_scope.insert(
+                    builtin_payload_origin_key(LoadStoreName::top_level(name).as_str()),
+                    HostTypeTerm::Unit,
+                );
                 global_tensor_helpers.builtin_values.insert(
                     LoadStoreName::top_level(name).as_str().to_string(),
                     builtin.clone(),
@@ -8730,7 +8772,11 @@ fn lower_host_expr_kind(
             } else {
                 ty
             };
-            HostExpr::new(HostExprKind::Tuple(items, ty))
+            let tuple = HostExpr::new(HostExprKind::Tuple(items, ty.clone()));
+            match resolve_host_builtin_payload(expr, program, scope, tensor_helpers)? {
+                Some(payload) => force_host_expr_type(tuple, payload.representation(ty)),
+                None => tuple,
+            }
         }
         Expr::Node(list, _) if list.tag() == DeepTag::Record => {
             lower_record_host_expr(expr, list, program, scope, tensor_helpers, expected_ty)?
@@ -8938,6 +8984,7 @@ fn lower_host_expr_kind(
         }
         Expr::Node(list, _) if list.tag() == DeepTag::Let => {
             let caller_values = tensor_helpers.builtin_values.clone();
+            let caller_tuples = tensor_helpers.builtin_tuples.clone();
             let lowered = (|| -> Result<HostExpr, crate::lower::LowerDiagnostic> {
                 let mut forwarding = tensor_helpers.forwarding.take();
                 let kids = list.children_slice();
@@ -9043,7 +9090,7 @@ fn lower_host_expr_kind(
                     if let Some(name) = symbol_name(binding.binding) {
                         let initializer = binding.initializer;
                         let index = ordinal * 2;
-                        let builtin_value = resolve_host_builtin_value(
+                        let builtin_value = resolve_host_builtin_payload(
                             initializer,
                             program,
                             &scoped,
@@ -9094,6 +9141,14 @@ fn lower_host_expr_kind(
                         // value even when a cross-let local-ascription region
                         // caused the sequential tail chain to be flattened.
                         value.append_merged_span(binding.bind_span);
+                        // The selected payload proves a closed operation even
+                        // when the logical tuple member is a function type.
+                        // Keep representation admission separate from its
+                        // retained authored invocation frames.
+                        if let Some(payload) = &builtin_value {
+                            let ty = payload.representation(host_expr_type(&value));
+                            value = force_host_expr_type(value, ty);
+                        }
                         let bind_ty = host_expr_type(&value);
                         let host_binding = HostBinding {
                             name: name.to_string(),
@@ -9108,10 +9163,20 @@ fn lower_host_expr_kind(
                             bindings.push(host_binding);
                         }
                         bind_host_local(&mut scoped, name.to_string(), bind_ty);
-                        if let Some(value) = builtin_value {
-                            tensor_helpers.builtin_values.insert(name.to_owned(), value);
-                        } else {
-                            tensor_helpers.builtin_values.remove(name);
+                        tensor_helpers.builtin_values.remove(name);
+                        tensor_helpers.builtin_tuples.remove(name);
+                        match builtin_value {
+                            Some(HostBuiltinPayload::Callable(value)) => {
+                                tensor_helpers.builtin_values.insert(name.to_owned(), value);
+                                scoped.insert(builtin_payload_origin_key(name), HostTypeTerm::Unit);
+                            }
+                            Some(HostBuiltinPayload::Tuple(values)) => {
+                                tensor_helpers
+                                    .builtin_tuples
+                                    .insert(name.to_owned(), values);
+                                scoped.insert(builtin_payload_origin_key(name), HostTypeTerm::Unit);
+                            }
+                            None => {}
                         }
                     }
                 }
@@ -9171,6 +9236,7 @@ fn lower_host_expr_kind(
                 )
             })();
             tensor_helpers.builtin_values = caller_values;
+            tensor_helpers.builtin_tuples = caller_tuples;
             lowered?
         }
         Expr::Node(list, _) if list.tag() == DeepTag::TupleGet => {
@@ -14202,27 +14268,21 @@ fn resolve_host_builtin_value(
     scope: &UnordMap<String, HostTypeTerm>,
     helpers: &TensorHelperSink,
 ) -> Result<Option<StaticBuiltinValue>, crate::lower::LowerDiagnostic> {
-    if let Some((DeepTag::Var, _, children)) = stamped_parts(expr)
-        && let Some(name) = children.first().and_then(symbol_name)
-        && scope.contains_key(name)
-        && !helpers.builtin_values.contains_key(name)
-    {
-        return Ok(None);
-    }
-    let mut value = if let Some((DeepTag::Copy, _, children)) = stamped_parts(expr) {
-        let [actual] = children else {
-            return Err(host_expr_lowering_error(
-                expr,
-                "checked callable Copy lacks its single value",
-            ));
-        };
-        resolve_host_builtin_value(actual, program, scope, helpers)?
-    } else {
-        cached_subexpr_lowering_context(program)
-            .with_builtin_values(helpers.builtin_values.clone())
-            .builtin_value(expr)
-            .map_err(|message| host_expr_lowering_error(expr, message))?
-    };
+    Ok(
+        match resolve_host_builtin_payload(expr, program, scope, helpers)? {
+            Some(HostBuiltinPayload::Callable(value)) => Some(value),
+            _ => None,
+        },
+    )
+}
+
+fn resolve_host_builtin_payload(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    helpers: &TensorHelperSink,
+) -> Result<Option<HostBuiltinPayload>, crate::lower::LowerDiagnostic> {
+    let mut payload = resolve_host_builtin_payload_inner(expr, program, scope, helpers)?;
     if let Some((_, metadata, _)) = stamped_parts(expr)
         && metadata.surf_binding_type().is_some_and(|origin| {
             *origin.value() == chelis_deep::annotations::BindingTypeOrigin::Explicit
@@ -14230,11 +14290,82 @@ fn resolve_host_builtin_value(
         && let Some(authored) = metadata.ty().map(|ty| ty.expression())
         && let Some(contract) = callable_formal_contract(program, authored)
             .map_err(|message| host_expr_lowering_error(expr, message))?
-        && let Some(value) = &mut value
+        && let Some(HostBuiltinPayload::Callable(value)) = &mut payload
     {
         value.retain_outer_contract(contract);
     }
-    Ok(value)
+    Ok(payload)
+}
+
+fn resolve_host_builtin_payload_inner(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    helpers: &TensorHelperSink,
+) -> Result<Option<HostBuiltinPayload>, crate::lower::LowerDiagnostic> {
+    if let Some((tag, _, children)) = stamped_parts(expr) {
+        match tag {
+            DeepTag::Var => {
+                if let Some(name) = children.first().and_then(symbol_name)
+                    && scope.contains_key(&builtin_payload_origin_key(name))
+                    && let Some(values) = helpers.builtin_tuples.get(name)
+                {
+                    return Ok(Some(HostBuiltinPayload::Tuple(values.clone())));
+                }
+            }
+            DeepTag::Tuple => {
+                let values = children
+                    .iter()
+                    .map(|child| resolve_host_builtin_payload(child, program, scope, helpers))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(values
+                    .iter()
+                    .any(Option::is_some)
+                    .then_some(HostBuiltinPayload::Tuple(values)));
+            }
+            DeepTag::TupleGet => {
+                let [tuple, index] = children else {
+                    return Err(host_expr_lowering_error(
+                        expr,
+                        "checked tuple projection lacks its operands",
+                    ));
+                };
+                let Some(index) =
+                    expr_int_literal(index).and_then(|index| usize::try_from(index).ok())
+                else {
+                    return Ok(None);
+                };
+                let Some(HostBuiltinPayload::Tuple(values)) =
+                    resolve_host_builtin_payload(tuple, program, scope, helpers)?
+                else {
+                    return Ok(None);
+                };
+                return Ok(values.get(index).cloned().flatten());
+            }
+            DeepTag::Copy => {
+                let [actual] = children else {
+                    return Err(host_expr_lowering_error(
+                        expr,
+                        "checked callable Copy lacks its single value",
+                    ));
+                };
+                return resolve_host_builtin_payload(actual, program, scope, helpers);
+            }
+            _ => {}
+        }
+    }
+    if let Some((DeepTag::Var, _, children)) = stamped_parts(expr)
+        && let Some(name) = children.first().and_then(symbol_name)
+        && scope.contains_key(name)
+        && !scope.contains_key(&builtin_payload_origin_key(name))
+    {
+        return Ok(None);
+    }
+    let value = cached_subexpr_lowering_context(program)
+        .with_builtin_values(helpers.builtin_values.clone())
+        .builtin_value(expr)
+        .map_err(|message| host_expr_lowering_error(expr, message))?;
+    Ok(value.map(HostBuiltinPayload::Callable))
 }
 
 fn lower_closed_host_application(
@@ -14331,6 +14462,10 @@ fn lower_closed_host_application(
             &mut local_scope,
             remaining_name.clone(),
             HostTypeTerm::CheckedBuiltinCallable(remaining.checked_identity()),
+        );
+        local_scope.insert(
+            builtin_payload_origin_key(&remaining_name),
+            HostTypeTerm::Unit,
         );
         let actual = Expr::node(
             DeepTag::Var,
@@ -15829,6 +15964,7 @@ struct RetainedBodyLoweringAuthority {
     dimensions: Option<UnordMap<String, DimInfo>>,
     specialization: Option<crate::lower::TensorCallsiteSpecialization>,
     builtin_values: BTreeMap<String, StaticBuiltinValue>,
+    builtin_tuples: BTreeMap<String, Vec<Option<HostBuiltinPayload>>>,
 }
 
 impl RetainedBodyLoweringAuthority {
@@ -15841,6 +15977,7 @@ impl RetainedBodyLoweringAuthority {
         let _dimensions = self.dimensions.map(ActiveDimSubstGuard::push);
         let caller = std::mem::replace(&mut sink.declaration_name, self.declaration);
         let caller_values = std::mem::replace(&mut sink.builtin_values, self.builtin_values);
+        let caller_tuples = std::mem::replace(&mut sink.builtin_tuples, self.builtin_tuples);
         let depth = sink.tensor_specializations.len();
         if let Some(specialization) = self.specialization {
             sink.tensor_specializations.push(specialization);
@@ -15849,6 +15986,7 @@ impl RetainedBodyLoweringAuthority {
         sink.tensor_specializations.truncate(depth);
         sink.declaration_name = caller;
         sink.builtin_values = caller_values;
+        sink.builtin_tuples = caller_tuples;
         result
     }
 }
@@ -17100,6 +17238,7 @@ fn lower_named_retained_host_invocation(
                 dimensions: actualize_polymorphic_contract.then_some(body_dimensions),
                 specialization: actualize_polymorphic_contract.then_some(tensor_specialization),
                 builtin_values: tensor_helpers.builtin_values.clone(),
+                builtin_tuples: tensor_helpers.builtin_tuples.clone(),
             }),
         },
     )
@@ -17137,6 +17276,7 @@ fn lower_retained_host_invocation(
                 dimensions: None,
                 specialization: None,
                 builtin_values: tensor_helpers.builtin_values.clone(),
+                builtin_tuples: tensor_helpers.builtin_tuples.clone(),
             });
     let Expr::Node(call, span) = expr else {
         return Err(host_expr_lowering_error(
@@ -17196,6 +17336,7 @@ fn lower_retained_host_invocation(
                     fresh.clone(),
                     HostTypeTerm::CheckedBuiltinCallable(value.checked_identity()),
                 );
+                local_scope.insert(builtin_payload_origin_key(&fresh), HostTypeTerm::Unit);
                 body_authority.builtin_values.insert(fresh.clone(), value);
                 substitutions.insert(
                     formal.name.clone(),
@@ -20185,6 +20326,58 @@ fn lower_host_callback(
             let Some(name) = list.children_slice().first().and_then(symbol_name) else {
                 return Ok(None);
             };
+            // A retained formal owns a complete callable value even when its
+            // executable binding uses the closed builtin discriminator. Reify
+            // the invocation through the ordinary application owner so every
+            // frame, including result-only frames, runs on each callback call.
+            if let Some(value) = resolve_host_builtin_value(expr, program, scope, tensor_helpers)?
+                && let Some(contract) = value.contracts().first()
+            {
+                let signature = decode_host_type(contract.signature())
+                    .map_err(|error| host_expr_lowering_error(expr, error.to_string()))?;
+                let Some((param_tys, ret_ty)) = host_fn_signature(&signature) else {
+                    return Err(host_expr_lowering_error(
+                        expr,
+                        "retained callback lacks its complete function signature",
+                    ));
+                };
+                let callee = match callee::resolve_value(name.to_owned(), scope) {
+                    HostAppCallee::Lexical(lexical) => lexical.callee(),
+                    HostAppCallee::Program(program) => program.callee(),
+                };
+                let mut params = positional_host_params(param_tys, &callee);
+                for param in &mut params {
+                    while scope.contains_key(&param.name)
+                        || tensor_helpers.builtin_values.contains_key(&param.name)
+                        || tensor_helpers.builtin_tuples.contains_key(&param.name)
+                    {
+                        param.name.push('_');
+                    }
+                }
+                let (authored, result) = parse_fn_type_expr_parts(contract.signature())
+                    .expect("normalized whole callable signature");
+                let application =
+                    synthesize_callable_application(expr, &params, Some(&authored), Some(&result));
+                let mut callback_scope = scope.clone();
+                for parameter in &params {
+                    bind_host_local(
+                        &mut callback_scope,
+                        parameter.name.clone(),
+                        parameter.ty.clone(),
+                    );
+                }
+                let body = lower_host_expr(&application, program, &callback_scope, tensor_helpers)?;
+                return Ok(Some(HostCallback {
+                    stationary_accumulator: None,
+                    accumulator_delta: None,
+                    accumulator_composition: None,
+                    kind: HostCallbackKind::Inline {
+                        params,
+                        body: Box::new(body),
+                    },
+                    ret_ty,
+                }));
+            }
             // A lexical binding shadows every definition of its spelling, so
             // its own function type is the only signature this callback may
             // take. A binding without one (an unannotated key-builtin alias)
