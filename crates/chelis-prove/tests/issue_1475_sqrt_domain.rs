@@ -633,3 +633,66 @@ fn issue3635_the_deep_lane_confirms_its_own_witness() {
     assert!(x < 0.0, "{counterexample}");
     assert!((-1.0..2.0).contains(&x), "{counterexample}");
 }
+
+#[test]
+fn issue3635_an_integer_binder_is_rebuilt_at_its_declared_width() {
+    crate::support::isolate();
+    // The witness names every binder, not just the one feeding `sqrt`. An
+    // integer binder must be rebuilt as an INTEGER at its declared width --
+    // `int_sample` clamps out of range, and a clamped value would be a
+    // different input from the one evaluated.
+    let source = r#"module M
+def k(x: f64, n: i32) -> f64 = sqrt(x)
+
+@property k_nonneg forall(x: f64, n: i32) where x > -1.0f64, x < 2.0f64, n > 0, n < 5:
+  (k(x, n) >= 0.0f64)
+"#;
+    let outcome = run_one(source, "smt-only", 0);
+
+    assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:?}");
+    let counterexample = outcome
+        .counterexample
+        .as_ref()
+        .unwrap_or_else(|| panic!("a confirmed witness is reported: {outcome:?}"));
+    let n = counterexample["n"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("`n` is reported as an integer, not a float: {counterexample}"));
+    assert!(
+        (1..5).contains(&n),
+        "the integer binder is admitted by its own guards: {counterexample}"
+    );
+    let x = counterexample["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("`x` is numeric: {counterexample}"));
+    assert!(x < 0.0, "{counterexample}");
+}
+
+#[test]
+fn issue3635_a_constant_sqrt_argument_confirms_against_an_unrelated_binder() {
+    crate::support::isolate();
+    // The negative argument is a CONSTANT, so the obligation is false with no
+    // dependence on the binder at all, and the witness's `x` is whatever the
+    // guards admit. The confirmation still has to evaluate the body -- which
+    // is false because `sqrt` of a negative constant is NaN -- so the failure
+    // is earned by the evaluation rather than by the binder's value.
+    let source = r#"module M
+def k() -> f64 = sqrt(0.0f64 - 1.0f64)
+
+@property k_nonneg forall(x: f64) where x > 0.0f64, x < 1.0f64:
+  (k() >= 0.0f64)
+"#;
+    let outcome = run_one(source, "smt-only", 0);
+
+    assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:?}");
+    let counterexample = outcome
+        .counterexample
+        .as_ref()
+        .unwrap_or_else(|| panic!("a confirmed witness is reported: {outcome:?}"));
+    let x = counterexample["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("`x` is numeric: {counterexample}"));
+    assert!(
+        x > 0.0 && x < 1.0,
+        "the binder is admitted by its own guards even though it is irrelevant: {counterexample}"
+    );
+}
