@@ -1629,8 +1629,13 @@ fn retained_host_builtin_result_frames_survive_selection_and_unused_callbacks() 
             } else {
                 format!("[to_tensor([{elements}])]")
             };
+            let outer_result = if nesting {
+                "List[tensor[*,f32]]"
+            } else {
+                "tensor[*,f32]"
+            };
             let source = format!(
-                "def invoke(h: (&{input} -> i64 -> {result}), x: {input}) -> {result} = h(x,0i64)\nresult=invoke(index,{value})\nafter=print(\"after-probe\")"
+                "def invoke(h: (&{input} -> i64 -> {result}), x: {input}) -> {outer_result} = h(x,0i64)\nresult=invoke(index,{value})\nafter=print(\"after-probe\")"
             );
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("retained_host_result.ch");

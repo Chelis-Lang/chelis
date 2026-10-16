@@ -8939,227 +8939,236 @@ fn lower_host_expr_kind(
         Expr::Node(list, _) if list.tag() == DeepTag::Let => {
             let caller_values = tensor_helpers.builtin_values.clone();
             let lowered = (|| -> Result<HostExpr, crate::lower::LowerDiagnostic> {
-                Ok({
-            let mut forwarding = tensor_helpers.forwarding.take();
-            let kids = list.children_slice();
-            let mut scoped = scope.clone();
-            let mut bindings = Vec::new();
-            let checked_lowering = cached_subexpr_lowering_context(program);
-            let flattened = sequential_host_let_chain(expr, program, scope);
-            let flattened_regions = if let Some(chain) = flattened.as_ref() {
-                checked_lowering.local_ascription_binding_regions(
-                    &chain.bind_expr,
-                    tensor_helpers.declaration_name.as_deref(),
-                )
-            } else {
-                Vec::new()
-            };
-            let crosses_nested_let = flattened.as_ref().is_some_and(|chain| {
-                flattened_regions.iter().any(|region| {
-                    let producer_layer = chain.bindings[region.producer_binding_index() / 2].layer;
-                    region
-                        .ascription_binding_indices()
-                        .iter()
-                        .any(|index| chain.bindings[*index / 2].layer != producer_layer)
-                })
-            });
-
-            let (let_bindings, bind_expr, body_expr, nested_layers) = if crosses_nested_let {
-                let chain = flattened.expect("cross-layer region requires a flattened let chain");
-                (
-                    chain.bindings,
-                    Cow::Owned(chain.bind_expr),
-                    chain.body,
-                    Some(chain.layers),
-                )
-            } else {
-                let bind_first = kids.first().ok_or_else(|| {
-                    host_expr_lowering_error(expr, "a `let` node has no bindings")
-                })?;
-                let bind_list = as_node(bind_first).ok_or_else(|| {
-                    host_expr_lowering_error(expr, "a `let` node has malformed bindings")
-                })?;
-                if bind_list.tag() != DeepTag::Bind {
-                    return Err(host_expr_lowering_error(
-                        expr,
-                        "a `let` node has malformed bindings",
-                    ));
-                }
-                let bind_span = bind_first.span_id();
-                let current = bind_list
-                    .children_slice()
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|pair| SequentialHostLetBinding {
-                        binding: &pair[0],
-                        initializer: &pair[1],
-                        bind_span,
-                        layer: 0,
-                    })
-                    .collect();
-                (
-                    current,
-                    Cow::Borrowed(bind_first),
-                    kids.get(1).ok_or_else(|| {
-                        host_expr_lowering_error(expr, "a `let` node has no body")
-                    })?,
-                    None,
-                )
-            };
-            let local_regions = checked_lowering
-                .local_ascription_binding_regions(
-                    bind_expr.as_ref(),
-                    tensor_helpers.declaration_name.as_deref(),
-                )
-                .into_iter()
-                .map(|region| (region.producer_binding_index(), region))
-                .collect::<BTreeMap<_, _>>();
-            let mut nested_bindings = nested_layers
-                .as_ref()
-                .map(|layers| (0..layers.len()).map(|_| Vec::new()).collect::<Vec<_>>());
-            let mut source_layer = None;
-            let mut source_ordinal = 0;
-            let mut route_layer = 0;
-            let mut initializer_position = forwarding.as_ref().map(|target| target.position);
-            for (ordinal, binding) in let_bindings.iter().enumerate() {
-                if binding.layer != route_layer {
-                    initializer_position = initializer_position.and_then(|position| {
-                        let layers = binding.layer.checked_sub(route_layer)?;
-                        forwarding
-                            .as_ref()?
-                            .plan
-                            .advance(position, DeepTag::Let, layers)
-                    });
-                    route_layer = binding.layer;
-                }
-                if source_layer == Some(binding.layer) {
-                    source_ordinal += 1;
+                let mut forwarding = tensor_helpers.forwarding.take();
+                let kids = list.children_slice();
+                let mut scoped = scope.clone();
+                let mut bindings = Vec::new();
+                let checked_lowering = cached_subexpr_lowering_context(program);
+                let flattened = sequential_host_let_chain(expr, program, scope);
+                let flattened_regions = if let Some(chain) = flattened.as_ref() {
+                    checked_lowering.local_ascription_binding_regions(
+                        &chain.bind_expr,
+                        tensor_helpers.declaration_name.as_deref(),
+                    )
                 } else {
-                    source_layer = Some(binding.layer);
-                    source_ordinal = 0;
-                }
-                if let Some(name) = symbol_name(binding.binding) {
-                    let initializer = binding.initializer;
-                    let index = ordinal * 2;
-                    let builtin_value = resolve_host_builtin_value(
-                        initializer, program, &scoped, tensor_helpers,
-                    )?;
-                    let selected = forwarding.as_ref().and_then(|target| {
-                        if target.retained
-                            || !target.plan.is_returned_invocation()
-                            || local_regions.contains_key(&index)
-                        {
-                            return None;
-                        }
-                        target
-                            .plan
-                            .initializer(initializer_position?, 0, source_ordinal)
-                    });
-                    let saved_position = forwarding.as_ref().map(|target| target.position);
-                    if let Some(position) = selected {
-                        let mut target = forwarding.take().expect("selected initializer authority");
-                        target.position = position;
-                        tensor_helpers.forwarding = Some(target);
+                    Vec::new()
+                };
+                let crosses_nested_let = flattened.as_ref().is_some_and(|chain| {
+                    flattened_regions.iter().any(|region| {
+                        let producer_layer =
+                            chain.bindings[region.producer_binding_index() / 2].layer;
+                        region
+                            .ascription_binding_indices()
+                            .iter()
+                            .any(|index| chain.bindings[*index / 2].layer != producer_layer)
+                    })
+                });
+
+                let (let_bindings, bind_expr, body_expr, nested_layers) = if crosses_nested_let {
+                    let chain =
+                        flattened.expect("cross-layer region requires a flattened let chain");
+                    (
+                        chain.bindings,
+                        Cow::Owned(chain.bind_expr),
+                        chain.body,
+                        Some(chain.layers),
+                    )
+                } else {
+                    let bind_first = kids.first().ok_or_else(|| {
+                        host_expr_lowering_error(expr, "a `let` node has no bindings")
+                    })?;
+                    let bind_list = as_node(bind_first).ok_or_else(|| {
+                        host_expr_lowering_error(expr, "a `let` node has malformed bindings")
+                    })?;
+                    if bind_list.tag() != DeepTag::Bind {
+                        return Err(host_expr_lowering_error(
+                            expr,
+                            "a `let` node has malformed bindings",
+                        ));
                     }
-                    let mut value = if let Some(local_region) = local_regions.get(&index) {
-                        lower_checked_local_ascription_region(
-                            name,
+                    let bind_span = bind_first.span_id();
+                    let current = bind_list
+                        .children_slice()
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| SequentialHostLetBinding {
+                            binding: &pair[0],
+                            initializer: &pair[1],
+                            bind_span,
+                            layer: 0,
+                        })
+                        .collect();
+                    (
+                        current,
+                        Cow::Borrowed(bind_first),
+                        kids.get(1).ok_or_else(|| {
+                            host_expr_lowering_error(expr, "a `let` node has no body")
+                        })?,
+                        None,
+                    )
+                };
+                let local_regions = checked_lowering
+                    .local_ascription_binding_regions(
+                        bind_expr.as_ref(),
+                        tensor_helpers.declaration_name.as_deref(),
+                    )
+                    .into_iter()
+                    .map(|region| (region.producer_binding_index(), region))
+                    .collect::<BTreeMap<_, _>>();
+                let mut nested_bindings = nested_layers
+                    .as_ref()
+                    .map(|layers| (0..layers.len()).map(|_| Vec::new()).collect::<Vec<_>>());
+                let mut source_layer = None;
+                let mut source_ordinal = 0;
+                let mut route_layer = 0;
+                let mut initializer_position = forwarding.as_ref().map(|target| target.position);
+                for (ordinal, binding) in let_bindings.iter().enumerate() {
+                    if binding.layer != route_layer {
+                        initializer_position = initializer_position.and_then(|position| {
+                            let layers = binding.layer.checked_sub(route_layer)?;
+                            forwarding
+                                .as_ref()?
+                                .plan
+                                .advance(position, DeepTag::Let, layers)
+                        });
+                        route_layer = binding.layer;
+                    }
+                    if source_layer == Some(binding.layer) {
+                        source_ordinal += 1;
+                    } else {
+                        source_layer = Some(binding.layer);
+                        source_ordinal = 0;
+                    }
+                    if let Some(name) = symbol_name(binding.binding) {
+                        let initializer = binding.initializer;
+                        let index = ordinal * 2;
+                        let builtin_value = resolve_host_builtin_value(
                             initializer,
-                            local_region,
-                            &checked_lowering,
                             program,
                             &scoped,
                             tensor_helpers,
-                        )?
-                    } else {
-                        let value = lower_host_expr(initializer, program, &scoped, tensor_helpers)?;
-                        retain_local_nested_ascription(value, initializer, program)?
-                    };
-                    if selected.is_some() {
-                        forwarding = tensor_helpers.forwarding.take();
-                        if let (Some(target), Some(position)) =
-                            (forwarding.as_mut(), saved_position)
-                        {
+                        )?;
+                        let selected = forwarding.as_ref().and_then(|target| {
+                            if target.retained
+                                || !target.plan.is_returned_invocation()
+                                || local_regions.contains_key(&index)
+                            {
+                                return None;
+                            }
+                            target
+                                .plan
+                                .initializer(initializer_position?, 0, source_ordinal)
+                        });
+                        let saved_position = forwarding.as_ref().map(|target| target.position);
+                        if let Some(position) = selected {
+                            let mut target =
+                                forwarding.take().expect("selected initializer authority");
                             target.position = position;
+                            tensor_helpers.forwarding = Some(target);
+                        }
+                        let mut value = if let Some(local_region) = local_regions.get(&index) {
+                            lower_checked_local_ascription_region(
+                                name,
+                                initializer,
+                                local_region,
+                                &checked_lowering,
+                                program,
+                                &scoped,
+                                tensor_helpers,
+                            )?
+                        } else {
+                            let value =
+                                lower_host_expr(initializer, program, &scoped, tensor_helpers)?;
+                            retain_local_nested_ascription(value, initializer, program)?
+                        };
+                        if selected.is_some() {
+                            forwarding = tensor_helpers.forwarding.take();
+                            if let (Some(target), Some(position)) =
+                                (forwarding.as_mut(), saved_position)
+                            {
+                                target.position = position;
+                            }
+                        }
+                        // The original `(bind {span: a} ...)` node wraps this
+                        // value even when a cross-let local-ascription region
+                        // caused the sequential tail chain to be flattened.
+                        value.append_merged_span(binding.bind_span);
+                        let bind_ty = host_expr_type(&value);
+                        let host_binding = HostBinding {
+                            name: name.to_string(),
+                            display_name: None,
+                            display_roots: Vec::new(),
+                            ty: bind_ty.clone(),
+                            value,
+                        };
+                        if let Some(nested_bindings) = nested_bindings.as_mut() {
+                            nested_bindings[binding.layer].push(host_binding);
+                        } else {
+                            bindings.push(host_binding);
+                        }
+                        bind_host_local(&mut scoped, name.to_string(), bind_ty);
+                        if let Some(value) = builtin_value {
+                            tensor_helpers.builtin_values.insert(name.to_owned(), value);
+                        } else {
+                            tensor_helpers.builtin_values.remove(name);
                         }
                     }
-                    // The original `(bind {span: a} ...)` node wraps this
-                    // value even when a cross-let local-ascription region
-                    // caused the sequential tail chain to be flattened.
-                    value.append_merged_span(binding.bind_span);
-                    let bind_ty = host_expr_type(&value);
-                    let host_binding = HostBinding {
-                        name: name.to_string(),
-                        display_name: None,
-                        display_roots: Vec::new(),
-                        ty: bind_ty.clone(),
-                        value,
+                }
+                if let Some(target) = forwarding.as_mut() {
+                    // The unflattened branch advances this exact Let occurrence;
+                    // flattened input advances its explicit original source layers.
+                    let position = if let Some(layers) = nested_layers.as_ref() {
+                        target
+                            .plan
+                            .advance(target.position, DeepTag::Let, layers.len())
+                    } else {
+                        target.plan.advance(target.position, DeepTag::Let, 1)
                     };
-                    if let Some(nested_bindings) = nested_bindings.as_mut() {
-                        nested_bindings[binding.layer].push(host_binding);
-                    } else {
-                        bindings.push(host_binding);
-                    }
-                    bind_host_local(&mut scoped, name.to_string(), bind_ty);
-                    if let Some(value) = builtin_value {
-                        tensor_helpers.builtin_values.insert(name.to_owned(), value);
-                    } else {
-                        tensor_helpers.builtin_values.remove(name);
+                    if let Some(position) = position {
+                        target.position = position;
+                        tensor_helpers.forwarding = forwarding;
+                    } else if target.retained {
+                        tensor_helpers.forwarding = forwarding;
                     }
                 }
-            }
-            if let Some(target) = forwarding.as_mut() {
-                // The unflattened branch advances this exact Let occurrence;
-                // flattened input advances its explicit original source layers.
-                let position = if let Some(layers) = nested_layers.as_ref() {
-                    target
-                        .plan
-                        .advance(target.position, DeepTag::Let, layers.len())
-                } else {
-                    target.plan.advance(target.position, DeepTag::Let, 1)
-                };
-                if let Some(position) = position {
-                    target.position = position;
-                    tensor_helpers.forwarding = forwarding;
-                } else if target.retained {
-                    tensor_helpers.forwarding = forwarding;
-                }
-            }
-            let mut body = lower_host_expr(body_expr, program, &scoped, tensor_helpers)?;
-            if let (Some(layers), Some(mut nested_bindings)) = (nested_layers, nested_bindings) {
-                for (layer, layer_bindings) in
-                    layers.into_iter().zip(nested_bindings.drain(..)).rev()
-                {
-                    let ty = if layer.explicit_ty.is_unresolved() {
-                        host_expr_type(&body)
+                let mut body = lower_host_expr(body_expr, program, &scoped, tensor_helpers)?;
+                Ok(
+                    if let (Some(layers), Some(mut nested_bindings)) =
+                        (nested_layers, nested_bindings)
+                    {
+                        for (layer, layer_bindings) in
+                            layers.into_iter().zip(nested_bindings.drain(..)).rev()
+                        {
+                            let ty = if layer.explicit_ty.is_unresolved() {
+                                host_expr_type(&body)
+                            } else {
+                                layer.explicit_ty
+                            };
+                            let mut nested = HostExpr::new(HostExprKind::Let {
+                                bindings: layer_bindings,
+                                body: Box::new(body),
+                                ty,
+                            });
+                            if let Some(span) = layer.span_id {
+                                nested.span_id = Some(span);
+                            }
+                            body = nested;
+                        }
+                        body
                     } else {
-                        layer.explicit_ty
-                    };
-                    let mut nested = HostExpr::new(HostExprKind::Let {
-                        bindings: layer_bindings,
-                        body: Box::new(body),
-                        ty,
-                    });
-                    if let Some(span) = layer.span_id {
-                        nested.span_id = Some(span);
-                    }
-                    body = nested;
-                }
-                body
-            } else {
-                let explicit_ty = expr_host_type(expr, program, scope);
-                HostExpr::new(HostExprKind::Let {
-                    bindings,
-                    body: Box::new(body.clone()),
-                    ty: if explicit_ty.is_unresolved() {
-                        host_expr_type(&body)
-                    } else {
-                        explicit_ty
+                        let explicit_ty = expr_host_type(expr, program, scope);
+                        HostExpr::new(HostExprKind::Let {
+                            bindings,
+                            body: Box::new(body.clone()),
+                            ty: if explicit_ty.is_unresolved() {
+                                host_expr_type(&body)
+                            } else {
+                                explicit_ty
+                            },
+                        })
                     },
-                })
-            }
-                })
+                )
             })();
             tensor_helpers.builtin_values = caller_values;
             lowered?
@@ -17414,13 +17423,17 @@ fn discard_unobserved_nullary_result(
             body: Box::new(discard_unobserved_nullary_result(body, program)?),
             ty: HostTypeTerm::Unit,
         },
-        HostExprKind::RetainedInvocation { bindings, body, .. } => {
-            HostExprKind::RetainedInvocation {
-                bindings: bindings.clone(),
-                body: Box::new(discard_unobserved_nullary_result(body, program)?),
-                ty: HostTypeTerm::Unit,
-            }
-        }
+        HostExprKind::RetainedInvocation {
+            bindings,
+            body,
+            forwarding,
+            ..
+        } => HostExprKind::RetainedInvocation {
+            bindings: bindings.clone(),
+            body: Box::new(discard_unobserved_nullary_result(body, program)?),
+            ty: HostTypeTerm::Unit,
+            forwarding: forwarding.clone(),
+        },
         // Result/entry observations and unknown producers require their
         // actual typed value. They cannot authorize a discard projection.
         _ => return None,
@@ -28219,7 +28232,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
                 &signature.scope,
                 &expected,
                 &context,
-                Some(operation),
+                Some(StaticBuiltinValue::resolve_bare("is_finite").unwrap()),
             )
             .is_some()
         );
@@ -28232,7 +28245,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
                 &expected,
                 true,
                 Some(&context),
-                Some(operation),
+                Some(StaticBuiltinValue::resolve_bare("is_finite").unwrap()),
             )
             .is_some()
         );

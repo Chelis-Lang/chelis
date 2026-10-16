@@ -13732,9 +13732,12 @@ impl<'program> LowerCtx<'program> {
                 &fn_expr,
                 args,
                 ty,
-                checked_result_precision,
-                checked_result_names,
+                CheckedCallableResult {
+                    precision: checked_result_precision,
+                    names: checked_result_names,
+                },
                 inlining_name,
+                PreparedCallRequirement::Ordinary,
             )),
             CallableExpr::Builtin(operation) => {
                 Some(self.lower_builtin_value_app(&operation, args, ty, app_span))
@@ -15071,7 +15074,7 @@ impl<'program> LowerCtx<'program> {
         );
         // Reuse the ordinary producer-claim protocol before preparing actuals.
         let prepared_claim = self.prepare_value_result_claim(Some(expected), false, false);
-        let result = self.lower_plain_callable_app_with_requirement(
+        let result = self.lower_plain_callable_app(
             &function,
             args,
             expected,
@@ -15088,28 +15091,6 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn lower_plain_callable_app(
-        &mut self,
-        fn_expr: &ResolvedFunction,
-        args: &[Expr],
-        expected_return_ty: &TensorType,
-        checked_result_precision: Option<Prim>,
-        checked_result_names: Option<&[Option<CheckedAxisName>]>,
-        inlining_name: Option<String>,
-    ) -> LoweredValue {
-        self.lower_plain_callable_app_with_requirement(
-            fn_expr,
-            args,
-            expected_return_ty,
-            CheckedCallableResult {
-                precision: checked_result_precision,
-                names: checked_result_names,
-            },
-            inlining_name,
-            PreparedCallRequirement::Ordinary,
-        )
-    }
-
-    fn lower_plain_callable_app_with_requirement(
         &mut self,
         fn_expr: &ResolvedFunction,
         args: &[Expr],
