@@ -3292,20 +3292,6 @@ impl ConstraintSamplingPlan {
             })
             .collect::<BTreeMap<_, _>>();
 
-        // A `!=` that removes the only value an interval admits leaves no
-        // sample, and must fail closed before any draw rather than be
-        // discovered as a nudge failure mid-run.
-        for (name, range) in &ranges {
-            let kind = kinds[name];
-            let lower = kind.lower_value(range.lower.value, range.lower.strict);
-            let upper = kind.upper_value(range.upper.value, range.upper.strict);
-            if lower == upper && excluded[name].contains(&lower) {
-                return Err(format!(
-                    "inconsistent scalar guards leave `{name}` with no representable sample"
-                ));
-            }
-        }
-
         // A missing side is a generator choice, not a hidden semantic bound.
         // Keep the historical width only as a finite sampling window anchored
         // at the user's actual guard; never intersect an explicit domain with
@@ -3389,6 +3375,30 @@ impl ConstraintSamplingPlan {
                 .unwrap_or(0);
             reserve_depth.insert(name.clone(), depth);
         }
+        // Emptiness the guards themselves imply must be decided here, before
+        // any draw, because a sampling failure mid-run is only ever treated
+        // as a rejected attempt. Two shapes qualify: a strict order chain
+        // with too few representable values to space its successors, and a
+        // `!=` that removes the only value an interval admits.
+        for (name, range) in &ranges {
+            let kind = kinds[name];
+            let lower = kind.lower_value(range.lower.value, range.lower.strict);
+            let mut upper = kind.upper_value(range.upper.value, range.upper.strict);
+            for _ in 0..reserve_depth[name] {
+                upper = kind.next_down(upper);
+            }
+            if !lower.is_finite() || !upper.is_finite() || lower > upper {
+                return Err(format!(
+                    "inconsistent scalar guards leave `{name}` with no representable sample"
+                ));
+            }
+            if lower == upper && excluded[name].contains(&lower) {
+                return Err(format!(
+                    "inconsistent scalar guards leave `{name}` with no representable sample"
+                ));
+            }
+        }
+
         Ok(Self {
             domains,
             ranges,
@@ -3737,15 +3747,15 @@ fn prove_surf_property_fuzz(
             Some(plan) => sample_property_with_constraints(property, plan, &mut rng, attempts - 1),
             None => sample_property(property, &mut rng, attempts - 1),
         };
+        // One attempt failing to produce a value is not the same fact as the
+        // guards admitting none. An edge candidate can pin an order successor
+        // onto a value a `!=` guard excludes, or onto a singleton, and later
+        // attempts are unaffected -- so this is a rejected attempt, not a
+        // terminal verdict. Emptiness the guards really imply is caught by
+        // `ConstraintSamplingPlan::derive`, before any draw.
         let sample = match sample {
             Ok(sample) => sample,
-            Err(reason) => {
-                return unsupported(&property.name, seed, reason).with_sampling(
-                    sampling_method,
-                    attempts,
-                    accepted,
-                );
-            }
+            Err(_) => continue,
         };
         if !property.preconditions.is_empty() {
             match eval_surf_sample(&library, property, &roots, &sample, true) {
@@ -5202,15 +5212,11 @@ fn prove_deep_property(
             }
             None => sample_deep_property(property, &mut rng, attempts - 1),
         };
+        // As in the Surf lane: an unresolvable attempt is rejected, not
+        // terminal (chelis#3636 round 2).
         let sample = match sample {
             Ok(sample) => sample,
-            Err(reason) => {
-                return unsupported(&property.name, seed, reason).with_sampling(
-                    sampling_method,
-                    attempts,
-                    accepted,
-                );
-            }
+            Err(_) => continue,
         };
         if !property.preconditions.is_empty() {
             match eval_deep_sample(exprs, property, &roots, &sample, true) {

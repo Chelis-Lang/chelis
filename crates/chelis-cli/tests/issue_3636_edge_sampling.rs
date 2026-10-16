@@ -836,3 +836,131 @@ fn issue_3636_integer_schedule_does_not_refute_a_total_claim() {
     assert_eq!(record["status"], "passed", "{record:#}");
     assert_eq!(record["accepted_samples"], 100, "{record:#}");
 }
+
+// --- an unresolvable attempt is rejected, not terminal -------------------
+//
+// An edge candidate can pin an order successor onto a value its guards then
+// refuse: a non-strict order edge reserves no spacing, so a predecessor at
+// its interval's top collapses the successor to a singleton that a `!=`
+// guard excludes. That attempt yields no sample, but the guards are
+// satisfiable and later attempts succeed. Routing it to the same terminal
+// verdict as "these guards admit nothing" aborted satisfiable properties.
+//
+// Emptiness the guards really imply is decided in
+// `ConstraintSamplingPlan::derive`, before any draw, so the fail-closed
+// tests above still hold.
+
+/// A non-strict order edge plus an exclusion at the successor's upper bound.
+/// `x = 1.0, y = 1.5` satisfies every guard, so `unsupported` would be false.
+#[test]
+fn issue_3636_nonstrict_order_with_an_exclusion_is_sampled() {
+    let source = "module Edge.OrderExclusion
+@property order_ne_nonstrict forall(x: f64, y: f64)
+where x > 0.0f64, y >= x, y <= 2.0f64, y != 2.0f64:
+  ((y >= x) && (y <= 2.0f64))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    // The attempt that could not resolve is accounted for as a rejection,
+    // not hidden: attempts exceed accepted samples by exactly that much.
+    assert!(
+        record["attempted_samples"].as_u64().unwrap_or_default() > 100,
+        "the skipped attempt must be counted: {record:#}"
+    );
+    assert!(
+        record["rejected_samples"].as_u64().unwrap_or_default() >= 1,
+        "the skipped attempt must be reported as rejected: {record:#}"
+    );
+}
+
+/// The same class through a three-binder chain, where the exclusion sits on
+/// the last link.
+#[test]
+fn issue_3636_order_chain_with_an_exclusion_is_sampled() {
+    let source = "module Edge.ChainExclusion
+@property chain_ne forall(x: f64, y: f64, z: f64)
+where x <= y, y <= z, z <= 3.0f64, z != 3.0f64:
+  (x <= z)
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    assert!(
+        record["rejected_samples"].as_u64().unwrap_or_default() >= 1,
+        "{record:#}"
+    );
+}
+
+/// Negative parity: a chain whose guards really admit nothing is still
+/// decided before any draw, with `unsupported` and zero accepted samples
+/// rather than an exhausted generator. This is the boundary the class fix
+/// must not cross.
+#[test]
+fn issue_3636_strict_chain_without_room_still_fails_closed_before_sampling() {
+    for source in [
+        // too few representable f32 values to space a strict chain
+        "module Edge.NoRoom\n@property no_slots forall(x: f32, y: f32)\nwhere x > 0.9999999, x < y, y < 1.0:\n  (x < y)\n",
+        // an exclusion that empties a singleton interval
+        "module Edge.NoValue\n@property no_value forall(x: f64)\nwhere x >= 1.0f64, x <= 1.0f64, x != 1.0f64:\n  (x == x)\n",
+    ] {
+        let (code, record) = prove(source, "32", "0");
+        assert_eq!(code, 2, "{source}: {record:#}");
+        assert_eq!(record["status"], "unsupported", "{source}: {record:#}");
+        assert_eq!(record["accepted_samples"], 0, "{source}: {record:#}");
+        assert_eq!(record["attempted_samples"], 0, "{source}: {record:#}");
+        assert_ne!(
+            record["composite_verdict"], "fuzz_validated",
+            "{source}: {record:#}"
+        );
+    }
+}
+
+/// The multi-binder diagonal, pinned as a known limitation rather than left
+/// to be rediscovered. Binders with equal ranges take the same candidate
+/// index at every scheduled attempt, so this property -- false at a pair of
+/// guard-admitted representable values -- is not refuted.
+///
+/// This test asserts the limitation, so it fails if the pairing ever changes.
+/// That is deliberate: the change would be an improvement, and whoever makes
+/// it should have to read the budget analysis in
+/// `spec/design/chelis_property_spec.md` and delete this test on purpose.
+#[test]
+fn issue_3636_multi_binder_schedule_visits_only_the_diagonal() {
+    let source = "module Edge.Diagonal
+def subject(x: f64, y: f64) -> f64 = (x / y)
+@property div_finite forall(x: f64, y: f64)
+where x > 0.0f64, y > 0.0f64:
+  ((subject(x, y) <= 1.7976931348623157e308f64) && (subject(x, y) >= -1.7976931348623157e308f64))
+";
+    for seed in ["0", "1", "7", "99"] {
+        let (code, record) = prove(source, "200", seed);
+        assert_eq!(
+            code, 0,
+            "seed {seed}: the diagonal limitation is expected to leave this unrefuted; \
+             if this now fails, the pairing improved and this test should be deleted: {record:#}"
+        );
+        assert_eq!(record["status"], "passed", "seed {seed}: {record:#}");
+    }
+}
+
+/// The same property with the guards narrowed so the diagonal lands on the
+/// refuting pair. This proves the witness exists and that the sampler reaches
+/// it when the pairing allows, so the test above records a pairing limit and
+/// not a magnitude-reach limit.
+#[test]
+fn issue_3636_the_diagonal_witness_is_real_when_the_guards_align_it() {
+    let source = "module Edge.DiagonalAligned
+def subject(x: f64, y: f64) -> f64 = (x / y)
+@property div_finite forall(x: f64, y: f64)
+where x > 1.0e300f64, y > 0.0f64, y < 1.0e-300f64:
+  ((subject(x, y) <= 1.7976931348623157e308f64) && (subject(x, y) >= -1.7976931348623157e308f64))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    let x = record["counterexample"]["x"].as_f64().expect("x");
+    let y = record["counterexample"]["y"].as_f64().expect("y");
+    assert!(x > 1.0e300 && y > 0.0 && y < 1.0e-300, "{record:#}");
+}

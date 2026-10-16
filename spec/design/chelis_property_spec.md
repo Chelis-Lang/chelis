@@ -365,9 +365,29 @@ still proposes the rest of each schedule.
 No remedy is available for that example today: the constraint-directed lane
 admits a property only when every binder is `f32`/`f64`, so a property with an
 `i32` binder cannot enter it. Widening that lane to mixed binders would be the
-fix. A per-binder cursor is rejected instead of deferred, because it would
-make attempt `i` denote a different point for each binder and so cost the
-schedule its reproducibility.
+fix.
+
+The shared ordinal has a second, larger consequence: **for several binders the
+schedule visits only the diagonal of the edge grid.** Binders with equal
+ranges take the same candidate index at every scheduled attempt, so
+`forall(x: f64, y: f64) where x > 0.0f64, y > 0.0f64` never pairs a large `x`
+with a tiny `y`, and a property false only at such a pair -- `x / y` being
+finite, for instance -- still reports `fuzz_validated`. That is chelis#3636's
+own defect surviving for multi-binder properties.
+
+A per-binder cursor is nonetheless not the fix, and the reason is budget
+rather than reproducibility: an index derived from `attempt` is a pure
+function of `attempt`, so a mixed-radix odometer would be exactly as
+reproducible and as seed-independent. It would, however, hold the slowest
+binder at one candidate for a whole cycle. The unguarded `f64` schedule is 44
+candidates long, so at the default 100 samples the diagonal gives every binder
+all 44 of its own classes while covering 44 of 1936 pairs, and an odometer
+gives the slowest binder 3 of 44 while covering 100 of 1936. Full grid
+coverage needs 1936 attempts. No reindexing makes the off-diagonal class
+impossible within a budget linear in the schedule length; it only chooses
+which vanishing fraction of the grid to spend the budget on, and the diagonal
+spends it on the per-binder classes this schedule exists to reach. Closing the
+multi-binder case needs a budget policy, not an index policy.
 
 The shared Tier-C runner is enabled in every normal CLI build, including a
 build without the `smt` feature, and is also the Tide implementation. Solver
