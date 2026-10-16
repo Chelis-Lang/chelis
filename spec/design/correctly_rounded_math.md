@@ -372,13 +372,16 @@ so far. The compile then took 0.56 s and 0.25 s. The unit that carries `pow` bou
 time, so more units would not help. The run is negligible (about 2 ms for every row), but
 macOS delays the first run of each new executable by about 0.15 s.
 
-**Overlap and probe.** `chelis build` compiles the program in its scratch directory while
-the canary compiles and runs (`toolchain::verify_compiler_during`). The program compile
-starts after the macro check and the C library check, so a compiler for another C library
-still compiles nothing. The build publishes the program only when the canary also accepts
-the compiler. A build reads the compiler's `--version` text once, in
-`toolchain::runtime_toolchain_probed`. The check reuses that text while the executable's
-size and modification time stay the same.
+**Overlap.** `chelis build` compiles the program in its scratch directory while the canary
+compiles and runs (`toolchain::verify_compiler_during`). The program compile starts after
+the macro check and the C library check, so a compiler for another C library still
+compiles nothing. The build publishes the program only when the canary also accepts the
+compiler.
+
+**Probe.** A build reads the compiler's `--version` text once. When
+`toolchain::runtime_toolchain_probed` reads it to select the compiler or OpenMP, the check
+reuses that read while the executable's size and modification time stay the same.
+Otherwise the check reads the text itself.
 
 A process checks each compiler once and keeps the accepted ones in memory. The key is the
 resolved path, the `--version` line, the profile argv, and the executable's size and
@@ -491,10 +494,11 @@ has a negative partner.
    `-ffp-model=fast`, and `-ffp-eval-method=double` (refused), and the accepted flags of
    §5 (accepted exactly when every row passes). `crmath_profile.rs` checks the obligation table itself.
    The canary unit tests check that each kernel unit carries the `kernel_text` of its
-   kernels byte for byte, and every kernel once. A wrapper that breaks only one unit is
-   refused. The `verify_compiler_during` tests check that the work starts only after the
-   macro and C library checks, and that a refusal drops its result. A build reads an
-   unchanged compiler's `--version` once.
+   kernels byte for byte, and every kernel once. Finite-only math in any one unit stops
+   that unit's compile, and ignored signed zeros in the driver unit break its rows. The
+   `verify_compiler_during` tests check that the work starts only after the macro and C
+   library checks, and that a refusal drops its result. A build reads an unchanged
+   compiler's `--version` once.
 10. FP environment: a host C driver that sets FTZ/DAZ and `FE_UPWARD`, then calls an
     exported function of a built static library on inputs with subnormal and inexact
     results, gets bits identical to eval and finds its own FTZ/DAZ/rounding state

@@ -1697,10 +1697,10 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-    /// A wrapper that changes one canary unit only is still refused. Every unit
-    /// carries the amalgamation's guards, so finite-only math stops the compile of
-    /// any one unit. Ignored signed zeros in the driver unit break its arithmetic
-    /// rows.
+    /// A wrapper that changes one canary unit is refused when that unit shows the
+    /// change. Every unit carries the amalgamation's guards, so finite-only math
+    /// stops the compile of any one unit. Ignored signed zeros in the driver unit
+    /// break its arithmetic rows.
     #[cfg(unix)]
     #[test]
     fn verify_compiler_refuses_a_wrapper_that_changes_one_canary_unit() {
