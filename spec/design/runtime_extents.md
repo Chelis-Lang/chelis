@@ -2351,6 +2351,41 @@ outside this forwarding representation. Additional independent claims retain
 their complete checks and may dominate total work even when one entry boundary
 has a construction receipt.
 
+### Returned invocation provenance
+
+A named invocation result is a distinct static role, `InvocationResult(id)`;
+it never establishes original accumulator or item identity. The result of one
+exact checked invocation may reach a callback result through whole immutable
+local references. Initializer analysis precedes binder installation, shadows
+invalidate the new binding, and scoped undo restores enclosing identities.
+The final returned role selects one invocation occurrence. Equal expressions,
+spans, variable spellings and equal runtime values do not select occurrences.
+
+An initializer-aware route uses parent-linked structural edges for metadata,
+Let bodies, exact Let initializer ordinals and block tails. Candidate occurrences
+hold route indices; only the selected route is materialized. Source provenance
+analysis does not arm a runtime receipt by itself. Eval must consume a one-shot
+activation at that exact initializer before evaluating call arguments; C must
+retain the same occurrence and independently validate its lowered region and
+returned-alias lineage. Ordered formal ingress proves scalar item staging.
+Local-ascription region lowering must preserve the selected occurrence or retain
+complete checking, never borrow a receipt for a substituted helper region.
+
+Effects and independent guards before and after the call execute normally.
+Successful selected-call entry evidence does not establish callback completion;
+only a successful callback returning that invocation's value supplies its outer
+postcondition. Earlier/later identical calls and recursive activations retain
+independent checks. Branch-result joins, selected callables, projections,
+repacking and rank/precision-polymorphic construction remain outside this plan.
+
+Analysis records bounded scoped-map/undo operations and parent links, with
+ordered-map comparisons adding their logarithmic factor. It does not clone an
+environment or a root-to-call route per candidate. Plan records, selected route
+materialization, checked source/callee comparisons, lowered validation, runtime
+routing, entry work and emitted bytes are accounted for separately. Structural
+visit counters do not measure ordered-map comparisons, allocator bytes or
+checked expression comparisons; those costs retain their own units.
+
 ## Part II: remaining delivery sequence
 
 Each row below is an owner of concrete work, not a claim that a PR exists.

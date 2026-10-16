@@ -3453,8 +3453,49 @@ impl<'a> EvalContext<'a> {
             .map(|region| (region.producer_binding_index(), region))
             .collect::<BTreeMap<_, _>>();
 
+            let mut source_layer = None;
+            let mut source_ordinal = 0;
+            let mut route_layer = 0;
+            let mut initializer_position = forwarding_cursor.map(|(_, position)| position);
             for (ordinal, binding) in let_bindings.iter().enumerate() {
+                if binding.layer != route_layer {
+                    initializer_position = initializer_position.and_then(|position| {
+                        let layers = binding.layer.checked_sub(route_layer)?;
+                        #[cfg(test)]
+                        FORWARDING_ROUTE_WORK.with(|work| work.set(work.get() + layers as u64));
+                        let (frame, _) = forwarding_cursor?;
+                        self.loop_compositions[frame].proof.forwarding().advance(
+                            position,
+                            DeepTag::Let,
+                            layers,
+                        )
+                    });
+                    route_layer = binding.layer;
+                }
+                if source_layer == Some(binding.layer) {
+                    source_ordinal += 1;
+                } else {
+                    source_layer = Some(binding.layer);
+                    source_ordinal = 0;
+                }
                 let index = ordinal * 2;
+                if !local_regions.contains_key(&index)
+                    && let Some((frame, _)) = forwarding_cursor
+                    && self.loop_compositions[frame]
+                        .proof
+                        .forwarding()
+                        .is_returned_invocation()
+                {
+                    #[cfg(test)]
+                    FORWARDING_ROUTE_WORK.with(|work| work.set(work.get() + 1));
+                    self.loop_compositions[frame].forwarding_position = initializer_position
+                        .and_then(|position| {
+                            self.loop_compositions[frame]
+                                .proof
+                                .forwarding()
+                                .initializer(position, 0, source_ordinal)
+                        });
+                }
                 let name = symbol_name(binding.binding)
                     .ok_or_else(|| "let binding must bind a name".to_string())?;
                 // Record the bound expr's static type (checker-annotated
@@ -3492,6 +3533,9 @@ impl<'a> EvalContext<'a> {
                 } else {
                     self.eval_expr(binding.initializer)?
                 };
+                // A selected App consumes its route before evaluating args.
+                // Any unsupported initializer continuation remains suspended.
+                self.take_forwarding_cursor();
                 let result_producer = self.result_producer.take();
                 self.binding_types.insert(name.to_string(), static_ty);
                 self.bindings

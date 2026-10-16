@@ -5692,3 +5692,113 @@ fn lexical_forwarding_stationary_named_entry_work_is_bounded() {
         }
     }
 }
+
+#[test]
+fn bound_result_wrappers_have_bounded_complete_eval_entry_work() {
+    let mut excessive = Vec::new();
+    for hops in [1, 2, 16] {
+        for seed in [100, 400] {
+            for steps in [100, 400] {
+                for unproved in [false, true] {
+                    let source = forwarding_wrapper_source(seed, steps, hops, unproved);
+                    let application = format!("step(old{}, item{}) }}", hops - 1, hops - 1);
+                    let source = source.replace(&application, &format!("selected_result = step(old{}, item{})\n saved_result = selected_result\n saved_result }}", hops - 1, hops - 1));
+                    let checked = checked_surf(&source);
+                    let empty = UnordMap::new();
+                    super::eval::reset_entry_claim_work();
+                    let outcome = evaluate_host_program_with_library_and_types(
+                        &checked,
+                        None,
+                        None,
+                        HostEvaluationInputs {
+                            roots: &empty,
+                            bindings: None,
+                        },
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        render_value(&outcome.host_bindings["out"]),
+                        (seed + steps).to_string()
+                    );
+                    let observations = super::eval::entry_claim_work();
+                    let traversal = super::eval::entry_claim_traversal_work();
+                    let route = super::eval::forwarding_route_work();
+                    let source_bytes = super::eval::composition_source_bytes();
+                    let work = observations + traversal;
+                    eprintln!(
+                        "bound result wrapper Eval N={seed} K={steps} L={hops} unproved={unproved}: observations={observations} traversal={traversal} route={route} source_bytes={source_bytes}"
+                    );
+                    assert!(
+                        source_bytes <= 1024 * source.len() as u64 * steps as u64,
+                        "source_bytes={source_bytes}"
+                    );
+                    assert!(
+                        route <= (8 * hops + 32) as u64 * steps as u64,
+                        "route={route}"
+                    );
+                    if unproved {
+                        assert!(work >= (seed * steps) as u64, "{work}");
+                    } else if work > 128 * (seed + steps) as u64 + 100 {
+                        excessive.push(format!("N={seed} K={steps} L={hops}: {work}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(excessive.is_empty(), "{}", excessive.join("\n"));
+}
+
+#[test]
+fn bound_result_nominal_aliases_count_complete_eval_entry_work() {
+    for collection in ["Chain", "Box"] {
+        for claim in ["3", "n"] {
+            for combine in ["fold", "scan"] {
+                for steps in [100, 400] {
+                    for unproved in [false, true] {
+                        let source = immutable_nominal_alias_source(
+                            collection, claim, "composed", combine, steps,
+                        );
+                        let tail = if unproved {
+                            "if i == 0i64 then saved else saved"
+                        } else {
+                            "saved"
+                        };
+                        let source = source.replace("-> step(acc, i)", &format!("-> {{ old = acc\n item = i\n result = step(old, item)\n saved = result\n {tail} }}"));
+                        let checked = checked_surf(&source);
+                        let empty = UnordMap::new();
+                        super::eval::reset_entry_claim_work();
+                        let outcome = evaluate_host_program_with_library_and_types(
+                            &checked,
+                            None,
+                            None,
+                            HostEvaluationInputs {
+                                roots: &empty,
+                                bindings: None,
+                            },
+                            None,
+                            None,
+                        )
+                        .expect("bound nominal result evaluates");
+                        assert_eq!(
+                            render_value(&outcome.host_bindings["out"]),
+                            steps.to_string()
+                        );
+                        let observations = super::eval::entry_claim_work();
+                        let traversal = super::eval::entry_claim_traversal_work();
+                        let total = observations + traversal;
+                        eprintln!(
+                            "bound nominal Eval {collection}/{claim}/{combine} K={steps} unproved={unproved}: observations={observations} traversal={traversal} total={total}"
+                        );
+                        if unproved {
+                            assert!(total >= (steps * steps / 2) as u64, "{total}");
+                        } else {
+                            assert!(total <= 96 * steps as u64 + 200, "{total}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

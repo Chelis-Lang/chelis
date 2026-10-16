@@ -2245,6 +2245,8 @@ pub enum HostExprKind<T = HostTypeTerm> {
         bindings: Vec<HostBinding<T>>,
         body: Box<HostExpr<T>>,
         ty: T,
+        /// Immutable source occurrence authority; never a checked-value stamp.
+        forwarding: Option<Arc<AccumulatorForwardingPlan>>,
     },
     Map {
         callback: HostCallback<T>,
@@ -2699,16 +2701,20 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
             body: Box::new(resolve_host_expr(*body)?),
             ty: ty.into_concrete()?,
         },
-        HostExprKind::RetainedInvocation { bindings, body, ty } => {
-            ConcreteHostExprKind::RetainedInvocation {
-                bindings: bindings
-                    .into_iter()
-                    .map(resolve_host_binding)
-                    .collect::<Result<Vec<_>, _>>()?,
-                body: Box::new(resolve_host_expr(*body)?),
-                ty: ty.into_concrete()?,
-            }
-        }
+        HostExprKind::RetainedInvocation {
+            bindings,
+            body,
+            ty,
+            forwarding,
+        } => ConcreteHostExprKind::RetainedInvocation {
+            bindings: bindings
+                .into_iter()
+                .map(resolve_host_binding)
+                .collect::<Result<Vec<_>, _>>()?,
+            body: Box::new(resolve_host_expr(*body)?),
+            ty: ty.into_concrete()?,
+            forwarding,
+        },
         HostExprKind::Map { callback, list, ty } => ConcreteHostExprKind::Map {
             callback: resolve_host_callback(callback)?,
             list: Box::new(resolve_host_expr(*list)?),
@@ -8267,7 +8273,12 @@ fn lower_host_expr_with_expected(
         );
         target.retained = retained.as_ref().is_ok_and(Option::is_some);
         let result = match retained? {
-            Some((body, _)) => body,
+            Some((mut body, _)) => {
+                if let HostExprKind::RetainedInvocation { forwarding, .. } = &mut body.kind {
+                    *forwarding = Some(Arc::new(target.plan.clone()));
+                }
+                body
+            }
             None => lower_host_expr_kind(expr, program, scope, tensor_helpers, expected_ty)?,
         };
         tensor_helpers.forwarding = Some(target);
@@ -8871,10 +8882,47 @@ fn lower_host_expr_kind(
             let mut nested_bindings = nested_layers
                 .as_ref()
                 .map(|layers| (0..layers.len()).map(|_| Vec::new()).collect::<Vec<_>>());
+            let mut source_layer = None;
+            let mut source_ordinal = 0;
+            let mut route_layer = 0;
+            let mut initializer_position = forwarding.as_ref().map(|target| target.position);
             for (ordinal, binding) in let_bindings.iter().enumerate() {
+                if binding.layer != route_layer {
+                    initializer_position = initializer_position.and_then(|position| {
+                        let layers = binding.layer.checked_sub(route_layer)?;
+                        forwarding
+                            .as_ref()?
+                            .plan
+                            .advance(position, DeepTag::Let, layers)
+                    });
+                    route_layer = binding.layer;
+                }
+                if source_layer == Some(binding.layer) {
+                    source_ordinal += 1;
+                } else {
+                    source_layer = Some(binding.layer);
+                    source_ordinal = 0;
+                }
                 if let Some(name) = symbol_name(binding.binding) {
                     let initializer = binding.initializer;
                     let index = ordinal * 2;
+                    let selected = forwarding.as_ref().and_then(|target| {
+                        if target.retained
+                            || !target.plan.is_returned_invocation()
+                            || local_regions.contains_key(&index)
+                        {
+                            return None;
+                        }
+                        target
+                            .plan
+                            .initializer(initializer_position?, 0, source_ordinal)
+                    });
+                    let saved_position = forwarding.as_ref().map(|target| target.position);
+                    if let Some(position) = selected {
+                        let mut target = forwarding.take().expect("selected initializer authority");
+                        target.position = position;
+                        tensor_helpers.forwarding = Some(target);
+                    }
                     let mut value = if let Some(local_region) = local_regions.get(&index) {
                         lower_checked_local_ascription_region(
                             name,
@@ -8889,6 +8937,14 @@ fn lower_host_expr_kind(
                         let value = lower_host_expr(initializer, program, &scoped, tensor_helpers)?;
                         retain_local_nested_ascription(value, initializer, program)?
                     };
+                    if selected.is_some() {
+                        forwarding = tensor_helpers.forwarding.take();
+                        if let (Some(target), Some(position)) =
+                            (forwarding.as_mut(), saved_position)
+                        {
+                            target.position = position;
+                        }
+                    }
                     // The original `(bind {span: a} ...)` node wraps this
                     // value even when a cross-let local-ascription region
                     // caused the sequential tail chain to be flattened.
@@ -8921,6 +8977,8 @@ fn lower_host_expr_kind(
                 };
                 if let Some(position) = position {
                     target.position = position;
+                    tensor_helpers.forwarding = forwarding;
+                } else if target.retained {
                     tensor_helpers.forwarding = forwarding;
                 }
             }
@@ -9956,7 +10014,9 @@ fn refine_host_expr_types(
             }
         }
         HostExprKind::Let { bindings, body, ty }
-        | HostExprKind::RetainedInvocation { bindings, body, ty } => {
+        | HostExprKind::RetainedInvocation {
+            bindings, body, ty, ..
+        } => {
             let mut local_scope = scope.clone();
             for binding in bindings.iter_mut() {
                 changed |= refine_host_expr_types(&mut binding.value, &mut local_scope, signatures);
@@ -15123,7 +15183,13 @@ fn retain_actualized_result_claim_with_order(
         span_id,
         merged_spans,
     } = body;
-    if let HostExprKind::RetainedInvocation { bindings, body, ty } = kind {
+    if let HostExprKind::RetainedInvocation {
+        bindings,
+        body,
+        ty,
+        forwarding,
+    } = kind
+    {
         let mut axes = literal_axes;
         if let Some((contract, observations, positions)) = bindings.iter().find_map(|binding| {
             let HostExprKind::SignatureEntry {
@@ -15153,7 +15219,12 @@ fn retain_actualized_result_claim_with_order(
         }
         if axes.is_empty() {
             return HostExpr {
-                kind: HostExprKind::RetainedInvocation { bindings, body, ty },
+                kind: HostExprKind::RetainedInvocation {
+                    bindings,
+                    body,
+                    ty,
+                    forwarding,
+                },
                 span_id,
                 merged_spans,
             };
@@ -15177,6 +15248,7 @@ fn retain_actualized_result_claim_with_order(
                 bindings,
                 body: Box::new(scoped),
                 ty,
+                forwarding,
             },
             span_id,
             merged_spans,
@@ -15314,6 +15386,7 @@ fn retain_nested_result_claim(
         mut bindings,
         body,
         ty,
+        forwarding,
     } = kind
     {
         let entry = bindings.iter().find_map(|binding| {
@@ -15437,6 +15510,7 @@ fn retain_nested_result_claim(
                 bindings,
                 body: Box::new(scoped),
                 ty,
+                forwarding,
             },
             span_id,
             merged_spans,
@@ -16956,6 +17030,7 @@ fn lower_retained_host_invocation(
         bindings,
         body: Box::new(body),
         ty,
+        forwarding: None,
     }))
 }
 
@@ -23300,6 +23375,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             bindings,
             body,
             ty: actual_ty,
+            forwarding,
         } => {
             let mut substitutions = UnordMap::new();
             collect_host_type_variable_substitutions(&actual_ty, &ty, &mut substitutions);
@@ -23323,6 +23399,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                 bindings,
                 body: Box::new(force_host_expr_type(*body, ty.clone())),
                 ty,
+                forwarding,
             }
         }
         // A scan's result lists the accumulators, so its element type is the
@@ -32017,6 +32094,7 @@ mod record_hoist_binder_vocabulary_tests {
             });
             let result_ty = HostTypeTerm::Tensor(tensor.clone());
             let retained = HostExpr::new(HostExprKind::RetainedInvocation {
+                forwarding: None,
                 bindings: vec![HostBinding {
                     name: "entry".into(),
                     display_name: None,
@@ -32433,12 +32511,12 @@ enum AccumulatorRootRole {
 
 /// One lexical analysis frame. Deliberately not Clone: entering a Let records
 /// only its changed bindings, and leaving restores them in reverse order.
-struct AccumulatorIdentities {
-    bindings: BTreeMap<String, Option<AccumulatorRootRole>>,
+struct AccumulatorIdentities<R = AccumulatorRootRole> {
+    bindings: BTreeMap<String, Option<R>>,
 }
 
-impl AccumulatorIdentities {
-    fn new(roots: impl IntoIterator<Item = (String, AccumulatorRootRole)>) -> Self {
+impl<R: Copy> AccumulatorIdentities<R> {
+    fn new(roots: impl IntoIterator<Item = (String, R)>) -> Self {
         let mut scope = Self {
             bindings: BTreeMap::new(),
         };
@@ -32447,7 +32525,7 @@ impl AccumulatorIdentities {
         }
         scope
     }
-    fn role(&self, name: &str) -> Option<AccumulatorRootRole> {
+    fn role(&self, name: &str) -> Option<R> {
         #[cfg(test)]
         charge_accumulator_identity_work(1);
         self.bindings.get(name).copied().flatten()
@@ -32457,16 +32535,12 @@ impl AccumulatorIdentities {
         charge_accumulator_identity_work(1);
         self.bindings.contains_key(name)
     }
-    fn bind(
-        &mut self,
-        name: &str,
-        role: Option<AccumulatorRootRole>,
-    ) -> Option<Option<AccumulatorRootRole>> {
+    fn bind(&mut self, name: &str, role: Option<R>) -> Option<Option<R>> {
         #[cfg(test)]
         charge_accumulator_identity_work(1);
         self.bindings.insert(name.to_owned(), role)
     }
-    fn restore(&mut self, name: &str, previous: Option<Option<AccumulatorRootRole>>) {
+    fn restore(&mut self, name: &str, previous: Option<Option<R>>) {
         #[cfg(test)]
         charge_accumulator_identity_work(1);
         if let Some(previous) = previous {
@@ -32491,13 +32565,20 @@ fn accumulator_identity_variable(mut expr: &Expr) -> Option<&str> {
     node.children_slice().first().and_then(symbol_name)
 }
 
-/// One checked lexical tail path. Initializers and block prefixes are not
-/// members of this path, even when they contain an identical application.
-#[derive(Debug, Clone)]
+/// One checked lexical occurrence path. A tail or exact returned-result
+/// initializer may be selected; identical unselected calls cannot use it.
+#[derive(Debug, Clone, PartialEq)]
 pub struct AccumulatorForwardingPlan {
     callee_name: String,
     callsite: Expr,
-    tails: Vec<DeepTag>,
+    tails: Vec<ForwardingStep>,
+    returned: Option<BoundAccumulatorForwardingPlan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForwardingStep {
+    Tail(DeepTag),
+    Initializer(usize),
 }
 
 impl AccumulatorForwardingPlan {
@@ -32510,17 +32591,25 @@ impl AccumulatorForwardingPlan {
     pub fn is_target(&self, position: usize) -> bool {
         position == self.tails.len()
     }
+    pub fn is_returned_invocation(&self) -> bool {
+        self.returned.is_some()
+    }
+    pub fn initializer(&self, position: usize, layer: usize, ordinal: usize) -> Option<usize> {
+        let position = self.advance(position, DeepTag::Let, layer)?;
+        matches!(self.tails.get(position), Some(ForwardingStep::Initializer(index)) if *index == ordinal)
+            .then_some(position + 1)
+    }
     pub fn advance(&self, position: usize, tag: DeepTag, layers: usize) -> Option<usize> {
         let end = position.checked_add(layers)?;
         self.tails
             .get(position..end)?
             .iter()
-            .all(|step| *step == tag)
+            .all(|step| *step == ForwardingStep::Tail(tag))
             .then_some(end)
     }
 }
 
-pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForwardingPlan> {
+fn tail_accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForwardingPlan> {
     fn bare(mut expr: &Expr) -> &Expr {
         while let Expr::MetaExpr(meta, _) = expr {
             expr = &meta.expr;
@@ -32562,11 +32651,11 @@ pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForward
                         roles.bind(name, Some(role));
                     }
                 }
-                tails.push(DeepTag::Let);
+                tails.push(ForwardingStep::Tail(DeepTag::Let));
                 current = children.get(1)?;
             }
             DeepTag::Block => {
-                tails.push(DeepTag::Block);
+                tails.push(ForwardingStep::Tail(DeepTag::Block));
                 current = children.last()?;
             }
             DeepTag::App => {
@@ -32589,11 +32678,390 @@ pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForward
                     callee_name: callee.to_owned(),
                     callsite: bare(current).clone(),
                     tails,
+                    returned: None,
                 });
             }
             _ => return None,
         }
     }
+}
+
+/// Structural edges from the original checked callback body to one invocation.
+/// Ordinals identify source binding occurrences, never binder spellings/spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundForwardingEdge {
+    Metadata,
+    LetInitializer(usize),
+    LetBody,
+    BlockTail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundForwardingRole {
+    Original(AccumulatorRootRole),
+    InvocationResult(usize),
+}
+
+/// Static lineage alone cannot authorize an entry receipt. Executors also
+/// validate the selected lowered region, returned-value link and each owning
+/// obligation before enabling reuse.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundAccumulatorForwardingPlan {
+    owner: Expr,
+    occurrence: usize,
+    callee_name: String,
+    callsite: Expr,
+    route: Vec<BoundForwardingEdge>,
+    candidate_count: usize,
+    route_records: usize,
+}
+
+impl BoundAccumulatorForwardingPlan {
+    pub fn owner(&self) -> &Expr {
+        &self.owner
+    }
+    pub fn occurrence(&self) -> usize {
+        self.occurrence
+    }
+    pub fn callee_name(&self) -> &str {
+        &self.callee_name
+    }
+    pub fn callsite(&self) -> &Expr {
+        &self.callsite
+    }
+    pub fn route(&self) -> &[BoundForwardingEdge] {
+        &self.route
+    }
+    pub fn analysis_records(&self) -> (usize, usize) {
+        (self.candidate_count, self.route_records)
+    }
+}
+
+/// Prove only static returned-value lineage. No runtime value, inferred shape,
+/// callback/callee obligation or capture authority is supplied by this walk.
+pub fn bound_accumulator_forwarding_plan(
+    callback: &Expr,
+) -> Option<BoundAccumulatorForwardingPlan> {
+    struct RouteRecord {
+        parent: Option<usize>,
+        edge: BoundForwardingEdge,
+    }
+    struct Candidate {
+        route: Option<usize>,
+        callee_name: String,
+        callsite: Expr,
+    }
+    struct Walk {
+        routes: Vec<RouteRecord>,
+        candidates: Vec<Candidate>,
+    }
+    impl Walk {
+        fn edge(&mut self, parent: Option<usize>, edge: BoundForwardingEdge) -> Option<usize> {
+            #[cfg(test)]
+            charge_accumulator_identity_work(1);
+            let index = self.routes.len();
+            self.routes.push(RouteRecord { parent, edge });
+            Some(index)
+        }
+        fn value(
+            &mut self,
+            expr: &Expr,
+            parent: Option<usize>,
+            roles: &mut AccumulatorIdentities<BoundForwardingRole>,
+        ) -> Option<BoundForwardingRole> {
+            struct LetState<'a> {
+                pairs: &'a [[Expr; 2]],
+                ordinal: usize,
+                body: &'a Expr,
+                parent: Option<usize>,
+                undo: Vec<(String, Option<Option<BoundForwardingRole>>)>,
+            }
+            enum Task<'a> {
+                Value(&'a Expr, Option<usize>),
+                Next(LetState<'a>),
+                Bind(LetState<'a>),
+                Restore(Vec<(String, Option<Option<BoundForwardingRole>>)>),
+            }
+            let mut tasks = vec![Task::Value(expr, parent)];
+            let mut result = None;
+            while let Some(task) = tasks.pop() {
+                #[cfg(test)]
+                charge_accumulator_identity_work(1);
+                match task {
+                    Task::Next(state) => {
+                        if let Some([_, initializer]) = state.pairs.get(state.ordinal) {
+                            let next = self.edge(
+                                state.parent,
+                                BoundForwardingEdge::LetInitializer(state.ordinal),
+                            );
+                            tasks.push(Task::Bind(state));
+                            tasks.push(Task::Value(initializer, next));
+                        } else {
+                            let next = self.edge(state.parent, BoundForwardingEdge::LetBody);
+                            tasks.push(Task::Restore(state.undo));
+                            tasks.push(Task::Value(state.body, next));
+                        }
+                    }
+                    Task::Bind(mut state) => {
+                        let [binder, _] = &state.pairs[state.ordinal];
+                        let mut names = UnordSet::new();
+                        collect_binder_names(binder, &mut names);
+                        for name in names.into_sorted() {
+                            let previous = roles.bind(&name, None);
+                            state.undo.push((name, previous));
+                        }
+                        if let (Some(role), Some(name)) = (result, symbol_name(binder)) {
+                            let previous = roles.bind(name, Some(role));
+                            state.undo.push((name.to_owned(), previous));
+                        }
+                        state.ordinal += 1;
+                        tasks.push(Task::Next(state));
+                    }
+                    Task::Restore(undo) => {
+                        for (name, previous) in undo.into_iter().rev() {
+                            roles.restore(&name, previous);
+                        }
+                    }
+                    Task::Value(expr, parent) => {
+                        result = None;
+                        if let Expr::MetaExpr(meta, _) = expr {
+                            let next = self.edge(parent, BoundForwardingEdge::Metadata);
+                            tasks.push(Task::Value(&meta.expr, next));
+                            continue;
+                        }
+                        let Some(node) = as_node(expr) else {
+                            continue;
+                        };
+                        let children = node.children_slice();
+                        match node.tag() {
+                            DeepTag::Var => {
+                                result = accumulator_identity_variable(expr)
+                                    .and_then(|name| roles.role(name));
+                            }
+                            DeepTag::App => {
+                                let [function, first, second] = children else {
+                                    continue;
+                                };
+                                if function.tag() != Some(DeepTag::Var) {
+                                    continue;
+                                }
+                                let Some(callee) = accumulator_identity_variable(function) else {
+                                    continue;
+                                };
+                                let first = accumulator_identity_variable(first)
+                                    .and_then(|name| roles.role(name));
+                                let second = accumulator_identity_variable(second)
+                                    .and_then(|name| roles.role(name));
+                                if roles.is_bound(callee)
+                                    || first
+                                        != Some(BoundForwardingRole::Original(
+                                            AccumulatorRootRole::Accumulator,
+                                        ))
+                                    || second
+                                        != Some(BoundForwardingRole::Original(
+                                            AccumulatorRootRole::Item,
+                                        ))
+                                {
+                                    continue;
+                                }
+                                let occurrence = self.candidates.len();
+                                self.candidates.push(Candidate {
+                                    route: parent,
+                                    callee_name: callee.to_owned(),
+                                    callsite: expr.clone(),
+                                });
+                                result = Some(BoundForwardingRole::InvocationResult(occurrence));
+                            }
+                            DeepTag::Let => {
+                                let bindings = children.first().and_then(as_node)?;
+                                let (pairs, remainder) = bindings.children_slice().as_chunks::<2>();
+                                if bindings.tag() != DeepTag::Bind || !remainder.is_empty() {
+                                    return None;
+                                }
+                                tasks.push(Task::Next(LetState {
+                                    pairs,
+                                    ordinal: 0,
+                                    body: children.get(1)?,
+                                    parent,
+                                    undo: Vec::new(),
+                                }));
+                            }
+                            DeepTag::Block => {
+                                if let Some(tail) = children.last() {
+                                    let next = self.edge(parent, BoundForwardingEdge::BlockTail);
+                                    tasks.push(Task::Value(tail, next));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            result
+        }
+    }
+    let mut callback_node = callback;
+    while let Expr::MetaExpr(meta, _) = callback_node {
+        callback_node = &meta.expr;
+    }
+    let node = as_node(callback_node).filter(|node| node.tag() == DeepTag::Fn)?;
+    let (types, _) = expr_fn_type(callback)?;
+    if types.len() != 2 || !matches!(types[1], HostTypeTerm::Scalar(_) | HostTypeTerm::Unit) {
+        return None;
+    }
+    let params = as_node(node.children_slice().first()?)?;
+    let [acc, item] = params.children_slice() else {
+        return None;
+    };
+    let mut roles = AccumulatorIdentities::new([
+        (
+            param_name(acc)?,
+            BoundForwardingRole::Original(AccumulatorRootRole::Accumulator),
+        ),
+        (
+            param_name(item)?,
+            BoundForwardingRole::Original(AccumulatorRootRole::Item),
+        ),
+    ]);
+    let mut walk = Walk {
+        routes: Vec::new(),
+        candidates: Vec::new(),
+    };
+    let BoundForwardingRole::InvocationResult(occurrence) =
+        walk.value(node.children_slice().get(1)?, None, &mut roles)?
+    else {
+        return None;
+    };
+    let selected = walk.candidates.get(occurrence)?;
+    let mut current = selected.route;
+    let mut route = Vec::new();
+    while let Some(index) = current {
+        #[cfg(test)]
+        charge_accumulator_identity_work(1);
+        let record = walk.routes.get(index)?;
+        route.push(record.edge);
+        current = record.parent;
+    }
+    route.reverse();
+    Some(BoundAccumulatorForwardingPlan {
+        owner: callback.clone(),
+        occurrence,
+        callee_name: selected.callee_name.clone(),
+        callsite: selected.callsite.clone(),
+        route,
+        candidate_count: walk.candidates.len(),
+        route_records: walk.routes.len(),
+    })
+}
+
+pub fn accumulator_forwarding_plan(callback: &Expr) -> Option<AccumulatorForwardingPlan> {
+    tail_accumulator_forwarding_plan(callback).or_else(|| {
+        let returned = bound_accumulator_forwarding_plan(callback)?;
+        let tails = returned
+            .route
+            .iter()
+            .filter_map(|edge| match edge {
+                BoundForwardingEdge::Metadata => None,
+                BoundForwardingEdge::LetInitializer(index) => {
+                    Some(ForwardingStep::Initializer(*index))
+                }
+                BoundForwardingEdge::LetBody => Some(ForwardingStep::Tail(DeepTag::Let)),
+                BoundForwardingEdge::BlockTail => Some(ForwardingStep::Tail(DeepTag::Block)),
+            })
+            .collect();
+        Some(AccumulatorForwardingPlan {
+            callee_name: returned.callee_name.clone(),
+            callsite: returned.callsite.clone(),
+            tails,
+            returned: Some(returned),
+        })
+    })
+}
+
+/// Independently validate a lowered callback's whole returned-value link.
+/// A source marker selects one immutable IR occurrence; it does not validate
+/// its callee recipe, signature or staged arguments. Consumers retain those
+/// separate checks before enabling any entry reuse.
+pub fn returned_accumulator_invocation<'a, T>(
+    body: &'a HostExpr<T>,
+    plan: &AccumulatorForwardingPlan,
+) -> Option<&'a HostExpr<T>> {
+    if !plan.is_returned_invocation() {
+        return None;
+    }
+    struct LetState<'a, T> {
+        bindings: &'a [HostBinding<T>],
+        ordinal: usize,
+        body: &'a HostExpr<T>,
+        undo: Vec<(String, Option<Option<bool>>)>,
+    }
+    enum Task<'a, T> {
+        Value(&'a HostExpr<T>),
+        Next(LetState<'a, T>),
+        Bind(LetState<'a, T>),
+        Restore(Vec<(String, Option<Option<bool>>)>),
+    }
+    let mut roles = AccumulatorIdentities::new(std::iter::empty::<(String, bool)>());
+    let mut tasks = vec![Task::Value(body)];
+    let mut result = None;
+    let mut selected = None;
+    let mut occurrences = 0;
+    while let Some(task) = tasks.pop() {
+        #[cfg(test)]
+        charge_accumulator_identity_work(1);
+        match task {
+            Task::Next(state) => {
+                if let Some(binding) = state.bindings.get(state.ordinal) {
+                    tasks.push(Task::Bind(state));
+                    tasks.push(Task::Value(&binding.value));
+                } else {
+                    tasks.push(Task::Restore(state.undo));
+                    tasks.push(Task::Value(state.body));
+                }
+            }
+            Task::Bind(mut state) => {
+                let binding = &state.bindings[state.ordinal];
+                let previous = roles.bind(&binding.name, result);
+                state.undo.push((binding.name.clone(), previous));
+                state.ordinal += 1;
+                tasks.push(Task::Next(state));
+            }
+            Task::Restore(undo) => {
+                for (name, previous) in undo.into_iter().rev() {
+                    roles.restore(&name, previous);
+                }
+            }
+            Task::Value(value) => {
+                result = None;
+                match &value.kind {
+                    HostExprKind::RetainedInvocation { forwarding, .. }
+                        if forwarding.as_deref() == Some(plan) =>
+                    {
+                        occurrences += 1;
+                        selected = Some(value);
+                        result = Some(true);
+                    }
+                    HostExprKind::Var(name, _) => result = roles.role(name),
+                    HostExprKind::Let { bindings, body, .. } => {
+                        tasks.push(Task::Next(LetState {
+                            bindings,
+                            ordinal: 0,
+                            body,
+                            undo: Vec::new(),
+                        }));
+                    }
+                    HostExprKind::ResultClaimScope { body, .. }
+                    | HostExprKind::ExtentSites { value: body, .. }
+                    | HostExprKind::FormalIngress { value: body, .. } => {
+                        tasks.push(Task::Value(body));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let selected = selected?;
+    (result == Some(true) && occurrences == 1).then_some(selected)
 }
 
 impl AccumulatorCompositionProof {
@@ -33369,6 +33837,226 @@ mod accumulator_forwarding_wrapper_tests {
             checked.adt_registry(),
         )
     }
+    fn returned_plan(body: &str) -> Option<BoundAccumulatorForwardingPlan> {
+        let source = format!(
+            "def step(acc: List[tensor[3, f32]], i: i64) -> List[tensor[*, f32]] = append(acc, to_tensor([1.0f32, 2.0f32, 3.0f32]))\nout = fold(fn (acc: List[tensor[*, f32]], i: i64) -> {body}, [to_tensor([1.0f32, 2.0f32, 3.0f32])], range(0i64, 2i64))\n"
+        );
+        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations).unwrap();
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
+        bound_accumulator_forwarding_plan(checked.exprs().last().and_then(find_lambda).unwrap())
+    }
+
+    #[test]
+    fn returned_invocation_plan_transports_only_whole_immutable_results() {
+        for body in [
+            "{ old = acc\n item = i\n result = step(old, item)\n result }",
+            "{ result = step(acc, i)\n saved = result\n result = acc\n saved }",
+            "{ result = step(acc, i)\n alias = result\n alias2 = alias\n alias2 }",
+        ] {
+            assert!(returned_plan(body).is_some(), "{body}");
+        }
+        for body in [
+            "{ result = step(acc, i)\n result = acc\n result }",
+            "{ result = step(acc, i)\n if i == 0i64 then result else result }",
+            "{ item = if i == 0i64 then i else i\n result = step(acc, item)\n result }",
+            "{ step = fn (xs: List[tensor[*, f32]], n: i64) -> xs\n result = step(acc, i)\n result }",
+        ] {
+            assert!(returned_plan(body).is_none(), "{body}");
+        }
+    }
+
+    #[test]
+    fn returned_invocation_plan_selects_occurrences_not_expression_equality() {
+        let first = returned_plan("{ result = step(acc, i)\n _ = step(acc, i)\n result }").unwrap();
+        let second =
+            returned_plan("{ _ = step(acc, i)\n result = step(acc, i)\n result }").unwrap();
+        assert_eq!(first.callee_name(), second.callee_name());
+        assert_eq!(first.analysis_records().0, 2);
+        assert_eq!(second.analysis_records().0, 2);
+        assert_ne!(first.occurrence(), second.occurrence());
+        assert_ne!(first.route(), second.route());
+    }
+
+    #[test]
+    fn returned_invocation_plan_counts_alias_and_candidate_records_separately() {
+        for length in [40, 80, 160] {
+            let mut body = String::from("{ result = step(acc, i)\n");
+            for index in 0..length {
+                let previous = if index == 0 {
+                    "result".to_owned()
+                } else {
+                    format!("alias{}", index - 1)
+                };
+                body.push_str(&format!("alias{index} = {previous}\n"));
+                body.push_str("_ = step(acc, i)\n");
+            }
+            body.push_str(&format!("alias{} }}", length - 1));
+            ACCUMULATOR_IDENTITY_WORK.with(|work| work.set(0));
+            let plan = returned_plan(&body).unwrap();
+            let work = ACCUMULATOR_IDENTITY_WORK.with(std::cell::Cell::get);
+            let (candidates, routes) = plan.analysis_records();
+            assert_eq!(plan.occurrence(), 0);
+            assert_eq!(candidates, length + 1);
+            eprintln!(
+                "returned source L={length}: visits={work} candidates={candidates} route_records={routes} selected_route={}",
+                plan.route().len()
+            );
+            assert!(routes <= 16 * length + 64, "L={length}: routes={routes}");
+            assert!(work <= 128 * length + 2048, "L={length}: work={work}");
+            // Whole callback/callee byte comparisons and ordered-map
+            // comparisons are separate from these structural visit units.
+        }
+    }
+
+    #[test]
+    fn returned_invocation_plan_keeps_post_call_effects_and_saved_roles_opaque() {
+        for body in [
+            "{ old = acc\n item = i\n result = step(old, item)\n _ = print(\"after\")\n saved = result\n result = old\n saved }",
+            "{ result = step(acc, i)\n _ = step(acc, i)\n result }",
+        ] {
+            assert!(returned_plan(body).is_some(), "{body}");
+        }
+        for body in [
+            "{ result = step(acc, i)\n alias = result\n alias = acc\n alias }",
+            "{ old = acc\n old = []\n result = step(old, i)\n result }",
+        ] {
+            assert!(returned_plan(body).is_none(), "{body}");
+        }
+    }
+
+    #[test]
+    fn lowered_returned_invocation_requires_exact_marker_and_whole_lineage() {
+        let plan = accumulator_forwarding_plan(
+            returned_plan("{ result = step(acc, i)\n result }")
+                .unwrap()
+                .owner(),
+        )
+        .unwrap();
+        let other = accumulator_forwarding_plan(
+            returned_plan("{ _ = step(acc, i)\n result = step(acc, i)\n result }")
+                .unwrap()
+                .owner(),
+        )
+        .unwrap();
+        let ty = HostTypeTerm::Unit;
+        let marked = |authority: AccumulatorForwardingPlan| {
+            HostExpr::new(HostExprKind::RetainedInvocation {
+                bindings: Vec::new(),
+                body: Box::new(HostExpr::new(HostExprKind::Unit)),
+                ty: ty.clone(),
+                forwarding: Some(Arc::new(authority)),
+            })
+        };
+        let binding = |name: &str, value| HostBinding {
+            name: name.to_owned(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: ty.clone(),
+            value,
+        };
+        let make = |return_name: &str, second: Option<HostExpr>| {
+            let mut bindings = vec![
+                binding("result", marked(plan.clone())),
+                binding(
+                    "saved",
+                    HostExpr::new(HostExprKind::Var("result".into(), ty.clone())),
+                ),
+            ];
+            if let Some(second) = second {
+                bindings.push(binding("later", second));
+            }
+            HostExpr::new(HostExprKind::Let {
+                bindings,
+                body: Box::new(HostExpr::new(HostExprKind::Var(
+                    return_name.into(),
+                    ty.clone(),
+                ))),
+                ty: ty.clone(),
+            })
+        };
+        assert!(returned_accumulator_invocation(&make("saved", None), &plan).is_some());
+        assert!(returned_accumulator_invocation(&make("unrelated", None), &plan).is_none());
+        assert!(
+            returned_accumulator_invocation(&make("later", Some(marked(other.clone()))), &plan)
+                .is_none()
+        );
+        assert!(
+            returned_accumulator_invocation(&make("saved", Some(marked(plan.clone()))), &plan)
+                .is_none()
+        );
+        assert!(returned_accumulator_invocation(&make("saved", None), &other).is_none());
+    }
+
+    #[test]
+    fn lowered_returned_alias_work_counts_success_and_failed_lineage() {
+        let plan = accumulator_forwarding_plan(
+            returned_plan("{ result = step(acc, i)\n result }")
+                .unwrap()
+                .owner(),
+        )
+        .unwrap();
+        let ty = HostTypeTerm::Unit;
+        for length in [40, 80, 160] {
+            let mut bindings = vec![HostBinding {
+                name: "result".into(),
+                display_name: None,
+                display_roots: Vec::new(),
+                ty: ty.clone(),
+                value: HostExpr::new(HostExprKind::RetainedInvocation {
+                    bindings: Vec::new(),
+                    body: Box::new(HostExpr::new(HostExprKind::Unit)),
+                    ty: ty.clone(),
+                    forwarding: Some(Arc::new(plan.clone())),
+                }),
+            }];
+            for index in 0..length {
+                bindings.push(HostBinding {
+                    name: format!("alias{index}"),
+                    display_name: None,
+                    display_roots: Vec::new(),
+                    ty: ty.clone(),
+                    value: HostExpr::new(HostExprKind::Var(
+                        if index == 0 {
+                            "result".into()
+                        } else {
+                            format!("alias{}", index - 1)
+                        },
+                        ty.clone(),
+                    )),
+                });
+            }
+            for valid in [true, false] {
+                let body = HostExpr::new(HostExprKind::Let {
+                    bindings: bindings.clone(),
+                    body: Box::new(HostExpr::new(HostExprKind::Var(
+                        if valid {
+                            format!("alias{}", length - 1)
+                        } else {
+                            "unproved_equal_value".into()
+                        },
+                        ty.clone(),
+                    ))),
+                    ty: ty.clone(),
+                });
+                ACCUMULATOR_IDENTITY_WORK.with(|work| work.set(0));
+                assert_eq!(
+                    returned_accumulator_invocation(&body, &plan).is_some(),
+                    valid
+                );
+                let work = ACCUMULATOR_IDENTITY_WORK.with(std::cell::Cell::get);
+                eprintln!("returned lowered L={length} valid={valid}: visits={work}");
+                assert!(work <= 16 * length + 100, "L={length}: visits={work}");
+            }
+        }
+    }
+
+    #[test]
+    fn returned_invocation_is_not_original_accumulator_identity() {
+        assert!(proof("{ result = step(acc, i)\n step(result, i) }").is_none());
+        assert!(returned_plan("{ result = step(acc, i)\n step(result, i) }").is_none());
+    }
+
     #[test]
     fn checked_composition_preserves_sequential_forwarding_roles() {
         for body in [

@@ -1061,7 +1061,12 @@ fn project_expr(
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::Let { .. } => unreachable!("let projection handled iteratively"),
-        ConcreteHostExprKind::RetainedInvocation { bindings, body, ty } => {
+        ConcreteHostExprKind::RetainedInvocation {
+            bindings,
+            body,
+            ty,
+            forwarding,
+        } => {
             // A retained formal that holds an admitted callable is a lexical
             // callable within the invocation's body.
             let mut visible = allowed_callbacks.clone();
@@ -1075,6 +1080,7 @@ fn project_expr(
                 projected.push(projected_binding);
             }
             HostAbiExprKind::RetainedInvocation {
+                forwarding,
                 bindings: projected,
                 body: Box::new(project_expr(*body, &visible)?),
                 ty: HostAbiType::try_from_concrete(&ty)?,
