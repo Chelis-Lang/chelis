@@ -1801,9 +1801,12 @@ fn induction_terminal_reason(case: &str, result: &crate::tier_b::TierBResult) ->
         TierBResult::Disproved(_) => None,
         TierBResult::Timeout => Some(format!("induction {case} obligation timed out")),
         TierBResult::Unknown => Some(format!("induction {case} obligation was unknown")),
-        TierBResult::Error(reason) | TierBResult::DomainDisproved { reason, .. } => {
-            Some(format!("induction {case} obligation error: {reason}"))
-        }
+        TierBResult::Error(reason) => Some(format!("induction {case} obligation error: {reason}")),
+        // Matches the `domain_disproved` status token this case records, rather
+        // than calling a decided obligation an error (chelis#3635).
+        TierBResult::DomainDisproved { reason, .. } => Some(format!(
+            "induction {case} obligation has a false `sqrt` domain obligation: {reason}"
+        )),
         TierBResult::Proved => None,
     }
 }

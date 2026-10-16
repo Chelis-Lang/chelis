@@ -4138,8 +4138,9 @@ def k(x: f64) -> f64 = sqrt(x)
     // deductive-tier record carries `"real"` even when it discloses no
     // real-arithmetic caveat. That predates this change and is unchanged by it
     // -- every `unsupported` SMT record has the same shape. Pinned here so the
-    // value is recorded rather than assumed; the mirror's inconsistency with
-    // `qualifiers:[]` is tracked separately and is not repaired here.
+    // value is recorded rather than assumed. Whether the field should instead
+    // mirror the qualifier set is a pre-existing question about both the CLI
+    // and tide emitters, and is not repaired here.
     assert_eq!(record["arith_model"], "real", "{record}");
     let x = record["counterexample"]["x"]
         .as_f64()

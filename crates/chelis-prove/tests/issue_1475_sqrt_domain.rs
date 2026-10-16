@@ -703,9 +703,9 @@ fn issue3635_an_integer_witness_outside_the_fuzz_window_still_confirms() {
     // A witness is an EXHIBITED input, not a drawn sample, so it is bounded by
     // the width's representable range rather than by the `[-1000, 1000]` fuzz
     // convenience window of `integer_fuzz_bounds`. The first version of this
-    // lane declined `n = 4001` as "not representable at i32" -- which it is --
-    // and `int_sample` would then have clamped it to 1000, evaluating an input
-    // the guards exclude.
+    // lane declined `n = 4001` as "not representable at i32" -- which is
+    // false, i32 represents it exactly -- and `int_sample` would then have
+    // clamped it to 1000, evaluating an input the guards exclude.
     let source = r#"module M
 def k(x: f64) -> f64 = sqrt(x)
 
