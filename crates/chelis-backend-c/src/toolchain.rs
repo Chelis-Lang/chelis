@@ -1,7 +1,7 @@
 //! Cross-platform toolchain resolution for Chelis CPU codegen consumers.
 
 use crate::fp_env;
-use chelis_crmath::c_source::{Kernel, kernel_text};
+use chelis_crmath::c_source::{Kernel, kernel_text, prelude as kernel_prelude};
 use chelis_crmath::profile;
 use std::{
     ffi::OsStr,
@@ -46,6 +46,15 @@ pub fn runtime_toolchain(requirements: CodegenRequirements) -> NativeToolchain {
     resolve_toolchain(requirements, &["CHELIS_CC"])
 }
 
+/// [`runtime_toolchain`], and the compiler's `--version` read that it took to
+/// select the compiler. `chelis build` gives that read to
+/// [`verify_compiler_during`], so one build runs `--version` once.
+pub fn runtime_toolchain_probed(
+    requirements: CodegenRequirements,
+) -> (NativeToolchain, Option<VersionProbe>) {
+    resolve_toolchain_probed(requirements, &["CHELIS_CC"])
+}
+
 /// Reference profile for a caller-selected compiler: the pinned profile with
 /// OpenMP off, so the agreement gate runs one thread. It does not resolve a
 /// compiler or read the environment. Callers spawn the compiler through
@@ -82,12 +91,27 @@ pub fn test_toolchain(requirements: CodegenRequirements) -> NativeToolchain {
 }
 
 fn resolve_toolchain(requirements: CodegenRequirements, override_vars: &[&str]) -> NativeToolchain {
-    let compiler = resolve_compiler(override_vars);
-    // OpenMP is gated on `is_real_gcc(&compiler)`. On macOS, `resolve_compiler`
-    // returns "clang" (Apple-clang), so this is always false there: Apple-clang
-    // does not bundle libomp and `-fopenmp` is unsupported.
-    let openmp_enabled = requirements.wants_openmp && is_real_gcc(&compiler);
-    pinned_toolchain(compiler, requirements, openmp_enabled)
+    resolve_toolchain_probed(requirements, override_vars).0
+}
+
+fn resolve_toolchain_probed(
+    requirements: CodegenRequirements,
+    override_vars: &[&str],
+) -> (NativeToolchain, Option<VersionProbe>) {
+    let (compiler, mut probe) = resolve_compiler(override_vars);
+    // OpenMP needs GCC. On macOS, `resolve_compiler` returns "clang" (Apple clang),
+    // so OpenMP is always off there: Apple clang does not bundle libomp and does
+    // not support `-fopenmp`.
+    let openmp_enabled = requirements.wants_openmp && {
+        if probe.is_none() {
+            probe = VersionProbe::read(&compiler);
+        }
+        probe.as_ref().is_some_and(VersionProbe::is_real_gcc)
+    };
+    (
+        pinned_toolchain(compiler, requirements, openmp_enabled),
+        probe,
+    )
 }
 
 /// The one host compile/link profile, shared by `chelis build` and the
@@ -233,6 +257,63 @@ impl fmt::Display for CompilerCheckError {
     }
 }
 
+/// An executable's size and modification time.
+type ExecutableStamp = (u64, Option<std::time::SystemTime>);
+
+fn executable_stamp(path: &Path) -> Option<ExecutableStamp> {
+    path.metadata()
+        .ok()
+        .map(|metadata| (metadata.len(), metadata.modified().ok()))
+}
+
+/// A compiler's `--version` output, read once for a build.
+/// [`runtime_toolchain_probed`] reads it to select the compiler.
+/// [`verify_compiler_during`] uses it in place of its own read, but only for the
+/// same file with the same size and modification time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionProbe {
+    path: PathBuf,
+    stamp: Option<ExecutableStamp>,
+    output: std::process::Output,
+}
+
+impl VersionProbe {
+    /// Run `compiler --version` under [`tool_command`]. `None` when no executable
+    /// has that name, or when it does not start.
+    fn read(compiler: &str) -> Option<Self> {
+        Self::read_path(resolve_executable(compiler)?).ok()
+    }
+
+    fn read_path(path: PathBuf) -> std::io::Result<Self> {
+        let stamp = executable_stamp(&path);
+        let output = tool_command(&path)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()?;
+        Ok(Self {
+            path,
+            stamp,
+            output,
+        })
+    }
+
+    fn succeeded(&self) -> bool {
+        self.output.status.success()
+    }
+
+    /// Whether the compiler is GCC: its `--version` text names neither Apple
+    /// clang nor clang.
+    fn is_real_gcc(&self) -> bool {
+        let text = compiler_version_text(&self.output);
+        self.succeeded() && !text.contains("Apple clang") && !text.contains("clang version")
+    }
+
+    /// Whether this probe read `path` in its present state.
+    fn reads(&self, path: &Path) -> bool {
+        self.path == path && self.stamp == executable_stamp(path)
+    }
+}
+
 /// The argument vector of a profile link: `compile_flags`, the `inputs`, the
 /// profile's `link_flags`, and the output. `chelis build` links executables
 /// with it and [`verify_compiler`] links the canary with it, so the canary is
@@ -251,49 +332,77 @@ pub fn link_args(
     args
 }
 
-/// Resolve `compiler`'s identity and check that, given `compile_flags` and
+/// Resolve `compiler`'s identity. Then check that, under `compile_flags` and
 /// `link_flags`, it compiles with the profile's floating-point semantics and
 /// against the carried runtime archive's C library. A wrapper script is opaque on
-/// the command line, so the check observes the compiler itself. First it reads what
-/// the compiler predefines under those flags:
-/// fast math (`__FAST_MATH__`), finite-only math (`__FINITE_MATH_ONLY__`), or a
-/// dropped optimisation level (`__OPTIMIZE__` missing although the profile
-/// passes `-O2`). Then it refuses a compiler for another C library
-/// ([`check_c_library`]). No macro reveals contraction, reassociation, or a NaN or
-/// infinity assumption, so it then compiles and runs the canary
-/// ([`canary_source`]) with the same flags, linked by [`link_args`], and compares the bits it prints with
-/// the profile's obligation table (`chelis_crmath::profile`): every kernel row of
-/// the MPFR fixtures and every arithmetic, comparison, conversion, and
-/// expression-shape row. Any difference means something outside the profile
-/// changed the compile, and the build is refused.
+/// the command line, so the check observes the compiler itself.
+///
+/// First it reads what the compiler predefines under those flags. It refuses fast
+/// math (`__FAST_MATH__`), finite-only math (`__FINITE_MATH_ONLY__`), and a dropped
+/// `-O2` (no `__OPTIMIZE__`). Then it refuses a compiler for another C library
+/// ([`check_c_library`]).
+///
+/// No macro reveals contraction, reassociation, or a NaN or infinity assumption.
+/// So it then compiles the canary units ([`canary_units`]) with the same flags,
+/// links them with [`link_args`], and runs the canary. It compares the bits that
+/// the canary prints with the profile's obligation table (`chelis_crmath::profile`).
+/// The table has every kernel row of the MPFR fixtures and every arithmetic,
+/// comparison, conversion, and expression-shape row. Any difference means that
+/// something outside the profile changed the compile, and the build is refused.
 pub fn verify_compiler(
     compiler: &str,
     compile_flags: &[String],
     link_flags: &[String],
 ) -> Result<CompilerIdentity, CompilerCheckError> {
-    let path = resolve_executable(compiler)
-        .ok_or_else(|| CompilerCheckError::NotFound(compiler.to_string()))?;
-    check_compiler(path, compile_flags, link_flags).map_err(CompilerCheckError::Refused)
+    verify_compiler_during(compiler, None, compile_flags, link_flags, || ())
+        .map(|(identity, ())| identity)
 }
 
-fn check_compiler(
-    path: PathBuf,
+/// [`verify_compiler`], with `work` run while the canary compiles and runs.
+/// `work` starts only after the identity, the macro check, and the C library
+/// check pass. So a compiler for another C library compiles nothing
+/// (spec/08-backends.md section 7). A refusal drops the result of `work`, so a
+/// caller that builds in a scratch directory publishes nothing a refused
+/// compiler built. A `probe` of the same unchanged file replaces the check's own
+/// `--version` read.
+pub fn verify_compiler_during<T>(
+    compiler: &str,
+    probe: Option<&VersionProbe>,
     compile_flags: &[String],
     link_flags: &[String],
-) -> Result<CompilerIdentity, String> {
-    let version = tool_command(&path)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("cannot run native compiler `{}`: {error}", path.display()))?;
-    if !version.status.success() {
+    work: impl FnOnce() -> T,
+) -> Result<(CompilerIdentity, T), CompilerCheckError> {
+    let path = resolve_executable(compiler)
+        .ok_or_else(|| CompilerCheckError::NotFound(compiler.to_string()))?;
+    check_compiler(path, probe, compile_flags, link_flags, work)
+        .map_err(CompilerCheckError::Refused)
+}
+
+fn check_compiler<T>(
+    path: PathBuf,
+    probe: Option<&VersionProbe>,
+    compile_flags: &[String],
+    link_flags: &[String],
+    work: impl FnOnce() -> T,
+) -> Result<(CompilerIdentity, T), String> {
+    let read;
+    let probe = match probe.filter(|probe| probe.reads(&path)) {
+        Some(probe) => probe,
+        None => {
+            read = VersionProbe::read_path(path.clone()).map_err(|error| {
+                format!("cannot run native compiler `{}`: {error}", path.display())
+            })?;
+            &read
+        }
+    };
+    if !probe.succeeded() {
         return Err(format!(
             "native compiler `{}` --version failed with {}",
             path.display(),
-            version.status
+            probe.output.status
         ));
     }
-    let version = compiler_version_text(&version)
+    let version = compiler_version_text(&probe.output)
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
@@ -310,17 +419,14 @@ fn check_compiler(
         version: version.clone(),
         compile_flags: compile_flags.to_vec(),
         link_flags: link_flags.to_vec(),
-        executable: path
-            .metadata()
-            .ok()
-            .map(|metadata| (metadata.len(), metadata.modified().ok())),
+        executable: executable_stamp(&path),
     };
     if ACCEPTED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .contains(&accepted)
     {
-        return Ok(CompilerIdentity { path, version });
+        return Ok((CompilerIdentity { path, version }, work()));
     }
 
     let macros = preprocessor_macros(&path, compile_flags, b"")?;
@@ -355,12 +461,18 @@ fn check_compiler(
         ));
     }
     check_c_library(&path, compile_flags)?;
-    run_canary(&path, compile_flags, link_flags)?;
+    // `work` runs on this thread while the canary compiles and runs on another.
+    let (canary, product) = std::thread::scope(|scope| {
+        let canary = scope.spawn(|| run_canary(&path, compile_flags, link_flags));
+        let product = work();
+        (canary.join(), product)
+    });
+    canary.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
     ACCEPTED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(accepted);
-    Ok(CompilerIdentity { path, version })
+    Ok((CompilerIdentity { path, version }, product))
 }
 
 /// The Linux C library a runtime archive was built for.
@@ -499,17 +611,81 @@ struct AcceptedCompiler {
     version: String,
     compile_flags: Vec<String>,
     link_flags: Vec<String>,
-    executable: Option<(u64, Option<std::time::SystemTime>)>,
+    executable: Option<ExecutableStamp>,
 }
 
 static ACCEPTED: std::sync::Mutex<Vec<AcceptedCompiler>> = std::sync::Mutex::new(Vec::new());
 
-/// The compiler canary: every kernel, generated code's NaN finalization, and the
-/// driver `chelis_crmath::profile` generates from the profile's obligation table.
-/// The kernel text and the NaN helpers are the bytes generated units carry, so the
-/// canary observes what the compiler does to them.
-fn canary_source() -> String {
-    let mut text = kernel_text(&Kernel::ALL);
+/// How many units carry the canary's kernels. The binary64 `pow` section is 29%
+/// of the kernel text, and its unit takes the longest to compile. So more units
+/// would not shorten the check.
+const CANARY_KERNEL_UNITS: usize = 4;
+
+/// The kernels of each canary kernel unit. Each kernel, largest section first,
+/// goes to the unit with the least text so far, so the units take similar times
+/// to compile. Ties go to the first such unit, so every host gets the same units.
+fn canary_kernel_groups() -> Vec<Vec<Kernel>> {
+    let mut kernels = Kernel::ALL.map(|kernel| {
+        (
+            kernel_text(&[kernel]).len() - kernel_prelude().len(),
+            kernel,
+        )
+    });
+    kernels.sort_by_key(|&(size, _)| std::cmp::Reverse(size));
+    let mut groups = vec![(0, Vec::new()); CANARY_KERNEL_UNITS];
+    for (size, kernel) in kernels {
+        let group = groups
+            .iter_mut()
+            .min_by_key(|(text, _)| *text)
+            .expect("the canary has kernel units");
+        group.0 += size;
+        group.1.push(kernel);
+    }
+    groups.into_iter().map(|(_, kernels)| kernels).collect()
+}
+
+/// The external function through which the driver unit calls `kernel`'s `static`
+/// entry: `chelis_canary_kernel_<name>`.
+fn canary_wrapper_name(kernel: Kernel) -> String {
+    format!("chelis_canary_kernel_{}", kernel.section_name())
+}
+
+/// The C function header of [`canary_wrapper_name`], with the entry's operand and
+/// result types.
+fn canary_wrapper(kernel: Kernel) -> String {
+    let parameters = ["a", "b"][..kernel.arity()]
+        .iter()
+        .map(|operand| format!("{} {operand}", kernel.c_type()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} {}({parameters})",
+        kernel.c_type(),
+        canary_wrapper_name(kernel)
+    )
+}
+
+/// A canary kernel unit: the text of `kernels` exactly as [`kernel_text`] gives it
+/// to a generated unit, then one external wrapper for each kernel entry.
+fn canary_kernel_unit(kernels: &[Kernel]) -> String {
+    let mut text = kernel_text(kernels);
+    for &kernel in kernels {
+        let operands = ["a", "b"][..kernel.arity()].join(", ");
+        text.push_str(&format!(
+            "{} {{ return {}({operands}); }}\n",
+            canary_wrapper(kernel),
+            kernel.entry()
+        ));
+    }
+    text
+}
+
+/// The canary's driver unit: the amalgamation's prelude, the bit-cast helpers,
+/// generated code's NaN finalization, and the `main` that `chelis_crmath::profile`
+/// generates from the obligation table. The `main` names each kernel entry, which
+/// a macro here turns into its wrapper in a kernel unit.
+fn canary_driver_unit() -> String {
+    let mut text = String::from(kernel_prelude());
     text.push_str(profile::canary_prelude());
     // The NaN helpers' bit casts, which generated units take from the runtime
     // header.
@@ -525,8 +701,29 @@ fn canary_source() -> String {
         "#define chelis_canary_finalize_f32 __chelis_nan_f32\n\
          #define chelis_canary_finalize_f64 __chelis_nan_f64\n",
     );
+    for kernel in Kernel::ALL {
+        text.push_str(&format!(
+            "{};\n#define {} {}\n",
+            canary_wrapper(kernel),
+            kernel.entry(),
+            canary_wrapper_name(kernel)
+        ));
+    }
     text.push_str(&profile::canary_driver());
     text
+}
+
+/// The compiler canary's translation units: one for each group of
+/// [`canary_kernel_groups`], then the driver unit. The kernel text and the NaN
+/// helpers are the bytes generated units carry, so the canary observes what the
+/// compiler does to them.
+fn canary_units() -> Vec<String> {
+    let mut units: Vec<String> = canary_kernel_groups()
+        .iter()
+        .map(|kernels| canary_kernel_unit(kernels))
+        .collect();
+    units.push(canary_driver_unit());
+    units
 }
 
 /// A scratch directory under the system temporary directory, removed on drop.
@@ -568,25 +765,33 @@ impl Drop for CanaryDir {
     }
 }
 
-/// The canary's compile-and-link arguments: [`link_args`] with the canary source
-/// as the one input.
-fn canary_args(
+/// A canary unit's compile arguments: the profile's compile flags, then `-c`, as
+/// a build compiles an object.
+fn canary_compile_args(
     compile_flags: &[String],
-    link_flags: &[String],
     source: &Path,
-    program: &Path,
+    object: &Path,
 ) -> Vec<std::ffi::OsString> {
-    link_args(
-        compile_flags,
-        &[source.as_os_str()],
-        link_flags,
-        program.as_os_str(),
-    )
+    let mut args: Vec<std::ffi::OsString> = compile_flags.iter().map(Into::into).collect();
+    args.extend(["-c".into(), source.into(), "-o".into(), object.into()]);
+    args
 }
 
-/// Compile and link [`canary_source`] with the profile's flags, run it on every C
-/// row of the obligation table, and refuse the compiler unless it prints exactly
-/// the table's bits.
+/// The canary's link arguments: [`link_args`] with the units' objects as the
+/// inputs.
+fn canary_link_args(
+    compile_flags: &[String],
+    link_flags: &[String],
+    objects: &[PathBuf],
+    program: &Path,
+) -> Vec<std::ffi::OsString> {
+    let inputs: Vec<&OsStr> = objects.iter().map(|object| object.as_os_str()).collect();
+    link_args(compile_flags, &inputs, link_flags, program.as_os_str())
+}
+
+/// Compile and link the canary units ([`canary_units`]) with the profile's flags.
+/// Run the canary on every C row of the obligation table, and refuse the
+/// compiler unless it prints exactly the table's bits.
 fn run_canary(path: &Path, compile_flags: &[String], link_flags: &[String]) -> Result<(), String> {
     let mismatches = canary_mismatches(path, compile_flags, link_flags)?;
     if mismatches.is_empty() {
@@ -621,29 +826,60 @@ fn canary_mismatches(
     link_flags: &[String],
 ) -> Result<Vec<profile::Mismatch>, String> {
     let refuse = |what: String| refusal(path, compile_flags, &what);
+    let cannot_run =
+        |error: std::io::Error| format!("cannot run native compiler `{}`: {error}", path.display());
     let dir = CanaryDir::create()?;
-    let source = dir.0.join("chelis-compiler-canary.c");
+    let mut sources = Vec::new();
+    let mut objects = Vec::new();
+    for (index, text) in canary_units().into_iter().enumerate() {
+        let source = dir.0.join(format!("chelis-compiler-canary-{index}.c"));
+        std::fs::write(&source, text)
+            .map_err(|error| format!("cannot write the compiler canary: {error}"))?;
+        objects.push(dir.0.join(format!("chelis-compiler-canary-{index}.o")));
+        sources.push(source);
+    }
     let program = dir.0.join("chelis-compiler-canary");
-    std::fs::write(&source, canary_source())
-        .map_err(|error| format!("cannot write the compiler canary: {error}"))?;
-    let compiled = tool_command(path)
-        .args(canary_args(compile_flags, link_flags, &source, &program))
+    // The units compile in parallel, so the unit that carries `pow` sets the time.
+    let compiled: Vec<std::io::Result<std::process::Output>> = std::thread::scope(|scope| {
+        let compiles: Vec<_> = sources
+            .iter()
+            .zip(&objects)
+            .map(|(source, object)| {
+                scope.spawn(move || {
+                    tool_command(path)
+                        .args(canary_compile_args(compile_flags, source, object))
+                        .stdin(Stdio::null())
+                        .output()
+                })
+            })
+            .collect();
+        compiles
+            .into_iter()
+            .map(|compile| {
+                compile
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    for (output, object) in compiled.into_iter().zip(&objects) {
+        let output = output.map_err(cannot_run)?;
+        if !output.status.success() || !object.is_file() {
+            return Err(canary_build_failure(path, compile_flags, &output));
+        }
+    }
+    let linked = tool_command(path)
+        .args(canary_link_args(
+            compile_flags,
+            link_flags,
+            &objects,
+            &program,
+        ))
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| format!("cannot run native compiler `{}`: {error}", path.display()))?;
-    if !compiled.status.success() || !program.is_file() {
-        // Not building is not evidence of added flags, so this refusal does not
-        // blame a wrapper; the compiler's own diagnostic names what failed, such
-        // as a missing builtin or the amalgamation's `#error` guards.
-        return Err(format!(
-            "native compiler `{}` did not build the floating-point canary, which \
-             compiles every correctly rounded kernel under the pinned profile ({}); \
-             set CHELIS_CC to a C compiler that builds it ({}): {}",
-            path.display(),
-            compile_flags.join(" "),
-            compiled.status,
-            String::from_utf8_lossy(&compiled.stderr).trim()
-        ));
+        .map_err(cannot_run)?;
+    if !linked.status.success() || !program.is_file() {
+        return Err(canary_build_failure(path, compile_flags, &linked));
     }
     use std::io::Write as _;
     let mut child = Command::new(&program)
@@ -674,6 +910,26 @@ fn canary_mismatches(
     profile::canary_mismatches(&printed).map_err(refuse)
 }
 
+/// The refusal for a compiler that did not compile or link the canary. Not
+/// building is not evidence of added flags, so this refusal does not blame a
+/// wrapper. The compiler's own diagnostic names what failed, such as a missing
+/// builtin or the amalgamation's `#error` guards.
+fn canary_build_failure(
+    path: &Path,
+    compile_flags: &[String],
+    output: &std::process::Output,
+) -> String {
+    format!(
+        "native compiler `{}` did not build the floating-point canary, which \
+         compiles every correctly rounded kernel under the pinned profile ({}); \
+         set CHELIS_CC to a C compiler that builds it ({}): {}",
+        path.display(),
+        compile_flags.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
 /// `PATH` lookup as the spawned tool will see it: [`tool_command`] passes
 /// `PATH` through, so the resolved file is the one that runs.
 fn resolve_executable(program: &str) -> Option<PathBuf> {
@@ -701,12 +957,14 @@ fn is_executable_file(path: &Path) -> bool {
     metadata.is_file()
 }
 
-fn resolve_compiler(override_vars: &[&str]) -> String {
+/// The compiler an override variable names, or else the first platform compiler
+/// whose `--version` succeeds, with that read.
+fn resolve_compiler(override_vars: &[&str]) -> (String, Option<VersionProbe>) {
     for var in override_vars {
         if let Ok(override_cc) = std::env::var(var)
             && !override_cc.is_empty()
         {
-            return override_cc;
+            return (override_cc, None);
         }
     }
     let candidates = if cfg!(target_os = "macos") {
@@ -715,26 +973,17 @@ fn resolve_compiler(override_vars: &[&str]) -> String {
         ["gcc", "clang", "cc"]
     };
     for compiler in candidates {
-        if tool_command(compiler)
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
+        if let Some(probe) = VersionProbe::read(compiler)
+            && probe.succeeded()
         {
-            return compiler.into();
+            return (compiler.into(), Some(probe));
         }
     }
-    candidates[0].into()
+    (candidates[0].into(), None)
 }
 
 pub fn is_real_gcc(bin: &str) -> bool {
-    let Ok(output) = tool_command(bin).arg("--version").output() else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let text = compiler_version_text(&output);
-    !text.contains("Apple clang") && !text.contains("clang version")
+    VersionProbe::read(bin).is_some_and(|probe| probe.is_real_gcc())
 }
 
 pub fn is_apple_clang(bin: &str) -> bool {
@@ -1080,21 +1329,28 @@ mod tests {
         }
     }
 
-    /// The canary translation unit compiled to assembly by `compiler`.
+    /// The canary's units compiled to assembly by `compiler`, in unit order.
     #[cfg(unix)]
     fn canary_assembly(compiler: &str, flags: &[String], dir: &Path) -> String {
-        let source = dir.join("canary-assembly.c");
-        let output = dir.join("canary-assembly.s");
-        std::fs::write(&source, canary_source()).unwrap();
-        let status = tool_command(compiler)
-            .args(flags)
-            .args(["-S", "-o"])
-            .arg(&output)
-            .arg(&source)
-            .status()
-            .unwrap();
-        assert!(status.success(), "{compiler} did not compile the canary");
-        std::fs::read_to_string(&output).unwrap()
+        let mut assembly = String::new();
+        for (index, unit) in canary_units().iter().enumerate() {
+            let source = dir.join(format!("canary-assembly-{index}.c"));
+            let output = dir.join(format!("canary-assembly-{index}.s"));
+            std::fs::write(&source, unit).unwrap();
+            let status = tool_command(compiler)
+                .args(flags)
+                .args(["-S", "-o"])
+                .arg(&output)
+                .arg(&source)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "{compiler} did not compile canary unit {index}"
+            );
+            assembly.push_str(&std::fs::read_to_string(&output).unwrap());
+        }
+        assembly
     }
 
     /// One test per flag a wrapper might append (chelis#2957 round-1
@@ -1336,12 +1592,17 @@ mod tests {
         }
     }
 
-    /// The canary is linked as a real build is: the profile's compile flags,
-    /// then its link flags (`-lm` among them, which glibc needs for `fma` and
-    /// `sqrt`), for every requirement combination.
+    /// The canary compiles as a build compiles an object, and links as a real
+    /// build does: the profile's compile flags, then its link flags. The link
+    /// flags include `-lm`, which glibc needs for `fma` and `sqrt`. This holds for
+    /// each OpenMP and BLAS combination.
     #[test]
     fn canary_links_with_the_profile_link_flags() {
-        let (source, program) = (Path::new("canary.c"), Path::new("canary"));
+        let (source, object, program) = (
+            Path::new("unit.c"),
+            Path::new("unit.o"),
+            Path::new("canary"),
+        );
         for wants_openmp in [false, true] {
             for needs_blas in [false, true] {
                 let requirements = CodegenRequirements {
@@ -1352,20 +1613,217 @@ mod tests {
                     pinned_toolchain("cc".into(), requirements, wants_openmp),
                     strict_reference_toolchain("cc".into(), requirements),
                 ] {
-                    let mut expected: Vec<std::ffi::OsString> =
-                        profile.compile_flags.iter().map(Into::into).collect();
-                    expected.push(source.into());
-                    expected.extend(profile.link_flags.iter().map(Into::into));
-                    expected.extend(["-o".into(), program.into()]);
+                    let flags = || -> Vec<std::ffi::OsString> {
+                        profile.compile_flags.iter().map(Into::into).collect()
+                    };
+                    let mut compile = flags();
+                    compile.extend(["-c".into(), source.into(), "-o".into(), object.into()]);
+                    assert_eq!(
+                        canary_compile_args(&profile.compile_flags, source, object),
+                        compile,
+                        "{profile:?}"
+                    );
+                    let mut link = flags();
+                    link.push(object.into());
+                    link.extend(profile.link_flags.iter().map(Into::into));
+                    link.extend(["-o".into(), program.into()]);
                     assert!(profile.link_flags.contains(&"-lm".to_string()));
                     assert_eq!(
-                        canary_args(&profile.compile_flags, &profile.link_flags, source, program),
-                        expected,
+                        canary_link_args(
+                            &profile.compile_flags,
+                            &profile.link_flags,
+                            &[object.to_path_buf()],
+                            program
+                        ),
+                        link,
                         "{profile:?}"
                     );
                 }
             }
         }
+    }
+
+    /// The canary compiles the bytes generated units carry. Each kernel unit holds
+    /// the text of its kernels exactly as `kernel_text` gives it. The units hold
+    /// every kernel once, and every unit starts with the amalgamation's guards.
+    #[test]
+    fn canary_units_carry_every_kernel_once_as_generated_units_do() {
+        let groups = canary_kernel_groups();
+        assert_eq!(groups.len(), CANARY_KERNEL_UNITS);
+        assert!(
+            groups.iter().all(|kernels| !kernels.is_empty()),
+            "{groups:?}"
+        );
+        let mut kernels = groups.concat();
+        kernels.sort();
+        assert_eq!(kernels, Kernel::ALL);
+        let units = canary_units();
+        assert_eq!(units.len(), CANARY_KERNEL_UNITS + 1);
+        for (unit, kernels) in units.iter().zip(&groups) {
+            let text = kernel_text(kernels);
+            assert!(unit.starts_with(&text), "{kernels:?}");
+            let wrappers = &unit[text.len()..];
+            for kernel in Kernel::ALL {
+                assert_eq!(
+                    wrappers.contains(&canary_wrapper(kernel)),
+                    kernels.contains(&kernel),
+                    "{kernel:?} in the unit of {kernels:?}"
+                );
+            }
+        }
+        let driver = units.last().expect("the driver unit");
+        assert!(driver.starts_with(kernel_prelude()));
+        assert!(driver.ends_with(&profile::canary_driver()));
+        assert!(!driver.contains("/* ==== kernel "));
+    }
+
+    /// A wrapper script that adds `extra` only to the command that compiles
+    /// canary unit `unit`, and hands every other command to the real compiler.
+    #[cfg(unix)]
+    fn unit_wrapper(dir: &Path, unit: usize, extra: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let compiler = test_toolchain(CodegenRequirements::default()).compiler;
+        let real = resolve_executable(&compiler).expect("a C compiler on PATH");
+        let path = dir.join(format!("unit-{unit}-cc"));
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\ncase \" $* \" in *chelis-compiler-canary-{unit}.c*) exec '{real}' \"$@\" {extra};; esac\nexec '{real}' \"$@\"\n",
+                real = real.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// A wrapper that changes one canary unit is refused when that unit shows the
+    /// change. Every unit carries the amalgamation's guards, so finite-only math
+    /// stops the compile of any one unit. Ignored signed zeros in the driver unit
+    /// break its arithmetic rows.
+    #[cfg(unix)]
+    #[test]
+    fn verify_compiler_refuses_a_wrapper_that_changes_one_canary_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
+        let (flags, links) = (reference.compile_flags, reference.link_flags);
+        for unit in 0..=CANARY_KERNEL_UNITS {
+            let compiler = unit_wrapper(dir.path(), unit, "-ffinite-math-only");
+            let result = verify_compiler(&compiler, &flags, &links);
+            assert!(
+                matches!(&result, Err(CompilerCheckError::Refused(reason)) if reason.contains("did not build")),
+                "unit {unit}: {result:?}"
+            );
+        }
+        let driver = unit_wrapper(dir.path(), CANARY_KERNEL_UNITS, "-fno-signed-zeros");
+        let result = verify_compiler(&driver, &flags, &links);
+        assert!(
+            matches!(&result, Err(CompilerCheckError::Refused(reason)) if reason.contains("signed-zero")),
+            "{result:?}"
+        );
+    }
+
+    /// `verify_compiler_during` starts `work` only once the identity, the macro
+    /// check, and the C library check accept the compiler. `work` then runs beside
+    /// the canary, and a canary refusal drops its result.
+    #[cfg(unix)]
+    #[test]
+    fn verify_compiler_during_runs_work_beside_the_canary_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
+        let (flags, links) = (reference.compile_flags, reference.link_flags);
+        let plain = wrapper(dir.path(), "plain-cc", "");
+        let (_, product) = verify_compiler_during(&plain, None, &flags, &links, || "product")
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(product, "product");
+
+        let contract = if cfg!(target_arch = "x86_64") {
+            "-mfma -ffp-contract=fast"
+        } else {
+            "-ffp-contract=fast"
+        };
+        let contracting = wrapper(dir.path(), "contract-cc", contract);
+        let ran = std::cell::Cell::new(false);
+        let result = verify_compiler_during(&contracting, None, &flags, &links, || ran.set(true));
+        assert!(
+            matches!(&result, Err(CompilerCheckError::Refused(reason)) if reason.contains("no-contraction")),
+            "{result:?}"
+        );
+        assert!(ran.get(), "the work runs beside the canary");
+
+        let mut refused_first = vec![
+            wrapper(dir.path(), "fast-cc", "-ffast-math"),
+            dir.path().join("missing-cc").to_string_lossy().into_owned(),
+        ];
+        if CARRIED_C_LIBRARY.is_some() {
+            let include =
+                fake_c_library_headers(dir.path(), CARRIED_C_LIBRARY == Some(CLibrary::Musl));
+            refused_first.push(wrapper(
+                dir.path(),
+                "foreign-cc",
+                &format!("-nostdinc -isystem '{}'", include.display()),
+            ));
+        }
+        for compiler in refused_first {
+            let ran = std::cell::Cell::new(false);
+            let result = verify_compiler_during(&compiler, None, &flags, &links, || ran.set(true));
+            assert!(result.is_err(), "{compiler}: {result:?}");
+            assert!(
+                !ran.get(),
+                "{compiler}: the work started before the checks that come first"
+            );
+        }
+    }
+
+    /// One build reads an unchanged compiler's `--version` once: the check reuses
+    /// the read that selected the toolchain. It reads again for another file or an
+    /// edited one, so the recorded identity is the compiler's own.
+    #[cfg(unix)]
+    #[test]
+    fn verify_compiler_during_reuses_a_version_probe_of_the_unchanged_compiler() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let reference = strict_reference_toolchain(String::new(), CodegenRequirements::default());
+        let (flags, links) = (reference.compile_flags, reference.link_flags);
+        let compiler = test_toolchain(CodegenRequirements::default()).compiler;
+        let real = resolve_executable(&compiler).expect("a C compiler on PATH");
+        let log = dir.path().join("versions.log");
+        let counted = dir.path().join("counted-cc");
+        let install = |version: &str| {
+            std::fs::write(
+                &counted,
+                format!(
+                    "#!/bin/sh\ncase \" $* \" in *' --version '*) echo read >> '{}'; echo '{version}'; exit 0;; esac\nexec '{}' \"$@\"\n",
+                    log.display(),
+                    real.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&counted, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // Every count follows the first read, which creates the log.
+        let reads = || {
+            std::fs::read_to_string(&log)
+                .expect("the wrapper logs each read")
+                .lines()
+                .count()
+        };
+        let name = counted.to_str().unwrap();
+        install("counted-cc 1");
+        let probe = VersionProbe::read(name).expect("a version probe");
+        assert_eq!(reads(), 1);
+        let verify = |compiler: &str| {
+            verify_compiler_during(compiler, Some(&probe), &flags, &links, || ())
+                .unwrap_or_else(|error| panic!("{error}"))
+                .0
+                .version
+        };
+        assert_eq!((verify(name), reads()), ("counted-cc 1".to_string(), 1));
+        // Another compiler's probe is not this compiler's read.
+        assert_ne!(verify(&wrapper(dir.path(), "other-cc", "")), "counted-cc 1");
+        // The edit changes the file's size, so the check reads it again.
+        install("counted-cc 2.0");
+        assert_eq!((verify(name), reads()), ("counted-cc 2.0".to_string(), 2));
     }
 
     #[test]

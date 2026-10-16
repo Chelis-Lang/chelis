@@ -8,7 +8,7 @@ use std::{
     process::Command,
 };
 
-use chelis_backend_c::toolchain::CompilerCheckError;
+use chelis_backend_c::toolchain::{CompilerCheckError, VersionProbe};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -20,6 +20,9 @@ pub(crate) struct NativeBuild {
     pub link_flags: Vec<String>,
     pub runtime_archive: PathBuf,
     pub requires_main: bool,
+    /// The compiler's `--version` read from the toolchain selection, which the
+    /// compiler check reuses.
+    pub version_probe: Option<VersionProbe>,
 }
 
 pub(crate) fn compiler_override(variable: &str, default: &str) -> OsString {
@@ -75,22 +78,66 @@ impl NativeBuild {
         }
 
         // The C compiler is a declared input: record which one ran, and refuse
-        // one whose wrapper or configuration changes the pinned profile.
-        if self.target == "c" {
-            let identity = chelis_backend_c::toolchain::verify_compiler(
+        // one whose wrapper or configuration changes the pinned profile. The
+        // product builds in a scratch directory while the canary checks the
+        // compiler, and the build publishes it only for an accepted compiler.
+        let build = || self.build_product(&archiver, &artifact);
+        let built = if self.target == "c" {
+            let (identity, built) = chelis_backend_c::toolchain::verify_compiler_during(
                 &self.compiler.to_string_lossy(),
+                self.version_probe.as_ref(),
                 &self.compile_flags,
                 &self.link_flags,
+                build,
             )
             .map_err(|error| match error {
                 CompilerCheckError::NotFound(tool) => tool_not_found("compile", self.target, &tool),
                 CompilerCheckError::Refused(reason) => format!("native compile: {reason}"),
             })?;
             println!("Compiler: {identity}");
+            built
+        } else {
+            build()
+        };
+        // Compiler output belongs to diagnostics, not the CLI's success channel.
+        io::stderr().write_all(&built.diagnostics)?;
+        let (_scratch, product) = built.product?;
+        fs::rename(&product, &artifact)?;
+        println!(
+            "Built {} {}",
+            if self.requires_main {
+                "executable"
+            } else {
+                "static library"
+            },
+            artifact.display()
+        );
+        if !self.requires_main {
+            self.print_link_requirements();
         }
+        Ok(())
+    }
 
-        // Same filesystem as the destination: rename publishes only a complete
-        // artifact. Never give a native tool the previous artifact's pathname.
+    /// Build the product in a scratch directory beside `artifact`. The result
+    /// keeps what the native tools printed, so the caller prints it after the
+    /// compiler check.
+    fn build_product(&self, archiver: &OsStr, artifact: &Path) -> Built {
+        let mut diagnostics = Vec::new();
+        let product = self.build_in_scratch(archiver, artifact, &mut diagnostics);
+        Built {
+            diagnostics,
+            product,
+        }
+    }
+
+    /// Same filesystem as the destination: rename publishes only a complete
+    /// artifact. Never give a native tool the previous artifact's pathname.
+    fn build_in_scratch(
+        &self,
+        archiver: &OsStr,
+        artifact: &Path,
+        diagnostics: &mut Vec<u8>,
+    ) -> Result<(tempfile::TempDir, PathBuf)> {
         let parent = artifact
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -110,9 +157,10 @@ impl NativeBuild {
                 self.target,
                 &product,
                 true,
+                diagnostics,
             )?;
         } else {
-            let mut archive = self.tool(&archiver);
+            let mut archive = self.tool(archiver);
             archive.arg("rcs").arg(&product);
             for (index, source) in self.sources.iter().enumerate() {
                 let object = scratch.path().join(format!("source-{index}.o"));
@@ -122,25 +170,20 @@ impl NativeBuild {
                     self.target,
                     &object,
                     false,
+                    diagnostics,
                 )?;
                 archive.arg(object);
             }
-            run(&mut archive, "archive", self.target, &product, false)?;
+            run(
+                &mut archive,
+                "archive",
+                self.target,
+                &product,
+                false,
+                diagnostics,
+            )?;
         }
-        fs::rename(&product, &artifact)?;
-        println!(
-            "Built {} {}",
-            if self.requires_main {
-                "executable"
-            } else {
-                "static library"
-            },
-            artifact.display()
-        );
-        if !self.requires_main {
-            self.print_link_requirements();
-        }
-        Ok(())
+        Ok((scratch, product))
     }
 
     /// Native tools run with an allowlisted environment, so variables such as
@@ -200,6 +243,14 @@ impl NativeBuild {
     }
 }
 
+/// A product built in a scratch directory, and what the native tools printed
+/// while they built it. The scratch directory holds the product until the
+/// build publishes it, and removes it when the build does not.
+struct Built {
+    diagnostics: Vec<u8>,
+    product: Result<(tempfile::TempDir, PathBuf)>,
+}
+
 fn require_product(path: &Path, executable: bool) -> Result<()> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("native tool did not produce {}: {error}", path.display()))?;
@@ -232,6 +283,7 @@ fn run(
     target: &str,
     product: &Path,
     executable: bool,
+    diagnostics: &mut Vec<u8>,
 ) -> Result<()> {
     let tool = command.get_program().to_string_lossy().into_owned();
     let output = command.output().map_err(|error| {
@@ -241,9 +293,8 @@ fn run(
             format!("native {stage}: cannot run `{tool}`: {error}")
         }
     })?;
-    // Compiler output belongs to diagnostics, not the CLI's success channel.
-    io::stderr().write_all(&output.stdout)?;
-    io::stderr().write_all(&output.stderr)?;
+    diagnostics.extend_from_slice(&output.stdout);
+    diagnostics.extend_from_slice(&output.stderr);
     if !output.status.success() {
         return Err(format!("native {stage}: `{tool}` failed with {}", output.status).into());
     }
@@ -397,6 +448,7 @@ mod tests {
             link_flags: link_flags.clone(),
             runtime_archive: PathBuf::from("out/libchelis_runtime.a"),
             requires_main: false,
+            version_probe: None,
         };
         let command = build.link_requirements();
         let mut expected = vec![OsStr::new("out/libchelis_runtime.a")];

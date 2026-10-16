@@ -331,17 +331,17 @@ MPFR-derived fixtures: `canary.txt` and `binary64_worst_cases.txt` for the kerne
 **Generator and check mode.** `scripts/vendor_core_math.py obligations` writes
 `profile_obligations.txt` from MPFR at each result width's precision, exponent range, and
 subnormalization, each written operation rounded once; `obligations --check` fails when
-the checked-in fixture differs from what the generator produces. The C canary has no
-checked-in form to go stale: `profile::canary_driver` generates its `main` from the
-primitive list on every check, and `toolchain.rs` places it after the kernel text and
-generated code's own NaN-finalization helpers (`fp_env.rs`), so the canary compiles the
-bytes generated units carry. Every operand is read from standard input at run time, so
-nothing folds. The same rows drive the Rust lanes' tests, which check coverage by class
-and that every row detects the rewrite it witnesses (a fused `a*b + c`, a reassociated or
-reciprocal form, a NaN passed through unfinalized). The f16 and bf16 storage conversions
-have no canary row because a compiler flag cannot reach their integer bit arithmetic;
-their rows are checked in the runtime, the evaluator, and generated C's conversion
-helpers instead (§8, test 15).
+the checked-in fixture differs from what the generator produces.
+
+The C canary has no checked-in form to go stale: `profile::canary_driver` generates its
+`main` from the primitive list on every check. Every operand is read from standard input
+at run time, so nothing folds. The same rows drive the Rust lanes' tests. Those tests
+check coverage by class. They also check that every row detects the rewrite it witnesses:
+a fused `a*b + c`, a reassociated or reciprocal form, or an unfinalized NaN.
+
+The f16 and bf16 storage conversions have no canary row, because a compiler flag cannot
+reach their integer bit arithmetic. The runtime, the evaluator, and generated C's
+conversion helpers check their rows instead (§8, test 15).
 
 **Accepted flags.** The check accepts a flag exactly when the compiler passes the macro
 checks and the canary built with the flag reproduces every obligation row; the wrapper
@@ -354,13 +354,42 @@ no trap) changes gcc's code but no row, and `-ffp-contract=on` is refused where 
 contracts (clang) and accepted where ISO C mode treats it as `off` (gcc).
 `-ffp-contract=fast` and every other flag in the wrapper tests are refused.
 
-**Cost and memo.** Compiling the canary with every kernel costs about half a second; the
-run is negligible. A process checks each compiler once: an accepted compiler is
-remembered in memory, keyed by its resolved path, `--version` line, profile argv, and the
-executable's size and modification time, so a wrapper edited in place is checked again.
-Nothing is cached across processes, because a persisted acceptance could not observe a
-change the key does not capture (a compiler configuration file, a file a wrapper reads),
-and spec/08 requires such a compiler to fail the build.
+**Five canary units.** Each of four kernel units carries the text of its kernels exactly
+as `kernel_text` gives it to a generated unit. It also defines one external wrapper for
+each kernel entry. The driver unit carries the amalgamation's prelude, the bit-cast
+helpers, generated code's own NaN-finalization helpers (`fp_env.rs`), and the generated
+`main`. The `main` calls each kernel through its wrapper, so the canary compiles the bytes
+generated units carry.
+
+**Cost.** The kernel text is about 1 MB, and the binary64 `pow` section is 29% of it. As
+one translation unit, the canary took 1.7 s to compile with GCC 16 on aarch64-linux and
+0.73 s with Nix clang 21 on macOS. So the check compiles the five units in parallel and
+links the objects with `link_args`. Each unit compiles with the profile's compile flags
+and `-c`, as a build compiles an object.
+
+The kernels go to the units largest section first, each to the unit with the least text
+so far. The compile then took 0.56 s and 0.25 s. The unit that carries `pow` bounds that
+time, so more units would not help. The run is negligible (about 2 ms for every row), but
+macOS delays the first run of each new executable by about 0.15 s.
+
+**Overlap.** `chelis build` compiles the program in its scratch directory while the canary
+compiles and runs (`toolchain::verify_compiler_during`). The program compile starts after
+the macro check and the C library check, so a compiler for another C library still
+compiles nothing. The build publishes the program only when the canary also accepts the
+compiler.
+
+**Probe.** A build reads the compiler's `--version` text once. When
+`toolchain::runtime_toolchain_probed` reads it to select the compiler or OpenMP, the check
+reuses that read while the executable's size and modification time stay the same.
+Otherwise the check reads the text itself.
+
+A process checks each compiler once and keeps the accepted ones in memory. The key is the
+resolved path, the `--version` line, the profile argv, and the executable's size and
+modification time. So a wrapper edited in place is checked again.
+
+Nothing is cached across processes, because a persisted acceptance could not see a change
+outside the key. Such a change can come from a compiler configuration file or from a file
+that a wrapper reads. Spec/08 needs such a compiler to fail the build.
 
 ## 6. Floating-point environment and NaN canonicalization (#2964)
 
@@ -464,6 +493,12 @@ has a negative partner.
    unsafe math, reassociation, reciprocal math, `-fno-signed-zeros`,
    `-ffp-model=fast`, and `-ffp-eval-method=double` (refused), and the accepted flags of
    §5 (accepted exactly when every row passes). `crmath_profile.rs` checks the obligation table itself.
+   The canary unit tests check that each kernel unit carries the `kernel_text` of its
+   kernels byte for byte, and every kernel once. Finite-only math in any one unit stops
+   that unit's compile, and ignored signed zeros in the driver unit break its rows. The
+   `verify_compiler_during` tests check that the work starts only after the macro and C
+   library checks, and that a refusal drops its result. A build reads an unchanged
+   compiler's `--version` once.
 10. FP environment: a host C driver that sets FTZ/DAZ and `FE_UPWARD`, then calls an
     exported function of a built static library on inputs with subnormal and inexact
     results, gets bits identical to eval and finds its own FTZ/DAZ/rounding state
