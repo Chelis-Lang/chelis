@@ -974,18 +974,18 @@ where x > 1.0e300f64, y > 0.0f64, y < 1.0e-300f64:
 
 // --- the routing reads the reason ---------------------------------------
 //
-// A draw that produces no value carries one of two facts, and they route
-// oppositely. `SamplingError::Unresolvable` is local to the attempt and is a
-// rejection; `SamplingError::Unsupported` is a fact about the property and is
-// terminal. An untyped error forced the routing to guess, which required
-// `derive` to predict every terminal case in advance -- and the cases it did
-// not predict reached `generator exhausted` (exit 3) where the design doc
-// requires `unsupported` (exit 2).
+// A draw that produces no value does not say, by itself, whether the guards
+// admit nothing. That is decided after the budget ends: `unsupported` when no
+// attempt ever placed every binder, and the exhausted-generator error when
+// some draw succeeded. Earlier revisions tried to decide it per attempt --
+// first from `derive` predicting every terminal case, then from whether the
+// binder had an order predecessor -- and each prediction had a shape it got
+// wrong, which is why none is made now.
 
 /// Exclusions covering every value of a two-value interval. `derive`'s
 /// singleton check does not fire, because the interval holds two values, not
-/// one; the sampler discovers it. The binder has no order predecessor, so the
-/// discovery is a property-level fact and must be terminal.
+/// one, so no check before the draws can see it. Every attempt then fails
+/// identically, which is what the verdict is read from.
 #[test]
 fn issue_3636_exclusions_covering_a_two_value_interval_report_unsupported() {
     let source = "module Edge.TwoValueExcluded
@@ -1203,5 +1203,96 @@ where n > 0, n < 3:
     assert!(
         record["accepted_samples"].as_u64().unwrap_or_default() > 0,
         "the draws did succeed; only the guard rejected them: {record:#}"
+    );
+}
+
+/// Run `prove --tier fuzz-only` over the Deep form of `source`, by desugaring
+/// it with `chelis deep` first.
+fn prove_deep(source: &str, samples: &str, seed: &str) -> (i32, Value) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let surf_path = dir.path().join("edge.ch");
+    std::fs::write(&surf_path, source).expect("write fixture");
+    let desugared = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .args(["deep", surf_path.to_str().expect("utf-8 path")])
+        .output()
+        .expect("desugar fixture");
+    assert!(
+        desugared.status.success(),
+        "chelis deep failed: {}",
+        String::from_utf8_lossy(&desugared.stderr)
+    );
+    let deep_path = dir.path().join("edge.dp");
+    std::fs::write(&deep_path, desugared.stdout).expect("write deep fixture");
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            deep_path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            samples,
+            "--seed",
+            seed,
+        ])
+        .output()
+        .expect("run prove");
+    let record = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|value| value["kind"] == "property")
+        .unwrap_or_else(|| {
+            panic!(
+                "property record: {}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        });
+    (output.status.code().unwrap_or(-1), record)
+}
+
+/// The Deep lane carries the same observation as the Surf lane, and until this
+/// test nothing pinned it: forcing the Deep arm off alone left every suite
+/// green, so the Deep lane could silently regress to reporting an exhausted
+/// generator for an unsatisfiable property while CI stayed green. The Surf
+/// equivalent is `issue_3636_pinned_predecessor_emptying_a_domain_reports_unsupported`.
+#[test]
+fn issue_3636_deep_lane_reports_unsupported_for_an_emptied_domain() {
+    let source = "module Edge.DeepPinned
+@property pinned_pred forall(x: f64, y: f64)
+where x >= 1.0f64, x <= 1.0f64, y >= x, y <= 1.0000000000000002f64, y != 1.0f64, y != 1.0000000000000002f64:
+  (y == y)
+";
+    let (code, record) = prove_deep(source, "8", "0");
+    assert_eq!(code, 2, "{record:#}");
+    assert_eq!(record["status"], "unsupported", "{record:#}");
+    assert!(
+        record["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no representable sample"),
+        "{record:#}"
+    );
+    assert_ne!(record["composite_verdict"], "fuzz_validated", "{record:#}");
+}
+
+/// Deep-lane parity for the other direction: a satisfiable property whose
+/// draws succeed must still exhaust rather than be called unsupported.
+#[test]
+fn issue_3636_deep_lane_exhausts_rather_than_claiming_unsupported() {
+    let source = "module Edge.DeepMixed
+@property order_ne_nonstrict forall(x: f64, y: f64)
+where x > 0.0f64, y >= x, y <= 2.0f64, y != 2.0f64:
+  ((y >= x) && (y <= 2.0f64))
+";
+    let (code, record) = prove_deep(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    assert!(
+        record["rejected_samples"].as_u64().unwrap_or_default() >= 1,
+        "an unresolvable attempt must occur, or this pins nothing: {record:#}"
     );
 }

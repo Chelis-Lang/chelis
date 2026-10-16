@@ -360,7 +360,11 @@ attempt is rejected. When the budget ends with fewer accepted samples than
 requested, the run reports:
 
 - `status:"unsupported"`, with the recorded reason, when **no attempt in the
-  whole budget ever placed every binder**. The guards admit nothing.
+  whole budget ever placed every binder and at least one reported that it
+  could not**. The guards admit nothing. Both halves are required: a budget
+  that permitted no attempt at all yields no evidence either way, and claiming
+  unsupportability from zero attempts would be a stronger statement than the
+  run can support.
 - `status:"error"` with the exhausted-generator reason when some draw did
   succeed. The domain is sampleable and the budget ran out -- a guard the
   proposal window starves (chelis#644) reaches this, and calling it
