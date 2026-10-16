@@ -1,1 +1,0 @@
-Reuse independent fold and scan accumulator entry evidence when one checked named call result returns through whole immutable local aliases. Preserve independent guards, effects, witnesses and returned-view owners. Correct the dimension-only empty nominal List oracle while retaining unresolved stored-type and dtype refusals.

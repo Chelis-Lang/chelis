@@ -1,1 +1,0 @@
-Reuse independently checked immutable accumulator components in eligible inline fold and scan callbacks, checking fresh components at the next entry while preserving effects and extent-trap attribution.

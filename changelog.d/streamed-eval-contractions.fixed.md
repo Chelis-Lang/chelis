@@ -1,1 +1,0 @@
-Root-scoped tensor evaluation streams private exact contraction products and Cartesian convolution coordinates through tagged kernels, preserving canonical reduction bits and original checks while bounding scratch by source and result sizes. All-values evaluation retains every intermediate.

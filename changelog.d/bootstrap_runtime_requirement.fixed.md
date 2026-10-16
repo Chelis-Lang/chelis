@@ -1,1 +1,0 @@
-`chelis reef install --bootstrap` matches dependency requirements with the manifest's typed resolver semantics, accepting exact matching requirements such as `=0.4.0` for the bundled runtime and selected shell peers. Incompatible requirements fail before installation; the runtime remains compiler-bundled and peers remain explicitly selected.
