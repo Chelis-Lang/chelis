@@ -3111,8 +3111,6 @@ fn float_edge_candidates(kind: FloatKind, lower: f64, upper: f64, excluded: &[f6
     push(-0.0, &mut candidates, &mut seen);
     push(kind.min_positive_subnormal(), &mut candidates, &mut seen);
     push(-kind.min_positive_subnormal(), &mut candidates, &mut seen);
-    push(kind.max_finite(), &mut candidates, &mut seen);
-    push(-kind.max_finite(), &mut candidates, &mut seen);
     // Small integers: the exact representable points at which a shifted pole
     // such as `1.0 / (x - 3.0)` is singular.
     for value in [1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 10.0, -10.0] {
@@ -3123,21 +3121,30 @@ fn float_edge_candidates(kind: FloatKind, lower: f64, upper: f64, excluded: &[f6
     // window never proposes `1e100`, and a *random* log-uniform draw would
     // make "this magnitude class is covered" a probabilistic claim no test
     // can pin. The rungs grow geometrically, so a ladder of this length
-    // spans every decade `f64` has to the nearest factor of three, and the
-    // `f32` rungs beyond its range round to infinity and are filtered out.
-    for exponent in LOG_MAGNITUDE_LADDER {
-        let magnitude = 10f64.powi(exponent);
+    // spans every decade `f64` has to the nearest factor of three. A rung
+    // outside a narrower dtype's range clamps onto that range's extremum and
+    // is then dropped as a duplicate of the `max_finite` push, so no rung
+    // contributes an infinity.
+    for magnitude in LOG_MAGNITUDE_LADDER {
         push(magnitude, &mut candidates, &mut seen);
         push(-magnitude, &mut candidates, &mut seen);
     }
     candidates
 }
 
-/// The decimal exponents of the magnitude ladder `float_edge_candidates`
-/// proposes. Geometric in both directions from `1`, ending at the `f64`
-/// extremes: the largest finite decade and the smallest subnormal one.
-const LOG_MAGNITUDE_LADDER: [i32; 15] = [
-    1, 3, 9, 27, 81, 243, 308, -1, -3, -9, -27, -81, -243, -308, -324,
+/// The magnitude ladder `float_edge_candidates` proposes: decades, geometric
+/// in both directions from `1e1`, ending at the `f64` extremes -- the largest
+/// finite decade and the smallest one the format still represents.
+///
+/// These are written as literals, which the compiler rounds correctly, and not
+/// computed with `10f64.powi(e)`, which accumulates error: `powi` disagrees
+/// with the correctly rounded decade at 7 of these 15 rungs, and
+/// `10f64.powi(-323)` is exactly `0.0`, which would make the bottom rung an
+/// inert duplicate of the zeros class and leave the smallest decade
+/// unproposed. `1e-323` is the floor rather than `1e-324` for the same
+/// reason: `1e-324` rounds to zero even as a literal.
+const LOG_MAGNITUDE_LADDER: [f64; 15] = [
+    1e1, 1e3, 1e9, 1e27, 1e81, 1e243, 1e308, 1e-1, 1e-3, 1e-9, 1e-27, 1e-81, 1e-243, 1e-308, 1e-323,
 ];
 
 /// The integer counterpart: the representable ends of the binder's fuzz
@@ -3396,12 +3403,17 @@ impl ConstraintSamplingPlan {
     /// Resolve `domain` into the representable `[lower, upper]` this attempt
     /// may draw `name` from: the bound strictness, then every order
     /// predecessor already sampled, then the successors' reserved spacing.
+    ///
+    /// `None` means this domain admits no representable value given the
+    /// predecessors already drawn. That is terminal for the admissible range
+    /// and merely declines the preference for the proposal window, so the
+    /// caller decides which.
     fn resolve(
         &self,
         name: &str,
         domain: ScalarDomain,
         values: &BTreeMap<String, f64>,
-    ) -> Result<(f64, f64), String> {
+    ) -> Option<(f64, f64)> {
         let kind = self.kinds[name];
         let mut lower = kind.lower_value(domain.lower.value, domain.lower.strict);
         for (predecessor, strict) in self.incoming.get(name).into_iter().flatten() {
@@ -3416,12 +3428,7 @@ impl ConstraintSamplingPlan {
         for _ in 0..self.reserve_depth[name] {
             upper = kind.next_down(upper);
         }
-        if !lower.is_finite() || !upper.is_finite() || lower > upper {
-            return Err(format!(
-                "inconsistent scalar guards leave `{name}` with no representable sample"
-            ));
-        }
-        Ok((lower, upper))
+        (lower.is_finite() && upper.is_finite() && lower <= upper).then_some((lower, upper))
     }
 
     /// Draw one assignment. `attempt` is the run's zero-based attempt
@@ -3434,16 +3441,38 @@ impl ConstraintSamplingPlan {
         for name in &self.topo {
             let kind = self.kinds[name];
             let excluded = &self.excluded[name];
-            let (window_lower, window_upper) = self.resolve(name, self.domains[name], &values)?;
-            let (lower, upper) = self.resolve(name, self.ranges[name], &values)?;
+            // The admissible range is authoritative: only an empty one means
+            // the guards really leave no sample.
+            let (lower, upper) =
+                self.resolve(name, self.ranges[name], &values)
+                    .ok_or_else(|| {
+                        format!(
+                            "inconsistent scalar guards leave `{name}` with no representable sample"
+                        )
+                    })?;
             let candidates = float_edge_candidates(kind, lower, upper, excluded);
-            // Once the schedule is spent the draw is the historical uniform
-            // one over the unchanged proposal window; widening that window is
-            // chelis#644.
+            // Once the schedule is spent the draw is a random one, preferring
+            // the narrower proposal window (chelis#644 owns its width). The
+            // window is only a preference: an order predecessor drawn from the
+            // admissible range can sit outside this binder's window entirely,
+            // and a window that admits nothing then yields to the admissible
+            // range rather than failing the attempt.
             let draw = match candidates.get(attempt) {
                 Some(candidate) => *candidate,
-                None if window_lower == window_upper => window_lower,
-                None => rng.next_f64(window_lower, window_upper),
+                None => {
+                    let (low, high) = self
+                        .resolve(name, self.domains[name], &values)
+                        .map(|(window_lower, window_upper)| {
+                            (window_lower.max(lower), window_upper.min(upper))
+                        })
+                        .filter(|(low, high)| low <= high)
+                        .unwrap_or((lower, upper));
+                    if low == high {
+                        low
+                    } else {
+                        rng.next_f64(low, high)
+                    }
+                }
             };
             let value = kind
                 .round_into_domain(draw, lower, upper)

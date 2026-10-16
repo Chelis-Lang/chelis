@@ -4,13 +4,26 @@
 //! (chelis#644) but that no point inside the guards is ever *chosen*
 //! deliberately: the sampler drew uniformly and so never visited a guard
 //! endpoint, an exact representable singularity, a subnormal, or an extreme
-//! magnitude. Each test below names the class of point the issue asks for and
-//! a property that is refuted only by that class.
+//! magnitude. Each test below names the class of point the issue asks for.
 //!
 //! Every positive test (the edge point is reached, so the false property
 //! fails) is paired with a negative test (a property that is actually true
 //! over the same domain still passes, and the sampler still reports its
 //! guard-filtered sample accounting).
+//!
+//! **On discrimination.** Each class has at least one test that fails when
+//! that class alone is removed from the schedule, verified by mutation rather
+//! than asserted. Two classes cannot be isolated by construction, and the
+//! tests say which test covers them instead of implying a dedicated one:
+//!
+//! - A *strict* guard's endpoint already is its adjacent representable
+//!   neighbour, and `x >= 0.0` makes `0.0` the endpoint rather than an
+//!   interior zero. So the `..._interior_...` and `..._nonstrict_...` tests
+//!   carry the zeros, subnormal and adjacent-neighbour classes; the
+//!   endpoint-guard tests cannot.
+//! - `±MAX` has no separate candidate. An unbounded side's endpoint *is* the
+//!   dtype extremum, and under any narrower guard `±MAX` is inadmissible, so
+//!   a dedicated push would be dead code. The endpoint class covers it.
 use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::tempdir;
@@ -571,4 +584,226 @@ where n > 0:
         record["rejected_samples"].as_u64().unwrap_or_default() >= 1,
         "the integer schedule's non-positive candidates are rejected: {record:#}"
     );
+}
+
+// --- binder-order guards -------------------------------------------------
+//
+// The edge schedule reads each binder's *admissible* range while the random
+// draw prefers a narrower proposal window. An order predecessor drawn from
+// the admissible range can therefore sit outside its successor's window
+// entirely. These properties are the shapes where that happens; each passed
+// before the schedule existed, so each is a regression test.
+
+/// The canonical interval shape. The schedule hands `lo` a magnitude far
+/// outside `hi`'s proposal window, so `hi`'s window admits nothing and the
+/// draw must fall back to its admissible range instead of failing the
+/// attempt. Before that fallback this reported
+/// `unsupported: inconsistent scalar guards leave `hi` with no representable
+/// sample` under `fuzz-only`, `auto` and Tide, under every seed.
+#[test]
+fn issue_3636_unbounded_binder_order_guard_is_sampled() {
+    let source = "module Edge.Order
+def width(lo: f64, hi: f64) -> f64 = (hi - lo)
+@property width_positive forall(lo: f64, hi: f64)
+where lo < hi:
+  (width(lo, hi) > 0.0f64)
+";
+    for tier in ["fuzz-only", "auto"] {
+        let (code, record) = prove_at_tier(source, "100", "0", tier);
+        assert_eq!(code, 0, "{tier}: {record:#}");
+        assert_eq!(record["status"], "passed", "{tier}: {record:#}");
+        assert_eq!(record["accepted_samples"], 100, "{tier}: {record:#}");
+        assert_eq!(record["attempted_samples"], 100, "{tier}: {record:#}");
+        assert_eq!(record["rejected_samples"], 0, "{tier}: {record:#}");
+    }
+}
+
+/// The same shape as a four-binder chain, where every successor inherits a
+/// predecessor's extreme value. `ord_chain4` regressed identically.
+#[test]
+fn issue_3636_binder_order_chain_is_sampled() {
+    let source = "module Edge.Chain
+@property ascending forall(a: f64, b: f64, c: f64, d: f64)
+where a < b, b < c, c < d:
+  ((a < d) && (b < c))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    assert_eq!(record["rejected_samples"], 0, "{record:#}");
+}
+
+/// A one-sided order guard on an `f32` pair, and a three-binder property
+/// where only two binders are ordered: the same fallback, different shapes.
+#[test]
+fn issue_3636_partially_ordered_and_f32_order_guards_are_sampled() {
+    for source in [
+        "module Edge.OrderF32\n@property ord forall(x: f32, y: f32)\nwhere x < y:\n  (x < y)\n",
+        "module Edge.OrderFree\n@property ord forall(x: f64, y: f64, z: f64)\nwhere x < y:\n  (z == z)\n",
+        "module Edge.OrderLower\n@property ord forall(x: f64, y: f64)\nwhere x > 0.0f64, x < y:\n  (y > 0.0f64)\n",
+    ] {
+        let (code, record) = prove(source, "100", "0");
+        assert_eq!(code, 0, "{source}: {record:#}");
+        assert_eq!(record["status"], "passed", "{source}: {record:#}");
+        assert_eq!(record["accepted_samples"], 100, "{source}: {record:#}");
+        assert_eq!(record["rejected_samples"], 0, "{source}: {record:#}");
+    }
+}
+
+/// Positive parity for the fallback: an ordered pair must still *reach* the
+/// extremes, not merely avoid erroring. `hi - lo` exceeds `1e292` only when
+/// both binders are near an IEEE extremum, which the proposal window's width
+/// of 20 cannot produce.
+#[test]
+fn issue_3636_binder_order_guard_reaches_extreme_magnitudes() {
+    let source = "module Edge.OrderExtreme
+@property narrow_width forall(lo: f64, hi: f64)
+where lo < hi:
+  ((hi - lo) < 1.0e292f64)
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    let lo = record["counterexample"]["lo"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("lo: {record:#}"));
+    let hi = record["counterexample"]["hi"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("hi: {record:#}"));
+    assert!(lo < hi, "the witness must satisfy its guard: {record:#}");
+    assert!(hi - lo >= 1.0e292, "{record:#}");
+}
+
+// --- discriminators for classes the schedule supplies only interiorly ----
+//
+// A guard whose endpoint *is* the landmark cannot distinguish the landmark's
+// own candidate from the endpoint candidate: under `x >= 0.0` the lower
+// endpoint is already `0.0`, and under `x > 0.0` it is already the smallest
+// subnormal. Each test below places the landmark strictly inside the guard so
+// that only its own class can propose it.
+
+/// Both zeros, interior to the guard. `x >= -1.0, x <= 1.0` makes `0.0`
+/// neither endpoint, so only the zeros class proposes it.
+#[test]
+fn issue_3636_interior_zero_is_proposed() {
+    let source = "module Edge.InteriorZero
+@property nonzero forall(x: f64)
+where x >= -1.0f64, x <= 1.0f64:
+  ((x > 0.0f64) || (x < 0.0f64))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["counterexample"]["x"], 0.0, "{record:#}");
+}
+
+/// The smallest positive subnormal, interior to the guard. True at `0.0` and
+/// from `1e-323` upward, so neither the zeros nor any ladder rung refutes it.
+#[test]
+fn issue_3636_interior_minimum_subnormal_is_proposed() {
+    let source = "module Edge.InteriorSubnormal
+@property not_tiny forall(x: f64)
+where x >= -1.0f64, x <= 1.0f64:
+  ((x == 0.0f64) || (x <= -1.0e-323f64) || (x >= 1.0e-323f64))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert_eq!(
+        witness.abs(),
+        f64::from_bits(1),
+        "only the minimum subnormal refutes this: {record:#}"
+    );
+}
+
+/// The representable neighbour of a *non-strict* endpoint. Under `x >= 1.0`
+/// the endpoint is `1.0` and its neighbour `next_up(1.0)` is a distinct
+/// value, unlike a strict guard where the two coincide.
+#[test]
+fn issue_3636_adjacent_neighbour_of_a_nonstrict_endpoint_is_proposed() {
+    let source = "module Edge.AdjacentNonStrict
+@property endpoint_or_far forall(x: f64)
+where x >= 1.0f64, x <= 2.0f64:
+  ((x == 1.0f64) || (x >= 1.0000000000000004f64))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert_eq!(
+        witness,
+        f64::from_bits(1.0f64.to_bits() + 1),
+        "only next_up(1.0) refutes this: {record:#}"
+    );
+}
+
+/// A ladder rung above `1e81`. True at and below `1e81`, and from `1e300`
+/// upward, so the endpoints, `±MAX` and the lower rungs all satisfy it;
+/// truncating the ladder restores the gap.
+#[test]
+fn issue_3636_upper_magnitude_ladder_rungs_are_proposed() {
+    let source = "module Edge.UpperLadder
+@property outside_band forall(x: f64):
+  ((x <= 1.0e81f64) || (x >= 1.0e300f64))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert!(
+        witness > 1.0e81 && witness < 1.0e300,
+        "the witness must come from a rung inside the band, got {witness}: {record:#}"
+    );
+}
+
+/// The ladder's bottom rung is a live subnormal, not zero. `1e-323` is the
+/// smallest decade `f64` represents; `1e-324` rounds to zero, and so does
+/// `10f64.powi(-323)`, which is why the rungs are written as literals rather
+/// than computed. True at the minimum subnormal and from `1e-320` upward, so
+/// only the bottom rung refutes.
+#[test]
+fn issue_3636_bottom_magnitude_ladder_rung_is_a_live_subnormal() {
+    let source = "module Edge.BottomLadder
+@property not_bottom_rung forall(x: f64)
+where x >= 0.0f64:
+  ((x <= 4.9e-324f64) || (x >= 1.0e-320f64))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 1, "{record:#}");
+    let witness = record["counterexample"]["x"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("f64 witness: {record:#}"));
+    assert_eq!(witness, 1.0e-323, "{record:#}");
+    assert_ne!(witness, 0.0, "the rung must not have rounded to zero");
+}
+
+/// The integer schedule. An `i32` binder is offered its fuzz range's lower
+/// end at the first attempt, so `--samples 1` refutes deterministically; a
+/// uniform draw would propose `-1000` with probability `1/2001`.
+#[test]
+fn issue_3636_integer_schedule_proposes_its_range_ends() {
+    let source = "module Edge.IntEnds
+@property above_floor forall(n: i32):
+  (n > -1000)
+";
+    let (code, record) = prove(source, "1", "0");
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(record["counterexample"]["n"], -1000, "{record:#}");
+}
+
+/// Negative parity for the integer schedule: a claim true across the whole
+/// fuzz range stays green, so the test above is not just "integers break".
+#[test]
+fn issue_3636_integer_schedule_does_not_refute_a_total_claim() {
+    let source = "module Edge.IntTotal
+@property in_range forall(n: i32):
+  ((n >= -1000) && (n <= 1000))
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
 }

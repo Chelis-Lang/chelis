@@ -299,20 +299,30 @@ pattern, and kept only where the dtype represents them inside the
 **admissible range** — the guards clamped to the dtype's finite range, which
 for an unguarded binder is `±MAX` rather than the proposal window:
 
-1. the interval's lower and upper endpoints;
-2. their adjacent representable neighbours;
+1. the interval's lower and upper endpoints. For a binder the guards leave
+   unbounded on a side, that endpoint is the dtype's finite extremum, so this
+   class is what reaches `±MAX`;
+2. their adjacent representable neighbours. Under a strict guard the endpoint
+   already *is* the neighbour, so the two classes coincide there and only a
+   non-strict guard distinguishes them;
 3. for each `!=` exclusion, the excluded value's two neighbours;
 4. `0.0` and `-0.0` (distinct: `1/0.0` and `1/-0.0` differ in sign);
 5. `±` the smallest positive subnormal (not `MIN_POSITIVE`: `1.0/MIN_POSITIVE`
    is finite at both widths, so only the subnormal reaches overflow);
-6. `±MAX`;
-7. the small integers `±1`, `±2`, `±3`, `±10`;
-8. a fixed ladder of decade magnitudes, geometric in both directions from
-   `1` and ending at the `f64` extremes: exponents
-   `1, 3, 9, 27, 81, 243, 308, -1, -3, -9, -27, -81, -243, -308, -324`, each
-   taken with both signs. `-324` is the subnormal floor and has no positive
-   counterpart; the `f32` rungs outside its range round to infinity or zero
-   and are filtered out.
+6. the small integers `±1`, `±2`, `±3`, `±10`;
+7. a fixed ladder of decade magnitudes, geometric in both directions from
+   `1e1` and ending at the `f64` extremes: `1e1, 1e3, 1e9, 1e27, 1e81, 1e243,
+   1e308` and `1e-1, 1e-3, 1e-9, 1e-27, 1e-81, 1e-243, 1e-308, 1e-323`, each
+   taken with both signs. The rungs are correctly rounded literals, not
+   `10f64.powi(e)`, which drifts from the decade at 7 of those 15 rungs and
+   returns exactly `0.0` for `powi(-323)`. `1e-323` is the floor because
+   `1e-324` rounds to zero even as a literal. A rung outside a narrower
+   dtype's range clamps onto that range's extremum and is then dropped as a
+   duplicate of the endpoint, so no rung contributes an infinity.
+
+An integer binder in the typed-generator lane has its own schedule: the ends
+of the width's fuzz range, `0`, `±1`, `±2`, and each end's inward neighbour.
+Widening that range is chelis#644.
 
 The ladder is a fixed list and not a log-uniform random draw, so "this
 magnitude class is covered" stays a claim a test can pin rather than a
@@ -328,14 +338,28 @@ consumes its attempt. For the constraint-directed lane the candidates are
 constructed inside the derived interval, so the guard-filtered accounting
 (`accepted_samples`, `attempted_samples`, `rejected_samples`) is unchanged.
 
+Because the schedule reads the admissible range while the random draw prefers
+the narrower proposal window, an order predecessor can be drawn from outside
+its successor's window: `forall(lo, hi) where lo < hi` can put `lo` at a
+magnitude the window's width cannot reach, after which `hi`'s window admits
+nothing. **The window is a preference, not a constraint.** A binder whose
+window admits no value, given the predecessors already drawn, draws from its
+admissible range instead. Only an empty *admissible* range means the guards
+leave no representable sample, and only that reports `unsupported`.
+
 One known limitation: because every binder indexes its schedule by the same
 attempt ordinal, a guard the typed-generator lane can only enforce by
 rejection discards the other binders' candidates at the same ordinals. A
 property with an `i32` binder guarded `n > 0` loses the float binder's
 candidates at the attempts whose integer candidate is non-positive. The lane
-still proposes the rest of each schedule. The remedy is to move such a guard
-into the constraint-directed lane; a per-binder cursor is rejected because it
-would make attempt `i` denote a different point for each binder.
+still proposes the rest of each schedule.
+
+No remedy is available for that example today: the constraint-directed lane
+admits a property only when every binder is `f32`/`f64`, so a property with an
+`i32` binder cannot enter it. Widening that lane to mixed binders would be the
+fix. A per-binder cursor is rejected instead of deferred, because it would
+make attempt `i` denote a different point for each binder and so cost the
+schedule its reproducibility.
 
 The shared Tier-C runner is enabled in every normal CLI build, including a
 build without the `smt` feature, and is also the Tide implementation. Solver
