@@ -467,7 +467,10 @@ def main() -> int:
         raise ReportFailure("Cargo is absent from the managed shell")
     legacy_wrapper_value = os.environ.get("KACHE_SCHEMA_27_WRAPPER")
     if not legacy_wrapper_value:
-        raise ReportFailure("managed shell does not expose KACHE_SCHEMA_27_WRAPPER")
+        raise ReportFailure(
+            "managed shell does not expose KACHE_SCHEMA_27_WRAPPER; run this oracle "
+            "in the kache-regression Devenv profile (docs/manual_gates.md)"
+        )
     legacy_wrapper = Path(legacy_wrapper_value)
     if not legacy_wrapper.is_file() or not os.access(legacy_wrapper, os.X_OK):
         raise ReportFailure(

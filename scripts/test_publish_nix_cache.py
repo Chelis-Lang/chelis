@@ -43,8 +43,14 @@ CLOSURE = [
     "/nix/store/mmmm-cvc5-1.3.1",
     TREE,
 ]
-PUSHED = sorted([CHELIS, RUNTIME, CHELISUP, TREE, CRATE_LIB, CRATE_OUT])
-TOKEN = {publish_nix_cache.TOKEN_VARIABLE: "token"}
+# The Devenv shell: its `gc/shell` root and its profile.
+DOTFILE = "/home/runner/work/chelis/chelis/.devenv"
+SHELL = "/nix/store/nnnn-devenv-shell"
+PROFILE = "/nix/store/oooo-devenv-profile"
+RESOLVED = {f"{DOTFILE}/gc/shell": SHELL, PROFILE: PROFILE}
+DEVENV = {"DEVENV_DOTFILE": DOTFILE, "DEVENV_PROFILE": PROFILE}
+PUSHED = sorted([CHELIS, RUNTIME, CHELISUP, TREE, CRATE_LIB, CRATE_OUT, SHELL, PROFILE])
+TOKEN = {publish_nix_cache.TOKEN_VARIABLE: "token", **DEVENV}
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 NIX_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 PUBLISH_RUN = "run: python scripts/publish_nix_cache.py"
@@ -93,7 +99,9 @@ def run_main(
 ) -> tuple[int, str, str]:
     stdout, stderr = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-        code = publish_nix_cache.main(list(argv), run=nix, environ=environ)
+        code = publish_nix_cache.main(
+            list(argv), run=nix, environ=environ, resolve=lambda path: RESOLVED.get(path, path)
+        )
     return code, stdout.getvalue(), stderr.getvalue()
 
 
@@ -125,7 +133,9 @@ def assert_releases_reach_the_publisher(release: str, nix: str) -> None:
     for text, rule in rules.items():
         if text not in dispatch:
             raise AssertionError(f"the dispatch job {rule}")
-    publish_steps = [step for step in nix.split("\n      - ") if PUBLISH_RUN in step]
+    publish_steps = [
+        step for step in nix.split("\n      - ") if f"\n        {PUBLISH_RUN}\n" in f"\n{step}\n"
+    ]
     if len(publish_steps) != 2:
         raise AssertionError("each native Nix job must have one publish step")
     for step in publish_steps:
@@ -188,9 +198,35 @@ class PublishNixCacheTests(unittest.TestCase):
         self.assertIn("run failed", stderr)
         self.assertNotIn("pushed", stdout)
 
+    def test_pushes_the_devenv_shell_root_and_its_profile(self) -> None:
+        nix = FakeNix()
+        code, _, _ = run_main(nix)
+        self.assertEqual(code, 0)
+        [(_, stdin)] = nix.pushes()
+        self.assertIn(f"{SHELL}\n", stdin)
+        self.assertIn(f"{PROFILE}\n", stdin)
+
+    def test_no_active_devenv_shell_stops_before_the_push(self) -> None:
+        for missing in ("DEVENV_DOTFILE", "DEVENV_PROFILE"):
+            with self.subTest(missing=missing):
+                environ = {key: value for key, value in TOKEN.items() if key != missing}
+                nix = FakeNix()
+                code, _, stderr = run_main(nix, environ=environ)
+                self.assertEqual(code, 1)
+                self.assertIn("no Devenv shell is active", stderr)
+                self.assertEqual(nix.calls, [], "the shell check runs before any Nix command")
+
+    def test_a_shell_root_outside_the_store_stops_before_the_push(self) -> None:
+        nix = FakeNix()
+        environ = {**TOKEN, "DEVENV_DOTFILE": "/tmp/no-devenv"}
+        code, _, stderr = run_main(nix, environ=environ)
+        self.assertEqual(code, 1)
+        self.assertIn("not a store path: /tmp/no-devenv/gc/shell", stderr)
+        self.assertEqual(nix.calls, [], "the shell check runs before any Nix command")
+
     def test_dry_run_lists_the_paths_without_a_token(self) -> None:
         nix = FakeNix()
-        code, stdout, _ = run_main(nix, argv=["--dry-run"], environ={})
+        code, stdout, _ = run_main(nix, argv=["--dry-run"], environ=DEVENV)
         self.assertEqual(code, 0)
         self.assertEqual(stdout.splitlines(), PUSHED)
         self.assertEqual(nix.pushes(), [])
@@ -210,7 +246,8 @@ class ReleaseTriggerContractTests(unittest.TestCase):
 
     def test_each_trigger_rule_rejects_its_mutation(self) -> None:
         publish_step = "      - name: Publish the packages and their build inputs to Cachix\n"
-        darwin_publish = f"        run: nix flake check --print-build-logs\n{publish_step}        {PUBLISH_GATE}\n"
+        dry_run = "        run: python scripts/publish_nix_cache.py --dry-run\n"
+        darwin_publish = f"{dry_run}{publish_step}        {PUBLISH_GATE}\n"
         mutations = [
             (
                 "release",
@@ -249,7 +286,7 @@ class ReleaseTriggerContractTests(unittest.TestCase):
             (
                 "nix",
                 darwin_publish,
-                f"        run: nix flake check --print-build-logs\n{publish_step}",
+                f"{dry_run}{publish_step}",
                 "must run only on main or a release tag",
             ),
             (
@@ -257,7 +294,7 @@ class ReleaseTriggerContractTests(unittest.TestCase):
                 darwin_publish
                 + "        env:\n          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_DEPLOY }}\n"
                 + f"        {PUBLISH_RUN}\n",
-                "        run: nix flake check --print-build-logs\n",
+                dry_run,
                 "each native Nix job must have one publish step",
             ),
         ]

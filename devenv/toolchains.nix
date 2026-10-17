@@ -83,6 +83,10 @@ let
   };
 in
 {
+  # The executable-cache regression oracle in docs/manual_gates.md reads this
+  # legacy Kache build. Only that profile builds the second Kache.
+  profiles.kache-regression.module.env.KACHE_SCHEMA_27_WRAPPER = "${legacyKache}/bin/kache";
+
   languages = {
     rust = {
       enable = true;
@@ -107,7 +111,6 @@ in
     CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER = "";
     KACHE_CONFIG = "${config.devenv.root}/.kache.toml";
     KACHE_DISABLED = "0";
-    KACHE_SCHEMA_27_WRAPPER = "${legacyKache}/bin/kache";
   }
   // lib.optionalAttrs pkgs.stdenv.isDarwin {
     # This is a native build. Keep Nix's SDK-aware compiler wrapper, but stop

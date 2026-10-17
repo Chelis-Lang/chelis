@@ -1985,4 +1985,4 @@ jobs:
         run: nix flake check --no-build --all-systems --option allow-import-from-derivation false
 
       - name: Check the format of the tracked Nix files
-        run: git ls-files -z -- '*.nix' ':(exclude)Cargo.nix' | xargs -0 nix shell --inputs-from . nixpkgs#nixfmt --command nixfmt --check
+        run: nix fmt -- --check

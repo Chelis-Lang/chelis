@@ -198,7 +198,8 @@ them. The `nixFormat` check uses the same nixfmt and the same files.
 
 A run of `nix-packages.yml` on `main` or on a release tag pushes to the
 `chelis-lang` Cachix cache. It pushes the `chelis`, `chelis-runtime`, and
-`chelisup` outputs, the cvc5 tree, and the Rust crate builds. A daily schedule
+`chelisup` outputs, the cvc5 tree, the Rust crate builds, and the Devenv
+shell closure. A daily schedule
 runs the workflow on `main`. That run skips its native builds when the cache
 already holds the packages of the `main` revision.
 
@@ -216,12 +217,12 @@ It runs these two commands, which you can also run before a push:
 
 ```sh
 nix flake check --no-build --all-systems --option allow-import-from-derivation false
-git ls-files -z -- '*.nix' ':(exclude)Cargo.nix' | xargs -0 nix shell --inputs-from . nixpkgs#nixfmt --command nixfmt --check
+nix fmt -- --check
 ```
 
 The first command evaluates the packages and checks of every supported system.
 The second command checks the format of each tracked Nix file except the
-generated `Cargo.nix`. Remove `--check` to format the files.
+generated `Cargo.nix`. Run `nix fmt` to format the files.
 
 The flake imports the committed `Cargo.nix`, so Nix evaluation needs no import
 from derivation. A change to `Cargo.lock`, a workspace manifest, or a crate
