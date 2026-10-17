@@ -57,8 +57,10 @@ thread_local! {
     // interpreter's probe work without a wall clock.
     static HOST_SUMMARY_PROBE_BUILDS: Cell<u64> = const { Cell::new(0) };
     /// Expression and metadata nodes the record-projection hoist built or
-    /// copied, so a test can bound its work by the body's size (chelis#3793).
-    static RECORD_HOIST_NODES: Cell<u64> = const { Cell::new(0) };
+    /// copied while a test counts them, so it can bound the hoist's work by the
+    /// body's size (chelis#3793). `None` when nothing counts, and then the hoist
+    /// does no counting walk at all.
+    static RECORD_HOIST_NODES: Cell<Option<u64>> = const { Cell::new(None) };
     /// Fallback for platforms where native stack headroom cannot be measured.
     static HOST_LOWER_DEPTH: Cell<usize> = const { Cell::new(0) };
     /// Reserve chosen from the stack available at the outermost host-lowering
@@ -876,14 +878,32 @@ pub fn host_summary_probe_builds() -> u64 {
     HOST_SUMMARY_PROBE_BUILDS.with(Cell::get)
 }
 
-/// Nodes the record-projection hoist has built or copied on this thread.
+/// Run `work`, counting the nodes the record-projection hoist builds or
+/// copies on this thread meanwhile.
 #[doc(hidden)]
-pub fn record_hoist_nodes() -> u64 {
-    RECORD_HOIST_NODES.with(Cell::get)
+pub fn counting_record_hoist_nodes<R>(work: impl FnOnce() -> R) -> (R, u64) {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            RECORD_HOIST_NODES.with(|count| count.set(self.0));
+        }
+    }
+    let restore = Restore(RECORD_HOIST_NODES.with(|count| count.replace(Some(0))));
+    let result = work();
+    let counted = RECORD_HOIST_NODES
+        .with(Cell::get)
+        .expect("the count stays armed while the work runs");
+    drop(restore);
+    (result, counted)
 }
 
-fn note_record_hoist_nodes(nodes: usize) {
-    RECORD_HOIST_NODES.with(|count| count.set(count.get() + nodes as u64));
+/// Add `nodes()` to the count, evaluating it only while a test counts.
+fn note_record_hoist_nodes(nodes: impl FnOnce() -> usize) {
+    RECORD_HOIST_NODES.with(|count| {
+        if let Some(counted) = count.get() {
+            count.set(Some(counted + nodes() as u64));
+        }
+    });
 }
 
 /// Reset [`host_summary_probe_builds`] for this thread.
@@ -7426,7 +7446,7 @@ fn hoist_record_projections(
             if node.tag() == DeepTag::Access
                 && let Some(hoist) = record_projection_hoist(expr, program, scope, bound)
             {
-                note_record_hoist_nodes(1);
+                note_record_hoist_nodes(|| 1);
                 return var_expr_node(&hoisted_local_name(hoists, hoist), *span);
             }
             let children = node
@@ -7435,7 +7455,7 @@ fn hoist_record_projections(
                 .enumerate()
                 .map(|(index, child)| {
                     if is_bound_bare_projection(node.tag(), index, child) {
-                        note_record_hoist_nodes(deep_expr_nodes(child));
+                        note_record_hoist_nodes(|| deep_expr_nodes(child));
                         child.clone()
                     } else {
                         hoist_record_projections(child, program, scope, bound, hoists)
@@ -7449,17 +7469,17 @@ fn hoist_record_projections(
             // unhoisted path it takes today.
             match Node::try_new(node.tag(), node.meta().clone(), children) {
                 Ok(rewritten) => {
-                    note_record_hoist_nodes(1 + deep_metadata_nodes(node.meta()));
+                    note_record_hoist_nodes(|| 1 + deep_metadata_nodes(node.meta()));
                     Expr::Node(Box::new(rewritten), *span)
                 }
                 Err(_) => {
-                    note_record_hoist_nodes(deep_expr_nodes(expr));
+                    note_record_hoist_nodes(|| deep_expr_nodes(expr));
                     expr.clone()
                 }
             }
         }
         Expr::BareList(items, span) => {
-            note_record_hoist_nodes(1);
+            note_record_hoist_nodes(|| 1);
             Expr::BareList(
                 items
                     .iter()
@@ -7472,7 +7492,7 @@ fn hoist_record_projections(
         // a typed parameter is one, so the rewriter descends it rather than
         // relying on the reader having refused first.
         Expr::UnknownForm(data) => {
-            note_record_hoist_nodes(1 + deep_metadata_nodes(&data.meta));
+            note_record_hoist_nodes(|| 1 + deep_metadata_nodes(&data.meta));
             Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
                 head: data.head.clone(),
                 meta: data.meta.clone(),
@@ -7485,7 +7505,7 @@ fn hoist_record_projections(
             }))
         }
         Expr::MetaExpr(meta, span) => {
-            note_record_hoist_nodes(1 + deep_metadata_nodes(&meta.metadata));
+            note_record_hoist_nodes(|| 1 + deep_metadata_nodes(&meta.metadata));
             Expr::MetaExpr(
                 chelis_deep::ast::MetaExpr {
                     metadata: meta.metadata.clone(),
@@ -7497,7 +7517,7 @@ fn hoist_record_projections(
             )
         }
         _ => {
-            note_record_hoist_nodes(deep_expr_nodes(expr));
+            note_record_hoist_nodes(|| deep_expr_nodes(expr));
             expr.clone()
         }
     }

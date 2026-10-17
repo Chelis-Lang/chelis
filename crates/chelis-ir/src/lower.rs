@@ -28870,6 +28870,7 @@ mod tests {
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
             local_ascriptions: Arc::new(Vec::new()),
+            declaration_bodies: Arc::default(),
             constructor_layouts: Arc::default(),
             tensor_specialization: TensorCallsiteSpecialization::default(),
             activation_record: ActivationRecord::Nothing,

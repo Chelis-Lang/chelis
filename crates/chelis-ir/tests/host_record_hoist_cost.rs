@@ -5,7 +5,8 @@
 //! nodes even when nothing was hoisted (chelis#3793).
 //!
 //! The oracle is the hoist's own count of the nodes it builds or copies, kept
-//! per thread, which is deterministic for a fixed program. Doubling the chain
+//! per thread while the test counts, which is deterministic for a fixed
+//! program. Doubling the chain
 //! must grow the count by at most 2.5 times: linear growth gives about 2,
 //! quadratic about 4.
 
@@ -48,10 +49,11 @@ fn chain(k: usize) -> CheckedProgram {
 
 /// Nodes the hoist built or copied while host lowering `program`.
 fn hoist_nodes(program: &CheckedProgram) -> u64 {
-    let before = chelis_ir::host::record_hoist_nodes();
-    let lowered = chelis_ir::host::try_lower_compiled_program(program).expect("the probe lowers");
+    let (lowered, nodes) = chelis_ir::host::counting_record_hoist_nodes(|| {
+        chelis_ir::host::try_lower_compiled_program(program).expect("the probe lowers")
+    });
     drop(lowered);
-    chelis_ir::host::record_hoist_nodes() - before
+    nodes
 }
 
 #[test]
