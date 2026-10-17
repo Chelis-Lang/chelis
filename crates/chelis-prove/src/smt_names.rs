@@ -180,10 +180,26 @@ pub(crate) fn fresh_module_probe_name(
     linked_terminal: &str,
     lexical_stem: &str,
 ) -> (String, bool) {
+    fresh_module_probe_name_in(
+        &mut NameSupply::for_deep_program(program),
+        type_name,
+        linked_terminal,
+        lexical_stem,
+    )
+}
+
+/// [`fresh_module_probe_name`] against a supply the caller seeded from its
+/// program and keeps current as it declares more names.
+pub(crate) fn fresh_module_probe_name_in(
+    names: &mut NameSupply,
+    type_name: &str,
+    linked_terminal: &str,
+    lexical_stem: &str,
+) -> (String, bool) {
     if let Some(linked) = chelis_types::linked_binding_in_module_of(type_name, linked_terminal) {
-        (fresh_root_name(program, &linked), true)
+        (names.fresh(&linked), true)
     } else {
-        (fresh_root_name(program, lexical_stem), false)
+        (names.fresh(lexical_stem), false)
     }
 }
 

@@ -46,6 +46,7 @@ use smt_lower::{
 mod beacon;
 mod beacon_scalar;
 mod injection;
+mod sample_batch;
 use crate::beacon_contract_prover::BeaconContractProver;
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
@@ -53,7 +54,7 @@ use crate::composition::{
 };
 use crate::contracts::{NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION, standard_contract_registry_for};
 use crate::discharge::QualifierSet;
-use crate::smt_names::{NameSupply, fresh_root_name};
+use crate::smt_names::NameSupply;
 
 /// The verification status of one user property.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3806,8 +3807,8 @@ fn prove_surf_property_fuzz(
         REJECTION_SAMPLING_METHOD
     };
 
-    let (roots, library) = match surf_eval_program(decls, eval_program) {
-        Ok(program) => (&program.roots, &program.library),
+    let program = match surf_eval_program(decls, eval_program) {
+        Ok(program) => program,
         Err(SurfEvalProgramError::Desugar(reason)) => {
             return error(
                 &property.name,
@@ -3825,6 +3826,14 @@ fn prove_surf_property_fuzz(
         }
     };
 
+    let lane = SurfLane { program, property };
+    let mut draws = sample_batch::AttemptDraws::new(&lane, max_attempts);
+    let mut draw = |attempt: usize| {
+        draw_attempt(match &constraint_plan {
+            Some(plan) => sample_property_with_constraints(property, plan, &mut rng, attempt),
+            None => sample_property(property, &mut rng, attempt),
+        })
+    };
     let mut accepted = 0usize;
     let mut attempts = 0usize;
     // Observed, not predicted: whether any attempt ever placed every binder,
@@ -3833,9 +3842,9 @@ fn prove_surf_property_fuzz(
     let mut unresolved: Option<String> = None;
     while accepted < samples_needed && attempts < max_attempts {
         attempts += 1;
-        let sample = match &constraint_plan {
-            Some(plan) => sample_property_with_constraints(property, plan, &mut rng, attempts - 1),
-            None => sample_property(property, &mut rng, attempts - 1),
+        let sample = match draws.next(&mut draw) {
+            sample_batch::Drawn::Sample { batch, index } => Ok((batch, index)),
+            sample_batch::Drawn::Failed(error) => Err(error),
         };
         // One attempt failing to produce a value is not the same fact as the
         // guards admitting none, and which one it is cannot be read off the
@@ -3845,7 +3854,7 @@ fn prove_surf_property_fuzz(
         // So nothing decides it here. The attempt records that it produced
         // nothing, and the loop's exhaustion arm decides from whether any
         // attempt in the whole budget ever succeeded.
-        let sample = match sample {
+        let (batch, index) = match sample {
             Ok(sample) => {
                 drew_a_value = true;
                 sample
@@ -3867,7 +3876,7 @@ fn prove_surf_property_fuzz(
             }
         };
         if !property.preconditions.is_empty() {
-            match eval_surf_sample(library, property, roots, &sample, true) {
+            match batch.eval(index, true) {
                 Ok(false) => continue,
                 Ok(true) => {}
                 Err(err) => {
@@ -3880,11 +3889,14 @@ fn prove_surf_property_fuzz(
             }
         }
         accepted += 1;
-        match eval_surf_sample(library, property, roots, &sample, false) {
+        match batch.eval(index, false) {
             Ok(true) => {}
             Ok(false) => {
-                let (shrunk, shrink_steps) =
-                    shrink_surf_counterexample(library, property, roots, sample);
+                let (shrunk, shrink_steps) = sample_batch::shrink_with_lane(
+                    batch.sample(index).clone(),
+                    &property.params,
+                    &lane,
+                );
                 return PropertyOutcome::new(
                     property.name.clone(),
                     PropertyStatus::Failed,
@@ -4255,7 +4267,6 @@ struct SampleValue {
     surf_expr: Expr,
     deep_expr: DeepExpr,
     json: serde_json::Value,
-    tensor_binding: Option<(String, TensorValue)>,
 }
 
 fn unsupported_property_params(params: &[Param]) -> Option<String> {
@@ -4474,7 +4485,6 @@ fn scalar_sample(
         surf_expr,
         deep_expr,
         json,
-        tensor_binding: None,
     }
 }
 
@@ -4522,7 +4532,6 @@ fn sample_tensor_value(
         surf_expr,
         deep_expr,
         json: serde_json::json!({ "shape": shape, "data": values }),
-        tensor_binding: None,
     })
 }
 
@@ -4619,6 +4628,9 @@ fn cast_expr(expr: Expr, ty: &str) -> Expr {
 /// check and lowering each time.
 struct SurfEvalProgram {
     roots: SampleRoots,
+    /// Every name the program spells, for naming the probes a run of samples
+    /// declares together (chelis#3117).
+    names: NameSupply,
     library: chelis_compiler_api::StdLibContext,
 }
 
@@ -4640,13 +4652,18 @@ fn surf_eval_program<'a>(
         // every name it spells (chelis#3267). The evaluator desugars the same
         // declarations, so a program that does not desugar fails here exactly
         // as its first sample would.
-        let roots = match chelis_surf::desugar::desugar_program(decls) {
-            Ok(program) => SampleRoots::for_program(&program),
+        let names = match chelis_surf::desugar::desugar_program(decls) {
+            Ok(program) => NameSupply::for_deep_program(&program),
             Err(reason) => return Err(SurfEvalProgramError::Desugar(reason.to_string())),
         };
+        let roots = SampleRoots::from_names(&names);
         let library = chelis_compiler_api::build_declaration_context(decls)
             .map_err(|err| SurfEvalProgramError::Compile(compiler_error_message(err)))?;
-        Ok(SurfEvalProgram { roots, library })
+        Ok(SurfEvalProgram {
+            roots,
+            names,
+            library,
+        })
     })
     .as_ref()
 }
@@ -4666,9 +4683,16 @@ impl SampleRoots {
     const PRE_STEM: &str = "__chelis_property_pre";
 
     fn for_program(program: &[DeepExpr]) -> Self {
+        Self::from_names(&NameSupply::for_deep_program(program))
+    }
+
+    /// Each root named fresh against `names`, as
+    /// [`fresh_root_name`](crate::smt_names::fresh_root_name) names
+    /// it against the program `names` was seeded from.
+    fn from_names(names: &NameSupply) -> Self {
         Self {
-            probe: fresh_root_name(program, Self::PROBE_STEM),
-            pre: fresh_root_name(program, Self::PRE_STEM),
+            probe: names.clone().fresh(Self::PROBE_STEM),
+            pre: names.clone().fresh(Self::PRE_STEM),
         }
     }
 
@@ -4685,40 +4709,84 @@ fn eval_surf_sample(
     precondition: bool,
 ) -> Result<bool, String> {
     let root = roots.select(precondition);
-    let mut source_decls = Vec::new();
-    for value in &sample.values {
-        if let Some((binding_name, tensor)) = &value.tensor_binding {
-            source_decls.push(Decl::Sig {
-                name: binding_name.clone(),
-                type_binders: Vec::new(),
-                ty: property
-                    .params
-                    .iter()
-                    .find(|param| param.name == value.name)
-                    .and_then(|param| param.ty.clone())
-                    .expect("tensor property params are typed"),
-                effects: None,
-                span: chelis_deep::Span::new(0, 0),
-            });
-            debug_assert!(tensor.validate().is_ok());
-        }
-    }
-    source_decls.push(Decl::LetDef {
-        name: root.to_string(),
-        ty: None,
-        value: sample_block_expr(property, sample, precondition),
-        span: chelis_deep::Span::new(0, 0),
-    });
     // The assembled declarations are checked and run as they are, never
     // printed and parsed again (chelis#3129).
     bool_property_root(
         chelis_compiler_api::compiler::eval_decls_selected_with_library(
             library,
-            &source_decls,
-            sample_bindings(sample),
+            &[surf_probe_decl(root, property, sample, precondition)],
+            BTreeMap::new(),
             &[root.to_string()],
         ),
     )
+}
+
+/// A fuzz lane's attempt as the chunked sampler takes it: an unsupported
+/// binder ends the run, an unresolvable attempt does not.
+fn draw_attempt(
+    sample: Result<Sample, SamplingError>,
+) -> sample_batch::Draw<Sample, SamplingError> {
+    match sample {
+        Ok(sample) => sample_batch::Draw::Sample(sample),
+        Err(error @ SamplingError::Unresolvable(_)) => sample_batch::Draw::Skipped(error),
+        Err(error @ SamplingError::Unsupported(_)) => sample_batch::Draw::Ends(error),
+    }
+}
+
+fn surf_probe_decl(root: &str, property: &Property, sample: &Sample, precondition: bool) -> Decl {
+    Decl::LetDef {
+        name: root.to_string(),
+        ty: None,
+        value: sample_block_expr(property, sample, precondition),
+        span: chelis_deep::Span::new(0, 0),
+    }
+}
+
+/// The Surf fuzz lane: probes are checked and lowered against the file's
+/// prepared declaration context.
+struct SurfLane<'a> {
+    program: &'a SurfEvalProgram,
+    property: &'a Property,
+}
+
+impl sample_batch::SampleLane for SurfLane<'_> {
+    type Sample = Sample;
+
+    fn guarded(&self) -> bool {
+        !self.property.preconditions.is_empty()
+    }
+
+    fn eval_alone(&self, sample: &Sample, precondition: bool) -> Result<bool, String> {
+        eval_surf_sample(
+            &self.program.library,
+            self.property,
+            &self.program.roots,
+            sample,
+            precondition,
+        )
+    }
+
+    fn compile(&self, samples: &[Sample]) -> Option<sample_batch::CompiledProbes> {
+        let mut names = self.program.names.clone();
+        let mut decls = Vec::new();
+        let mut roots = Vec::with_capacity(samples.len());
+        for sample in samples {
+            let pre = self.guarded().then(|| {
+                let root = names.fresh(SampleRoots::PRE_STEM);
+                decls.push(surf_probe_decl(&root, self.property, sample, true));
+                root
+            });
+            let probe = names.fresh(SampleRoots::PROBE_STEM);
+            decls.push(surf_probe_decl(&probe, self.property, sample, false));
+            roots.push(sample_batch::ProbeRoots { pre, probe });
+        }
+        let prepared = chelis_compiler_api::compiler::prepare_decls_with_library(
+            &self.program.library,
+            &decls,
+        )
+        .ok()?;
+        Some(sample_batch::CompiledProbes::new(prepared, roots))
+    }
 }
 
 fn sample_block_expr(property: &Property, sample: &Sample, precondition: bool) -> Expr {
@@ -4802,14 +4870,6 @@ fn bool_property_root(
     }
 }
 
-fn sample_bindings(sample: &Sample) -> BTreeMap<String, TensorValue> {
-    sample
-        .values
-        .iter()
-        .filter_map(|value| value.tensor_binding.clone())
-        .collect()
-}
-
 fn counterexample_json(sample: &Sample) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for value in &sample.values {
@@ -4820,105 +4880,51 @@ fn counterexample_json(sample: &Sample) -> serde_json::Value {
 
 const MAX_SHRINK_STEPS: usize = 64;
 
-fn shrink_surf_counterexample(
-    library: &chelis_compiler_api::StdLibContext,
-    property: &Property,
-    roots: &SampleRoots,
-    sample: Sample,
-) -> (Sample, usize) {
-    shrink_counterexample(sample, &property.params, |candidate| {
-        sample_still_fails_surf(library, property, roots, candidate)
-    })
-}
-
-fn shrink_deep_counterexample(
-    exprs: &[DeepExpr],
-    property: &DeepProperty,
-    roots: &SampleRoots,
-    sample: Sample,
-) -> (Sample, usize) {
-    shrink_counterexample(sample, &property.params, |candidate| {
-        sample_still_fails_deep(exprs, property, roots, candidate)
-    })
-}
-
+/// Shrink a counterexample one binder at a time: each step tries every
+/// binder's candidates, in binder order, and keeps the first trial that
+/// `first_failing` reports still fails. `first_failing` receives one step's
+/// trials in that order and returns the first that still fails.
 fn shrink_counterexample<F>(
     mut sample: Sample,
     params: &[Param],
-    mut still_fails: F,
+    mut first_failing: F,
 ) -> (Sample, usize)
 where
-    F: FnMut(&Sample) -> bool,
+    F: FnMut(Vec<Sample>) -> Option<Sample>,
 {
     let mut steps = 0usize;
     while steps < MAX_SHRINK_STEPS {
-        let mut changed = false;
-        for index in 0..sample.values.len() {
-            let Some(ty) = params
-                .iter()
-                .find(|param| param.name == sample.values[index].name)
-                .and_then(|param| param.ty.as_ref())
-            else {
-                continue;
-            };
-            for candidate in shrink_candidates(&sample.values[index], ty) {
-                if candidate.json == sample.values[index].json {
-                    continue;
-                }
-                let mut trial = sample.clone();
-                trial.values[index] = candidate;
-                if still_fails(&trial) {
-                    sample = trial;
-                    steps += 1;
-                    changed = true;
-                    break;
-                }
-            }
-            if changed || steps >= MAX_SHRINK_STEPS {
-                break;
-            }
-        }
-        if !changed {
+        let Some(shrunk) = first_failing(shrink_trials(&sample, params)) else {
             break;
-        }
+        };
+        sample = shrunk;
+        steps += 1;
     }
     (sample, steps)
 }
 
-fn sample_still_fails_surf(
-    library: &chelis_compiler_api::StdLibContext,
-    property: &Property,
-    roots: &SampleRoots,
-    sample: &Sample,
-) -> bool {
-    if !property.preconditions.is_empty() {
-        match eval_surf_sample(library, property, roots, sample, true) {
-            Ok(true) => {}
-            Ok(false) | Err(_) => return false,
+/// One shrink step's trials: `sample` with one binder replaced by one of its
+/// shrink candidates, for every binder in order and every candidate in order.
+fn shrink_trials(sample: &Sample, params: &[Param]) -> Vec<Sample> {
+    let mut trials = Vec::new();
+    for index in 0..sample.values.len() {
+        let Some(ty) = params
+            .iter()
+            .find(|param| param.name == sample.values[index].name)
+            .and_then(|param| param.ty.as_ref())
+        else {
+            continue;
+        };
+        for candidate in shrink_candidates(&sample.values[index], ty) {
+            if candidate.json == sample.values[index].json {
+                continue;
+            }
+            let mut trial = sample.clone();
+            trial.values[index] = candidate;
+            trials.push(trial);
         }
     }
-    matches!(
-        eval_surf_sample(library, property, roots, sample, false),
-        Ok(false)
-    )
-}
-
-fn sample_still_fails_deep(
-    exprs: &[DeepExpr],
-    property: &DeepProperty,
-    roots: &SampleRoots,
-    sample: &Sample,
-) -> bool {
-    if !property.preconditions.is_empty() {
-        match eval_deep_sample(exprs, property, roots, sample, true) {
-            Ok(true) => {}
-            Ok(false) | Err(_) => return false,
-        }
-    }
-    matches!(
-        eval_deep_sample(exprs, property, roots, sample, false),
-        Ok(false)
-    )
+    trials
 }
 
 fn shrink_candidates(value: &SampleValue, ty: &TypeExpr) -> Vec<SampleValue> {
@@ -5155,7 +5161,6 @@ fn tensor_sample(name: &str, shape: &[usize], precision: &str, values: &[f64]) -
         surf_expr: tensor_surf_expr(shape, precision, values),
         deep_expr: tensor_deep_expr(shape, precision, values),
         json: serde_json::json!({ "shape": shape, "data": values }),
-        tensor_binding: None,
     }
 }
 
@@ -5404,7 +5409,21 @@ fn prove_deep_property_fuzz(
         REJECTION_SAMPLING_METHOD
     };
 
-    let roots = SampleRoots::for_program(exprs);
+    let names = NameSupply::for_deep_program(exprs);
+    let roots = SampleRoots::from_names(&names);
+    let lane = DeepLane {
+        exprs,
+        property,
+        roots: &roots,
+        names: &names,
+    };
+    let mut draws = sample_batch::AttemptDraws::new(&lane, max_attempts);
+    let mut draw = |attempt: usize| {
+        draw_attempt(match &constraint_plan {
+            Some(plan) => sample_deep_property_with_constraints(property, plan, &mut rng, attempt),
+            None => sample_deep_property(property, &mut rng, attempt),
+        })
+    };
 
     let mut accepted = 0usize;
     let mut attempts = 0usize;
@@ -5414,15 +5433,13 @@ fn prove_deep_property_fuzz(
     let mut unresolved: Option<String> = None;
     while accepted < samples_needed && attempts < max_attempts {
         attempts += 1;
-        let sample = match &constraint_plan {
-            Some(plan) => {
-                sample_deep_property_with_constraints(property, plan, &mut rng, attempts - 1)
-            }
-            None => sample_deep_property(property, &mut rng, attempts - 1),
+        let sample = match draws.next(&mut draw) {
+            sample_batch::Drawn::Sample { batch, index } => Ok((batch, index)),
+            sample_batch::Drawn::Failed(error) => Err(error),
         };
         // As in the Surf lane: an unresolvable attempt is rejected, not
         // terminal (chelis#3636 round 2).
-        let sample = match sample {
+        let (batch, index) = match sample {
             Ok(sample) => {
                 drew_a_value = true;
                 sample
@@ -5444,7 +5461,7 @@ fn prove_deep_property_fuzz(
             }
         };
         if !property.preconditions.is_empty() {
-            match eval_deep_sample(exprs, property, &roots, &sample, true) {
+            match batch.eval(index, true) {
                 Ok(false) => continue,
                 Ok(true) => {}
                 Err(err) => {
@@ -5457,11 +5474,14 @@ fn prove_deep_property_fuzz(
             }
         }
         accepted += 1;
-        match eval_deep_sample(exprs, property, &roots, &sample, false) {
+        match batch.eval(index, false) {
             Ok(true) => {}
             Ok(false) => {
-                let (shrunk, shrink_steps) =
-                    shrink_deep_counterexample(exprs, property, &roots, sample);
+                let (shrunk, shrink_steps) = sample_batch::shrink_with_lane(
+                    batch.sample(index).clone(),
+                    &property.params,
+                    &lane,
+                );
                 return PropertyOutcome::new(
                     property.name.clone(),
                     PropertyStatus::Failed,
@@ -5852,27 +5872,71 @@ fn eval_deep_sample(
 ) -> Result<bool, String> {
     let root = roots.select(precondition);
     let mut source_exprs = exprs.to_vec();
-    for value in &sample.values {
-        if let Some((binding_name, _)) = &value.tensor_binding
-            && let Some(ty) = property
-                .params
-                .iter()
-                .find(|param| param.name == value.name)
-                .and_then(|param| param.ty.as_ref())
-                .and_then(surf_type_to_deep)
-        {
-            source_exprs.push(deep_node("defsig", vec![deep_symbol(binding_name), ty]));
-        }
-    }
-    source_exprs.push(deep_node(
+    source_exprs.push(deep_probe_def(root, property, sample, precondition));
+    let source = chelis_deep::printer::print_canonical(&source_exprs);
+    eval_bool_with_bindings(SourceKind::Deep, source, root, BTreeMap::new())
+}
+
+fn deep_probe_def(
+    root: &str,
+    property: &DeepProperty,
+    sample: &Sample,
+    precondition: bool,
+) -> DeepExpr {
+    deep_node(
         "def",
         vec![
             deep_symbol(root),
             deep_sample_block_expr(property, sample, precondition),
         ],
-    ));
-    let source = chelis_deep::printer::print_canonical(&source_exprs);
-    eval_bool_with_bindings(SourceKind::Deep, source, root, sample_bindings(sample))
+    )
+}
+
+/// The Deep fuzz lane: probes join the whole program, which is printed,
+/// checked and lowered as the Deep source ingress takes it.
+struct DeepLane<'a> {
+    exprs: &'a [DeepExpr],
+    property: &'a DeepProperty,
+    roots: &'a SampleRoots,
+    names: &'a NameSupply,
+}
+
+impl sample_batch::SampleLane for DeepLane<'_> {
+    type Sample = Sample;
+
+    fn guarded(&self) -> bool {
+        !self.property.preconditions.is_empty()
+    }
+
+    fn eval_alone(&self, sample: &Sample, precondition: bool) -> Result<bool, String> {
+        eval_deep_sample(self.exprs, self.property, self.roots, sample, precondition)
+    }
+
+    fn compile(&self, samples: &[Sample]) -> Option<sample_batch::CompiledProbes> {
+        let mut names = self.names.clone();
+        let mut source_exprs = self.exprs.to_vec();
+        let mut roots = Vec::with_capacity(samples.len());
+        for sample in samples {
+            let pre = self.guarded().then(|| {
+                let root = names.fresh(SampleRoots::PRE_STEM);
+                source_exprs.push(deep_probe_def(&root, self.property, sample, true));
+                root
+            });
+            let probe = names.fresh(SampleRoots::PROBE_STEM);
+            source_exprs.push(deep_probe_def(&probe, self.property, sample, false));
+            roots.push(sample_batch::ProbeRoots { pre, probe });
+        }
+        // A Deep property file carries no Reef library to compile against;
+        // the whole program is the context, compiled once for every probe.
+        #[allow(deprecated)]
+        let prepared = chelis_compiler_api::compiler::prepare_eval(EvalRequest {
+            source_kind: SourceKind::Deep,
+            source: chelis_deep::printer::print_canonical(&source_exprs),
+            bindings: BTreeMap::new(),
+        })
+        .ok()?;
+        Some(sample_batch::CompiledProbes::new(prepared, roots))
+    }
 }
 
 fn deep_sample_block_expr(
