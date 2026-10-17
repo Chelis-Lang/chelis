@@ -365,3 +365,93 @@ fn validate_deep_still_rejects_crlf_after_directive_stripping() {
         .failure()
         .stderr(predicates::str::contains("not canonically formatted"));
 }
+
+/// A `cargo` on `PATH` that records each invocation's arguments and fails, as
+/// `cargo locate-project` does outside a workspace.
+#[cfg(unix)]
+fn recording_cargo(dir: &std::path::Path) -> (std::ffi::OsString, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let log = dir.join("cargo-invocations.log");
+    let shim = bin.join("cargo");
+    fs::write(
+        &shim,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut path = std::ffi::OsString::from(&bin);
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    (path, log)
+}
+
+#[cfg(unix)]
+fn recorded_locate_project_spawns(log: &std::path::Path) -> usize {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.starts_with("locate-project"))
+        .count()
+}
+
+/// chelis#1329: the workspace probe anchors exception globs, and no
+/// exception names a rule a `.ch` or `.dp` file can violate, so the style
+/// gate and `check`'s advisory pass never spawn `cargo locate-project` for
+/// one. `chelis lint --check` over a directory still probes once per walk,
+/// which shows the recording shim is the `cargo` the CLI resolves.
+#[cfg(unix)]
+#[test]
+fn style_gated_commands_spawn_no_workspace_probe() {
+    let dir = tempdir().unwrap();
+    let (path_env, log) = recording_cargo(dir.path());
+    let surf = dir.path().join("clean.ch");
+    fs::write(&surf, "def main() -> i32 = 1\n").unwrap();
+    let deep = dir.path().join("clean.dp");
+    fs::write(&deep, "(def {} value (lit {} 1))\n").unwrap();
+    let flagged = dir.path().join("flagged.ch");
+    let decls = chelis_surf::parser::parse_str("def _internal() -> i32 = 1\n").expect("parses");
+    fs::write(&flagged, chelis_surf::format::format_program(&decls)).unwrap();
+
+    let runs: [(&[&str], &std::path::Path, bool); 5] = [
+        (&["check"], &surf, true),
+        (&["eval", "--file"], &surf, true),
+        (&["validate", "--surf"], &surf, true),
+        (&["validate", "--deep"], &deep, true),
+        (&["check"], &flagged, false),
+    ];
+    for (args, file, succeeds) in runs {
+        let assert = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("PATH", &path_env)
+            .env_remove("CHELIS_STYLE_GATE_DISABLE")
+            .args(args)
+            .arg(file)
+            .assert();
+        if succeeds {
+            assert.success();
+        } else {
+            assert
+                .failure()
+                .stderr(predicates::str::contains("surf-value-snake-case"));
+        }
+        assert_eq!(
+            recorded_locate_project_spawns(&log),
+            0,
+            "`chelis {} {}` spawned `cargo locate-project`",
+            args.join(" "),
+            file.display()
+        );
+    }
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("PATH", &path_env)
+        .args(["lint", "--check"])
+        .arg(dir.path())
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("surf-value-snake-case"));
+    assert_eq!(recorded_locate_project_spawns(&log), 1);
+}

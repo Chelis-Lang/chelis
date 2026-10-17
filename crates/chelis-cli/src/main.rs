@@ -3766,7 +3766,6 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
                 == target_file
         })
         .collect::<Vec<_>>();
-    let exceptions_list = style_gate::exceptions();
     // Anchor exception matching against the detected Cargo workspace
     // root, the same anchor `cmd_lint` uses. If the file is not inside
     // a Cargo workspace, detection fails and no workspace-rooted
@@ -3774,13 +3773,12 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
     // through unfiltered (correct: a file outside the workspace is not,
     // e.g., `crates/chelis-surf/tests/fixtures/*.ch`). This advisory
     // emit is a best-effort nicety, so a detection failure skips
-    // exception filtering rather than aborting `chelis check`.
-    let filtered = match style_gate::detect_lint_workspace_root(parent) {
-        Ok(workspace_root) => {
-            chelis_lint::exceptions::apply_exceptions(&mine, &exceptions_list, &workspace_root)
-        }
-        Err(_) => mine,
-    };
+    // exception filtering rather than aborting `chelis check`. The probe
+    // runs only when an exception names one of these violations' rules
+    // (chelis#1329).
+    let filtered = style_gate::filter_excepted_violations(mine, &style_gate::exceptions(), || {
+        style_gate::detect_lint_workspace_root(parent)
+    });
     for violation in filtered {
         eprintln!("warning: {violation}");
     }
