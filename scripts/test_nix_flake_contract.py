@@ -550,7 +550,9 @@ class NixFlakeContractTests(unittest.TestCase):
             check=True,
         ).stdout.split(b"\0")
         with tempfile.TemporaryDirectory() as raw:
-            flake = Path(raw) / "flake"
+            # Upstream Nix rejects a `path:` flake below a symbolic link, and
+            # the macOS temporary directory is below /var, a symbolic link.
+            flake = Path(raw).resolve() / "flake"
             for name in tracked:
                 if not name:
                     continue

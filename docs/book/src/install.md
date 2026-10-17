@@ -118,12 +118,16 @@ generated static library.
 The Chelis flake builds the compiler from source for Linux x86_64 and macOS
 arm64. It is a second channel beside the release binaries. `chelisup` stays
 the installer of release toolchains and selects the compiler version for each
-project. Run a release compiler, or install it in your Nix profile:
+project. Run a release compiler, or install it in your Nix profile. Replace
+`X.Y.Z` with a release version, as in the commands above:
 
 ```sh
-nix run github:Chelis-Lang/chelis/v0.20.0 -- --version
-nix profile install github:Chelis-Lang/chelis/v0.20.0
+nix run github:Chelis-Lang/chelis/vX.Y.Z -- --version
+nix profile install github:Chelis-Lang/chelis/vX.Y.Z
 ```
+
+The overlay and the C toolchain in the `chelis` package, which the text below
+describes, start with the first release after 0.20.0.
 
 The flake has three packages:
 
@@ -145,7 +149,7 @@ supports:
 ```nix
 {
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.chelis.url = "github:Chelis-Lang/chelis/v0.20.0";
+  inputs.chelis.url = "github:Chelis-Lang/chelis/vX.Y.Z";
 
   outputs = { nixpkgs, chelis, ... }:
     let

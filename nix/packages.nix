@@ -309,8 +309,9 @@ let
   # The arguments of the `bin/chelis` wrapper, one makeWrapper argument for
   # each element. `chelis build` finds the C compiler, `ar`, and the linker on
   # PATH. The wrapper puts the C compiler and the binutils of stdenv first, so
-  # a build needs no host toolchain. The compiler identifies its image without
-  # argv[0] (chelis#3649), so the wrapper keeps the argv[0] of its caller.
+  # a build needs no host toolchain. The wrapper gives the compiler its
+  # libexec path as argv[0]. The compiler identifies its image without
+  # argv[0] (chelis#3649), so the wrapper needs no --argv0.
   chelisWrapperArgs = [
     "--prefix"
     "PATH"
