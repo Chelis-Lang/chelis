@@ -570,6 +570,18 @@ pub fn build_stdlib_context(
     build_declaration_context(stdlib_decls)
 }
 
+/// Declaration-context builds since the process started: a work counter that
+/// lets a test assert a caller builds one context per declaration set rather
+/// than one per use (chelis#3745).
+static DECLARATION_CONTEXT_BUILDS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn declaration_context_builds() -> u64 {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    DECLARATION_CONTEXT_BUILDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Check and lower declarations as a reusable in-memory library, preserving
 /// the caller's linker provenance. Ordinary source receives ordinary admission
 /// checks; Reef callers retain the guard installed at their link boundary.
@@ -577,6 +589,7 @@ pub fn build_declaration_context(
     decls: &[chelis_surf::ast::Decl],
 ) -> Result<StdLibContext, CompilerError> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    DECLARATION_CONTEXT_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let prepared = crate::pipeline::prepare_surf_decls(decls, None).map_err(|error| {
         crate::compiler::pipeline_rejection_to_compiler_error(
             crate::pipeline::PipelineRejection::Preparation(error),

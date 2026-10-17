@@ -97,8 +97,8 @@ pub fn registered_clarabel_solve_symbol(
 }
 pub use stdlib_cache::{
     StdLibContext, build_declaration_context, build_stdlib_context, cache_disabled,
-    load_or_build_stdlib_context, stdlib_cache_key, stdlib_cache_key_input_bytes,
-    typecheck_cache_dir,
+    declaration_context_builds, load_or_build_stdlib_context, stdlib_cache_key,
+    stdlib_cache_key_input_bytes, typecheck_cache_dir,
 };
 
 /// Pinned compiler version for fixture `reef.toml` files in tests and for
