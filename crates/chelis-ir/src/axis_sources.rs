@@ -1610,6 +1610,7 @@ pub fn ordered_interface_loads(nodes: &[DagNode]) -> Vec<&DagNode> {
 /// endpoint and each class member once scanned the DAG again, which made C
 /// emission cubic in the number of runtime-extent inputs (chelis#3726).
 struct InterfaceSlots<'a> {
+    dag: &'a Dag,
     loads: Vec<&'a DagNode>,
     by_name: chelis_unord::UnordMap<&'a str, usize>,
 }
@@ -1625,12 +1626,17 @@ impl<'a> InterfaceSlots<'a> {
                 _ => None,
             })
             .collect();
-        Self { loads, by_name }
+        Self {
+            dag,
+            loads,
+            by_name,
+        }
     }
 
-    /// Find a witness in the single ordered interface-input set.
-    fn slot(&self, dag: &Dag, load: NodeId) -> Option<usize> {
-        let RiscOp::Load { name } = &dag.get(load)?.op else {
+    /// Find a witness in the single ordered interface-input set of the DAG
+    /// that built this table.
+    fn slot(&self, load: NodeId) -> Option<usize> {
+        let RiscOp::Load { name } = &self.dag.get(load)?.op else {
             return None;
         };
         self.by_name.get(name.as_str()).copied()
@@ -2187,7 +2193,6 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
             }
             let claim = DimClaim::Name(name.clone());
             let entry = OrderedMember::new(
-                dag,
                 &slots,
                 ClassMember {
                     node: node.id,
@@ -2261,13 +2266,11 @@ struct OrderedMember {
 }
 
 impl OrderedMember {
-    fn new(dag: &Dag, slots: &InterfaceSlots<'_>, member: ClassMember) -> Self {
+    fn new(slots: &InterfaceSlots<'_>, member: ClassMember) -> Self {
         // A named class takes its canonical value from an axis declaring
         // that name, not from a foreign value that merely claims equality.
         let slot = match member.source {
-            AxisSource::ExternalAxis { load, axis } => {
-                slots.slot(dag, load).map(|slot| (slot, axis))
-            }
+            AxisSource::ExternalAxis { load, axis } => slots.slot(load).map(|slot| (slot, axis)),
             _ => None,
         };
         Self {
@@ -2292,8 +2295,7 @@ impl OrderedMember {
             self.member.axis,
         )
         .and_then(|observation| observation.entry_axis(dag, slots));
-        let slot =
-            input_axis.and_then(|(load, axis)| slots.slot(dag, load).map(|slot| (slot, axis)));
+        let slot = input_axis.and_then(|(load, axis)| slots.slot(load).map(|slot| (slot, axis)));
         (slot.is_none(), slot, self.node, self.member.axis)
     }
 
@@ -2323,7 +2325,6 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
                 continue;
             }
             let entry = OrderedMember::new(
-                dag,
                 &slots,
                 ClassMember {
                     node: node.id,
@@ -2730,7 +2731,7 @@ pub fn witness_entry_obligations(
             return None;
         };
         let load = load_through_casts(dag, id, 0)?;
-        slots.slot(dag, load)?;
+        slots.slot(load)?;
         Some(ExtentRecord::Read {
             load,
             axis: usize::try_from(*axis).ok()?,
@@ -2774,12 +2775,7 @@ pub fn witness_entry_obligations(
 /// checks retain derivation order. Exact duplicate comparisons are emitted once.
 pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
     let slots = InterfaceSlots::of(dag);
-    let position = |(load, axis)| {
-        (
-            slots.slot(dag, load).expect("entry witness is an input"),
-            axis,
-        )
-    };
+    let position = |(load, axis)| (slots.slot(load).expect("entry witness is an input"), axis);
     let mut guards = Vec::new();
     // An authored literal result whose extent is an exact parameter witness
     // is ready at that witness's signature position. The token identifies
@@ -2945,17 +2941,12 @@ pub fn entry_validation_plan_for_resolved_loads(
             ..
         } => {
             let position = |(load, axis): (NodeId, usize)| {
-                (
-                    slots.slot(dag, load).expect("entry witness is an input"),
-                    axis,
-                )
+                (slots.slot(load).expect("entry witness is an input"), axis)
             };
             position(*canonical).max(position(*observed))
         }
         EntryExtentGuard::Literal { observed, .. } => (
-            slots
-                .slot(dag, observed.0)
-                .expect("entry witness is an input"),
+            slots.slot(observed.0).expect("entry witness is an input"),
             observed.1,
         ),
     };
@@ -3851,7 +3842,7 @@ impl LiteralResultInterfaceObservation {
                 (parameter == name.as_str()).then_some(observed)
             }
             Self::InputAxis { load, axis } => {
-                slots.slot(dag, load)?;
+                slots.slot(load)?;
                 Some((load, axis))
             }
         }
@@ -3939,7 +3930,7 @@ fn interface_witness_axis(
         return None;
     };
     let load = load_through_casts(dag, witness, 0)?;
-    slots.slot(dag, load)?;
+    slots.slot(load)?;
     Some((load, usize::try_from(axis).ok()?))
 }
 
