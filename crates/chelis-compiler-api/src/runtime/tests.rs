@@ -1444,6 +1444,36 @@ fn issue_3741_retained_contracts_normalize_once_not_per_application() {
     );
 }
 
+/// chelis#3778: what a closure's fixed syntax determines about its entry
+/// (normalized parameter and result types and the entry contract) is built
+/// once per closure value, not at every application. The fold applies one
+/// closure value at every step; its clones share the built facts.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With a fresh
+/// cache per application, the build count equalled the application count.
+#[test]
+fn issue_3778_closure_entry_types_are_built_once_per_closure() {
+    let mut builds = Vec::new();
+    for steps in [10usize, 40] {
+        super::eval::reset_entry_claim_work();
+        let result = evaluate_result(&format!(
+            "result = fold(fn (acc: (i64, f32), i: i64) -> (add(acc.0, i), acc.1), \
+             (0i64, 1.0f32), range(0i64, {steps}i64)).0\n"
+        ));
+        assert_eq!(result, (steps * (steps - 1) / 2).to_string());
+        builds.push(super::eval::closure_entry_builds());
+    }
+    eprintln!("#3778 receipt: entry types built {builds:?} for 10 and 40 applications");
+    assert!(
+        builds[0] >= 1,
+        "#3778: applying the closure builds its entry types, or this receipt measures nothing"
+    );
+    assert_eq!(
+        builds[0], builds[1],
+        "#3778: applying a closure again must not rebuild its entry types"
+    );
+}
+
 /// chelis#2204: a closure parameter shadows a captured binding of the same
 /// name at the interpreter level, not only inside `Frame`'s own unit tests.
 /// Red-team round 1 on chelis#2208 inverted `Frame::get` to prefer the
@@ -4768,11 +4798,12 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
     .remove(0);
     assert_eq!(
         describe_value(&RuntimeValue::Closure {
-            checked_function: Box::new(checked_function),
-            params: vec!["x".to_string()],
-            param_types: vec![None],
+            checked_function: std::sync::Arc::new(checked_function),
+            params: vec!["x".to_string()].into(),
+            param_types: vec![None].into(),
             return_type: None,
             checked_signature: None,
+            entry_types: Default::default(),
             invocation_contracts: Box::default(),
             body: super::closure_body::ClosureBody::new(chelis_deep::ast::Expr::Atom(
                 chelis_deep::ast::Atom::Bool(false),

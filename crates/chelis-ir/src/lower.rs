@@ -2039,7 +2039,7 @@ impl SubexprLoweringContext {
     pub fn local_ascription_binding_regions(
         &self,
         bindings: &Expr,
-        _declaration_name: Option<&str>,
+        declaration_name: Option<&str>,
     ) -> Vec<LocalAscriptionBindingRegion> {
         let bind_kids = match bindings.carrier() {
             ExprCarrier::DecodedNode(DeepTag::Bind, _, children) => children,
@@ -2050,6 +2050,20 @@ impl SubexprLoweringContext {
             | ExprCarrier::MetadataMap(_)
             | ExprCarrier::MetadataExpression(_) => return Vec::new(),
         };
+        self.local_ascription_binding_pair_regions(
+            &bind_kids.iter().collect::<Vec<_>>(),
+            declaration_name,
+        )
+    }
+
+    /// [`Self::local_ascription_binding_regions`] over borrowed alternating
+    /// binder and initializer positions, so a caller that flattens nested
+    /// binding layers copies no syntax to ask (chelis#3778).
+    pub fn local_ascription_binding_pair_regions(
+        &self,
+        bind_kids: &[&Expr],
+        _declaration_name: Option<&str>,
+    ) -> Vec<LocalAscriptionBindingRegion> {
 
         #[derive(Default)]
         struct RegionParts {
