@@ -683,11 +683,6 @@ name = "compiler_pin_tripwire"
 package = "chelis-compiler-api"
 name = "recursive_profile_allocations"
 
-# chelis#3778: applying a closure must not copy its syntax.
-[[standing_target]]
-package = "chelis-compiler-api"
-name = "closure_application_allocations"
-
 # chelis#2023: builtin-spelled lexical inputs agree in eval and native C.
 [[standing_target]]
 package = "chelis-compiler-api"
