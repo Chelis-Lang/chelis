@@ -120,6 +120,13 @@ impl ParamMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OwnerOrigin {
     Owned,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "host lowering mints no borrowed-from owner; verification still checks the provenance of any program that carries one"
+        )
+    )]
     BorrowedFrom(OwnerId),
     ExternalBorrow,
 }

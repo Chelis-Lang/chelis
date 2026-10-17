@@ -52,6 +52,12 @@ impl HostVerification {
     }
 }
 
+mod live;
+
+use live::{LiveSet, UnitOwnerFacts};
+#[cfg(test)]
+pub(super) use live::{live_entry_visits, with_reference_scans_counted};
+
 #[cfg(test)]
 thread_local! {
     static CALL_GRAPH_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -1069,8 +1075,12 @@ fn verify_unit(
     check_params(unit)?;
     check_reachable(unit, &blocks)?;
 
+    let owner_facts = UnitOwnerFacts::new(unit);
     let entry = blocks[&unit.entry];
-    let initial: BTreeSet<_> = entry.params.iter().map(|p| p.owner).collect();
+    let mut initial = LiveSet::new(&owner_facts);
+    for param in &entry.params {
+        initial.insert(param.owner);
+    }
     let mut incoming = BTreeMap::from([(unit.entry, initial)]);
     let mut queue = VecDeque::from([unit.entry]);
     let mut max_live_heap_owners = 0;
@@ -1080,8 +1090,8 @@ fn verify_unit(
         let block = blocks[&id];
         let mut live = incoming[&id].clone();
         check_borrows(unit, block.id, &live)?;
-        max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live));
-        local_max_live_bytes = local_max_live_bytes.maximum(live_byte_cost(unit, &live)?);
+        max_live_heap_owners = max_live_heap_owners.max(live.heap_owned_count());
+        local_max_live_bytes = local_max_live_bytes.maximum(live.byte_cost()?);
         for operation in &block.ops {
             if let Op::Apply {
                 kind: ApplyKind::DirectCall { callee },
@@ -1089,15 +1099,14 @@ fn verify_unit(
                 ..
             } = &operation.kind
             {
-                let mut carry = live.clone();
-                for arg in args {
-                    if arg.use_ == OwnershipUse::Move {
-                        carry.remove(&arg.owner);
-                    }
-                }
+                let moved = args
+                    .iter()
+                    .filter(|arg| arg.use_ == OwnershipUse::Move)
+                    .map(|arg| arg.owner)
+                    .collect();
                 direct_calls.push(DirectCallLiveCost {
                     callee: *callee,
-                    carry: live_byte_cost(unit, &carry)?,
+                    carry: live.byte_cost_without(&moved)?,
                 });
             }
             if let Some(dest) = destination(&operation.kind)
@@ -1105,7 +1114,7 @@ fn verify_unit(
             {
                 // Account for the transient point after result allocation and
                 // before moved inputs receive their post-operation terminal.
-                max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live) + 1);
+                max_live_heap_owners = max_live_heap_owners.max(live.heap_owned_count() + 1);
                 if !matches!(
                     &operation.kind,
                     Op::Apply {
@@ -1114,7 +1123,7 @@ fn verify_unit(
                     }
                 ) {
                     local_max_live_bytes = local_max_live_bytes.maximum(add_live_byte_bounds(
-                        live_byte_cost(unit, &live)?,
+                        live.byte_cost()?,
                         owner_byte_cost(unit, dest)?,
                     ));
                 }
@@ -1128,8 +1137,8 @@ fn verify_unit(
                 callable_schemas,
                 &mut live,
             )?;
-            max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live));
-            local_max_live_bytes = local_max_live_bytes.maximum(live_byte_cost(unit, &live)?);
+            max_live_heap_owners = max_live_heap_owners.max(live.heap_owned_count());
+            local_max_live_bytes = local_max_live_bytes.maximum(live.byte_cost()?);
         }
         verify_terminator(
             unit,
@@ -1308,14 +1317,6 @@ fn operation_exists_in_block(unit: &Unit, block: BlockId, operation: OpId) -> bo
         })
 }
 
-fn live_heap_count(unit: &Unit, live: &BTreeSet<OwnerId>) -> usize {
-    live.iter()
-        .filter(|owner| {
-            unit.owners[owner].origin == OwnerOrigin::Owned && unit.owners[owner].class.is_heap()
-        })
-        .count()
-}
-
 /// Sum two live-byte bounds. A sum beyond u64 has no finite representable
 /// bound and is [`super::LiveByteBound::Unbounded`]: the summary is an
 /// analysis result, never a reason to refuse a program whose allocations each
@@ -1385,24 +1386,6 @@ fn owner_byte_cost(unit: &Unit, owner: OwnerId) -> Result<super::LiveByteBound, 
     Ok(elements
         .checked_mul(width)
         .map_or(super::LiveByteBound::Unbounded, super::LiveByteBound::Exact))
-}
-
-fn live_byte_cost(
-    unit: &Unit,
-    live: &BTreeSet<OwnerId>,
-) -> Result<super::LiveByteBound, OwnershipError> {
-    let mut result = super::LiveByteBound::Exact(0);
-    for owner in live {
-        let info = unit
-            .owners
-            .get(owner)
-            .ok_or_else(|| incomplete(unit, *owner, "metadata"))?;
-        if info.origin != OwnerOrigin::Owned || !info.class.is_heap() {
-            continue;
-        }
-        result = add_live_byte_bounds(result, owner_byte_cost(unit, *owner)?);
-    }
-    Ok(result)
 }
 
 /// The strongly connected components of the direct-call graph, found by one
@@ -1884,7 +1867,7 @@ fn verify_op(
     definitions: &BTreeSet<OwnerId>,
     units: &BTreeMap<UnitId, &Unit>,
     callable_schemas: &BTreeMap<UnitId, CallableSchema>,
-    live: &mut BTreeSet<OwnerId>,
+    live: &mut LiveSet<'_>,
 ) -> Result<(), OwnershipError> {
     match op {
         Op::Define { dest, .. } => define(unit, *dest, live),
@@ -2082,13 +2065,13 @@ fn verify_op(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn verify_terminator(
+fn verify_terminator<'a>(
     unit: &Unit,
     block: &Block,
     definitions: &BTreeSet<OwnerId>,
     blocks: &BTreeMap<BlockId, &Block>,
-    live: &BTreeSet<OwnerId>,
-    incoming: &mut BTreeMap<BlockId, BTreeSet<OwnerId>>,
+    live: &LiveSet<'a>,
+    incoming: &mut BTreeMap<BlockId, LiveSet<'a>>,
     queue: &mut VecDeque<BlockId>,
 ) -> Result<(), OwnershipError> {
     match &block.terminator {
@@ -2231,14 +2214,14 @@ fn verify_terminator(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn transfer(
+fn transfer<'a>(
     unit: &Unit,
     block: &Block,
     edge: &Edge,
     definitions: &BTreeSet<OwnerId>,
     blocks: &BTreeMap<BlockId, &Block>,
-    live: &BTreeSet<OwnerId>,
-    incoming: &mut BTreeMap<BlockId, BTreeSet<OwnerId>>,
+    live: &LiveSet<'a>,
+    incoming: &mut BTreeMap<BlockId, LiveSet<'a>>,
     queue: &mut VecDeque<BlockId>,
 ) -> Result<(), OwnershipError> {
     let target = blocks
@@ -2283,7 +2266,9 @@ fn transfer(
             next.remove(&param.owner);
         }
     }
-    next.extend(target.params.iter().map(|p| p.owner));
+    for param in &target.params {
+        next.insert(param.owner);
+    }
     for terminal in &edge.terminals {
         verify_edge_terminal(unit, block.id, terminal.kind, definitions, &mut next)?;
     }
@@ -2311,7 +2296,7 @@ fn verify_edge_terminal(
     block: BlockId,
     terminal: Terminal,
     definitions: &BTreeSet<OwnerId>,
-    live: &mut BTreeSet<OwnerId>,
+    live: &mut LiveSet<'_>,
 ) -> Result<(), OwnershipError> {
     let owner = terminal.owner();
     if !definitions.contains(&owner) {
@@ -2403,7 +2388,7 @@ fn use_operand(
     operand: &Operand,
     expected: Option<OwnershipUse>,
     definitions: &BTreeSet<OwnerId>,
-    live: &mut BTreeSet<OwnerId>,
+    live: &mut LiveSet<'_>,
 ) -> Result<(), OwnershipError> {
     if !definitions.contains(&operand.owner) {
         return Err(incomplete(unit, operand.owner, "definition"));
@@ -2440,9 +2425,7 @@ fn use_operand(
                 block: block.0,
             });
         }
-        if let Some(borrow) = live.iter().find(|candidate| {
-            unit.owners[candidate].origin == OwnerOrigin::BorrowedFrom(operand.owner)
-        }) {
+        if let Some(borrow) = live.first_borrow_of(operand.owner) {
             return Err(OwnershipError::LiveBorrowAtConsume {
                 unit: unit.name.clone(),
                 owner: operand.owner.0,
@@ -2455,7 +2438,7 @@ fn use_operand(
     Ok(())
 }
 
-fn define(unit: &Unit, owner: OwnerId, live: &mut BTreeSet<OwnerId>) -> Result<(), OwnershipError> {
+fn define(unit: &Unit, owner: OwnerId, live: &mut LiveSet<'_>) -> Result<(), OwnershipError> {
     if unit.owners[&owner].origin != OwnerOrigin::Owned {
         return Err(OwnershipError::BadClass {
             unit: unit.name.clone(),
@@ -2467,13 +2450,9 @@ fn define(unit: &Unit, owner: OwnerId, live: &mut BTreeSet<OwnerId>) -> Result<(
     Ok(())
 }
 
-fn check_borrows(
-    unit: &Unit,
-    block: BlockId,
-    live: &BTreeSet<OwnerId>,
-) -> Result<(), OwnershipError> {
-    for owner in live {
-        if let OwnerOrigin::BorrowedFrom(source) = unit.owners[owner].origin
+fn check_borrows(unit: &Unit, block: BlockId, live: &LiveSet<'_>) -> Result<(), OwnershipError> {
+    for owner in live.iter() {
+        if let OwnerOrigin::BorrowedFrom(source) = unit.owners[&owner].origin
             && !live.contains(&source)
         {
             return Err(OwnershipError::OwnerNotLive {
@@ -2486,11 +2465,7 @@ fn check_borrows(
     Ok(())
 }
 
-fn check_terminal(
-    unit: &Unit,
-    block: BlockId,
-    live: &BTreeSet<OwnerId>,
-) -> Result<(), OwnershipError> {
+fn check_terminal(unit: &Unit, block: BlockId, live: &LiveSet<'_>) -> Result<(), OwnershipError> {
     if let Some(owner) = live
         .iter()
         .find(|owner| unit.owners[owner].origin == OwnerOrigin::Owned)
@@ -2508,10 +2483,11 @@ fn check_terminal(
 /// The owners live in `from` and not in `to`, labelled with their source
 /// binding names. A join mismatch is only actionable if the reader can see
 /// which owner the two paths disagree about (chelis#2122).
-fn owner_difference(unit: &Unit, from: &BTreeSet<OwnerId>, to: &BTreeSet<OwnerId>) -> String {
+fn owner_difference(unit: &Unit, from: &LiveSet<'_>, to: &LiveSet<'_>) -> String {
     let labels = from
-        .difference(to)
-        .map(|owner| crate::ownership::render::owner_label(unit, *owner))
+        .iter()
+        .filter(|owner| !to.contains(owner))
+        .map(|owner| crate::ownership::render::owner_label(unit, owner))
         .collect::<Vec<_>>();
     if labels.is_empty() {
         "none".to_string()

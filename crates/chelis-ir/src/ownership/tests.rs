@@ -4252,3 +4252,122 @@ fn call_graph_components_agree_with_pairwise_reachability() {
         super::verify::verify(&RawProgram { units }).unwrap();
     }
 }
+
+/// chelis#2330: `n` fixed tensors defined in one block, carried across a jump
+/// and dropped in reverse order in the next. Every operation reads the
+/// live-heap count and live-byte bound, every drop moves an owner, and the
+/// jump copies and checks the whole live set once per block.
+fn wide_live_set_program(count: u32) -> RawProgram {
+    let defines = (0..count).map(define).collect::<Vec<_>>();
+    let drops = (0..count)
+        .rev()
+        .map(|owner| Op::Drop {
+            owner: Operand::move_(OwnerId(owner)),
+        })
+        .collect::<Vec<_>>();
+    roots(
+        vec![
+            block(0, vec![], defines, Terminator::Jump(edge(1, vec![]))),
+            block(1, vec![], drops, Terminator::Exit),
+        ],
+        (0..count)
+            .map(|owner| (OwnerId(owner), fixed_tensor_info(4)))
+            .collect(),
+    )
+}
+
+/// The live-set entries one `verify` visits for each size in a doubling sweep.
+fn live_entry_visit_sweep(sizes: &[u32]) -> Vec<u64> {
+    sizes
+        .iter()
+        .map(|&count| {
+            let before = super::verify::live_entry_visits();
+            let verified = super::verify::verify(&wide_live_set_program(count)).unwrap();
+            assert_eq!(
+                verified.live_set_bound().max_live_heap_owners(),
+                count as usize
+            );
+            assert_eq!(
+                verified.live_set_bound().max_live_bytes,
+                LiveByteBound::Exact(16 * u64::from(count))
+            );
+            super::verify::live_entry_visits() - before
+        })
+        .collect()
+}
+
+#[test]
+fn verify_reads_live_set_aggregates_without_rescanning_the_live_set() {
+    // The quadratic quantity itself (chelis#2330): live-set entries visited
+    // across the whole verification. A per-operation scan of a live set that
+    // grows with the body makes it grow about 4x per doubling.
+    let visits = live_entry_visit_sweep(&[80, 160, 320, 640]);
+    assert!(
+        max_doubling_ratio(&visits) <= 2.2,
+        "live-set entries visited per doubling must stay linear: {visits:?}"
+    );
+}
+
+#[test]
+fn live_set_visit_guard_catches_a_reintroduced_per_operation_scan() {
+    // Negative control: the test build cross-checks every running aggregate
+    // against a full scan of the live set. Counting those scans is exactly a
+    // per-operation rescan, and the guard above must see it go quadratic.
+    let visits = super::verify::with_reference_scans_counted(|| {
+        live_entry_visit_sweep(&[80, 160, 320, 640])
+    });
+    assert!(
+        max_doubling_ratio(&visits) >= 3.5,
+        "a per-operation live-set scan must read as quadratic: {visits:?}"
+    );
+}
+
+/// chelis#2330: the running live-byte totals reproduce the owner-order sum
+/// even where that sum depends on order. With an unknown cost on the lowest
+/// owner, the sum is unknown before the two exact costs overflow u64; the
+/// test build cross-checks every read against that ordered full scan.
+#[test]
+fn running_live_byte_totals_keep_the_owner_order_sum() {
+    let half = 1usize << 61;
+    let dynamic = value_info(
+        ConcreteHostType::Tensor(TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        }),
+        OwnerOrigin::Owned,
+    );
+    let program = |owners: [OwnerInfo; 3]| {
+        let mut ops = (0..3).map(define).collect::<Vec<_>>();
+        ops.extend((0..3).rev().map(|owner| Op::Drop {
+            owner: Operand::move_(OwnerId(owner)),
+        }));
+        roots(
+            vec![block(0, vec![], ops, Terminator::Exit)],
+            owners
+                .into_iter()
+                .enumerate()
+                .map(|(owner, info)| (OwnerId(u32::try_from(owner).unwrap()), info))
+                .collect(),
+        )
+    };
+    let unknown_first = program([
+        dynamic.clone(),
+        fixed_tensor_info(half),
+        fixed_tensor_info(half),
+    ]);
+    assert_eq!(
+        super::verify::verify(&unknown_first)
+            .unwrap()
+            .live_set_bound()
+            .max_live_bytes,
+        LiveByteBound::Unknown
+    );
+    let unknown_last = program([fixed_tensor_info(half), fixed_tensor_info(half), dynamic]);
+    assert_eq!(
+        super::verify::verify(&unknown_last)
+            .unwrap()
+            .live_set_bound()
+            .max_live_bytes,
+        LiveByteBound::Unbounded
+    );
+}
