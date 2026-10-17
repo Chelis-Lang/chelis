@@ -34,9 +34,17 @@ struct ExpandedCfg {
 )]
 pub(super) struct ScheduleFacts {
     cfgs: BTreeMap<UnitId, ExpandedCfg>,
+    verification: super::verify::HostVerification,
 }
 
 impl ScheduleFacts {
+    /// The verification of the scheduled program `schedule` returned with.
+    /// The program it describes is the one `schedule` left in place; the
+    /// caller seals both together (chelis#3730).
+    pub(super) fn into_verification(self) -> super::verify::HostVerification {
+        self.verification
+    }
+
     #[cfg(test)]
     pub(super) fn postdominates(
         &self,
@@ -195,9 +203,8 @@ pub(super) fn schedule(
     rebuild_host_sites(program, sites, &placed_by_unit)?;
     upgrade_copy_last_use_moves(program, sites)?;
     upgrade_container_last_use_moves(program, sites)?;
-    let facts = ScheduleFacts { cfgs };
-    super::verify::verify(program)?;
-    Ok(facts)
+    let verification = super::verify::verify(program)?;
+    Ok(ScheduleFacts { cfgs, verification })
 }
 
 /// chelis#2205: consume a container at its scheduled last use.

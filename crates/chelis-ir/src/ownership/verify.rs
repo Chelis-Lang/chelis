@@ -60,7 +60,14 @@ pub(super) use live::{live_entry_visits, with_reference_scans_counted};
 
 #[cfg(test)]
 thread_local! {
+    static VERIFY_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static CALL_GRAPH_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Whole-program verifications run on this thread.
+#[cfg(test)]
+pub(super) fn verify_calls() -> u64 {
+    VERIFY_CALLS.with(std::cell::Cell::get)
 }
 
 /// Call-graph nodes and calls visited on this thread while finding the
@@ -71,6 +78,8 @@ pub(super) fn call_graph_visits() -> u64 {
 }
 
 pub(super) fn verify(program: &OwnershipProgram) -> Result<HostVerification, OwnershipError> {
+    #[cfg(test)]
+    VERIFY_CALLS.with(|calls| calls.set(calls.get() + 1));
     if super::last_use::has_schedule(program) {
         super::last_use::verify_canonical(program)?;
     }

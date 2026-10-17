@@ -4371,3 +4371,40 @@ fn running_live_byte_totals_keep_the_owner_order_sum() {
         LiveByteBound::Unbounded
     );
 }
+
+fn lower_source_for_ownership(source: &str) -> super::HostOwnershipProgram {
+    let declarations = chelis_surf::parser::parse_str(source).expect("surf parse");
+    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("desugar");
+    let checked = chelis_types::check_typed_program(&deep)
+        .unwrap_or_else(|errors| panic!("type check: {:?}", errors.errors));
+    let checked = chelis_effects::check_program(&checked)
+        .unwrap_or_else(|error| panic!("effects: {error:?}"));
+    let checked = chelis_types::check_linearity(&checked)
+        .unwrap_or_else(|error| panic!("linearity: {error:?}"));
+    let realizability =
+        chelis_effects::realizability::infer_realizability(&checked, &[Prim::F32, Prim::Bool]);
+    let manifest = chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
+    let compiled = crate::host::try_lower_compiled_program_with_manifest(&checked, &manifest)
+        .unwrap_or_else(|diagnostic| panic!("host lowering: {diagnostic:?}"));
+    let host = compiled.host.expect("test source must have a host lane");
+    let manifested = chelis_types::manifest::ManifestedProgram::new(
+        checked,
+        manifest,
+        chelis_types::types::Target::C,
+    );
+    super::lower_host_ownership(&manifested, host).unwrap()
+}
+
+#[test]
+fn host_build_verifies_each_distinct_ownership_program_once() {
+    // chelis#3730: the conservative pre-schedule graph and the scheduled
+    // program are verified once each. The boundary reuses the scheduled
+    // program's verification rather than running it again on the same
+    // sealed program.
+    let source = "def bump(x: i64) -> i64 = add(x, 1i64)\nr = bump(3i64)\n";
+    let before = super::verify::verify_calls();
+    let lowered = lower_source_for_ownership(source);
+    let verified = super::verify_ownership(lowered).unwrap();
+    assert_eq!(super::verify::verify_calls() - before, 2);
+    assert!(verified.render().contains("unit bump Function"));
+}
