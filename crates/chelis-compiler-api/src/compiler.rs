@@ -2575,6 +2575,30 @@ pub fn eval_decls_selected_with_library(
     eval_compiled(&compiled, bindings, Some(selected_root_names))
 }
 
+/// [`eval_decls_selected_with_library`] split at its compile: check and lower
+/// the declarations against the library once, then evaluate any number of
+/// their roots through [`PreparedEval::eval_root`]. Each root evaluates as
+/// [`eval_decls_selected_with_library`] would evaluate it alone; the compile
+/// and the host program the evaluator composes are shared by every call.
+pub fn prepare_decls_with_library(
+    library: &crate::stdlib_cache::StdLibContext,
+    decls: &[Decl],
+) -> Result<PreparedEval> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    let lowered = library.library_dag().ok_or_else(|| {
+        stage_error(
+            "lower",
+            "the prepared library has no lowering product",
+            GeneralKind::LowerError,
+        )
+    })?;
+    let compiled =
+        compile_decls_against_library(library.checked_library(), lowered, decls, Target::Eval)?;
+    Ok(PreparedEval {
+        compiled: std::sync::Arc::new(compiled),
+    })
+}
+
 /// Compile the source once, then evaluate it once per entry in `test_roots`,
 /// returning a parallel Vec of per-root `(name, Result<EvalResult>)` pairs.
 ///
@@ -2798,6 +2822,7 @@ fn compile_decls_against_library(
     rewritten: &[Decl],
     target: Target,
 ) -> Result<CompiledSource> {
+    EVAL_COMPILATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     bail_if_cancelled("desugar")?;
     let prepared = crate::pipeline::prepare_surf_decls_with_context(
         rewritten,
@@ -3658,6 +3683,19 @@ pub fn eval_program_fact_derivations() -> u64 {
     EVAL_PROGRAM_FACT_DERIVATIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Programs checked for evaluation since the process started, whether the
+/// check succeeds or not: a whole program from source or declarations, or new
+/// declarations against a prepared library. A work counter that lets a test
+/// assert a caller compiles once for many evaluations rather than once per
+/// evaluation (chelis#3117).
+static EVAL_COMPILATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn eval_compilations() -> u64 {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    EVAL_COMPILATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl CompiledSource {
     fn checked(&self) -> &CheckedProgram {
         self.program.checked()
@@ -4158,6 +4196,7 @@ fn compile_source_scoped_mode(
     codegen: bool,
     #[cfg(feature = "compilation-trace")] collect_trace: bool,
 ) -> Result<CompiledSource> {
+    EVAL_COMPILATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // eval_for_target(C) still evaluates a value graph using a C manifest;
     // requesting that manifest must not silently select native host emission.
     let planned_c = codegen && target == Target::C;
@@ -4191,6 +4230,7 @@ fn compile_decls_for_eval(
     entry: Option<&str>,
     target: Target,
 ) -> Result<CompiledSource> {
+    EVAL_COMPILATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     bail_if_cancelled("parse")?;
     let prepared = crate::pipeline::prepare_surf_decls(decls, entry)
         .map_err(|error| {

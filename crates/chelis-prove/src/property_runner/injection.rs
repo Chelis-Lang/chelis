@@ -26,6 +26,7 @@ use crate::composition::{
 };
 use crate::smt_names::fresh_root_name;
 
+use super::sample_batch::{AttemptDraws, CompiledProbes, Draw, Drawn, ProbeRoots, SampleLane};
 use super::{PropertyOutcome, PropertyRunOptions, PropertyStatus, PropertyTier};
 
 /// Does this property have at least one binder whose type is an
@@ -377,60 +378,53 @@ pub(super) fn prove_with_injection(
     let max_attempts = max_injection_attempts(samples_needed, options.max_attempts);
     let mut attempts = 0usize;
 
-    while accepted < samples_needed && attempts < max_attempts {
-        attempts += 1;
-        // Sample each binder. Opaque binders are generated invariant-valid
-        // (the injected assumption); on starvation, report. Each binding
-        // carries its Deep value expr and a JSON repr for counterexamples.
+    let lane = InjectionLane::new(
+        &exprs,
+        &home_type,
+        (!pre_deep.is_empty()).then(|| conjoin(&pre_deep)),
+        &body_deep,
+    );
+    let mut draws = AttemptDraws::new(&lane, max_attempts);
+    let sample_context = SampleContext {
+        exprs: &exprs,
+        invariants: &invariants,
+        consts: &consts,
+        module_source: &module_source,
+        options,
+        gen_budget,
+    };
+    // Sample each binder. Opaque binders are generated invariant-valid (the
+    // injected assumption); on starvation, report. Each binding carries its
+    // Deep value expr and a JSON repr for counterexamples.
+    let mut draw = |_attempt: usize| {
         let mut bindings = Vec::new();
-        let sample_context = SampleContext {
-            exprs: &exprs,
-            invariants: &invariants,
-            consts: &consts,
-            module_source: &module_source,
-            options,
-            gen_budget,
-        };
         for binder in &binders {
             match sample_plan(&binder.plan, &binder.name, &mut rng, &sample_context) {
                 Ok((value, json)) => bindings.push(EvalBinding::new(&binder.name, value, json)),
-                Err(error) => match *error {
-                    (_, crate::opaque::GenerationFailure::ProbeRejected(reason)) => {
-                        return outcome_error(property_name, seed, reason);
-                    }
-                    (path, crate::opaque::GenerationFailure::Starved(diag)) => {
-                        if options.invariant_min_rate == 0.0 {
-                            return outcome(
-                                property_name,
-                                PropertyStatus::Error,
-                                0,
-                                seed,
-                                None,
-                                Some(format!(
-                                    "generator exhausted for invariant binder `{}` of type `{}`",
-                                    path, diag.type_name
-                                )),
-                                Vec::new(),
-                            );
-                        }
-                        return outcome(
-                            property_name,
-                            PropertyStatus::Unsupported,
-                            0,
-                            seed,
-                            None,
-                            Some(diag.message()),
-                            Vec::new(),
-                        );
-                    }
-                },
+                Err(error) => {
+                    return Draw::Ends(generation_failure_outcome(
+                        property_name,
+                        seed,
+                        options,
+                        *error,
+                    ));
+                }
             }
         }
+        Draw::Sample(bindings)
+    };
+
+    while accepted < samples_needed && attempts < max_attempts {
+        attempts += 1;
+        let (batch, index) = match draws.next(&mut draw) {
+            Drawn::Sample { batch, index } => (batch, index),
+            Drawn::Failed(outcome) => return outcome,
+        };
 
         // Precondition filter (composed with the injected invariant by the
         // generator already restricting opaque binders).
         if !pre_deep.is_empty() {
-            match eval_bool_in_module(&exprs, &home_type, &bindings, &conjoin(&pre_deep)) {
+            match batch.eval(index, true) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(e) => return outcome_error(property_name, seed, e),
@@ -438,10 +432,10 @@ pub(super) fn prove_with_injection(
         }
 
         accepted += 1;
-        match eval_bool_in_module(&exprs, &home_type, &bindings, &body_deep) {
+        match batch.eval(index, false) {
             Ok(true) => {}
             Ok(false) => {
-                let cx = counterexample(&bindings);
+                let cx = counterexample(batch.sample(index));
                 return outcome(
                     property_name,
                     PropertyStatus::Failed,
@@ -473,6 +467,247 @@ pub(super) fn prove_with_injection(
         None,
         injection_assumptions(property_name, &binders, samples_needed, seed),
     )
+}
+
+/// The outcome a binder whose value could not be generated ends the run with.
+fn generation_failure_outcome(
+    property_name: &str,
+    seed: u64,
+    options: &PropertyRunOptions,
+    failure: (String, crate::opaque::GenerationFailure),
+) -> PropertyOutcome {
+    match failure {
+        (_, crate::opaque::GenerationFailure::ProbeRejected(reason)) => {
+            outcome_error(property_name, seed, reason)
+        }
+        (path, crate::opaque::GenerationFailure::Starved(diag)) => {
+            if options.invariant_min_rate == 0.0 {
+                return outcome(
+                    property_name,
+                    PropertyStatus::Error,
+                    0,
+                    seed,
+                    None,
+                    Some(format!(
+                        "generator exhausted for invariant binder `{}` of type `{}`",
+                        path, diag.type_name
+                    )),
+                    Vec::new(),
+                );
+            }
+            outcome(
+                property_name,
+                PropertyStatus::Unsupported,
+                0,
+                seed,
+                None,
+                Some(diag.message()),
+                Vec::new(),
+            )
+        }
+    }
+}
+
+/// The injection lane: each probe, and the helpers that build its opaque
+/// values, join the property's module program, as [`eval_bool_in_module`]
+/// declares them for one sample.
+struct InjectionLane<'a> {
+    exprs: &'a [Expr],
+    home_type: &'a str,
+    guard: Option<Expr>,
+    body: &'a Expr,
+    /// `exprs` with invariant metadata stripped, as every probe program
+    /// carries it, and every name it spells.
+    stripped: Vec<Expr>,
+    names: crate::smt_names::NameSupply,
+}
+
+impl<'a> InjectionLane<'a> {
+    fn new(exprs: &'a [Expr], home_type: &'a str, guard: Option<Expr>, body: &'a Expr) -> Self {
+        let stripped = exprs.iter().map(strip_invariant_meta).collect::<Vec<_>>();
+        let names = crate::smt_names::NameSupply::for_deep_program(&stripped);
+        Self {
+            exprs,
+            home_type,
+            guard,
+            body,
+            stripped,
+            names,
+        }
+    }
+
+    fn predicate(&self, precondition: bool) -> Option<&Expr> {
+        if precondition {
+            self.guard.as_ref()
+        } else {
+            Some(self.body)
+        }
+    }
+}
+
+impl SampleLane for InjectionLane<'_> {
+    type Sample = Vec<EvalBinding>;
+
+    fn guarded(&self) -> bool {
+        self.guard.is_some()
+    }
+
+    fn eval_alone(&self, sample: &Self::Sample, precondition: bool) -> Result<bool, String> {
+        let predicate = self
+            .predicate(precondition)
+            .expect("an unguarded property evaluates no guard");
+        eval_bool_in_module(self.exprs, self.home_type, sample, predicate)
+    }
+
+    fn compile(&self, samples: &[Self::Sample]) -> Option<CompiledProbes> {
+        use chelis_compiler_api::schema::{EvalRequest, SourceKind};
+        let mut program = ProbeProgram::new(&self.stripped, self.names.clone());
+        let mut roots = Vec::with_capacity(samples.len());
+        for bindings in samples {
+            let mut probe = |predicate: &Expr| {
+                let mut wrapped = predicate.clone();
+                for binding in bindings.iter().rev() {
+                    let value = program.materialize(&binding.value);
+                    wrapped = node(
+                        "let",
+                        vec![node("bind", vec![sym(&binding.name), value]), wrapped],
+                    );
+                }
+                program.probe(self.home_type, wrapped)
+            };
+            let pre = self.guard.as_ref().map(&mut probe);
+            let probe = probe(self.body);
+            roots.push(ProbeRoots { pre, probe });
+        }
+        // The probes join the module program the injection lane has always
+        // evaluated, compiled once for every probe.
+        #[allow(deprecated)]
+        let prepared = chelis_compiler_api::compiler::prepare_eval(EvalRequest {
+            source_kind: SourceKind::Deep,
+            source: chelis_deep::printer::print_canonical(&program.finish()),
+            bindings: Default::default(),
+        })
+        .ok()?;
+        Some(CompiledProbes::new(prepared, roots))
+    }
+}
+
+/// A module program that probes and value helpers are declared into, many at
+/// once. Each declaration lands where [`inject_probe_into_defining_module`]
+/// and [`inject_owned_value_helper`] place it, named fresh against the
+/// program and every declaration already added, and the program is rebuilt
+/// once at the end rather than once per declaration.
+struct ProbeProgram<'p> {
+    base: &'p [Expr],
+    names: crate::smt_names::NameSupply,
+    /// The module each type's declarations join: the first `module` that
+    /// defines it, or the first `module` for the empty type name; `None` when
+    /// they join the top level.
+    targets: std::collections::BTreeMap<String, Option<usize>>,
+    /// Declarations appended to `base[index]`'s module, in order.
+    into_module: std::collections::BTreeMap<usize, Vec<Expr>>,
+    /// Declarations appended after `base`, in order.
+    top_level: Vec<Expr>,
+}
+
+impl<'p> ProbeProgram<'p> {
+    fn new(base: &'p [Expr], names: crate::smt_names::NameSupply) -> Self {
+        Self {
+            base,
+            names,
+            targets: Default::default(),
+            into_module: Default::default(),
+            top_level: Vec::new(),
+        }
+    }
+
+    fn target(&mut self, type_name: &str) -> Option<usize> {
+        let base = self.base;
+        *self
+            .targets
+            .entry(type_name.to_string())
+            .or_insert_with(|| {
+                base.iter().position(|expr| {
+                    list_tag(expr) == Some(DeepTag::Module)
+                        && (type_name.is_empty() || module_defines(expr, type_name))
+                        && matches!(expr, Expr::Node(..))
+                })
+            })
+    }
+
+    /// Append `decl` where a lexical declaration for `type_name` goes, or to
+    /// the top level for a linked one.
+    fn append(&mut self, type_name: &str, linked: bool, decl: Expr) {
+        self.names.reserve_deep(&decl);
+        let target = if linked { None } else { self.target(type_name) };
+        match target {
+            Some(index) => self.into_module.entry(index).or_default().push(decl),
+            None => self.top_level.push(decl),
+        }
+    }
+
+    /// [`materialize_value`] against this program.
+    fn materialize(&mut self, value: &GeneratedValue) -> Expr {
+        match value {
+            GeneratedValue::Direct(expr) => expr.clone(),
+            GeneratedValue::Opaque { type_name, value } => {
+                let (helper, linked) = crate::smt_names::fresh_module_probe_name_in(
+                    &mut self.names,
+                    type_name,
+                    "chelis_value_probe",
+                    "__chelis_value_probe",
+                );
+                self.append(
+                    type_name,
+                    linked,
+                    node("def", vec![sym(&helper), value.clone()]),
+                );
+                self.append(type_name, linked, node("export", vec![sym(&helper)]));
+                var_node(&helper)
+            }
+            GeneratedValue::Record { ctor_name, fields } => {
+                let mut children = vec![sym(ctor_name)];
+                for (field, child) in fields {
+                    children.push(node("kv", vec![sym(field), self.materialize(child)]));
+                }
+                node("record", children)
+            }
+        }
+    }
+
+    /// Declare `body` as a probe in the module that defines `home_type`, as
+    /// [`inject_probe_into_defining_module`] does, and name it.
+    fn probe(&mut self, home_type: &str, body: Expr) -> String {
+        let (probe, linked) = crate::smt_names::fresh_module_probe_name_in(
+            &mut self.names,
+            home_type,
+            "chelis_prop_probe",
+            "__chelis_prop_probe",
+        );
+        self.append(home_type, linked, node("def", vec![sym(&probe), body]));
+        probe
+    }
+
+    fn finish(mut self) -> Vec<Expr> {
+        let mut out = Vec::with_capacity(self.base.len() + self.top_level.len());
+        for (index, expr) in self.base.iter().enumerate() {
+            match (self.into_module.remove(&index), expr) {
+                (Some(appended), Expr::Node(module, span)) => {
+                    let mut children = module.children_slice().to_vec();
+                    children.extend(appended);
+                    out.push(Expr::node(
+                        module.tag(),
+                        module.meta().clone(),
+                        children,
+                        *span,
+                    ));
+                }
+                _ => out.push(expr.clone()),
+            }
+        }
+        out.extend(self.top_level);
+        out
+    }
 }
 
 /// Outer rejection-loop attempt cap, computed exactly as the surf/deep fuzz

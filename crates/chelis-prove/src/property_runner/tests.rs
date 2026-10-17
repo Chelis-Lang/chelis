@@ -48,7 +48,14 @@ fn prepared_surf_samples_preserve_monolithic_guards_predicates_and_shrinking() {
             .remove(0);
         let deep = chelis_surf::desugar::desugar_program(&decls).unwrap();
         let roots = SampleRoots::for_program(&deep);
-        let library = chelis_compiler_api::build_declaration_context(&decls).unwrap();
+        let cell = SurfEvalProgramCell::new();
+        let Ok(program) = surf_eval_program(&decls, &cell) else {
+            panic!("{source}: the declaration context builds");
+        };
+        let lane = SurfLane {
+            program,
+            property: &property,
+        };
         let monolithic = |sample: &Sample, precondition: bool| {
             let mut whole = decls.clone();
             whole.push(Decl::LetDef {
@@ -59,29 +66,41 @@ fn prepared_surf_samples_preserve_monolithic_guards_predicates_and_shrinking() {
             });
             bool_property_root(chelis_compiler_api::compiler::eval_decls_selected(
                 &whole,
-                sample_bindings(sample),
+                BTreeMap::new(),
                 &[roots.select(precondition).to_string()],
             ))
         };
         let mut rng = Lcg::new(0);
-        for attempt in 0..8 {
-            let sample = sample_property(&property, &mut rng, attempt).unwrap();
+        let samples = (0..8)
+            .map(|attempt| sample_property(&property, &mut rng, attempt).unwrap())
+            .collect::<Vec<_>>();
+        // One compile holds every sample's probes; each answers as the
+        // sample's own whole program does.
+        let batch = sample_batch::SampleBatch::new(&lane, samples.clone());
+        for (index, sample) in samples.iter().enumerate() {
             for precondition in [true, false] {
+                let expected = monolithic(sample, precondition).expect("baseline sample executes");
                 assert_eq!(
-                    eval_surf_sample(&library, &property, &roots, &sample, precondition),
-                    Ok(monolithic(&sample, precondition).expect("baseline sample executes")),
+                    eval_surf_sample(&program.library, &property, &roots, sample, precondition),
+                    Ok(expected),
                     "{source}"
                 );
+                if precondition && property.preconditions.is_empty() {
+                    continue;
+                }
+                assert_eq!(batch.eval(index, precondition), Ok(expected), "{source}");
             }
             let still_fails = |sample: &Sample| {
                 (property.preconditions.is_empty() || matches!(monolithic(sample, true), Ok(true)))
                     && matches!(monolithic(sample, false), Ok(false))
             };
-            if still_fails(&sample) {
+            if still_fails(sample) {
                 let (expected, expected_steps) =
-                    shrink_counterexample(sample.clone(), &property.params, still_fails);
+                    shrink_counterexample(sample.clone(), &property.params, |trials| {
+                        trials.into_iter().find(|trial| still_fails(trial))
+                    });
                 let (actual, actual_steps) =
-                    shrink_surf_counterexample(&library, &property, &roots, sample);
+                    sample_batch::shrink_with_lane(sample.clone(), &property.params, &lane);
                 assert_eq!(
                     counterexample_json(&actual),
                     counterexample_json(&expected),
