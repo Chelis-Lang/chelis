@@ -104,7 +104,7 @@ fn a_build_with_declared_directories_passes_the_compiler_check_and_runs() {
 }
 
 #[test]
-fn a_relative_or_empty_declared_entry_fails_the_build() {
+fn a_relative_or_comma_declared_entry_fails_the_build() {
     for (include, library, variable, entry) in [
         (
             "include",
@@ -116,9 +116,9 @@ fn a_relative_or_empty_declared_entry_fails_the_build() {
         ("/abs/include", "lib", "CHELIS_C_LIBRARY_PATH", "\"lib\""),
         (
             "/abs/include",
-            "/abs/lib:",
+            "/abs/a,b/lib",
             "CHELIS_C_LIBRARY_PATH",
-            "empty entry",
+            "comma",
         ),
     ] {
         for emit_c in [true, false] {
@@ -136,4 +136,16 @@ fn a_relative_or_empty_declared_entry_fails_the_build() {
             assert!(!dir.path().join("program-out/program").exists());
         }
     }
+}
+
+/// A wrapper that prefixes a directory to an exported empty value leaves a
+/// trailing empty entry. That entry declares nothing.
+#[test]
+fn an_empty_declared_entry_declares_nothing() {
+    let dir = tempdir().unwrap();
+    let output = build(dir.path(), BLAS_PROGRAM, Some(("/abs/include:", ":")), true);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let stdout = text(&output.stdout);
+    assert!(stdout.contains("-isystem/abs/include"), "{stdout}");
+    assert!(!stdout.contains("-L"), "{stdout}");
 }

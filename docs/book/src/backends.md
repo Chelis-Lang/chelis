@@ -61,6 +61,21 @@ invalid value fails the build rather than falling back to another tool. When
 the compiler is GCC, parallel loops compile with OpenMP (`-fopenmp`); this
 changes speed, not results, because each parallel loop is element-wise.
 
+The C compiler runs with a cleared environment, so `CPATH`, `LIBRARY_PATH`
+and `NIX_CFLAGS_COMPILE` have no effect. To use C headers and libraries from
+other directories, such as an OpenBLAS installation, set
+`CHELIS_C_INCLUDE_PATH` and `CHELIS_C_LIBRARY_PATH`. Each is a
+colon-separated list of absolute directories. Each include directory adds
+`-isystemDIR` to the compile. Each library directory adds `-LDIR` and the
+run-time search path `-Wl,-rpath,DIR` to the link. A relative entry fails the
+build.
+
+```sh
+CHELIS_C_INCLUDE_PATH=/opt/openblas/include \
+CHELIS_C_LIBRARY_PATH=/opt/openblas/lib \
+  chelis build app.ch
+```
+
 ## Calling a static library from C
 
 Build a definitions-only module:

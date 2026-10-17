@@ -315,7 +315,8 @@ let
   # On Linux, a program whose C includes chelis_blas.h links OpenBLAS. The
   # compiler clears the C compiler environment. Thus the wrapper declares the
   # OpenBLAS directories through the two declared variables of
-  # spec/08-backends.md section 7. The prefix keeps the directories of the user.
+  # spec/08-backends.md section 7. The OpenBLAS directories come before the
+  # directories that the user declares.
   chelisWrapperArgs = [
     "--prefix"
     "PATH"

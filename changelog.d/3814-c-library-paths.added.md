@@ -5,6 +5,6 @@ colon-separated list of absolute directories. Each include directory adds
 `-Wl,-rpath,DIR` to the C link.
 
 `chelis build`, the compiler check and the Python bindings use these flags. A
-relative or empty entry fails the build. On Linux, the `chelis` Nix package
+relative entry fails the build. On Linux, the `chelis` Nix package
 declares the OpenBLAS directories, so a program that calls BLAS builds and
 runs. See [#3814](https://github.com/Chelis-Lang/chelis/issues/3814).

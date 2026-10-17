@@ -86,9 +86,11 @@ impl DeclaredCDirectories {
         )
     }
 
-    /// Parse the two variable values. An unset or empty value declares no
-    /// directory. A relative, empty or non-UTF-8 entry is an error. So is a
-    /// library entry with a comma, which `-Wl,-rpath,<dir>` cannot carry.
+    /// Parse the two variable values. An unset or empty value, and an empty
+    /// entry, declare no directory. A wrapper that prefixes a directory to an
+    /// empty value makes such an entry. A relative or non-UTF-8 entry is an
+    /// error. So is a library entry with a comma, which `-Wl,-rpath,<dir>`
+    /// cannot carry.
     pub fn parse(include: Option<&OsStr>, library: Option<&OsStr>) -> Result<Self, String> {
         Ok(Self {
             include: parse_directory_list(C_INCLUDE_PATH_VARIABLE, include, false)?,
@@ -137,12 +139,9 @@ fn parse_directory_list(
         .ok_or_else(|| format!("{variable} is not valid UTF-8: {}", value.to_string_lossy()))?;
     value
         .split(':')
+        .filter(|entry| !entry.is_empty())
         .map(|entry| {
-            if entry.is_empty() {
-                Err(format!(
-                    "{variable} has an empty entry in {value:?}: each entry must be an absolute directory"
-                ))
-            } else if !Path::new(entry).is_absolute() {
+            if !Path::new(entry).is_absolute() {
                 Err(format!(
                     "{variable} entry {entry:?} is not an absolute directory: each entry must be an absolute directory"
                 ))
@@ -1990,12 +1989,21 @@ mod tests {
                 "-Wl,-rpath,/opt/b/lib"
             ]
         );
-        for (include, library) in [(None, None), (Some(""), Some(""))] {
+        for (include, library) in [(None, None), (Some(""), Some("")), (Some(":"), Some("::"))] {
             assert_eq!(
                 DeclaredCDirectories::parse(include.map(OsStr::new), library.map(OsStr::new)),
                 Ok(DeclaredCDirectories::default())
             );
         }
+        // An empty entry declares nothing. A wrapper that prefixes a directory
+        // to an exported empty value makes a trailing one.
+        let prefixed = DeclaredCDirectories::parse(
+            Some(OsStr::new("/nix/include:")),
+            Some(OsStr::new(":/a/lib::/b/lib")),
+        )
+        .unwrap();
+        assert_eq!(prefixed.include, ["/nix/include"]);
+        assert_eq!(prefixed.library, ["/a/lib", "/b/lib"]);
     }
 
     #[test]
@@ -2003,11 +2011,11 @@ mod tests {
         for (include, library, variable, entry) in [
             ("include", "", C_INCLUDE_PATH_VARIABLE, "\"include\""),
             ("/a:./b", "", C_INCLUDE_PATH_VARIABLE, "\"./b\""),
-            ("/a::/b", "", C_INCLUDE_PATH_VARIABLE, "empty entry"),
-            ("/a:", "", C_INCLUDE_PATH_VARIABLE, "empty entry"),
+            ("/a::./b", "", C_INCLUDE_PATH_VARIABLE, "\"./b\""),
+            ("/a:.", "", C_INCLUDE_PATH_VARIABLE, "\".\""),
             ("", "lib", C_LIBRARY_PATH_VARIABLE, "\"lib\""),
             ("", "~/lib", C_LIBRARY_PATH_VARIABLE, "\"~/lib\""),
-            ("", ":/lib", C_LIBRARY_PATH_VARIABLE, "empty entry"),
+            ("", ":lib:", C_LIBRARY_PATH_VARIABLE, "\"lib\""),
             ("", "/opt/a,b/lib", C_LIBRARY_PATH_VARIABLE, "comma"),
         ] {
             let error =
