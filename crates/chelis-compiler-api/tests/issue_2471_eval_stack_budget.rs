@@ -1,10 +1,13 @@
 //! A recursive user call must fail through the eval diagnostic channel before
 //! it exhausts the native stack, preserving effects that completed before it.
+//! The depth it reaches first is the same whichever lane evaluates it.
+
+#![allow(deprecated)] // `prepare_eval` is the no-library path `chelis test` still takes
 
 use std::collections::BTreeMap;
 use std::process::Command;
 
-use chelis_compiler_api::compiler::eval;
+use chelis_compiler_api::compiler::{eval, prepare_eval};
 use chelis_compiler_api::schema::{EvalRequest, SourceKind};
 use chelis_types::{
     reset_grow_segment_bytes_for_test, run_on_grown_stack, set_grow_segment_bytes_for_test,
@@ -139,4 +142,96 @@ fn wide_recursive_body_returns_a_diagnostic_instead_of_aborting() {
 #[test]
 fn very_wide_recursive_body_returns_a_diagnostic_instead_of_aborting() {
     assert_deep_recursion_reports_diagnostic("very_wide");
+}
+
+/// The segment both lanes evaluate on in the chelis#3742 receipt, and the
+/// native stack of the thread standing in for a `chelis test` worker. The
+/// worker thread is far smaller than the segment, so a lane that evaluated on
+/// its caller's thread would reach a much shallower depth.
+const LANE_SEGMENT_BYTES: usize = 4 * 1024 * 1024;
+const WORKER_THREAD_BYTES: usize = 1024 * 1024;
+
+fn request(depth: usize) -> EvalRequest {
+    EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: source(depth),
+        bindings: BTreeMap::new(),
+    }
+}
+
+/// `chelis eval`'s shape: the whole command runs on the grown segment.
+fn eval_lane_passes(depth: usize) -> bool {
+    set_grow_segment_bytes_for_test(LANE_SEGMENT_BYTES);
+    let passed = run_on_grown_stack(|| eval(request(depth))).is_ok();
+    reset_grow_segment_bytes_for_test();
+    passed
+}
+
+/// `chelis test`'s shape: the program is prepared once, and each root is
+/// evaluated on a worker thread of its own.
+fn worker_lane_passes(depth: usize) -> bool {
+    let prepared = run_on_grown_stack(|| prepare_eval(request(depth))).expect("prepare");
+    std::thread::Builder::new()
+        .name("issue-3742-worker".to_string())
+        .stack_size(WORKER_THREAD_BYTES)
+        .spawn(move || {
+            set_grow_segment_bytes_for_test(LANE_SEGMENT_BYTES);
+            let passed = prepared.eval_root(BTreeMap::new(), "out").is_ok();
+            reset_grow_segment_bytes_for_test();
+            passed
+        })
+        .expect("worker thread starts")
+        .join()
+        .expect("worker thread returns")
+}
+
+/// The deepest recursion `passes` accepts: doubling to the first failure,
+/// then bisecting. Every probe is an independent evaluation.
+fn deepest_passing(passes: impl Fn(usize) -> bool) -> usize {
+    assert!(passes(1), "a single call must evaluate");
+    let mut low = 1;
+    let mut high = 2;
+    while passes(high) {
+        low = high;
+        high *= 2;
+        assert!(high <= 1 << 20, "recursion never exhausted the segment");
+    }
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if passes(middle) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+/// chelis#3742: the depth a recursion reaches is a property of the evaluator,
+/// not of the thread its caller runs on. `chelis eval` evaluated inside the
+/// CLI's grown segment while a `chelis test` worker evaluated on its own
+/// 32 MiB thread, so the test lane held about a tenth of eval's recursion and
+/// a Nautilus test that passed under eval failed under test.
+///
+/// The receipt is the deepest passing depth of each lane on the same segment
+/// size, from a worker thread a quarter of that size. Evaluation enters a
+/// fresh segment in both lanes, so the two depths are equal exactly.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. Without the
+/// segment at the evaluator's entry the worker lane evaluated on its 1 MiB
+/// thread and reached a much shallower depth than the eval lane.
+#[test]
+fn issue_3742_recursion_depth_is_the_same_in_the_eval_and_worker_lanes() {
+    let eval_depth = deepest_passing(eval_lane_passes);
+    let worker_depth = deepest_passing(worker_lane_passes);
+    eprintln!("#3742 receipt: eval lane {eval_depth}, worker lane {worker_depth}");
+    assert!(
+        eval_depth >= 8,
+        "#3742: a {LANE_SEGMENT_BYTES}-byte segment must hold more than a few calls, or \
+         this receipt compares nothing; it held {eval_depth}"
+    );
+    assert_eq!(
+        worker_depth, eval_depth,
+        "#3742: the worker lane must reach the eval lane's recursion depth"
+    );
 }

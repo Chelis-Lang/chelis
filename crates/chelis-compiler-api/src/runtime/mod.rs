@@ -677,8 +677,40 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     )
 }
 
+/// Every host evaluation runs on the stack segment the check pipeline grows
+/// (`chelis_types::run_on_grown_stack`), whichever thread its caller is on.
+/// The recursion guard measures the stack actually left (spec/08-backends.md
+/// section 1.1), so the depth a program reaches is a property of this
+/// evaluator, not of whether `chelis eval` or a `chelis test` worker thread
+/// called it (chelis#3742). Under a caller that already grew a segment this
+/// is a second segment of the same size, never a different budget.
 #[allow(clippy::too_many_arguments)]
 fn evaluate_host_program_core(
+    prepared: Option<&PreparedHostEvaluation>,
+    program: &CheckedProgram,
+    library: Option<&CheckedProgram>,
+    library_lowered_names: Option<&BTreeMap<String, bool>>,
+    inputs: HostEvaluationInputs<'_>,
+    selected_roots: Option<&[String]>,
+    manifested_lowered_names: Option<&BTreeMap<String, bool>>,
+    system_boundary: system::EvalSystemBoundary,
+) -> Result<RuntimeOutcome, RuntimeFailure> {
+    chelis_types::run_on_grown_stack(|| {
+        evaluate_host_program_on_grown_stack(
+            prepared,
+            program,
+            library,
+            library_lowered_names,
+            inputs,
+            selected_roots,
+            manifested_lowered_names,
+            system_boundary,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_host_program_on_grown_stack(
     prepared: Option<&PreparedHostEvaluation>,
     program: &CheckedProgram,
     library: Option<&CheckedProgram>,
