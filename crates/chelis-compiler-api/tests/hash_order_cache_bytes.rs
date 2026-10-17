@@ -309,19 +309,13 @@ fn write_worker_artifacts(package_root: &Path, reef_home: &Path, result_dir: &Pa
     let encoded = context.encode().expect("encode compiled context");
     artifacts.write(Artifact::CompiledEncode, &encoded);
 
-    // The CLI parent writes `CompiledContext::encode_for_handoff()` directly to
-    // the worker tempfile and passes the digest it returns in the worker's
-    // environment (chelis#2211). Both entry points build the same envelope, so
-    // this artifact locks that public handoff root under its product name while
-    // making the intentional byte identity explicit; the assertion below is
-    // what says the two really are the same bytes.
+    // The CLI parent writes the handoff envelope to the worker tempfile and
+    // passes the digest it returns in the worker's environment (chelis#2211).
+    // The handoff carries the checked parts without the lowering (chelis#2256),
+    // so it is its own envelope and is locked here as its own artifact.
     let (handoff, handoff_digest) = context
         .encode_for_handoff()
         .expect("encode compiled context for handoff");
-    assert!(
-        handoff == encoded,
-        "the handoff and disk-cache encoders must build the same envelope"
-    );
     artifacts.write(Artifact::CliWorkerHandoff, &handoff);
     // The digest is a function of those bytes, so pinning it beside them
     // extends this oracle's hash-state independence to the exact value the

@@ -52,7 +52,8 @@ pub use compiler::{
 pub use compiler::{add_function, replace_function_body};
 pub use context::{
     CacheError, CacheIdentity, CompiledContext, ContextHash, ContextLoadPath, HandoffDigest,
-    compile_reef_context, compile_reef_context_for_entries, load_or_compile_for_package,
+    LoadedContext, compile_reef_context, compile_reef_context_for_entries,
+    compiled_context_payload_encodes, load_or_compile_for_package, load_or_compile_package_context,
     load_or_compile_with_local_registry_fallback,
 };
 /// Experimental decode chokepoint for opaque-type invariant revalidation

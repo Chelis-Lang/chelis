@@ -7949,7 +7949,10 @@ fn cmd_test(
     // and the discovered test files import, and every worker runs its files
     // against this one context.
     let test_entries = test_entry_imports(&test_files);
-    let context = match chelis_compiler_api::load_or_compile_for_package(
+    // chelis#3744: the parent only hands the context on, so on a cache hit the
+    // handoff is sealed from the verified cache payload rather than encoded
+    // from the decoded context.
+    let context = match chelis_compiler_api::load_or_compile_package_context(
         &reef_home_path,
         &cwd,
         &test_entries,
@@ -7964,6 +7967,7 @@ fn cmd_test(
                 &test_entries,
                 &EMBEDDED_RUNTIME,
             )
+            .map(chelis_compiler_api::LoadedContext::from)
             .map_err(|err| format!("compile test context: {}", compiler_error_messages(&err)))?
         }
         Err(err) => {
