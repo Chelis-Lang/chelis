@@ -5,18 +5,8 @@
   cvc5,
 }:
 let
-  source = import ./source.nix { inherit lib root; };
-  # `packages` carries packages/chelis-std, which the chelis-std-bundle build
-  # script packs into the runtime the compiler embeds.
-  crateSource = import ./source.nix {
-    inherit lib root;
-    includeRoots = [
-      "crates"
-      "grammars"
-      "packages"
-      "tree-sitter-chelis"
-    ];
-  };
+  sources = import ./source.nix { inherit lib; };
+  source = sources.package;
   manifest = lib.importTOML (root + "/Cargo.toml");
   version = manifest.workspace.package.version;
   # crate2nix 0.15.0 generates the committed root Cargo.nix with the compiler
@@ -34,42 +24,111 @@ let
       "chelis-cli/${feature}"
     ]) (lib.sort lib.lessThan compilerFeatures)
   );
-  toolchain = pkgs.rust-bin.fromRustupToolchainFile (root + "/rust-toolchain.toml");
+  # Crate builds need only rustc, cargo, and rust-std. So the package
+  # toolchain is the minimal profile of the version that rust-toolchain.toml
+  # pins. The Devenv toolchain keeps the components that the file names.
+  toolchain = pkgs.rust-bin.fromRustupToolchain {
+    inherit ((lib.importTOML (root + "/rust-toolchain.toml")).toolchain) channel;
+    profile = "minimal";
+  };
+  # The chelis-std inputs that the chelis-std-bundle build script packs
+  # (crates/chelis-std-bundle/build/stage.rs). These are reef.toml, each
+  # declared source root that exists, and each declared metadata file.
+  chelisStd = "packages/chelis-std";
+  chelisStdPackage = (lib.importTOML (sources.root + "/${chelisStd}/reef.toml")).package;
+  chelisStdInputs = map (path: "${chelisStd}/${path}") (
+    [
+      "reef.toml"
+      "src"
+    ]
+    ++ lib.filter (path: builtins.pathExists (sources.root + "/${chelisStd}/${path}")) (
+      chelisStdPackage.additional_sources or [ ]
+    )
+    ++ lib.optional (chelisStdPackage ? readme) chelisStdPackage.readme
+    ++ lib.optional (chelisStdPackage ? license-file) chelisStdPackage.license-file
+  );
+  hipRuntimeSources = map (name: "crates/chelis-backend-hip/runtime/${name}") [
+    "chelis_device_descriptor.h"
+    "chelis_device_owner.cpp"
+    "chelis_device_owner.h"
+    "chelis_hip_runtime.h"
+  ];
+  # The paths that a workspace crate compile reads outside its own source.
+  # These are include_str! and include_bytes! arguments, build script inputs,
+  # and files under tests/ that non-test code embeds. A crate without an
+  # entry builds from its own directory only.
+  crateBuildReads = {
+    "chelis-cli" = hipRuntimeSources ++ [
+      "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"
+    ];
+    "chelis-compiler-api" =
+      map (name: "crates/chelis-runtime/include/${name}") [
+        "chelis_blas.h"
+        "chelis_runtime.h"
+        "chelis_runtime_dtype.h"
+        "chelis_runtime_views.h"
+      ]
+      ++ hipRuntimeSources
+      ++ [ "packages/chelis-clarabel/src/qp.ch" ];
+    "chelis-cove" = [
+      "grammars/tree-sitter-chelis-deep/queries/highlights.scm"
+      "grammars/tree-sitter-chelis-surf/queries/highlights.scm"
+    ];
+    "chelis-crmath" = map (name: "crates/chelis-crmath/tests/fixtures/${name}") [
+      "binary64_worst_cases.txt"
+      "canary.txt"
+      "profile_obligations.txt"
+    ];
+    "chelis-std-bundle" = chelisStdInputs;
+    "tree-sitter-chelis" = [
+      "grammars/tree-sitter-chelis-deep/src/parser.c"
+      "grammars/tree-sitter-chelis-deep/src/tree_sitter"
+      "grammars/tree-sitter-chelis-surf/src/parser.c"
+      "grammars/tree-sitter-chelis-surf/src/scanner.cc"
+      "grammars/tree-sitter-chelis-surf/src/tree_sitter"
+    ];
+  };
+  workspaceCrates = builtins.attrNames cargoGraph.workspaceMembers;
+  crateSources =
+    let
+      unknown = lib.subtractLists workspaceCrates (builtins.attrNames crateBuildReads);
+    in
+    if unknown != [ ] then
+      throw "nix/packages.nix: crateBuildReads names no workspace crate ${toString unknown}"
+    else
+      lib.genAttrs workspaceCrates (
+        name:
+        sources.crate {
+          inherit (cargoGraph.internal.crates.${name}) src;
+          buildReads = crateBuildReads.${name} or [ ];
+        }
+      );
+  # Every file that a workspace crate build reads. The native lane check
+  # records the digest of this view.
+  crateSource = sources.workspaceView (
+    lib.fileset.unions (map (crate: crate.fileset) (builtins.attrValues crateSources))
+  );
   buildRustCrateForPkgs =
     cratePkgs:
     cratePkgs.buildRustCrate.override {
       cargo = toolchain;
       rustc = toolchain;
-      defaultCrateOverrides = cratePkgs.defaultCrateOverrides // {
-        "chelis-cli" = attrs: {
-          src = crateSource;
-          sourceRoot = "chelis-source/crates/chelis-cli";
+      defaultCrateOverrides =
+        cratePkgs.defaultCrateOverrides
+        // lib.mapAttrs (
+          _name: crate: _attrs:
+          builtins.removeAttrs crate [ "fileset" ]
+        ) crateSources
+        // {
+          "cvc5-sys" = attrs: {
+            nativeBuildInputs = (attrs.nativeBuildInputs or [ ]) ++ [
+              pkgs.llvmPackages.libclang
+              pkgs.pkg-config
+            ];
+            CVC5_DIR = "${cvc5.dir}";
+            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          };
         };
-        "chelis-compiler-api" = attrs: {
-          src = crateSource;
-          sourceRoot = "chelis-source/crates/chelis-compiler-api";
-        };
-        "chelis-cove" = attrs: {
-          src = crateSource;
-          sourceRoot = "chelis-source/crates/chelis-cove";
-        };
-        "chelis-std-bundle" = attrs: {
-          src = crateSource;
-          sourceRoot = "chelis-source/crates/chelis-std-bundle";
-        };
-        "cvc5-sys" = attrs: {
-          nativeBuildInputs = (attrs.nativeBuildInputs or [ ]) ++ [
-            pkgs.llvmPackages.libclang
-            pkgs.pkg-config
-          ];
-          CVC5_DIR = "${cvc5.dir}";
-          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-        };
-        "tree-sitter-chelis" = attrs: {
-          src = crateSource;
-          sourceRoot = "chelis-source/tree-sitter-chelis";
-        };
-      };
     };
   cargoGraph = import (root + "/Cargo.nix") {
     inherit buildRustCrateForPkgs pkgs;
