@@ -2,7 +2,9 @@
 //! for the program. The kernel decision once rebuilt program-wide call-graph
 //! facts for every definition it decided: the set of recursive functions
 //! (one graph walk per function), the set of function names, and a scan of
-//! every caller, so lowering `n` definitions did `n^2` work (chelis#3785).
+//! every caller; and each kernel lowering scanned every declaration to find
+//! the one owning its body. Lowering `n` definitions did `n^2` work
+//! (chelis#3785).
 //!
 //! The oracle is the heap bytes host lowering allocates, counted by this
 //! binary's allocator, which is deterministic for a fixed program. The counter
@@ -159,4 +161,27 @@ fn the_detector_rejects_a_name_set_copied_per_definition() {
         !grows_linearly(small, large),
         "the detector accepted a per-definition name-set copy: {small} -> {large} bytes"
     );
+}
+
+/// Declarations examined to find a body's owner while host lowering `program`.
+fn declaration_visits(program: &CheckedProgram) -> u64 {
+    let before = chelis_ir::lower::declaration_body_visits();
+    let lowered = chelis_ir::host::try_lower_compiled_program(program).expect("the probe lowers");
+    drop(lowered);
+    chelis_ir::lower::declaration_body_visits() - before
+}
+
+#[test]
+fn finding_a_body_owner_examines_a_bounded_number_of_declarations_per_definition() {
+    // Every kernel lowering asks which declaration owns its body. The answer
+    // must examine the declarations that could match, not every one.
+    let sizes = [64, 128, 256, 512];
+    let visits = on_measuring_thread(move || sizes.map(|n| declaration_visits(&independent(n))));
+    eprintln!("declarations examined at n = {sizes:?}: {visits:?}");
+    for (n, visits) in sizes.into_iter().zip(visits) {
+        assert!(
+            visits <= 4 * n as u64,
+            "host lowering of {n} definitions examined {visits} declarations to find body owners"
+        );
+    }
 }
