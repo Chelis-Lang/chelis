@@ -134,6 +134,11 @@ declaration list. Property discovery on an empty library emits no property recor
 - `chelis check <package-source>` and `chelis build <package-source>` use the same
   resolved package graph and repair a missing `reef.lock`, including when the prepared
   graph came from a warm cache. A malformed identity or integrity failure remains hard.
+- `chelis check`, `build`, `cost`, and `prove` repair a missing lock only when the
+  process can write the package root. A source in a read-only store is an example of a
+  root that the process cannot write. For such a root, these commands resolve the graph
+  in memory and write nothing into the root. `chelis eval --file` and `chelis test`
+  always resolve a missing lock in memory. A resolution error stays hard in each case.
 - `chelis reef publish` runs build, then copies artifacts into
   `$CHELIS_REEF_HOME/packages/<name>/<version>/` and updates
   `$CHELIS_REEF_HOME/index.json`.

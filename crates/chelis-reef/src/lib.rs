@@ -2535,6 +2535,23 @@ fn find_package_root_from_dir(mut dir: PathBuf) -> Result<Option<PathBuf>, Strin
     }
 }
 
+/// Whether this process can create files in the package root `root`. A
+/// denied or read-only root answers `false`. Any other failure of the probe
+/// is an error, not a guess.
+fn package_root_is_writable(root: &Path) -> Result<bool, String> {
+    use rustix::fs::{Access, access};
+    use rustix::io::Errno;
+
+    match access(root, Access::WRITE_OK) {
+        Ok(()) => Ok(true),
+        Err(Errno::ACCESS | Errno::PERM | Errno::ROFS) => Ok(false),
+        Err(error) => Err(format!(
+            "check write access to package root {}: {error}",
+            root.display()
+        )),
+    }
+}
+
 /// Link the Surf program at `file` with the reef package found by walking up
 /// from the file itself, or, when `file` is outside every package, as a
 /// single-file program ([`prepare_single_file_program`]). Every command
@@ -2558,13 +2575,22 @@ pub fn prepare_program_for_file(
         return prepare_single_file_program(&file.display().to_string(), &decls, runtime);
     };
     let lock_path = root.join("reef.lock");
+    // A missing lock is repaired only in a package root that this process can
+    // write. A root that it cannot write, such as a source in a read-only
+    // store, keeps its in-memory resolution and receives no file
+    // (spec/design/reef_distribution.md, chelis#3812).
+    let repair_missing_lock =
+        || -> Result<bool, String> { Ok(!lock_path.exists() && package_root_is_writable(&root)?) };
     let graph = match prepare_reef_graph_cached(&root, runtime) {
         Ok(graph) => graph,
         // `prepare_program_for_file` historically repairs an absent or
         // obsolete lockfile by resolving the manifest and rewriting the lock.
-        // Preserve that behavior; the cached/lock fast path owns only a
+        // Preserve that behavior. The cached/lock fast path owns only a
         // parseable current lock.
-        Err(_) if !lock_path.exists() => {
+        Err(error) => {
+            if !repair_missing_lock()? {
+                return Err(error);
+            }
             let (loaded, _) = load_package_graph_with_lock_preference(
                 &root,
                 LoadOptions::default_for_load(runtime),
@@ -2575,17 +2601,16 @@ pub fn prepare_program_for_file(
             write_lockfile(&lock_path, &build_lockfile(&loaded, runtime))?;
             prepare_graph_from_loaded(root.clone(), loaded, &BTreeSet::new(), runtime)?
         }
-        Err(error) => return Err(error),
     };
     // chelis#971: a prepared-graph cache hit can succeed without consulting
     // the package lockfile. `prepare_program_for_file` is the source-file
     // check/build path and historically owns lockfile repair, so persist the
     // resolved graph even when the cache supplied it. Otherwise a warm cache
     // makes a successful package build silently omit `reef.lock`.
-    if !lock_path.exists() {
-        write_lockfile(&lock_path, &build_lockfile(&graph.graph, runtime))?;
-    } else {
+    if lock_path.exists() {
         read_lockfile(&lock_path)?;
+    } else if repair_missing_lock()? {
+        write_lockfile(&lock_path, &build_lockfile(&graph.graph, runtime))?;
     }
     let root_package = graph
         .graph
@@ -12601,6 +12626,143 @@ mod tests {
             .into_iter()
             .find(|dependency| dependency.name == CHELIS_STD_PACKAGE_NAME)
             .expect("the lock records the runtime")
+    }
+
+    /// A package with no `reef.lock`. Its root holds only `reef.toml` and
+    /// `src/main.ch`, as a source copied into a read-only store does.
+    /// `dependencies` is the body of the `[dependencies]` table.
+    fn lockless_package(dependencies: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("app");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\ncompiler = \"{CURRENT_COMPILER_VERSION}\"\nmodule_prefix = \"App\"\n\n[dependencies]\n{dependencies}"
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module App.Main\nimport Std.Text (join)\n\ndef probe(parts: List[string]) -> string = join(parts, \",\")\n",
+        );
+        (
+            dir,
+            root.canonicalize().expect("canonicalize the package root"),
+        )
+    }
+
+    /// Every path under `root`, relative to it, with its file bytes.
+    fn package_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+            for entry in fs::read_dir(dir).expect("read the package directory") {
+                let path = entry.expect("read a directory entry").path();
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("relative path")
+                    .to_path_buf();
+                if path.is_dir() {
+                    out.insert(relative, None);
+                    walk(root, &path, out);
+                } else {
+                    out.insert(
+                        relative,
+                        Some(fs::read(&path).expect("read a package file")),
+                    );
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    /// Removes write permission from a package root and restores it on drop,
+    /// so that the temporary directory can be removed.
+    #[cfg(unix)]
+    struct ReadOnlyRoot<'a>(&'a Path);
+
+    #[cfg(unix)]
+    impl<'a> ReadOnlyRoot<'a> {
+        fn new(root: &'a Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root, fs::Permissions::from_mode(0o555))
+                .expect("remove write permission from the package root");
+            assert!(
+                !package_root_is_writable(root).expect("probe the package root"),
+                "the test process must not bypass directory permissions"
+            );
+            Self(root)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ReadOnlyRoot<'_> {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// chelis#3812: a package root that the process cannot write, with no
+    /// lock, prepares from an in-memory resolution. It writes no
+    /// `reef.lock`, `.reef-write.lock`, or `.gitignore`, on a cold or a warm
+    /// prepared-graph cache.
+    #[cfg(unix)]
+    #[test]
+    fn read_only_root_without_lock_prepares_in_memory() {
+        let (_dir, root) = lockless_package("");
+        let before = package_tree(&root);
+        let _read_only = ReadOnlyRoot::new(&root);
+        for run in ["cold", "warm"] {
+            let prepared = prepare_program_for_file(&root.join("src/main.ch"), test_runtime())
+                .unwrap_or_else(|error| panic!("{run} prepare of a read-only root: {error}"))
+                .expect("the entry file is inside the package");
+            assert!(
+                !prepared.stdlib_decls.is_empty(),
+                "{run} prepare links the bundled runtime"
+            );
+            assert_eq!(
+                package_tree(&root),
+                before,
+                "{run} prepare wrote into a read-only package root"
+            );
+        }
+    }
+
+    /// A writable root with no lock keeps the lock repair: the prepare
+    /// writes `reef.lock` and the project ignore rules.
+    #[test]
+    fn writable_root_without_lock_repairs_lock() {
+        let (_dir, root) = lockless_package("");
+        assert!(package_root_is_writable(&root).expect("probe the package root"));
+        prepare_program_for_file(&root.join("src/main.ch"), test_runtime())
+            .expect("prepare a writable root")
+            .expect("the entry file is inside the package");
+        assert_eq!(
+            locked_runtime(&root).name,
+            CHELIS_STD_PACKAGE_NAME,
+            "the repaired lock records the runtime"
+        );
+        let ignore = fs::read_to_string(root.join(".gitignore")).expect("read .gitignore");
+        assert!(
+            ignore.lines().any(|line| line == ".reef-write.lock"),
+            "{ignore}"
+        );
+    }
+
+    /// Negative parity: a read-only root does not hide a resolution error.
+    /// The missing path dependency fails with its own message, not with a
+    /// write error, and the root stays unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn read_only_root_without_lock_keeps_resolution_errors() {
+        let (_dir, root) = lockless_package("absent = { path = \"./absent\" }\n");
+        let before = package_tree(&root);
+        let _read_only = ReadOnlyRoot::new(&root);
+        let error = prepare_program_for_file(&root.join("src/main.ch"), test_runtime())
+            .expect_err("a missing path dependency fails");
+        assert!(error.contains("absent"), "{error}");
+        assert!(!error.contains("Permission denied"), "{error}");
+        assert_eq!(package_tree(&root), before);
     }
 
     fn edit_locked_runtime(root: &Path, edit: impl FnOnce(&mut LockedDependency)) {
