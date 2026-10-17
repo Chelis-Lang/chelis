@@ -703,6 +703,32 @@ mod tests {
     /// A minimal well-formed `Decl` slice for key-stability tests. The
     /// exact shape is irrelevant; what matters is that the same slice
     /// hashes identically and a different slice hashes differently.
+    /// chelis#3769 review: a cancellation during a typecheck cache lowering
+    /// is an error, so neither builder saves an entry without the lowering a
+    /// completed build would carry. A lowering that merely declines is
+    /// `Ok(None)`; only the cancellation arm turns into `Err`.
+    #[test]
+    fn a_cancelled_typecheck_cache_lowering_is_an_error_not_a_decline() {
+        let context =
+            build_stdlib_context(&sample_decls("cancel_lowering")).expect("sample context builds");
+        assert!(
+            lower_library_unless_cancelled(context.checked_library())
+                .expect("an uncancelled lowering is not an error")
+                .is_some(),
+            "the sample library must lower, so the cancellation is what changes the outcome"
+        );
+        let token = chelis_types::CancelToken::new();
+        let _guard = chelis_types::install_cancel_token(token.clone());
+        token.cancel();
+        match lower_library_unless_cancelled(context.checked_library()) {
+            Err(error) => assert!(error.is_cancellation(), "{error:?}"),
+            Ok(lowered) => panic!(
+                "a cancelled lowering must be an error, not a decline: {:?}",
+                lowered.map(|_| "Some")
+            ),
+        }
+    }
+
     fn sample_decls(marker: &str) -> Vec<chelis_surf::ast::Decl> {
         chelis_surf::parser::parse_str(&format!("module Sample\ndef {marker}_value() -> i32 = 1\n"))
             .expect("sample decls must parse")
