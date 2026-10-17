@@ -580,12 +580,7 @@ pub fn run_surf_decls_properties_with_contract_decls(
     options: &PropertyRunOptions,
 ) -> Result<PropertyRunResult, String> {
     let properties = collect_surf_properties(entry_decls, module_decls, options.only.as_deref())?;
-    // Prepared lazily once, shared by every scalar SMT goal and guard plan.
-    // The source declarations continue to own discovery and concrete execution.
-    let semantic_program = OnceCell::new();
-    // Built lazily once, shared by every property's samples and every domain
-    // witness confirmation: the declarations are the same for all of them.
-    let eval_program = OnceCell::new();
+    let programs = SurfFilePrograms::default();
     // Proof-only scalar extraction bypasses the runtime lowerer. Check the
     // exact linked declaration set once for all selected scalar Beacon goals,
     // before any result can be reported by Tide or a direct library caller.
@@ -615,8 +610,7 @@ pub fn run_surf_decls_properties_with_contract_decls(
                 property,
                 options,
                 &scalar_check,
-                &semantic_program,
-                &eval_program,
+                &programs,
             )
             .with_goal(goal),
         );
@@ -787,6 +781,18 @@ fn property_contracts(options: &[PropertyOption]) -> Vec<String> {
 // Surf property running (Tier B -> Tier C, with injection)
 // ===========================================================================
 
+/// The views of one Surf file's declarations that every property in the file
+/// shares, each prepared lazily on first use.
+#[derive(Default)]
+struct SurfFilePrograms {
+    /// Shared by every scalar SMT goal and guard plan. The source
+    /// declarations continue to own discovery and concrete execution.
+    semantic: OnceCell<Result<SemanticSurfProgram, String>>,
+    /// Shared by every property's samples and every domain witness
+    /// confirmation (chelis#3745).
+    evaluation: SurfEvalProgramCell,
+}
+
 fn prove_surf_property(
     decls: &[Decl],
     module_decls: &[Decl],
@@ -794,9 +800,10 @@ fn prove_surf_property(
     property: &Property,
     options: &PropertyRunOptions,
     scalar_check: &Result<(), String>,
-    semantic_program: &OnceCell<Result<SemanticSurfProgram, String>>,
-    eval_program: &SurfEvalProgramCell,
+    programs: &SurfFilePrograms,
 ) -> PropertyOutcome {
+    let semantic_program = &programs.semantic;
+    let eval_program = &programs.evaluation;
     if expanded_contracts(property)
         .iter()
         .any(|id| id == "clarabel.qp.ideal_optimality" || id == "clarabel.qp.assume_psd")
