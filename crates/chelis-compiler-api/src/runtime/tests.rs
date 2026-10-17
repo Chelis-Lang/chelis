@@ -6206,3 +6206,80 @@ fn bound_result_nominal_aliases_count_complete_eval_entry_work() {
         }
     }
 }
+
+/// chelis#3838: a recursion that carries a tensor holds each call's result
+/// to a bounded number of claims, however deep the recursion. Each level
+/// re-declared its result claim and inherited every enclosing level's equal
+/// copy, so a call at depth `d` held `d` claims and memory grew with the
+/// square of the depth. The receipt sums the claims each application's body
+/// is held to over self recursion, mutual recursion, a binder-declared result
+/// and a tail through a local ascription, at doubling depths.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With every
+/// inherited copy kept, the sums were the triangular numbers of the depth.
+#[test]
+fn issue_3838_tensor_recursion_holds_bounded_result_claims() {
+    fn held(source: &str) -> u64 {
+        super::eval::reset_entry_claim_work();
+        assert_eq!(
+            evaluate_result(source),
+            "tensor(shape=[2], data=[1.0, 2.0])"
+        );
+        super::eval::result_claims_held()
+    }
+    /// A program that recurses to `depth`.
+    type AtDepth = fn(usize) -> String;
+    let programs: [(&str, AtDepth); 4] = [
+        ("self", |depth| {
+            format!(
+                "a = to_tensor([1.0f32, 2.0f32])\n\
+                 def f(n: i64, b: tensor[2, f32]) -> tensor[2, f32] = \
+                 if eq(n, 0i64) then b else f(sub(n, 1i64), b)\n\
+                 result = f({depth}i64, a)\n"
+            )
+        }),
+        ("mutual", |depth| {
+            format!(
+                "a = to_tensor([1.0f32, 2.0f32])\n\
+                 def ping(n: i64, b: tensor[2, f32]) -> tensor[2, f32] = \
+                 if eq(n, 0i64) then b else pong(sub(n, 1i64), b)\n\
+                 def pong(n: i64, b: tensor[2, f32]) -> tensor[2, f32] = \
+                 if eq(n, 0i64) then b else ping(sub(n, 1i64), b)\n\
+                 result = ping({depth}i64, a)\n"
+            )
+        }),
+        ("binder", |depth| {
+            format!(
+                "a = to_tensor([1.0f32, 2.0f32])\n\
+                 def f[m](n: i64, b: tensor[m, f32]) -> tensor[m, f32] = \
+                 if eq(n, 0i64) then b else f(sub(n, 1i64), b)\n\
+                 result = f({depth}i64, a)\n"
+            )
+        }),
+        ("local", |depth| {
+            format!(
+                "a = to_tensor([1.0f32, 2.0f32])\n\
+                 def f(n: i64, b: tensor[2, f32]) -> tensor[2, f32] = {{\n  \
+                 y: tensor[2, f32] = if eq(n, 0i64) then b else f(sub(n, 1i64), b)\n  \
+                 y\n\
+                 }}\n\
+                 result = f({depth}i64, a)\n"
+            )
+        }),
+    ];
+    for (shape, program) in programs {
+        let counts = [100, 200, 400].map(|depth| held(&program(depth)));
+        let shown = counts.map(|count| count.to_string()).join(", ");
+        eprintln!("#3838 receipt: {shape} at depth 100, 200, 400 held {shown} claims");
+        assert!(
+            counts[0] >= 100,
+            "#3838 {shape}: every level is held to its claim"
+        );
+        for pair in counts.windows(2) {
+            assert!(
+                pair[1] * 2 <= pair[0] * 5,
+                "#3838 {shape}: claims held grew superlinearly in depth: {shown}"
+            );
+        }
+    }
+}

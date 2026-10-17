@@ -445,6 +445,18 @@ impl DeclaredResultClaim {
     }
 }
 
+/// Append `claim` to `claims` unless an earlier claim states the same
+/// obligation. Claims are checked in order and the first failure names the
+/// trap, and two claims with the same obligation reach the same verdict, so a
+/// later copy can never name one. Keeping one copy bounds a claim list by its
+/// distinct obligations rather than by the depth of the recursion that
+/// inherits it (chelis#3838).
+fn push_result_claim(claims: &mut Vec<DeclaredResultClaim>, claim: DeclaredResultClaim) {
+    if !claims.iter().any(|kept| kept.same_obligation(&claim)) {
+        claims.push(claim);
+    }
+}
+
 /// One position of a nested result claim's walk: the pattern node, the value
 /// at it and its producer provenance, and the next component to visit.
 struct VerdictVisit<'a> {
@@ -1220,6 +1232,14 @@ thread_local! {
     static ENTRY_LIST_ELEMENT_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static INVOCATION_CONTRACT_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static CLOSURE_ENTRY_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static RESULT_CLAIMS_HELD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Result claims the evaluated function bodies were held to, summed over the
+/// applications (chelis#3838).
+#[cfg(test)]
+pub(super) fn result_claims_held() -> u64 {
+    RESULT_CLAIMS_HELD.with(std::cell::Cell::get)
 }
 
 /// Retained invocation contracts checked, one per frame per application
@@ -1267,6 +1287,7 @@ pub(super) fn reset_entry_claim_work() {
     ENTRY_LIST_ELEMENT_STEPS.with(|v| v.set(0));
     INVOCATION_CONTRACT_CHECKS.with(|v| v.set(0));
     CLOSURE_ENTRY_BUILDS.with(|v| v.set(0));
+    RESULT_CLAIMS_HELD.with(|v| v.set(0));
 }
 #[cfg(test)]
 pub(super) fn entry_claim_work() -> u64 {
@@ -3507,7 +3528,7 @@ impl<'a> EvalContext<'a> {
                     // The enclosing claims precede the local annotation, in
                     // declaration order.
                     let mut ascribed = local_claims.to_vec();
-                    ascribed.push(ascription);
+                    push_result_claim(&mut ascribed, ascription);
                     self.eval_under_result_claim(binding.initializer, &ascribed)?
                 } else if guarded == Some(index) {
                     self.eval_under_result_claim(
@@ -3598,12 +3619,15 @@ impl<'a> EvalContext<'a> {
                         DimInfo::Named(_, _) => None,
                     })
                     .collect();
-                claims.push(DeclaredResultClaim {
-                    rank: claim.dims.len(),
-                    axes,
-                    first_sites: Vec::new(),
-                    nested: None,
-                });
+                push_result_claim(
+                    &mut claims,
+                    DeclaredResultClaim {
+                        rank: claim.dims.len(),
+                        axes,
+                        first_sites: Vec::new(),
+                        nested: None,
+                    },
+                );
             }
             return self.eval_under_result_claim(region.initializer(), &claims);
         }
@@ -4148,12 +4172,15 @@ impl<'a> EvalContext<'a> {
         }
         // Entry contracts run outer to inner above. Results unwind the same
         // invocation stack, retaining declaration order within each frame.
-        let mut formal_claims = result_frames
+        let mut formal_claims = Vec::new();
+        for claim in result_frames
             .into_iter()
             .rev()
             .flatten()
-            .collect::<Vec<_>>();
-        formal_claims.extend_from_slice(claims);
+            .chain(claims.iter().cloned())
+        {
+            push_result_claim(&mut formal_claims, claim);
+        }
         self.apply_resolved_callable_with_arg_types_impl(
             callable,
             args,
@@ -4566,25 +4593,21 @@ impl<'a> EvalContext<'a> {
                             first_sites: claim.first_sites.clone(),
                             nested: None,
                         });
-                    let mut claims = declaration_claim.into_iter().collect::<Vec<_>>();
-                    // Claims are checked in order and the first failure names
-                    // the trap, so a later copy of an earlier claim can never
-                    // name one. The declared claim keeps its place ahead of
-                    // the inherited ones and a later equal copy is dropped:
-                    // a recursive activation, self or mutual, holds each
+                    // The declared claims keep their place ahead of the
+                    // inherited ones, and a later equal copy is dropped: a
+                    // recursive activation, self or mutual, holds each
                     // distinct claim once and names the trap it would name
                     // with the copy.
-                    claims.extend(nested_claim.clone());
-                    claims.extend(
-                        inherited_claims
-                            .iter()
-                            .filter(|inherited| {
-                                !nested_claim
-                                    .as_ref()
-                                    .is_some_and(|nested| inherited.same_obligation(nested))
-                            })
-                            .cloned(),
-                    );
+                    let mut claims = Vec::new();
+                    for claim in declaration_claim
+                        .into_iter()
+                        .chain(nested_claim)
+                        .chain(inherited_claims.iter().cloned())
+                    {
+                        push_result_claim(&mut claims, claim);
+                    }
+                    #[cfg(test)]
+                    RESULT_CLAIMS_HELD.with(|v| v.set(v.get() + claims.len() as u64));
                     let forwarding_index =
                         activate_forwarding.then(|| self.loop_compositions.len() - 1);
                     if let Some(index) = forwarding_index {
