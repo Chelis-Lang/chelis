@@ -1326,13 +1326,15 @@ pub struct chelis_mapped_file {
 const LEDGER_VALUE_SLOT_BYTES: u64 = 24;
 const LEDGER_DICT_ENTRY_BYTES: u64 = LEDGER_VALUE_SLOT_BYTES * 2;
 
+/// `site` is formatted only by an enabled ledger or on failure, so a caller
+/// passes `format_args!` rather than building a `String` per allocation.
 fn ledger_allocation(
     pointer: *const libc::c_void,
     kind: ownership_ledger::Kind,
     bytes: u64,
-    site: &str,
+    site: impl std::fmt::Display,
 ) {
-    if !ownership_ledger::allocate(pointer, kind, bytes, site) {
+    if !ownership_ledger::allocate(pointer, kind, bytes, &site) {
         runtime_fail!("compiled ownership ledger rejected allocation at {site}");
     }
 }
@@ -2112,10 +2114,10 @@ unsafe fn new_tensor(
         } else {
             0
         },
-        &format!("{site} storage"),
+        format_args!("{site} storage"),
     );
     if provenance == TensorStorageProvenance::EntryBorrowed {
-        ownership_ledger::borrow(storage.cast(), &format!("{site} caller storage"));
+        ownership_ledger::borrow(storage.cast(), format_args!("{site} caller storage"));
     }
 
     let mut tensor = Box::new(chelis_tensor {
@@ -2134,7 +2136,7 @@ unsafe fn new_tensor(
         tensor.cast(),
         ownership_ledger::Kind::Tensor,
         0,
-        &format!("{site} descriptor"),
+        format_args!("{site} descriptor"),
     );
     tensor
 }
