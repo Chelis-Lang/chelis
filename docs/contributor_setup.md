@@ -165,18 +165,36 @@ nix build .#chelis
 nix run .#chelis -- --version
 ```
 
+In the `chelis` package, `bin/chelis` is a wrapper, and `libexec/chelis` is the
+compiler. The wrapper puts the C compiler and the binutils of the Nix `stdenv`
+first on `PATH`, so `chelis build` needs no host toolchain. The
+`chelisWrapperArgs` list in `nix/packages.nix` holds the wrapper arguments.
+The `wrappedBuild` check builds an executable and a static library with an
+empty host `PATH`, and runs the executable. The same build with
+`libexec/chelis` must fail.
+
 Both `chelis` and `chelis-runtime` verify their copied archive and all six
 public headers against the sealed compiler's export. `nix flake check`
-rechecks both outputs against the combined package's own compiler, then links
-and runs a native C consumer separately with each output's exact include
-directory and archive path. Rebuild both outputs from the same compiler
-revision; never mix an archive or header from another derivation. A failed
+rechecks both outputs against the compiler of the combined package. Then it
+links and runs a native C consumer separately with the include directory and
+archive path of each output. Rebuild both outputs from the same compiler
+revision. Never mix an archive or header from another derivation. A failed
 Nix-wrapper installation leaves its previous stable GC root and selected
 toolchain untouched.
 
-On Linux, `nix flake check` also checks that the `chelis` executable carries a
+The packages refer to no full copy of the flake source. A build script that
+they run enters `packageScripts` in `nix/packages.nix`, a store path with only
+those scripts. Thus an edit of the documentation keeps every package
+derivation, and `scripts/test_nix_flake_contract.py` checks this.
+
+On Linux, `nix flake check` also checks that `libexec/chelis` carries a
 GNU build id. The compiler identifies its own build by that id. Without it,
 each `chelis` process computes SHA-256 over the whole executable.
+
+The flake also has `overlays.default`, which adds the three packages for the
+system of the consumer, and `formatter.<system>`. `nix fmt` formats each
+tracked `.nix` file except `Cargo.nix`, and `nix fmt -- --check` only checks
+them. The `nixFormat` check uses the same nixfmt and the same files.
 
 A run of `nix-packages.yml` on `main` or on a release tag pushes to the
 `chelis-lang` Cachix cache. It pushes the `chelis`, `chelis-runtime`, and
@@ -189,13 +207,9 @@ cache, a build of a pushed revision downloads those outputs. A build of a later
 revision downloads the unchanged cvc5 tree and crates. It compiles only the
 crates whose sources or dependencies changed.
 
-Nix applies these flake settings only for a trusted user. On a single-user
-install, or as a user in `trusted-users`, pass `--accept-flake-config`. On a
-multi-user install, the Nix daemon ignores the settings for other users, and
-Nix compiles the packages. For them, an administrator adds
-`https://chelis-lang.cachix.org` to `extra-substituters` and the key from
-`flake.nix` to `extra-trusted-public-keys` in the system Nix configuration (for
-example `/etc/nix/nix.conf`). Then the administrator restarts the Nix daemon.
+Nix uses the cache only for a trusted user. The
+[install guide](book/src/install.md#use-the-binary-cache) gives the settings
+for other users, for NixOS, and for `/etc/nix/nix.conf`.
 
 Each pull request runs the `Nix flake evaluation` CI job. It builds nothing.
 It runs these two commands, which you can also run before a push:

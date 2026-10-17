@@ -81,22 +81,43 @@ let
   chelisupCrate = cargoGraph.workspaceMembers."chelisup".build.override {
     features = [ ];
   };
+  contracts = import ./contracts.nix;
+  # The scripts that the package builds run, as a minimal store path. A
+  # reference to the flake source gives new package derivations for each edit
+  # of the repository, also for an edit of the documentation.
+  packageScripts = lib.fileset.toSource {
+    root = ../scripts;
+    fileset = ../scripts/verify_runtime_package.py;
+  };
+  packageMeta = {
+    homepage = "https://chelis.ch";
+    license = lib.licenses.mit;
+    platforms = contracts.supportedSystems;
+  };
   compiler = pkgs.runCommand "chelis-cli-${version}" { } ''
     test -x ${compilerCrate}/bin/chelis
     install -Dm755 ${compilerCrate}/bin/chelis $out/bin/chelis
   '';
   # The runtime the compiler carries (spec/08-backends.md §2.1): `chelis-runtime`
   # and `chelis` ship the compiler's export, never a separately built crate.
-  runtime = pkgs.runCommand "chelis-runtime-${version}" { nativeBuildInputs = [ pkgs.python311 ]; } ''
-    export_dir="$TMPDIR/runtime-export"
-    ${compiler}/bin/chelis runtime export "$export_dir"
-    install -Dm444 "$export_dir/libchelis_runtime.a" $out/lib/libchelis_runtime.a
-    mkdir -p $out/include
-    ${lib.concatMapStringsSep "\n" (header: ''
-      install -Dm444 "$export_dir/${header}" $out/include/${header}
-    '') (import ./contracts.nix).publicRuntimeHeaders}
-    python3 ${root}/scripts/verify_runtime_package.py "$export_dir" "$out"
-  '';
+  runtime =
+    pkgs.runCommand "chelis-runtime-${version}"
+      {
+        meta = packageMeta // {
+          description = "C runtime library and headers of the Chelis compiler";
+        };
+        nativeBuildInputs = [ pkgs.python311 ];
+      }
+      ''
+        export_dir="$TMPDIR/runtime-export"
+        ${compiler}/bin/chelis runtime export "$export_dir"
+        install -Dm444 "$export_dir/libchelis_runtime.a" $out/lib/libchelis_runtime.a
+        mkdir -p $out/include
+        ${lib.concatMapStringsSep "\n" (header: ''
+          install -Dm444 "$export_dir/${header}" $out/include/${header}
+        '') contracts.publicRuntimeHeaders}
+        python3 ${packageScripts}/verify_runtime_package.py "$export_dir" "$out"
+      '';
   chelisup = pkgs.runCommand "chelisup-${version}" { } ''
     test -x ${chelisupCrate}/bin/chelisup
     install -Dm755 ${chelisupCrate}/bin/chelisup $out/libexec/chelisup
@@ -285,34 +306,67 @@ let
     EOF
     chmod 0755 $out/bin/chelisup
   '';
+  # The arguments of the `bin/chelis` wrapper, one makeWrapper argument for
+  # each element. `chelis build` finds the C compiler, `ar`, and the linker on
+  # PATH. The wrapper puts the C compiler and the binutils of stdenv first, so
+  # a build needs no host toolchain. The wrapper gives the compiler its
+  # libexec path as argv[0]. The compiler identifies its image without
+  # argv[0] (chelis#3649), so the wrapper needs no --argv0.
+  chelisWrapperArgs = [
+    "--prefix"
+    "PATH"
+    ":"
+    (lib.makeBinPath [
+      pkgs.stdenv.cc
+      pkgs.stdenv.cc.bintools
+    ])
+  ];
   chelis =
     pkgs.runCommand "chelis-${version}"
       {
         inherit version;
-        meta.mainProgram = "chelis";
-        nativeBuildInputs = [ pkgs.python311 ];
+        meta = packageMeta // {
+          description = "Compiler for Chelis, a numerical language with typed tensor shapes and checked properties";
+          mainProgram = "chelis";
+        };
+        nativeBuildInputs = [
+          pkgs.makeBinaryWrapper
+          pkgs.python311
+        ];
       }
       ''
-        mkdir -p $out/bin $out/lib $out/include
-        cp ${compiler}/bin/chelis $out/bin/chelis
+        mkdir -p $out/bin $out/lib $out/include $out/libexec
+        cp ${compiler}/bin/chelis $out/libexec/chelis
+        makeBinaryWrapper $out/libexec/chelis $out/bin/chelis \
+          ${lib.escapeShellArgs chelisWrapperArgs}
         cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a
         cp ${runtime}/include/*.h $out/include/
         export_dir="$TMPDIR/combined-export"
         $out/bin/chelis runtime export "$export_dir"
-        python3 ${root}/scripts/verify_runtime_package.py "$export_dir" "$out"
+        python3 ${packageScripts}/verify_runtime_package.py "$export_dir" "$out"
       '';
 in
 {
+  # The chelisup launcher above keeps its own section, so its metadata is
+  # added here.
+  chelisup = lib.addMetaAttrs (
+    packageMeta
+    // {
+      description = "Installer and version selector for Chelis toolchains";
+      mainProgram = "chelisup";
+    }
+  ) chelisup;
   inherit
     cargoGraph
     chelis
-    chelisup
+    chelisWrapperArgs
     chelisupCrate
     compiler
     compilerCrate
     crate2nixCommand
     crate2nixVersion
     crateSource
+    packageScripts
     runtime
     source
     toolchain

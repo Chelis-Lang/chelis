@@ -30,6 +30,7 @@
     chelis = {
       required = [
         "bin/chelis"
+        "libexec/chelis"
         "lib/libchelis_runtime.a"
         "include/chelis_runtime.h"
         "include/chelis_runtime_views.h"
@@ -39,12 +40,17 @@
         "include/chelis_math.h"
       ];
       forbidden = [ "bin/chelisup" ];
-      allowedProductExecutables = [ "bin/chelis" ];
+      allowedProductExecutables = [
+        "bin/chelis"
+        "libexec/chelis"
+      ];
       inventory = [
         "bin"
         "include"
         "lib"
+        "libexec"
         "bin/chelis"
+        "libexec/chelis"
         "lib/libchelis_runtime.a"
         "include/chelis_runtime.h"
         "include/chelis_runtime_views.h"
