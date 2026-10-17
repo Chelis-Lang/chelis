@@ -423,18 +423,25 @@ what each does:
   the transmitted lowered payload, since its wire always carries one, and
   adopts the checker results (`chelis_pipeline_core::bind_cached_library`,
   chelis#2558).
-- `StdLibContext` carries an optional lowered payload. When it is present the
-  decoder re-lowers, compares, and adopts the checker results; when it is
-  absent the decoder reruns both checkers, as the dependency route does.
-- `LibraryContext`, the dependency typecheck cache, carries none
-  (`LibraryContextWire`, `library_cache.rs`). Its decoder keeps rerunning both
-  checkers (`chelis_pipeline_core::validate_cached_library`), and those reruns
-  with the type-environment agreement are its whole post-decode semantic
-  check. `cache_wire_compatibility.rs`'s
-  `caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violation` is
-  the control: a program edited into a use after consume and resealed is
-  rejected by the linearity rerun. The rerun is paid only on `chelis check`
-  and `chelis build` in a package whose build lane has a dependency prefix.
+- The two typecheck caches, `StdLibContext` (chelis-std) and `LibraryContext`
+  (the dependency cache, holding the composed chelis-std and dependency
+  library), each carry an optional lowered payload and decode through one
+  binder (`stdlib_cache::bind_typecheck_cache_library`). When the lowering is
+  present the decoder re-lowers, compares, and adopts the checker results;
+  when it is absent the decoder reruns both checkers
+  (`chelis_pipeline_core::validate_cached_library`), and those reruns with the
+  type-environment agreement are its whole post-decode semantic check. The
+  producer stores a lowering whenever the library lowers standalone; a
+  library with a definition whose lowering needs a caller to pin a symbolic
+  axis is stored without one. `cache_wire_compatibility.rs` holds the
+  controls: in
+  `caches_with_a_lowering_reject_a_program_only_edit_into_a_linearity_violation`
+  a program edited into a use after consume and resealed is rejected by the
+  lowering comparison, in
+  `caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violation`
+  the same edit with the lowering stripped is rejected by the linearity rerun,
+  and `typecheck_cache_hits_with_a_lowering_rerun_no_checker` counts the
+  reruns a load pays: none with a lowering, one without.
 
 Where the comparison does run, it catches a payload whose parts stopped
 agreeing with each other, and the envelope's embedded digest cannot stand in
@@ -474,9 +481,10 @@ file's `0600` mode leaves open, which is a `TMPDIR` other users can write to,
 the ordinary shape of a shared build machine.
 
 Adopting the producer's checker results is sound only while rerunning the
-checkers reproduces the program they were handed. The compiled-context and
-stdlib routes no longer re-derive them, so nothing at run time would notice a
-checker that started to normalize, sort, dedup or intern, or a layer
+checkers reproduces the program they were handed. The compiled-context route
+and both typecheck cache routes, chelis-std's and the dependency cache's, no
+longer re-derive them when a lowering is stored, so nothing at run time would
+notice a checker that started to normalize, sort, dedup or intern, or a layer
 composition that lost one layer's results. `chelis-compiler-api`'s
 `compiled_context_authenticated_handoff.rs` holds the test that would:
 `cached_program_is_a_checker_fixed_point` builds a package that links the
@@ -499,7 +507,7 @@ re-derivation on the strength of a sentence, which is the escalation
 `AGENTS.md` warns about under "permission-to-mandate". chelis#2558 removed the
 checker reruns from the disk routes that carry a lowering by amending the rule
 above with its threat model, kept the lowering comparison, and kept the reruns
-on the dependency route, which has no lowering to compare; the fixed-point
+where a payload has no lowering to compare; the fixed-point
 test replaces the removed reruns as the guard that adopting equals
 re-deriving.
 

@@ -67,7 +67,7 @@
 //! It requires one opaque identity on both type products.
 //! It adopts the producer's effect and linearity results where it re-lowers
 //! and compares a stored lowering, and reruns those checkers where the
-//! payload carries none, as the dependency cache's does (chelis#2558).
+//! payload carries none (chelis#2558).
 
 use chelis_unord::UnordSet;
 use std::collections::BTreeMap;

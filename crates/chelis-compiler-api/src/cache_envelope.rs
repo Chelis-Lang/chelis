@@ -98,7 +98,9 @@ impl CachePayload for crate::LibraryContext {
     // V26 (#3130): Deep 0.20 removes Pipe and SurfPipeStage enum variants.
     // V28 carries mandatory rank-body evidence and its library-proof digest.
     // V29 combines rank evidence with checked callable occurrence metadata.
-    const FORMAT_VERSION: u32 = 29;
+    // V30 (chelis#3729): the payload carries an optional lowering of the
+    // composed library, so bincode's positional fields shift.
+    const FORMAT_VERSION: u32 = 30;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 

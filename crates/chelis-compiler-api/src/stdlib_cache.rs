@@ -197,42 +197,66 @@ impl<'de> Deserialize<'de> for StdLibContext {
     {
         let wire = StdLibContextWire::deserialize(deserializer)?;
         let _linked = chelis_types::install_linked_program_guard();
-        // The stored effect and linearity results are adopted only when a
-        // stored lowering is re-derived and compared below; without one the
-        // program has nothing else to disagree with, so the checkers rerun
-        // (chelis#2558).
-        let library = if wire.library_dag.is_some() {
-            chelis_pipeline_core::bind_cached_library(wire.type_env, wire.library_checked)
-        } else {
-            chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
-        }
-        .map_err(serde::de::Error::custom)?;
-        let library_dag = match wire.library_dag {
-            Some(cached) => {
-                if cached.library_proof_id() != library.program().library_proof_id() {
-                    return Err(serde::de::Error::custom(
-                        "the lowered library does not match the checked library",
-                    ));
-                }
-                let expected =
-                    crate::pipeline::lower_library(&library).map_err(serde::de::Error::custom)?;
-                if !cache_envelope::lowered_library_payload_matches(&cached, expected.raw())
-                    .map_err(serde::de::Error::custom)?
-                {
-                    return Err(serde::de::Error::custom(
-                        "the lowered library payload does not match the checked library",
-                    ));
-                }
-                Some(expected)
-            }
-            None => None,
-        };
+        let (library, library_dag) =
+            bind_typecheck_cache_library(wire.type_env, wire.library_checked, wire.library_dag)
+                .map_err(serde::de::Error::custom)?;
         Ok(Self {
             library,
             library_dag,
             structural_stats: wire.structural_stats,
         })
     }
+}
+
+/// Lower a library for a typecheck cache entry, best-effort: `None` when it
+/// does not lower standalone. A cancellation is an error, so the caller stops
+/// instead of saving an entry without the lowering it would otherwise carry.
+pub(crate) fn lower_library_unless_cancelled(
+    library: &crate::pipeline::CheckedLibrary,
+) -> Result<Option<crate::pipeline::LoweredLibrary>, CompilerError> {
+    match crate::pipeline::lower_library(library) {
+        Ok(lowered) => Ok(Some(lowered)),
+        Err(crate::pipeline::PipelineRejection::Cancelled { stage }) => {
+            Err(crate::compiler::cancelled_stage_error(stage))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// Bind a decoded typecheck cache payload under the one rule
+/// `spec/design/checker_totality.md` section C3 states for every on-disk
+/// route: the stored effect and linearity results are adopted only when the
+/// payload carries a lowering of the program, and that lowering is re-derived
+/// from the program and compared byte for byte. Without one the program has
+/// nothing else to disagree with, so both checkers rerun (chelis#2558). Both
+/// typecheck caches, chelis-std's and the dependency library's, decode
+/// through here.
+pub(crate) fn bind_typecheck_cache_library(
+    type_env: TypeEnv,
+    program: CheckedProgram,
+    lowering: Option<IrLoweredLibrary>,
+) -> Result<
+    (
+        crate::pipeline::CheckedLibrary,
+        Option<crate::pipeline::LoweredLibrary>,
+    ),
+    String,
+> {
+    let Some(cached) = lowering else {
+        let library = chelis_pipeline_core::validate_cached_library(type_env, program)
+            .map_err(|rejection| rejection.to_string())?;
+        return Ok((library, None));
+    };
+    let library = chelis_pipeline_core::bind_cached_library(type_env, program)
+        .map_err(|rejection| rejection.to_string())?;
+    if cached.library_proof_id() != library.program().library_proof_id() {
+        return Err("the lowered library does not match the checked library".to_string());
+    }
+    let expected = crate::pipeline::lower_library(&library).map_err(|error| error.to_string())?;
+    if !cache_envelope::lowered_library_payload_matches(&cached, expected.raw())? {
+        return Err("the lowered library payload does not match the checked library".to_string());
+    }
+    Ok((library, Some(expected)))
 }
 
 /// The 32-byte content-addressed cache key for a chelis-std sub-context.
@@ -592,8 +616,9 @@ pub fn build_declaration_context(
     // and `build` falls back to the monolithic lowering path when it is
     // `None`. Some chelis-std defs are only lowerable once a concrete
     // caller pins a symbolic axis; the unpruned whole-library lower can
-    // legitimately hit that.
-    let library_dag = crate::pipeline::lower_library(&library).ok();
+    // legitimately hit that. A cancelled lowering is a cancelled build,
+    // never an entry to save.
+    let library_dag = lower_library_unless_cancelled(&library)?;
 
     Ok(StdLibContext {
         library,
@@ -678,6 +703,32 @@ mod tests {
     /// A minimal well-formed `Decl` slice for key-stability tests. The
     /// exact shape is irrelevant; what matters is that the same slice
     /// hashes identically and a different slice hashes differently.
+    /// chelis#3769 review: a cancellation during a typecheck cache lowering
+    /// is an error, so neither builder saves an entry without the lowering a
+    /// completed build would carry. A lowering that merely declines is
+    /// `Ok(None)`; only the cancellation arm turns into `Err`.
+    #[test]
+    fn a_cancelled_typecheck_cache_lowering_is_an_error_not_a_decline() {
+        let context =
+            build_stdlib_context(&sample_decls("cancel_lowering")).expect("sample context builds");
+        assert!(
+            lower_library_unless_cancelled(context.checked_library())
+                .expect("an uncancelled lowering is not an error")
+                .is_some(),
+            "the sample library must lower, so the cancellation is what changes the outcome"
+        );
+        let token = chelis_types::CancelToken::new();
+        let _guard = chelis_types::install_cancel_token(token.clone());
+        token.cancel();
+        match lower_library_unless_cancelled(context.checked_library()) {
+            Err(error) => assert!(error.is_cancellation(), "{error:?}"),
+            Ok(lowered) => panic!(
+                "a cancelled lowering must be an error, not a decline: {:?}",
+                lowered.map(|_| "Some")
+            ),
+        }
+    }
+
     fn sample_decls(marker: &str) -> Vec<chelis_surf::ast::Decl> {
         chelis_surf::parser::parse_str(&format!("module Sample\ndef {marker}_value() -> i32 = 1\n"))
             .expect("sample decls must parse")
