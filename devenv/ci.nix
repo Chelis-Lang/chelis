@@ -44,9 +44,6 @@
       outputs.native-numerics = numerics.cache;
 
       env = {
-        # The schema-transition oracle runs in the default development profile,
-        # not ordinary CI. Do not realize its second Kache build for every job.
-        KACHE_SCHEMA_27_WRAPPER = lib.mkForce "";
         # Shared compiler-cache entries require non-incremental compilation.
         CARGO_INCREMENTAL = "0";
         # The wrapper's Bash %q response syntax cannot preserve arbitrary path bytes.

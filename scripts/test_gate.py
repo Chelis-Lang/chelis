@@ -518,7 +518,7 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
 
 
 _NIX_REVIEWED_WORKFLOW_SHA256 = (
-    "6b2abf74fc90d58714adba3b281b109f8a8e35e9a39528f4c9805aa6b88bca0b"
+    "dfc82d0a07b8db9fdeab0f345bccd5ec768391176e67abf9ef5ca509dd427c08"
 )
 _NIX_REVIEWED_SCHEDULE = "'37 2 * * *'"
 _NIX_NATIVE_JOBS = ("nix-linux-x86-64", "nix-darwin-arm64")

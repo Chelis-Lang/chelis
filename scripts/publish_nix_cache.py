@@ -6,21 +6,24 @@ complete native flake check set passed on that system. `release.yml` dispatches
 that run on each release tag. A daily schedule runs it on `main` when the cache
 does not hold the packages, and a maintainer can dispatch it on `main`.
 
-The script gives three groups of paths to `cachix push`:
+The script gives four groups of paths to `cachix push`:
 
 - The outputs of `packages.<system>.chelis`, `chelis-runtime`, and `chelisup`.
 - The cvc5 tree that the `cvc5-sys` crate links, which the flake exposes as
   `legacyPackages.<system>.cvc5-dir`.
 - Each Rust crate build in the build closure of the three packages.
   `buildRustCrate` names each crate derivation `rust_<crate>-<version>`.
+- The activated Devenv shell: the `$DEVENV_DOTFILE/gc/shell` root, which holds
+  the shell environment, and the `$DEVENV_PROFILE` profile. Their runtime
+  closure holds the Rust toolchain, Kache, and the other shell packages.
 
 Cachix also pushes the runtime closure of each path. With the default
 "upstream caches" setting of the cache, Cachix skips each path that
-cache.nixos.org serves. The script does not select the Rust toolchain, because
-a build downloads it from static.rust-lang.org in about the same time.
+cache.nixos.org serves.
 
 A build of a later revision then downloads the unchanged cvc5 tree and crates.
-It compiles only the crates whose sources or dependencies changed.
+It compiles only the crates whose sources or dependencies changed. A later run
+on an unchanged Devenv shell downloads the shell instead of a new build.
 
 The Cachix CLI comes from the flake's pinned Nixpkgs, and it reads its token
 from `CACHIX_AUTH_TOKEN`. The workflow fills that variable from the
@@ -29,7 +32,8 @@ from `CACHIX_AUTH_TOKEN`. The workflow fills that variable from the
 users download these paths instead of compiling them.
 
 Exit codes: 0 pushed (or, with `--dry-run`, listed), 1 a Nix or Cachix command
-failed or the build closure held no crate build, 2 the token is missing.
+failed, the build closure held no crate build, or no activated Devenv shell was
+found, 2 the token is missing.
 """
 
 from __future__ import annotations
@@ -49,8 +53,10 @@ PACKAGES = ("chelis", "chelis-runtime", "chelisup")
 CVC5_TREE = "cvc5-dir"
 # buildRustCrate names each crate derivation `rust_<crate>-<version>`.
 CRATE_PREFIX = "rust_"
+STORE_PREFIX = "/nix/store/"
 
 Runner = Callable[[Sequence[str], str | None], str]
+Resolver = Callable[[str], str]
 
 
 class PublishError(RuntimeError):
@@ -131,6 +137,23 @@ def crate_builds(system: str, run: Runner) -> list[str]:
     return crates
 
 
+def devenv_shell_roots(
+    environ: Mapping[str, str], resolve: Resolver = os.path.realpath
+) -> list[str]:
+    """The store paths of the activated Devenv shell and its profile."""
+    dotfile = environ.get("DEVENV_DOTFILE")
+    profile = environ.get("DEVENV_PROFILE")
+    if not dotfile or not profile:
+        raise PublishError(
+            "DEVENV_DOTFILE and DEVENV_PROFILE are not set, so no Devenv shell is active"
+        )
+    roots = [resolve(str(Path(dotfile) / "gc" / "shell")), resolve(profile)]
+    for root in roots:
+        if not root.startswith(STORE_PREFIX):
+            raise PublishError(f"a Devenv shell root is not a store path: {root}")
+    return roots
+
+
 def push(paths: Sequence[str], run: Runner) -> None:
     run(
         ["nix", "run", "--inputs-from", ".", "nixpkgs#cachix", "--", "push", CACHE_NAME],
@@ -142,6 +165,7 @@ def main(
     argv: Sequence[str] | None = None,
     run: Runner = run_command,
     environ: Mapping[str, str] = os.environ,
+    resolve: Resolver = os.path.realpath,
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -158,7 +182,13 @@ def main(
         return 2
     try:
         system = current_system(run)
-        paths = sorted({*built_outputs(system, run), *crate_builds(system, run)})
+        paths = sorted(
+            {
+                *built_outputs(system, run),
+                *crate_builds(system, run),
+                *devenv_shell_roots(environ, resolve),
+            }
+        )
         if args.dry_run:
             for path in paths:
                 print(path)
