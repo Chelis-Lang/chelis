@@ -99,7 +99,7 @@ let
       cadical' = cadical;
       libpoly = poly;
     }).overrideAttrs
-      (_old: {
+      (old: {
         inherit version;
         src = source;
         # Bind every archive and header to the same dependency derivation. In
@@ -139,6 +139,11 @@ let
           "-DSTATIC_BINARY=OFF"
         ];
         doCheck = false;
+        # ENABLE_GPL=OFF keeps cvc5 under its modified BSD license. The
+        # statically linked GMP, CaDiCaL and LibPoly keep their own licenses.
+        meta = old.meta // {
+          license = lib.licenses.bsd3;
+        };
       });
 
   # cvc5-sys checks the release file and build/src/libcvc5.a before linking.
