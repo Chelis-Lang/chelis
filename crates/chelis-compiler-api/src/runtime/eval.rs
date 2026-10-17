@@ -124,9 +124,9 @@ fn let_result_binding_index(bind_kids: &[&Expr], body: &Expr) -> Option<usize> {
     let mut name = tail_binding_name(body)?;
     let mut found = None;
     for (index, pair) in bind_kids.as_chunks::<2>().0.iter().enumerate().rev() {
-        if symbol_name(&pair[0]) == Some(name) {
+        if symbol_name(pair[0]) == Some(name) {
             found = Some(index * 2);
-            match tail_binding_name(&pair[1]) {
+            match tail_binding_name(pair[1]) {
                 Some(alias) => name = alias,
                 None => break,
             }
@@ -4485,7 +4485,7 @@ impl<'a> EvalContext<'a> {
                         })?;
                         self.bindings.insert(name, RuntimeValue::int64(size));
                     }
-                    for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
+                    for (index, (param, arg)) in params.iter().zip(args).enumerate() {
                         let declared = param_types
                             .get(index)
                             .cloned()

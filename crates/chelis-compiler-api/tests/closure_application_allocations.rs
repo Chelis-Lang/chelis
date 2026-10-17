@@ -101,7 +101,10 @@ fn closure_application_allocations_do_not_scale_with_its_syntax() {
             let small = per_step(2);
             let large = per_step(256);
             eprintln!("allocations per fold step: {small} (2 additions), {large} (256 additions)");
-            assert!(small > 0, "a fold step allocates, or this receipt measures nothing");
+            assert!(
+                small > 0,
+                "a fold step allocates, or this receipt measures nothing"
+            );
             assert!(
                 large <= small + small / 10,
                 "a fold step allocated {large} times with a 256-addition untaken branch \

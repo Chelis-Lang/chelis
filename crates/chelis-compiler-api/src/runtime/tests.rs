@@ -1503,7 +1503,9 @@ fn issue_3758_recursive_higher_order_chains_check_bounded_frames() {
     for depth in [50, 200] {
         let self_checks = checks(&walk(depth), &depth.to_string());
         let mutual_checks = checks(&ping_pong(depth), "tensor(shape=[2], data=[1.0, 2.0])");
-        eprintln!("#3758 receipt: depth {depth} checked {self_checks} (self), {mutual_checks} (mutual)");
+        eprintln!(
+            "#3758 receipt: depth {depth} checked {self_checks} (self), {mutual_checks} (mutual)"
+        );
         assert!(
             self_checks >= depth as u64,
             "#3758: every application of `f` checks its retained contract, or this receipt measures nothing"
@@ -1512,7 +1514,9 @@ fn issue_3758_recursive_higher_order_chains_check_bounded_frames() {
             excessive.push(format!("self recursion at depth {depth}: {self_checks}"));
         }
         if mutual_checks > 4 * depth as u64 {
-            excessive.push(format!("mutual recursion at depth {depth}: {mutual_checks}"));
+            excessive.push(format!(
+                "mutual recursion at depth {depth}: {mutual_checks}"
+            ));
         }
     }
     assert!(
@@ -1543,7 +1547,8 @@ fn issue_3758_bounded_chains_keep_every_rejection() {
                   def pong(g: tensor[*, f32] -> tensor[8, f32], x: tensor[*, f32], k: i64) -> \
                   tensor[*, f32] = if eq(k, 0i64) then x else ping(g, g(x), sub(k, 1i64))\n\
                   result = ping(grow, to_tensor([1.0f32]), 6i64)\n";
-    let error = evaluate_result_or_failure(result).expect_err("an inner frame's result claim fails");
+    let error =
+        evaluate_result_or_failure(result).expect_err("an inner frame's result claim fails");
     assert!(
         error.contains("extent `8`: claimed = 8, concat axis 0 = 4"),
         "#3758: a frame retained through the other formal still claims its result: {error}"
@@ -1618,7 +1623,10 @@ fn issue_3778_closure_entry_types_are_built_once_per_closure() {
         assert_eq!(result, (steps * (steps - 1) / 2).to_string());
         builds.push(super::eval::closure_entry_builds());
     }
-    eprintln!("#3778 receipt: entry types built {builds:?} for 10 and 40 applications");
+    eprintln!(
+        "#3778 receipt: entry types built {} for 10 applications, {} for 40",
+        builds[0], builds[1]
+    );
     assert!(
         builds[0] >= 1,
         "#3778: applying the closure builds its entry types, or this receipt measures nothing"

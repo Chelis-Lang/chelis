@@ -560,14 +560,13 @@ mod tests {
     #[test]
     fn retained_frame_reduction_keeps_both_verdict_orders_and_bounds_the_chain() {
         type Chain = Vec<Arc<NormalizedCallableContract>>;
-        let contracts = ["(t-prim {} f64)", "(t-prim {} f32)", "(t-prim {} i64)"]
-            .map(|result| {
-                let signature = function_contract(result);
-                NormalizedCallableContract {
-                    authored: signature.clone(),
-                    signature,
-                }
-            });
+        let contracts = ["(t-prim {} f64)", "(t-prim {} f32)", "(t-prim {} i64)"].map(|result| {
+            let signature = function_contract(result);
+            NormalizedCallableContract {
+                authored: signature.clone(),
+                signature,
+            }
+        });
         let label = |frame: &Arc<NormalizedCallableContract>| {
             contracts
                 .iter()
@@ -575,14 +574,16 @@ mod tests {
                 .unwrap()
         };
         let verdicts = |chain: &Chain, failing: usize| {
-            let fails = |frame: &&Arc<NormalizedCallableContract>| failing & (1 << label(frame)) != 0;
+            let fails =
+                |frame: &&Arc<NormalizedCallableContract>| failing & (1 << label(frame)) != 0;
             (
                 chain.iter().find(fails).map(label),
                 chain.iter().rev().find(fails).map(label),
             )
         };
         let equivalent = |left: &Chain, right: &Chain| {
-            (0..1usize << contracts.len()).all(|failing| verdicts(left, failing) == verdicts(right, failing))
+            (0..1usize << contracts.len())
+                .all(|failing| verdicts(left, failing) == verdicts(right, failing))
         };
         // Keeping only the first of each contract loses the result order's
         // verdict, so the equivalence oracle is not vacuous.
@@ -613,7 +614,12 @@ mod tests {
                 unreduced.iter().map(label).collect::<Vec<_>>()
             );
             for contract in 0..contracts.len() {
-                let count = |chain: &Chain| chain.iter().filter(|frame| label(frame) == contract).count();
+                let count = |chain: &Chain| {
+                    chain
+                        .iter()
+                        .filter(|frame| label(frame) == contract)
+                        .count()
+                };
                 assert!(
                     count(&reduced) <= 2,
                     "retention {sequence:?} kept {} equal frames",
@@ -630,7 +636,13 @@ mod tests {
                 }
             }
         }
-        assert!(unreduced_exceeded, "the sweep must reach chains the bound rejects");
-        assert!(first_only_diverged, "the sweep must reach chains a lossy reduction breaks");
+        assert!(
+            unreduced_exceeded,
+            "the sweep must reach chains the bound rejects"
+        );
+        assert!(
+            first_only_diverged,
+            "the sweep must reach chains a lossy reduction breaks"
+        );
     }
 }
