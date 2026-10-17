@@ -2868,6 +2868,7 @@ int main(int argc, char **argv) {{
     chelis_tensor *updates = filled(2, CHELIS_DTYPE_F32, update_values, sizeof(update_values));
     chelis_tensor *inputs[3] = {{{order}}}, *outputs[1] = {{0}};
     sparse_trap(inputs, 3, outputs, 1);
+    for (int i = 0; i < 3; i++) chelis_tensor_release(inputs[i]);
     chelis_tensor_release(outputs[0]);
     return 0;
 }}
@@ -2897,8 +2898,10 @@ int main(int argc, char **argv) {{
                 let run = Command::new(&binary).arg(selected).output().unwrap();
                 assert_eq!(run.status.code(), Some(1), "{name} {selected}: {run:?}");
                 let stderr = String::from_utf8_lossy(&run.stderr);
+                // A trap exits inside the call, so a leak-checking sanitizer can
+                // report the live inputs after the two trap lines.
                 assert_eq!(
-                    stderr.lines().collect::<Vec<_>>(),
+                    stderr.lines().take(2).collect::<Vec<_>>(),
                     [
                         format!("{name} index {selected} out of bounds at axis 0 of extent 3"),
                         format!("numeric trap: domain in {name} at i64"),
