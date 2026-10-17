@@ -979,6 +979,29 @@ fn append_at_a_lists_last_use_moves_and_the_chain_stops_borrowing() {
     );
 }
 
+/// chelis#3724: a list whose scheduled last use is `take` moves into it, and a
+/// list read after the `take` stays borrowed.
+#[test]
+fn take_at_a_lists_last_use_moves_and_a_later_read_keeps_borrowing() {
+    let last = unit_text(
+        &verified_source(
+            "def trim() -> i64 = {\n  xs = range(0i64, 4i64)\n  ys = take(xs, 2i64)\n  len(ys)\n}\nn = trim()\n",
+        ),
+        "trim",
+    );
+    assert_eq!(count(&last, "builtin:take(move"), 1, "{last}");
+    assert_eq!(count(&last, "builtin:take(borrow"), 0, "{last}");
+
+    let later = unit_text(
+        &verified_source(
+            "def trim() -> i64 = {\n  xs = range(0i64, 4i64)\n  ys = take(xs, 2i64)\n  add(len(ys), len(xs))\n}\nn = trim()\n",
+        ),
+        "trim",
+    );
+    assert_eq!(count(&later, "builtin:take(borrow"), 1, "{later}");
+    assert_eq!(count(&later, "builtin:take(move"), 0, "{later}");
+}
+
 /// chelis#2205 negative half: a list read after the append is not moved into
 /// it, and a list read twice moves only at the second, final append.
 #[test]

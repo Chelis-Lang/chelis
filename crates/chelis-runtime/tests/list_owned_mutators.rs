@@ -10,8 +10,8 @@
 use chelis_runtime::{
     chelis_list_append_owned, chelis_list_concat_owned, chelis_list_empty, chelis_list_index,
     chelis_list_len, chelis_list_push_moved, chelis_list_release, chelis_list_retain,
-    chelis_scalar_from_bits, chelis_value, chelis_value_box_scalar, chelis_value_release,
-    chelis_value_unbox_scalar, CHELIS_DTYPE_I64,
+    chelis_list_take, chelis_list_take_owned, chelis_scalar_from_bits, chelis_value,
+    chelis_value_box_scalar, chelis_value_release, chelis_value_unbox_scalar, CHELIS_DTYPE_I64,
 };
 
 unsafe fn int_value(value: i64) -> chelis_value {
@@ -133,5 +133,85 @@ fn null_inputs_behave_like_the_cloning_entry_points() {
         assert_eq!(chelis_list_len(joined), 1);
         chelis_list_release(joined);
         chelis_list_release(rhs);
+    }
+}
+
+unsafe fn ints(values: &[i64]) -> *mut chelis_runtime::chelis_list {
+    let list = chelis_list_empty();
+    for value in values {
+        chelis_list_push_moved(list, int_value(*value));
+    }
+    list
+}
+
+unsafe fn contents(list: *const chelis_runtime::chelis_list) -> Vec<i64> {
+    (0..chelis_list_len(list))
+        .map(|index| int_at(list, index))
+        .collect()
+}
+
+/// chelis#3724: a uniquely owned list is truncated in place and comes back as
+/// the same allocation, holding the prefix.
+#[test]
+fn unique_take_owned_truncates_in_place_and_returns_the_same_list() {
+    unsafe {
+        let list = ints(&[1, 2, 3, 4]);
+        let result = chelis_list_take_owned(list, 2);
+        assert!(
+            std::ptr::eq(result, list),
+            "a uniquely owned list is truncated in place"
+        );
+        assert_eq!(contents(result), vec![1, 2]);
+        chelis_list_release(result);
+    }
+}
+
+/// A shared list is never truncated: the consuming take clones the prefix,
+/// leaves the shared view whole, and releases the owner the caller gave up.
+#[test]
+fn shared_take_owned_clones_and_leaves_the_shared_view_untouched() {
+    unsafe {
+        let list = ints(&[1, 2, 3]);
+        chelis_list_retain(list);
+        let result = chelis_list_take_owned(list, 1);
+        assert!(
+            !std::ptr::eq(result, list),
+            "a shared list is never truncated in place"
+        );
+        assert_eq!(
+            contents(list),
+            vec![1, 2, 3],
+            "the shared view keeps its length"
+        );
+        assert_eq!(contents(result), vec![1]);
+        chelis_list_release(list);
+        chelis_list_release(result);
+    }
+}
+
+/// The consuming take agrees with the cloning take on every count, including
+/// zero and counts at and above the length, where `list_take` truncates at
+/// the end ([05-OP-32]).
+#[test]
+fn take_owned_agrees_with_the_cloning_take_on_every_count() {
+    unsafe {
+        for count in 0..=6 {
+            let source = ints(&[10, 20, 30, 40]);
+            let expected = chelis_list_take(source, count);
+            let owned = chelis_list_take_owned(source, count);
+            assert_eq!(contents(owned), contents(expected), "count {count}");
+            chelis_list_release(expected);
+            chelis_list_release(owned);
+        }
+    }
+}
+
+/// A null list takes the cloning entry point's path.
+#[test]
+fn take_owned_of_a_null_list_behaves_like_the_cloning_entry_point() {
+    unsafe {
+        let result = chelis_list_take_owned(std::ptr::null_mut(), 3);
+        assert_eq!(chelis_list_len(result), 0);
+        chelis_list_release(result);
     }
 }

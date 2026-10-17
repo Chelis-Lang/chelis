@@ -40,7 +40,8 @@ pub struct chelis_list {
     ///
     /// An exclusive offset inside the one allocation, never a window
     /// onto a buffer a second handle can see: it moves only in
-    /// `chelis_list_drop_owned`, only at strong-owner count one, and
+    /// `chelis_list_drop_owned` and `chelis_list_take_owned` (whose
+    /// compaction resets it), only at strong-owner count one, and
     /// only under an ownership `Move` the verifier proved. Any other
     /// holder forces that entry point's cloning arm, which builds a
     /// fresh list at head zero. [05-OP-44]'s heap-kind universe is
@@ -109,6 +110,31 @@ impl chelis_list {
     pub(crate) fn advance_head(&mut self, count: usize) {
         debug_assert!(self.head <= self.items.len(), "head past the allocation");
         self.head += count.min(self.items.len() - self.head);
+    }
+
+    /// Keep only the first `len` live elements (chelis#3724).
+    ///
+    /// The caller has already released every element past `len`, for the
+    /// reason `advance_head` gives: releasing first keeps every read inside
+    /// `live()`. A `len` at or above the live length changes nothing, which
+    /// is how [05-OP-32]'s "`list_take` truncates at the end" arrives here.
+    ///
+    /// The allocation is bounded the way `compact_retired_prefix` bounds it,
+    /// over the buffer rather than the length: once the buffer holds more
+    /// than twice the slots it uses, it is rebuilt at the used length. A
+    /// truncation that kept the capacity would leave a one-element prefix
+    /// holding the buffer of the list it was taken from, and the ledger
+    /// reports exactly that capacity. Halving before each rebuild keeps the
+    /// copying amortised O(1) per removed element: a cursor that trims one
+    /// element per step rebuilds at half, a quarter, an eighth of the
+    /// original length.
+    pub(crate) fn truncate_live(&mut self, len: usize) {
+        debug_assert!(self.head <= self.items.len(), "head past the allocation");
+        let live_len = self.items.len() - self.head;
+        self.items.truncate(self.head + len.min(live_len));
+        if !self.compact_retired_prefix() && self.items.capacity() > 2 * self.items.len() {
+            self.items.shrink_to_fit();
+        }
     }
 
     /// Reclaim the retired prefix once it is larger than the live
@@ -298,5 +324,54 @@ mod tests {
             compactions <= N.ilog2() as usize + 2,
             "a full walk compacted {compactions} times"
         );
+    }
+
+    /// chelis#3724: a truncation gives the unused buffer back once the
+    /// buffer holds more than twice the slots it uses, and not before.
+    #[test]
+    fn a_truncation_shrinks_the_buffer_only_past_half() {
+        let mut list = list_with_slack(64, 64);
+        list.truncate_live(40);
+        assert_eq!(list.live().len(), 40);
+        assert_eq!(
+            list.buffer_capacity(),
+            64,
+            "a buffer still more than half used is kept"
+        );
+        list.truncate_live(1);
+        assert_eq!(list.live().len(), 1);
+        assert!(
+            list.buffer_capacity() <= 2,
+            "a one-element prefix must not keep the 64-slot buffer, kept {}",
+            list.buffer_capacity()
+        );
+        list.truncate_live(5);
+        assert_eq!(
+            list.live().len(),
+            1,
+            "a count above the length keeps the list"
+        );
+    }
+
+    /// The copying a trim-one-per-step cursor pays is linear: the buffer is
+    /// rebuilt only when it has halved, so the slots moved sum to under n.
+    #[test]
+    fn a_trim_one_per_step_cursor_moves_a_linear_number_of_slots() {
+        const N: usize = 1024;
+        let mut list = list_with_slack(N, N);
+        let mut moved = 0usize;
+        while !list.live().is_empty() {
+            let capacity = list.buffer_capacity();
+            let target = list.live().len() - 1;
+            list.truncate_live(target);
+            if list.buffer_capacity() != capacity {
+                moved += list.live().len();
+            }
+            assert!(
+                list.buffer_capacity() <= 2 * list.live().len().max(1),
+                "the buffer never holds more than twice the slots it uses"
+            );
+        }
+        assert!(moved <= N, "a full trim moved {moved} slots, above n = {N}");
     }
 }

@@ -617,8 +617,8 @@ the stack-budget check. The final return still supplies result provenance,
 and the loop performs arithmetic in the same order as the recursive source.
 
 The consumed operand of a container-producing builtin (a row of the ownership
-IR's `CONTAINER_CONSUMERS` table: `append`, `concat` and `skip` at the list
-kind, `dict_insert`, `dict_merge` and `dict_remove` at the dictionary kind,
+IR's `CONTAINER_CONSUMERS` table: `append`, `concat`, `skip` and `take` at the
+list kind, `dict_insert`, `dict_merge` and `dict_remove` at the dictionary kind,
 and `string_concat` at the string kind) is moved
 into the builtin when the scheduler places that owner's terminal directly
 after the application: lowering borrows every builtin operand, and the
@@ -627,7 +627,7 @@ the verifier re-checks the move as it would any other (no live borrow, no
 later use). The move establishes only the borrow half of exclusivity. The
 sharing half is the runtime's: as with tensor reuse in C6, the consuming entry
 point (`chelis_list_append_owned`, `chelis_list_concat_owned`,
-`chelis_list_drop_owned`, `chelis_dict_insert_owned`,
+`chelis_list_drop_owned`, `chelis_list_take_owned`, `chelis_dict_insert_owned`,
 `chelis_dict_merge_owned`, `chelis_dict_remove_owned`,
 `chelis_string_concat_owned`, private to the emitter like the accumulator
 ABI)
@@ -660,8 +660,8 @@ Membership is narrower than "produces its own kind". A row is for a callable
 whose result is its operand with an edit applied, so that reusing the
 allocation replaces a copy of the whole operand with the edit alone. The edit
 need not grow the container: `append`, `concat`, `dict_insert`, `dict_merge`
-and `string_concat` add, `dict_remove` deletes a keyed entry and `skip`
-deletes a leading run, but in each the surviving content is carried over in
+and `string_concat` add, `dict_remove` deletes a keyed entry, `skip`
+deletes a leading run and `take` a trailing one, but in each the surviving content is carried over in
 place rather than rebuilt.
 
 A callable whose result is a positional sub-range of its operand is a row only
@@ -693,13 +693,19 @@ drained in place would keep the original capacity and leave a one-element list
 holding the buffer of the list it was skipped from. The cost is amortised O(1)
 per skipped element. [#2334] delivered it.
 
-`take` is not a row and does not need to be: its result is a prefix, so the
-in-place form is a truncation with no offset involved, and its callers are one
-standard-library wrapper and two examples. `string_slice` and `string_trim` are
-not rows either, because a string carries the derived state described below and
-a sub-range of one is not the single mutation a sub-range of a list is. Those
-three remain dispositions rather than derivations and could be revisited on
-their own evidence.
+`take` is a row for the simpler half of the same reason. Its result is a
+prefix, so the in-place form is a truncation: `chelis_list_take_owned` releases
+the elements past the count and shortens the only handle, with no offset and
+no new heap kind, so the clobber above cannot arise. A truncation bounds the
+allocation as the compaction does, rebuilding the buffer at the used length
+once it holds more than twice the slots it uses, which keeps the copying
+amortised O(1) per removed element. A cursor that trims its last element with
+`take(xs, len(xs) - 1)` is therefore linear rather than quadratic.
+
+`string_slice` and `string_trim` are not rows, because a string carries the
+derived state described below and a sub-range of one is not the single
+mutation a sub-range of a list is. Those two remain dispositions rather than
+derivations and could be revisited on their own evidence.
 
 The string row carries an obligation neither of the other kinds has, and it
 is the reason a heap kind is not interchangeable here. `RuntimeString` stores

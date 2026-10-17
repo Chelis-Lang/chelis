@@ -210,6 +210,14 @@ pub(crate) const CONTAINER_CONSUMERS: &[ContainerConsumer] = &[
         kind: HeapKind::List,
         operand: 0,
     },
+    // chelis#3724. `take` returns a prefix of its operand, so the in-place
+    // story is a truncation: the consuming entry point releases the
+    // elements past the count and shortens the list, with no offset.
+    ContainerConsumer {
+        label: "builtin:take",
+        kind: HeapKind::List,
+        operand: 0,
+    },
     ContainerConsumer {
         label: "builtin:dict_insert",
         kind: HeapKind::Dict,

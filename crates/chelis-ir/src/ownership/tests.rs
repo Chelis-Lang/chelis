@@ -3791,6 +3791,7 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
         ("builtin:append", list),
         ("builtin:concat", list),
         ("builtin:skip", list),
+        ("builtin:take", list),
         ("builtin:dict_insert", dict),
         ("builtin:dict_merge", dict),
         ("builtin:dict_remove", dict),
@@ -3817,6 +3818,12 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
         container_consumer_operand("builtin:skip", Some(dict), |_| Some(dict)),
         None,
         "a dictionary application never matches the list-kinded `skip` row"
+    );
+    // chelis#3724's `take`, the prefix twin of `skip`, keyed the same way.
+    assert_eq!(
+        container_consumer_operand("builtin:take", Some(dict), |_| Some(dict)),
+        None,
+        "a dictionary application never matches the list-kinded `take` row"
     );
     // Rejected by the result comparison: the row's kind is Dict.
     assert_eq!(
