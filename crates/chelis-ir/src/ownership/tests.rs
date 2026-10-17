@@ -4506,3 +4506,268 @@ fn host_build_verifies_each_distinct_ownership_program_once() {
     assert_eq!(super::verify::verify_calls() - before, 2);
     assert!(verified.render().contains("unit bump Function"));
 }
+
+/// chelis#3755: a body whose owners and operations both grow with `count`.
+/// Block 0 borrows a branch condition, defines `count` owners that are each
+/// read once right after their definition, and defines `count` more that are
+/// carried to a join: the then arm reads every carried owner, and both arms
+/// move them into the join's `count` unused owned parameters. Every owner asks
+/// the scheduler and the canonical re-check for its definition, its uses and
+/// future need, its placement anchors and the edges entering its block.
+fn last_use_scaling_program(count: u32) -> RawProgram {
+    let line = |index: u32| 1 + index;
+    let carried = |index: u32| 1 + count + index;
+    let joined = |index: u32| 1 + 2 * count + index;
+    let moves = || {
+        (0..count)
+            .map(|index| Operand::move_(OwnerId(carried(index))))
+            .collect::<Vec<_>>()
+    };
+    let mut ops = Vec::new();
+    for index in 0..count {
+        ops.push(define(line(index)));
+        ops.push(borrow_op(line(index)));
+    }
+    ops.extend((0..count).map(|index| define(carried(index))));
+    let mut entry = block(
+        0,
+        vec![BlockParam {
+            owner: OwnerId(0),
+            mode: ParamMode::EntryBorrow,
+        }],
+        ops,
+        Terminator::Branch {
+            condition: Operand::borrow(OwnerId(0)),
+            then_edge: edge(1, vec![]),
+            else_edge: edge(2, moves()),
+        },
+    );
+    entry
+        .ops
+        .extend((0..count).map(|index| provisional(0x4000_0000 + index, line(index), true)));
+    let then_block = block(
+        1,
+        vec![],
+        (0..count).map(|index| borrow_op(carried(index))).collect(),
+        Terminator::Jump(edge(2, moves())),
+    );
+    let mut join = block(
+        2,
+        (0..count)
+            .map(|index| BlockParam {
+                owner: OwnerId(joined(index)),
+                mode: ParamMode::Owned,
+            })
+            .collect(),
+        vec![],
+        Terminator::Exit,
+    );
+    join.ops
+        .extend((0..count).map(|index| provisional(0x5000_0000 + index, joined(index), true)));
+    let mut owners = BTreeMap::from([(OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow))]);
+    owners.extend(
+        (0..count)
+            .flat_map(|index| [line(index), carried(index), joined(index)])
+            .map(|owner| (OwnerId(owner), info(Prim::String, OwnerOrigin::Owned))),
+    );
+    roots(vec![entry, then_block, join], owners)
+}
+
+/// chelis#3755: a chain of `count` blocks, each defining an owner that the
+/// next block reads, so each owner's frontier is found in another block and
+/// every lookup by block identity ranges over a unit that grows with it.
+fn last_use_block_chain_program(count: u32) -> RawProgram {
+    let blocks = (0..=count)
+        .map(|index| {
+            let mut ops = Vec::new();
+            if index > 0 {
+                ops.push(borrow_op(index - 1));
+            }
+            if index < count {
+                ops.push(define(index));
+            }
+            let terminator = if index < count {
+                Terminator::Jump(edge(index + 1, vec![]))
+            } else {
+                Terminator::Exit
+            };
+            let mut block = block(index, vec![], ops, terminator);
+            if index > 0 {
+                block
+                    .ops
+                    .push(provisional(0x4000_0000 + index, index - 1, true));
+            }
+            block
+        })
+        .collect();
+    roots(
+        blocks,
+        (0..count)
+            .map(|owner| (OwnerId(owner), info(Prim::String, OwnerOrigin::Owned)))
+            .collect(),
+    )
+}
+
+/// chelis#3755: `count` owners defined up front and all read by one final
+/// operation, so every owner's single frontier sits at the end of the body
+/// and post-dominates a definition that much earlier.
+fn last_use_late_read_program(count: u32) -> RawProgram {
+    let mut ops = (0..count).map(define).collect::<Vec<_>>();
+    ops.push(Op::Apply {
+        dest: None,
+        label: "observe all".into(),
+        kind: ApplyKind::Intrinsic,
+        schema: OperationSchema::new(vec![OwnershipUse::Borrow; count as usize], None),
+        args: (0..count)
+            .map(|owner| Operand::borrow(OwnerId(owner)))
+            .collect(),
+    });
+    let mut entry = block(0, vec![], ops, Terminator::Exit);
+    entry
+        .ops
+        .extend((0..count).map(|owner| provisional(0x4000_0000 + owner, owner, true)));
+    roots(
+        vec![entry],
+        (0..count)
+            .map(|owner| (OwnerId(owner), info(Prim::String, OwnerOrigin::Owned)))
+            .collect(),
+    )
+}
+
+/// The scheduled scope exits of a unit: in blocks, and on edges.
+fn scheduled_terminal_counts(unit: &Unit) -> (usize, usize) {
+    let in_block = unit
+        .blocks
+        .iter()
+        .flat_map(|block| &block.ops)
+        .filter(|operation| operation.role == OperationRole::ScheduledScopeExit)
+        .count();
+    let on_edges = unit
+        .blocks
+        .iter()
+        .flat_map(|block| block.terminator.edges())
+        .map(|edge| edge.terminals.len())
+        .sum();
+    (in_block, on_edges)
+}
+
+/// chelis#3755: a recursive function whose body chains `count` let
+/// bindings, lowered from source so the scheduler also re-anchors every
+/// terminal in a real host-site map.
+fn last_use_lowered_chain_source(count: u32) -> String {
+    let mut source =
+        String::from("def st(s: i64, i: i64) -> i64 = if gte(i, 5i64) then s else {\n");
+    let mut previous = "s".to_string();
+    for index in 0..count {
+        source.push_str(&format!("  t{index} = add({previous}, 1i64)\n"));
+        previous = format!("t{index}");
+    }
+    source.push_str(&format!(
+        "  st({previous}, add(i, 1i64))\n}}\nr = st(1i64, 0i64)\n"
+    ));
+    source
+}
+
+/// Run `run` on a thread with a stack deep enough for the front end on a
+/// long let chain in a debug build. The lookup counters are per thread, so the
+/// whole measurement runs there.
+fn on_large_stack<T: Send>(run: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn_scoped(scope, run)
+            .expect("spawn the measurement thread")
+            .join()
+            .expect("the measurement thread completes")
+    })
+}
+
+/// The lookup visits the scheduler and the canonical re-check of its result
+/// make for each size in a doubling sweep, per shape: the wide body, the
+/// block chain, the late read and the lowered let chain.
+fn owner_lookup_visit_sweep(sizes: &[u32]) -> [Vec<u64>; 4] {
+    let mut visits = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for &count in sizes {
+        let mut wide = last_use_scaling_program(count);
+        let before = super::last_use::lookup_visits();
+        schedule(&mut wide).unwrap();
+        visits[0].push(super::last_use::lookup_visits() - before);
+        // Each line owner dies after its read; each joined parameter dies on
+        // both edges into the join.
+        assert_eq!(
+            scheduled_terminal_counts(&wide.units[0]),
+            (count as usize, 2 * count as usize)
+        );
+
+        let mut chain = last_use_block_chain_program(count);
+        let before = super::last_use::lookup_visits();
+        schedule(&mut chain).unwrap();
+        visits[1].push(super::last_use::lookup_visits() - before);
+        // Each chain owner dies after its read in the next block.
+        assert_eq!(
+            scheduled_terminal_counts(&chain.units[0]),
+            (count as usize, 0)
+        );
+
+        let mut late = last_use_late_read_program(count);
+        let before = super::last_use::lookup_visits();
+        schedule(&mut late).unwrap();
+        visits[2].push(super::last_use::lookup_visits() - before);
+        // Every owner dies right after the final read.
+        assert_eq!(
+            scheduled_terminal_counts(&late.units[0]),
+            (count as usize, 0)
+        );
+
+        let source = last_use_lowered_chain_source(count);
+        let before = super::last_use::lookup_visits();
+        let lowered = lower_source_for_ownership(&source);
+        visits[3].push(super::last_use::lookup_visits() - before);
+        let super::OwnershipProof::Host { program, .. } = &lowered.proof else {
+            panic!("source lowering must produce a host ownership proof");
+        };
+        let owners = program
+            .units
+            .iter()
+            .map(|unit| unit.owners.len())
+            .sum::<usize>();
+        assert!(
+            owners >= count as usize,
+            "the lowered chain must bind an owner per let: {owners}"
+        );
+    }
+    visits
+}
+
+#[test]
+fn last_use_lookups_stay_linear_in_the_body() {
+    // The quadratic quantity itself (chelis#3755): operations, parameters,
+    // edges, site actions and index entries the per-owner and per-terminal
+    // lookups of the scheduler and its canonical re-check examine. A scan of
+    // the unit, a block or the site map per owner or per terminal makes it
+    // grow about 4x per doubling.
+    for visits in on_large_stack(|| owner_lookup_visit_sweep(&[32, 64, 128, 256])) {
+        assert!(
+            max_doubling_ratio(&visits) <= 2.2,
+            "lookup visits per doubling must stay linear: {visits:?}"
+        );
+    }
+}
+
+#[test]
+fn owner_lookup_guard_catches_a_reintroduced_per_owner_scan() {
+    // Negative control: the test build checks every indexed lookup against
+    // the scan it replaced. Counting those scans is exactly a per-owner or
+    // per-terminal scan, and the guard above must see it go quadratic.
+    let sweeps = on_large_stack(|| {
+        super::last_use::with_reference_scans_counted(|| {
+            owner_lookup_visit_sweep(&[32, 64, 128, 256])
+        })
+    });
+    for visits in sweeps {
+        assert!(
+            max_doubling_ratio(&visits) >= 3.5,
+            "a per-owner scan must read as quadratic: {visits:?}"
+        );
+    }
+}
