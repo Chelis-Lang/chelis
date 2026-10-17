@@ -1955,34 +1955,42 @@ mod tests {
     }
 
     /// chelis#3722: a kept parse serves only a source with the same projection.
-    /// A source with one more external function gets its own parse, so the
-    /// validation still refuses the unregistered definition.
+    /// A longer source, and a source of the same length with other bytes, each
+    /// get their own parse. So the validation still refuses the unregistered
+    /// definition that each of them adds.
     #[test]
     fn a_kept_parse_serves_only_its_own_projection() {
+        let comment = "/* int external_helper(int x) { return x - 1; } */\n";
         let (source, header) = sealed_fixture(
             "demo",
             "alpha",
             "chelis_fn_616c706861",
             "int chelis_fn_616c706861(int x);",
             "int chelis_fn_616c706861(int x) {\n    return x + 1;\n}",
-            "",
+            comment,
         );
-        let mut kept = None;
-        GeneratedHeader::parse(&header)
-            .expect("sealed header")
-            .validate_source_with(&source, &mut kept)
-            .expect("the sealed pair validates");
-        let extra = format!("{source}\nint external_helper(int x) {{\n    return x - 1;\n}}\n");
-        let resealed = rewrite_source_digest(&header, &extra);
-        C_PARSES.with(|parses| parses.set(0));
-        assert!(
-            GeneratedHeader::parse(&resealed)
-                .expect("syntactically resealed header")
-                .validate_source_with(&extra, &mut kept)
-                .is_err(),
-            "a parse of another source must not admit an unregistered external definition"
-        );
-        assert_eq!(C_PARSES.with(std::cell::Cell::get), 1);
+        let uncommented = comment.replace("/*", "  ").replace("*/", "  ");
+        let same_length = source.replacen(comment, &uncommented, 1);
+        assert_ne!(same_length, source);
+        assert_eq!(same_length.len(), source.len());
+        let longer = format!("{source}\nint external_helper(int x) {{\n    return x - 1;\n}}\n");
+        for (case, other) in [("longer", longer), ("same length", same_length)] {
+            let mut kept = None;
+            GeneratedHeader::parse(&header)
+                .expect("sealed header")
+                .validate_source_with(&source, &mut kept)
+                .expect("the sealed pair validates");
+            let resealed = rewrite_source_digest(&header, &other);
+            C_PARSES.with(|parses| parses.set(0));
+            assert!(
+                GeneratedHeader::parse(&resealed)
+                    .expect("syntactically resealed header")
+                    .validate_source_with(&other, &mut kept)
+                    .is_err(),
+                "{case}: a parse of another source must not admit an unregistered external definition"
+            );
+            assert_eq!(C_PARSES.with(std::cell::Cell::get), 1, "{case}");
+        }
     }
 
     fn declaration_record_prefix(source_name: &str) -> String {
