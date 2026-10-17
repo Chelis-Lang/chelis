@@ -12983,7 +12983,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!("{}    {index_type} {selected} = ((const {index_element}*)chelis_host_tensor_data({indices}))[{slot}];", self.indent));
-        self.lines.push(format!("{}    chelis_sparse_check_index({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {selected}));", self.indent));
+        self.lines.push(format!("{}    if ({selected} < 0 || {selected} >= {prefix}_selected_extent) chelis_sparse_check_index({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {selected}));", self.indent));
         self.lines.push(format!("{}    {index_type} {offset} = {offset_expression} + {selected} * {prefix}_selected_scale;", self.indent));
         match kind {
             SparseSummaryKind::Gather => self.lines.push(format!("{}    (({element}*){view}.data)[{linear}] = ((const {element}*)chelis_host_tensor_data({base}))[{offset}];", self.indent)),
