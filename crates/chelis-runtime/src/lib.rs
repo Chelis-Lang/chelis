@@ -634,10 +634,19 @@ struct CarryTree<T> {
 
 impl<T: RuntimeArithmetic> CarryTree<T> {
     fn new() -> Self {
+        #[cfg(test)]
+        EINSUM_SLOTS_WRITTEN.with(|written| written.set(written.get() + 64));
         Self {
             levels: [T::default(); 64],
             count: 0,
         }
+    }
+
+    /// Empty the tree for another sum. A level is read only after this sum
+    /// writes it, so the levels need no clearing.
+    #[inline]
+    fn reset(&mut self) {
+        self.count = 0;
     }
 
     /// Whether the next leaf starts a pair, the level-1 subtree of two
@@ -664,9 +673,12 @@ impl<T: RuntimeArithmetic> CarryTree<T> {
         self.levels[depth & 63] = carry;
         self.count += 1 << level;
         #[cfg(test)]
-        EINSUM_SUBTREES_HELD.with(|held| {
-            held.set(held.get().max(self.count.count_ones() as usize));
-        });
+        {
+            EINSUM_SUBTREES_HELD.with(|held| {
+                held.set(held.get().max(self.count.count_ones() as usize));
+            });
+            EINSUM_SLOTS_WRITTEN.with(|written| written.set(written.get() + 1));
+        }
     }
 
     /// The root after the last leaf; an empty tree is zero, with no addition.
@@ -7502,6 +7514,9 @@ thread_local! {
     /// The most completed subtrees one output of the last
     /// `chelis_tensor_einsum` call on this thread held at once.
     static EINSUM_SUBTREES_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Carry-tree slots `chelis_tensor_einsum` has initialized or written on
+    /// this thread.
+    static EINSUM_SLOTS_WRITTEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Einsum labels iterated row-major, with each operand's offset stride per
@@ -7743,11 +7758,13 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         };
         let mut out_at = EinsumOdometer::new(&plan.output);
         let mut outer_at = EinsumOdometer::new(&outer);
+        // chelis#3782: each product enters the canonical tree as it is
+        // formed, so an output holds one partial sum per completed subtree
+        // rather than its whole reduction ([05-OP-33]). One tree serves every
+        // output, so an output costs the slots it writes, not the tree's.
+        let mut tree = CarryTree::<Accumulator>::new();
         for out_linear in 0..out_size {
-            // chelis#3782: each product enters the canonical tree as it is
-            // formed, so an output holds one partial sum per completed
-            // subtree rather than its whole reduction ([05-OP-33]).
-            let mut tree = CarryTree::<Accumulator>::new();
+            tree.reset();
             for _ in 0..outer_count {
                 let mut at = [
                     out_at.offsets[0] + outer_at.offsets[0],
@@ -10701,6 +10718,41 @@ mod einsum_index_cost_tests {
         );
         carry_tree_matches_balanced_sum(|i| (wide[i] * 1.0e3) as i64, |v: i64| v as u64);
         carry_tree_matches_balanced_sum(|i| wide[i] as i32, |v: i32| u64::from(v as u32));
+    }
+
+    fn slots_written() -> usize {
+        EINSUM_SLOTS_WRITTEN.with(std::cell::Cell::get)
+    }
+
+    /// One carry tree serves every output of a call: the call initializes
+    /// its 64 slots once, and each output writes at most one slot per
+    /// product, so an output with few products costs those few writes, not
+    /// the tree's capacity. The sweep covers 1 to 64 products per output
+    /// over 37 outputs.
+    #[test]
+    fn an_output_writes_only_the_tree_slots_its_products_use() {
+        let outputs = 37usize;
+        for k in 1..=64usize {
+            let a = values(outputs * k, k as u32);
+            let b = values(k, 300 + k as u32);
+            unsafe {
+                let lhs = tensor(&[outputs as i64, k as i64], &a);
+                let rhs = tensor(&[k as i64], &b);
+                let text = CString::new("ij,j->i").unwrap();
+                let equation = chelis_string_from_cstr(text.as_ptr());
+                let before = slots_written();
+                let out = chelis_tensor_einsum(equation, lhs, rhs, CHELIS_DTYPE_F64);
+                let written = slots_written() - before;
+                assert!(
+                    written <= 64 + outputs * k,
+                    "{k} products per output: {written} slots initialized or written"
+                );
+                for value in [out, lhs, rhs] {
+                    chelis_tensor_release(value);
+                }
+                chelis_string_release(equation);
+            }
+        }
     }
 
     /// An empty output holds nothing however large its reduction.
