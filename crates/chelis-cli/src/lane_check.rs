@@ -673,11 +673,12 @@ fn check_identity(
     deadline: Duration,
     cwd: &Path,
 ) -> Result<String, String> {
-    let selected_compiler = input
-        .map(|input| input.compiler.path.clone())
-        .unwrap_or_else(|| {
-            chelis_backend_c::toolchain::runtime_toolchain(CodegenRequirements::default()).compiler
-        });
+    let selected_compiler = match input {
+        Some(input) => input.compiler.path.clone(),
+        None => {
+            chelis_backend_c::toolchain::runtime_toolchain(CodegenRequirements::default())?.compiler
+        }
+    };
     let compiler = resolve_executable(&selected_compiler, &scope.environment["PATH"])?;
     let compiler_str = compiler
         .to_str()

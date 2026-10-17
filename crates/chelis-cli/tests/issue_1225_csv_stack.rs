@@ -73,7 +73,8 @@ fn compiled_c_reads_long_valid_line_without_a_recursive_frame_per_character() {
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let mut compile = StdCommand::new(&toolchain.compiler);
     compile.current_dir(&output);
     compile.arg("-O2");

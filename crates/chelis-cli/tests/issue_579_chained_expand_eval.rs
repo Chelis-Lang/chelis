@@ -289,7 +289,8 @@ fn build_compile_execute(source: &str, name: &str) -> std::process::Output {
             wants_openmp: true,
             needs_blas,
         },
-    );
+    )
+    .expect("declared C directories");
     let bin = out_dir.join(name);
     let mut cc = StdCommand::new(&toolchain.compiler);
     cc.current_dir(&out_dir)

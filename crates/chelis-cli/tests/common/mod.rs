@@ -408,7 +408,8 @@ pub fn link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
             wants_openmp: true,
             needs_blas: generated_source_needs_blas(out_dir, source),
         },
-    );
+    )
+    .expect("declared C directories");
     let mut cmd = StdCommand::new(&toolchain.compiler);
     cmd.current_dir(out_dir);
     cmd.arg("-O2");

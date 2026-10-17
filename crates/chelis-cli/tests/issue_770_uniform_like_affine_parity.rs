@@ -161,7 +161,8 @@ fn c_sampled_no_fp_contract(program: &str, name: &str) -> Vec<f64> {
             wants_openmp: true,
             needs_blas: common::generated_source_needs_blas(&out_dir, &source),
         },
-    );
+    )
+    .expect("declared C directories");
     let mut cmd = std::process::Command::new(&toolchain.compiler);
     cmd.current_dir(&out_dir);
     cmd.arg("-O2");

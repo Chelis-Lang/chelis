@@ -112,7 +112,8 @@ fn compile_driver_for_symbol(
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let mut command = NativeCommand::new(&toolchain.compiler);
     command.current_dir(out);
     command.arg("-O0");

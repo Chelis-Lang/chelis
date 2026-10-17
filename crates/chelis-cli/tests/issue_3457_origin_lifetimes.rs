@@ -145,7 +145,8 @@ fn live_metadata_with_sanitizers(name: &str, source: &str, sanitized: bool) -> L
                 wants_openmp: true,
                 needs_blas: false,
             },
-        );
+        )
+        .expect("declared C directories");
         let receipt: serde_json::Value = serde_json::from_slice(
             &std::fs::read(destination.join(chelis_runtime_bundle::RECEIPT_FILE_NAME)).unwrap(),
         )

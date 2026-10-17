@@ -561,6 +561,7 @@ impl ExportBinaryCache {
                             needs_blas,
                         }
                     )
+                    .expect("declared C directories")
                 )
             })
             .clone();

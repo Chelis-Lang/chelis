@@ -53,7 +53,8 @@ fn compiled_c_parses_object_beyond_the_prior_stack_limit_and_rejects_trailing_co
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let mut compile = StdCommand::new(&toolchain.compiler);
     compile.current_dir(&output);
     compile.arg("-O2");

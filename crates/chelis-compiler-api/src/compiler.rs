@@ -2120,7 +2120,7 @@ fn execution_artifact_from_compiled_observed(
                 return Ok(compiled_execution_artifact(
                     entry_symbol,
                     None,
-                    compile_result_c(target, entry_symbol, &result),
+                    compile_result_c(target, entry_symbol, &result)?,
                     manifest_result(&compiled.program),
                     execution_input_specs(&entry_dag, &result.input_labels)?,
                     execution_output_specs(&entry_dag, &result.output_labels)?,
@@ -2280,7 +2280,7 @@ fn execution_artifact_from_compiled_observed(
                 let mut artifact = compiled_execution_artifact(
                     &func_name,
                     None,
-                    compile_result_c(target, &func_name, &result),
+                    compile_result_c(target, &func_name, &result)?,
                     manifest_result(&compiled.program),
                     Vec::new(),
                     Vec::new(),
@@ -2326,7 +2326,7 @@ fn execution_artifact_from_compiled_observed(
             let mut artifact = compiled_execution_artifact(
                 &func_name,
                 None,
-                compile_result_c(target, &func_name, &result),
+                compile_result_c(target, &func_name, &result)?,
                 manifest_result(&compiled.program),
                 execution_input_specs(&compiled.dag, &result.input_labels)?,
                 execution_output_specs(&compiled.dag, &result.output_labels)?,
@@ -4485,9 +4485,10 @@ fn compile_result_c(
     target: CompileTarget,
     func_name: &str,
     result: &CodegenResult,
-) -> CompileResult {
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
-    CompileResult {
+) -> Result<CompileResult> {
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements)
+        .map_err(|error| stage_error("compile", error, GeneralKind::Other))?;
+    Ok(CompileResult {
         target,
         entry_name: func_name.to_string(),
         files: vec![
@@ -4520,7 +4521,7 @@ fn compile_result_c(
         link_flags: toolchain.link_flags,
         peak_device_bytes_estimate: None,
         manifest: RootManifestResult::default(),
-    }
+    })
 }
 
 fn compile_result_hip(
@@ -4585,7 +4586,8 @@ fn compile_result_hip_host(
     func_name: &str,
     result: &chelis_backend_hip::HipHostProgramCodegenResult,
 ) -> Result<CompileResult> {
-    let mut toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements);
+    let mut toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements)
+        .map_err(|error| stage_error("compile", error, GeneralKind::Other))?;
     toolchain.compile_flags.retain(|flag| flag != "-fopenmp");
     toolchain.link_flags.retain(|flag| flag != "-fopenmp");
     let mut files = vec![

@@ -1872,7 +1872,8 @@ fn c_aggregate_origin_arena_is_fresh_for_repeated_public_calls() {
             wants_openmp: true,
             needs_blas: false,
         },
-    );
+    )
+    .expect("declared C directories");
     let linked = StdCommand::new(&toolchain.compiler)
         .current_dir(&output_dir)
         .args(["-O1", "-g", "-fsanitize=address", "-fno-omit-frame-pointer"])

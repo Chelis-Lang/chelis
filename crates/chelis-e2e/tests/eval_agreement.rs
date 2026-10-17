@@ -157,7 +157,8 @@ int main(void) {{
     write_temp_file(tmp.path(), "main.c", &main_c);
     let bin_path = tmp.path().join("test_bin");
 
-    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements)
+        .expect("declared C directories");
     let mut cmd = Command::new(&toolchain.compiler);
     let extra = c_test_extra_flags();
     if !extra.is_empty() {
