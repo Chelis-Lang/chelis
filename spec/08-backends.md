@@ -129,6 +129,13 @@ Generated source SHALL NOT use direct or indirect preprocessor aliases to reasso
 a public definition. Every externally linked function definition except the generated
 process entry `main` SHALL be registered by exactly one public export block.
 Translation-unit-private `static` helpers remain outside the public blocks and valid.
+Generated source SHALL NOT spell a compiler extension that can define, alias, or
+relocate a symbol or change its linkage: no `__attribute__`, `__attribute`,
+`__declspec`, `asm`, `__asm`, `__asm__`, or `_Pragma` outside a literal or comment. The
+one exception is the exact specifier `__attribute__((noinline))` as a declaration
+specifier of a translation-unit-private `static` function definition, identified by
+the same structural parse; it only stops the C compiler from inlining that helper and
+changes no symbol, linkage, or definition byte the records bind.
 Downstream C code SHALL call declarations from the generated header, and tooling SHALL
 consume the generated associations rather than reconstructing symbols from Chelis
 source spellings.
