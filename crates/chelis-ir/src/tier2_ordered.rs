@@ -444,26 +444,37 @@ pub fn lower_einsum(
 }
 
 /// A float `einsum` whose [05-OP-33] contraction graph is spec/05 §4.1's
-/// product sum over one axis: one reduction label `k` that both operands
-/// carry, an output ending in a row label `m` of one operand and a column
-/// label `n` of the other, and no diagonal. Every label both operands carry
-/// has one static extent, so the contraction owes no runtime label check.
+/// product sum over one axis, with nothing materialized beyond an operand's
+/// or the result's own size.
 ///
-/// The products are then `[lead.., m, k, n]`, and the reduction visits `k`
-/// in increasing order, the atom's one assignment order for a single
-/// reduction label.
+/// It has one reduction label `k` that both operands carry, no diagonal, and
+/// an output `[batch.., rows.., m, n]`: `m` and `rows` are labels only the row
+/// operand carries, `n` a label only the column operand carries, and `batch`
+/// labels both carry. Every label both operands carry has one static extent,
+/// so the contraction owes no runtime label check. The row operand's `rows`
+/// and `m` flatten into one row axis, so the column operand is never copied
+/// along a label it lacks; that flattened extent is static, or is one runtime
+/// extent beside static extents of one.
+///
+/// The products are then `[batch.., rows * m, k, n]`, and the reduction
+/// visits `k` in increasing order, the atom's one assignment order for a
+/// single reduction label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EinsumContraction {
-    /// Whether the product's left operand is the einsum's right operand.
-    /// Both orders give the same bits: float multiplication commutes, and
-    /// every product finalizes its NaN canonically ([04-NUM-2]).
+    /// Whether the product's left (row) operand is the einsum's right
+    /// operand. Both orders give the same bits: float multiplication
+    /// commutes, and every product finalizes its NaN canonically
+    /// ([04-NUM-2]).
     swapped: bool,
-    /// The output labels before `m` and `n`, in output order.
-    lead: Vec<u8>,
+    /// Output labels both operands carry, in output order.
+    batch: Vec<u8>,
+    /// Output labels before `m` only the row operand carries, in output
+    /// order.
+    rows: Vec<u8>,
     m: u8,
     k: u8,
     n: u8,
-    /// The left and right product operands' labels.
+    /// The row and column operands' labels.
     labels: [Vec<u8>; 2],
 }
 
@@ -505,27 +516,62 @@ pub fn einsum_contraction(
     if reductions.any(|&l| l != k) || !a.contains(&k) || !b.contains(&k) {
         return None;
     }
-    let [.., m, n] = output.as_slice() else {
+    let [lead @ .., m, n] = output.as_slice() else {
         return None;
     };
     let (m, n) = (*m, *n);
     let only =
         |side: &[u8], other: &[u8], label: u8| side.contains(&label) && !other.contains(&label);
-    let swapped = if only(&a, &b, m) && only(&b, &a, n) {
-        false
+    let (swapped, row, column, row_ty) = if only(&a, &b, m) && only(&b, &a, n) {
+        (false, &a, &b, lhs)
     } else if only(&b, &a, m) && only(&a, &b, n) {
-        true
+        (true, &b, &a, rhs)
     } else {
         return None;
     };
+    // Lead labels are batch labels, then row-only labels; a column-only lead
+    // label would copy the row operand along it.
+    let batch_len = lead
+        .iter()
+        .take_while(|l| row.contains(l) && column.contains(l))
+        .count();
+    let (batch, rows) = lead.split_at(batch_len);
+    if rows.iter().any(|l| column.contains(l) || !row.contains(l)) {
+        return None;
+    }
+    flattened_rows(
+        rows.iter()
+            .chain([&m])
+            .map(|l| &row_ty.dims[row.iter().position(|own| own == l).expect("row label")]),
+    )?;
     Some(EinsumContraction {
         swapped,
-        lead: output[..output.len() - 2].to_vec(),
+        batch: batch.to_vec(),
+        rows: rows.to_vec(),
         m,
         k,
         n,
         labels: if swapped { [b, a] } else { [a, b] },
     })
+}
+
+/// One row axis for `dims`: their static product, or their one runtime
+/// extent when every other extent is one.
+fn flattened_rows<'a>(dims: impl Iterator<Item = &'a DimInfo>) -> Option<DimInfo> {
+    let mut product = 1usize;
+    let mut runtime = None;
+    for dim in dims {
+        match static_extent(dim) {
+            Some(n) => product = product.checked_mul(n)?,
+            None if runtime.is_none() => runtime = Some(dim.clone()),
+            None => return None,
+        }
+    }
+    match runtime {
+        None => Some(DimInfo::Lit(product)),
+        Some(dim) if product == 1 => Some(dim),
+        Some(_) => None,
+    }
 }
 
 fn static_extent(dim: &DimInfo) -> Option<usize> {
@@ -536,16 +582,19 @@ fn static_extent(dim: &DimInfo) -> Option<usize> {
 }
 
 /// [05-OP-33] `einsum` in its [`EinsumContraction`] form, built as the
-/// graph spec/05 §4.1 gives `matmul`: each operand converts exactly to the
-/// accumulator, is permuted to `[lead.., m, k]` or `[lead.., k, n]` and
-/// expanded along the lead labels it lacks, and the two meet as
-/// `Sum(Mul(Expand(lhs), Expand(rhs)))` over `k`, which a lane runs as its
-/// product-sum kernel. Each product finalizes at the accumulator and the `k`
-/// products enter the canonical balanced tree in increasing order, the bits
-/// [05-OP-33] fixes; the result finalizes once at `sum_result(p, accumulator)`.
+/// graph spec/05 §4.1 gives `matmul`. Each operand converts exactly to the
+/// accumulator and is permuted to `[batch.., rows.., m, k]` or
+/// `[batch.., k, n]`; the row operand's `rows.., m` reshape into one row axis.
+/// The two meet as `Sum(Mul(Expand(row), Expand(column)))` over `k`, which a
+/// lane runs as its product-sum kernel without storing either expansion, and
+/// the sum reshapes back to the output. Each product finalizes at the
+/// accumulator and the `k` products enter the canonical balanced tree in
+/// increasing order, the bits [05-OP-33] fixes; the result finalizes once at
+/// `sum_result(p, accumulator)`. No node holds more elements than an operand
+/// or the result.
 ///
-/// A label only one operand carries may have a runtime extent; an expansion
-/// along it reads the extent from that operand's shape.
+/// A label only one operand carries may have a runtime extent; the column
+/// expansion reads the row extent from the row operand's shape.
 pub fn lower_einsum_contraction(
     owner: Owner,
     dag: &mut Dag,
@@ -554,76 +603,41 @@ pub fn lower_einsum_contraction(
     accumulator: Option<Prim>,
     span: Option<&str>,
 ) -> Result<NodeId, String> {
-    let operands = if plan.swapped {
+    let [(row, row_ty), (column, column_ty)] = if plan.swapped {
         [operands[1], operands[0]]
     } else {
         operands
     };
-    let precision = operands[0].1.precision;
+    let precision = row_ty.precision;
     let accumulator = match accumulator {
         Some(accumulator) => accumulator,
         None => precision.default_reduce_sum_accumulator()?,
     };
     let result = precision.sum_result_precision(accumulator);
-    // The first operand carrying `label`, its axis, and that axis's extent.
-    let source = |label: u8| {
-        (0..2)
-            .find_map(|side| {
-                let axis = plan.labels[side].iter().position(|&l| l == label)?;
-                Some((side, axis, operands[side].1.dims[axis].clone()))
-            })
-            .expect("every contraction label occurs in an operand")
-    };
     let at = |dims: &[DimInfo]| TensorType {
         dims: dims.to_vec(),
         precision: accumulator,
     };
-    let expand = |dag: &mut Dag, node: NodeId, dims: &mut Vec<DimInfo>, axis: usize, label: u8| {
-        let (side, source_axis, dim) = source(label);
-        let (size, inputs) = match static_extent(&dim) {
-            Some(n) => (RtDim::Lit(n), vec![node]),
-            None => (
-                RtDim::InputAxis {
-                    tensor: 1,
-                    axis: RtAxis::Lit(
-                        i32::try_from(source_axis).expect("tensor rank fits the i32 axis carrier"),
-                    ),
-                },
-                vec![node, operands[side].0],
-            ),
-        };
-        dims.insert(axis, dim);
-        add_synth(
-            owner,
-            dag,
-            RiscOp::Expand { axis, size },
-            inputs,
-            at(dims),
-            span,
-        )
+    let dim = |side: usize, label: u8| {
+        let ty = if side == 0 { row_ty } else { column_ty };
+        let axis = plan.labels[side].iter().position(|&l| l == label);
+        ty.dims[axis.expect("own label")].clone()
     };
-    let mut views = Vec::with_capacity(2);
-    for (side, &(mut node, ty)) in operands.iter().enumerate() {
-        let labels = &plan.labels[side];
+    // Convert and permute one operand to `order`.
+    let arrange = |dag: &mut Dag, side: usize, node: NodeId, ty: &TensorType, order: &[u8]| {
+        let mut node = node;
         if precision != accumulator {
             let cast = RiscOp::Cast {
                 new_precision: accumulator,
             };
             node = add_synth(owner, dag, cast, vec![node], at(&ty.dims), span);
         }
-        let tail = if side == 0 {
-            [plan.m, plan.k]
-        } else {
-            [plan.k, plan.n]
-        };
-        let axes: Vec<usize> = plan
-            .lead
+        let labels = &plan.labels[side];
+        let axes: Vec<usize> = order
             .iter()
-            .filter(|l| labels.contains(l))
-            .chain(&tail)
             .map(|&l| labels.iter().position(|&own| own == l).expect("own label"))
             .collect();
-        let mut dims: Vec<DimInfo> = axes.iter().map(|&axis| ty.dims[axis].clone()).collect();
+        let dims: Vec<DimInfo> = axes.iter().map(|&axis| ty.dims[axis].clone()).collect();
         if axes.iter().enumerate().any(|(i, &axis)| i != axis) {
             node = add_synth(
                 owner,
@@ -634,31 +648,96 @@ pub fn lower_einsum_contraction(
                 span,
             );
         }
-        for (axis, &label) in plan.lead.iter().enumerate() {
-            if !labels.contains(&label) {
-                node = expand(dag, node, &mut dims, axis, label);
-            }
-        }
-        let (axis, label) = if side == 0 {
-            (plan.lead.len() + 2, plan.n)
-        } else {
-            (plan.lead.len(), plan.m)
-        };
-        views.push(expand(dag, node, &mut dims, axis, label));
-    }
-    let mut dims: Vec<DimInfo> = plan
-        .lead
+        (node, dims)
+    };
+    let batch = plan.batch.len();
+    let row_order: Vec<u8> = plan
+        .batch
         .iter()
-        .chain(&[plan.m, plan.k, plan.n])
-        .map(|&l| source(l).2)
+        .chain(&plan.rows)
+        .chain(&[plan.m, plan.k])
+        .copied()
         .collect();
-    let product = add_synth(owner, dag, RiscOp::Mul, views, at(&dims), span);
-    let axis = plan.lead.len() + 1;
-    dims.remove(axis);
-    let sum = RiscOp::Sum { axis, accumulator };
-    let sum = add_synth(owner, dag, sum, vec![product], at(&dims), span);
+    let (mut row, row_dims) = arrange(dag, 0, row, row_ty, &row_order);
+    let flat = flattened_rows(row_dims[batch..row_dims.len() - 1].iter())
+        .ok_or("`einsum` rows do not flatten to one axis")?;
+    let mut flat_dims = row_dims[..batch].to_vec();
+    flat_dims.extend([flat.clone(), dim(0, plan.k)]);
+    if !plan.rows.is_empty() {
+        let new_shape = flat_dims.iter().map(RtDim::from_dim_info).collect();
+        row = add_synth(
+            owner,
+            dag,
+            RiscOp::Reshape { new_shape },
+            vec![row],
+            at(&flat_dims),
+            span,
+        );
+    }
+    let column_order: Vec<u8> = plan
+        .batch
+        .iter()
+        .chain(&[plan.k, plan.n])
+        .copied()
+        .collect();
+    let (column, column_dims) = arrange(dag, 1, column, column_ty, &column_order);
+    let mut product_dims = flat_dims.clone();
+    product_dims.push(dim(1, plan.n));
+    let n_size = match static_extent(&dim(1, plan.n)) {
+        Some(n) => (RtDim::Lit(n), vec![row]),
+        None => (
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: rt_axis(column_dims.len() - 1),
+            },
+            vec![row, column],
+        ),
+    };
+    let m_size = match static_extent(&flat) {
+        Some(n) => (RtDim::Lit(n), vec![column]),
+        None => (
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: rt_axis(batch),
+            },
+            vec![column, row],
+        ),
+    };
+    let expand = |dag: &mut Dag, axis: usize, (size, inputs): (RtDim, Vec<NodeId>)| {
+        add_synth(
+            owner,
+            dag,
+            RiscOp::Expand { axis, size },
+            inputs,
+            at(&product_dims),
+            span,
+        )
+    };
+    let views = vec![expand(dag, batch + 2, n_size), expand(dag, batch, m_size)];
+    let product = add_synth(owner, dag, RiscOp::Mul, views, at(&product_dims), span);
+    let mut dims = product_dims.clone();
+    dims.remove(batch + 1);
+    let sum = RiscOp::Sum {
+        axis: batch + 1,
+        accumulator,
+    };
+    let mut node = add_synth(owner, dag, sum, vec![product], at(&dims), span);
+    if !plan.rows.is_empty() {
+        let mut out_dims = row_dims[..row_dims.len() - 1].to_vec();
+        out_dims.push(dim(1, plan.n));
+        let new_shape = out_dims.iter().map(RtDim::from_dim_info).collect();
+        node = add_synth(
+            owner,
+            dag,
+            RiscOp::Reshape { new_shape },
+            vec![node],
+            at(&out_dims),
+            span,
+        );
+        dims = out_dims;
+    }
     if result == accumulator {
-        return Ok(sum);
+        return Ok(node);
     }
     let cast = RiscOp::Cast {
         new_precision: result,
@@ -667,7 +746,11 @@ pub fn lower_einsum_contraction(
         dims,
         precision: result,
     };
-    Ok(add_synth(owner, dag, cast, vec![sum], ty, span))
+    Ok(add_synth(owner, dag, cast, vec![node], ty, span))
+}
+
+fn rt_axis(axis: usize) -> RtAxis {
+    RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits the i32 axis carrier"))
 }
 
 fn repeated_label(labels: &[u8]) -> Option<(usize, usize)> {
@@ -711,8 +794,9 @@ mod einsum_contraction_tests {
         einsum_contraction(equation, &ty(a, p), &ty(b, p))
     }
 
-    /// [05-OP-33]'s one-reduction-label contractions whose output ends in a
-    /// row of one operand and a column of the other.
+    /// [05-OP-33]'s one-reduction-label contractions whose output is
+    /// `[batch.., rows.., m, n]`, with the row operand's labels flattening
+    /// to one axis.
     #[test]
     fn matmul_shaped_float_contractions_have_the_contraction_form() {
         let f32 = Prim::F32;
@@ -722,7 +806,8 @@ mod einsum_contraction_tests {
             ("mk,nk->mn", lit(&[3, 37]), lit(&[5, 37])),
             ("km,kn->mn", lit(&[37, 3]), lit(&[37, 5])),
             ("bmk,bkn->bmn", lit(&[2, 3, 17]), lit(&[2, 17, 4])),
-            ("mk,bkn->bmn", lit(&[3, 9]), lit(&[2, 9, 4])),
+            ("bamk,bkn->bamn", lit(&[2, 5, 3, 17]), lit(&[2, 17, 4])),
+            ("mak,kn->amn", lit(&[3, 2, 7]), lit(&[7, 4])),
             ("ij,jk->ki", lit(&[3, 7]), lit(&[7, 5])),
             (
                 "mk,kn->mn",
@@ -732,7 +817,7 @@ mod einsum_contraction_tests {
             (
                 "amk,kn->amn",
                 vec![
-                    runtime("a"),
+                    DimInfo::Lit(1),
                     runtime("m"),
                     DimInfo::Named("k".into(), Some(8)),
                 ],
@@ -758,7 +843,8 @@ mod einsum_contraction_tests {
 
     /// Everything else keeps the runtime kernel: integers, diagonals, no or
     /// several reduction labels, an output that does not end in a row and a
-    /// column, and any label both operands carry without one static extent.
+    /// column, a shared label without one static extent, and a lead label
+    /// the contraction could only reach by copying an operand along it.
     #[test]
     fn every_other_einsum_has_no_contraction_form() {
         let f32 = Prim::F32;
@@ -802,60 +888,100 @@ mod einsum_contraction_tests {
             ("mK,Kn->mn", lit(&[3, 7]), lit(&[7, 5])),
             ("mk,kn->mnn", lit(&[3, 7]), lit(&[7, 5])),
             ("mk,kn->mx", lit(&[3, 7]), lit(&[7, 5])),
+            // A lead label only the column operand carries.
+            ("mk,bkn->bmn", lit(&[3, 9]), lit(&[2, 9, 4])),
+            // A row-only lead label before a batch label.
+            ("abmk,bkn->abmn", lit(&[2, 3, 4, 5]), lit(&[3, 5, 6])),
+            // Rows that flatten to no single extent.
+            (
+                "amk,kn->amn",
+                vec![runtime("a"), runtime("m"), DimInfo::Lit(8)],
+                lit(&[8, 5]),
+            ),
+            (
+                "amk,kn->amn",
+                vec![DimInfo::Lit(2), runtime("m"), DimInfo::Lit(8)],
+                lit(&[8, 5]),
+            ),
         ] {
             assert!(plan(equation, &a, &b, f32).is_none(), "`{equation}`");
         }
+    }
+
+    fn lowered(equation: &str, a: &[DimInfo], b: &[DimInfo], p: Prim) -> (Dag, NodeId) {
+        let plan = plan(equation, a, b, p).expect("contraction form");
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("test"));
+        let a_ty = ty(a, p);
+        let b_ty = ty(b, p);
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let y = dag.add_node(
+            owner,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        let root =
+            lower_einsum_contraction(owner, &mut dag, &plan, [(x, &a_ty), (y, &b_ty)], None, None)
+                .expect("lowered");
+        dag.set_roots(vec![root]);
+        assert!(
+            verify::verify(&dag).is_empty(),
+            "`{equation}`: {:?}",
+            verify::verify(&dag)
+        );
+        (dag, root)
     }
 
     /// The graph is spec/05 §4.1's product sum, which the lanes' fused
     /// product-sum kernels recognize in its blocked row-and-column layout.
     #[test]
     fn the_contraction_lowers_to_the_blocked_product_sum() {
-        for (equation, a, b, p) in [
-            ("amk,kn->amn", lit(&[2, 3, 37]), lit(&[37, 5]), Prim::F32),
+        for (equation, a, b, p, out) in [
+            (
+                "amk,kn->amn",
+                lit(&[2, 3, 37]),
+                lit(&[37, 5]),
+                Prim::F32,
+                lit(&[2, 3, 5]),
+            ),
             (
                 "mk,nk->mn",
                 vec![runtime("m"), DimInfo::Lit(9)],
                 vec![runtime("n"), DimInfo::Lit(9)],
                 Prim::F64,
+                vec![runtime("m"), runtime("n")],
             ),
-            ("nk,mk->mn", lit(&[5, 7]), lit(&[3, 7]), Prim::F16),
-            ("mk,bkn->bmn", lit(&[3, 9]), lit(&[2, 9, 4]), Prim::Bf16),
+            (
+                "nk,mk->mn",
+                lit(&[5, 7]),
+                lit(&[3, 7]),
+                Prim::F16,
+                lit(&[3, 5]),
+            ),
+            (
+                "bamk,bkn->bamn",
+                lit(&[2, 5, 3, 9]),
+                lit(&[2, 9, 4]),
+                Prim::Bf16,
+                lit(&[2, 5, 3, 4]),
+            ),
+            (
+                "amk,kn->amn",
+                vec![DimInfo::Lit(1), runtime("s"), DimInfo::Lit(8)],
+                vec![DimInfo::Lit(8), runtime("e")],
+                Prim::F32,
+                vec![DimInfo::Lit(1), runtime("s"), runtime("e")],
+            ),
         ] {
-            let plan = plan(equation, &a, &b, p).expect("contraction form");
-            let mut dag = Dag::new();
-            let owner = Owner::from(dag.declare("test"));
-            let a_ty = ty(&a, p);
-            let b_ty = ty(&b, p);
-            let x = dag.add_node(
-                owner,
-                RiscOp::Load { name: "x".into() },
-                vec![],
-                a_ty.clone(),
-                None,
-            );
-            let y = dag.add_node(
-                owner,
-                RiscOp::Load { name: "y".into() },
-                vec![],
-                b_ty.clone(),
-                None,
-            );
-            let root = lower_einsum_contraction(
-                owner,
-                &mut dag,
-                &plan,
-                [(x, &a_ty), (y, &b_ty)],
-                None,
-                None,
-            )
-            .expect("lowered");
-            dag.set_roots(vec![root]);
-            assert!(
-                verify::verify(&dag).is_empty(),
-                "`{equation}`: {:?}",
-                verify::verify(&dag)
-            );
+            let (dag, root) = lowered(equation, &a, &b, p);
             let inlined = reduction_inlined_products(&dag);
             assert_eq!(inlined.len(), 1, "`{equation}` product sum");
             let product = dag.get(inlined[0].product).unwrap();
@@ -872,7 +998,56 @@ mod einsum_contraction_tests {
                 matches!(dag.get(inlined[0].views[1]).unwrap().op, RiscOp::Expand { axis, .. } if axis == rank - 3)
             );
             let root = dag.get(root).unwrap();
-            assert_eq!(root.output_type.precision, p, "`{equation}` result dtype");
+            assert_eq!(
+                root.output_type,
+                TensorType {
+                    dims: out,
+                    precision: p
+                },
+                "`{equation}` result type"
+            );
+        }
+    }
+
+    /// No stored node is larger than an operand or the result: the only
+    /// expansions are the two the product sum reads without storing, so the
+    /// column operand is never copied along a row-only label.
+    #[test]
+    fn the_contraction_stores_nothing_larger_than_an_operand_or_the_result() {
+        let elements = |ty: &TensorType| -> usize {
+            ty.dims
+                .iter()
+                .map(|dim| static_extent(dim).expect("static"))
+                .product()
+        };
+        for (equation, a, b) in [
+            ("amk,kn->amn", lit(&[256, 1, 512]), lit(&[512, 512])),
+            ("abmk,kn->abmn", lit(&[4, 8, 3, 64]), lit(&[64, 32])),
+            ("mak,kn->amn", lit(&[3, 16, 64]), lit(&[64, 32])),
+            ("bamk,bkn->bamn", lit(&[2, 16, 3, 32]), lit(&[2, 32, 8])),
+            ("mk,nk->mn", lit(&[3, 64]), lit(&[32, 64])),
+        ] {
+            let (dag, root) = lowered(equation, &a, &b, Prim::F32);
+            let inlined = reduction_inlined_products(&dag);
+            let skipped = inlined[0].skipped();
+            let bound = elements(&ty(&a, Prim::F32))
+                .max(elements(&ty(&b, Prim::F32)))
+                .max(elements(&dag.get(root).unwrap().output_type));
+            for node in dag.nodes() {
+                if skipped.contains(&node.id) {
+                    continue;
+                }
+                assert!(
+                    !matches!(node.op, RiscOp::Expand { .. }),
+                    "`{equation}` stores an expansion"
+                );
+                assert!(
+                    elements(&node.output_type) <= bound,
+                    "`{equation}` stores {:?} of {} elements, over {bound}",
+                    node.op,
+                    elements(&node.output_type)
+                );
+            }
         }
     }
 }

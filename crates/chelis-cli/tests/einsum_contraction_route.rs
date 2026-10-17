@@ -6,7 +6,7 @@
 //! The fixture covers both sides. Its routed definitions span f32, f64, f16
 //! and bf16, an explicit f64 accumulator, permuted and swapped operands,
 //! batch and runtime row extents (including zero rows), a 257-leaf tree,
-//! and inf, NaN and signed-zero products. Its retained definitions are a diagonal, two and
+//! inf, NaN and signed-zero products, and an f16 double-rounding witness. Its retained definitions are a diagonal, two and
 //! zero reduction labels, a matrix-vector product, a runtime contraction
 //! extent and an integer contraction.
 
@@ -34,6 +34,11 @@ const ROUTED: &[&str] = &[
     "wide",
     "runtime_rows",
     "deep",
+    "flattened",
+    "interleaved",
+    "sequence",
+    "widened",
+    "narrowed",
     "special",
 ];
 
@@ -44,6 +49,7 @@ const RETAINED: &[&str] = &[
     "matvec",
     "runtime_depth",
     "integer",
+    "broadcast_columns",
 ];
 
 fn stdout(output: &std::process::Output, lane: &str) -> String {
@@ -64,11 +70,15 @@ fn body<'a>(emitted: &'a str, name: &str) -> &'a str {
 }
 
 fn build(out_dir: &Path) -> String {
+    build_source(Path::new(FIXTURE), out_dir, "route")
+}
+
+fn build_source(source: &Path, out_dir: &Path, stem: &str) -> String {
     let built = Command::cargo_bin("chelis")
         .expect("binary")
         .args([
             "build",
-            FIXTURE,
+            source.to_str().unwrap(),
             "--target",
             "c",
             "--output",
@@ -77,7 +87,22 @@ fn build(out_dir: &Path) -> String {
         .output()
         .expect("build");
     stdout(&built, "build");
-    std::fs::read_to_string(out_dir.join("route.c")).expect("generated C")
+    std::fs::read_to_string(out_dir.join(format!("{stem}.c"))).expect("generated C")
+}
+
+/// The element counts of every statically shaped `chelis_alloc` in `emitted`.
+fn static_allocations(emitted: &str) -> Vec<u64> {
+    emitted
+        .match_indices("chelis_alloc(")
+        .filter_map(|(at, _)| {
+            let rest = &emitted[at..];
+            let dims = &rest[rest.find("(int64_t[]){")? + "(int64_t[]){".len()..];
+            let dims = &dims[..dims.find('}')?];
+            dims.split(',')
+                .map(|dim| dim.trim().parse::<u64>().ok())
+                .product::<Option<u64>>()
+        })
+        .collect()
 }
 
 /// Each routed definition's body calls no runtime einsum and the program
@@ -131,6 +156,48 @@ fn routed_and_retained_einsums_match_eval_bit_for_bit() {
         .expect("eval");
     let eval = stdout(&eval, "eval");
     let bindings = eval.lines().filter(|line| line.starts_with("r_")).count();
-    assert_eq!(bindings, ROUTED.len() + RETAINED.len() + 1, "{eval}");
+    assert_eq!(bindings, ROUTED.len() + RETAINED.len() + 2, "{eval}");
     assert_eq!(compiled, eval);
+    // 1 + 2^-11 + 2^-40 rounds once from f64 to the f16 above 1, and to 1
+    // through an intermediate f32; at the f32 accumulator the 2^-40 term is
+    // already gone and the tie rounds to even.
+    for line in [
+        "r_widened = tensor(shape=[1, 1], data=[1.001])",
+        "r_narrowed = tensor(shape=[1, 1], data=[1.0])",
+    ] {
+        assert!(
+            eval.lines().any(|printed| printed == line),
+            "{line}\n{eval}"
+        );
+    }
+}
+
+/// A lead label only the row operand carries flattens into rows, so the
+/// routed contraction stores nothing larger than an operand or the result.
+/// Copying the weight along `a` would allocate `256 * 512 * 512` elements
+/// here.
+#[test]
+fn a_row_only_lead_label_allocates_no_copy_of_the_other_operand() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("rows.ch");
+    std::fs::write(
+        &source,
+        "module EinsumRows\n\
+         def g32(n: i64, lo: f32) -> tensor[*, f32] = cumsum(expand(to_tensor([lo]), 0i32, n), 0i32)\n\
+         def project(x: tensor[256, 1, 512, f32], w: tensor[512, 512, f32]) -> tensor[256, 1, 512, f32] = einsum(\"amk,kn->amn\", x, w)\n\
+         out = project(reshape(g32(131072i64, 0.001f32), [256i64, 1i64, 512i64]), reshape(g32(262144i64, 0.002f32), [512i64, 512i64]))\n",
+    )
+    .expect("write program");
+    let emitted = build_source(&source, &dir.path().join("out"), "rows");
+    assert!(
+        !body(&emitted, "project").contains("chelis_tensor_einsum("),
+        "`project` still calls the runtime einsum kernel"
+    );
+    let allocations = static_allocations(&emitted);
+    assert!(!allocations.is_empty(), "no static allocation was read");
+    let largest = allocations.iter().copied().max().unwrap();
+    assert!(
+        largest <= 512 * 512,
+        "a {largest}-element allocation exceeds the largest operand: {allocations:?}"
+    );
 }
