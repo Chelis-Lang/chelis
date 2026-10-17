@@ -4626,20 +4626,12 @@ pub fn top_level_lowering_map(
         collect_function_typed_defs(exprs),
         type_env,
     );
-    let mut cache = BTreeMap::new();
-    let mut visiting = UnordSet::new();
+    let mut walk = LowerabilityWalk::default();
     for name in top_level_defs.keys() {
-        let lowered = def_is_lowered(
-            name,
-            &top_level_defs,
-            &types,
-            type_env,
-            &mut cache,
-            &mut visiting,
-        );
-        cache.insert(name.clone(), lowered);
+        let lowered = def_is_lowered(name, &top_level_defs, &types, type_env, &mut walk);
+        walk.verdicts.insert(name.clone(), lowered);
     }
-    cache
+    walk.verdicts
 }
 
 /// Phase G helper: compute `top_level_lowering_map` for new code with
@@ -4675,23 +4667,15 @@ pub fn top_level_lowering_map_with_context(
         collect_function_typed_defs(new_exprs),
         new_type_env,
     );
-    let mut cache = library.lowered_names.clone();
-    let mut visiting = UnordSet::new();
+    let mut walk = LowerabilityWalk::with_verdicts(library.lowered_names.clone());
     for name in top_level_defs.keys() {
-        if cache.contains_key(name) {
+        if walk.verdicts.contains_key(name) {
             continue;
         }
-        let lowered = def_is_lowered(
-            name,
-            &top_level_defs,
-            &types,
-            new_type_env,
-            &mut cache,
-            &mut visiting,
-        );
-        cache.insert(name.clone(), lowered);
+        let lowered = def_is_lowered(name, &top_level_defs, &types, new_type_env, &mut walk);
+        walk.verdicts.insert(name.clone(), lowered);
     }
-    cache
+    walk.verdicts
 }
 
 /// Inverse of `LowerCtx::type_from_type_expr` — used by
@@ -4756,15 +4740,12 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
         collect_function_typed_defs(program.exprs()),
         program.type_env(),
     );
-    let mut cache = BTreeMap::new();
-    let mut visiting = UnordSet::new();
     !expr_depends_on_nonlowerable_name(
         expr,
         &top_level_defs,
         &types,
         program.type_env(),
-        &mut cache,
-        &mut visiting,
+        &mut LowerabilityWalk::default(),
         &LowerabilityBindings::default(),
     )
 }
@@ -5773,13 +5754,12 @@ fn def_is_lowered(
     top_level_defs: &BTreeMap<String, Expr>,
     types: &LowerabilityTypes<'_>,
     type_env: &BTreeMap<String, Expr>,
-    cache: &mut BTreeMap<String, bool>,
-    visiting: &mut UnordSet<String>,
+    walk: &mut LowerabilityWalk,
 ) -> bool {
-    if let Some(lowered) = cache.get(name) {
+    if let Some(lowered) = walk.verdicts.get(name) {
         return *lowered;
     }
-    if !visiting.insert(name.to_string()) {
+    if !walk.visiting.insert(name.to_string()) {
         return !types
             .declared_type(name)
             .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)));
@@ -5807,23 +5787,315 @@ fn def_is_lowered(
         // strict classification so emit-main still materializes
         // their runtime literals.
         !def_body_requires_host_runtime(body)
-            && !expr_depends_on_nonlowerable_name(
+            && !callee_body_requires_host(
+                name,
                 body,
+                None,
+                None,
                 top_level_defs,
                 types,
                 type_env,
-                cache,
-                visiting,
-                &LowerabilityBindings::default(),
+                walk,
             )
             && !types
                 .declared_type(name)
                 .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)))
     });
 
-    visiting.remove(name);
-    cache.insert(name.to_string(), lowered);
+    walk.visiting.remove(name);
+    walk.verdicts.insert(name.to_string(), lowered);
     lowered
+}
+
+/// One lowerability classification's mutable state (chelis#3707).
+///
+/// `verdicts` holds [`def_is_lowered`]'s answer per declaration and
+/// `visiting` is the cycle guard every declaration edge shares.
+/// `callee_bodies` holds the verdict of walking a declaration's body under the
+/// callable facts a call supplies, which [`def_is_lowered`] and both
+/// declaration edges of [`expr_depends_on_nonlowerable_name`] read, so a
+/// callee reached from many call sites is walked once per distinct supplied
+/// facts. A walk per call site costs 2^depth on a chain of declarations that
+/// each call the previous one twice.
+#[derive(Default)]
+struct LowerabilityWalk {
+    verdicts: BTreeMap<String, bool>,
+    visiting: UnordSet<String>,
+    callee_bodies: BTreeMap<(String, Option<Vec<SuppliedCallable>>), CalleeBodyVerdict>,
+    recursion: DeclarationRecursion,
+}
+
+impl LowerabilityWalk {
+    /// A classification that starts from verdicts already decided, such as a
+    /// library's.
+    fn with_verdicts(verdicts: BTreeMap<String, bool>) -> Self {
+        Self {
+            verdicts,
+            ..Self::default()
+        }
+    }
+}
+
+/// What walking one declaration body under one set of supplied callable facts
+/// found.
+#[derive(Clone, Copy)]
+struct CalleeBodyVerdict {
+    requires_host: bool,
+    /// The walk met a vmap target whose callable identity is unresolved, the
+    /// fact [`function_has_unresolved_vmap_target`] reads.
+    unresolved_vmap: bool,
+}
+
+thread_local! {
+    static LOWERABILITY_CALLEE_BODY_WALKS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Declaration bodies the lowerability walk has walked on this thread since
+/// the last call (chelis#3707).
+#[cfg(test)]
+fn take_lowerability_callee_body_walks() -> u64 {
+    LOWERABILITY_CALLEE_BODY_WALKS.with(|walks| walks.replace(0))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Walks every callee body per call site, as the walk did before its memo,
+    /// so a test can compare the memoized verdicts with the unmemoized ones
+    /// and watch the counted guard catch the re-walk.
+    static LOWERABILITY_MEMO_DISABLED: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+fn lowerability_memo_disabled() -> bool {
+    LOWERABILITY_MEMO_DISABLED.with(Cell::get)
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn lowerability_memo_disabled() -> bool {
+    false
+}
+
+/// Whether `name`'s body requires host execution when a call supplies
+/// `supplied` for its callable formals; `None` is the standalone template,
+/// whose callable formals all await their call site. The caller has put
+/// `name` in `visiting`. When the walk meets an unresolved vmap target it
+/// marks `unresolved_vmap`, from the memo as from a fresh walk.
+///
+/// A memoized verdict must be the answer a fresh walk would give at every
+/// later call site. A fresh walk can differ only where it meets a declaration
+/// already in `visiting`, and a declaration on the stack that this body's
+/// walk can reach lies in a recursive binding group with `name`. So a
+/// declaration outside every recursive group is walked once per distinct
+/// supplied facts, and a recursive group's members keep a walk per call site,
+/// whose answer depends on which members the stack holds.
+#[allow(clippy::too_many_arguments)]
+fn callee_body_requires_host(
+    name: &str,
+    body: &Expr,
+    supplied: Option<Vec<SuppliedCallable>>,
+    unresolved_vmap: Option<&std::rc::Rc<Cell<bool>>>,
+    top_level_defs: &BTreeMap<String, Expr>,
+    types: &LowerabilityTypes<'_>,
+    type_env: &BTreeMap<String, Expr>,
+    walk: &mut LowerabilityWalk,
+) -> bool {
+    let memoized =
+        !lowerability_memo_disabled() && !walk.recursion.is_recursive(name, top_level_defs);
+    let key = (name.to_string(), supplied.clone());
+    let cached = memoized
+        .then(|| walk.callee_bodies.get(&key).copied())
+        .flatten();
+    let verdict = match cached {
+        Some(verdict) => verdict,
+        None => {
+            LOWERABILITY_CALLEE_BODY_WALKS.with(|walks| walks.set(walks.get() + 1));
+            let bindings = LowerabilityBindings {
+                supplied_formals: supplied,
+                ..LowerabilityBindings::default()
+            };
+            let requires_host = expr_depends_on_nonlowerable_name(
+                body,
+                top_level_defs,
+                types,
+                type_env,
+                walk,
+                &bindings,
+            );
+            let verdict = CalleeBodyVerdict {
+                requires_host,
+                unresolved_vmap: bindings.unresolved_vmap.get(),
+            };
+            if memoized {
+                walk.callee_bodies.insert(key, verdict);
+            }
+            verdict
+        }
+    };
+    if verdict.unresolved_vmap
+        && let Some(cell) = unresolved_vmap
+    {
+        cell.set(true);
+    }
+    verdict.requires_host
+}
+
+/// Which declarations lie in a recursive binding group of the reference graph,
+/// where a declaration reaches every declaration its body names. Settled on
+/// first query by Tarjan's algorithm over what the queried declaration
+/// reaches, so a walk over one function pays only for what it reaches. Naming
+/// is a superset of every edge the lowerability walk follows, so a declaration
+/// this calls non-recursive can never meet itself or a caller on the stack.
+#[derive(Default)]
+struct DeclarationRecursion {
+    recursive: BTreeMap<String, bool>,
+}
+
+impl DeclarationRecursion {
+    fn is_recursive(&mut self, name: &str, declarations: &BTreeMap<String, Expr>) -> bool {
+        if let Some(recursive) = self.recursive.get(name) {
+            return *recursive;
+        }
+        self.settle_from(name, declarations);
+        self.recursive.get(name).copied().unwrap_or(false)
+    }
+
+    /// Tarjan's strongly connected components, iteratively, from `root`.
+    /// Declarations settled by an earlier query are finished components: none
+    /// of them reaches a declaration this run discovers, or the earlier run
+    /// would have discovered it.
+    fn settle_from(&mut self, root: &str, declarations: &BTreeMap<String, Expr>) {
+        /// A declaration whose successors are being explored.
+        struct Frame {
+            name: String,
+            successors: Vec<String>,
+            next: usize,
+        }
+        #[derive(Default)]
+        struct Search {
+            index: BTreeMap<String, usize>,
+            low: BTreeMap<String, usize>,
+            stack: Vec<String>,
+            on_stack: UnordSet<String>,
+        }
+        impl Search {
+            fn open(&mut self, name: &str, declarations: &BTreeMap<String, Expr>) -> Frame {
+                let position = self.index.len();
+                self.index.insert(name.to_string(), position);
+                self.low.insert(name.to_string(), position);
+                self.stack.push(name.to_string());
+                self.on_stack.insert(name.to_string());
+                Frame {
+                    name: name.to_string(),
+                    successors: declarations
+                        .get(name)
+                        .into_iter()
+                        .flat_map(|body| referenced_declarations(body, declarations))
+                        .collect(),
+                    next: 0,
+                }
+            }
+
+            fn lower_to(&mut self, name: &str, position: usize) {
+                let low = self.low[name].min(position);
+                self.low.insert(name.to_string(), low);
+            }
+        }
+        let mut search = Search::default();
+        let mut frames = vec![search.open(root, declarations)];
+        while let Some(frame) = frames.last_mut() {
+            if let Some(successor) = frame.successors.get(frame.next).cloned() {
+                frame.next += 1;
+                if self.recursive.contains_key(&successor) {
+                    continue;
+                }
+                match search.index.get(&successor).copied() {
+                    Some(position) => {
+                        if search.on_stack.contains(&successor) {
+                            let name = frame.name.clone();
+                            search.lower_to(&name, position);
+                        }
+                    }
+                    None => frames.push(search.open(&successor, declarations)),
+                }
+                continue;
+            }
+            let Frame {
+                name, successors, ..
+            } = frames.pop().expect("a frame is open");
+            let low = search.low[&name];
+            if let Some(parent) = frames.last() {
+                search.lower_to(&parent.name, low);
+            }
+            if low != search.index[&name] {
+                continue;
+            }
+            let mut component = Vec::new();
+            loop {
+                let member = search
+                    .stack
+                    .pop()
+                    .expect("a component's root is on the stack");
+                search.on_stack.remove(&member);
+                let root_reached = member == name;
+                component.push(member);
+                if root_reached {
+                    break;
+                }
+            }
+            let recursive = component.len() > 1 || successors.contains(&name);
+            for member in component {
+                self.recursive.insert(member, recursive);
+            }
+        }
+    }
+}
+
+/// Every declaration of `declarations` that `body` names anywhere, metadata
+/// included, deduplicated in first-seen order.
+fn referenced_declarations(body: &Expr, declarations: &BTreeMap<String, Expr>) -> Vec<String> {
+    fn visit(
+        expr: &Expr,
+        declarations: &BTreeMap<String, Expr>,
+        seen: &mut UnordSet<String>,
+        names: &mut Vec<String>,
+    ) {
+        let mut child = |value: &Expr| {
+            visit(value, declarations, seen, names);
+            false
+        };
+        match expr.carrier() {
+            ExprCarrier::Atom(Atom::Name(name)) => {
+                if declarations.contains_key(name.as_str()) && seen.insert(name.clone()) {
+                    names.push(name.clone());
+                }
+            }
+            ExprCarrier::Atom(_) => {}
+            ExprCarrier::DecodedNode(_, metadata, children)
+            | ExprCarrier::UndecodableHead(_, metadata, children) => {
+                metadata.any_expression(&mut child);
+                children.iter().for_each(|value| {
+                    child(value);
+                });
+            }
+            ExprCarrier::StructuralList(children) => {
+                children.iter().for_each(|value| {
+                    child(value);
+                });
+            }
+            ExprCarrier::MetadataMap(map) => {
+                map.any_expression(&mut child);
+            }
+            ExprCarrier::MetadataExpression(meta) => {
+                child(&meta.expr);
+                meta.metadata.any_expression(&mut child);
+            }
+        }
+    }
+    let mut seen = UnordSet::new();
+    let mut names = Vec::new();
+    visit(body, declarations, &mut seen, &mut names);
+    names
 }
 
 fn lookup_declared_type_expr<'a>(
@@ -5878,7 +6150,7 @@ struct LowerabilityBindings {
 
 /// What a call site supplies to a declaration's callable formal. The callee
 /// is analyzed under the actual's own fact, never the formal's signature.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum SuppliedCallable {
     /// A literal template the numeric resolver can specialize.
     Template,
@@ -5980,8 +6252,7 @@ pub(crate) fn function_has_unresolved_vmap_target(
         declarations,
         &types,
         &empty,
-        &mut BTreeMap::new(),
-        &mut UnordSet::new(),
+        &mut LowerabilityWalk::default(),
         &bindings,
     );
     bindings.unresolved_vmap.get()
@@ -5992,8 +6263,7 @@ fn expr_depends_on_nonlowerable_name(
     top_level_defs: &BTreeMap<String, Expr>,
     types: &LowerabilityTypes<'_>,
     type_env: &BTreeMap<String, Expr>,
-    cache: &mut BTreeMap<String, bool>,
-    visiting: &mut UnordSet<String>,
+    walk: &mut LowerabilityWalk,
     bound_names: &LowerabilityBindings,
 ) -> bool {
     if let Some((tag, meta, kids)) = match expr.carrier() {
@@ -6026,8 +6296,7 @@ fn expr_depends_on_nonlowerable_name(
                     top_level_defs,
                     types,
                     type_env,
-                    cache,
-                    visiting,
+                    walk,
                     &scoped,
                 )
             });
@@ -6041,8 +6310,7 @@ fn expr_depends_on_nonlowerable_name(
                     top_level_defs,
                     types,
                     type_env,
-                    cache,
-                    visiting,
+                    walk,
                     &scoped,
                 )
             });
@@ -6066,29 +6334,25 @@ fn expr_depends_on_nonlowerable_name(
                 .skip(1)
                 .map(|arg| bound_names.supplied_callable(arg, top_level_defs))
                 .collect::<Vec<_>>();
-            if has_callable_formals && visiting.insert(name.clone()) {
+            if has_callable_formals && walk.visiting.insert(name.clone()) {
                 // Supplying a static callable resolves the template's
                 // callable requirement, not its independent host-control or
                 // aggregate representation requirements.
                 if def_body_requires_host_runtime(body) {
-                    visiting.remove(&name);
+                    walk.visiting.remove(&name);
                     return true;
                 }
-                let scoped = LowerabilityBindings {
-                    supplied_formals: Some(supplied),
-                    unresolved_vmap: bound_names.unresolved_vmap.clone(),
-                    ..LowerabilityBindings::default()
-                };
-                let requires_host = expr_depends_on_nonlowerable_name(
+                let requires_host = callee_body_requires_host(
+                    &name,
                     body,
+                    Some(supplied),
+                    Some(&bound_names.unresolved_vmap),
                     top_level_defs,
                     types,
                     type_env,
-                    cache,
-                    visiting,
-                    &scoped,
+                    walk,
                 );
-                visiting.remove(&name);
+                walk.visiting.remove(&name);
                 // The standalone template's unresolved formal is not the
                 // supplied target at this call. Its body and eager actuals
                 // own the lane decision; runtime choices remain unresolved.
@@ -6099,8 +6363,7 @@ fn expr_depends_on_nonlowerable_name(
                             top_level_defs,
                             types,
                             type_env,
-                            cache,
-                            visiting,
+                            walk,
                             bound_names,
                         )
                     });
@@ -6150,19 +6413,20 @@ fn expr_depends_on_nonlowerable_name(
                     || fn_type_has_bounded_scalar_var(ty, types.dtype_bound_names.get(&name))
             }))
         {
-            if def_body_requires_host_runtime(body) || !visiting.insert(name.clone()) {
+            if def_body_requires_host_runtime(body) || !walk.visiting.insert(name.clone()) {
                 return true;
             }
-            let requires_host = expr_depends_on_nonlowerable_name(
+            let requires_host = callee_body_requires_host(
+                &name,
                 body,
+                None,
+                None,
                 top_level_defs,
                 types,
                 type_env,
-                cache,
-                visiting,
-                &LowerabilityBindings::default(),
+                walk,
             );
-            visiting.remove(&name);
+            walk.visiting.remove(&name);
             return requires_host
                 || kids.iter().skip(1).any(|arg| {
                     expr_depends_on_nonlowerable_name(
@@ -6170,8 +6434,7 @@ fn expr_depends_on_nonlowerable_name(
                         top_level_defs,
                         types,
                         type_env,
-                        cache,
-                        visiting,
+                        walk,
                         bound_names,
                     )
                 });
@@ -6184,7 +6447,7 @@ fn expr_depends_on_nonlowerable_name(
             if admitted_builtin_callable(expr, top_level_defs).is_some() {
                 return false;
             }
-            return !def_is_lowered(name, top_level_defs, types, type_env, cache, visiting);
+            return !def_is_lowered(name, top_level_defs, types, type_env, walk);
         }
         if tag == DeepTag::Fn {
             let mut scoped = bound_names.clone();
@@ -6231,8 +6494,7 @@ fn expr_depends_on_nonlowerable_name(
                     top_level_defs,
                     types,
                     type_env,
-                    cache,
-                    visiting,
+                    walk,
                     &scoped,
                 )
             });
@@ -6256,8 +6518,7 @@ fn expr_depends_on_nonlowerable_name(
                         top_level_defs,
                         types,
                         type_env,
-                        cache,
-                        visiting,
+                        walk,
                         &scoped,
                     ) {
                         return true;
@@ -6280,8 +6541,7 @@ fn expr_depends_on_nonlowerable_name(
                     top_level_defs,
                     types,
                     type_env,
-                    cache,
-                    visiting,
+                    walk,
                     &scoped,
                 )
             });
@@ -6293,8 +6553,7 @@ fn expr_depends_on_nonlowerable_name(
                     top_level_defs,
                     types,
                     type_env,
-                    cache,
-                    visiting,
+                    walk,
                     bound_names,
                 )
             }) {
@@ -6324,8 +6583,7 @@ fn expr_depends_on_nonlowerable_name(
                         top_level_defs,
                         types,
                         type_env,
-                        cache,
-                        visiting,
+                        walk,
                         &scoped,
                     )
                 }) || arm_kids.get(2).is_some_and(|body| {
@@ -6334,8 +6592,7 @@ fn expr_depends_on_nonlowerable_name(
                         top_level_defs,
                         types,
                         type_env,
-                        cache,
-                        visiting,
+                        walk,
                         &scoped,
                     )
                 }) {
@@ -6350,8 +6607,7 @@ fn expr_depends_on_nonlowerable_name(
                 top_level_defs,
                 types,
                 type_env,
-                cache,
-                visiting,
+                walk,
                 bound_names,
             )
         }) || kids.iter().any(|child| {
@@ -6360,8 +6616,7 @@ fn expr_depends_on_nonlowerable_name(
                 top_level_defs,
                 types,
                 type_env,
-                cache,
-                visiting,
+                walk,
                 bound_names,
             )
         });
@@ -6378,8 +6633,7 @@ fn expr_depends_on_nonlowerable_name(
                 top_level_defs,
                 types,
                 type_env,
-                cache,
-                visiting,
+                walk,
                 bound_names,
             )
         }),
@@ -6389,8 +6643,7 @@ fn expr_depends_on_nonlowerable_name(
                 top_level_defs,
                 types,
                 type_env,
-                cache,
-                visiting,
+                walk,
                 bound_names,
             ) || meta.metadata.any_expression(|value| {
                 expr_depends_on_nonlowerable_name(
@@ -6398,8 +6651,7 @@ fn expr_depends_on_nonlowerable_name(
                     top_level_defs,
                     types,
                     type_env,
-                    cache,
-                    visiting,
+                    walk,
                     bound_names,
                 )
             })
@@ -6410,8 +6662,7 @@ fn expr_depends_on_nonlowerable_name(
                 top_level_defs,
                 types,
                 type_env,
-                cache,
-                visiting,
+                walk,
                 bound_names,
             )
         }),
@@ -6421,8 +6672,7 @@ fn expr_depends_on_nonlowerable_name(
                 top_level_defs,
                 types,
                 type_env,
-                cache,
-                visiting,
+                walk,
                 bound_names,
             )
         }),
@@ -28745,14 +28995,13 @@ mod tests {
         let type_env = BTreeMap::new();
         let types =
             LowerabilityTypes::new(&signatures, &dtype_bound_names, UnordSet::new(), &type_env);
-        let mut cache = BTreeMap::from([("bad".into(), false)]);
+        let mut walk = LowerabilityWalk::with_verdicts(BTreeMap::from([("bad".into(), false)]));
         expr_depends_on_nonlowerable_name(
             &match_expr,
             &top_level_defs,
             &types,
             &BTreeMap::new(),
-            &mut cache,
-            &mut UnordSet::new(),
+            &mut walk,
             &LowerabilityBindings::default(),
         )
     }
@@ -34557,5 +34806,480 @@ mod regression_tests {
             "gradient of sum(mul(x,x),0) at x=[3.0] must be 6.0, got {:?}",
             output.to_f64_lossy_vec()
         );
+    }
+}
+
+/// chelis#3707 and chelis#3727: the lowerability walk reaches a callee's body
+/// through a callable-formal call, a precision- or rank-polymorphic call, or a
+/// bare reference, and walked it once per call site. These tests count the
+/// body walks rather than time the classification, and compare every
+/// memoized answer with the walk per call site, which the memo switch
+/// restores.
+#[cfg(test)]
+mod lowerability_memo_tests {
+    use super::*;
+
+    fn checked(source: &str) -> CheckedProgram {
+        let decls = chelis_surf::parser::parse_str(source).expect("surf parse failed");
+        let deep = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture desugars");
+        let typed = chelis_types::check_ir_program(&deep)
+            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
+        let effected = chelis_effects::check_program(&typed)
+            .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
+        chelis_types::check_linearity(&effected)
+            .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
+    }
+
+    /// The chelis#3707 witness: every level forwards a callable formal to two
+    /// calls of the level below.
+    fn callable_chain(depth: usize) -> String {
+        let signature =
+            "(h: (&tensor[*, f64] -> tensor[*, bool]), x: tensor[*, f64]) -> tensor[*, bool]";
+        let mut source = format!("def u0{signature} = h(x)\n");
+        for level in 1..=depth {
+            let below = level - 1;
+            source.push_str(&format!(
+                "def u{level}{signature} = and(u{below}(h, x), u{below}(h, x))\n"
+            ));
+        }
+        source.push_str(&format!(
+            "out = u{depth}(is_finite, to_tensor([1.0f64, 2.0f64]))\n"
+        ));
+        source
+    }
+
+    /// The chelis#3727 witness: the same shape with a precision variable and
+    /// no callable formal.
+    fn precision_chain(depth: usize) -> String {
+        let signature = "[p: Float](x: tensor[2, p]) -> tensor[2, bool]";
+        let mut source = format!("def w0{signature} = is_finite(x)\n");
+        for level in 1..=depth {
+            let below = level - 1;
+            source.push_str(&format!(
+                "def w{level}{signature} = and(w{below}(x), w{below}(x))\n"
+            ));
+        }
+        source.push_str(&format!("out = w{depth}(to_tensor([1.0f64, 2.0f64]))\n"));
+        source
+    }
+
+    /// A callable formal forwarded down to a vmap target at the bottom, the
+    /// fact [`function_has_unresolved_vmap_target`] reads through the memo.
+    fn vmap_chain(depth: usize) -> String {
+        let signature = "[n](h: (&tensor[2, f32] -> tensor[2, f32]), x: tensor[n, 2, f32]) -> tensor[n, 2, f32]";
+        let mut source = format!("def v0{signature} = vmap(h)(x)\n");
+        for level in 1..=depth {
+            let below = level - 1;
+            source.push_str(&format!(
+                "def v{level}{signature} = add(v{below}(h, x), v{below}(h, x))\n"
+            ));
+        }
+        source
+    }
+
+    /// The callable chain over a self-recursive base. The base's walk meets
+    /// itself on the stack, so it keeps a walk per call site; the levels above
+    /// it are outside every recursive group.
+    fn chain_over_recursive_base(depth: usize) -> String {
+        callable_chain(depth).replace("= h(x)\n", "= and(h(x), u0(h, x))\n")
+    }
+
+    /// The precision chain over a self-recursive base, whose cycle guard
+    /// answers host.
+    fn precision_chain_over_recursive_base(depth: usize) -> String {
+        precision_chain(depth).replace("= is_finite(x)\n", "= and(is_finite(x), w0(x))\n")
+    }
+
+    /// Mutually recursive pairs, each calling the pair below, with callable
+    /// and polymorphic edges mixed: answers here depend on the stack.
+    fn mutual_pairs(depth: usize) -> String {
+        let callable =
+            "(h: (&tensor[*, f64] -> tensor[*, bool]), x: tensor[*, f64]) -> tensor[*, bool]";
+        let mut source = format!("def a0{callable} = h(x)\ndef b0{callable} = h(x)\n");
+        for level in 1..=depth {
+            let below = level - 1;
+            source.push_str(&format!(
+                "def a{level}{callable} = and(b{level}(h, x), a{below}(h, x))\n\
+                 def b{level}{callable} = and(a{level}(h, x), b{below}(h, x))\n"
+            ));
+        }
+        source.push_str(&format!(
+            "out = a{depth}(is_finite, to_tensor([1.0f64, 2.0f64]))\n"
+        ));
+        source
+    }
+
+    /// A recursive group reached from outside it through a callable-formal
+    /// call and through a polymorphic call. Every callee body walked here
+    /// belongs to the group.
+    const RECURSIVE_GROUP: &str = "\
+        def a(x: tensor[2, f64]) -> tensor[2, bool] = c(is_finite, x)\n\
+        def b(x: tensor[2, f64]) -> tensor[2, bool] = xp(x)\n\
+        def c[p: Float](h: (&tensor[2, p] -> tensor[2, bool]), x: tensor[2, p]) -> tensor[2, bool] = xp(x)\n\
+        def xp[p: Float](x: tensor[2, p]) -> tensor[2, bool] = c(is_finite, x)\n";
+
+    /// A recursive group whose answers depend on which members the stack
+    /// holds, found by the program generator below. The walk per call site
+    /// classifies `d1` host; replaying the group's walks memoized while
+    /// classifying `d0` would classify it numeric.
+    const STACK_DEPENDENT_GROUP: &str = "\
+        def d0(x: tensor[2, f64]) -> tensor[2, bool] = and(d2(is_finite, x), and({\n\
+          pair = (is_finite, is_nan)\n\
+          d1(pair.0, x)\n\
+        }, {\n\
+          pair = (is_finite, is_nan)\n\
+          d5(pair.0, x)\n\
+        }))\n\
+        def d1(h: (&tensor[2, f64] -> tensor[2, bool]), x: tensor[2, f64]) -> tensor[2, bool] = and(and(d3(x), and(d3(x), d2(is_nan, x))), h(x))\n\
+        def d2(h: (&tensor[2, f64] -> tensor[2, bool]), x: tensor[2, f64]) -> tensor[2, bool] = and(d0(x), h(x))\n\
+        def d3(x: tensor[2, f64]) -> tensor[2, bool] = is_nan(x)\n\
+        def d5(h: (&tensor[2, f64] -> tensor[2, bool]), x: tensor[2, f64]) -> tensor[2, bool] = {\n\
+          h = is_nan\n\
+          and(h(x), d0(x))\n\
+        }\n\
+        out = d1(is_finite, to_tensor([1.0f64, 2.0f64]))\n";
+
+    /// An answer and the callee bodies its classification walked.
+    type Walked<T> = (T, u64);
+
+    type Verdicts = BTreeMap<String, bool>;
+
+    /// `classify`'s answer with the memo on and then with the walk per call
+    /// site.
+    fn with_and_without_memo<T>(classify: impl Fn() -> T) -> (Walked<T>, Walked<T>) {
+        let run = |disabled: bool| {
+            LOWERABILITY_MEMO_DISABLED.with(|flag| flag.set(disabled));
+            take_lowerability_callee_body_walks();
+            let answer = classify();
+            let walks = take_lowerability_callee_body_walks();
+            LOWERABILITY_MEMO_DISABLED.with(|flag| flag.set(false));
+            (answer, walks)
+        };
+        (run(false), run(true))
+    }
+
+    fn lowering_map(source: &str) -> (Walked<Verdicts>, Walked<Verdicts>) {
+        let checked = checked(source);
+        with_and_without_memo(|| top_level_lowering_map(checked.exprs(), checked.type_env()))
+    }
+
+    const DEPTH: usize = 12;
+
+    /// Evidentiary status: REGRESSION TEST. The walk per call site, restored
+    /// by the memo switch, costs 2^DEPTH walks here, and so did the walk
+    /// before its memo.
+    #[test]
+    fn issue_3707_callable_formal_chain_walks_each_callee_once() {
+        let ((memoized, walks), (unmemoized, rewalks)) = lowering_map(&callable_chain(DEPTH));
+        assert_eq!(memoized, unmemoized, "the memo changes no verdict");
+        let definitions = DEPTH as u64 + 2;
+        assert!(
+            walks <= 2 * definitions,
+            "{definitions} definitions cost {walks} callee-body walks"
+        );
+        assert!(
+            rewalks >= 1 << DEPTH,
+            "negative control: the walk per call site re-walks the chain, {rewalks} walks"
+        );
+    }
+
+    /// Evidentiary status: REGRESSION TEST, as above, for the precision- and
+    /// rank-polymorphic edge.
+    #[test]
+    fn issue_3727_polymorphic_chain_walks_each_callee_once() {
+        let ((memoized, walks), (unmemoized, rewalks)) = lowering_map(&precision_chain(DEPTH));
+        assert_eq!(memoized, unmemoized, "the memo changes no verdict");
+        let definitions = DEPTH as u64 + 2;
+        assert!(
+            walks <= 2 * definitions,
+            "{definitions} definitions cost {walks} callee-body walks"
+        );
+        assert!(
+            rewalks >= 1 << DEPTH,
+            "negative control: the walk per call site re-walks the chain, {rewalks} walks"
+        );
+    }
+
+    /// The vmap-target query walks each callee once per query, and keeps its
+    /// answers: a forwarded callable reaching a vmap is an unresolved target,
+    /// and one reaching only an application is not.
+    #[test]
+    fn unresolved_vmap_targets_walk_each_callee_once_per_query() {
+        for (source, prefix, expected) in [
+            (vmap_chain(DEPTH), "v", true),
+            (callable_chain(DEPTH), "u", false),
+        ] {
+            let checked = checked(&source);
+            let definitions = collect_top_level_defs(checked.exprs());
+            let ((memoized, walks), (unmemoized, rewalks)) = with_and_without_memo(|| {
+                (0..=DEPTH)
+                    .map(|level| {
+                        let function = &definitions[&format!("{prefix}{level}")];
+                        function_has_unresolved_vmap_target(function, &definitions)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(memoized, unmemoized, "the memo changes no answer");
+            assert!(
+                memoized.iter().all(|target| *target == expected),
+                "{memoized:?}"
+            );
+            let levels = DEPTH as u64 + 1;
+            assert!(
+                walks <= levels * levels,
+                "{levels} queries cost {walks} callee-body walks"
+            );
+            if !expected {
+                assert!(rewalks >= 1 << DEPTH, "negative control: {rewalks} walks");
+            }
+        }
+    }
+
+    /// A recursive binding group keeps the walk per call site, so its answers
+    /// cannot depend on the memo; the declarations above it stay memoized.
+    #[test]
+    fn recursive_groups_keep_their_unmemoized_answers() {
+        let ((memoized, walks), (unmemoized, rewalks)) =
+            lowering_map(&chain_over_recursive_base(DEPTH));
+        assert_eq!(memoized, unmemoized, "the memo changes no verdict");
+        let definitions = DEPTH as u64 + 2;
+        assert!(
+            walks <= 4 * definitions,
+            "{definitions} definitions cost {walks} callee-body walks"
+        );
+        assert!(rewalks >= 1 << DEPTH, "negative control: {rewalks} walks");
+
+        for source in [precision_chain_over_recursive_base(DEPTH), mutual_pairs(4)] {
+            let ((memoized, _), (unmemoized, _)) = lowering_map(&source);
+            assert_eq!(memoized, unmemoized, "the memo changes no verdict");
+        }
+        let ((memoized, _), (unmemoized, _)) = lowering_map(STACK_DEPENDENT_GROUP);
+        assert_eq!(memoized, unmemoized, "the memo changes no verdict");
+        assert_eq!(memoized.get("d1"), Some(&false), "{memoized:?}");
+
+        // Only the outside declarations' own walks could be shared, and each
+        // runs once, so the group's members are walked exactly as often as
+        // without the memo.
+        let ((memoized, walks), (unmemoized, rewalks)) = lowering_map(RECURSIVE_GROUP);
+        assert_eq!(memoized, unmemoized, "the memo changes no verdict");
+        assert_eq!(
+            walks, rewalks,
+            "a recursive group's member is never memoized"
+        );
+    }
+
+    /// Two calls of one callee that supply different callable facts: a
+    /// literal callable, and a projection out of a local pair that applying
+    /// needs the host for. A memo that forgot the supplied facts would answer
+    /// the second call with the first call's numeric verdict.
+    const CALLS_SUPPLYING_DIFFERENT_FACTS: &str = "\
+        def c(h: (&tensor[2, f64] -> tensor[2, bool]), x: tensor[2, f64]) -> tensor[2, bool] = h(x)\n\
+        def m(x: tensor[2, f64]) -> tensor[2, bool] = and(c(is_finite, x), {\n\
+          pair = (is_finite, is_nan)\n\
+          c(pair.0, x)\n\
+        })\n";
+
+    #[test]
+    fn a_callee_is_memoized_per_supplied_callable_facts() {
+        let ((memoized, _), (unmemoized, _)) = lowering_map(CALLS_SUPPLYING_DIFFERENT_FACTS);
+        assert_eq!(memoized, unmemoized, "the memo changes no verdict");
+        assert_eq!(memoized.get("m"), Some(&false), "{memoized:?}");
+    }
+
+    /// A deterministic source of small programs mixing every edge the walk
+    /// crosses: callable-formal, precision-polymorphic and plain declarations,
+    /// host-only bodies, vmap targets, recursion and shadowed binders, with
+    /// forwarded formals, literal builtins and projected callables as actuals.
+    struct ProgramGenerator(u64);
+
+    impl ProgramGenerator {
+        fn below(&mut self, bound: usize) -> usize {
+            // xorshift64*: deterministic, so a failure names its seed.
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            (self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 33) as usize % bound
+        }
+
+        fn actual(&mut self, forwarded: bool) -> String {
+            match self.below(if forwarded { 5 } else { 4 }) {
+                0 => "is_finite".to_string(),
+                1 => "is_nan".to_string(),
+                2 => "pair.0".to_string(),
+                3 => "pair.1".to_string(),
+                _ => "h".to_string(),
+            }
+        }
+
+        /// A `tensor[2, bool]` expression over `x`, in a body whose formal `h`
+        /// is a callable when `callable`, and whose `x` is precision-generic
+        /// when `generic`.
+        fn body(&mut self, kinds: &[Kind], callable: bool, generic: bool, depth: usize) -> String {
+            let choice = if depth == 0 {
+                self.below(3)
+            } else {
+                self.below(7)
+            };
+            match choice {
+                0 => "is_finite(x)".to_string(),
+                1 if callable => "h(x)".to_string(),
+                1 => "is_nan(x)".to_string(),
+                2 | 3 => {
+                    let target = self.below(kinds.len());
+                    match kinds[target] {
+                        Kind::Callable if !generic => {
+                            let actual = self.actual(callable);
+                            if actual.starts_with("pair") {
+                                format!(
+                                    "{{\n  pair = (is_finite, is_nan)\n  d{target}({actual}, x)\n}}"
+                                )
+                            } else {
+                                format!("d{target}({actual}, x)")
+                            }
+                        }
+                        Kind::Plain | Kind::Host if !generic => format!("d{target}(x)"),
+                        Kind::Generic => format!("d{target}(x)"),
+                        _ => "is_nan(x)".to_string(),
+                    }
+                }
+                4 if callable && !generic => {
+                    // A local that shadows the callable formal.
+                    let inner = self.body(kinds, false, generic, depth - 1);
+                    format!("{{\n  h = is_nan\n  and(h(x), {inner})\n}}")
+                }
+                _ => {
+                    let left = self.body(kinds, callable, generic, depth - 1);
+                    let right = self.body(kinds, callable, generic, depth - 1);
+                    format!("and({left}, {right})")
+                }
+            }
+        }
+
+        fn program(&mut self) -> (String, Vec<String>) {
+            let count = 2 + self.below(5);
+            let kinds = (0..count)
+                .map(|_| match self.below(4) {
+                    0 => Kind::Callable,
+                    1 => Kind::Generic,
+                    2 => Kind::Plain,
+                    _ => Kind::Host,
+                })
+                .collect::<Vec<_>>();
+            let mut source = String::new();
+            for (index, kind) in kinds.iter().enumerate() {
+                let (header, callable, generic) = match kind {
+                    Kind::Callable => (
+                        "(h: (&tensor[2, f64] -> tensor[2, bool]), x: tensor[2, f64])",
+                        true,
+                        false,
+                    ),
+                    Kind::Generic => ("[p: Float](x: tensor[2, p])", false, true),
+                    Kind::Plain | Kind::Host => ("(x: tensor[2, f64])", false, false),
+                };
+                let body = self.body(&kinds, callable, generic, 3);
+                let body = if *kind == Kind::Host {
+                    format!("{{\n  _ = print(\"d{index}\")\n  {body}\n}}")
+                } else {
+                    body
+                };
+                source.push_str(&format!(
+                    "def d{index}{header} -> tensor[2, bool] = {body}\n"
+                ));
+            }
+            // Callable vmap templates forwarding their formal or a builtin.
+            let maps = self.below(3);
+            let signature = "[n](h: (&tensor[2, f32] -> tensor[2, f32]), x: tensor[n, 2, f32]) -> tensor[n, 2, f32]";
+            for index in 0..maps {
+                let body = match (index, self.below(3)) {
+                    (0, _) | (_, 0) => "vmap(h)(x)".to_string(),
+                    (_, 1) => format!("v{}(neg, x)", self.below(index)),
+                    _ => format!("add(v{0}(h, x), v{0}(neg, x))", self.below(index)),
+                };
+                source.push_str(&format!("def v{index}{signature} = {body}\n"));
+            }
+            let root = self.below(count);
+            let call = match kinds[root] {
+                Kind::Callable => format!("d{root}(is_finite, to_tensor([1.0f64, 2.0f64]))"),
+                _ => format!("d{root}(to_tensor([1.0f64, 2.0f64]))"),
+            };
+            source.push_str(&format!("out = {call}\n"));
+            let functions = (0..count)
+                .map(|index| format!("d{index}"))
+                .chain((0..maps).map(|index| format!("v{index}")))
+                .collect();
+            (source, functions)
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Callable,
+        Generic,
+        Plain,
+        Host,
+    }
+
+    fn try_checked(source: &str) -> Option<CheckedProgram> {
+        let decls = chelis_surf::parser::parse_str(source).ok()?;
+        let deep = chelis_surf::desugar::desugar_program(&decls).ok()?;
+        let typed = chelis_types::check_ir_program(&deep).ok()?;
+        let effected = chelis_effects::check_program(&typed).ok()?;
+        chelis_types::check_linearity(&effected).ok()
+    }
+
+    /// Every lowerability query answers the same with and without the memo
+    /// over a fixed-seed corpus of generated programs.
+    #[test]
+    fn generated_programs_answer_the_same_with_and_without_the_memo() {
+        const PROGRAMS: usize = 400;
+        let mut generator = ProgramGenerator(0x3707_3727_c0de_5eed);
+        let mut checked_programs = 0;
+        for _ in 0..PROGRAMS {
+            let (source, functions) = generator.program();
+            let Some(checked) = try_checked(&source) else {
+                continue;
+            };
+            checked_programs += 1;
+            let definitions = collect_top_level_defs(checked.exprs());
+            let ((memoized, _), (unmemoized, _)) = with_and_without_memo(|| {
+                let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
+                let answers = functions
+                    .iter()
+                    .filter_map(|name| definitions.get(name))
+                    .map(|body| {
+                        (
+                            function_has_unresolved_vmap_target(body, &definitions),
+                            expr_is_dag_lowerable(body, &checked),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (lowered, answers)
+            });
+            assert_eq!(
+                memoized, unmemoized,
+                "the memo changes an answer for:\n{source}"
+            );
+        }
+        assert!(
+            checked_programs >= PROGRAMS / 4,
+            "only {checked_programs} of {PROGRAMS} generated programs check"
+        );
+    }
+
+    #[test]
+    fn declaration_recursion_finds_every_group() {
+        let checked = checked(&format!(
+            "{}{}",
+            precision_chain_over_recursive_base(2),
+            mutual_pairs(1).replace("out =", "pairs =")
+        ));
+        let definitions = collect_top_level_defs(checked.exprs());
+        let mut recursion = DeclarationRecursion::default();
+        let recursive = definitions
+            .keys()
+            .filter(|name| recursion.is_recursive(name, &definitions))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(recursive, ["a1", "b1", "w0"]);
     }
 }

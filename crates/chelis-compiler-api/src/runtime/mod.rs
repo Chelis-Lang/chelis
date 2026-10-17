@@ -636,6 +636,12 @@ impl PreparedHostEvaluation {
             scope_maps: std::sync::OnceLock::new(),
         }
     }
+
+    /// A host-lowering session over the prepared program, sharing its
+    /// program-wide facts.
+    pub(crate) fn session(&self) -> chelis_ir::host::HostLoweringSession<'_> {
+        self.host.session()
+    }
 }
 
 /// Evaluate against a program prepared once for many evaluations

@@ -2658,8 +2658,9 @@ fn copy_cost_for_checked(
         }
     }
     let mut functions = Vec::new();
-    for name in &entry_names {
-        if let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(checked, name) {
+    let dags = chelis_ir::host::lower_named_tensor_entry_dags(checked, &entry_names);
+    for (name, dag) in entry_names.iter().zip(dags) {
+        if let Some(dag) = dag {
             let roots = dag.roots().to_vec();
             if roots.is_empty() {
                 continue;
@@ -13717,5 +13718,49 @@ mod runtime_dim_reject_tests {
             None,
         );
         reject_unsupported_hip_ops(&dag).expect("literal bounds must pass the HIP seam");
+    }
+}
+
+/// chelis#3728 and chelis#1921: `chelis cost` lowers every named entry of one
+/// program through one host-lowering session. It opened a fresh session per
+/// entry, each re-deriving every program-wide fact, so the command cost the
+/// square of the definition count. The count of opened sessions is
+/// process-wide, and nextest runs each test in its own process.
+#[cfg(test)]
+mod cost_session_tests {
+    use super::copy_cost_for_file;
+    use chelis_ir::host::host_lowering_sessions;
+
+    fn source(definitions: usize) -> String {
+        let mut source = String::new();
+        for index in 0..definitions {
+            source.push_str(&format!(
+                "def f{index}(x: tensor[3, f32]) -> tensor[3, f32] = add(x, x)\n"
+            ));
+        }
+        source
+    }
+
+    /// Evidentiary status: REGRESSION TEST, watched opening one session per
+    /// definition (1 and 8) on the per-entry loop it replaces.
+    #[test]
+    fn cost_opens_one_session_whatever_the_definition_count() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        for definitions in [1, 8] {
+            let path = directory.path().join(format!("defs_{definitions}.ch"));
+            std::fs::write(&path, source(definitions)).expect("write fixture");
+            let before = host_lowering_sessions();
+            let report = copy_cost_for_file(&path).expect("cost");
+            let sessions = host_lowering_sessions() - before;
+            assert_eq!(
+                report.summary.functions.len(),
+                definitions,
+                "every definition is an entry"
+            );
+            assert_eq!(
+                sessions, 1,
+                "{definitions} definitions opened {sessions} sessions"
+            );
+        }
     }
 }

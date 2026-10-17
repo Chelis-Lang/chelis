@@ -530,6 +530,7 @@ impl PreparedHostProgram {
 
     /// A session over the program that reuses and extends the shared facts.
     pub fn session(&self) -> HostLoweringSession<'_> {
+        HOST_LOWERING_SESSIONS.fetch_add(1, Ordering::Relaxed);
         HostLoweringSession {
             program: &self.program,
             facts: DefLaneFacts::default(),
@@ -696,10 +697,25 @@ fn take_top_level_name_index_builds() -> u64 {
     TOP_LEVEL_NAME_INDEX_BUILDS.with(|builds| builds.replace(0))
 }
 
+/// Host-lowering sessions opened since the process started, by
+/// [`HostLoweringSession::new`] or [`PreparedHostProgram::session`]. A fresh
+/// session derives every program-wide fact again, and even a prepared one
+/// starts its per-definition kernel decisions empty, so an entry point that
+/// opens one per ask instead of one per program repeats that work per ask,
+/// which no type can forbid (chelis#1921). A test drives a public entry with
+/// one ask and with many, and asserts the count does not grow with the asks.
+static HOST_LOWERING_SESSIONS: AtomicU64 = AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn host_lowering_sessions() -> u64 {
+    HOST_LOWERING_SESSIONS.load(Ordering::Relaxed)
+}
+
 impl<'program> HostLoweringSession<'program> {
     /// Begin a session over `program`. Nothing is derived here; every field
     /// fills in on its first miss.
     pub fn new(program: &'program CheckedProgram) -> Self {
+        HOST_LOWERING_SESSIONS.fetch_add(1, Ordering::Relaxed);
         Self {
             program,
             facts: DefLaneFacts::default(),
@@ -3293,12 +3309,7 @@ pub fn preferred_tensor_entry_name(program: &ConcreteHostProgram) -> Option<&str
         .map(|function| function.name.as_str())
 }
 
-type NamedTensorEntryLoweringInputs = (
-    Expr,
-    Vec<(String, TensorType)>,
-    Option<TensorType>,
-    Arc<BTreeMap<String, Expr>>,
-);
+type NamedTensorEntryLoweringInputs = (Expr, Vec<(String, TensorType)>, Option<TensorType>);
 
 fn named_tensor_entry_lowering_inputs(
     program: &HostLoweringSession<'_>,
@@ -3334,7 +3345,7 @@ fn named_tensor_entry_lowering_inputs(
     let result_claim = lookup_declared_type_expr(program, name)
         .and_then(|ty| parse_expanded_fn_type_expr(program, &ty))
         .and_then(|(_, result)| tensor_type_from_host_input(&result));
-    Some((body_expr, scope, result_claim, defs))
+    Some((body_expr, scope, result_claim))
 }
 
 pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Option<crate::Dag> {
@@ -3343,9 +3354,30 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     let session = HostLoweringSession::new(program);
     lower_named_tensor_entry_with(
         &session,
+        &std::cell::OnceCell::new(),
         name,
         crate::lower::try_lower_subexpr_program_with_ordered_inputs,
     )
+}
+
+/// [`lower_named_tensor_entry_dag`] for each of `names` in order, lowered as
+/// the iterator is consumed, through one session and one lowering context. A
+/// caller asking for many entries of one program derives the program's facts
+/// once rather than once per entry (chelis#3728).
+pub fn lower_named_tensor_entry_dags<'a>(
+    program: &'a CheckedProgram,
+    names: &'a [String],
+) -> impl Iterator<Item = Option<crate::Dag>> + 'a {
+    let session = HostLoweringSession::new(program);
+    let context = std::cell::OnceCell::new();
+    names.iter().map(move |name| {
+        lower_named_tensor_entry_with(
+            &session,
+            &context,
+            name,
+            crate::lower::try_lower_subexpr_program_with_ordered_inputs,
+        )
+    })
 }
 
 /// [`lower_named_tensor_entry_dag`] with the lowering trace of the same
@@ -3358,15 +3390,31 @@ pub fn lower_named_tensor_entry_dag_with_trace(
     let session = HostLoweringSession::new(program);
     lower_named_tensor_entry_with(
         &session,
+        &std::cell::OnceCell::new(),
         name,
         crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace,
     )
 }
 
+/// The lowering context a named tensor entry's body lowers in.
+fn named_tensor_entry_context(
+    program: &HostLoweringSession<'_>,
+) -> crate::lower::SubexprLoweringContext {
+    crate::lower::prepare_checked_subexpr_lowering_context(
+        program,
+        cached_program_defs(program),
+        Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
+    )
+}
+
 // Observation must not duplicate the entry's source scope or result claim.
 // Only the actual lowerer's optional return product differs.
+///
+/// `context` is built on the first entry that has a tensor signature, so a
+/// name without one costs no lowering context.
 fn lower_named_tensor_entry_with<T>(
     program: &HostLoweringSession<'_>,
+    context: &std::cell::OnceCell<crate::lower::SubexprLoweringContext>,
     name: &str,
     lower: impl FnOnce(
         &Expr,
@@ -3376,19 +3424,15 @@ fn lower_named_tensor_entry_with<T>(
         bool,
     ) -> Result<T, crate::lower::LowerDiagnostic>,
 ) -> Option<T> {
-    let (body_expr, scope, result_claim, defs) = named_tensor_entry_lowering_inputs(program, name)?;
+    let (body_expr, scope, result_claim) = named_tensor_entry_lowering_inputs(program, name)?;
     // Issue #197: a fatal lowering diagnostic (AD-rejection) must
     // propagate as a panic so the outer `catch_lowering_external`
     // surfaces it to the user. Silently absorbing it with `.ok()`
     // would let the host fallback emit an undefined-symbol call to
     // the grad function.
-    let context = crate::lower::prepare_checked_subexpr_lowering_context(
-        program,
-        defs,
-        Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
-    );
     // `scope` is this def's own declared parameter list.
-    match lower(&body_expr, scope, &context, result_claim.as_ref(), true) {
+    let context = context.get_or_init(|| named_tensor_entry_context(program));
+    match lower(&body_expr, scope, context, result_claim.as_ref(), true) {
         Ok(lowered) => Some(lowered),
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
