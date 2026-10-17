@@ -15,6 +15,33 @@
 //! own edge candidates. Each test below names the part of that policy it
 //! pins, and every positive test is paired with the control that keeps it
 //! from passing for the wrong reason.
+//!
+//! **On discrimination.** Every element of the policy was removed in turn and
+//! the failure observed, rather than asserted. Eleven mutations, all detected:
+//!
+//! | removed | caught by |
+//! |---|---|
+//! | the off-diagonal half | every pairing test here |
+//! | the diagonal half | `..._the_diagonal_survives_the_interleave` |
+//! | the arity-one carve-out | `..._single_binder_schedule_is_not_interleaved` |
+//! | the digit's dependence on binder position | every pairing test here |
+//! | the largest-candidate role | `..._the_refuting_pair_is_off_diagonal_...` |
+//! | the smallest-candidate role | `..._the_largest_negative_role_...` |
+//! | the smallest-positive role | `..._the_smallest_positive_role_...` |
+//! | the largest-negative role | `..._the_largest_negative_role_...` |
+//! | the moderate role | `..._typed_generator_lane_pairs_off_diagonal` |
+//! | the zero role | unit test only -- see below |
+//! | the cell cap | unit test only -- see below |
+//!
+//! Two elements have no discriminator at this level, and this says so rather
+//! than implying a dedicated one. The **zero role** cannot be isolated by a
+//! property: wherever the guards admit a zero it is also the interval's
+//! endpoint or its smallest-magnitude candidate, so another role proposes it
+//! anyway and only the exact role list can see the difference. The **cell
+//! cap** is the point at which the odometer yields back to the uniform draw,
+//! which no property can observe without asserting a probability. Both are
+//! pinned exactly in `chelis-prove`'s `property_runner::tests`, under the
+//! same `issue_3697_` prefix.
 use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::tempdir;
@@ -115,6 +142,42 @@ fn issue_3697_the_refuting_pair_is_off_diagonal_and_guard_admitted() {
         x > 1.0e150 && y < 1.0e-150,
         "the pair must be off-diagonal, got {x} and {y}: {record:#}"
     );
+}
+
+/// The cell, pinned exactly. The reported witness is post-shrink -- the
+/// runner shrinks before reporting -- so the test above asserts the witness's
+/// *classes* rather than its values, and on its own it cannot say which cell
+/// refuted. This property is false at exactly one pair, `(MAX, min
+/// subnormal)`, so shrinking cannot move either component and the raw cell is
+/// what gets reported.
+///
+/// `MAX` is each binder's largest-candidate representative and the minimum
+/// subnormal its smallest-positive one, which for these guards are digits 0
+/// and 1 of a three-representative list: cell 6, and so attempt 13. The
+/// fourteenth attempt is therefore the one that refutes, under every seed,
+/// and that count is the whole mechanism claim.
+#[test]
+fn issue_3697_the_refuting_cell_is_reached_at_a_fixed_attempt() {
+    let source = "module Pair.Exact
+@property only_at_the_cell forall(x: f64, y: f64)
+where x > 0.0f64, y > 0.0f64:
+  ((x < 1.7976931348623157e308f64) || (y >= 1.0e-323f64))
+";
+    for seed in ["0", "1", "7", "99"] {
+        let (code, record) = prove(source, "100", seed);
+        assert_eq!(code, 1, "seed {seed}: {record:#}");
+        assert_eq!(witness(&record, "x"), f64::MAX, "seed {seed}: {record:#}");
+        assert_eq!(
+            witness(&record, "y"),
+            f64::from_bits(1),
+            "seed {seed}: {record:#}"
+        );
+        assert_eq!(
+            record["attempted_samples"], 14,
+            "seed {seed}: the cell is attempt 13, so the fourteenth attempt \
+             refutes; a different count means the pairing moved: {record:#}"
+        );
+    }
 }
 
 /// Negative parity for the refutation: the same two binders under the same

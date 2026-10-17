@@ -476,8 +476,14 @@ with the binder count is deliberately **not** part of this policy, because it
 would change the cost of every run to serve the arity that needs it least
 often.
 
-Two consequences are deliberate and bounded:
+Three consequences are deliberate and bounded:
 
+- The interleave **halves the rate** at which a multi-binder property's
+  diagonal is walked, so one refuted only at a late candidate needs about
+  twice the samples it did. The default budget of 100 covers the 44-candidate
+  unguarded `f64` schedule at that rate; a budget below 88 reaches only a
+  prefix of it, which is the degradation a budget smaller than the schedule
+  already had.
 - A single-binder property takes **neither** half: its attempts index the
   schedule exactly as before. An odometer over one binder's own classes is the
   diagonal, so the phase would only halve the rate at which that schedule is
@@ -494,6 +500,25 @@ attempt ordinal, so a pair-refuted property is refuted under every seed, and
 the run stays reproducible for a given seed and inputs. Cells are proposals
 filtered exactly as the diagonal's and the uniform draw's are: the precondition
 still runs, and a rejected cell is a rejected sample that consumes its attempt.
+
+Three other budget policies were weighed and not taken:
+
+- **Scaling the default sample budget with the binder count.** Rejected above:
+  it changes the cost of every run to serve the arity that needs it least
+  often, and `--samples` already serves the arity that does.
+- **A per-property pairing strategy, declared in source.** This would compose
+  with a per-binder domain option, so it is worth revisiting *with* that
+  option rather than before it. On its own it adds language surface to solve a
+  problem a default can solve, which the explicit-and-structural bias does not
+  license: the bias prefers spelling a choice out where the choice is real, not
+  manufacturing one.
+- **Pairing only the binders a property's body actually combines.** This rests
+  on a mistaken premise about what the compiler already knows.
+  `property_dependency_edges` collects the module-level *function and value*
+  names a property's body references and **excludes the property's own
+  parameter names by construction**, so it cannot say which binders meet in an
+  expression. Deriving that would mean a new traversal, which is its own
+  change; nothing in the existing extraction supplies it.
 
 The shared Tier-C runner is enabled in every normal CLI build, including a
 build without the `smt` feature, and is also the Tide implementation. Solver
