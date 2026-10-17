@@ -2850,8 +2850,13 @@ exact ADT identity by [05-OP-34].
 > there, and products in the specified assignment order combine through the
 > adjacent-pair balanced tree. An empty reduction is exact zero. The result is
 > `sum_result(p, accumulator)`; integer overflow is checked at every multiply
-> and add. Output positions and tree nodes evaluate left to right, fixing the
-> first trap. The float adjoint is the reverse derivative of this exact
+> and add. Every such overflow is [04-NUM-9]'s overflow trap in `einsum` at
+> the accumulator dtype, so an einsum traps exactly when one of its multiplies
+> or additions overflows, and evaluation order cannot change the trap it
+> reports. The balanced tree therefore fixes which additions occur, as the
+> Reduction order rule fixes them for `sum`, but not when each executes: a
+> product may be formed before any addition of its output or when the tree
+> first consumes it. The float adjoint is the reverse derivative of this exact
 > multiply-and-balanced-add graph; contributions to one operand cell follow
 > forward output then reduction order and combine through the same tree.
 > Integers are forward-only and bool is a type error.
