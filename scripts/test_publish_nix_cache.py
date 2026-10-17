@@ -43,7 +43,7 @@ CLOSURE = [
     "/nix/store/mmmm-cvc5-1.3.1",
     TREE,
 ]
-# The activated Devenv shell: its `gc/shell` root and its profile.
+# The Devenv shell: its `gc/shell` root and its profile.
 DOTFILE = "/home/runner/work/chelis/chelis/.devenv"
 SHELL = "/nix/store/nnnn-devenv-shell"
 PROFILE = "/nix/store/oooo-devenv-profile"
@@ -198,7 +198,7 @@ class PublishNixCacheTests(unittest.TestCase):
         self.assertIn("run failed", stderr)
         self.assertNotIn("pushed", stdout)
 
-    def test_pushes_the_activated_devenv_shell_and_its_profile(self) -> None:
+    def test_pushes_the_devenv_shell_root_and_its_profile(self) -> None:
         nix = FakeNix()
         code, _, _ = run_main(nix)
         self.assertEqual(code, 0)
