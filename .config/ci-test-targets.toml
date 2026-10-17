@@ -3167,15 +3167,6 @@ reason = "the nix-eval job evaluates the runtime consumer check that copies this
 tracking_issue = "chelis#3816"
 
 [[path_rule]]
-prefix = "nix/contracts.nix"
-disposition = "owner"
-workflow = "nix-packages.yml"
-job = "nix-linux-x86-64"
-cadence = "workflow_dispatch and published release"
-reason = "the native Nix jobs evaluate the supported systems and package shapes that this contract declares"
-tracking_issue = "chelis#3818"
-
-[[path_rule]]
 prefix = "flake.nix"
 disposition = "owner"
 workflow = "ci.yml"
