@@ -459,11 +459,8 @@ pub fn lower_einsum(
 /// carries, and `batch` labels both carry. Every label both operands carry
 /// has one static extent, so the contraction owes no runtime label check. The
 /// row operand's `rows` and `m` flatten into one row axis, so the column
-/// operand is never copied along a label it lacks. The flattened extent is
-/// static, or one runtime extent beside static extents of nonzero product,
-/// computed from the row operand's own shape when that product exceeds one;
-/// such a computed product needs both operands already in order, so it stores
-/// no permuted copy the runtime kernel would not.
+/// operand is never copied along a label it lacks; that flattened extent is
+/// static, or is one runtime extent beside static extents of one.
 ///
 /// The products are then `[batch.., rows * m, k, n]`, and the reduction
 /// visits `k` in increasing order, the atom's one assignment order for a
@@ -580,23 +577,11 @@ pub fn einsum_contraction(
         labels: if swapped { [b, a] } else { [a, b] },
         accumulator,
     };
-    // A computed row product holds no more than the runtime kernel only when
-    // both operands are already in order: a permuted copy of either would be
-    // an operand-sized buffer the runtime kernel never stores.
-    let order = |tail: &[u8], rows: &[u8]| -> Vec<u8> {
-        plan.batch.iter().chain(rows).chain(tail).copied().collect()
-    };
-    if matches!(flat, RowExtent::Product(_))
-        && (plan.labels[0] != order(&[plan.m, plan.k], &plan.rows)
-            || plan.labels[1] != order(&[plan.k, plan.n], &[]))
-    {
-        return None;
-    }
     // Every shape the graph plans, the expansion included, has strides, an
     // element count and a byte size that fit i64 at the accumulator, the
     // widest dtype any of them holds.
     let (row_ty, column_ty) = if swapped { (rhs, lhs) } else { (lhs, rhs) };
-    let shapes = plan.planned_shapes(row_ty, column_ty, flat.planned());
+    let shapes = plan.planned_shapes(row_ty, column_ty, flat);
     shapes
         .iter()
         .all(|dims| representable(dims, accumulator))
@@ -609,7 +594,7 @@ impl EinsumContraction {
         &self,
         row: &TensorType,
         column: &TensorType,
-        flat: Vec<DimInfo>,
+        flat: DimInfo,
     ) -> [Vec<DimInfo>; 3] {
         let dim = |ty: &TensorType, side: usize, label: u8| {
             ty.dims[self.labels[side]
@@ -620,8 +605,7 @@ impl EinsumContraction {
         };
         let batch: Vec<DimInfo> = self.batch.iter().map(|&l| dim(row, 0, l)).collect();
         let mut rows = batch.clone();
-        rows.extend(flat);
-        rows.push(dim(row, 0, self.k));
+        rows.extend([flat, dim(row, 0, self.k)]);
         let mut product = rows.clone();
         product.push(dim(column, 1, self.n));
         let mut output = batch;
@@ -654,64 +638,27 @@ fn representable(dims: &[DimInfo], precision: Prim) -> bool {
     extents.is_some_and(|extents| ShapeMetadata::contiguous(&extents, dtype).is_ok())
 }
 
-/// The extent of the one row axis the row operand's `rows` and `m` flatten
-/// into.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RowExtent {
-    /// Their static product.
-    Static(usize),
-    /// Their one runtime extent, every other extent being one.
-    Runtime(DimInfo),
-    /// Their one runtime extent times static extents of nonzero product
-    /// `.0`, which the graph computes from the row operand's shape.
-    Product(usize),
-}
-
-impl RowExtent {
-    /// The flattened axis's extent, a computed product excepted.
-    fn dim(&self) -> Option<DimInfo> {
-        match self {
-            Self::Static(n) => Some(DimInfo::Lit(*n)),
-            Self::Runtime(dim) => Some(dim.clone()),
-            Self::Product(_) => None,
-        }
-    }
-
-    /// The axes standing for the flattened axis in a planned shape: a
-    /// computed product is its static factor beside a runtime extent, so
-    /// the static factor counts toward the shape's representability.
-    fn planned(&self) -> Vec<DimInfo> {
-        match self {
-            Self::Product(factor) => {
-                vec![DimInfo::Lit(*factor), DimInfo::Named(String::new(), None)]
-            }
-            other => other.dim().into_iter().collect(),
-        }
-    }
-}
-
-/// One row axis for `dims`, which carry at most one runtime extent.
+/// One row axis for `dims`: their static product, or their one runtime
+/// extent when every other extent is one.
 ///
-/// Beside only nonzero static extents, the one runtime extent is bounded by
-/// the row operand that carries it, which exists in memory, so the computed
-/// product cannot overflow. Two runtime extents bound nothing when either is
-/// zero, so such rows have no axis and keep the runtime kernel.
-fn flattened_rows<'a>(dims: impl Iterator<Item = &'a DimInfo>) -> Option<RowExtent> {
+/// A runtime extent beside a static extent above one has no row axis: its
+/// product needs a reshape that copies the operand and the result (#3802).
+fn flattened_rows<'a>(dims: impl Iterator<Item = &'a DimInfo>) -> Option<DimInfo> {
     let mut product = DimExpr::Concrete(1);
-    let mut runtime = Vec::new();
+    let mut runtime = None;
     for dim in dims {
         match static_extent(dim) {
             Some(_) => product = DimExpr::Mul(Box::new(product), Box::new(DimExpr::from(dim))),
-            None => runtime.push(dim.clone()),
+            None if runtime.is_none() => runtime = Some(dim.clone()),
+            None => return None,
         }
     }
     // An unrepresentable static product has no row axis.
     let product = product.as_concrete()?;
-    match runtime.as_slice() {
-        [] => Some(RowExtent::Static(product)),
-        [dim] if product == 1 => Some(RowExtent::Runtime(dim.clone())),
-        [_] if product > 0 => Some(RowExtent::Product(product)),
-        _ => None,
+    match runtime {
+        None => Some(DimInfo::Lit(product)),
+        Some(dim) if product == 1 => Some(dim),
+        Some(_) => None,
     }
 }
 
@@ -737,9 +684,7 @@ fn static_extent(dim: &DimInfo) -> Option<usize> {
 /// node holds more bytes than an operand or the result.
 ///
 /// A label only one operand carries may have a runtime extent; the column
-/// expansion reads the row extent from the row operand's shape, and a
-/// flattened row extent with a runtime factor is the checked product of the
-/// row operand's extents.
+/// expansion reads the row extent from the row operand's shape.
 pub fn lower_einsum_contraction(
     owner: Owner,
     dag: &mut Dag,
@@ -795,55 +740,17 @@ pub fn lower_einsum_contraction(
         .copied()
         .collect();
     let (mut row, row_dims) = arrange(dag, 0, row, row_ty, &row_order);
-    let row_axes = batch..row_dims.len() - 1;
-    let (flat, extent) = match flattened_rows(row_dims[row_axes.clone()].iter())
-        .ok_or("`einsum` rows do not flatten to one axis")?
-    {
-        RowExtent::Product(_) => {
-            // The checked i64 product of the row operand's own extents.
-            let scalar = typed(&[], Prim::Int64);
-            let mut extent = None;
-            for axis in row_axes {
-                let read = add_synth(
-                    owner,
-                    dag,
-                    RiscOp::Shape { axis },
-                    vec![row],
-                    scalar.clone(),
-                    span,
-                );
-                extent = Some(match extent {
-                    None => read,
-                    Some(product) => add_synth(
-                        owner,
-                        dag,
-                        RiscOp::Mul,
-                        vec![product, read],
-                        scalar.clone(),
-                        span,
-                    ),
-                });
-            }
-            let extent = extent.expect("a product has two factors");
-            let name = format!("_rt_dim_{}_{batch}", extent.0);
-            (DimInfo::Named(name, None), Some(extent))
-        }
-        rows => (rows.dim().expect("a flattened extent"), None),
-    };
+    let flat = flattened_rows(row_dims[batch..row_dims.len() - 1].iter())
+        .ok_or("`einsum` rows do not flatten to one axis")?;
     let mut flat_dims = row_dims[..batch].to_vec();
     flat_dims.extend([flat.clone(), dim(0, plan.k)]);
     if !plan.rows.is_empty() {
-        let mut new_shape: Vec<RtDim> = flat_dims.iter().map(RtDim::from_dim_info).collect();
-        let mut inputs = vec![row];
-        if let Some(extent) = extent {
-            new_shape[batch] = RtDim::Node(1);
-            inputs.push(extent);
-        }
+        let new_shape = flat_dims.iter().map(RtDim::from_dim_info).collect();
         row = add_synth(
             owner,
             dag,
             RiscOp::Reshape { new_shape },
-            inputs,
+            vec![row],
             at(&flat_dims),
             span,
         );
@@ -1028,18 +935,6 @@ mod einsum_contraction_tests {
                 ],
                 vec![DimInfo::Lit(8), runtime("n")],
             ),
-            // Rows whose flattened extent is one runtime extent beside a
-            // static row above one (chelis#3781).
-            (
-                "amk,kn->amn",
-                vec![runtime("a"), DimInfo::Lit(3), DimInfo::Lit(8)],
-                lit(&[8, 5]),
-            ),
-            (
-                "amk,kn->amn",
-                vec![DimInfo::Lit(2), runtime("m"), DimInfo::Lit(8)],
-                lit(&[8, 5]),
-            ),
         ] {
             assert!(plan(equation, &a, &b, f32).is_some(), "`{equation}`");
         }
@@ -1159,7 +1054,21 @@ mod einsum_contraction_tests {
                 lit(&[usize::MAX / 2 + 1, 2, 8]),
                 lit(&[8, 5]),
             ),
-            // Two runtime rows, which bound nothing when either is zero.
+            // A runtime row beside a static row above one, whose product
+            // the route would compute in a consumer helper that keeps its
+            // operand alive past the runtime kernel's release (chelis#3781),
+            // and two runtime rows, which also bound nothing when either is
+            // zero.
+            (
+                "amk,kn->amn",
+                vec![runtime("a"), DimInfo::Lit(3), DimInfo::Lit(8)],
+                lit(&[8, 5]),
+            ),
+            (
+                "amk,kn->amn",
+                vec![DimInfo::Lit(2), runtime("m"), DimInfo::Lit(8)],
+                lit(&[8, 5]),
+            ),
             (
                 "amk,kn->amn",
                 vec![runtime("a"), runtime("m"), DimInfo::Lit(8)],
@@ -1300,14 +1209,6 @@ mod einsum_contraction_tests {
                 f16,
                 Some(f64),
                 vec![DimInfo::Lit(1), runtime("s"), DimInfo::Lit(5)],
-            ),
-            (
-                "amk,kn->amn",
-                vec![runtime("a"), DimInfo::Lit(3), DimInfo::Lit(8)],
-                lit(&[8, 5]),
-                f32,
-                Some(f64),
-                vec![runtime("a"), DimInfo::Lit(3), DimInfo::Lit(5)],
             ),
         ] {
             let contraction = einsum_contraction(equation, &ty(&a, p), &ty(&b, p), accumulator)
@@ -1877,7 +1778,6 @@ mod einsum_contraction_tests {
             DimInfo::Lit(LARGE),
         ];
         let (mut accepted, mut assignments, mut refused) = (0usize, 0usize, 0usize);
-        let mut computed_rows = 0usize;
         let mut consumed = 0usize;
         for equation in [
             "abmk,kn->abmn",
@@ -1910,7 +1810,11 @@ mod einsum_contraction_tests {
                     .iter()
                     .filter(|&&l| static_extent(&pick(l)).is_none())
                     .count();
-                let computed = runtime_rows >= 2;
+                let static_rows: usize = b"abm"
+                    .iter()
+                    .filter_map(|&l| static_extent(&pick(l)))
+                    .product();
+                let computed = runtime_rows >= 2 || (runtime_rows == 1 && static_rows != 1);
                 for p in [Prim::F32, Prim::F16] {
                     let Some(contraction) =
                         einsum_contraction(equation, &ty(&a, p), &ty(&b, p), None)
@@ -1920,7 +1824,7 @@ mod einsum_contraction_tests {
                     };
                     assert!(
                         !computed,
-                        "`{equation}` {a:?} {b:?} routes two runtime rows"
+                        "`{equation}` {a:?} {b:?} routes a computed row product"
                     );
                     accepted += 1;
                     let (dag, root) = lowered(equation, &a, &b, p, &contraction);
@@ -1943,25 +1847,14 @@ mod einsum_contraction_tests {
                         if allocatable(&shape(&a), p) && allocatable(&shape(&b), p) {
                             c_storage_bytes(&dag, binding)
                                 .check(&format!("`{equation}` {a:?} {b:?} {p:?} at {binding}"));
-                            computed_rows += usize::from(
-                                runtime_rows == 1
-                                    && dag
-                                        .nodes()
-                                        .iter()
-                                        .any(|node| matches!(node.op, RiscOp::Shape { .. })),
-                            );
                         }
                     }
                 }
             }
         }
         assert!(
-            accepted > 1000
-                && assignments > 1000
-                && refused > 200
-                && computed_rows > 200
-                && consumed > 4000,
-            "{accepted} accepted, {assignments} assignments, {refused} two-runtime-row refusals, {computed_rows} computed rows"
+            accepted > 1000 && assignments > 1000 && refused > 1000 && consumed > 4000,
+            "{accepted} accepted, {assignments} assignments, {refused} computed-row refusals"
         );
     }
 

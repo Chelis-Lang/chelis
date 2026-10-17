@@ -1,16 +1,13 @@
 A compiled product-sum kernel no longer copies its operands or its result at
 the reshapes around it. When an `einsum` contraction flattens row labels, the
 kernel reads the row operand in place through the flattening reshape and
-stores each total directly in the output reshape's buffer, so it allocates
-only its result, as the runtime kernel does. The same store applies to any
-compiled `matmul` or product sum whose result is reshaped. A reshape's
-element-count check and its trap order are unchanged.
+stores each total directly in the output reshape's buffer. The same store
+applies to any compiled `matmul` or product sum whose result is reshaped in the
+same compiled function. A reshape's element-count check and its trap order are
+unchanged, and results are bit-identical.
 
 A compiled f32 `amk,kn->amn` over `x: tensor[16384, 3, 256]` now peaks at
-97.8 MiB instead of 145.8 MiB. With the copies gone, `einsum` rows whose
-flattened extent is one runtime extent beside static ones, for example
-`tensor[a, 3, k]`, also take the product-sum kernel: at a = 16384 that drops
-from about 67.3e9 to 44.0e9 instructions with the same 97.8 MiB peak. Rows with
-two or more runtime extents keep the runtime kernel. Results are bit-identical.
-See [#3802](https://github.com/Chelis-Lang/chelis/issues/3802) and
-[#3781](https://github.com/Chelis-Lang/chelis/issues/3781).
+97.8 MiB instead of 145.8 MiB, and an f16 one over `tensor[65536, 3, 64]` at
+354.1 MB instead of 379.3 MB. `einsum` rows whose flattened extent is a
+runtime extent beside a static one still use the runtime kernel. See
+[#3802](https://github.com/Chelis-Lang/chelis/issues/3802).

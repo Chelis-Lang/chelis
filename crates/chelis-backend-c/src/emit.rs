@@ -11465,7 +11465,7 @@ mod tests {
             ("amk,kn->amn", lit(&[2, 3, 8]), lit(&[8, 4])),
             (
                 "amk,kn->amn",
-                vec![runtime("a"), DimInfo::Lit(3), DimInfo::Lit(8)],
+                vec![runtime("a"), DimInfo::Lit(1), DimInfo::Lit(8)],
                 lit(&[8, 4]),
             ),
             (

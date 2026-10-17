@@ -1,5 +1,4 @@
-//! chelis#3736 / chelis#3703 / chelis#3781 / chelis#3783 / chelis#3802: a
-//! compiled float
+//! chelis#3736 / chelis#3703 / chelis#3783 / chelis#3802: a compiled float
 //! `einsum` whose [05-OP-33] contraction is spec/05 §4.1's product sum over
 //! one reduction label runs the emitted product-sum kernel `matmul` uses,
 //! with the bits `chelis eval` computes; every other einsum keeps the runtime
@@ -8,17 +7,19 @@
 //! The fixture covers both sides. Its routed definitions span f32 and f64,
 //! f16 and bf16 at their f32 default, f16 and f32 at an f64 accumulator,
 //! permuted and swapped operands, batch and runtime row extents (including
-//! zero rows), flattened row labels, including one runtime row beside a
-//! static row above one (chelis#3781), operands read again or reused after
+//! zero rows), flattened row labels, operands read again or reused after
 //! the contraction, a 257-leaf tree, inf, NaN and signed-zero products, an
 //! f16 total that overflows to inf, and an f16 double-rounding witness. Its
 //! retained definitions are a diagonal, two and zero reduction labels, a
 //! matrix-vector product, a runtime contraction extent, an integer
-//! contraction, a lead label only the column operand carries, two runtime
-//! rows (including empty ones whose row product would overflow i64 before a
-//! zero factor), a runtime row product whose operand would need a permuted
-//! copy, at f32, f16, bf16 and f64, and empty batches whose expansion strides
-//! would exceed i64, with static or runtime rows. Its f16 and bf16 `matmul`s share the sum's narrowing.
+//! contraction, a lead label only the column operand carries, a runtime row
+//! beside a static row above one, alone or read by a consumer (chelis#3781),
+//! two runtime rows (including empty ones whose row product would overflow
+//! i64 before a zero factor), runtime rows that would need a permuted copy,
+//! at f32, f16, bf16 and f64, and empty batches whose expansion strides would
+//! exceed i64, with static or runtime rows. Its `pinned` product reads an
+//! owned operand in place through two reshapes, so the operand must stay
+//! alive through the kernel (chelis#3802). Its f16 and bf16 `matmul`s share the sum's narrowing.
 
 mod common;
 
@@ -53,8 +54,6 @@ const ROUTED: &[&str] = &[
     "batched_brain",
     "special_half",
     "special_wide",
-    "product_rows",
-    "narrow_rows",
     "reused",
     "moved",
 ];
@@ -67,6 +66,10 @@ const RETAINED: &[&str] = &[
     "runtime_depth",
     "integer",
     "broadcast_columns",
+    "product_rows",
+    "narrow_rows",
+    "consumed_rows",
+    "squared_rows",
     "paired_rows",
     "mak32",
     "mak16",
@@ -309,7 +312,7 @@ fn tensor_helper<'a>(emitted: &'a str, name: &str) -> &'a str {
 /// flattening reshape and stores each total straight into the output
 /// reshape's slot, so its tensor helper allocates exactly its result, as the
 /// runtime kernel does. The sweep covers `K > N`, `N > K` and `K = N`, static
-/// and runtime rows (one runtime row beside a static row, chelis#3781), and
+/// and runtime rows (one runtime row beside rows of one), and
 /// f32, f16 and f32 at an f64 accumulator. Copying the row operand or the
 /// result at either reshape would allocate a second buffer.
 #[test]
@@ -332,9 +335,14 @@ fn routed_helpers_allocate_only_their_result() {
                     "p{k}x{n}{dtype}{result}{}",
                     if runtime { "rt" } else { "st" }
                 );
-                let (generics, rows) = if runtime { ("[a]", "a") } else { ("", "8") };
+                // A runtime row routes beside rows of one, as on main.
+                let (generics, lead, mid, shape) = if runtime {
+                    ("[s]", "1", "s", "1i64, 24i64")
+                } else {
+                    ("", "8", "3", "8i64, 3i64")
+                };
                 program.push_str(&format!(
-                    "def {name}{generics}(x: tensor[{rows}, 3, {k}, {dtype}], w: tensor[{k}, {n}, {dtype}]) -> tensor[{rows}, 3, {n}, {result}] = einsum(\"amk,kn->amn\", x, w{accumulator})\n"
+                    "def {name}{generics}(x: tensor[{lead}, {mid}, {k}, {dtype}], w: tensor[{k}, {n}, {dtype}]) -> tensor[{lead}, {mid}, {n}, {result}] = einsum(\"amk,kn->amn\", x, w{accumulator})\n"
                 ));
                 let operand = |count: usize, lo: &str, shape: &str| {
                     let generated = format!("g32({count}i64, {lo}f32)");
@@ -347,10 +355,10 @@ fn routed_helpers_allocate_only_their_result() {
                 };
                 program.push_str(&format!(
                     "r_{name} = {name}({}, {})\n",
-                    operand(24 * k, "0.001", &format!("8i64, 3i64, {k}i64")),
+                    operand(24 * k, "0.001", &format!("{shape}, {k}i64")),
                     operand(k * n, "0.002", &format!("{k}i64, {n}i64")),
                 ));
-                defs.push((name, rows, n));
+                defs.push((name, format!("{lead}, {mid}"), n));
             }
         }
     }
@@ -372,7 +380,7 @@ fn routed_helpers_allocate_only_their_result() {
             "`{name}` allocates more than its result: {allocations:#?}"
         );
         assert!(
-            allocations[0].contains(&format!("(int64_t[]){{ {rows}, 3, {n} }}")),
+            allocations[0].contains(&format!("(int64_t[]){{ {rows}, {n} }}")),
             "`{name}` allocates something other than its result: {}",
             allocations[0]
         );

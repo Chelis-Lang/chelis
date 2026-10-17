@@ -44,6 +44,15 @@ def mak32[a](x: tensor[3, a, 8, f32], w: tensor[8, 4, f32]) -> tensor[a, 3, 4, f
 def mak16[a](x: tensor[3, a, 8, f16], w: tensor[8, 4, f16]) -> tensor[a, 3, 4, f16] = einsum("mak,kn->amn", x, w)
 def makbf[a](x: tensor[3, a, 8, bf16], w: tensor[8, 4, bf16]) -> tensor[a, 3, 4, bf16] = einsum("mak,kn->amn", x, w)
 def mak64[a](x: tensor[3, a, 8, f64], w: tensor[8, 4, f64]) -> tensor[a, 3, 4, f64] = einsum("mak,kn->amn", x, w)
+def consumed_rows[a](x: tensor[a, 3, 8, f32], w: tensor[8, 4, f32]) -> tensor[a, 3, 4, f32] = sum(insert(einsum("amk,kn->amn", x, w), 0i32, 2i64), 0i32)
+def squared_rows[a](x: tensor[a, 3, 8, f32], w: tensor[8, 4, f32]) -> tensor[a, 3, 4, f32] = {
+  e = einsum("amk,kn->amn", x, w)
+  mul(e, sin(e))
+}
+def pinned(x: tensor[64, f32]) -> tensor[64, f32] = {
+  y = exp(x)
+  reshape(matmul(reshape(y, [8i64, 8i64]), reshape(y, [8i64, 8i64])), [64i64])
+}
 def broadcast_columns(x: tensor[3, 13, f32], w: tensor[2, 13, 5, f32]) -> tensor[2, 3, 5, f32] = einsum("mk,bkn->bmn", x, w)
 def widened(x: tensor[1, 3, f16], w: tensor[3, 1, f16]) -> tensor[1, 1, f16] = einsum("mk,kn->mn", x, w, accumulator=f64)
 def narrowed(x: tensor[1, 3, f16], w: tensor[3, 1, f16]) -> tensor[1, 1, f16] = einsum("mk,kn->mn", x, w)
@@ -87,6 +96,9 @@ r_mak32 = mak32(reshape(g32(96i64, 6.7794f32), [3i64, 4i64, 8i64]), reshape(g32(
 r_mak16 = mak16(reshape(cast(g32(96i64, 6.9256f32), f16), [3i64, 4i64, 8i64]), reshape(cast(g32(32i64, 6.9987f32), f16), [8i64, 4i64]))
 r_makbf = makbf(reshape(cast(g32(96i64, 7.0718f32), bf16), [3i64, 4i64, 8i64]), reshape(cast(g32(32i64, 7.1449f32), bf16), [8i64, 4i64]))
 r_mak64 = mak64(reshape(g64(96i64, 7.218f64), [3i64, 4i64, 8i64]), reshape(g64(32i64, 7.2911f64), [8i64, 4i64]))
+r_consumed_rows = consumed_rows(reshape(g32(48i64, 7.3642f32), [2i64, 3i64, 8i64]), reshape(g32(32i64, 7.4373f32), [8i64, 4i64]))
+r_squared_rows = squared_rows(reshape(g32(48i64, 7.5104f32), [2i64, 3i64, 8i64]), reshape(g32(32i64, 7.5835f32), [8i64, 4i64]))
+r_pinned = pinned(g32(64i64, 0.03f32))
 r_broadcast_columns = broadcast_columns(reshape(g32(39i64, 4.7326f32), [3i64, 13i64]), reshape(g32(130i64, 4.8057f32), [2i64, 13i64, 5i64]))
 r_widened = widened(cast(to_tensor([[1.0f32, 0.015625f32, 9.5367431640625e-7f32]]), f16), cast(to_tensor([[1.0f32], [0.03125f32], [9.5367431640625e-7f32]]), f16))
 r_narrowed = narrowed(cast(to_tensor([[1.0f32, 0.015625f32, 9.5367431640625e-7f32]]), f16), cast(to_tensor([[1.0f32], [0.03125f32], [9.5367431640625e-7f32]]), f16))
