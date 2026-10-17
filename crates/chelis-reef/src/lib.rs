@@ -5172,6 +5172,29 @@ impl GitHubReleaseSpec {
             repo = self.repo,
         )
     }
+
+    /// The release asset file name of the source archive:
+    /// `<repo>-<version>.tar.zst`.
+    pub fn archive_asset_name(&self) -> String {
+        format!("{}-{}.tar.zst", self.repo, self.version)
+    }
+
+    /// The release asset file name of the compiled shell:
+    /// `<repo>-<version>.chb`.
+    pub fn shell_asset_name(&self) -> String {
+        format!("{}-{}.chb", self.repo, self.version)
+    }
+
+    /// The public web download URL of the release asset `asset`. Only a
+    /// public release serves it.
+    pub fn public_download_url(&self, asset: &str) -> String {
+        format!(
+            "https://github.com/{org}/{repo}/releases/download/{tag}/{asset}",
+            org = self.org,
+            repo = self.repo,
+            tag = self.tag,
+        )
+    }
 }
 
 /// One asset entry parsed out of the release-metadata JSON response.
@@ -5519,8 +5542,8 @@ pub fn install_from_github(
     let tmp = tempfile::tempdir().map_err(|e| GitHubFetchError::Io {
         message: format!("create tempdir: {e}"),
     })?;
-    let archive_name = format!("{}-{}.tar.zst", spec.repo, spec.version);
-    let shell_name = format!("{}-{}.chb", spec.repo, spec.version);
+    let archive_name = spec.archive_asset_name();
+    let shell_name = spec.shell_asset_name();
     let archive_path = tmp.path().join(&archive_name);
     let shell_path = tmp.path().join(&shell_name);
 
@@ -5983,6 +6006,17 @@ pub enum LockfileInstallError {
         version: String,
         inner: GitHubFetchError,
     },
+    /// chelis#3813: an offline import of one entry failed. The message
+    /// names the missing file, the hash mismatch, or the validation
+    /// failure.
+    Import {
+        name: String,
+        version: String,
+        message: String,
+    },
+    /// chelis#3813: a `local_registry` entry has no `remote_origin`, so
+    /// a fetch plan cannot give its download URL.
+    MissingOrigin { name: String, version: String },
 }
 
 impl std::fmt::Display for LockfileInstallError {
@@ -6006,8 +6040,210 @@ impl std::fmt::Display for LockfileInstallError {
                 version,
                 inner,
             } => write!(f, "lockfile entry `{name}` v{version}: {inner}"),
+            Self::Import {
+                name,
+                version,
+                message,
+            } => write!(f, "lockfile entry `{name}` v{version}: {message}"),
+            Self::MissingOrigin { name, version } => write!(
+                f,
+                "lockfile entry `{name}` v{version} has no `remote_origin`, so it has no \
+                 download URL. Run `chelis reef install --bootstrap` or `--from-github` and \
+                 rebuild to record the origin"
+            ),
         }
     }
+}
+
+/// One file in a [`FetchPlan`] (chelis#3813).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlannedDownload {
+    /// The locked package.
+    pub name: String,
+    pub version: String,
+    /// `archive`, `shell`, or `binary`.
+    pub kind: PlannedDownloadKind,
+    /// The release asset file name. An offline import reads
+    /// `<artifact_dir>/<file>`.
+    pub file: String,
+    /// The public release download URL.
+    pub url: String,
+    /// The lowercase hex SHA-256 that `reef.lock` pins.
+    pub sha256: String,
+    /// The locked `github://<org>/<repo>@<tag>` origin.
+    pub remote_origin: String,
+    /// The host platform of a locked binary. Absent for other kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlannedDownloadKind {
+    Archive,
+    Shell,
+    Binary,
+}
+
+/// The download URL and pinned SHA-256 of each artifact that a package's
+/// `reef.lock` locks (chelis#3813). `chelis reef fetch-plan` prints it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FetchPlan {
+    pub format_version: u32,
+    pub package: PackageId,
+    pub artifacts: Vec<PlannedDownload>,
+}
+
+/// The `format_version` of [`FetchPlan`].
+pub const FETCH_PLAN_FORMAT_VERSION: u32 = 1;
+
+/// Plan the downloads of `<package_root>/reef.lock` without network
+/// access. A `local_registry` entry gives its archive and its shell, and a
+/// `binary` entry gives its asset. `path` and `bundled` entries, and a
+/// legacy `local_registry` entry for `chelis-std`, give nothing. An entry
+/// with no origin, or with an origin that does not parse, is an error.
+pub fn lockfile_fetch_plan(package_root: &Path) -> Result<FetchPlan, LockfileInstallError> {
+    let (_, lock) = read_install_lock(package_root)?;
+    let mut artifacts = Vec::new();
+    for dep in &lock.dependencies {
+        let parse = |origin: &str| {
+            parse_remote_origin(origin).map_err(|inner| LockfileInstallError::OriginParse {
+                name: dep.name.clone(),
+                version: dep.version.clone(),
+                inner,
+            })
+        };
+        let planned = |kind, spec: &GitHubReleaseSpec, file: String, sha256: &str, origin: &str| {
+            PlannedDownload {
+                name: dep.name.clone(),
+                version: dep.version.clone(),
+                kind,
+                url: spec.public_download_url(&file),
+                file,
+                sha256: sha256.to_string(),
+                remote_origin: origin.to_string(),
+                platform: None,
+            }
+        };
+        match &dep.source {
+            LockSource::Path { .. } | LockSource::Bundled { .. } => {}
+            LockSource::LocalRegistry { .. } if dep.name == CHELIS_STD_PACKAGE_NAME => {}
+            LockSource::LocalRegistry {
+                remote_origin: None,
+            } => {
+                return Err(LockfileInstallError::MissingOrigin {
+                    name: dep.name.clone(),
+                    version: dep.version.clone(),
+                });
+            }
+            LockSource::LocalRegistry {
+                remote_origin: Some(origin),
+            } => {
+                let spec = parse(origin)?;
+                artifacts.push(planned(
+                    PlannedDownloadKind::Archive,
+                    &spec,
+                    spec.archive_asset_name(),
+                    &dep.archive_sha256,
+                    origin,
+                ));
+                artifacts.push(planned(
+                    PlannedDownloadKind::Shell,
+                    &spec,
+                    spec.shell_asset_name(),
+                    &dep.shell_sha256,
+                    origin,
+                ));
+            }
+            LockSource::Binary {
+                remote_origin,
+                platform,
+                asset,
+                sha256,
+            } => {
+                let spec = parse(remote_origin)?;
+                artifacts.push(PlannedDownload {
+                    platform: Some(platform.clone()),
+                    ..planned(
+                        PlannedDownloadKind::Binary,
+                        &spec,
+                        asset.clone(),
+                        sha256,
+                        remote_origin,
+                    )
+                });
+            }
+        }
+    }
+    Ok(FetchPlan {
+        format_version: FETCH_PLAN_FORMAT_VERSION,
+        package: lock.package.clone(),
+        artifacts,
+    })
+}
+
+/// The path of `<dir>/<file>` when that file exists and hashes to
+/// `pinned`. Nothing else reads the file before this check.
+fn verified_locked_file(dir: &Path, file: &str, pinned: &str) -> Result<PathBuf, String> {
+    let path = dir.join(file);
+    if !path.is_file() {
+        return Err(format!(
+            "missing artifact file {} in the artifact directory",
+            path.display()
+        ));
+    }
+    let actual = sha256_file(&path).map_err(|error| format!("hash {}: {error}", path.display()))?;
+    // Reef writes lowercase pins. An exact comparison rejects any other
+    // spelling here, before the registry write.
+    if actual != pinned {
+        return Err(format!(
+            "SHA-256 mismatch for {}: reef.lock pins {pinned}, but the file hashes to {actual}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+/// Import one locked archive and shell pair from `dir` into the registry
+/// with the locked origin. Both files must equal their lock pins first.
+fn import_locked_pair(
+    dep: &LockedDependency,
+    spec: &GitHubReleaseSpec,
+    origin: &str,
+    dir: &Path,
+    registry_root: &Path,
+) -> Result<InstalledArtifact, String> {
+    let archive = verified_locked_file(dir, &spec.archive_asset_name(), &dep.archive_sha256)?;
+    let shell = verified_locked_file(dir, &spec.shell_asset_name(), &dep.shell_sha256)?;
+    install_validated_artifact_pair(
+        &archive,
+        &shell,
+        &spec.repo,
+        &spec.version,
+        registry_root,
+        Some(origin),
+    )
+}
+
+/// Place one locked binary asset from `dir` at `<chelis_home>/bin/<name>`.
+/// The asset must equal its lock pin first.
+fn import_locked_binary(
+    name: &str,
+    dir: &Path,
+    asset: &str,
+    pinned: &str,
+    chelis_home: &Path,
+) -> Result<PathBuf, String> {
+    if !is_safe_artifact_name(name) || !is_safe_artifact_name(asset) {
+        return Err(format!(
+            "refusing to import binary `{name}` from asset `{asset}`: \
+             each must be a bare file name"
+        ));
+    }
+    let asset_path = verified_locked_file(dir, asset, pinned)?;
+    let dest = chelis_home.join("bin").join(name);
+    extract_and_place_binary(&asset_path, asset, name, &dest).map_err(|error| error.to_string())?;
+    Ok(dest)
 }
 
 /// Versionless canonical roots for no-selector bootstrap. The existing bounded
@@ -6166,6 +6402,38 @@ pub fn install_from_lockfile(
     package_root: &Path,
     registry_root: &Path,
 ) -> Result<Vec<LockfileInstallEntry>, LockfileInstallError> {
+    install_lockfile_entries(package_root, registry_root, LockedBytes::Network)
+}
+
+/// chelis#3813: install every dependency of `<package_root>/reef.lock`
+/// from files in `artifact_dir`, with no network access. The file names
+/// are the `file` values of [`lockfile_fetch_plan`]. Each file must hash
+/// to its lock pin before any registry write, and each registry entry
+/// records the locked `remote_origin`. The per-entry results and the
+/// top-level errors are those of [`install_from_lockfile`].
+pub fn import_lockfile_artifacts(
+    package_root: &Path,
+    registry_root: &Path,
+    artifact_dir: &Path,
+) -> Result<Vec<LockfileInstallEntry>, LockfileInstallError> {
+    install_lockfile_entries(
+        package_root,
+        registry_root,
+        LockedBytes::Directory(artifact_dir),
+    )
+}
+
+/// Where the lockfile install takes the bytes of each locked artifact.
+#[derive(Clone, Copy)]
+enum LockedBytes<'a> {
+    /// The recorded `remote_origin`, through the GitHub REST API.
+    Network,
+    /// Files in this directory, named as the fetch plan names them.
+    Directory(&'a Path),
+}
+
+/// Read and validate `<package_root>/reef.lock` for an install or a plan.
+fn read_install_lock(package_root: &Path) -> Result<(PathBuf, ReefLock), LockfileInstallError> {
     let lockfile_path = package_root.join("reef.lock");
     if !lockfile_path.exists() {
         return Err(LockfileInstallError::NotFound {
@@ -6186,6 +6454,15 @@ pub fn install_from_lockfile(
         path: lockfile_path.clone(),
         message,
     })?;
+    Ok((lockfile_path, lock))
+}
+
+fn install_lockfile_entries(
+    package_root: &Path,
+    registry_root: &Path,
+    bytes: LockedBytes<'_>,
+) -> Result<Vec<LockfileInstallEntry>, LockfileInstallError> {
+    let (lockfile_path, lock) = read_install_lock(package_root)?;
 
     fs::create_dir_all(registry_root).map_err(|e| LockfileInstallError::Malformed {
         path: lockfile_path.clone(),
@@ -6281,27 +6558,40 @@ pub fn install_from_lockfile(
                         continue;
                     }
                 };
-                // `install_binary_artifact` verifies the lock-pinned
-                // `sha256` fail-closed before any placement.
-                match install_binary_artifact(
-                    &dep.name, &spec.org, &spec.repo, &spec.tag, asset, sha256, platform, &home,
-                ) {
-                    Ok(binary) => {
+                let installed = match bytes {
+                    // `install_binary_artifact` verifies the lock-pinned
+                    // `sha256` fail-closed before any placement.
+                    LockedBytes::Network => install_binary_artifact(
+                        &dep.name, &spec.org, &spec.repo, &spec.tag, asset, sha256, platform, &home,
+                    )
+                    .map(|binary| binary.path)
+                    .map_err(|inner| LockfileInstallError::Fetch {
+                        name: dep.name.clone(),
+                        version: dep.version.clone(),
+                        inner,
+                    }),
+                    LockedBytes::Directory(dir) => import_locked_binary(
+                        &dep.name, dir, asset, sha256, &home,
+                    )
+                    .map_err(|message| LockfileInstallError::Import {
+                        name: dep.name.clone(),
+                        version: dep.version.clone(),
+                        message,
+                    }),
+                };
+                match installed {
+                    Ok(path) => {
                         results.push(LockfileInstallEntry::InstalledBinary {
                             name: dep.name.clone(),
                             version: dep.version.clone(),
-                            path: binary.path,
+                            path,
                         });
                     }
-                    Err(e) => {
+                    Err(error) => {
                         results.push(LockfileInstallEntry::Failed {
                             name: dep.name.clone(),
                             version: dep.version.clone(),
-                            error: LockfileInstallError::Fetch {
-                                name: dep.name.clone(),
-                                version: dep.version.clone(),
-                                inner: e,
-                            },
+                            error,
                         });
                     }
                 }
@@ -6347,8 +6637,31 @@ pub fn install_from_lockfile(
                 // `install_validated_artifact_pair` with the origin
                 // stamped, so the registry is left in a byte-identical
                 // state to the original install.
-                let org_repo_tag = format!("{}/{}@{}", spec.org, spec.repo, spec.tag);
-                match install_from_github(&org_repo_tag, registry_root) {
+                let installed = match bytes {
+                    LockedBytes::Network => {
+                        let org_repo_tag = format!("{}/{}@{}", spec.org, spec.repo, spec.tag);
+                        install_from_github(&org_repo_tag, registry_root).map_err(|inner| {
+                            LockfileInstallError::Fetch {
+                                name: dep.name.clone(),
+                                version: dep.version.clone(),
+                                inner,
+                            }
+                        })
+                    }
+                    // chelis#3813: the bytes come from the directory, and
+                    // each file must equal its lock pin before the
+                    // registry sees it.
+                    LockedBytes::Directory(dir) => {
+                        import_locked_pair(dep, &spec, origin, dir, registry_root).map_err(
+                            |message| LockfileInstallError::Import {
+                                name: dep.name.clone(),
+                                version: dep.version.clone(),
+                                message,
+                            },
+                        )
+                    }
+                };
+                match installed {
                     Ok(artifact) => {
                         // Hash-pin verification: the lockfile records
                         // the expected hashes and the fresh fetch
@@ -6388,15 +6701,11 @@ pub fn install_from_lockfile(
                             results.push(LockfileInstallEntry::Installed(artifact));
                         }
                     }
-                    Err(e) => {
+                    Err(error) => {
                         results.push(LockfileInstallEntry::Failed {
                             name: dep.name.clone(),
                             version: dep.version.clone(),
-                            error: LockfileInstallError::Fetch {
-                                name: dep.name.clone(),
-                                version: dep.version.clone(),
-                                inner: e,
-                            },
+                            error,
                         });
                     }
                 }
@@ -6442,7 +6751,7 @@ impl From<BootstrapError> for String {
 fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ParsedManifest, BootstrapError> {
     let token = try_github_token();
     let api_base = github_api_base_url();
-    let archive_name = format!("{}-{}.tar.zst", spec.repo, spec.version);
+    let archive_name = spec.archive_asset_name();
 
     let tmp = tempfile::tempdir().map_err(|e| {
         BootstrapError::Fetch(GitHubFetchError::Io {

@@ -154,6 +154,12 @@ declaration list. Property discovery on an empty library emits no property recor
   runtime rather than a bootstrap target.
 - `chelis reef install --from-lockfile` re-fetches lockfile dependencies from their
   recorded `remote_origin` and verifies bytes against the lockfile hashes.
+- `chelis reef fetch-plan [--package-root <path>]` prints, as JSON, the public download
+  URL and the pinned SHA-256 of each artifact that `reef.lock` locks. It reads only
+  `reef.lock` and makes no network request.
+- `chelis reef install --from-lockfile --artifact-dir <dir>` imports the files that
+  `fetch-plan` names from `<dir>`. It makes no network request. It verifies each file
+  against the `reef.lock` hashes, and it records the locked `remote_origin`.
 - `chelis reef verify-artifact --shell <path> --archive <path>` performs the
   install path's complete, read-only CHB/archive validation for release gates.
 
@@ -187,6 +193,42 @@ noncanonical metadata ordering, duplicate module/export/dependency entries,
 invalid exact compiler pins, and invalid embedded SHA-256 text before checking
 the paired archive digest. These checks cover fields the installer does not
 otherwise consume (chelis#972).
+
+### Locked artifact downloads and offline import
+
+A tool that fetches files outside Reef, such as a Nix fixed-output derivation, uses
+these two commands. Reef then owns the registry layout and `index.json`.
+
+`fetch-plan` output is one JSON object with `format_version` 1, the root `package`
+(`name`, `version`), and an `artifacts` array in lock order. Each element has these
+fields:
+
+- `name` and `version`: the locked package.
+- `kind`: `archive`, `shell`, or `binary`.
+- `file`: the release asset file name. The import reads `<dir>/<file>`.
+- `url`: `https://github.com/<org>/<repo>/releases/download/<tag>/<file>`, from the
+  `github://<org>/<repo>@<tag>` origin.
+- `sha256`: the lowercase hex SHA-256 that `reef.lock` pins.
+- `remote_origin`: the locked origin.
+- `platform`: present only for `binary`, the host platform of the locked binary.
+
+A `local_registry` entry gives two elements. The `archive` file is
+`<repo>-<version>.tar.zst` and the `shell` file is `<repo>-<version>.chb`, where
+`<version>` is the tag without one leading `v`. A `binary` entry gives one element
+whose `file` is its locked `asset`. `path` and `bundled` entries, and a legacy
+`local_registry` entry for `chelis-std`, give no element. A `local_registry` entry
+with no `remote_origin`, or with an origin that does not parse, makes the command
+fail. The public URL serves public releases only.
+
+The import walks the entries of `reef.lock` as `--from-lockfile` does. For each
+element it reads `<dir>/<file>` and compares the file SHA-256 with the lock before any
+registry write. A missing file or a different hash fails that entry and changes
+nothing for it.
+
+A verified `local_registry` pair then passes the install validation and enters the
+registry and `index.json` with the locked `remote_origin`. A verified binary for the
+host platform goes to `<chelis_home>/bin/<name>`. A binary for another platform is
+skipped, as with `--from-lockfile`. The command fails when any entry fails.
 
 ### Reproducible package artifact contract
 

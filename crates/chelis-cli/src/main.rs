@@ -655,6 +655,9 @@ enum ReefCommand {
     ///   without a recorded `remote_origin` (older monorepo-only
     ///   installs) error with a suggestion to re-run `--bootstrap` to
     ///   populate origins.
+    ///   With `--artifact-dir <DIR>`, the files come from `<DIR>` with
+    ///   the names that `chelis reef fetch-plan` gives, and no network
+    ///   request is made.
     /// * `--bootstrap [<ORG>/<REPO>@<TAG>...]` — install canonical shell
     ///   releases in dependency order. With no explicit entries, the
     ///   canonical nautilus, coral, and shoals roots and their complete
@@ -696,6 +699,14 @@ enum ReefCommand {
         /// `--from-monorepo`, `--from-github`, or `--bootstrap`.
         #[arg(long, value_name = "PATH", requires = "from_lockfile")]
         package_root: Option<PathBuf>,
+        /// With `--from-lockfile`, import the locked archive, shell, and
+        /// binary files from this directory instead of the network.
+        /// Each file has the name that `chelis reef fetch-plan` gives
+        /// and must match its `reef.lock` SHA-256. Each registry entry
+        /// records the locked `remote_origin`. No network request is
+        /// made.
+        #[arg(long, value_name = "DIR", requires = "from_lockfile")]
+        artifact_dir: Option<PathBuf>,
         /// Install shells in dependency order from GitHub Releases.
         ///
         /// With no entries, jointly resolve canonical nautilus, coral,
@@ -726,6 +737,22 @@ enum ReefCommand {
         /// `--bootstrap` directly).
         #[arg(value_name = "NAME[=VERSION]")]
         packages: Vec<String>,
+    },
+    /// Print the download URL and SHA-256 of each artifact that
+    /// `reef.lock` locks, as JSON.
+    ///
+    /// Reads only the project's `reef.lock` and makes no network
+    /// request. Each element of `artifacts` names the package and the
+    /// `kind` (`archive`, `shell`, or `binary`). It also gives the
+    /// release asset `file`, its public `url`, its pinned `sha256`, and
+    /// the locked `remote_origin`. Fetch the files into one directory.
+    /// Then run `chelis reef install --from-lockfile --artifact-dir
+    /// <DIR>` to import them without network access.
+    FetchPlan {
+        /// Package root that holds `reef.lock`. Defaults to the
+        /// current directory.
+        #[arg(long, value_name = "PATH")]
+        package_root: Option<PathBuf>,
     },
     /// Export a hermetic bundle of pinned dependencies for agent sandboxes.
     ///
@@ -5480,11 +5507,17 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             println!("Shell: {}", artifacts.shell_path.display());
             println!("Archive: {}", artifacts.archive_path.display());
         }
+        ReefCommand::FetchPlan { package_root } => {
+            let root = package_root.unwrap_or_else(|| PathBuf::from("."));
+            let plan = chelis_reef::lockfile_fetch_plan(&root)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
         ReefCommand::Install {
             from_monorepo,
             from_github,
             from_lockfile,
             package_root,
+            artifact_dir,
             bootstrap,
             packages,
         } => {
@@ -5540,7 +5573,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                             .into());
                     }
                     let pkg_root = package_root.unwrap_or_else(|| PathBuf::from("."));
-                    run_install_from_lockfile(&pkg_root)?;
+                    run_install_from_lockfile(&pkg_root, artifact_dir.as_deref())?;
                 }
                 (None, None, false, Some(bootstrap_args)) => {
                     if !packages.is_empty() {
@@ -6090,14 +6123,22 @@ fn print_audit_report(
 
 /// Re-install every dependency named by a package's `reef.lock`, fetching
 /// each from its recorded `remote_origin` and verifying hashes against the
-/// pins. Prints one line per [`chelis_reef::LockfileInstallEntry`] and
-/// returns an aggregated error if any entry failed or lacked an origin.
+/// pins. With `artifact_dir`, read each file from that directory and make no
+/// network request (chelis#3813). Prints one line per
+/// [`chelis_reef::LockfileInstallEntry`] and returns an aggregated error if
+/// any entry failed or lacked an origin.
 ///
 /// Extracted from the `reef install --from-lockfile` arm so `reef setup`
 /// (WS-C) reuses the exact same reporting.
-fn run_install_from_lockfile(pkg_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn run_install_from_lockfile(
+    pkg_root: &Path,
+    artifact_dir: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let registry_root = chelis_reef::registry_home()?;
-    let results = chelis_reef::install_from_lockfile(pkg_root, &registry_root)?;
+    let results = match artifact_dir {
+        Some(dir) => chelis_reef::import_lockfile_artifacts(pkg_root, &registry_root, dir)?,
+        None => chelis_reef::install_from_lockfile(pkg_root, &registry_root)?,
+    };
     let mut any_failure = false;
     let mut any_no_origin = false;
     for entry in &results {
@@ -6218,7 +6259,7 @@ fn cmd_reef_setup(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error
 
     // Step 2: source packages + binary artifacts from reef.lock (WS-A).
     if root.join("reef.lock").is_file() {
-        run_install_from_lockfile(&root)?;
+        run_install_from_lockfile(&root, None)?;
     } else {
         println!("  install:   no reef.lock; skipping source-package/binary install");
     }
