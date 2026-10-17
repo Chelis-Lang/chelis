@@ -14,7 +14,7 @@
 
 use chelis_types::types::Prim;
 
-use crate::dag::{Dag, DimInfo, NodeId, Owner, RiscOp, RtAxis, RtDim, TensorType};
+use crate::dag::{Dag, DimExpr, DimInfo, NodeId, Owner, RiscOp, RtAxis, RtDim, TensorType};
 use crate::tier2::add_synth;
 
 /// Why an ordered lowering produced no graph.
@@ -558,15 +558,17 @@ pub fn einsum_contraction(
 /// One row axis for `dims`: their static product, or their one runtime
 /// extent when every other extent is one.
 fn flattened_rows<'a>(dims: impl Iterator<Item = &'a DimInfo>) -> Option<DimInfo> {
-    let mut product = 1usize;
+    let mut product = DimExpr::Concrete(1);
     let mut runtime = None;
     for dim in dims {
         match static_extent(dim) {
-            Some(n) => product = product.checked_mul(n)?,
+            Some(_) => product = DimExpr::Mul(Box::new(product), Box::new(DimExpr::from(dim))),
             None if runtime.is_none() => runtime = Some(dim.clone()),
             None => return None,
         }
     }
+    // An unrepresentable static product has no row axis.
+    let product = product.as_concrete()?;
     match runtime {
         None => Some(DimInfo::Lit(product)),
         Some(dim) if product == 1 => Some(dim),
@@ -901,6 +903,12 @@ mod einsum_contraction_tests {
             (
                 "amk,kn->amn",
                 vec![DimInfo::Lit(2), runtime("m"), DimInfo::Lit(8)],
+                lit(&[8, 5]),
+            ),
+            // Rows whose static product has no representation.
+            (
+                "amk,kn->amn",
+                lit(&[usize::MAX / 2 + 1, 2, 8]),
                 lit(&[8, 5]),
             ),
         ] {
