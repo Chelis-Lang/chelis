@@ -19,6 +19,7 @@ use std::fs::File;
 use std::io::Write;
 use std::ptr;
 use std::sync::atomic::{fence, AtomicU8, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 pub mod build_record;
 mod decimal_parse;
@@ -1498,6 +1499,59 @@ struct RuntimeString {
     /// exactly when it is ASCII, so `char_count == value.len()` is an O(1)
     /// all-ASCII test, and in that case character indices are byte indices.
     char_count: usize,
+    /// Byte offsets of every [`CHAR_CHECKPOINT_STRIDE`]-th character, so a
+    /// character index on non-ASCII text is found from the nearest
+    /// checkpoint instead of from the start (chelis#3725).
+    ///
+    /// Built on the first `chelis_string_slice` that needs it, never for
+    /// ASCII text, and through `OnceLock` because a shared string can be
+    /// read from more than one thread. It is derived from `value` like
+    /// `char_count`, so a mutator owes it the same update: the in-place arm
+    /// of `chelis_string_concat_owned` extends it.
+    char_checkpoints: OnceLock<Box<CharCheckpoints>>,
+}
+
+/// Characters between consecutive entries of
+/// [`RuntimeString::char_checkpoints`]: a slice of non-ASCII text walks at
+/// most this many characters before its first one.
+const CHAR_CHECKPOINT_STRIDE: usize = 64;
+
+/// `offsets[j]` is the byte offset of character `j * CHAR_CHECKPOINT_STRIDE`,
+/// for every such character the string holds.
+struct CharCheckpoints {
+    offsets: Vec<usize>,
+}
+
+impl CharCheckpoints {
+    fn build(text: &str) -> Self {
+        let mut checkpoints = Self { offsets: vec![0] };
+        checkpoints.extend(text);
+        checkpoints
+    }
+
+    /// Record the checkpoints `text` holds past the last one recorded, by
+    /// walking from that checkpoint: O(stride + new bytes).
+    fn extend(&mut self, text: &str) {
+        let last = *self
+            .offsets
+            .last()
+            .expect("character 0 is always a checkpoint");
+        for (walked, (offset, _)) in text[last..].char_indices().enumerate().skip(1) {
+            if walked.is_multiple_of(CHAR_CHECKPOINT_STRIDE) {
+                self.offsets.push(last + offset);
+            }
+        }
+    }
+
+    /// The nearest checkpoint at or before character `index`, as
+    /// `(character, byte offset)`.
+    fn at_or_before(&self, index: usize) -> (usize, usize) {
+        let checkpoint = (index / CHAR_CHECKPOINT_STRIDE).min(self.offsets.len() - 1);
+        (
+            checkpoint * CHAR_CHECKPOINT_STRIDE,
+            self.offsets[checkpoint],
+        )
+    }
 }
 
 unsafe fn retain_header(
@@ -1837,6 +1891,7 @@ fn new_runtime_string(value: String) -> chelis_string {
         value,
         nul_terminated,
         char_count,
+        char_checkpoints: OnceLock::new(),
     });
     let handle = Box::into_raw(inner);
     ledger_allocation(
@@ -4531,6 +4586,9 @@ pub unsafe extern "C" fn chelis_string_concat_owned(
                 .extend_from_slice((*rhs.handle).value.as_bytes());
             (*lhs.handle).nul_terminated.push(0);
             (*lhs.handle).char_count = (*lhs.handle).char_count.saturating_add(characters);
+            if let Some(checkpoints) = (*lhs.handle).char_checkpoints.get_mut() {
+                checkpoints.extend(&(*lhs.handle).value);
+            }
         }
         // Record the in-place arm unconditionally, including the empty
         // right-hand side that changes no byte. The ledger is the only
@@ -4549,6 +4607,13 @@ pub unsafe extern "C" fn chelis_string_concat_owned(
 #[no_mangle]
 pub unsafe extern "C" fn chelis_string_trim(value: chelis_string) -> chelis_string {
     new_runtime_string(string_value(value).value.trim().to_owned())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Characters `chelis_string_slice` has stepped over on non-ASCII text
+    /// on this thread; tests read it to bound the walk per call.
+    static SLICE_CHARS_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[no_mangle]
@@ -4586,14 +4651,28 @@ pub unsafe extern "C" fn chelis_string_slice(
         // O(len) copy with no scan of the source at all.
         return new_runtime_string(text[start..end].to_owned());
     }
-    // Multi-byte: walk char boundaries once to convert the character range
-    // into a byte range. O(end) time and O(len) allocated bytes.
+    // Multi-byte: walk char boundaries to convert the character range into a
+    // byte range, starting from the nearest checkpoint at or before `start`.
+    // O(stride + len) time and O(len) allocated bytes.
     //
-    // The previous implementation collected the WHOLE string into a
-    // `Vec<char>` on every call -- 4 bytes per character regardless of how
-    // few were requested -- so a scanner taking one character at a time
-    // across a string of length L allocated O(L^2) bytes.
-    let mut offsets = text.char_indices().map(|(offset, _)| offset).skip(start);
+    // Walking from the start of the string instead made each call O(start),
+    // so a scanner taking one character at a time across a string of length
+    // L ran in O(L^2) time (chelis#3725); collecting the whole string into a
+    // `Vec<char>` before that allocated O(L^2) bytes as well.
+    let (from_char, from_byte) = if start < CHAR_CHECKPOINT_STRIDE {
+        (0, 0)
+    } else {
+        inner
+            .char_checkpoints
+            .get_or_init(|| Box::new(CharCheckpoints::build(text)))
+            .at_or_before(start)
+    };
+    #[cfg(test)]
+    SLICE_CHARS_WALKED.with(|walked| walked.set(walked.get() + (end - from_char)));
+    let mut offsets = text[from_byte..]
+        .char_indices()
+        .map(|(offset, _)| from_byte + offset)
+        .skip(start - from_char);
     let begin = match offsets.next() {
         Some(offset) => offset,
         None => return new_runtime_string(String::new()),
@@ -9766,8 +9845,9 @@ mod list_dir_conversion_tests {
     }
 }
 
-/// chelis#2301 and chelis#3733: dictionary operations find a key through the
-/// index without revalidating stored keys. The counts are exact
+/// chelis#2301, chelis#3733 and chelis#3725: dictionary operations find a key
+/// through the index without revalidating stored keys, and a character slice
+/// of non-ASCII text walks from a nearby checkpoint. The counts are exact
 /// functions of the inputs, so each bound is deterministic; the quadratic
 /// implementations these replace exceed every bound by orders of magnitude at
 /// the sizes used here. The differential cases hold the observable contract
@@ -9782,6 +9862,10 @@ mod container_cost_tests {
 
     fn validations() -> usize {
         VALUES_VALIDATED.with(std::cell::Cell::get)
+    }
+
+    fn chars_walked() -> usize {
+        SLICE_CHARS_WALKED.with(std::cell::Cell::get)
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10091,6 +10175,117 @@ mod container_cost_tests {
             assert_eq!(lookup(dict, &Key::Int(3)), Some(999));
             chelis_dict_release(dict);
             chelis_list_release(list);
+        }
+    }
+
+    unsafe fn runtime_text(text: &str) -> chelis_string {
+        chelis_string_from_utf8(text.as_ptr(), text.len() as i64)
+    }
+
+    unsafe fn slice(value: chelis_string, start: usize, len: usize) -> String {
+        let piece = chelis_string_slice(value, start as i64, len as i64);
+        let out = string_value(piece).value.clone();
+        chelis_string_release(piece);
+        out
+    }
+
+    fn reference(text: &str, start: usize, len: usize) -> String {
+        text.chars().skip(start).take(len).collect()
+    }
+
+    #[test]
+    fn a_character_scanner_over_non_ascii_text_walks_a_bounded_distance_per_call() {
+        let n = 20_000;
+        let text = "é".repeat(n);
+        unsafe {
+            let value = runtime_text(&text);
+            let before = chars_walked();
+            for start in 0..n {
+                assert_eq!(slice(value, start, 1), "é");
+            }
+            let walked = chars_walked() - before;
+            assert!(
+                walked <= n * (CHAR_CHECKPOINT_STRIDE + 1),
+                "{walked} characters walked for {n} one-character slices"
+            );
+            // Grown in place after its checkpoints exist, the string keeps a
+            // checkpoint near every index, old or new.
+            let mut value = value;
+            for _ in 0..4 {
+                let rhs = runtime_text(&text);
+                value = chelis_string_concat_owned(value, rhs);
+                chelis_string_release(rhs);
+            }
+            let before = chars_walked();
+            for start in 0..5 * n {
+                assert_eq!(slice(value, start, 1), "é");
+            }
+            let walked = chars_walked() - before;
+            assert!(
+                walked <= 5 * n * (CHAR_CHECKPOINT_STRIDE + 1),
+                "{walked} characters walked for {} one-character slices of a grown string",
+                5 * n
+            );
+            chelis_string_release(value);
+        }
+    }
+
+    /// Every range of mixed-width text, including ranges that start at,
+    /// just before and just after a checkpoint and ranges that run off the
+    /// end, matches the scalar-value reference; so do ranges of a string
+    /// grown in place after its checkpoints were built.
+    #[test]
+    fn checkpointed_slices_match_the_reference_on_built_and_grown_strings() {
+        let piece = "aé漢😀";
+        let text: String = piece.repeat(70);
+        let count = text.chars().count();
+        unsafe {
+            let value = runtime_text(&text);
+            for start in 0..=count + 1 {
+                for len in [0, 1, 2, 63, 64, 65, 300, count + 5] {
+                    assert_eq!(
+                        slice(value, start, len),
+                        reference(&text, start, len),
+                        "{start} {len}"
+                    );
+                }
+            }
+            // Grow it in place after the checkpoints exist, by both ASCII and
+            // non-ASCII pieces, and keep slicing past the old end.
+            let mut grown = text.clone();
+            let mut value = value;
+            for round in 0..40 {
+                let tail = if round % 2 == 0 {
+                    "xyz".repeat(round + 1)
+                } else {
+                    piece.repeat(round)
+                };
+                let rhs = runtime_text(&tail);
+                value = chelis_string_concat_owned(value, rhs);
+                chelis_string_release(rhs);
+                grown.push_str(&tail);
+                let count = grown.chars().count();
+                assert_eq!(chelis_string_len(value) as usize, count);
+                for start in [
+                    0,
+                    63,
+                    64,
+                    65,
+                    count / 2,
+                    count.saturating_sub(70),
+                    count - 1,
+                    count,
+                ] {
+                    for len in [1, 5, 64, 129] {
+                        assert_eq!(
+                            slice(value, start, len),
+                            reference(&grown, start, len),
+                            "{round} {start} {len}"
+                        );
+                    }
+                }
+            }
+            chelis_string_release(value);
         }
     }
 }
