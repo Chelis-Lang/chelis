@@ -202,6 +202,7 @@ fn public_inherent_api_is_exact() {
                     "insert",
                     "into_sorted",
                     "is_empty",
+                    "last_where",
                     "len",
                     "new",
                     "remove",
@@ -294,7 +295,18 @@ fn public_trait_api_is_exact() {
     );
     assert_eq!(
         public_traits("PersistentSet"),
-        BTreeSet::from(["Clone", "Debug", "Default", "Extend", "FromIterator"].map(str::to_owned))
+        BTreeSet::from(
+            [
+                "Clone",
+                "Debug",
+                "Default",
+                "Deserialize",
+                "Extend",
+                "FromIterator",
+                "Serialize",
+            ]
+            .map(str::to_owned)
+        )
     );
     assert_eq!(
         public_traits("ScopedMap"),

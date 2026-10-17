@@ -889,6 +889,25 @@ impl<K: Ord + Clone, V: Clone> PersistentMap<K, V> {
         self.get(key).is_some()
     }
 
+    /// The last entry, in key order, for which `holds` is true, when `holds`
+    /// is true on a prefix of the entries in key order and false after it.
+    /// One root-to-leaf descent: O(log n), and `holds` sees only the entries
+    /// on that path. A predicate that is not such a prefix gets an
+    /// unspecified one of its true entries, or `None`.
+    pub fn last_where(&self, mut holds: impl FnMut(&K, &V) -> bool) -> Option<(&K, &V)> {
+        let mut link = &self.root;
+        let mut last = None;
+        while let Some(node) = link {
+            if holds(&node.key, &node.value) {
+                last = Some((&node.key, &node.value));
+                link = &node.right;
+            } else {
+                link = &node.left;
+            }
+        }
+        last
+    }
+
     /// Return the contents in the key's canonical `Ord` order. See
     /// [`UnordMap::to_sorted`] for the authority requirement.
     #[must_use]
@@ -1153,6 +1172,32 @@ where
 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let entries = UnordMap::<K, V>::deserialize(deserializer)?;
+        Ok(entries.into_sorted().into_iter().collect())
+    }
+}
+
+impl<T> Serialize for PersistentSet<T>
+where
+    T: Ord + Serialize,
+{
+    /// The same sequence of elements an [`UnordSet`] writes.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut entries = Vec::with_capacity(self.map.len);
+        collect_sorted(&self.map.root, &mut entries);
+        let mut sequence = serializer.serialize_seq(Some(entries.len()))?;
+        for (value, ()) in entries {
+            sequence.serialize_element(value)?;
+        }
+        sequence.end()
+    }
+}
+
+impl<'de, T> Deserialize<'de> for PersistentSet<T>
+where
+    T: Ord + Clone + Deserialize<'de>,
+{
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let entries = UnordSet::<T>::deserialize(deserializer)?;
         Ok(entries.into_sorted().into_iter().collect())
     }
 }

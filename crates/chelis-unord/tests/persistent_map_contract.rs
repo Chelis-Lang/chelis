@@ -147,3 +147,19 @@ fn debug_reports_the_length_only() {
     let set: PersistentSet<&str> = ["secret"].into_iter().collect();
     assert_eq!(format!("{set:?}"), "PersistentSet { len: 1 }");
 }
+
+#[test]
+fn last_where_finds_the_end_of_a_true_prefix() {
+    // Every size up to 300 and every prefix length: the descent answers what a
+    // scan of the sorted entries answers.
+    for len in 0..300u64 {
+        let map: PersistentMap<u64, u64> = (0..len).map(|key| (key * 3, key)).collect();
+        for cut in 0..=len {
+            let found = map
+                .last_where(|key, _| *key < cut * 3)
+                .map(|(key, value)| (*key, *value));
+            let expected = cut.checked_sub(1).map(|last| (last * 3, last));
+            assert_eq!(found, expected, "len {len}, prefix {cut}");
+        }
+    }
+}
