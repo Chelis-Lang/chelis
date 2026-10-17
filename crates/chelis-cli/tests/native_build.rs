@@ -1885,7 +1885,7 @@ fn nan_atom_rows(
 /// universe (`RiscAtomIdentity::ALL`) through [`nan_atom_coverage`], and the
 /// expected finalization from `fp_env::risc_nan_finalization`, so a new atom
 /// or a reclassification changes what this oracle checks. `to_tensor` is a
-/// list builtin and `einsum` a runtime kernel, neither with a RISC atom, so
+/// list builtin and `einsum` a host builtin, neither with a RISC atom, so
 /// their rows are listed by name.
 #[test]
 fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_library_abi() {
@@ -1954,8 +1954,9 @@ fn every_reduction_and_vendor_kernel_finalizes_nan_like_eval_through_the_static_
             finalization: None,
             gradient: false,
         });
-        // `einsum` is a runtime kernel with no RISC atom; its products and
-        // sums are arithmetic (chelis#1290 owns its accumulation order).
+        // `einsum` has no RISC atom; its products and sums are arithmetic
+        // (chelis#1290 owns its accumulation order). This contraction form
+        // runs the emitted product-sum kernel (chelis#3736).
         rows.push(NanKernelRow {
             label: format!("einsum_{}", w.name),
             width: w,

@@ -15238,6 +15238,37 @@ fn resolve_host_builtin_payload_inner(
     Ok(value.map(HostBuiltinPayload::Callable))
 }
 
+/// Whether a host `einsum` application has the matmul-shaped contraction
+/// form its numeric IR lowering accepts (chelis#3736). Such an application
+/// runs as a tensor helper's canonical product-sum kernel; every other einsum
+/// keeps the host kernel.
+fn einsum_lowers_to_contraction(
+    name: &str,
+    list: &Node,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> bool {
+    let [_, equation, lhs, rhs] = list.children_slice() else {
+        return false;
+    };
+    let tensor = |expr: &Expr| match expr_host_type(expr, program, scope) {
+        HostTypeTerm::Tensor(tensor) => Some(tensor),
+        _ => None,
+    };
+    if name != "einsum" {
+        return false;
+    }
+    let (Some(equation), Some(lhs), Some(rhs)) = (
+        crate::lower::string_literal(equation),
+        tensor(lhs),
+        tensor(rhs),
+    ) else {
+        return false;
+    };
+    crate::tier2_ordered::einsum_contraction(equation, &lhs, &rhs, explicit_accumulator(list))
+        .is_some()
+}
+
 fn lower_closed_host_application(
     app_expr: &Expr,
     list: &Node,
@@ -15262,9 +15293,10 @@ fn lower_closed_host_application(
                     .contains(&chelis_types::BuiltinSemanticDomain::Numeric)
         });
     if let HostTypeTerm::Tensor(tensor_ty) = &expected
-        && numeric_owner
-        && !builtin_keeps_tensor_in_host_lane(operation.symbol())
-        && !should_keep_tensor_expr_in_host_lane(app_expr)
+        && ((numeric_owner
+            && !builtin_keeps_tensor_in_host_lane(operation.symbol())
+            && !should_keep_tensor_expr_in_host_lane(app_expr))
+            || einsum_lowers_to_contraction(operation.symbol(), list, program, scope))
     {
         let value =
             resolve_host_builtin_value(&list.children_slice()[0], program, scope, tensor_helpers)?
@@ -16014,7 +16046,8 @@ fn lower_program_host_app(
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
         && !reaches_list_entry
-        && !should_keep_tensor_expr_in_host_lane(app_expr)
+        && (!should_keep_tensor_expr_in_host_lane(app_expr)
+            || (callee_is_builtin && einsum_lowers_to_contraction(&name, list, program, scope)))
         && let Some(tensor_call) = try_lower_tensor_helper_call(
             helper_expr.as_ref(),
             program,

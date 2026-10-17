@@ -7009,7 +7009,7 @@ fn app_var_name_and_args(expr: &Expr) -> Option<(&str, &[Expr])> {
     Some((name, &kids[1..]))
 }
 
-fn string_literal(expr: &Expr) -> Option<&str> {
+pub(crate) fn string_literal(expr: &Expr) -> Option<&str> {
     match expr.carrier() {
         ExprCarrier::Atom(Atom::Str(value)) => Some(value),
         ExprCarrier::DecodedNode(DeepTag::Lit, _, kids) => match kids.first()? {
@@ -20033,7 +20033,8 @@ impl<'program> LowerCtx<'program> {
             // operation needs an IR graph whose reverse derivative is the
             // atom's adjoint (spec/05 §5). Untransformed programs keep the
             // exact host kernels, so the graph exists only where AD or
-            // batching consumes it.
+            // batching consumes it, apart from the einsum contraction form
+            // below.
             "diagonal" | "trace" | "cumsum" | "einsum"
                 if self.allow_host_list_ad_rewrites
                     && args.len() == if func_name == "cumsum" { 2 } else { 3 } =>
@@ -20139,6 +20140,39 @@ impl<'program> LowerCtx<'program> {
                     )
                     .fatal(),
                 )
+            }
+
+            // [05-OP-33] / [05-OP-51]: outside a transform, a float einsum in
+            // its matmul-shaped contraction form lowers to that product sum
+            // (chelis#3736). Every other einsum keeps its host kernel.
+            "einsum" if args.len() == 3 => {
+                let contraction = string_literal(&args[0]).map(str::to_owned);
+                let a = self.lower_expr_node(&args[1], "einsum lhs");
+                let b = self.lower_expr_node(&args[2], "einsum rhs");
+                let a_ty = self.lowered_type_or(a, ty);
+                let b_ty = self.lowered_type_or(b, ty);
+                let plan = contraction.as_deref().and_then(|equation| {
+                    tier2_ordered::einsum_contraction(equation, &a_ty, &b_ty, accumulator)
+                });
+                let span = self.current_span_id.clone();
+                match plan.map(|plan| {
+                    tier2_ordered::lower_einsum_contraction(
+                        self.owner(),
+                        &mut self.dag,
+                        &plan,
+                        [(a, &a_ty), (b, &b_ty)],
+                        accumulator,
+                        span.as_deref(),
+                    )
+                }) {
+                    Some(Ok(node)) => node,
+                    _ => self.reject_lowering_at(
+                        (Some(app_span), self.current_span_id.clone()),
+                        "application of `einsum` has no numeric IR lowering; \
+                         preserve its host execution (spec/05-risc-primitives.md [05-HOST-1])"
+                            .to_string(),
+                    ),
+                }
             }
 
             // Exact argument values do not implement the operation. A fake

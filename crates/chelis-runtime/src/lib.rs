@@ -7424,6 +7424,63 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
     out
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Operand offsets `chelis_tensor_einsum` has derived through checked
+    /// metadata on this thread; tests read it to bound index work per call.
+    static EINSUM_CHECKED_OFFSETS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Product slots `chelis_tensor_einsum` has reserved on this thread.
+    static EINSUM_PRODUCTS_RESERVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Einsum labels iterated row-major, with each operand's offset stride per
+/// label.
+struct EinsumAxes {
+    extents: Vec<i64>,
+    strides: [Vec<i64>; 2],
+}
+
+/// The output and reduction label spaces of one einsum call (chelis#3702).
+struct EinsumPlan {
+    output: EinsumAxes,
+    reduction: EinsumAxes,
+}
+
+/// A row-major coordinate in an [`EinsumAxes`] space and both operands'
+/// offsets at it.
+struct EinsumOdometer {
+    coordinates: Vec<i64>,
+    offsets: [i64; 2],
+}
+
+impl EinsumOdometer {
+    fn new(axes: &EinsumAxes) -> Self {
+        Self {
+            coordinates: vec![0; axes.extents.len()],
+            offsets: [0; 2],
+        }
+    }
+
+    /// Step to the next coordinate, the last label fastest; past the last
+    /// coordinate it returns to the first.
+    #[inline]
+    fn advance(&mut self, axes: &EinsumAxes) {
+        for axis in (0..self.coordinates.len()).rev() {
+            self.coordinates[axis] += 1;
+            if self.coordinates[axis] < axes.extents[axis] {
+                for side in 0..2 {
+                    self.offsets[side] += axes.strides[side][axis];
+                }
+                return;
+            }
+            self.coordinates[axis] = 0;
+            for side in 0..2 {
+                self.offsets[side] -= (axes.extents[axis] - 1) * axes.strides[side][axis];
+            }
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_einsum(
     equation: chelis_string,
@@ -7448,7 +7505,6 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
     let lhs_chars = equation.lhs;
     let rhs_chars = equation.rhs;
     let mut label_dims = [-1i64; 26];
-    let mut label_values = [0i64; 26];
     let mut out_contains = [false; 26];
     let mut reduction_seen = [false; 26];
     for &label in &out_labels {
@@ -7509,21 +7565,69 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         "einsum reduction buffer",
     );
     let out = allocate_tensor(output_metadata, "einsum output");
+    // chelis#3702: each operand offset is affine in the label coordinates, so
+    // the per-label strides are computed once (a repeated label, a diagonal,
+    // sums its axes' strides) and the largest offset is checked once below.
+    // The loops then step offsets as row-major odometers in the same output
+    // and reduction order the atom fixes.
+    let label_strides = |chars: &[u8], operand: *const chelis_tensor| {
+        let mut strides = [0i64; 26];
+        for (&label, &stride) in chars.iter().zip((*operand).metadata.strides()) {
+            if stride < 0 {
+                runtime_fail!("Domain: einsum operand has a negative stride");
+            }
+            let slot = &mut strides[einsum_label_index(label)];
+            *slot = slot
+                .checked_add(stride)
+                .unwrap_or_else(|| runtime_fail!("Overflow: einsum diagonal stride exceeds i64"));
+        }
+        strides
+    };
+    let lhs_strides = label_strides(&lhs_chars, lhs);
+    let rhs_strides = label_strides(&rhs_chars, rhs);
+    let axes = |labels: &[u8]| EinsumAxes {
+        extents: labels
+            .iter()
+            .map(|&label| label_dims[einsum_label_index(label)])
+            .collect(),
+        strides: [&lhs_strides, &rhs_strides].map(|strides| {
+            labels
+                .iter()
+                .map(|&label| strides[einsum_label_index(label)])
+                .collect()
+        }),
+    };
+    let plan = EinsumPlan {
+        output: axes(&out_labels),
+        reduction: axes(&reduction_labels),
+    };
+    if (*out).count() > 0 && plan.reduction.extents.iter().all(|&extent| extent > 0) {
+        // Strides are nonnegative, so the last coordinate of every label
+        // reaches the largest offset; it is in range, and so is every other.
+        for (chars, operand, name) in [
+            (&lhs_chars, lhs, "einsum lhs"),
+            (&rhs_chars, rhs, "einsum rhs"),
+        ] {
+            #[cfg(test)]
+            EINSUM_CHECKED_OFFSETS.with(|count| count.set(count.get() + 1));
+            metadata_or_fail(
+                (*operand)
+                    .metadata
+                    .flat_index_by(|axis| label_dims[einsum_label_index(chars[axis])] - 1),
+                name,
+            );
+        }
+    }
     // Einsum is numeric only; dispatch on dtype outside the loops so
     // the multiply-add accumulates in the native precision.
     // Pre-migration f32-only multiply-add silently corrupted F64 / I64
     // einsums.  Bool is undefined per Contract 3.
-    #[allow(clippy::too_many_arguments)]
     unsafe fn einsum_loop<Source, Accumulator, Output>(
         lhs: *const chelis_tensor,
         rhs: *const chelis_tensor,
         out: *mut chelis_tensor,
-        out_labels: &[u8],
-        lhs_chars: &[u8],
-        rhs_chars: &[u8],
-        reduction_labels: &[u8],
+        plan: &EinsumPlan,
         reduction: &IterationSpace,
-        label_values: &mut [i64; 26],
     ) where
         Source: RuntimeAccumulationSource<Accumulator>,
         Accumulator: RuntimeArithmetic,
@@ -7537,212 +7641,113 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         let lp = Source::data_ptr_unchecked(lhs as *mut chelis_tensor);
         let rp = Source::data_ptr_unchecked(rhs as *mut chelis_tensor);
         let op = Output::data_ptr_unchecked(out);
-        let mut out_index = vec![0; out_labels.len()];
-        let mut reduction_index = vec![0; reduction_labels.len()];
-        let mut lhs_index = vec![0; lhs_chars.len()];
-        let mut rhs_index = vec![0; rhs_chars.len()];
-        // One product buffer serves every output.
+        // The last reduction label steps both offsets by a fixed stride; an
+        // odometer walks the labels before it.
+        let (outer, inner, inner_strides) = match plan.reduction.extents.split_last() {
+            Some((&inner, outer)) => (
+                EinsumAxes {
+                    extents: outer.to_vec(),
+                    strides: plan
+                        .reduction
+                        .strides
+                        .each_ref()
+                        .map(|strides| strides[..outer.len()].to_vec()),
+                },
+                inner,
+                plan.reduction
+                    .strides
+                    .each_ref()
+                    .map(|strides| strides[outer.len()]),
+            ),
+            None => (
+                EinsumAxes {
+                    extents: Vec::new(),
+                    strides: [Vec::new(), Vec::new()],
+                },
+                1,
+                [0, 0],
+            ),
+        };
+        let outer_count = if reduction_total == 0 {
+            0
+        } else {
+            reduction_total / inner as usize
+        };
+        let mut out_at = EinsumOdometer::new(&plan.output);
+        let mut outer_at = EinsumOdometer::new(&outer);
+        // One product buffer serves every output. It is sized at the first
+        // output, so an empty output reserves nothing for its reduction.
         let mut products = Vec::new();
         for out_linear in 0..out_size {
-            if !out_labels.is_empty() {
-                metadata_or_fail(
-                    (*out).metadata.unravel(out_linear as i64, &mut out_index),
-                    "einsum output index",
-                );
-            }
-            for (i, &label) in out_labels.iter().enumerate() {
-                label_values[einsum_label_index(label)] = out_index[i];
-            }
             products.clear();
-            products.reserve(reduction_total);
-            for reduction_linear in 0..reduction_total {
-                if !reduction_labels.is_empty() {
-                    metadata_or_fail(
-                        reduction.unravel(reduction_linear as i64, &mut reduction_index),
-                        "einsum reduction index",
+            if out_linear == 0 {
+                #[cfg(test)]
+                EINSUM_PRODUCTS_RESERVED.with(|count| count.set(count.get() + reduction_total));
+                products.reserve(reduction_total);
+            }
+            for _ in 0..outer_count {
+                let mut lhs_at = out_at.offsets[0] + outer_at.offsets[0];
+                let mut rhs_at = out_at.offsets[1] + outer_at.offsets[1];
+                for _ in 0..inner {
+                    let lv = *lp.add(lhs_at as usize);
+                    let rv = *rp.add(rhs_at as usize);
+                    products.push(
+                        lv.into_accumulator()
+                            .runtime_mul(rv.into_accumulator(), "einsum"),
                     );
+                    lhs_at += inner_strides[0];
+                    rhs_at += inner_strides[1];
                 }
-                for (i, &label) in reduction_labels.iter().enumerate() {
-                    label_values[einsum_label_index(label)] = reduction_index[i];
-                }
-                for (i, &label) in lhs_chars.iter().enumerate() {
-                    lhs_index[i] = label_values[einsum_label_index(label)];
-                }
-                for (i, &label) in rhs_chars.iter().enumerate() {
-                    rhs_index[i] = label_values[einsum_label_index(label)];
-                }
-                let lv = *lp.add(metadata_or_fail(
-                    (*lhs).metadata.flat_index(&lhs_index),
-                    "tensor index",
-                ));
-                let rv = *rp.add(metadata_or_fail(
-                    (*rhs).metadata.flat_index(&rhs_index),
-                    "tensor index",
-                ));
-                products.push(
-                    lv.into_accumulator()
-                        .runtime_mul(rv.into_accumulator(), "einsum"),
-                );
+                outer_at.advance(&outer);
             }
             *op.add(out_linear) =
                 Output::from_accumulator(runtime_balanced_sum(&mut products, "einsum"));
+            out_at.advance(&plan.output);
         }
     }
     match (dtype, accumulator) {
-        (RuntimeDType::F32, RuntimeDType::F32) => einsum_loop::<f32, f32, f32>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::F32, RuntimeDType::F64) => einsum_loop::<f32, f64, f64>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::F64, RuntimeDType::F64) => einsum_loop::<f64, f64, f64>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::F16, RuntimeDType::F32) => einsum_loop::<half::f16, f32, half::f16>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::F16, RuntimeDType::F64) => einsum_loop::<half::f16, f64, half::f16>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::Bf16, RuntimeDType::F32) => einsum_loop::<half::bf16, f32, half::bf16>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::Bf16, RuntimeDType::F64) => einsum_loop::<half::bf16, f64, half::bf16>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::I64, RuntimeDType::I64) => einsum_loop::<i64, i64, i64>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::I32, RuntimeDType::I32) => einsum_loop::<i32, i32, i32>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::I32, RuntimeDType::I64) => einsum_loop::<i32, i64, i64>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::I16, RuntimeDType::I32) => einsum_loop::<i16, i32, i32>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::I16, RuntimeDType::I64) => einsum_loop::<i16, i64, i64>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::I8, RuntimeDType::I32) => einsum_loop::<i8, i32, i32>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
-        (RuntimeDType::I8, RuntimeDType::I64) => einsum_loop::<i8, i64, i64>(
-            lhs,
-            rhs,
-            out,
-            &out_labels,
-            &lhs_chars,
-            &rhs_chars,
-            &reduction_labels,
-            &reduction_space,
-            &mut label_values,
-        ),
+        (RuntimeDType::F32, RuntimeDType::F32) => {
+            einsum_loop::<f32, f32, f32>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::F32, RuntimeDType::F64) => {
+            einsum_loop::<f32, f64, f64>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::F64, RuntimeDType::F64) => {
+            einsum_loop::<f64, f64, f64>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::F16, RuntimeDType::F32) => {
+            einsum_loop::<half::f16, f32, half::f16>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::F16, RuntimeDType::F64) => {
+            einsum_loop::<half::f16, f64, half::f16>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::Bf16, RuntimeDType::F32) => {
+            einsum_loop::<half::bf16, f32, half::bf16>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::Bf16, RuntimeDType::F64) => {
+            einsum_loop::<half::bf16, f64, half::bf16>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::I64, RuntimeDType::I64) => {
+            einsum_loop::<i64, i64, i64>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::I32, RuntimeDType::I32) => {
+            einsum_loop::<i32, i32, i32>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::I32, RuntimeDType::I64) => {
+            einsum_loop::<i32, i64, i64>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::I16, RuntimeDType::I32) => {
+            einsum_loop::<i16, i32, i32>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::I16, RuntimeDType::I64) => {
+            einsum_loop::<i16, i64, i64>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::I8, RuntimeDType::I32) => {
+            einsum_loop::<i8, i32, i32>(lhs, rhs, out, &plan, &reduction_space)
+        }
+        (RuntimeDType::I8, RuntimeDType::I64) => {
+            einsum_loop::<i8, i64, i64>(lhs, rhs, out, &plan, &reduction_space)
+        }
         _ => unreachable!("einsum_result_dtype rejected every unsupported accumulator pair"),
     }
     out
@@ -10340,6 +10345,220 @@ mod container_cost_tests {
                 }
             }
             chelis_string_release(value);
+        }
+    }
+}
+
+/// chelis#3702: einsum checks each operand's largest offset once per call,
+/// never an index per product, and still visits products in the atom's
+/// output-then-reduction order.
+#[cfg(test)]
+mod einsum_index_cost_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    fn checked_offsets() -> usize {
+        EINSUM_CHECKED_OFFSETS.with(std::cell::Cell::get)
+    }
+
+    unsafe fn tensor(shape: &[i64], values: &[f32]) -> *mut chelis_tensor {
+        let tensor = chelis_alloc(shape.len() as i32, shape.as_ptr(), CHELIS_DTYPE_F32);
+        let guard = chelis_tensor_begin_write(tensor);
+        let data = chelis_tensor_write_view(guard).data.cast::<f32>();
+        data.copy_from(values.as_ptr(), values.len());
+        chelis_tensor_end_write(guard);
+        tensor
+    }
+
+    /// Order-sensitive values: mixed signs across several binades.
+    fn values(count: usize, seed: u32) -> Vec<f32> {
+        (0..count)
+            .map(|i| {
+                let x = (i as u32).wrapping_mul(2_654_435_761).wrapping_add(seed);
+                let mantissa = 1.0 + (x % 1000) as f32 / 999.0;
+                let scale = [1.0e-3f32, 1.0, 1.0e3, 1.0e6][(x / 1000 % 4) as usize];
+                if x.is_multiple_of(3) {
+                    -mantissa * scale
+                } else {
+                    mantissa * scale
+                }
+            })
+            .collect()
+    }
+
+    /// The contraction computed from explicit coordinates, products in
+    /// output-then-reduction row-major order, each output summed by the
+    /// canonical tree.
+    fn reference(equation: &str, a: (&[i64], &[f32]), b: (&[i64], &[f32])) -> Vec<f32> {
+        let (inputs, output) = equation.split_once("->").unwrap();
+        let (la, lb) = inputs.split_once(',').unwrap();
+        let mut extent = std::collections::BTreeMap::new();
+        for (labels, shape) in [(la, a.0), (lb, b.0)] {
+            for (label, &n) in labels.chars().zip(shape) {
+                extent.insert(label, n);
+            }
+        }
+        let reductions: Vec<char> = la
+            .chars()
+            .chain(lb.chars())
+            .filter(|l| !output.contains(*l))
+            .fold(Vec::new(), |mut seen, l| {
+                if !seen.contains(&l) {
+                    seen.push(l);
+                }
+                seen
+            });
+        let space = |labels: &[char]| -> Vec<Vec<i64>> {
+            let mut points = vec![vec![]];
+            for label in labels {
+                points = points
+                    .into_iter()
+                    .flat_map(|p| {
+                        (0..extent[label]).map(move |c| {
+                            let mut q = p.clone();
+                            q.push(c);
+                            q
+                        })
+                    })
+                    .collect();
+            }
+            points
+        };
+        let at = |labels: &str, shape: &[i64], data: &[f32], coordinate: &dyn Fn(char) -> i64| {
+            let mut flat = 0;
+            for (label, &n) in labels.chars().zip(shape) {
+                flat = flat * n + coordinate(label);
+            }
+            data[flat as usize]
+        };
+        let out_labels: Vec<char> = output.chars().collect();
+        space(&out_labels)
+            .into_iter()
+            .map(|o| {
+                let mut products: Vec<f32> = space(&reductions)
+                    .into_iter()
+                    .map(|r| {
+                        let coordinate = |label: char| {
+                            out_labels
+                                .iter()
+                                .position(|&l| l == label)
+                                .map(|i| o[i])
+                                .unwrap_or_else(|| {
+                                    r[reductions.iter().position(|&l| l == label).unwrap()]
+                                })
+                        };
+                        let x = at(la, a.0, a.1, &coordinate);
+                        let y = at(lb, b.0, b.1, &coordinate);
+                        x.runtime_mul(y, "einsum")
+                    })
+                    .collect();
+                runtime_balanced_sum(&mut products, "einsum")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn einsum_checks_operand_offsets_once_per_call() {
+        let cases: &[(&str, &[i64], &[i64])] = &[
+            ("ij,jk->ik", &[3, 37], &[37, 5]),
+            ("ij,jk->ik", &[9, 200], &[200, 7]),
+            ("bij,bjk->bik", &[2, 3, 17], &[2, 17, 4]),
+            ("ij,kj->ki", &[3, 11], &[5, 11]),
+            ("ii,i->i", &[6, 6], &[6]),
+            ("iij,jk->ik", &[4, 4, 9], &[9, 3]),
+            ("ijk,jk->i", &[3, 4, 5], &[4, 5]),
+            ("i,j->ij", &[3], &[5]),
+            ("ij,ij->", &[4, 13], &[4, 13]),
+        ];
+        for (index, &(equation, a_shape, b_shape)) in cases.iter().enumerate() {
+            let a = values(a_shape.iter().product::<i64>() as usize, index as u32);
+            let b = values(b_shape.iter().product::<i64>() as usize, 77 + index as u32);
+            let expected = reference(equation, (a_shape, &a), (b_shape, &b));
+            unsafe {
+                let lhs = tensor(a_shape, &a);
+                let rhs = tensor(b_shape, &b);
+                let text = CString::new(equation).unwrap();
+                let equation_value = chelis_string_from_cstr(text.as_ptr());
+                let before = checked_offsets();
+                let out = chelis_tensor_einsum(equation_value, lhs, rhs, CHELIS_DTYPE_F32);
+                assert_eq!(
+                    checked_offsets() - before,
+                    2,
+                    "`{equation}` checked offsets"
+                );
+                let data = chelis_tensor_read_view(out).data.cast::<f32>();
+                let actual: Vec<u32> = (0..expected.len())
+                    .map(|i| (*data.add(i)).to_bits())
+                    .collect();
+                let expected: Vec<u32> = expected.iter().map(|v| v.to_bits()).collect();
+                assert_eq!(actual, expected, "`{equation}` result bits");
+                for value in [out, lhs, rhs] {
+                    chelis_tensor_release(value);
+                }
+                chelis_string_release(equation_value);
+            }
+        }
+    }
+
+    fn products_reserved() -> usize {
+        EINSUM_PRODUCTS_RESERVED.with(std::cell::Cell::get)
+    }
+
+    /// The product buffer is reserved once, at the first output: a contraction
+    /// whose output is empty reserves nothing however large its reduction, and
+    /// a nonempty one reserves exactly its reduction count.
+    #[test]
+    fn the_product_buffer_is_reserved_once_and_only_for_an_output() {
+        unsafe {
+            let text = CString::new("az,cw->zw").unwrap();
+            let equation = chelis_string_from_cstr(text.as_ptr());
+            let wide = tensor(&[4_000_000_000, 0], &[]);
+            let narrow = tensor(&[2, 0], &[]);
+            let before = products_reserved();
+            let empty = chelis_tensor_einsum(equation, wide, narrow, CHELIS_DTYPE_F32);
+            assert_eq!(chelis_tensor_numel(empty), 0);
+            assert_eq!(products_reserved() - before, 0, "empty output");
+            for value in [empty, wide, narrow] {
+                chelis_tensor_release(value);
+            }
+            chelis_string_release(equation);
+
+            let text = CString::new("ij,jk->ik").unwrap();
+            let equation = chelis_string_from_cstr(text.as_ptr());
+            let lhs = tensor(&[9, 37], &values(9 * 37, 1));
+            let rhs = tensor(&[37, 7], &values(37 * 7, 2));
+            let before = products_reserved();
+            let out = chelis_tensor_einsum(equation, lhs, rhs, CHELIS_DTYPE_F32);
+            assert_eq!(
+                products_reserved() - before,
+                37,
+                "63 outputs of 37 products"
+            );
+            for value in [out, lhs, rhs] {
+                chelis_tensor_release(value);
+            }
+            chelis_string_release(equation);
+        }
+    }
+
+    #[test]
+    fn an_empty_contraction_checks_no_offset_and_sums_to_zero() {
+        unsafe {
+            let lhs = tensor(&[3, 0], &[]);
+            let rhs = tensor(&[0, 2], &[]);
+            let text = CString::new("ij,jk->ik").unwrap();
+            let equation = chelis_string_from_cstr(text.as_ptr());
+            let before = checked_offsets();
+            let out = chelis_tensor_einsum(equation, lhs, rhs, CHELIS_DTYPE_F32);
+            assert_eq!(checked_offsets() - before, 0);
+            let data = chelis_tensor_read_view(out).data.cast::<f32>();
+            for i in 0..6 {
+                assert_eq!((*data.add(i)).to_bits(), 0.0f32.to_bits());
+            }
+            for value in [out, lhs, rhs] {
+                chelis_tensor_release(value);
+            }
+            chelis_string_release(equation);
         }
     }
 }
