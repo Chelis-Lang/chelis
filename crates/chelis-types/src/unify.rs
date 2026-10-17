@@ -28,6 +28,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::*;
 
+// Counts the type nodes `Subst::apply` visits, for the chelis#2622 scaling
+// oracle: checking a nested program applies the substitution to each node's
+// type at most once per stamp, never once per enclosing level.
+#[cfg(test)]
+thread_local! {
+    static APPLY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_apply_visits() -> usize {
+    APPLY_VISITS.with(|visits| visits.replace(0))
+}
+
 const INTERNAL_VMAP_AXIS_PREFIX: &str = "\0vmap-axis:";
 
 fn mapped_axis_annotation(axis: usize) -> String {
@@ -2576,6 +2589,8 @@ impl Subst {
     /// Path-compresses any chains of length ≥ 2 it encounters so future
     /// lookups land in O(1).
     pub fn apply(&self, ty: &Type) -> Type {
+        #[cfg(test)]
+        APPLY_VISITS.with(|visits| visits.set(visits.get() + 1));
         match ty {
             Type::Var(v) => match self.resolve_tvar(*v) {
                 Type::Var(variable) => Type::Var(variable),
@@ -2965,27 +2980,36 @@ impl Subst {
     /// Semantic annotation/name-query view. Never use this before the authored
     /// result guards: projecting a labelled identity to Name erases rigidity.
     pub(crate) fn semantic_type(&self, ty: &Type) -> Type {
-        match self.apply(ty) {
+        self.semantic_view(self.apply(ty))
+    }
+
+    /// The semantic view of a type `apply` has already resolved. `apply`
+    /// resolves every child, so the children need only the dimension
+    /// projection; applying again at each level would rebuild every subtree
+    /// once per enclosing level, quadratic in the type's depth (chelis#2622).
+    fn semantic_view(&self, ty: Type) -> Type {
+        match ty {
             Type::Tensor(dims, prec) => {
                 Type::Tensor(dims.iter().map(|d| self.semantic_dim(d)).collect(), prec)
             }
             Type::Fn(args, ret) => Type::Fn(
-                args.iter().map(|a| self.semantic_type(a)).collect(),
-                Box::new(self.semantic_type(&ret)),
+                args.into_iter().map(|a| self.semantic_view(a)).collect(),
+                Box::new(self.semantic_view(*ret)),
             ),
-            Type::Ref(inner) => Type::Ref(Box::new(self.semantic_type(&inner))),
+            Type::Ref(inner) => Type::Ref(Box::new(self.semantic_view(*inner))),
             Type::Tuple(items) => {
-                Type::Tuple(items.iter().map(|t| self.semantic_type(t)).collect())
+                Type::Tuple(items.into_iter().map(|t| self.semantic_view(t)).collect())
             }
-            Type::Adt(name, args) => {
-                Type::Adt(name, args.iter().map(|t| self.semantic_type(t)).collect())
-            }
+            Type::Adt(name, args) => Type::Adt(
+                name,
+                args.into_iter().map(|t| self.semantic_view(t)).collect(),
+            ),
             Type::KindedAdt(name, args) => Type::KindedAdt(
                 name,
-                args.iter()
+                args.into_iter()
                     .map(|a| match a {
-                        NominalArg::Type(t) => NominalArg::Type(self.semantic_type(t)),
-                        NominalArg::Dimension(d) => NominalArg::Dimension(self.semantic_dim(d)),
+                        NominalArg::Type(t) => NominalArg::Type(self.semantic_view(t)),
+                        NominalArg::Dimension(d) => NominalArg::Dimension(self.semantic_dim(&d)),
                     })
                     .collect(),
             ),
