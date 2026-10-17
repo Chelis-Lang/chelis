@@ -4175,6 +4175,104 @@ fn live_byte_composition_finds_call_graph_components_in_linear_work() {
     );
 }
 
+/// chelis#2330: a direct call's carry is the live-byte bound without the
+/// owners it moves. The running totals subtract the moved owners instead of
+/// copying the set; the test build cross-checks every read against the
+/// copy-and-rescan, across unknown, exact, unbounded and overflowing costs
+/// (the order-dependent case included), a duplicate move, and moving
+/// everything.
+/// The callee does not exist, so each program is rejected at the call, after
+/// its carry is costed.
+#[test]
+fn direct_call_carry_excludes_moved_owners_like_a_rescan() {
+    let half = 1usize << 61;
+    let dynamic = value_info(
+        ConcreteHostType::Tensor(TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        }),
+        OwnerOrigin::Owned,
+    );
+    let layouts = [
+        [
+            dynamic.clone(),
+            fixed_tensor_info(half),
+            fixed_tensor_info(half),
+        ],
+        [
+            fixed_tensor_info(half),
+            dynamic.clone(),
+            fixed_tensor_info(half),
+        ],
+        [
+            fixed_tensor_info(half),
+            fixed_tensor_info(half),
+            dynamic.clone(),
+        ],
+        [
+            fixed_tensor_info(half),
+            fixed_tensor_info(half),
+            fixed_tensor_info(3),
+        ],
+        [dynamic.clone(), dynamic.clone(), fixed_tensor_info(half)],
+        // A tensor whose byte size exceeds u64 costs `Unbounded`.
+        [
+            fixed_tensor_info(usize::MAX),
+            fixed_tensor_info(3),
+            dynamic.clone(),
+        ],
+        [
+            fixed_tensor_info(3),
+            fixed_tensor_info(usize::MAX),
+            fixed_tensor_info(usize::MAX),
+        ],
+    ];
+    let move_sets: [&[u32]; 9] = [
+        &[],
+        &[0],
+        &[1],
+        &[2],
+        &[0, 1],
+        &[1, 2],
+        &[0, 2],
+        &[1, 1],
+        &[0, 1, 2],
+    ];
+    for layout in &layouts {
+        for moved in move_sets {
+            let mut ops = (0..3).map(define).collect::<Vec<_>>();
+            ops.push(Op::Apply {
+                dest: Some(OwnerId(3)),
+                label: "carry call".into(),
+                kind: ApplyKind::DirectCall { callee: UnitId(99) },
+                schema: OperationSchema::new(
+                    Vec::new(),
+                    Some(ValueClass::NonHeap(NonHeapKind::Scalar(Prim::Int64))),
+                ),
+                args: moved
+                    .iter()
+                    .map(|owner| Operand::move_(OwnerId(*owner)))
+                    .collect(),
+            });
+            let mut owners = layout
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(owner, info)| (OwnerId(u32::try_from(owner).unwrap()), info))
+                .collect::<BTreeMap<_, _>>();
+            owners.insert(OwnerId(3), info(Prim::Int64, OwnerOrigin::Owned));
+            let program = roots(vec![block(0, vec![], ops, Terminator::Exit)], owners);
+            assert!(
+                matches!(
+                    super::verify::verify(&program),
+                    Err(OwnershipError::MissingUnit { unit: 99, .. })
+                ),
+                "moving {moved:?} must reach the call"
+            );
+        }
+    }
+}
+
 /// chelis#3723: deterministic pseudo-random call graphs, cyclic and acyclic.
 /// The test build checks the linear components against pairwise
 /// reachability on every graph of at most 64 units, and the composed bound

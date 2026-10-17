@@ -1494,8 +1494,9 @@ enum OwnershipProof {
         sites: ir::HostSiteMap,
         nested_dags: Vec<NestedDagProof>,
         /// The verification `last_use::schedule` computed for exactly
-        /// `program`. Nothing can change the sealed program afterwards, so
-        /// the boundary reuses it instead of verifying it again (chelis#3730).
+        /// `program`. No code mutates a constructed proof, so the boundary
+        /// reuses it instead of verifying the same program again
+        /// (chelis#3730).
         verification: verify::HostVerification,
     },
     Dag(DagOwnershipPlan),

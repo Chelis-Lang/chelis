@@ -300,7 +300,10 @@ impl<'a> LiveSet<'a> {
                 Some(LiveByteBound::Exact(bytes)) => exact_bytes -= u128::from(*bytes),
                 Some(LiveByteBound::Unknown) => unknown_bytes -= 1,
                 Some(LiveByteBound::Unbounded) => unbounded_bytes -= 1,
-                None => unreachable!("an excluded errored owner is skipped above"),
+                // An errored owner is held in `errored_bytes`, never in the
+                // totals, and the error search above already passed over an
+                // excluded one: like the rescan, it contributes nothing.
+                None => {}
             }
         }
         if unbounded_bytes > 0 {
@@ -364,5 +367,69 @@ impl<'a> LiveSet<'a> {
             result = super::add_live_byte_bounds(result, super::owner_byte_cost(unit, *owner)?);
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use chelis_types::types::Prim;
+
+    use super::{LiveSet, UnitOwnerFacts};
+    use crate::dag::{DimInfo, TensorType};
+    use crate::host_type_state::ConcreteHostType;
+    use crate::ownership::LiveByteBound;
+    use crate::ownership::classify::{Placement, classify};
+    use crate::ownership::error::OwnershipError;
+    use crate::ownership::ir::{
+        BlockId, OwnerId, OwnerInfo, OwnerOrigin, ScheduleState, Unit, UnitId, UnitKind,
+    };
+
+    fn tensor(elements: usize, precision: Prim) -> OwnerInfo {
+        let ty = ConcreteHostType::Tensor(TensorType {
+            dims: vec![DimInfo::Lit(elements)],
+            precision,
+        });
+        OwnerInfo {
+            class: classify(&ty, Placement::Value).unwrap(),
+            ty,
+            placement: Placement::Value,
+            origin: OwnerOrigin::Owned,
+            names: Vec::new(),
+            span_id: None,
+        }
+    }
+
+    #[test]
+    fn excluding_an_owner_whose_byte_cost_errors_drops_its_error() {
+        // Verification never costs a carry while an errored owner is live:
+        // the full-set read before it fails first. The running totals still
+        // match the rescan when a caller excludes one.
+        let unit = Unit {
+            id: UnitId(0),
+            name: "roots".into(),
+            kind: UnitKind::Roots,
+            schedule: ScheduleState::Phase2ScopeExit,
+            callable_body: None,
+            entry: BlockId(0),
+            blocks: Vec::new(),
+            owners: BTreeMap::from([
+                (OwnerId(0), tensor(4, Prim::F8e4m3)),
+                (OwnerId(1), tensor(4, Prim::F32)),
+            ]),
+        };
+        let facts = UnitOwnerFacts::new(&unit);
+        let mut live = LiveSet::new(&facts);
+        live.insert(OwnerId(0));
+        live.insert(OwnerId(1));
+        assert!(matches!(
+            live.byte_cost(),
+            Err(OwnershipError::LiveByteBoundDType { owner: 0, .. })
+        ));
+        assert_eq!(
+            live.byte_cost_without(&BTreeSet::from([OwnerId(0)])),
+            Ok(LiveByteBound::Exact(16))
+        );
     }
 }
