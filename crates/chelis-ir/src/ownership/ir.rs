@@ -502,6 +502,13 @@ pub(crate) struct Unit {
     pub(crate) entry: BlockId,
     pub(crate) blocks: Vec<Block>,
     pub(crate) owners: BTreeMap<OwnerId, OwnerInfo>,
+    /// The top-level binding each captured environment parameter borrows,
+    /// spelled exactly as the host body reads it: a top-level label, or the
+    /// bare source name. Lowering records it when it mints the capture. Later
+    /// local aliases add their own spellings to the owner's `names`, and a
+    /// local may be spelled like a top-level value, so the names cannot
+    /// identify the capture (chelis#3839).
+    pub(crate) captured_globals: BTreeMap<OwnerId, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1209,23 +1209,26 @@ impl<'a> VerifiedHostFunctionView<'a> {
                 let name = if let Some(payload) = self.function().params.get(index) {
                     payload.name.as_str()
                 } else {
-                    let captured = owner
-                        .info
-                        .names
-                        .iter()
-                        .filter(|name| {
-                            self.emission.payload.program.globals.iter().any(|binding| {
-                                binding.name == name.as_str()
-                                    || crate::LoadStoreName::top_level_source_for_label(name)
-                                        .ok()
-                                        .flatten()
-                                        .is_some_and(|source| source == binding.name)
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    let [name] = captured.as_slice() else {
-                        unreachable!("verified capture names exactly one retained global")
-                    };
+                    // The capture is identified by the spelling it was minted
+                    // under, never by its owner's alias names: a later local
+                    // alias may be spelled like any top-level value.
+                    let name = unit
+                        .captured_globals
+                        .get(&param.owner)
+                        .expect("verified environment parameter records its captured global");
+                    let source = crate::LoadStoreName::top_level_source_for_label(name)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| name.clone());
+                    assert!(
+                        self.emission
+                            .payload
+                            .program
+                            .globals
+                            .iter()
+                            .any(|binding| binding.name == source),
+                        "verified capture `{name}` names a retained global"
+                    );
                     name.as_str()
                 };
                 VerifiedHostBodyBinding { owner, name }

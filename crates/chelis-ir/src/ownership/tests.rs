@@ -105,6 +105,7 @@ fn roots(blocks: Vec<Block>, owners: BTreeMap<OwnerId, OwnerInfo>) -> RawProgram
             entry: BlockId(0),
             blocks,
             owners,
+            captured_globals: BTreeMap::new(),
         }],
     }
 }
@@ -900,6 +901,7 @@ fn direct_call_program(transform_result: bool, callee: UnitId) -> RawProgram {
                 entry: BlockId(0),
                 blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
                 owners: BTreeMap::new(),
+                captured_globals: BTreeMap::new(),
             },
             Unit {
                 id: UnitId(1),
@@ -910,6 +912,7 @@ fn direct_call_program(transform_result: bool, callee: UnitId) -> RawProgram {
                 entry: BlockId(0),
                 blocks: caller_blocks,
                 owners: caller_owners,
+                captured_globals: BTreeMap::new(),
             },
             Unit {
                 id: UnitId(2),
@@ -927,6 +930,7 @@ fn direct_call_program(transform_result: bool, callee: UnitId) -> RawProgram {
                     },
                 )],
                 owners: BTreeMap::from([(OwnerId(0), info(Prim::Int64, OwnerOrigin::Owned))]),
+                captured_globals: BTreeMap::new(),
             },
         ],
     }
@@ -1205,6 +1209,9 @@ fn callable_environment_borrows_are_not_direct_call_arguments() {
     program.units[2]
         .owners
         .insert(OwnerId(1), info(Prim::String, OwnerOrigin::ExternalBorrow));
+    program.units[2]
+        .captured_globals
+        .insert(OwnerId(1), "g".into());
     super::verify::verify(&program).unwrap();
 
     program.units[2].blocks[0].params[0].mode = ParamMode::Owned;
@@ -1221,6 +1228,9 @@ fn callable_environment_borrows_are_not_direct_call_arguments() {
     wrong_origin.units[2]
         .owners
         .insert(OwnerId(1), info(Prim::String, OwnerOrigin::Owned));
+    wrong_origin.units[2]
+        .captured_globals
+        .insert(OwnerId(1), "g".into());
     assert!(matches!(
         super::verify::verify(&wrong_origin),
         Err(OwnershipError::LoweringInvariant { unit, .. }) if unit == "callee"
@@ -1241,9 +1251,65 @@ fn callable_environment_borrows_are_not_direct_call_arguments() {
         (OwnerId(1), info(Prim::String, OwnerOrigin::ExternalBorrow)),
         (OwnerId(2), parameter_info(Prim::Int64, OwnerOrigin::Owned)),
     ]);
+    capture_before_formal.units[2]
+        .captured_globals
+        .insert(OwnerId(1), "g".into());
     assert!(matches!(
         super::verify::verify(&capture_before_formal),
-        Err(OwnershipError::LoweringInvariant { unit, .. }) if unit == "callee"
+        Err(OwnershipError::LoweringInvariant { unit, detail })
+            if unit == "callee" && detail.contains("follows captured environment parameters")
+    ));
+}
+
+/// chelis#3839: every callable environment parameter carries the identity of
+/// the global it captured, and only environment parameters do. The C
+/// projection reads that record instead of searching the owner's alias names.
+#[test]
+fn every_environment_parameter_records_exactly_its_captured_global() {
+    let captured = || {
+        let mut program = direct_call_program(false, UnitId(2));
+        program.units[2].blocks[0].params.push(BlockParam {
+            owner: OwnerId(1),
+            mode: ParamMode::Borrowed,
+        });
+        program.units[2]
+            .owners
+            .insert(OwnerId(1), info(Prim::String, OwnerOrigin::ExternalBorrow));
+        program
+    };
+    let disagrees = |program: &RawProgram| {
+        matches!(
+            super::verify::verify(program),
+            Err(OwnershipError::LoweringInvariant { unit, detail })
+                if unit == "callee" && detail.contains("disagree with the captured-global records")
+        )
+    };
+
+    let mut recorded = captured();
+    recorded.units[2]
+        .captured_globals
+        .insert(OwnerId(1), "@chelis_global_67".into());
+    super::verify::verify(&recorded).unwrap();
+
+    // An environment parameter without a record.
+    assert!(disagrees(&captured()));
+
+    // A record for an owner that is not an environment parameter.
+    let mut stray = recorded.clone();
+    stray.units[2]
+        .captured_globals
+        .insert(OwnerId(0), "g".into());
+    assert!(disagrees(&stray));
+
+    // The roots unit captures nothing.
+    let mut roots_record = recorded.clone();
+    roots_record.units[0]
+        .captured_globals
+        .insert(OwnerId(0), "g".into());
+    assert!(matches!(
+        super::verify::verify(&roots_record),
+        Err(OwnershipError::LoweringInvariant { unit, detail })
+            if unit == "roots" && detail.contains("records a captured global")
     ));
 }
 
@@ -1430,6 +1496,7 @@ fn verified_live_byte_summation_overflow_is_unbounded() {
                 entry: BlockId(0),
                 blocks: vec![block(0, Vec::new(), Vec::new(), Terminator::Exit)],
                 owners: BTreeMap::new(),
+                captured_globals: BTreeMap::new(),
             },
             Unit {
                 id: UnitId(1),
@@ -1443,6 +1510,7 @@ fn verified_live_byte_summation_overflow_is_unbounded() {
                     (OwnerId(0), fixed_tensor_info(half)),
                     (OwnerId(1), fixed_tensor_info(half)),
                 ]),
+                captured_globals: BTreeMap::new(),
             },
         ],
     };
@@ -1617,6 +1685,7 @@ fn recursive_byte_bound_program(drop_before_call: bool) -> RawProgram {
                 entry: BlockId(0),
                 blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
                 owners: BTreeMap::new(),
+                captured_globals: BTreeMap::new(),
             },
             Unit {
                 id: UnitId(1),
@@ -1637,6 +1706,7 @@ fn recursive_byte_bound_program(drop_before_call: bool) -> RawProgram {
                     (OwnerId(0), fixed_tensor_info(4)),
                     (OwnerId(1), info(Prim::Int64, OwnerOrigin::Owned)),
                 ]),
+                captured_globals: BTreeMap::new(),
             },
         ],
     }
@@ -2094,6 +2164,7 @@ fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
                 entry: BlockId(0),
                 blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
                 owners: BTreeMap::new(),
+                captured_globals: BTreeMap::new(),
             },
             Unit {
                 id: UnitId(1),
@@ -2104,6 +2175,7 @@ fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
                 entry: BlockId(0),
                 blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
                 owners: BTreeMap::new(),
+                captured_globals: BTreeMap::new(),
             },
         ],
     };
@@ -3531,6 +3603,7 @@ fn host_site_rebuild_qualifies_equal_operation_ids_by_unit() {
         entry: BlockId(0),
         blocks: vec![function_block],
         owners: BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
+        captured_globals: BTreeMap::new(),
     });
     let record = |index, unit, operation| HostSiteRecord {
         id: HostSiteId::from_index(index),
@@ -4117,6 +4190,7 @@ fn recursive_call_chain_program(count: u32) -> RawProgram {
         entry: BlockId(0),
         blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
         owners: BTreeMap::new(),
+        captured_globals: BTreeMap::new(),
     }];
     for index in 1..=count {
         let ops = if index == 1 {
@@ -4147,6 +4221,7 @@ fn recursive_call_chain_program(count: u32) -> RawProgram {
             owners: (0..=result)
                 .map(|owner| (OwnerId(owner), info(Prim::Int64, OwnerOrigin::Owned)))
                 .collect(),
+            captured_globals: BTreeMap::new(),
         });
     }
     RawProgram { units }
@@ -4297,6 +4372,7 @@ fn call_graph_components_agree_with_pairwise_reachability() {
             entry: BlockId(0),
             blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
             owners: BTreeMap::new(),
+            captured_globals: BTreeMap::new(),
         }];
         for index in 1..=count {
             let calls = next(4);
@@ -4345,6 +4421,7 @@ fn call_graph_components_agree_with_pairwise_reachability() {
                     },
                 )],
                 owners,
+                captured_globals: BTreeMap::new(),
             });
         }
         super::verify::verify(&RawProgram { units }).unwrap();

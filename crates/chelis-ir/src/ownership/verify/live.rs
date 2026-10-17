@@ -418,6 +418,7 @@ mod tests {
                 (OwnerId(0), tensor(4, Prim::F8e4m3)),
                 (OwnerId(1), tensor(4, Prim::F32)),
             ]),
+            captured_globals: BTreeMap::new(),
         };
         let facts = UnitOwnerFacts::new(&unit);
         let mut live = LiveSet::new(&facts);
