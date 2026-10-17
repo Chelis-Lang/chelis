@@ -56,6 +56,9 @@ thread_local! {
     // compiled: it lets a counted receipt in `chelis-compiler-api` bound the
     // interpreter's probe work without a wall clock.
     static HOST_SUMMARY_PROBE_BUILDS: Cell<u64> = const { Cell::new(0) };
+    /// Expression and metadata nodes the record-projection hoist built or
+    /// copied, so a test can bound its work by the body's size (chelis#3793).
+    static RECORD_HOIST_NODES: Cell<u64> = const { Cell::new(0) };
     /// Fallback for platforms where native stack headroom cannot be measured.
     static HOST_LOWER_DEPTH: Cell<usize> = const { Cell::new(0) };
     /// Reserve chosen from the stack available at the outermost host-lowering
@@ -871,6 +874,16 @@ fn elementwise_function_of_operands(builtin: &str) -> bool {
 
 pub fn host_summary_probe_builds() -> u64 {
     HOST_SUMMARY_PROBE_BUILDS.with(Cell::get)
+}
+
+/// Nodes the record-projection hoist has built or copied on this thread.
+#[doc(hidden)]
+pub fn record_hoist_nodes() -> u64 {
+    RECORD_HOIST_NODES.with(Cell::get)
+}
+
+fn note_record_hoist_nodes(nodes: usize) {
+    RECORD_HOIST_NODES.with(|count| count.set(count.get() + nodes as u64));
 }
 
 /// Reset [`host_summary_probe_builds`] for this thread.
@@ -7413,6 +7426,7 @@ fn hoist_record_projections(
             if node.tag() == DeepTag::Access
                 && let Some(hoist) = record_projection_hoist(expr, program, scope, bound)
             {
+                note_record_hoist_nodes(1);
                 return var_expr_node(&hoisted_local_name(hoists, hoist), *span);
             }
             let children = node
@@ -7421,50 +7435,71 @@ fn hoist_record_projections(
                 .enumerate()
                 .map(|(index, child)| {
                     if is_bound_bare_projection(node.tag(), index, child) {
+                        note_record_hoist_nodes(deep_expr_nodes(child));
                         child.clone()
                     } else {
                         hoist_record_projections(child, program, scope, bound, hoists)
                     }
                 })
                 .collect();
-            let mut rewritten = node.clone();
-            // A rewrite that the node gate refuses leaves the subtree alone;
-            // the caller then takes the unhoisted path it takes today.
-            if rewritten.try_replace_children(children).is_err() {
-                return expr.clone();
+            // Rebuilt from the tag, the metadata and the rewritten children:
+            // copying the node first would copy the subtree it replaces, at
+            // every level of the body (chelis#3793). A rewrite that the node
+            // gate refuses leaves the subtree alone; the caller then takes the
+            // unhoisted path it takes today.
+            match Node::try_new(node.tag(), node.meta().clone(), children) {
+                Ok(rewritten) => {
+                    note_record_hoist_nodes(1 + deep_metadata_nodes(node.meta()));
+                    Expr::Node(Box::new(rewritten), *span)
+                }
+                Err(_) => {
+                    note_record_hoist_nodes(deep_expr_nodes(expr));
+                    expr.clone()
+                }
             }
-            Expr::Node(rewritten, *span)
         }
-        Expr::BareList(items, span) => Expr::BareList(
-            items
-                .iter()
-                .map(|item| hoist_record_projections(item, program, scope, bound, hoists))
-                .collect(),
-            *span,
-        ),
+        Expr::BareList(items, span) => {
+            note_record_hoist_nodes(1);
+            Expr::BareList(
+                items
+                    .iter()
+                    .map(|item| hoist_record_projections(item, program, scope, bound, hoists))
+                    .collect(),
+                *span,
+            )
+        }
         // Round 2, P3: an unstamped form carries children like any other, and
         // a typed parameter is one, so the rewriter descends it rather than
         // relying on the reader having refused first.
-        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
-            head: data.head.clone(),
-            meta: data.meta.clone(),
-            children: data
-                .children
-                .iter()
-                .map(|child| hoist_record_projections(child, program, scope, bound, hoists))
-                .collect(),
-            span: data.span,
-        })),
-        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
-            chelis_deep::ast::MetaExpr {
-                metadata: meta.metadata.clone(),
-                expr: Box::new(hoist_record_projections(
-                    &meta.expr, program, scope, bound, hoists,
-                )),
-            },
-            *span,
-        ),
-        _ => expr.clone(),
+        Expr::UnknownForm(data) => {
+            note_record_hoist_nodes(1 + deep_metadata_nodes(&data.meta));
+            Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+                head: data.head.clone(),
+                meta: data.meta.clone(),
+                children: data
+                    .children
+                    .iter()
+                    .map(|child| hoist_record_projections(child, program, scope, bound, hoists))
+                    .collect(),
+                span: data.span,
+            }))
+        }
+        Expr::MetaExpr(meta, span) => {
+            note_record_hoist_nodes(1 + deep_metadata_nodes(&meta.metadata));
+            Expr::MetaExpr(
+                chelis_deep::ast::MetaExpr {
+                    metadata: meta.metadata.clone(),
+                    expr: Box::new(hoist_record_projections(
+                        &meta.expr, program, scope, bound, hoists,
+                    )),
+                },
+                *span,
+            )
+        }
+        _ => {
+            note_record_hoist_nodes(deep_expr_nodes(expr));
+            expr.clone()
+        }
     }
 }
 
