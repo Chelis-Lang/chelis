@@ -188,6 +188,35 @@ fn the_parent_hands_workers_the_verified_cache_bytes() {
         parts_len < envelope.payload.len(),
         "the payload carries a lowering after the checked parts"
     );
+    // Not decoding the lowering does not mean not verifying it: the worker
+    // checks the producer's digest over every payload byte first. A byte
+    // flipped inside the lowering is refused, whether or not the envelope's
+    // own digest is resealed to match.
+    let mut tampered = EnvelopeMirror {
+        payload: envelope.payload.clone(),
+        ..bincode::deserialize(&warm_bytes[magic..]).expect("the envelope decodes")
+    };
+    let inside_lowering = parts_len + (tampered.payload.len() - parts_len) / 2;
+    tampered.payload[inside_lowering] ^= 0x01;
+    for reseal in [false, true] {
+        if reseal {
+            tampered.payload_sha256 = Sha256::digest(&tampered.payload).into();
+        }
+        let mut bytes = warm_bytes[..magic].to_vec();
+        bytes.extend(bincode::serialize(&tampered).expect("encode the tampered envelope"));
+        let error = CompiledContext::decode_authenticated(&bytes, &warm_digest)
+            .expect_err("a byte flipped inside the lowering must not authenticate");
+        let expected_reason = if reseal {
+            "digest its producer delivered"
+        } else {
+            "sha256"
+        };
+        assert!(
+            error.contains(expected_reason),
+            "resealed={reseal}: the rejection must name the failed digest: {error}"
+        );
+    }
+
     envelope.payload.truncate(parts_len);
     envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
     let mut unlowered = warm_bytes[..magic].to_vec();
