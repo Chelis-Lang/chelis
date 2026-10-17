@@ -54,6 +54,56 @@ the usual way to prepare an application such as
 Clone that application to access its example programs; Reef downloads the
 libraries it depends on separately.
 
+## Fetch locked packages with another tool
+
+A build system such as Nix can download the locked packages itself and give
+them to Reef. `reef fetch-plan` prints the public download URL and the pinned
+SHA-256 of each file that `reef.lock` locks. It reads only the lockfile and
+makes no network request:
+
+```sh
+chelis reef fetch-plan --package-root .
+```
+
+For a project that locks Coral 0.7.45, the output starts like this:
+
+```json
+{
+  "format_version": 1,
+  "package": {
+    "name": "hello-chelis",
+    "version": "0.1.12"
+  },
+  "artifacts": [
+    {
+      "name": "coral",
+      "version": "0.7.45",
+      "kind": "archive",
+      "file": "coral-0.7.45.tar.zst",
+      "url": "https://github.com/Chelis-Lang/coral/releases/download/v0.7.45/coral-0.7.45.tar.zst",
+      "sha256": "87e82d63e01ce2ddc931dc19306680d4f18ad24fada1ffb883e026c6719d9538",
+      "remote_origin": "github://Chelis-Lang/coral@v0.7.45"
+    },
+```
+
+Each package gives an `archive` and a `shell` element. A locked binary gives
+one `binary` element with its `platform`. The bundled `chelis-std` and path
+dependencies give no element. A lock entry without `remote_origin` makes the
+command fail, because it has no download URL. The URLs serve public releases
+only.
+
+Download each `url`, check it against `sha256`, and put the file in one
+directory under its `file` name. Then import the directory:
+
+```sh
+chelis reef install --from-lockfile --artifact-dir fetched
+```
+
+The import makes no network request. It compares each file with the
+`reef.lock` hash before it writes to the registry, so a missing file or a
+different file stops the import. Reef keeps the locked `remote_origin` of each
+package in its registry.
+
 ## Create a package
 
 To start a new library or application, use `reef init`:
