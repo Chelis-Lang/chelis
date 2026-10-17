@@ -198,8 +198,8 @@ them. The `nixFormat` check uses the same nixfmt and the same files.
 
 A run of `nix-packages.yml` on `main` or on a release tag pushes to the
 `chelis-lang` Cachix cache. It pushes the `chelis`, `chelis-runtime`, and
-`chelisup` outputs, the cvc5 tree, the Rust crate builds, and the activated
-Devenv shell. A daily schedule
+`chelisup` outputs, the cvc5 tree, the Rust crate builds, and the Devenv
+shell closure. A daily schedule
 runs the workflow on `main`. That run skips its native builds when the cache
 already holds the packages of the `main` revision.
 

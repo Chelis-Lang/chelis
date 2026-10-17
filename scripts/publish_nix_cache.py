@@ -13,9 +13,11 @@ The script gives four groups of paths to `cachix push`:
   `legacyPackages.<system>.cvc5-dir`.
 - Each Rust crate build in the build closure of the three packages.
   `buildRustCrate` names each crate derivation `rust_<crate>-<version>`.
-- The activated Devenv shell: the `$DEVENV_DOTFILE/gc/shell` root, which holds
-  the shell environment, and the `$DEVENV_PROFILE` profile. Their runtime
-  closure holds the Rust toolchain, Kache, and the other shell packages.
+- The Devenv shell: the `$DEVENV_DOTFILE/gc/shell` root and the
+  `$DEVENV_PROFILE` profile. At publish time the root holds the shell of the
+  `devenv test` smoke step. That shell differs from the activated shell only in
+  small generated files. Their runtime closure holds the Rust toolchain, Kache,
+  and the other shell packages.
 
 Cachix also pushes the runtime closure of each path. With the default
 "upstream caches" setting of the cache, Cachix skips each path that
@@ -23,7 +25,8 @@ cache.nixos.org serves.
 
 A build of a later revision then downloads the unchanged cvc5 tree and crates.
 It compiles only the crates whose sources or dependencies changed. A later run
-on an unchanged Devenv shell downloads the shell instead of a new build.
+on an unchanged Devenv shell downloads Kache, the Rust toolchain, and the
+profile, and it builds only the small generated shell files.
 
 The Cachix CLI comes from the flake's pinned Nixpkgs, and it reads its token
 from `CACHIX_AUTH_TOKEN`. The workflow fills that variable from the
@@ -32,7 +35,7 @@ from `CACHIX_AUTH_TOKEN`. The workflow fills that variable from the
 users download these paths instead of compiling them.
 
 Exit codes: 0 pushed (or, with `--dry-run`, listed), 1 a Nix or Cachix command
-failed, the build closure held no crate build, or no activated Devenv shell was
+failed, the build closure held no crate build, or no Devenv shell root was
 found, 2 the token is missing.
 """
 
@@ -140,7 +143,7 @@ def crate_builds(system: str, run: Runner) -> list[str]:
 def devenv_shell_roots(
     environ: Mapping[str, str], resolve: Resolver = os.path.realpath
 ) -> list[str]:
-    """The store paths of the activated Devenv shell and its profile."""
+    """The store paths of the Devenv shell root and its profile."""
     dotfile = environ.get("DEVENV_DOTFILE")
     profile = environ.get("DEVENV_PROFILE")
     if not dotfile or not profile:
@@ -181,12 +184,13 @@ def main(
         )
         return 2
     try:
+        shell_roots = devenv_shell_roots(environ, resolve)
         system = current_system(run)
         paths = sorted(
             {
                 *built_outputs(system, run),
                 *crate_builds(system, run),
-                *devenv_shell_roots(environ, resolve),
+                *shell_roots,
             }
         )
         if args.dry_run:

@@ -214,7 +214,7 @@ class PublishNixCacheTests(unittest.TestCase):
                 code, _, stderr = run_main(nix, environ=environ)
                 self.assertEqual(code, 1)
                 self.assertIn("no Devenv shell is active", stderr)
-                self.assertEqual(nix.pushes(), [])
+                self.assertEqual(nix.calls, [], "the shell check runs before any Nix command")
 
     def test_a_shell_root_outside_the_store_stops_before_the_push(self) -> None:
         nix = FakeNix()
@@ -222,7 +222,7 @@ class PublishNixCacheTests(unittest.TestCase):
         code, _, stderr = run_main(nix, environ=environ)
         self.assertEqual(code, 1)
         self.assertIn("not a store path: /tmp/no-devenv/gc/shell", stderr)
-        self.assertEqual(nix.pushes(), [])
+        self.assertEqual(nix.calls, [], "the shell check runs before any Nix command")
 
     def test_dry_run_lists_the_paths_without_a_token(self) -> None:
         nix = FakeNix()
