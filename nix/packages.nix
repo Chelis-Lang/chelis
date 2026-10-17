@@ -17,7 +17,7 @@ let
       "tree-sitter-chelis"
     ];
   };
-  manifest = lib.importTOML (source + "/Cargo.toml");
+  manifest = lib.importTOML (root + "/Cargo.toml");
   version = manifest.workspace.package.version;
   # crate2nix 0.15.0 generates the committed root Cargo.nix with the compiler
   # features below. The Cargo.nix freshness job in ci.yml runs the same
@@ -34,7 +34,7 @@ let
       "chelis-cli/${feature}"
     ]) (lib.sort lib.lessThan compilerFeatures)
   );
-  toolchain = pkgs.rust-bin.fromRustupToolchainFile (source + "/rust-toolchain.toml");
+  toolchain = pkgs.rust-bin.fromRustupToolchainFile (root + "/rust-toolchain.toml");
   buildRustCrateForPkgs =
     cratePkgs:
     cratePkgs.buildRustCrate.override {
