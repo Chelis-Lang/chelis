@@ -856,6 +856,8 @@ pub(crate) fn emit_host_abi_program(
         // and it keeps the `chelis_list_drop` stem of the published
         // cloning symbol it pairs with.
         "chelis_list *chelis_list_drop_owned(chelis_list *list, int64_t count);".to_string(),
+        // chelis#3724: the consuming `take`. Private for the same reason.
+        "chelis_list *chelis_list_take_owned(chelis_list *list, int64_t count);".to_string(),
         "chelis_dict *chelis_dict_insert_owned(chelis_dict *dict, chelis_value key, chelis_value value);"
             .to_string(),
         "chelis_dict *chelis_dict_merge_owned(chelis_dict *lhs, const chelis_dict *rhs);"
@@ -10116,7 +10118,16 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "take" => {
-                // A selection: the prefix keeps each element's producer.
+                // chelis#3724: a list the verifier moved at its last use is
+                // truncated in place; a borrowed one still clones the prefix.
+                let entry = if container_operand_is_moved(site, "builtin:take")? {
+                    "chelis_list_take_owned"
+                } else {
+                    "chelis_list_take"
+                };
+                // A selection: the prefix keeps each element's producer. Build
+                // the metadata view before the consuming entry point can
+                // release or truncate the source payload.
                 self.lines.push(format!(
                     "{}__chelis_global_origin_assign(&{}, __chelis_host_result_origin_list_prefix(__chelis_origin_arena, {}, {}));",
                     self.indent,
@@ -10125,7 +10136,7 @@ impl<'a> HostEmitter<'a> {
                     arg_vars[1].0
                 ));
                 self.lines.push(format!(
-                    "{}{target} = chelis_list_take({}, {});",
+                    "{}{target} = {entry}({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
                 ));
                 return Ok(());

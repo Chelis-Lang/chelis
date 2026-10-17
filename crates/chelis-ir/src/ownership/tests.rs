@@ -3791,6 +3791,7 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
         ("builtin:append", list),
         ("builtin:concat", list),
         ("builtin:skip", list),
+        ("builtin:take", list),
         ("builtin:dict_insert", dict),
         ("builtin:dict_merge", dict),
         ("builtin:dict_remove", dict),
@@ -3817,6 +3818,12 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
         container_consumer_operand("builtin:skip", Some(dict), |_| Some(dict)),
         None,
         "a dictionary application never matches the list-kinded `skip` row"
+    );
+    // chelis#3724's `take`, the prefix twin of `skip`, keyed the same way.
+    assert_eq!(
+        container_consumer_operand("builtin:take", Some(dict), |_| Some(dict)),
+        None,
+        "a dictionary application never matches the list-kinded `take` row"
     );
     // Rejected by the result comparison: the row's kind is Dict.
     assert_eq!(
@@ -3893,5 +3900,181 @@ fn a_consumer_row_matches_only_its_own_heap_kind() {
         ),
         None,
         "a unit-returning application is not a container consumer"
+    );
+}
+
+/// A consuming application of one string-classed owner per operand, with a
+/// string result, for the copy-at-last-use rewrite tests.
+fn consume_op(dest: u32, operands: &[u32]) -> Op {
+    Op::Apply {
+        dest: Some(OwnerId(dest)),
+        label: "consume".into(),
+        kind: ApplyKind::Intrinsic,
+        schema: OperationSchema::new(
+            vec![OwnershipUse::Move; operands.len()],
+            Some(ValueClass::Heap(HeapKind::String)),
+        ),
+        args: operands
+            .iter()
+            .map(|owner| Operand::move_(OwnerId(*owner)))
+            .collect(),
+    }
+}
+
+fn copy_op(dest: u32, source: u32) -> Op {
+    Op::Copy {
+        dest: OwnerId(dest),
+        source: Operand::clone_(OwnerId(source)),
+    }
+}
+
+fn string_owners(count: u32) -> BTreeMap<OwnerId, OwnerInfo> {
+    (0..count)
+        .map(|owner| (OwnerId(owner), info(Prim::String, OwnerOrigin::Owned)))
+        .collect()
+}
+
+fn ops_of(program: &RawProgram) -> Vec<Op> {
+    program.units[0].blocks[0]
+        .ops
+        .iter()
+        .map(|operation| operation.kind.clone())
+        .collect()
+}
+
+/// chelis#2206: a copy whose source the scheduler retires directly after it
+/// was that source's last read, so the rewrite hands the source itself to the
+/// copy's consumer. The copy, the release and the copy's identity disappear.
+#[test]
+fn a_copy_at_its_sources_last_use_becomes_a_move() {
+    let mut entry = block(
+        0,
+        vec![],
+        vec![define(0), copy_op(1, 0), consume_op(2, &[1]), root(2)],
+        Terminator::Exit,
+    );
+    entry.ops.push(provisional(90, 0, true));
+    let mut program = roots(vec![entry], string_owners(3));
+    schedule(&mut program).unwrap();
+    assert_eq!(
+        ops_of(&program),
+        vec![define(0), consume_op(2, &[0]), root(2)]
+    );
+    assert!(!program.units[0].owners.contains_key(&OwnerId(1)));
+}
+
+/// chelis#3716: one application naming the owner in two consuming slots gets
+/// one copy per slot from lowering; only the copy directly before the owner's
+/// release is its last read, so exactly that slot moves the owner and the
+/// other keeps its inserted copy.
+#[test]
+fn two_copies_for_one_application_keep_one_and_move_the_last() {
+    let mut entry = block(
+        0,
+        vec![],
+        vec![
+            define(0),
+            copy_op(1, 0),
+            copy_op(2, 0),
+            consume_op(3, &[1, 2]),
+            root(3),
+        ],
+        Terminator::Exit,
+    );
+    entry.ops.push(provisional(90, 0, true));
+    let mut program = roots(vec![entry], string_owners(4));
+    schedule(&mut program).unwrap();
+    assert_eq!(
+        ops_of(&program),
+        vec![define(0), copy_op(1, 0), consume_op(3, &[1, 0]), root(3)]
+    );
+}
+
+/// Negative twin: a read of the source after the copy keeps the copy, and the
+/// source is released after that read.
+#[test]
+fn a_copy_before_a_later_read_of_its_source_stays_a_copy() {
+    let mut entry = block(
+        0,
+        vec![],
+        vec![
+            define(0),
+            copy_op(1, 0),
+            borrow_op(0),
+            consume_op(2, &[1]),
+            root(2),
+        ],
+        Terminator::Exit,
+    );
+    entry.ops.push(provisional(90, 0, true));
+    let mut program = roots(vec![entry], string_owners(3));
+    schedule(&mut program).unwrap();
+    let ops = ops_of(&program);
+    assert_eq!(ops[1], copy_op(1, 0));
+    assert_eq!(
+        ops[3],
+        Op::Drop {
+            owner: Operand::move_(OwnerId(0)),
+        }
+    );
+    assert_eq!(ops[4], consume_op(2, &[1]));
+}
+
+/// The rewrite's safety rests on the verifier, which must still reject an
+/// application that moves one owner through two slots (chelis#3716's
+/// hand-forged control): the second slot reads an owner the first consumed.
+#[test]
+fn one_owner_moved_through_two_slots_of_one_application_is_rejected() {
+    let program = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![define(0), consume_op(1, &[0, 0]), root(1)],
+            Terminator::Exit,
+        )],
+        string_owners(2),
+    );
+    assert!(matches!(
+        verify_raw(program),
+        Err(OwnershipError::OwnerNotLive { owner: 0, .. })
+    ));
+}
+
+/// The copy rewrite takes its operand census once per unit, however many
+/// copies it upgrades: a per-candidate census is a scan of the unit per copy,
+/// quadratic in the unit (round-1 finding on chelis#3751). Eight independent
+/// copy-at-last-use chains in one unit all upgrade under one census.
+#[test]
+fn the_copy_rewrite_takes_one_operand_census_per_unit() {
+    const CHAINS: u32 = 8;
+    let mut ops = Vec::new();
+    for chain in 0..CHAINS {
+        let base = chain * 3;
+        ops.extend([
+            define(base),
+            copy_op(base + 1, base),
+            consume_op(base + 2, &[base + 1]),
+            root(base + 2),
+        ]);
+    }
+    let mut entry = block(0, vec![], ops, Terminator::Exit);
+    entry
+        .ops
+        .extend((0..CHAINS).map(|chain| provisional(900 + chain, chain * 3, true)));
+    let mut program = roots(vec![entry], string_owners(CHAINS * 3));
+    let before = super::last_use::OPERAND_CENSUSES.with(std::cell::Cell::get);
+    schedule(&mut program).unwrap();
+    let censuses = super::last_use::OPERAND_CENSUSES.with(std::cell::Cell::get) - before;
+    let copies = ops_of(&program)
+        .iter()
+        .filter(|op| matches!(op, Op::Copy { .. }))
+        .count();
+    assert_eq!(
+        copies, 0,
+        "every chain's copy is its source's last read and upgrades"
+    );
+    assert_eq!(
+        censuses, 1,
+        "{CHAINS} upgrades took {censuses} operand censuses of one unit"
     );
 }

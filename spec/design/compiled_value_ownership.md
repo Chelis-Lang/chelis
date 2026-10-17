@@ -269,6 +269,16 @@ owner on every owned result edge. If a result value is an argument or capture:
 These rules close the mechanisms behind [#1344] and [#1356] without a
 “returns argument N” summary.
 
+A consuming argument that names an owner is an ordinary consume, and spec/04
+handles ordinary consuming fan-out with inserted copies. Lowering cannot tell
+an owner's last read from an earlier one, so it hands every consuming call
+argument that names an owner a `Copy` of it, wherever the call stands and
+however many of its slots name that owner; only a fresh value moves directly.
+Whether the copy was needed is decided by the last-use schedule (C7), never by
+the slot or by tail position: the copy at the owner's last read becomes a
+move, and a call that names one owner in several slots keeps one copy per slot
+except that one.
+
 The artifact boundary is an adapter before these internal edges. It may pass an
 `EntryBorrow` directly to a borrowed formal, but it must copy before an owned
 formal so the internal move never consumes the caller's owner.
@@ -582,7 +592,19 @@ post-dominance, not source scope alone:
 - a loop iteration drops non-carried owners before the back-edge;
 - a tail call happens only after all non-argument frame owners are terminated;
   and
-- a manifested root consumes its owner before process teardown.
+- a manifested root consumes its owner before process teardown; and
+- a copy whose source's terminal follows it directly was the source's last
+  read, so the source itself moves to the copy's consumer.
+
+The last rule is a rewrite after scheduling, keyed on the schedule rather than
+on where the read stands. When an owner's scheduled `Drop` follows a `Copy` of
+it with only scheduled terminals in between, and that copy's single use is a
+move later in the same block (an application operand, a `Return`, or a `Jump`
+argument) that does not already name the owner, the consumer receives the
+owner, and the `Copy`, the `Drop` and the copy's identity disappear. A retain
+cancelled by a release becomes nothing, and the result is exactly the IR a
+move at that position would have produced, so the verifier re-checks it as any
+other move. Copy scalars keep their copies, which cost nothing.
 
 For a verified direct self-tail call with a scalar result and no delegated
 entry receipt, the C host emitter reuses the private function frame as a loop.
@@ -595,8 +617,8 @@ the stack-budget check. The final return still supplies result provenance,
 and the loop performs arithmetic in the same order as the recursive source.
 
 The consumed operand of a container-producing builtin (a row of the ownership
-IR's `CONTAINER_CONSUMERS` table: `append`, `concat` and `skip` at the list
-kind, `dict_insert`, `dict_merge` and `dict_remove` at the dictionary kind,
+IR's `CONTAINER_CONSUMERS` table: `append`, `concat`, `skip` and `take` at the
+list kind, `dict_insert`, `dict_merge` and `dict_remove` at the dictionary kind,
 and `string_concat` at the string kind) is moved
 into the builtin when the scheduler places that owner's terminal directly
 after the application: lowering borrows every builtin operand, and the
@@ -605,7 +627,7 @@ the verifier re-checks the move as it would any other (no live borrow, no
 later use). The move establishes only the borrow half of exclusivity. The
 sharing half is the runtime's: as with tensor reuse in C6, the consuming entry
 point (`chelis_list_append_owned`, `chelis_list_concat_owned`,
-`chelis_list_drop_owned`, `chelis_dict_insert_owned`,
+`chelis_list_drop_owned`, `chelis_list_take_owned`, `chelis_dict_insert_owned`,
 `chelis_dict_merge_owned`, `chelis_dict_remove_owned`,
 `chelis_string_concat_owned`, private to the emitter like the accumulator
 ABI)
@@ -638,8 +660,8 @@ Membership is narrower than "produces its own kind". A row is for a callable
 whose result is its operand with an edit applied, so that reusing the
 allocation replaces a copy of the whole operand with the edit alone. The edit
 need not grow the container: `append`, `concat`, `dict_insert`, `dict_merge`
-and `string_concat` add, `dict_remove` deletes a keyed entry and `skip`
-deletes a leading run, but in each the surviving content is carried over in
+and `string_concat` add, `dict_remove` deletes a keyed entry, `skip`
+deletes a leading run and `take` a trailing one, but in each the surviving content is carried over in
 place rather than rebuilt.
 
 A callable whose result is a positional sub-range of its operand is a row only
@@ -671,13 +693,19 @@ drained in place would keep the original capacity and leave a one-element list
 holding the buffer of the list it was skipped from. The cost is amortised O(1)
 per skipped element. [#2334] delivered it.
 
-`take` is not a row and does not need to be: its result is a prefix, so the
-in-place form is a truncation with no offset involved, and its callers are one
-standard-library wrapper and two examples. `string_slice` and `string_trim` are
-not rows either, because a string carries the derived state described below and
-a sub-range of one is not the single mutation a sub-range of a list is. Those
-three remain dispositions rather than derivations and could be revisited on
-their own evidence.
+`take` is a row for the simpler half of the same reason. Its result is a
+prefix, so the in-place form is a truncation: `chelis_list_take_owned` releases
+the elements past the count and shortens the only handle, with no offset and
+no new heap kind, so the clobber above cannot arise. A truncation bounds the
+allocation as the compaction does, rebuilding the buffer at the used length
+once it holds more than twice the slots it uses, which keeps the copying
+amortised O(1) per removed element. A cursor that trims its last element with
+`take(xs, len(xs) - 1)` is therefore linear rather than quadratic.
+
+`string_slice` and `string_trim` are not rows, because a string carries the
+derived state described below and a sub-range of one is not the single
+mutation a sub-range of a list is. Those two remain dispositions rather than
+derivations and could be revisited on their own evidence.
 
 The string row carries an obligation neither of the other kinds has, and it
 is the reason a heap kind is not interchangeable here. `RuntimeString` stores

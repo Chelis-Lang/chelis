@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::error::OwnershipError;
 use super::ir::{
     ApplyKind, Block, BlockId, EdgeId, EdgeTerminal, HostSiteAction, HostSiteMap, Op, OpId,
-    Operation, OperationRole, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse, ScheduleState,
-    Terminal, Terminator, Unit, UnitId, container_consumer_operand,
+    Operand, Operation, OperationRole, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse,
+    ScheduleState, Terminal, Terminator, Unit, UnitId, container_consumer_operand,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -193,6 +193,7 @@ pub(super) fn schedule(
         placed_by_unit.push((unit_index, placements));
     }
     rebuild_host_sites(program, sites, &placed_by_unit)?;
+    upgrade_copy_last_use_moves(program, sites)?;
     upgrade_container_last_use_moves(program, sites)?;
     let facts = ScheduleFacts { cfgs };
     super::verify::verify(program)?;
@@ -306,6 +307,259 @@ fn upgrade_container_last_use_moves(
         }
     }
     Ok(upgraded)
+}
+
+/// chelis#2206, chelis#3716: move a named owner at its scheduled last use.
+///
+/// Lowering hands every call argument a `Copy` of a named owner, because it
+/// cannot tell a last use from an earlier one and one call may name the
+/// owner in several consuming slots (spec/04's ordinary consuming fan-out).
+/// The scheduler can tell: when an owner's scheduled `Drop` follows a `Copy`
+/// of it, with only scheduled scope exits in between, that copy was the
+/// owner's last read on this path, and the owner dies right after paying for
+/// it. Hand the owner itself to the copy's consumer instead: the consumer's
+/// operand names the owner, the `Copy` and the `Drop` disappear together with
+/// their host-site actions, and the copy's identity leaves the unit. A retain
+/// followed by a release becomes nothing.
+///
+/// One call naming the owner twice gets one copy and one move: lowering
+/// emits a copy per slot, in slot order, and only the last copy sits directly
+/// before the owner's `Drop`. Which slot moves is therefore decided by the
+/// schedule, never by the slot.
+///
+/// Eligibility is deliberately narrow, so this rewrite can only reproduce the
+/// shape a move at that position would have had: the consumer is the copy's
+/// one and only use, it moves the copy, it sits later in the same block (an
+/// application or the block's `Return` or `Jump`), and it does not already
+/// name the owner. The owner then lives from the copy to that consumer and is
+/// read by nothing in between, because the scheduler placed its terminal
+/// before the consumer. The final `verify` re-checks the result.
+///
+/// The cost is linear in the program apart from the in-block removals: the
+/// operand census is taken once per unit and kept current as rewrites land,
+/// and the host-site actions of every removed operation are dropped in one
+/// pass over the site map at the end.
+fn upgrade_copy_last_use_moves(
+    program: &mut OwnershipProgram,
+    sites: &mut HostSiteMap,
+) -> Result<usize, OwnershipError> {
+    let mut upgraded = 0;
+    let mut removed = BTreeSet::new();
+    for (unit_index, unit) in program.units.iter_mut().enumerate() {
+        let mut census = owner_operand_counts(unit);
+        let mut block_index = 0;
+        while block_index < unit.blocks.len() {
+            let mut index = 0;
+            while index < unit.blocks[block_index].ops.len() {
+                let Some(rewrite) = copy_upgrade_at(unit, &census, block_index, index) else {
+                    index += 1;
+                    continue;
+                };
+                apply_copy_upgrade(unit, block_index, &rewrite, &mut census);
+                let block = unit.blocks[block_index].id;
+                removed.insert((unit_index, block, rewrite.copy_id));
+                removed.insert((unit_index, block, rewrite.drop_id));
+                upgraded += 1;
+                // The `Copy` before this index is gone; the operation that
+                // followed the removed `Drop` now sits at `index - 1`.
+                index = rewrite.copy_index;
+            }
+            block_index += 1;
+        }
+    }
+    if !removed.is_empty() {
+        for record in &mut sites.records {
+            record.actions.retain(|action| match action {
+                HostSiteAction::Operation {
+                    unit,
+                    block,
+                    operation,
+                } => !removed.contains(&(*unit, *block, *operation)),
+                _ => true,
+            });
+        }
+    }
+    Ok(upgraded)
+}
+
+/// A copy-at-last-use rewrite found by [`copy_upgrade_at`].
+struct CopyUpgrade {
+    owner: OwnerId,
+    copy: OwnerId,
+    copy_index: usize,
+    copy_id: OpId,
+    drop_index: usize,
+    drop_id: OpId,
+    consumer: CopyConsumer,
+}
+
+enum CopyConsumer {
+    Operation { index: usize, operand: usize },
+    Return,
+    Jump { operand: usize },
+}
+
+/// Recognize a scheduled `Drop` at `drop_index` that retires the source of
+/// the `Copy` directly before it (only scheduled scope exits between).
+fn copy_upgrade_at(
+    unit: &Unit,
+    census: &BTreeMap<OwnerId, usize>,
+    block_index: usize,
+    drop_index: usize,
+) -> Option<CopyUpgrade> {
+    let block = &unit.blocks[block_index];
+    let terminal = &block.ops[drop_index];
+    let Op::Drop { owner: dropped } = &terminal.kind else {
+        return None;
+    };
+    if terminal.role != OperationRole::ScheduledScopeExit || dropped.use_ != OwnershipUse::Move {
+        return None;
+    }
+    let owner = dropped.owner;
+    let copy_index = block.ops[..drop_index]
+        .iter()
+        .rposition(|operation| operation.role != OperationRole::ScheduledScopeExit)?;
+    let Op::Copy { dest, source } = &block.ops[copy_index].kind else {
+        return None;
+    };
+    if source.owner != owner || source.use_ != OwnershipUse::Clone {
+        return None;
+    }
+    let copy = *dest;
+    if census.get(&copy).copied() != Some(1) {
+        return None;
+    }
+    let names_owner = |operands: &[Operand]| operands.iter().any(|arg| arg.owner == owner);
+    let moves_copy = |operands: &[Operand]| {
+        operands
+            .iter()
+            .position(|arg| arg.owner == copy && arg.use_ == OwnershipUse::Move)
+    };
+    let consumer =
+        block.ops[drop_index + 1..]
+            .iter()
+            .enumerate()
+            .find_map(|(offset, operation)| match &operation.kind {
+                Op::Apply { args, .. } => moves_copy(args).map(|operand| {
+                    (!names_owner(args)).then_some(CopyConsumer::Operation {
+                        index: drop_index + 1 + offset,
+                        operand,
+                    })
+                }),
+                _ => None,
+            });
+    let consumer = match consumer {
+        Some(found) => found?,
+        None => match &block.terminator {
+            Terminator::Return { result }
+                if result.owner == copy && result.use_ == OwnershipUse::Move =>
+            {
+                CopyConsumer::Return
+            }
+            Terminator::Jump(edge) if !names_owner(&edge.args) => CopyConsumer::Jump {
+                operand: moves_copy(&edge.args)?,
+            },
+            _ => return None,
+        },
+    };
+    Some(CopyUpgrade {
+        owner,
+        copy,
+        copy_index,
+        copy_id: block.ops[copy_index].id,
+        drop_index,
+        drop_id: terminal.id,
+        consumer,
+    })
+}
+
+/// Rewrite one recognized copy and keep the operand census current: the copy
+/// identity leaves the unit, and the owner loses the copy's source operand and
+/// its `Drop` and gains the consumer's operand.
+fn apply_copy_upgrade(
+    unit: &mut Unit,
+    block_index: usize,
+    rewrite: &CopyUpgrade,
+    census: &mut BTreeMap<OwnerId, usize>,
+) {
+    let block = &mut unit.blocks[block_index];
+    match rewrite.consumer {
+        CopyConsumer::Operation { index, operand } => {
+            if let Op::Apply { args, .. } = &mut block.ops[index].kind {
+                args[operand].owner = rewrite.owner;
+            }
+        }
+        CopyConsumer::Return => {
+            if let Terminator::Return { result } = &mut block.terminator {
+                result.owner = rewrite.owner;
+            }
+        }
+        CopyConsumer::Jump { operand } => {
+            if let Terminator::Jump(edge) = &mut block.terminator {
+                edge.args[operand].owner = rewrite.owner;
+            }
+        }
+    }
+    block.ops.remove(rewrite.drop_index);
+    block.ops.remove(rewrite.copy_index);
+    unit.owners.remove(&rewrite.copy);
+    census.remove(&rewrite.copy);
+    // The owner had at least the copy's source operand and its `Drop`, so
+    // the net loss of one cannot underflow.
+    if let Some(count) = census.get_mut(&rewrite.owner) {
+        *count -= 1;
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many whole-unit operand censuses the copy rewrite has taken on
+    /// this thread, for the test that bounds them at one per unit.
+    pub(super) static OPERAND_CENSUSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// For every owner `unit` names, how many operand positions name it:
+/// operation operands, terminator operands, edge arguments and edge
+/// terminals.
+fn owner_operand_counts(unit: &Unit) -> BTreeMap<OwnerId, usize> {
+    #[cfg(test)]
+    OPERAND_CENSUSES.with(|scans| scans.set(scans.get() + 1));
+    let mut counts = BTreeMap::new();
+    let mut note = |owner: OwnerId| *counts.entry(owner).or_insert(0) += 1;
+    for block in &unit.blocks {
+        for operation in &block.ops {
+            match &operation.kind {
+                Op::Apply { args, .. } => args.iter().for_each(|arg| note(arg.owner)),
+                Op::Copy {
+                    source: operand, ..
+                }
+                | Op::Project { source: operand }
+                | Op::LoopItem { list: operand, .. }
+                | Op::Drop { owner: operand }
+                | Op::RootConsume { owner: operand, .. } => note(operand.owner),
+                Op::Discard { owner } => note(*owner),
+                Op::Define { .. } => {}
+            }
+        }
+        match &block.terminator {
+            Terminator::Return { result: operand }
+            | Terminator::Branch {
+                condition: operand, ..
+            }
+            | Terminator::Match {
+                scrutinee: operand, ..
+            }
+            | Terminator::Loop { list: operand, .. } => note(operand.owner),
+            Terminator::Jump(_) | Terminator::Exit => {}
+        }
+        for edge in block.terminator.edges() {
+            edge.args.iter().for_each(|arg| note(arg.owner));
+            edge.terminals
+                .iter()
+                .for_each(|terminal| note(terminal.kind.owner()));
+        }
+    }
+    counts
 }
 
 pub(super) fn verify_canonical(program: &OwnershipProgram) -> Result<(), OwnershipError> {

@@ -901,8 +901,11 @@ fn call_escape_retain_inside_a_block_keeps_its_matching_release() {
     if skip_without_cc() {
         return;
     }
+    // `base` is read again after the call, so the call is not its last use
+    // and must take the escape retain; at a last use the call would move it
+    // (chelis#2206).
     let source = "def idl(p: List[i64]) -> List[i64] = p\n\
-                  def h3() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = idl(base)\n  len(r)\n}\n\
+                  def h3() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = idl(base)\n  add(len(r), len(base))\n}\n\
                   n = h3()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "escape_retain_balance");
     let body = emitted_function(&emitted, "int64_t h3()");
@@ -926,6 +929,39 @@ fn call_escape_retain_inside_a_block_keeps_its_matching_release() {
     );
 }
 
+/// The moved twin of the row above: `base`'s last use is the call, so the
+/// call moves it (chelis#2206) and the identity callee hands the same
+/// allocation back. This is the shape whose refcount the escape retain once
+/// underflowed; with the move there is no retain, and the body still releases
+/// exactly what it created.
+#[test]
+fn call_escape_at_a_last_use_moves_and_keeps_the_matching_release() {
+    if skip_without_cc() {
+        return;
+    }
+    let source = "def idl(p: List[i64]) -> List[i64] = p\n\
+                  def h3() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = idl(base)\n  len(r)\n}\n\
+                  n = h3()\n";
+    let (stdout, emitted) = build_run_and_emit(source, "escape_move_balance");
+    assert_line_matches_eval(source, "escape_move_balance", &stdout, "n");
+    let body = emitted_function(&emitted, "int64_t h3()");
+    let creations = count_in(body, "chelis_list_from_values(");
+    let retains = count_in(body, "chelis_list_retain(");
+    let releases = count_in(body, "chelis_list_release(");
+    assert_eq!(
+        (creations, retains),
+        (1, 0),
+        "the call is `base`'s last use, so it moves `base` and takes no \
+         escape retain:\n{body}"
+    );
+    assert_eq!(
+        creations + retains,
+        releases,
+        "every allocation `h3` makes must still be released before it \
+         returns. Got {creations} + {retains} vs {releases}:\n{body}"
+    );
+}
+
 #[test]
 fn call_escape_retain_survives_a_callee_that_may_return_a_captured_binding() {
     if skip_without_cc() {
@@ -934,10 +970,11 @@ fn call_escape_retain_survives_a_callee_that_may_return_a_captured_binding() {
     // `f1` returns its parameter on one branch and a captured top-level
     // binding on the other, so the result is both argument-aliasing and
     // outer-aliasing. The retain has already fired for the argument, so
-    // the outer-alias verdict must not cancel the release.
+    // the outer-alias verdict must not cancel the release. `base` is read
+    // again after the call so the call is not its last use (chelis#2206).
     let source = "g: List[i64] = [9i64]\n\
                   def f1(p: List[i64], c: bool) -> List[i64] = if c then p else g\n\
-                  def h1() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = f1(base, true)\n  len(r)\n}\n\
+                  def h1() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = f1(base, true)\n  add(len(r), len(base))\n}\n\
                   n = h1()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "escape_retain_outer");
     let body = emitted_function(&emitted, "int64_t h1()");
@@ -957,6 +994,38 @@ fn call_escape_retain_survives_a_callee_that_may_return_a_captured_binding() {
         releases,
         "an outer-alias verdict must not cancel a release the escape \
          retain already paid for (chelis#1222). Got {creations} + \
+         {retains} vs {releases}:\n{body}"
+    );
+}
+
+/// The moved twin of the row above: `base`'s last use is the call to the
+/// argument-or-captured callee, so the call moves it (chelis#2206). No
+/// retain is owed, and the outer-alias verdict must still not cancel the
+/// release of the returned owner.
+#[test]
+fn call_escape_at_a_last_use_into_a_may_return_captured_callee_moves() {
+    if skip_without_cc() {
+        return;
+    }
+    let source = "g: List[i64] = [9i64]\n\
+                  def f1(p: List[i64], c: bool) -> List[i64] = if c then p else g\n\
+                  def h1() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = f1(base, true)\n  len(r)\n}\n\
+                  n = h1()\n";
+    let (stdout, emitted) = build_run_and_emit(source, "escape_move_outer");
+    assert_line_matches_eval(source, "escape_move_outer", &stdout, "n");
+    let body = emitted_function(&emitted, "int64_t h1()");
+    let creations = count_in(body, "chelis_list_from_values(");
+    let retains = count_in(body, "chelis_list_retain(");
+    let releases = count_in(body, "chelis_list_release(");
+    assert_eq!(
+        (creations, retains),
+        (1, 0),
+        "the call is `base`'s last use, so it moves `base`:\n{body}"
+    );
+    assert_eq!(
+        creations + retains,
+        releases,
+        "the returned owner must still be released once. Got {creations} + \
          {retains} vs {releases}:\n{body}"
     );
 }

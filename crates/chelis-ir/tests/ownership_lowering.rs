@@ -534,24 +534,186 @@ fn scalar_reused_in_tail_call_slots_duplicates_and_verifies() {
     );
 }
 
-/// chelis#2068 soundness guard: the scalar carve-out is scoped strictly to Copy
-/// scalars. A heap value (here a `string`, whose owned parameter mode moves it)
-/// used in two tail-call slots is a genuine use-after-move and MUST still be
-/// rejected, since moving one owned string into two owned slots would need an
-/// explicit copy the user did not write.
+/// A function unit without its authored-entry borrow adapter: the adapter
+/// block copies each borrowed entry argument into the owned body's parameter,
+/// which is the ABI's business rather than the body's.
+fn owned_body(text: &str) -> &str {
+    if !text.contains("b0 (EntryBorrow") {
+        return text;
+    }
+    let start = text
+        .find("\n  b1 (")
+        .unwrap_or_else(|| panic!("an adapted entry has an owned body block:\n{text}"));
+    &text[start..]
+}
+
+/// The owner identities a rendered application moves, in slot order.
+fn moved_operands(text: &str, label: &str) -> Vec<String> {
+    let line = text
+        .lines()
+        .find(|line| line.contains(label))
+        .unwrap_or_else(|| panic!("missing {label:?} in:\n{text}"));
+    let args = line
+        .split(label)
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .expect("rendered application closes its operand list");
+    args.split(", ")
+        .map(|arg| {
+            arg.strip_prefix("move ")
+                .unwrap_or_else(|| panic!("operand {arg:?} is not moved in:\n{text}"))
+                .to_string()
+        })
+        .collect()
+}
+
+/// The owner identity a rendered `copy clone` reads, keyed by its destination.
+fn copy_source(text: &str, dest: &str) -> Option<String> {
+    let prefix = format!("{dest} = copy clone ");
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix(&prefix).map(str::to_string))
+}
+
+/// chelis#3716: spec/04 makes a consuming call argument an ordinary consume,
+/// and "ordinary consuming fan-out (a later use after an earlier ordinary
+/// consume) is handled by inserted copies". A heap value named in two owned
+/// slots of one call therefore lowers to one inserted copy and one move, with
+/// two distinct moved owners, and verifies. This test previously asserted the
+/// opposite (`OwnerNotLive`), which locked in the compiled lane's rejection of
+/// a program the checker and the evaluator accept.
 #[test]
-fn heap_value_reused_in_tail_call_slots_is_still_rejected() {
+fn heap_value_reused_in_tail_call_slots_copies_one_slot_and_moves_the_other() {
     let source = "def joins(a: string, b: string) -> string = string_concat(a, b)\n\
                   def dupstr(s: string) -> string = joins(s, s)\n\
                   def run_main() -> string = dupstr(\"hi\")\n";
-    let error = match lower_source(source) {
-        Ok(lowered) => verify_ownership(lowered).expect_err("heap double-move must be rejected"),
-        Err(error) => error,
-    };
-    assert!(
-        matches!(error, OwnershipError::OwnerNotLive { .. }),
-        "a genuine use-after-move of an owned heap value must stay rejected, got: {error}"
+    let program = verified_source(source);
+    let dupstr = owned_body(&unit_text(&program, "dupstr")).to_string();
+    let operands = moved_operands(&dupstr, "call:joins(");
+    assert_eq!(operands.len(), 2, "{dupstr}");
+    assert_ne!(
+        operands[0], operands[1],
+        "the two slots must move distinct owners:\n{dupstr}"
     );
+    assert_eq!(
+        count(&dupstr, "= copy clone %"),
+        1,
+        "exactly one slot is served by an inserted copy:\n{dupstr}"
+    );
+    // The copy reads the very owner the other slot moves, so the parameter is
+    // consumed once, by the call, and never dropped separately.
+    assert_eq!(
+        copy_source(&dupstr, &operands[0]).as_deref(),
+        Some(operands[1].as_str()),
+        "the first slot copies the owner the second slot moves:\n{dupstr}"
+    );
+    assert_eq!(count(&dupstr, "drop move"), 0, "{dupstr}");
+}
+
+/// chelis#3716 for a loop result: the #2781 re-homing lets the owner live in
+/// the enclosing scope, and two owned slots of one call then take one inserted
+/// copy and one move, exactly as for any other named heap value. This test
+/// previously asserted `OwnerNotLive`.
+#[test]
+fn a_loop_result_named_in_two_owned_slots_copies_one_and_moves_the_other() {
+    let source = "def joins(a: List[string], b: List[string]) -> List[string] = concat(a, b)\n\
+                  def go(src: List[string]) -> List[string] = {\n\
+                    hs = map(fn (x) -> x, src)\n\
+                    joins(hs, hs)\n\
+                  }\n\
+                  p = go([\"a\", \"b\"])\n";
+    let program = verified_source(source);
+    let go = owned_body(&unit_text(&program, "go")).to_string();
+    let operands = moved_operands(&go, "call:joins(");
+    assert_ne!(operands[0], operands[1], "{go}");
+    assert_eq!(
+        copy_source(&go, &operands[0]).as_deref(),
+        Some(operands[1].as_str()),
+        "the first slot copies the loop result the second slot moves:\n{go}"
+    );
+}
+
+/// chelis#2206: a named heap value moves into the call that is its last use
+/// even outside tail position. Lowering hands the call a copy, the scheduler
+/// places the owner's release right after it, and the post-schedule rewrite
+/// turns that retain-then-release into a move. A let-bound call used once
+/// therefore copies nothing and drops nothing.
+#[test]
+fn a_let_bound_call_at_a_values_last_use_moves_it() {
+    let program = verified_source(
+        "def f(a: List[i64]) -> i64 = len(a)\n\
+         def g(xs: List[i64]) -> i64 = {\n\
+           r = f(xs)\n\
+           r\n\
+         }\n\
+         out = g([1i64, 2i64])\n",
+    );
+    let g = owned_body(&unit_text(&program, "g")).to_string();
+    assert_eq!(count(&g, "= copy clone %"), 0, "{g}");
+    assert_eq!(count(&g, "drop move"), 0, "{g}");
+    assert_eq!(moved_operands(&g, "call:f(").len(), 1, "{g}");
+}
+
+/// chelis#2206: with N uses, the first N - 1 calls receive copies and the last
+/// moves; the binding is never released separately.
+#[test]
+fn only_the_last_of_several_calls_moves_the_value() {
+    let program = verified_source(
+        "def f(a: List[i64]) -> i64 = len(a)\n\
+         def g(xs: List[i64]) -> i64 = {\n\
+           r1 = f(xs)\n\
+           r2 = f(xs)\n\
+           r3 = f(xs)\n\
+           add(add(r1, r2), r3)\n\
+         }\n\
+         out = g([1i64, 2i64])\n",
+    );
+    let g = owned_body(&unit_text(&program, "g")).to_string();
+    assert_eq!(count(&g, "= copy clone %"), 2, "{g}");
+    assert_eq!(count(&g, "drop move"), 0, "{g}");
+}
+
+/// chelis#2206 negative twin: a read after the call keeps the copy, because the
+/// call is not the value's last use, and the value is released after that read.
+#[test]
+fn a_call_before_a_later_read_keeps_its_copy() {
+    let program = verified_source(
+        "def f(a: List[i64]) -> i64 = len(a)\n\
+         def g(xs: List[i64]) -> i64 = {\n\
+           r = f(xs)\n\
+           add(r, len(xs))\n\
+         }\n\
+         out = g([1i64, 2i64])\n",
+    );
+    let g = owned_body(&unit_text(&program, "g")).to_string();
+    assert_eq!(count(&g, "= copy clone %"), 1, "{g}");
+    assert_eq!(count(&g, "drop move"), 1, "{g}");
+    assert!(
+        line_index(&g, "call:f(") < line_index(&g, "builtin:len("),
+        "{g}"
+    );
+    assert!(
+        line_index(&g, "builtin:len(") < line_index(&g, "drop move"),
+        "the value is released after its later read:\n{g}"
+    );
+}
+
+/// chelis#2206: a later argument of the same call that borrows the value is a
+/// read before the call, so the copy the consuming slot received is still the
+/// last use and the value moves (lowering evaluates every argument before it
+/// hands any slot its operand).
+#[test]
+fn a_borrowing_later_argument_does_not_block_the_move() {
+    let program = verified_source(
+        "def f(a: List[i64], n: i64) -> i64 = add(len(a), n)\n\
+         def g(xs: List[i64]) -> i64 = {\n\
+           r = f(xs, len(xs))\n\
+           r\n\
+         }\n\
+         out = g([1i64, 2i64])\n",
+    );
+    let g = owned_body(&unit_text(&program, "g")).to_string();
+    assert_eq!(count(&g, "= copy clone %"), 0, "{g}");
+    assert_eq!(count(&g, "drop move"), 0, "{g}");
 }
 
 /// chelis#2781: a loop mints its exit-block parameter while the loop BODY
@@ -593,28 +755,6 @@ fn a_loop_result_is_copied_for_a_call_inside_a_later_loop_body() {
     assert!(
         roots.contains("root hs move %"),
         "`hs` must still reach the root manifest:\n{roots}"
-    );
-}
-
-/// chelis#2781 soundness guard: re-homing a loop result to its enclosing scope
-/// does not make a genuine double-move legal. Two owned slots of one call still
-/// need a copy the user did not write, so the second slot reads a dead owner
-/// and the program stays rejected.
-#[test]
-fn a_loop_result_moved_into_two_owned_slots_is_still_rejected() {
-    let source = "def joins(a: List[string], b: List[string]) -> List[string] = concat(a, b)\n\
-                  def go(src: List[string]) -> List[string] = {\n\
-                    hs = map(fn (x) -> x, src)\n\
-                    joins(hs, hs)\n\
-                  }\n\
-                  p = go([\"a\", \"b\"])\n";
-    let error = match lower_source(source) {
-        Ok(lowered) => verify_ownership(lowered).expect_err("double-move must be rejected"),
-        Err(error) => error,
-    };
-    assert!(
-        matches!(error, OwnershipError::OwnerNotLive { .. }),
-        "a genuine use-after-move of a loop result must stay rejected, got: {error}"
     );
 }
 
@@ -839,6 +979,29 @@ fn append_at_a_lists_last_use_moves_and_the_chain_stops_borrowing() {
     );
 }
 
+/// chelis#3724: a list whose scheduled last use is `take` moves into it, and a
+/// list read after the `take` stays borrowed.
+#[test]
+fn take_at_a_lists_last_use_moves_and_a_later_read_keeps_borrowing() {
+    let last = unit_text(
+        &verified_source(
+            "def trim() -> i64 = {\n  xs = range(0i64, 4i64)\n  ys = take(xs, 2i64)\n  len(ys)\n}\nn = trim()\n",
+        ),
+        "trim",
+    );
+    assert_eq!(count(&last, "builtin:take(move"), 1, "{last}");
+    assert_eq!(count(&last, "builtin:take(borrow"), 0, "{last}");
+
+    let later = unit_text(
+        &verified_source(
+            "def trim() -> i64 = {\n  xs = range(0i64, 4i64)\n  ys = take(xs, 2i64)\n  add(len(ys), len(xs))\n}\nn = trim()\n",
+        ),
+        "trim",
+    );
+    assert_eq!(count(&later, "builtin:take(borrow"), 1, "{later}");
+    assert_eq!(count(&later, "builtin:take(move"), 0, "{later}");
+}
+
 /// chelis#2205 negative half: a list read after the append is not moved into
 /// it, and a list read twice moves only at the second, final append.
 #[test]
@@ -917,10 +1080,13 @@ fn append_at_last_use_moves_even_when_an_aggregate_holds_the_list() {
 fn fold_accumulator_is_one_owned_block_parameter_on_both_paths() {
     let alias = unit_text(&verified_fixture("issue_1346_fold_alias"), "roots");
     assert!(alias.contains("loop borrow"), "{alias}");
+    // `base` is read for the last time as the fold's seed, so the seed moves
+    // it into the loop rather than copying it and releasing it one operation
+    // later (chelis#2206).
     let first_loop_entry = alias.find("jump b1 [move").unwrap();
     assert_eq!(
         count(&alias[..first_loop_entry], "= copy clone"),
-        1,
+        0,
         "{alias}"
     );
     assert!(

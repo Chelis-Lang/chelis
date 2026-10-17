@@ -879,7 +879,23 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         Ok(dest)
     }
 
-    fn consume(&mut self, value: Value, tail: Option<usize>) -> Result<Operand, OwnershipError> {
+    /// Hand `value` to a consuming position.
+    ///
+    /// `scope_result` names the scope whose result this position is: a join
+    /// arm's value, a callable's return value, or a loop's carried state. A
+    /// named owner whose home is that scope or a deeper one dies with the
+    /// scope, so the position takes it. Every other position, and every call
+    /// argument in particular (`scope_result` is `None`), receives a copy:
+    /// lowering does not know whether this read is the owner's last use, and
+    /// one call may name the same owner in several consuming slots, which
+    /// spec/04 resolves with inserted copies (chelis#3716). The last-use
+    /// scheduler knows; `last_use::upgrade_copy_last_use_moves` turns the copy
+    /// taken at an owner's last use back into a move (chelis#2206).
+    fn consume(
+        &mut self,
+        value: Value,
+        scope_result: Option<usize>,
+    ) -> Result<Operand, OwnershipError> {
         match value {
             Value::Fresh(owner) => {
                 self.moved.insert(owner);
@@ -897,19 +913,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     self.invariant(format!("owner %{} has no scope depth", owner.0))
                 })?;
                 // A by-value Copy scalar owns no resource, so a use duplicates
-                // it rather than transferring it. Moving the original owner
-                // would consume it, wrongly leaving a second occurrence of the
-                // same named scalar in one call (`f3(x, x)` in tail position)
-                // reading a dead owner (chelis#2068). Duplicating instead keeps
-                // the original live for every slot. This is scoped strictly to
-                // Copy scalars: a heap value (tensor, string, container, ...)
-                // still moves on its proven last use, so a genuine
-                // use-after-move of an owned resource stays rejected.
+                // it rather than transferring it (chelis#2068).
                 let is_copy_scalar =
                     matches!(info.class, ValueClass::NonHeap(NonHeapKind::Scalar(_)));
                 let movable = info.origin == OwnerOrigin::Owned
                     && !is_copy_scalar
-                    && tail.is_some_and(|scope| depth >= scope);
+                    && scope_result.is_some_and(|scope| depth >= scope);
                 if movable {
                     self.moved.insert(owner);
                     Ok(Operand::move_(owner))
@@ -1093,14 +1102,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         })
     }
 
-    fn lower_expr(
-        &mut self,
-        expr: &ConcreteHostExpr,
-        tail: Option<usize>,
-    ) -> Result<Value, OwnershipError> {
+    fn lower_expr(&mut self, expr: &ConcreteHostExpr) -> Result<Value, OwnershipError> {
         self.with_expr_span(expr, |lowerer| {
             lowerer.with_site(HostSiteKind::Expression, |lowerer| {
-                lowerer.lower_expr_at_site(expr, tail)
+                lowerer.lower_expr_at_site(expr)
             })
         })
     }
@@ -1136,19 +1141,15 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         result
     }
 
-    fn lower_expr_at_site(
-        &mut self,
-        expr: &ConcreteHostExpr,
-        tail: Option<usize>,
-    ) -> Result<Value, OwnershipError> {
+    fn lower_expr_at_site(&mut self, expr: &ConcreteHostExpr) -> Result<Value, OwnershipError> {
         match &expr.kind {
-            ConcreteHostExprKind::ResultClaimScope { body, .. } => self.lower_expr(body, tail),
-            ConcreteHostExprKind::FormalIngress { value, .. } => self.lower_expr(value, tail),
+            ConcreteHostExprKind::ResultClaimScope { body, .. } => self.lower_expr(body),
+            ConcreteHostExprKind::FormalIngress { value, .. } => self.lower_expr(value),
             ConcreteHostExprKind::ExtentSites { value, .. } => {
                 // The sites read the value's extents after it is produced, so
                 // the value stays live through this expression; it is
                 // returned unchanged, as `debug` returns its argument.
-                let value = self.lower_expr(value, None)?;
+                let value = self.lower_expr(value)?;
                 let operand = self.borrow(value)?;
                 self.emit(Op::Apply {
                     dest: None,
@@ -1272,12 +1273,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     args.iter()
                         .map(|arg| {
                             self.with_site(HostSiteKind::Argument, |lowerer| {
-                                lowerer.lower_expr(arg, None)
+                                lowerer.lower_expr(arg)
                             })
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 };
-                self.lower_call(callee, values, ty, tail, native_specs)
+                self.lower_call(callee, values, ty, native_specs)
             }
             ConcreteHostExprKind::SignatureEntry {
                 plan, args, lists, ..
@@ -1302,9 +1303,8 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                             actual: render_type(&actual),
                         });
                     }
-                    let value = self.with_site(HostSiteKind::Argument, |lowerer| {
-                        lowerer.lower_expr(arg, None)
-                    })?;
+                    let value =
+                        self.with_site(HostSiteKind::Argument, |lowerer| lowerer.lower_expr(arg))?;
                     operands.push(self.borrow(value)?);
                 }
                 for entry in lists {
@@ -1321,7 +1321,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                         });
                     }
                     let value = self.with_site(HostSiteKind::Argument, |lowerer| {
-                        lowerer.lower_expr(&entry.value, None)
+                        lowerer.lower_expr(&entry.value)
                     })?;
                     operands.push(self.borrow(value)?);
                 }
@@ -1335,7 +1335,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             ConcreteHostExprKind::Builtin { name, args, ty } => {
                 if name == "copy" && args.len() == 1 {
                     let value = self.with_site(HostSiteKind::Argument, |lowerer| {
-                        lowerer.lower_expr(&args[0], None)
+                        lowerer.lower_expr(&args[0])
                     })?;
                     let source = self.borrow(value)?;
                     let dest = self.copy(source.owner)?;
@@ -1343,7 +1343,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 }
                 if name == "debug" && args.len() == 1 {
                     let value = self.with_site(HostSiteKind::Argument, |lowerer| {
-                        lowerer.lower_expr(&args[0], None)
+                        lowerer.lower_expr(&args[0])
                     })?;
                     let operand = self.borrow(value)?;
                     self.emit(Op::Apply {
@@ -1365,9 +1365,8 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     super::ir::OwnershipUse::Borrow
                 };
                 for arg in args {
-                    let value = self.with_site(HostSiteKind::Argument, |lowerer| {
-                        lowerer.lower_expr(arg, None)
-                    })?;
+                    let value =
+                        self.with_site(HostSiteKind::Argument, |lowerer| lowerer.lower_expr(arg))?;
                     operands.push(match use_ {
                         super::ir::OwnershipUse::Move => self.consume(value, None)?,
                         super::ir::OwnershipUse::Borrow => self.borrow(value)?,
@@ -1415,7 +1414,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 field_index,
                 ty,
             } => {
-                let base = self.lower_expr(base, None)?;
+                let base = self.lower_expr(base)?;
                 let base = self.borrow(base)?;
                 self.apply(
                     ty,
@@ -1449,12 +1448,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 let depth = self.depth();
                 for binding in bindings {
                     self.with_site(HostSiteKind::Binding, |lowerer| {
-                        let value = lowerer.lower_expr(&binding.value, None)?;
+                        let value = lowerer.lower_expr(&binding.value)?;
                         lowerer.bind(&binding.name, value)
                     })?;
                 }
-                let body_tail = Some(tail.map_or(depth, |outer| outer.min(depth)));
-                let value = self.lower_expr(body, body_tail)?;
+                let value = self.lower_expr(body)?;
                 let value = self.resolve_out(value, depth);
                 self.exit_scope()?;
                 Ok(value)
@@ -1467,7 +1465,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 ty,
             } => self.lower_fold(callback, init, list, ty),
             ConcreteHostExprKind::TensorCall { helper, args, ty } => {
-                self.lower_tensor_call(*helper, args, ty, tail)
+                self.lower_tensor_call(*helper, args, ty)
             }
             ConcreteHostExprKind::Filter { callback, list, ty } => {
                 self.lower_filter_like("filter_step", callback, list, ty)
@@ -1544,7 +1542,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             operands.push(self.with_site(HostSiteKind::Argument, |lowerer| {
                 lowerer.with_expr_span(item, |lowerer| {
                     lowerer.with_site(HostSiteKind::Expression, |lowerer| {
-                        let value = lowerer.lower_expr_at_site(item, None)?;
+                        let value = lowerer.lower_expr_at_site(item)?;
                         lowerer.consume(value, None)
                     })
                 })
@@ -1733,7 +1731,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                             actual: render_type(&actual),
                         });
                     }
-                    lowerer.lower_expr_at_site(argument.expr, None)
+                    lowerer.lower_expr_at_site(argument.expr)
                 })
             })
         })
@@ -1744,7 +1742,6 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         callee: &HostCallee,
         values: Vec<Value>,
         ty: &ConcreteHostType,
-        tail: Option<usize>,
         native_specs: Option<Vec<ParamSpec>>,
     ) -> Result<Value, OwnershipError> {
         let function = callee.name();
@@ -1890,7 +1887,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             let mode = spec.mode.use_();
             expected.push(mode);
             args.push(match mode {
-                super::ir::OwnershipUse::Move => self.consume(value, tail)?,
+                super::ir::OwnershipUse::Move => self.consume(value, None)?,
                 super::ir::OwnershipUse::Borrow => self.borrow(value)?,
                 super::ir::OwnershipUse::Clone => unreachable!("parameter modes never clone"),
             });
@@ -1904,7 +1901,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         join: BlockId,
     ) -> Result<(), OwnershipError> {
         let depth = self.depth();
-        let value = self.lower_expr(expr, Some(depth))?;
+        let value = self.lower_expr(expr)?;
         let result = self.consume(value, Some(depth))?;
         self.exit_scope()?;
         self.set_terminator(Terminator::Jump(Edge {
@@ -1922,7 +1919,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         else_expr: &ConcreteHostExpr,
         ty: &ConcreteHostType,
     ) -> Result<Value, OwnershipError> {
-        let cond = self.lower_expr(cond, None)?;
+        let cond = self.lower_expr(cond)?;
         let cond = self.borrow(cond)?;
         let join_owner = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let then_block = self.new_block(Vec::new());
@@ -2059,7 +2056,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 });
             }
         };
-        let scrutinee = self.lower_expr(scrutinee, None)?;
+        let scrutinee = self.lower_expr(scrutinee)?;
         let scrutinee = self.borrow(scrutinee)?;
         let some = self.new_block(Vec::new());
         let none = self.new_block(Vec::new());
@@ -2125,7 +2122,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         default_expr: Option<&ConcreteHostExpr>,
         ty: &ConcreteHostType,
     ) -> Result<Value, OwnershipError> {
-        let scrutinee = self.lower_expr(scrutinee, None)?;
+        let scrutinee = self.lower_expr(scrutinee)?;
         let scrutinee = self.borrow(scrutinee)?;
         let join_owner = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let join = self.new_block(vec![BlockParam {
@@ -2214,12 +2211,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         callback: &ConcreteHostCallback,
         params: &[OwnerId],
     ) -> Result<Value, OwnershipError> {
-        let depth = self.depth();
         match &callback.kind {
-            ConcreteHostCallbackKind::Inline { body, .. } => self.lower_expr(body, Some(depth)),
+            ConcreteHostCallbackKind::Inline { body, .. } => self.lower_expr(body),
             ConcreteHostCallbackKind::Named { callee, .. } => {
                 let values = params.iter().map(|owner| Value::Named(*owner)).collect();
-                self.lower_call(callee, values, &callback.ret_ty, Some(depth), None)
+                self.lower_call(callee, values, &callback.ret_ty, None)
             }
         }
     }
@@ -2253,9 +2249,9 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             )));
         }
         let element_ty = self.list_element_type(list)?;
-        let init = self.lower_expr(init, None)?;
+        let init = self.lower_expr(init)?;
         let init = self.consume(init, None)?;
-        let list = self.lower_expr(list, None)?;
+        let list = self.lower_expr(list)?;
         let list = self.borrow(list)?;
         let outer_depth = self.depth();
         let header_owner = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
@@ -2369,7 +2365,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             )));
         }
         let element_ty = self.list_element_type(list)?;
-        let list = self.lower_expr(list, None)?;
+        let list = self.lower_expr(list)?;
         let list = self.borrow(list)?;
         let seed = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         self.emit(Op::Define {
@@ -2484,7 +2480,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             )));
         }
         let element_ty = self.list_element_type(list)?;
-        let list = self.lower_expr(list, None)?;
+        let list = self.lower_expr(list)?;
         let list = self.borrow(list)?;
         let seed = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         self.emit(Op::Define {
@@ -2624,9 +2620,9 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         }
         let element_ty = self.list_element_type(list)?;
         let state_ty = expr_type(init);
-        let init = self.lower_expr(init, None)?;
+        let init = self.lower_expr(init)?;
         let init = self.consume(init, None)?;
-        let list = self.lower_expr(list, None)?;
+        let list = self.lower_expr(list)?;
         let list = self.borrow(list)?;
         let output_seed = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         self.emit(Op::Define {
@@ -2779,19 +2775,17 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         helper: usize,
         args: &[ConcreteHostExpr],
         ty: &ConcreteHostType,
-        tail: Option<usize>,
     ) -> Result<Value, OwnershipError> {
         let Some(helper_ref) = self.helpers.get(helper) else {
             return Err(self.invariant(format!("tensor helper {helper} does not exist")));
         };
         if helper_ref.identity_input().is_some() && args.len() == 1 {
-            return self.lower_expr(&args[0], tail);
+            return self.lower_expr(&args[0]);
         }
         let mut operands = Vec::with_capacity(args.len());
         for arg in args {
-            let value = self.with_site(HostSiteKind::Argument, |lowerer| {
-                lowerer.lower_expr(arg, None)
-            })?;
+            let value =
+                self.with_site(HostSiteKind::Argument, |lowerer| lowerer.lower_expr(arg))?;
             operands.push(self.borrow(value)?);
         }
         self.apply(
@@ -2972,7 +2966,7 @@ fn lower_roots(
     lowerer.push_scope();
     for binding in &ctx.host.globals {
         lowerer.with_site(HostSiteKind::Binding, |lowerer| {
-            let value = lowerer.lower_expr(&binding.value, None)?;
+            let value = lowerer.lower_expr(&binding.value)?;
             lowerer.bind(&binding.name, value)?;
             if let Some(place) = lowerer.lookup(&binding.name) {
                 lowerer.scope_mut()?.names.insert(
@@ -3235,7 +3229,7 @@ fn lower_function(
         lowerer.scope_mut()?.names.insert(param.name.clone(), place);
     }
     lowerer.with_site(HostSiteKind::FunctionReturn, |lowerer| {
-        let value = lowerer.lower_expr(&function.body, Some(0))?;
+        let value = lowerer.lower_expr(&function.body)?;
         let result = lowerer.consume(value, Some(0))?;
         lowerer.exit_scope()?;
         lowerer.set_terminator(Terminator::Return { result })

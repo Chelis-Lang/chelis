@@ -5467,6 +5467,60 @@ pub unsafe extern "C" fn chelis_list_take(
     new_list(items, "chelis_list_take")
 }
 
+/// Consuming take (chelis#3724): the in-place counterpart of
+/// `chelis_list_take` for a uniquely owned list, with the same contract as
+/// `chelis_list_append_owned`.
+///
+/// At strong-owner count one this releases the elements past `count` and
+/// truncates the list in place. That is O(removed) where the cloning entry
+/// point is O(count), which is what makes a cursor that trims its last
+/// element linear instead of quadratic. The result is a prefix of the only
+/// handle, so no second handle can observe the truncation, and no offset is
+/// involved. The returned pointer is the input; [04-LIN-4] forbids a backend
+/// from inferring a returned owner from pointer equality.
+///
+/// Otherwise the cloning path runs and the consumed input is released, so a
+/// retained alias is never mutated.
+///
+/// A count at or above the length returns the whole list: [05-OP-32]'s
+/// `list_take` truncates at the end.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_list_take_owned(
+    list: *mut chelis_list,
+    count: i64,
+) -> *mut chelis_list {
+    if count < 0 {
+        runtime_fail!(
+            "{}",
+            chelis_abi::failure::list_argument_negative("take", "count", count)
+        );
+    }
+    if list.is_null() {
+        return chelis_list_take(list, count);
+    }
+    if (*list).header.strong.load(Ordering::Relaxed) == 1 {
+        // Saturating for the reason `chelis_list_drop_owned` records: a
+        // count that does not fit `usize` is above every list's length.
+        let requested = usize::try_from(count).unwrap_or(usize::MAX);
+        let live_len = (*list).live().len();
+        for offset in requested.min(live_len)..live_len {
+            // Read the slot out, then release, so no borrow of the list
+            // spans the call.
+            let value = (*list).live()[offset];
+            chelis_value_release(value);
+        }
+        (*list).truncate_live(requested);
+        // Owed on every in-place return, a count at or above the length
+        // included: the `resize` is the ledger's only per-call signal that
+        // the in-place arm ran rather than the cloning one.
+        resize_list_ledger(list, "chelis_list_take_owned");
+        return list;
+    }
+    let result = chelis_list_take(list, count);
+    release_list_ptr(list);
+    result
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_list_drop(
     list: *const chelis_list,
