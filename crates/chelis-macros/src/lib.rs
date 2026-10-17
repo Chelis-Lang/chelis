@@ -1,5 +1,5 @@
 use chelis_deep::DeepTag;
-use chelis_unord::{UnordMap, UnordSet};
+use chelis_unord::{PersistentMap, PersistentSet, UnordMap, UnordSet};
 
 use chelis_deep::Span;
 use chelis_deep::annotations::{MacroSource, MetadataKey, MetadataValue};
@@ -144,7 +144,7 @@ impl MacroDef {
             .collect::<UnordMap<_, _>>();
         let mut placed = UnordSet::new();
         collect_symbols(
-            &substitute_expr(&self.body, &substitutions, &UnordSet::new()),
+            &substitute_expr(&self.body, &substitutions, &PersistentSet::new()),
             &mut placed,
         );
         placeholders
@@ -662,11 +662,12 @@ impl Expander {
         let invocation = macro_source(&def.name, args);
         let (placeholder_params, placeholder_args) =
             macro_arg_placeholders(&def.body, arguments, self.expansions);
-        let placeholder_body = substitute_expr(&def.body, &placeholder_params, &UnordSet::new());
+        let placeholder_body =
+            substitute_expr(&def.body, &placeholder_params, &PersistentSet::new());
         let hygienic = hygienize_expr(
             &placeholder_body,
             &mut self.hygiene_counter,
-            &UnordMap::new(),
+            &PersistentMap::new(),
         );
         let substituted = inherit_replaced_value_annotations(
             replace_placeholder_vars(&hygienic, &placeholder_args)?,
@@ -868,9 +869,14 @@ fn collect_symbols(expr: &Expr, out: &mut UnordSet<String>) {
     }
 }
 
+/// The names bound around an expansion site. Each nested scope adds to a
+/// copy of its parent's, so the set is persistent: a copy shares its parent's
+/// storage, and a scope `d` binders deep costs `d` insertions rather than
+/// `d^2 / 2` copied names (chelis#3837). Substitution's shadowed set and
+/// hygiene's renaming map are persistent for the same reason.
 #[derive(Debug, Clone, Default)]
 struct Scope {
-    blockers: UnordSet<String>,
+    blockers: PersistentSet<String>,
 }
 
 impl Scope {
@@ -956,7 +962,7 @@ fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
 fn substitute_expr(
     expr: &Expr,
     params: &UnordMap<String, Expr>,
-    shadowed: &UnordSet<String>,
+    shadowed: &PersistentSet<String>,
 ) -> Expr {
     match expr.carrier() {
         ExprCarrier::Atom(_) => expr.clone(),
@@ -1016,7 +1022,7 @@ fn substitute_expr(
 fn substitute_fn(
     node: MacroNode<'_>,
     params: &UnordMap<String, Expr>,
-    shadowed: &UnordSet<String>,
+    shadowed: &PersistentSet<String>,
 ) -> Expr {
     let Some(AdmittedSpecialForm::Fn { params_expr, body }) = admitted_special_form(node) else {
         return node.expr.clone();
@@ -1038,7 +1044,7 @@ fn substitute_fn(
 fn substitute_let(
     node: MacroNode<'_>,
     params: &UnordMap<String, Expr>,
-    shadowed: &UnordSet<String>,
+    shadowed: &PersistentSet<String>,
 ) -> Expr {
     let Some(AdmittedSpecialForm::Let { bind_node, body }) = admitted_special_form(node) else {
         return node.expr.clone();
@@ -1065,7 +1071,7 @@ fn substitute_let(
 fn substitute_match(
     node: MacroNode<'_>,
     params: &UnordMap<String, Expr>,
-    shadowed: &UnordSet<String>,
+    shadowed: &PersistentSet<String>,
 ) -> Expr {
     let kids = node.children;
     let mut children = Vec::with_capacity(kids.len());
@@ -1080,11 +1086,17 @@ fn substitute_match(
             if arm_kids.len() >= 3 {
                 let mut arm_shadowed = shadowed.clone();
                 arm_shadowed.extend(chelis_deep::pattern_binder_names(&arm_kids[0]));
-                let mut arm_children = arm_kids.to_vec();
-                if !is_unit_list(&arm_kids[1]) {
-                    arm_children[1] = substitute_expr(&arm_kids[1], params, &arm_shadowed);
-                }
-                arm_children[2] = substitute_expr(&arm_kids[2], params, &arm_shadowed);
+                // Copy only the children substitution leaves as they are,
+                // never the guard or body it is about to replace.
+                let guard = if is_unit_list(&arm_kids[1]) {
+                    arm_kids[1].clone()
+                } else {
+                    substitute_expr(&arm_kids[1], params, &arm_shadowed)
+                };
+                let body = substitute_expr(&arm_kids[2], params, &arm_shadowed);
+                let mut arm_children = Vec::with_capacity(arm_kids.len());
+                arm_children.extend([arm_kids[0].clone(), guard, body]);
+                arm_children.extend_from_slice(&arm_kids[3..]);
                 children.push(rebuild_macro_node(
                     arm_node,
                     arm_node.metadata.clone(),
@@ -1098,7 +1110,7 @@ fn substitute_match(
     rebuild_macro_node(node, node.metadata.clone(), children)
 }
 
-fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &UnordMap<String, String>) -> Expr {
+fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &PersistentMap<String, String>) -> Expr {
     match expr.carrier() {
         ExprCarrier::Atom(_) => expr.clone(),
         ExprCarrier::MetadataMap(meta) => Expr::Map(
@@ -1151,7 +1163,11 @@ fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &UnordMap<String, Strin
     }
 }
 
-fn hygienize_fn(node: MacroNode<'_>, counter: &mut usize, env: &UnordMap<String, String>) -> Expr {
+fn hygienize_fn(
+    node: MacroNode<'_>,
+    counter: &mut usize,
+    env: &PersistentMap<String, String>,
+) -> Expr {
     let Some(AdmittedSpecialForm::Fn { params_expr, body }) = admitted_special_form(node) else {
         return node.expr.clone();
     };
@@ -1163,7 +1179,11 @@ fn hygienize_fn(node: MacroNode<'_>, counter: &mut usize, env: &UnordMap<String,
     )
 }
 
-fn hygienize_let(node: MacroNode<'_>, counter: &mut usize, env: &UnordMap<String, String>) -> Expr {
+fn hygienize_let(
+    node: MacroNode<'_>,
+    counter: &mut usize,
+    env: &PersistentMap<String, String>,
+) -> Expr {
     let Some(AdmittedSpecialForm::Let { bind_node, body }) = admitted_special_form(node) else {
         return node.expr.clone();
     };
@@ -1190,7 +1210,7 @@ fn hygienize_let(node: MacroNode<'_>, counter: &mut usize, env: &UnordMap<String
 fn hygienize_match(
     node: MacroNode<'_>,
     counter: &mut usize,
-    env: &UnordMap<String, String>,
+    env: &PersistentMap<String, String>,
 ) -> Expr {
     let kids = node.children;
     let mut children = Vec::with_capacity(kids.len());
@@ -1204,12 +1224,18 @@ fn hygienize_match(
             let arm_kids = arm_node.children;
             if arm_kids.len() >= 3 {
                 let (pattern, arm_env) = hygienize_pattern(&arm_kids[0], counter, env);
-                let mut arm_children = arm_kids.to_vec();
-                arm_children[0] = pattern;
-                if !is_unit_list(&arm_kids[1]) {
-                    arm_children[1] = hygienize_expr(&arm_kids[1], counter, &arm_env);
-                }
-                arm_children[2] = hygienize_expr(&arm_kids[2], counter, &arm_env);
+                // Copy only the children hygiene leaves as they are, never
+                // the guard or body it is about to replace. The guard is
+                // renamed before the body, which fixes the fresh names.
+                let guard = if is_unit_list(&arm_kids[1]) {
+                    arm_kids[1].clone()
+                } else {
+                    hygienize_expr(&arm_kids[1], counter, &arm_env)
+                };
+                let body = hygienize_expr(&arm_kids[2], counter, &arm_env);
+                let mut arm_children = Vec::with_capacity(arm_kids.len());
+                arm_children.extend([pattern, guard, body]);
+                arm_children.extend_from_slice(&arm_kids[3..]);
                 children.push(rebuild_macro_node(
                     arm_node,
                     arm_node.metadata.clone(),
@@ -1226,8 +1252,8 @@ fn hygienize_match(
 fn hygienize_params_expr(
     expr: &Expr,
     counter: &mut usize,
-    env: &UnordMap<String, String>,
-) -> (Expr, UnordMap<String, String>) {
+    env: &PersistentMap<String, String>,
+) -> (Expr, PersistentMap<String, String>) {
     let mut next_env = env.clone();
     let node = match expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Params, metadata, children) => {
@@ -1301,8 +1327,8 @@ fn hygienize_params_expr(
 fn hygienize_pattern(
     expr: &Expr,
     counter: &mut usize,
-    env: &UnordMap<String, String>,
-) -> (Expr, UnordMap<String, String>) {
+    env: &PersistentMap<String, String>,
+) -> (Expr, PersistentMap<String, String>) {
     let node = match expr.carrier() {
         ExprCarrier::DecodedNode(tag, metadata, children) => {
             MacroNode::new(expr, tag, metadata, children)
@@ -1819,7 +1845,7 @@ mod tests {
     fn typed_parameter_is_hygienized_as_a_binder() {
         let params = node(DeepTag::Params, vec![typed_parameter("typed_parameter")]);
         let mut counter = 0;
-        let (result, env) = hygienize_params_expr(&params, &mut counter, &UnordMap::new());
+        let (result, env) = hygienize_params_expr(&params, &mut counter, &PersistentMap::new());
         assert_eq!(counter, 1);
         assert_eq!(
             env.get("typed_parameter").map(String::as_str),
@@ -1913,13 +1939,13 @@ mod tests {
             let mut substitutions = UnordMap::new();
             substitutions.insert("value".to_string(), int32_lit(9));
             assert_eq!(
-                substitute_expr(&function, &substitutions, &UnordSet::new()),
+                substitute_expr(&function, &substitutions, &PersistentSet::new()),
                 node(DeepTag::Fn, vec![params.clone(), int32_lit(9)]),
                 "a typed parameter carrier must not freeze substitution"
             );
 
             let function = node(DeepTag::Fn, vec![params.clone(), var("outer")]);
-            let mut env = UnordMap::new();
+            let mut env = PersistentMap::new();
             env.insert("outer".to_string(), "renamed".to_string());
             let mut counter = 0;
             assert_eq!(
@@ -1979,17 +2005,17 @@ mod tests {
         );
         let malformed_let_owner = node(DeepTag::Let, vec![int32_lit(0), var("value")]);
         assert_eq!(
-            substitute_expr(&malformed_fn_params, &substitutions, &UnordSet::new()),
+            substitute_expr(&malformed_fn_params, &substitutions, &PersistentSet::new()),
             malformed_fn_params,
             "substitution must not enter a fn with a non-name parameter"
         );
         assert_eq!(
-            substitute_expr(&malformed_let_owner, &substitutions, &UnordSet::new()),
+            substitute_expr(&malformed_let_owner, &substitutions, &PersistentSet::new()),
             malformed_let_owner,
             "substitution must not enter a let whose first child is not Bind"
         );
 
-        let mut env = UnordMap::new();
+        let mut env = PersistentMap::new();
         env.insert("outer".to_string(), "renamed".to_string());
         let malformed_hygiene_fn = node(
             DeepTag::Fn,
