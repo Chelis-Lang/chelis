@@ -87,6 +87,21 @@ fn magic_len(bytes: &[u8]) -> usize {
         + 1
 }
 
+/// Where the checked parts end in a payload, which is where the transmitted
+/// lowering begins.
+fn checked_parts_len(payload: &[u8]) -> usize {
+    let mut rest = payload;
+    let _: CheckedPartsMirror =
+        serde::Deserialize::deserialize(&mut bincode::Deserializer::with_reader(
+            &mut rest,
+            bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes(),
+        ))
+        .expect("the payload leads with the checked parts");
+    payload.len() - rest.len()
+}
+
 fn load(reef_home: &Path, root: &Path) -> chelis_compiler_api::LoadedContext {
     load_or_compile_package_context(
         reef_home,
@@ -174,49 +189,11 @@ fn the_parent_hands_workers_the_verified_cache_bytes() {
     let magic = magic_len(&warm_bytes);
     let mut envelope: EnvelopeMirror =
         bincode::deserialize(&warm_bytes[magic..]).expect("the envelope decodes");
-    let mut rest = envelope.payload.as_slice();
-    let _: CheckedPartsMirror =
-        serde::Deserialize::deserialize(&mut bincode::Deserializer::with_reader(
-            &mut rest,
-            bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes(),
-        ))
-        .expect("the payload leads with the checked parts");
-    let parts_len = envelope.payload.len() - rest.len();
+    let parts_len = checked_parts_len(&envelope.payload);
     assert!(
         parts_len < envelope.payload.len(),
         "the payload carries a lowering after the checked parts"
     );
-    // Not decoding the lowering does not mean not verifying it: the worker
-    // checks the producer's digest over every payload byte first. A byte
-    // flipped inside the lowering is refused, whether or not the envelope's
-    // own digest is resealed to match.
-    let mut tampered = EnvelopeMirror {
-        payload: envelope.payload.clone(),
-        ..bincode::deserialize(&warm_bytes[magic..]).expect("the envelope decodes")
-    };
-    let inside_lowering = parts_len + (tampered.payload.len() - parts_len) / 2;
-    tampered.payload[inside_lowering] ^= 0x01;
-    for reseal in [false, true] {
-        if reseal {
-            tampered.payload_sha256 = Sha256::digest(&tampered.payload).into();
-        }
-        let mut bytes = warm_bytes[..magic].to_vec();
-        bytes.extend(bincode::serialize(&tampered).expect("encode the tampered envelope"));
-        let error = CompiledContext::decode_authenticated(&bytes, &warm_digest)
-            .expect_err("a byte flipped inside the lowering must not authenticate");
-        let expected_reason = if reseal {
-            "digest its producer delivered"
-        } else {
-            "sha256"
-        };
-        assert!(
-            error.contains(expected_reason),
-            "resealed={reseal}: the rejection must name the failed digest: {error}"
-        );
-    }
-
     envelope.payload.truncate(parts_len);
     envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
     let mut unlowered = warm_bytes[..magic].to_vec();
@@ -231,4 +208,65 @@ fn the_parent_hands_workers_the_verified_cache_bytes() {
     );
     CompiledContext::decode(&unlowered)
         .expect_err("the disk route must refuse a payload without its lowering");
+}
+
+/// The worker decodes only the checked parts, so the transmitted lowering is
+/// trustworthy only because the producer's digest covers every payload byte.
+/// A byte flipped at the start, in the middle, or at the end of the lowering
+/// must be refused by both routes, whether or not the envelope's own digest is
+/// resealed to match. The worker route compares against the producer's digest;
+/// the disk route re-derives the lowering and compares.
+#[test]
+fn a_tampered_lowering_byte_is_refused_by_both_routes() {
+    let (_dir, root) = package_fixture();
+    let reef_home = TempDir::new().expect("reef home");
+    let (bytes, digest) = load(reef_home.path(), &root)
+        .into_handoff()
+        .expect("handoff");
+    let magic = magic_len(&bytes);
+    let envelope: EnvelopeMirror =
+        bincode::deserialize(&bytes[magic..]).expect("the envelope decodes");
+    let parts_len = checked_parts_len(&envelope.payload);
+    let last = envelope.payload.len() - 1;
+    assert!(
+        parts_len < last,
+        "the payload carries a lowering after the checked parts"
+    );
+
+    // Control: the untouched bytes authenticate and decode on both routes.
+    CompiledContext::decode_authenticated(&bytes, &digest)
+        .expect("the producer's own bytes must authenticate");
+    CompiledContext::decode(&bytes).expect("the producer's own bytes must decode");
+
+    for (position, index) in [
+        ("first", parts_len),
+        ("middle", parts_len + (last - parts_len) / 2),
+        ("last", last),
+    ] {
+        for reseal in [false, true] {
+            let mut tampered: EnvelopeMirror =
+                bincode::deserialize(&bytes[magic..]).expect("the envelope decodes");
+            tampered.payload[index] ^= 0x01;
+            if reseal {
+                tampered.payload_sha256 = Sha256::digest(&tampered.payload).into();
+            }
+            let mut changed = bytes[..magic].to_vec();
+            changed.extend(bincode::serialize(&tampered).expect("encode the tampered envelope"));
+            let case = format!("{position} lowering byte, resealed={reseal}");
+
+            let error = CompiledContext::decode_authenticated(&changed, &digest)
+                .expect_err(&format!("the worker route accepted a tampered {case}"));
+            let expected = if reseal {
+                "does not match the digest its producer delivered"
+            } else {
+                "payload sha256 does not match envelope"
+            };
+            assert!(
+                error.contains(expected),
+                "{case}: the worker route must name the failed digest: {error}"
+            );
+            CompiledContext::decode(&changed)
+                .expect_err(&format!("the disk route accepted a tampered {case}"));
+        }
+    }
 }
