@@ -293,8 +293,7 @@ fn hex_digest(value: &str) -> bool {
 
 /// The Nix systems that a pinned proof scope can name. Each pairs with the CPU
 /// architecture as `std::env::consts::ARCH` and GNU triples spell it.
-const PROOF_SYSTEMS: [(&str, &str); 2] =
-    [("x86_64-linux", "x86_64"), ("aarch64-linux", "aarch64")];
+const PROOF_SYSTEMS: [(&str, &str); 2] = [("x86_64-linux", "x86_64"), ("aarch64-linux", "aarch64")];
 
 fn proof_system_architecture(nix_system: &str) -> Option<&'static str> {
     PROOF_SYSTEMS
@@ -1393,13 +1392,8 @@ mod tests {
             ("x86_64-linux", "macos", "x86_64", "macos", "x86_64"),
         ] {
             assert!(
-                check_native_execution(
-                    system,
-                    &execution(os, cpu_isa),
-                    host_os,
-                    host_architecture
-                )
-                .is_err(),
+                check_native_execution(system, &execution(os, cpu_isa), host_os, host_architecture)
+                    .is_err(),
                 "{system} {os}/{cpu_isa} on {host_os}/{host_architecture}"
             );
         }
