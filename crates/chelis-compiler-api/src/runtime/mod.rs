@@ -5,6 +5,10 @@ use std::sync::Arc;
 
 use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_ir::callable_value::NormalizedCallableContract;
+
+/// A retained invocation contract, normalized once and shared by every clone
+/// of the callable that carries it (chelis#3741).
+type RetainedContract = Arc<NormalizedCallableContract>;
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_types::{
@@ -225,7 +229,7 @@ pub enum RuntimeValue {
     /// A statically admitted operation value. Its sealed token owns both the
     /// canonical declaration and whole checked scheme; no closure source is
     /// reconstructed and no caller binding can redirect the operation.
-    Builtin(chelis_ir::callable_value::ResolvedBuiltinValue<NormalizedCallableContract>),
+    Builtin(chelis_ir::callable_value::ResolvedBuiltinValue<RetainedContract>),
     Closure {
         /// Exact checked `(fn ...)` expression that produced this closure.
         /// Transform lowering reuses this carrier directly: rebuilding a
@@ -250,7 +254,7 @@ pub enum RuntimeValue {
         /// entry so a broader supplied callable cannot erase a narrower
         /// invocation contract. Each is normalized once, where it is
         /// retained, never again per application (chelis#3741).
-        invocation_contracts: Box<Vec<NormalizedCallableContract>>,
+        invocation_contracts: Box<Vec<RetainedContract>>,
         /// The body, with the reads in it that are their binding's last
         /// use. Shared, so a clone of the closure copies no syntax.
         body: Arc<closure_body::ClosureBody>,
@@ -280,13 +284,13 @@ pub enum RuntimeValue {
         /// Authored higher-order formal signatures retained at each
         /// specialization boundary, shared with ordinary closures so every
         /// supported runtime callable executes the same invocation protocol.
-        invocation_contracts: Box<Vec<NormalizedCallableContract>>,
+        invocation_contracts: Box<Vec<RetainedContract>>,
     },
     Unit,
 }
 
 impl RuntimeValue {
-    fn invocation_contracts(&self) -> Option<&[NormalizedCallableContract]> {
+    fn invocation_contracts(&self) -> Option<&[RetainedContract]> {
         match self {
             Self::Closure {
                 invocation_contracts,
@@ -301,7 +305,7 @@ impl RuntimeValue {
         }
     }
 
-    fn retain_invocation_contract(&mut self, contract: NormalizedCallableContract) {
+    fn retain_invocation_contract(&mut self, contract: RetainedContract) {
         match self {
             Self::Closure {
                 invocation_contracts,

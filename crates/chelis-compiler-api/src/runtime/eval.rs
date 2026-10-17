@@ -3929,10 +3929,12 @@ impl<'a> EvalContext<'a> {
     /// retains it. Every later application reads the retained normalized
     /// signature, so the per-call path only checks actual arguments
     /// (chelis#3741).
-    fn retained_contract(&self, authored: &Expr) -> Result<NormalizedCallableContract, String> {
-        NormalizedCallableContract::from_authored(&self.adt_registry, authored)?.ok_or_else(|| {
-            "retained invocation contract is not a checked function signature".to_owned()
-        })
+    fn retained_contract(&self, authored: &Expr) -> Result<RetainedContract, String> {
+        NormalizedCallableContract::from_authored(&self.adt_registry, authored)?
+            .map(Arc::new)
+            .ok_or_else(|| {
+                "retained invocation contract is not a checked function signature".to_owned()
+            })
     }
 
     fn apply_resolved_callable_under_result_claim(

@@ -29,6 +29,17 @@ pub trait CallableContractFrame: Clone {
     fn authored_syntax(&self) -> &Expr;
 }
 
+/// A shared frame is the frame it shares: cloning a chain of them copies no
+/// syntax.
+impl<C: CallableContractFrame> CallableContractFrame for Arc<C> {
+    fn signature_syntax(&self) -> &Expr {
+        C::signature_syntax(self)
+    }
+    fn authored_syntax(&self) -> &Expr {
+        C::authored_syntax(self)
+    }
+}
+
 impl CallableContractFrame for Expr {
     fn signature_syntax(&self) -> &Expr {
         self
