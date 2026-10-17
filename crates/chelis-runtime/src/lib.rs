@@ -595,21 +595,22 @@ impl RuntimeAccumulationSource<f64> for f32 {
 }
 
 /// Adjacent-pair balanced sum used where [05-OP-33] selects the canonical
-/// reduction tree. The leaf vector is already in the atom's required order.
-fn runtime_balanced_sum<T: RuntimeArithmetic>(mut leaves: Vec<T>, op: &'static str) -> T {
-    if leaves.is_empty() {
+/// reduction tree. The leaves are already in the atom's required order. Each
+/// pass writes pair `j` to slot `j`, which no later pair of that pass reads,
+/// so the tree folds within the leaf storage and allocates nothing.
+fn runtime_balanced_sum<T: RuntimeArithmetic>(leaves: &mut [T], op: &'static str) -> T {
+    let mut count = leaves.len();
+    if count == 0 {
         return T::default();
     }
-    while leaves.len() > 1 {
-        let mut next = Vec::with_capacity(leaves.len().div_ceil(2));
-        let (pairs, remainder) = leaves.as_slice().as_chunks::<2>();
-        for pair in pairs {
-            next.push(pair[0].runtime_add(pair[1], op));
+    while count > 1 {
+        for pair in 0..count / 2 {
+            leaves[pair] = leaves[2 * pair].runtime_add(leaves[2 * pair + 1], op);
         }
-        if let Some(last) = remainder.first() {
-            next.push(*last);
+        if count % 2 == 1 {
+            leaves[count / 2] = leaves[count - 1];
         }
-        leaves = next;
+        count = count.div_ceil(2);
     }
     // A sum is arithmetic even when its group has one leaf that no addition
     // touched, so that leaf finalizes like every other sum ([04-NUM-2]).
@@ -6660,6 +6661,8 @@ unsafe fn tensor_scatter(
     ) {
         let output = T::data_ptr_unchecked(out);
         let update = T::data_ptr_unchecked(updates as *mut chelis_tensor);
+        // One leaf buffer serves every destination.
+        let mut leaves = Vec::new();
         for (out_linear, update_indices) in additive_leaves.iter().enumerate() {
             if update_indices.is_empty() {
                 continue;
@@ -6669,10 +6672,11 @@ unsafe fn tensor_scatter(
                     .and_then(|count| count.scratch_len::<T>()),
                 "scatter scratch",
             );
-            let mut leaves = Vec::with_capacity(count);
+            leaves.clear();
+            leaves.reserve(count);
             leaves.push(*output.add(out_linear));
             leaves.extend(update_indices.iter().map(|index| *update.add(*index)));
-            *output.add(out_linear) = runtime_balanced_sum(leaves, "scatter");
+            *output.add(out_linear) = runtime_balanced_sum(&mut leaves, "scatter");
         }
     }
     // Walk the update positions, then dispatch on output dtype only
@@ -7197,9 +7201,12 @@ pub unsafe extern "C" fn chelis_tensor_trace(
         let inner = metadata_or_fail(axis.inner().as_usize(), "chelis_tensor_trace");
         let input = Source::data_ptr_unchecked(diag);
         let output = Output::data_ptr_unchecked(out);
+        // One leaf buffer serves every output.
+        let mut leaves = Vec::new();
         for outer_idx in 0..outer {
             for inner_idx in 0..inner {
-                let mut leaves = Vec::with_capacity(metadata_or_fail(
+                leaves.clear();
+                leaves.reserve(metadata_or_fail(
                     axis.extent().scratch_len::<Accumulator>(),
                     "trace scratch",
                 ));
@@ -7213,7 +7220,7 @@ pub unsafe extern "C" fn chelis_tensor_trace(
                 *output.add(metadata_or_fail(
                     axis.reduced_index(outer_idx, inner_idx),
                     "trace output",
-                )) = Output::from_accumulator(runtime_balanced_sum(leaves, "trace"));
+                )) = Output::from_accumulator(runtime_balanced_sum(&mut leaves, "trace"));
             }
         }
     }
@@ -7453,6 +7460,8 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         let mut reduction_index = vec![0; reduction_labels.len()];
         let mut lhs_index = vec![0; lhs_chars.len()];
         let mut rhs_index = vec![0; rhs_chars.len()];
+        // One product buffer serves every output.
+        let mut products = Vec::new();
         for out_linear in 0..out_size {
             if !out_labels.is_empty() {
                 metadata_or_fail(
@@ -7463,7 +7472,8 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
             for (i, &label) in out_labels.iter().enumerate() {
                 label_values[einsum_label_index(label)] = out_index[i];
             }
-            let mut products = Vec::with_capacity(reduction_total);
+            products.clear();
+            products.reserve(reduction_total);
             for reduction_linear in 0..reduction_total {
                 if !reduction_labels.is_empty() {
                     metadata_or_fail(
@@ -7494,7 +7504,7 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
                 );
             }
             *op.add(out_linear) =
-                Output::from_accumulator(runtime_balanced_sum(products, "einsum"));
+                Output::from_accumulator(runtime_balanced_sum(&mut products, "einsum"));
         }
     }
     match (dtype, accumulator) {
