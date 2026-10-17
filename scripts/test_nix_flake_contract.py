@@ -16,7 +16,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NIX = shutil.which("nix")
 REQUIRES_NIX = unittest.skipUnless(NIX, "Nix is not installed")
-EXPECTED_SYSTEMS = ["aarch64-darwin", "x86_64-linux"]
+EXPECTED_SYSTEMS = ["aarch64-darwin", "aarch64-linux", "x86_64-linux"]
+LINUX_SYSTEMS = ["aarch64-linux", "x86_64-linux"]
 EXPECTED_PACKAGES = ["chelis", "chelis-runtime", "chelisup", "default"]
 EXPECTED_APPS = ["chelis", "chelisup", "default"]
 EXPECTED_HEADERS = [
@@ -198,27 +199,29 @@ class NixFlakeContractTests(unittest.TestCase):
 
     @REQUIRES_NIX
     def test_lane_check_exists_only_for_native_linux(self) -> None:
-        linux = nix_json(
-            "eval", "--json", ".#checks.x86_64-linux", "--apply", "builtins.attrNames"
-        )
         darwin = nix_json(
             "eval", "--json", ".#checks.aarch64-darwin", "--apply", "builtins.attrNames"
         )
-        self.assertIn("lane-check", linux)
         self.assertNotIn("lane-check", darwin)
-        # Evaluation needs no import from derivation, so any host can force
-        # the Linux derivation without a Linux builder.
-        self.assertEqual(
-            nix_raw(
-                "eval",
-                "--option",
-                "allow-import-from-derivation",
-                "false",
-                "--raw",
-                ".#checks.x86_64-linux.lane-check.system",
-            ),
-            "x86_64-linux",
-        )
+        for system in LINUX_SYSTEMS:
+            with self.subTest(system=system):
+                linux = nix_json(
+                    "eval", "--json", f".#checks.{system}", "--apply", "builtins.attrNames"
+                )
+                self.assertIn("lane-check", linux)
+                # Evaluation needs no import from derivation, so any host can
+                # force each Linux derivation without a Linux builder.
+                self.assertEqual(
+                    nix_raw(
+                        "eval",
+                        "--option",
+                        "allow-import-from-derivation",
+                        "false",
+                        "--raw",
+                        f".#checks.{system}.lane-check.system",
+                    ),
+                    system,
+                )
 
     @REQUIRES_NIX
     def test_package_names_are_exact_on_each_system(self) -> None:

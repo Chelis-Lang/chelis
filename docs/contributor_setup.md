@@ -158,7 +158,14 @@ tree. The [SMT build guide](smt_build_setup.md) has the prerequisites.
 ## Nix source packages
 
 From the checkout root, Nix provides source builds of `chelis`,
-`chelis-runtime`, and `chelisup` on `x86_64-linux` and `aarch64-darwin`:
+`chelis-runtime`, and `chelisup` on `x86_64-linux`, `aarch64-linux`, and
+`aarch64-darwin`. Each system has a native CI job that runs the complete check
+set, and `checks.<system>.lane-check` exists on both Linux systems.
+
+`x86_64-darwin` (Intel macOS) is not supported. nixpkgs removes that system for
+26.11 (NixOS/nixpkgs#535508), and Devenv publishes no build for it.
+
+Build and run the compiler:
 
 ```sh
 nix build .#chelis
@@ -249,8 +256,8 @@ with the minimal profile (rustc, cargo, and rust-std) of the Rust version in
 ## Optional Devenv shell
 
 The native path above works without Devenv. The optional shell supplies
-pinned Rust, Python, C and contributor tools on `x86_64-linux` and
-`aarch64-darwin`. It creates `.devenv/state/venv` for Python 3.11 and does not
+pinned Rust, Python, C and contributor tools on `x86_64-linux`,
+`aarch64-linux`, and `aarch64-darwin`. It creates `.devenv/state/venv` for Python 3.11 and does not
 replace the root `.venv`.
 
 Install Nix using its [official instructions](https://nixos.org/download/):

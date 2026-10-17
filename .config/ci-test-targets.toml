@@ -3535,6 +3535,15 @@ cadence = "workflow_dispatch, published release, and daily schedule"
 reason = "the native sandbox authors its locked proof scope from this generator"
 tracking_issue = "chelis#763"
 
+[[path_rule]]
+prefix = "scripts/test_lane_check_scope.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the proof-scope native-system table tests"
+tracking_issue = "chelis#3818"
+
 # The Nix x86-64 gate consumes this complete exact-safe corpus as an input.
 [[path_rule]]
 prefix = "tests/corpus/lane_check/"

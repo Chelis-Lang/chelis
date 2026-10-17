@@ -36,6 +36,27 @@ def command(*argv: str) -> str:
     return subprocess.check_output(argv, text=True).strip()
 
 
+# The Nix systems that a pinned proof scope can name. Each maps to the CPU
+# architecture that `platform.machine()`, Rust, and GNU triples report on Linux.
+PROOF_SYSTEMS = {"x86_64-linux": "x86_64", "aarch64-linux": "aarch64"}
+
+
+def native_architecture(nix_system: str, system: str, machine: str) -> str:
+    """Return the architecture of `nix_system` when this host runs it natively."""
+    architecture = PROOF_SYSTEMS.get(nix_system)
+    if architecture is None:
+        raise ValueError(f"lane-check proof does not support Nix system {nix_system!r}")
+    if system != "Linux" or machine != architecture:
+        raise ValueError(f"lane-check proof for {nix_system} must run on native {architecture} Linux")
+    return architecture
+
+
+def is_linux_triple_for(triple: str, architecture: str) -> bool:
+    """True for a GNU triple `<architecture>-<vendor>-linux-<abi>`."""
+    prefix = f"{architecture}-"
+    return triple.startswith(prefix) and "linux" in triple[len(prefix):].split("-")
+
+
 def create(args: argparse.Namespace) -> None:
     lock = json.loads(args.flake_lock.read_text(encoding="utf-8"))
     nixpkgs_node = lock["nodes"][lock["nodes"]["root"]["inputs"]["nixpkgs"]]
@@ -49,8 +70,7 @@ def create(args: argparse.Namespace) -> None:
     for name, path in libraries.items():
         if not Path(path).exists():
             raise ValueError(f"missing {name} in pinned closure: {path}")
-    if platform.system() != "Linux" or platform.machine() != "x86_64":
-        raise ValueError("lane-check proof must run on native x86_64 Linux")
+    architecture = native_architecture(args.nix_system, platform.system(), platform.machine())
     # `bin/chelis` is a wrapper. The lane check compares this path with the
     # executable that runs, which is the real compiler.
     chelis = args.chelis / "libexec" / "chelis"
@@ -79,6 +99,8 @@ def create(args: argparse.Namespace) -> None:
         raise ValueError(
             f"pinned Rust build host {rustc_host!r} contradicts target {args.build_target!r}"
         )
+    if not is_linux_triple_for(args.build_target, architecture):
+        raise ValueError(f"Rust build target {args.build_target!r} contradicts {args.nix_system}")
     report = {
         "schema_version": 1,
         "source_sha256": sha256_tree(args.source),
@@ -111,12 +133,14 @@ def create(args: argparse.Namespace) -> None:
             "target": command(str(compiler), "-dumpmachine"),
         },
         "libraries": {**libraries, "linkage": "dynamic"},
-        "nix_system": "x86_64-linux",
-        "execution": {"os": "linux", "cpu_isa": "x86_64"},
+        "nix_system": args.nix_system,
+        "execution": {"os": "linux", "cpu_isa": architecture},
         "environment": environment,
     }
-    if not report["compiler"]["target"].startswith("x86_64-"):
-        raise ValueError(f"compiler target contradicts native Linux: {report['compiler']['target']}")
+    if not is_linux_triple_for(report["compiler"]["target"], architecture):
+        raise ValueError(
+            f"compiler target {report['compiler']['target']!r} contradicts {args.nix_system}"
+        )
     args.output.write_text(json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
@@ -136,6 +160,7 @@ def main() -> None:
     parser.add_argument("--math-provider", type=Path, required=True)
     parser.add_argument("--math-provider-drv", required=True)
     parser.add_argument("--rustc", type=Path, required=True)
+    parser.add_argument("--nix-system", choices=sorted(PROOF_SYSTEMS), required=True)
     parser.add_argument("--build-target", required=True)
     parser.add_argument("--output", type=Path, required=True)
     create(parser.parse_args())
