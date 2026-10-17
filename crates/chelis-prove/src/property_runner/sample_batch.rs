@@ -1,9 +1,18 @@
-//! One compile serves many fuzz evaluations (chelis#3117).
+//! One compile serves many fuzz evaluations (chelis#3117, chelis#3801).
 //!
-//! A sample's guard and predicate are evaluated as roots of a program that
-//! binds the sample's values as literals, because the evaluator's entry
-//! points take runtime arguments only for tensor inputs. Compiling that
-//! program once per evaluation made a fuzz run pay a compile for every guard,
+//! A property whose binders all have values the compiler can take as call
+//! arguments (scalars, booleans and strings) is compiled once as two
+//! functions of its binders, the guard and the predicate, and every sample,
+//! guard and shrink trial is one call of them with the sample's values
+//! ([`CallProgram`]). A call evaluates the binders' values where the
+//! single-probe program spells them as literals; the two compute the same
+//! value, but a call that errors is answered by the sample's own program, so
+//! an error's message is always that program's.
+//!
+//! The other properties (tensor binders, no binders, or values with no
+//! argument spelling) evaluate a sample's guard and predicate as roots of a
+//! program that binds the sample's values as literals. Compiling that program
+//! once per evaluation made a fuzz run pay a compile for every guard,
 //! predicate and shrink trial. Here the probes of a whole run of samples are
 //! declared in one program, compiled once, and each probe is evaluated as a
 //! selected root of that program.
@@ -69,6 +78,54 @@ pub(super) trait SampleLane {
     /// sample in one program and compile it. `None` when that program does not
     /// compile.
     fn compile(&self, samples: &[Self::Sample]) -> Option<CompiledProbes>;
+
+    /// The sample's guard (`precondition`) or predicate as a call of the
+    /// property's compiled [`CallProgram`]. `None` when the lane has no call
+    /// program for this property or this sample has no argument spelling.
+    fn call(&self, _sample: &Self::Sample, _precondition: bool) -> Option<Result<bool, String>> {
+        None
+    }
+}
+
+/// A property compiled once as functions of its binders: the guard (when
+/// guarded) and the predicate, each a definition whose parameters are the
+/// property's binders.
+pub(super) struct CallProgram {
+    prepared: chelis_compiler_api::compiler::PreparedEval,
+    pre: Option<String>,
+    probe: String,
+}
+
+impl CallProgram {
+    pub(super) fn new(
+        prepared: chelis_compiler_api::compiler::PreparedEval,
+        pre: Option<String>,
+        probe: String,
+    ) -> Self {
+        Self {
+            prepared,
+            pre,
+            probe,
+        }
+    }
+
+    /// Call the guard or the predicate with `arguments`, one per binder.
+    pub(super) fn call(
+        &self,
+        arguments: BTreeMap<String, chelis_compiler_api::schema::ExecutionValue>,
+        precondition: bool,
+    ) -> Option<Result<bool, String>> {
+        let root = if precondition {
+            self.pre.as_deref()?
+        } else {
+            self.probe.as_str()
+        };
+        Some(bool_property_root(self.prepared.call_root(
+            root,
+            arguments,
+            BTreeMap::new(),
+        )))
+    }
 }
 
 /// A compiled program holding the probes of a run of samples.
@@ -121,6 +178,12 @@ impl<'l, L: SampleLane> SampleBatch<'l, L> {
     /// Sample `index`'s guard or predicate, with the value its own program
     /// gives (see the module documentation).
     pub(super) fn eval(&self, index: usize, precondition: bool) -> Result<bool, String> {
+        if let Some(answer) = self.lane.call(&self.samples[index], precondition) {
+            return match answer {
+                Ok(value) => Ok(value),
+                Err(_) => self.lane.eval_alone(&self.samples[index], precondition),
+            };
+        }
         let compiled = self
             .compiled
             .get_or_init(|| self.lane.compile(&self.samples));

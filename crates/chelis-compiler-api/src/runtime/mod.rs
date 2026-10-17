@@ -505,6 +505,16 @@ pub(crate) struct HostEvaluationInputs<'a> {
     pub(crate) bindings: Option<&'a UnordMap<String, IrTensorValue>>,
 }
 
+/// One call of a selected parameterized root with its non-tensor argument
+/// values, keyed by parameter name ([05-OBS-9]). The compiler admits the
+/// call before evaluation: every authored non-tensor parameter has a value
+/// whose type is the parameter's checked type, and no other name is
+/// supplied. Tensor parameters still arrive as bindings.
+pub(crate) struct HostCall {
+    pub(crate) root: String,
+    pub(crate) arguments: BTreeMap<String, RuntimeValue>,
+}
+
 /// A failed execution still owes the effects it performed before unwinding.
 #[derive(Debug)]
 pub(crate) struct RuntimeFailure {
@@ -650,12 +660,19 @@ impl PreparedHostEvaluation {
     pub(crate) fn session(&self) -> chelis_ir::host::HostLoweringSession<'_> {
         self.host.session()
     }
+
+    /// The program the host evaluator runs: the library composed with the
+    /// source, or the source alone.
+    pub(crate) fn program(&self) -> &CheckedProgram {
+        self.host.program()
+    }
 }
 
 /// Evaluate against a program prepared once for many evaluations
 /// (chelis#3144). `prepared` holds `library` composed with `program`, or
 /// `program` alone without a library; its sessions reuse the program-wide
 /// host-lowering facts earlier evaluations derived.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_prepared_host_program(
     prepared: &PreparedHostEvaluation,
     program: &CheckedProgram,
@@ -664,6 +681,7 @@ pub(crate) fn evaluate_prepared_host_program(
     inputs: HostEvaluationInputs<'_>,
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
+    call: Option<&HostCall>,
 ) -> Result<RuntimeOutcome, RuntimeFailure> {
     evaluate_host_program_core(
         Some(prepared),
@@ -674,6 +692,7 @@ pub(crate) fn evaluate_prepared_host_program(
         selected_roots,
         manifested_lowered_names,
         system::EvalSystemBoundary::permissive(),
+        call,
     )
 }
 
@@ -697,6 +716,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
         selected_roots,
         manifested_lowered_names,
         system_boundary,
+        None,
     )
 }
 
@@ -717,6 +737,7 @@ fn evaluate_host_program_core(
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
     system_boundary: system::EvalSystemBoundary,
+    call: Option<&HostCall>,
 ) -> Result<RuntimeOutcome, RuntimeFailure> {
     chelis_types::run_on_grown_stack(|| {
         evaluate_host_program_on_grown_stack(
@@ -728,6 +749,7 @@ fn evaluate_host_program_core(
             selected_roots,
             manifested_lowered_names,
             system_boundary,
+            call,
         )
     })
 }
@@ -742,6 +764,7 @@ fn evaluate_host_program_on_grown_stack(
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
     system_boundary: system::EvalSystemBoundary,
+    call: Option<&HostCall>,
 ) -> Result<RuntimeOutcome, RuntimeFailure> {
     let HostEvaluationInputs {
         roots: tensor_bindings,
@@ -991,18 +1014,26 @@ fn evaluate_host_program_on_grown_stack(
         // the effect-row guard above proves the automatic application pure.
         ctx.failure_kind = RuntimeFailureKind::Ordinary;
         let callable = ctx.resolve_top_level(name);
+        let call_arguments = call
+            .filter(|call| call.root == name)
+            .map(|call| &call.arguments);
         let applied = callable.and_then(|closure| {
             // Admission and required-input filtering already selected this
-            // call. Deliver its supplied tensor actuals independently of the
-            // body's execution profile, retaining evaluated-root precedence.
+            // call. Deliver its supplied argument values and tensor actuals
+            // independently of the body's execution profile, retaining
+            // evaluated-root precedence.
             let args: Vec<Option<RuntimeValue>> = match &closure {
                 RuntimeValue::Closure { params, .. } => params
                     .iter()
                     .map(|param| {
-                        tensor_bindings
-                            .get(param)
-                            .cloned()
-                            .map(RuntimeValue::Tensor)
+                        call_arguments
+                            .and_then(|arguments| arguments.get(param).cloned())
+                            .or_else(|| {
+                                tensor_bindings
+                                    .get(param)
+                                    .cloned()
+                                    .map(RuntimeValue::Tensor)
+                            })
                             .or_else(|| {
                                 bound_evaluation_inputs?
                                     .get(param)

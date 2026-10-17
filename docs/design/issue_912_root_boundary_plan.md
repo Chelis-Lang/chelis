@@ -134,6 +134,31 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
     is independently owned; non-root owners drop. This ownership lowering is
     downstream #1286 work and does not add a second root manifest.
 
+20. **A call with argument values runs on the Host lane.** [05-OBS-9] admits a
+    selected parameterized definition with typed call arguments for its
+    non-tensor parameters (`compiler::PreparedEval::call_root`, chelis#3801).
+    Those values enter the host evaluator, which applies the definition to
+    them, so the manifest entry of a call that supplies any argument is
+    assigned the Host lane with the `StructuralForm` reason
+    `selected-callable-arguments`; a call whose parameters are all tensors
+    keeps the lane the Tensor-lane realizability check gives it. The Host lane
+    holds every dtype, so this assignment never narrows a value and satisfies
+    [05-OBS-10]. The entry's required inputs stay its tensor inputs: the live
+    tensor parameters, never an argued one. A call the manifest does not
+    specialize, because a live tensor parameter has no binding, is an error
+    rather than a result without its root. Admission is one type-directed walk
+    of each argument against the parameter's checked type, at every depth,
+    before anything evaluates: a scalar's dtype tag equals the declared
+    primitive; booleans, strings, keys and unit match their own types; tuples,
+    `List` and `Dict` admit every element at its declared type; a tensor's
+    dtype and every literal extent equal the declared ones; and a record's or
+    variant's constructor belongs to the declared data type, each field
+    admitted at its declared type. A value of an invariant-carrying type is
+    then revalidated against the invariant tables the compile derives once, as
+    every in-process value of that type is. A value of a generic user data type
+    (its field types depend on type arguments) and a tensor whose declared
+    extents are not all literal are rejected at the call boundary (#3804).
+
 ## Coordination
 
 - **#733** (spec provenance): manifest machinery binds to atoms.

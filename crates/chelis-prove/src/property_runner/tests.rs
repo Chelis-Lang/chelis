@@ -52,10 +52,7 @@ fn prepared_surf_samples_preserve_monolithic_guards_predicates_and_shrinking() {
         let Ok(program) = surf_eval_program(&decls, &cell) else {
             panic!("{source}: the declaration context builds");
         };
-        let lane = SurfLane {
-            program,
-            property: &property,
-        };
+        let lane = SurfLane::new(program, &property);
         let monolithic = |sample: &Sample, precondition: bool| {
             let mut whole = decls.clone();
             whole.push(Decl::LetDef {
