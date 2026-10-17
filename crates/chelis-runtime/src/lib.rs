@@ -6,6 +6,7 @@
 )]
 
 pub use chelis_vocab::{RuntimeDType, RuntimeDTypeDecodeError};
+pub use dict::chelis_dict;
 pub use element::{Bf16Bits, F16Bits};
 use libc::{c_char, c_int};
 pub use list::chelis_list;
@@ -21,6 +22,7 @@ use std::sync::atomic::{fence, AtomicU8, AtomicUsize, Ordering};
 
 pub mod build_record;
 mod decimal_parse;
+mod dict;
 pub mod dtype_header;
 mod element;
 pub mod host_assert;
@@ -1215,7 +1217,16 @@ unsafe fn validate_heap_payload(value: chelis_value, context: &str) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// `validate_value` calls on this thread; tests read it to bound the
+    /// validation work per dictionary operation (chelis#3733).
+    static VALUES_VALIDATED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 unsafe fn validate_value(value: chelis_value, context: &str) {
+    #[cfg(test)]
+    VALUES_VALIDATED.with(|count| count.set(count.get() + 1));
     if value.reserved != [0; 7] {
         runtime_fail!("Domain: {context}: value reserved bytes must be zero");
     }
@@ -1296,12 +1307,6 @@ pub struct chelis_tuple {
 }
 
 #[repr(C)]
-pub struct chelis_dict {
-    header: HeapHeader,
-    entries: Vec<chelis_dict_entry>,
-}
-
-#[repr(C)]
 pub struct chelis_adt {
     header: HeapHeader,
     ctor: chelis_string,
@@ -1379,12 +1384,9 @@ fn new_tuple(items: Vec<chelis_value>, site: &str) -> *mut chelis_tuple {
     pointer
 }
 
-fn new_dict(entries: Vec<chelis_dict_entry>, site: &str) -> *mut chelis_dict {
-    let bytes = (entries.capacity() as u64).saturating_mul(LEDGER_DICT_ENTRY_BYTES);
-    let pointer = Box::into_raw(Box::new(chelis_dict {
-        header: HeapHeader::new(ownership_ledger::Kind::Dict),
-        entries,
-    }));
+fn new_dict(dict: chelis_dict, site: &str) -> *mut chelis_dict {
+    let bytes = (dict.buffer_capacity() as u64).saturating_mul(LEDGER_DICT_ENTRY_BYTES);
+    let pointer = Box::into_raw(Box::new(dict));
     ledger_allocation(pointer.cast(), ownership_ledger::Kind::Dict, bytes, site);
     pointer
 }
@@ -1458,7 +1460,7 @@ fn resize_dict_ledger(dict: *mut chelis_dict, site: &str) {
         return;
     }
     let bytes =
-        unsafe { ((*dict).entries.capacity() as u64).saturating_mul(LEDGER_DICT_ENTRY_BYTES) };
+        unsafe { ((*dict).buffer_capacity() as u64).saturating_mul(LEDGER_DICT_ENTRY_BYTES) };
     if !ownership_ledger::resize(dict.cast(), bytes, site) {
         runtime_fail!("compiled ownership ledger rejected dict resize at {site}");
     }
@@ -1658,7 +1660,7 @@ unsafe fn finalize_one(
         }
         ownership_ledger::Kind::Dict => {
             let dict = Box::from_raw(pointer.cast::<chelis_dict>());
-            for entry in &dict.entries {
+            for entry in dict.entries() {
                 release_child(entry.key, pending);
                 release_child(entry.value, pending);
             }
@@ -1882,25 +1884,6 @@ unsafe fn clone_items_reserving(items: &[chelis_value], extra: usize) -> Vec<che
     out
 }
 
-unsafe fn value_key_eq(lhs: chelis_value, rhs: chelis_value) -> bool {
-    validate_value(lhs, "dictionary key");
-    validate_value(rhs, "dictionary key");
-    if lhs.tag != rhs.tag {
-        return false;
-    }
-    match lhs.tag {
-        chelis_value_tag::CHELIS_VALUE_SCALAR => {
-            let lhs = lhs.payload.scalar;
-            let rhs = rhs.payload.scalar;
-            lhs.dtype == rhs.dtype && lhs.bits == rhs.bits
-        }
-        chelis_value_tag::CHELIS_VALUE_STRING => {
-            chelis_string_eq(lhs.payload.string, rhs.payload.string)
-        }
-        _ => false,
-    }
-}
-
 unsafe fn validate_dict_key(key: chelis_value, context: &str) {
     validate_value(key, context);
     match key.tag {
@@ -1922,14 +1905,13 @@ unsafe fn validate_dict_key(key: chelis_value, context: &str) {
     }
 }
 
+/// The position of `key` in `dict`, which may be null. `key` must have passed
+/// `validate_dict_key`, or be a key some dictionary already stores.
 unsafe fn dict_find(dict: *const chelis_dict, key: chelis_value) -> Option<usize> {
     if dict.is_null() {
         return None;
     }
-    (*dict)
-        .entries
-        .iter()
-        .position(|entry| value_key_eq(entry.key, key))
+    (*dict).find(key)
 }
 
 unsafe fn tensor_normalize_axis(tensor: *const chelis_tensor, axis: i32, op: &str) -> usize {
@@ -4875,7 +4857,7 @@ pub unsafe extern "C" fn chelis_dict_len(dict: *const chelis_dict) -> i64 {
     if dict.is_null() {
         0
     } else {
-        (*dict).entries.len() as i64
+        (*dict).len() as i64
     }
 }
 
@@ -5674,7 +5656,7 @@ pub unsafe extern "C" fn chelis_list_enumerate(list: *const chelis_list) -> *mut
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_dict_from_pairs(pairs: *const chelis_list) -> *mut chelis_dict {
-    let mut entries: Vec<chelis_dict_entry> = Vec::new();
+    let mut entries = chelis_dict::with_capacity(0);
     if !pairs.is_null() {
         for pair in (*pairs).live() {
             if pair.tag != chelis_value_tag::CHELIS_VALUE_TUPLE {
@@ -5687,14 +5669,11 @@ pub unsafe extern "C" fn chelis_dict_from_pairs(pairs: *const chelis_list) -> *m
             let key = (*entry).items[0];
             validate_dict_key(key, "chelis_dict_from_pairs key");
             let value = (*entry).items[1];
-            if let Some(pos) = entries
-                .iter()
-                .position(|existing| value_key_eq(existing.key, key))
-            {
-                chelis_value_release(entries[pos].value);
-                entries[pos].value = chelis_value_clone(value);
+            if let Some(pos) = entries.find(key) {
+                chelis_value_release(*entries.value_mut(pos));
+                *entries.value_mut(pos) = chelis_value_clone(value);
             } else {
-                entries.push(chelis_dict_entry {
+                entries.push_absent(chelis_dict_entry {
                     key: chelis_value_clone(key),
                     value: chelis_value_clone(value),
                 });
@@ -5717,7 +5696,7 @@ pub unsafe extern "C" fn chelis_dict_get(
 ) -> *mut chelis_option {
     validate_dict_key(key, "chelis_dict_get key");
     if let Some(index) = dict_find(dict, key) {
-        let value = chelis_value_clone((*dict).entries[index].value);
+        let value = chelis_value_clone((*dict).entry(index).value);
         new_option(Some(value), "chelis_dict_get")
     } else {
         new_option(None, "chelis_dict_get")
@@ -5756,11 +5735,12 @@ pub unsafe extern "C" fn chelis_dict_remove(
     key: chelis_value,
 ) -> *mut chelis_dict {
     validate_dict_key(key, "chelis_dict_remove key");
-    let mut entries = Vec::new();
+    let mut entries = chelis_dict::with_capacity(0);
     if !dict.is_null() {
-        for entry in &(*dict).entries {
-            if !value_key_eq(entry.key, key) {
-                entries.push(chelis_dict_entry {
+        for entry in (*dict).entries() {
+            if !dict::key_eq(entry.key, key) {
+                // The source's keys are distinct, so every kept key is absent.
+                entries.push_absent(chelis_dict_entry {
                     key: chelis_value_clone(entry.key),
                     value: chelis_value_clone(entry.value),
                 });
@@ -5779,25 +5759,18 @@ pub unsafe extern "C" fn chelis_dict_insert(
     validate_dict_key(key, "chelis_dict_insert key");
     validate_value(value, "chelis_dict_insert value");
     let mut entries = if dict.is_null() {
-        Vec::new()
+        chelis_dict::with_capacity(0)
     } else {
-        let mut out = Vec::with_capacity((*dict).entries.len() + 1);
-        for entry in &(*dict).entries {
-            out.push(chelis_dict_entry {
-                key: chelis_value_clone(entry.key),
-                value: chelis_value_clone(entry.value),
-            });
-        }
-        out
+        (*dict).cloned_with_extra(1, |entry| chelis_dict_entry {
+            key: chelis_value_clone(entry.key),
+            value: chelis_value_clone(entry.value),
+        })
     };
-    if let Some(index) = entries
-        .iter()
-        .position(|entry| value_key_eq(entry.key, key))
-    {
-        chelis_value_release(entries[index].value);
-        entries[index].value = chelis_value_clone(value);
+    if let Some(index) = entries.find(key) {
+        chelis_value_release(*entries.value_mut(index));
+        *entries.value_mut(index) = chelis_value_clone(value);
     } else {
-        entries.push(chelis_dict_entry {
+        entries.push_absent(chelis_dict_entry {
             key: chelis_value_clone(key),
             value: chelis_value_clone(value),
         });
@@ -5810,25 +5783,21 @@ pub unsafe extern "C" fn chelis_dict_merge(
     lhs: *const chelis_dict,
     rhs: *const chelis_dict,
 ) -> *mut chelis_dict {
-    let mut entries = Vec::new();
-    if !lhs.is_null() {
-        for entry in &(*lhs).entries {
-            entries.push(chelis_dict_entry {
-                key: chelis_value_clone(entry.key),
-                value: chelis_value_clone(entry.value),
-            });
-        }
-    }
+    let mut entries = if lhs.is_null() {
+        chelis_dict::with_capacity(0)
+    } else {
+        (*lhs).cloned_with_extra(0, |entry| chelis_dict_entry {
+            key: chelis_value_clone(entry.key),
+            value: chelis_value_clone(entry.value),
+        })
+    };
     if !rhs.is_null() {
-        for entry in &(*rhs).entries {
-            if let Some(index) = entries
-                .iter()
-                .position(|existing| value_key_eq(existing.key, entry.key))
-            {
-                chelis_value_release(entries[index].value);
-                entries[index].value = chelis_value_clone(entry.value);
+        for entry in (*rhs).entries() {
+            if let Some(index) = entries.find(entry.key) {
+                chelis_value_release(*entries.value_mut(index));
+                *entries.value_mut(index) = chelis_value_clone(entry.value);
             } else {
-                entries.push(chelis_dict_entry {
+                entries.push_absent(chelis_dict_entry {
                     key: chelis_value_clone(entry.key),
                     value: chelis_value_clone(entry.value),
                 });
@@ -5869,16 +5838,11 @@ pub unsafe extern "C" fn chelis_dict_insert_owned(
         // exactly once, so the replaced value's release must never run
         // before the incoming one has its own count.
         let fresh = chelis_value_clone(value);
-        let existing = (*dict)
-            .entries
-            .iter()
-            .position(|entry| value_key_eq(entry.key, key));
-        if let Some(index) = existing {
-            let previous = (*dict).entries[index].value;
-            (*dict).entries[index].value = fresh;
+        if let Some(index) = (*dict).find(key) {
+            let previous = std::mem::replace((*dict).value_mut(index), fresh);
             chelis_value_release(previous);
         } else {
-            (*dict).entries.push(chelis_dict_entry {
+            (*dict).push_absent(chelis_dict_entry {
                 key: chelis_value_clone(key),
                 value: fresh,
             });
@@ -5909,24 +5873,16 @@ pub unsafe extern "C" fn chelis_dict_merge_owned(
     // extending.
     let aliased = std::ptr::eq(lhs as *const chelis_dict, rhs);
     if !aliased && (*lhs).header.strong.load(Ordering::Relaxed) == 1 {
-        let incoming = if rhs.is_null() {
-            0
-        } else {
-            (*rhs).entries.len()
-        };
-        for position in 0..incoming {
-            let entry = (*rhs).entries[position];
-            let existing = (*lhs)
-                .entries
-                .iter()
-                .position(|held| value_key_eq(held.key, entry.key));
-            if let Some(index) = existing {
+        // `rhs` is a different allocation here, so reading its entries while
+        // `lhs` grows touches nothing that moves.
+        let incoming = (!rhs.is_null()).then(|| (*rhs).entries());
+        for entry in incoming.into_iter().flatten() {
+            if let Some(index) = (*lhs).find(entry.key) {
                 let fresh = chelis_value_clone(entry.value);
-                let previous = (*lhs).entries[index].value;
-                (*lhs).entries[index].value = fresh;
+                let previous = std::mem::replace((*lhs).value_mut(index), fresh);
                 chelis_value_release(previous);
             } else {
-                (*lhs).entries.push(chelis_dict_entry {
+                (*lhs).push_absent(chelis_dict_entry {
                     key: chelis_value_clone(entry.key),
                     value: chelis_value_clone(entry.value),
                 });
@@ -5956,19 +5912,11 @@ pub unsafe extern "C" fn chelis_dict_remove_owned(
     }
     validate_dict_key(key, "chelis_dict_remove_owned key");
     if (*dict).header.strong.load(Ordering::Relaxed) == 1 {
-        // `retain` rather than a single removal, so a dictionary that somehow
-        // holds one key twice loses exactly the entries `chelis_dict_remove`
-        // would have filtered out.
-        let mut removed: Vec<chelis_dict_entry> = Vec::new();
-        (*dict).entries.retain(|entry| {
-            if value_key_eq(entry.key, key) {
-                removed.push(*entry);
-                false
-            } else {
-                true
-            }
-        });
-        for entry in removed {
+        // Every construction path keeps keys distinct, so one key names at
+        // most one entry and this removes exactly what `chelis_dict_remove`
+        // filters out.
+        if let Some(index) = (*dict).find(key) {
+            let entry = (*dict).remove_at(index);
             chelis_value_release(entry.key);
             chelis_value_release(entry.value);
         }
@@ -5983,7 +5931,7 @@ pub unsafe extern "C" fn chelis_dict_remove_owned(
 pub unsafe extern "C" fn chelis_dict_keys(dict: *const chelis_dict) -> *mut chelis_list {
     let mut items = Vec::new();
     if !dict.is_null() {
-        for entry in &(*dict).entries {
+        for entry in (*dict).entries() {
             items.push(chelis_value_clone(entry.key));
         }
     }
@@ -5994,7 +5942,7 @@ pub unsafe extern "C" fn chelis_dict_keys(dict: *const chelis_dict) -> *mut chel
 pub unsafe extern "C" fn chelis_dict_values(dict: *const chelis_dict) -> *mut chelis_list {
     let mut items = Vec::new();
     if !dict.is_null() {
-        for entry in &(*dict).entries {
+        for entry in (*dict).entries() {
             items.push(chelis_value_clone(entry.value));
         }
     }
@@ -6005,7 +5953,7 @@ pub unsafe extern "C" fn chelis_dict_values(dict: *const chelis_dict) -> *mut ch
 pub unsafe extern "C" fn chelis_dict_entries(dict: *const chelis_dict) -> *mut chelis_list {
     let mut items = Vec::new();
     if !dict.is_null() {
-        for entry in &(*dict).entries {
+        for entry in (*dict).entries() {
             let pair = [entry.key, entry.value];
             let tuple = chelis_tuple_from_values(pair.as_ptr(), 2);
             items.push(chelis_value_take_tuple(tuple));
@@ -7758,7 +7706,7 @@ unsafe fn render_value_steps(root: ValueRenderStep) -> String {
                 out.push_str("dict(");
                 steps.push(ValueRenderStep::Text(")"));
                 if !dict.is_null() {
-                    for (index, entry) in (*dict).entries.iter().enumerate().rev() {
+                    for (index, entry) in (*dict).entries().enumerate().rev() {
                         steps.push(ValueRenderStep::Value(entry.value));
                         steps.push(ValueRenderStep::Text(": "));
                         steps.push(ValueRenderStep::Value(entry.key));
@@ -7955,14 +7903,14 @@ unsafe fn values_equal(lhs: chelis_value, rhs: chelis_value) -> bool {
             }
             CHELIS_VALUE_DICT => {
                 let (lhs, rhs) = (lhs.payload.dict, rhs.payload.dict);
-                if (*lhs).entries.len() != (*rhs).entries.len() {
+                if (*lhs).len() != (*rhs).len() {
                     return false;
                 }
-                for entry in (*lhs).entries.iter().rev() {
+                for entry in (*lhs).entries().rev() {
                     let Some(index) = dict_find(rhs, entry.key) else {
                         return false;
                     };
-                    pending.push((entry.value, (*rhs).entries[index].value));
+                    pending.push((entry.value, (*rhs).entry(index).value));
                 }
             }
             CHELIS_VALUE_MAPPED_FILE => runtime_fail!(
@@ -8466,8 +8414,7 @@ unsafe fn csv_table_rows<'a>(
                 runtime_fail!("{builtin}: a table row is not Dict[string,string]");
             }
             (*row.payload.dict)
-                .entries
-                .iter()
+                .entries()
                 .map(|entry| {
                     if entry.key.tag != chelis_value_tag::CHELIS_VALUE_STRING
                         || entry.value.tag != chelis_value_tag::CHELIS_VALUE_STRING
@@ -8511,13 +8458,19 @@ pub unsafe extern "C" fn chelis_parse_csv(text: chelis_string) -> *mut chelis_li
     let items = rows
         .into_iter()
         .map(|row| {
-            let entries = row
-                .into_iter()
-                .map(|(key, value)| chelis_dict_entry {
-                    key: internal_value_from_string(new_runtime_string(key)),
+            let mut entries = chelis_dict::with_capacity(row.len());
+            for (key, value) in row {
+                let key = internal_value_from_string(new_runtime_string(key));
+                // `parse_csv_text` rejects a duplicate column, so each key
+                // is absent; a repeat here is a broken invariant, not data.
+                if entries.find(key).is_some() {
+                    runtime_fail!("parse_csv: duplicate column reached the dictionary builder");
+                }
+                entries.push_absent(chelis_dict_entry {
+                    key,
                     value: internal_value_from_string(new_runtime_string(value)),
-                })
-                .collect();
+                });
+            }
             chelis_value_take_dict(new_dict(entries, "chelis_parse_csv"))
         })
         .collect();
@@ -9810,5 +9763,334 @@ mod list_dir_conversion_tests {
             list_dir_names_to_strings(names, "/d\n\r\t\\\"'é"),
             Err("IO trap in list_dir: directory b\"/d\\n\\r\\t\\\\\\\"\\'\\xc3\\xa9\", entry b\"bad\\n\\r\\t\\\\\\\"\\'\\xff\": name is not valid UTF-8".to_owned())
         );
+    }
+}
+
+/// chelis#2301 and chelis#3733: dictionary operations find a key through the
+/// index without revalidating stored keys. The counts are exact
+/// functions of the inputs, so each bound is deterministic; the quadratic
+/// implementations these replace exceed every bound by orders of magnitude at
+/// the sizes used here. The differential cases hold the observable contract
+/// fixed against a linear-scan reference model.
+#[cfg(test)]
+mod container_cost_tests {
+    use super::*;
+
+    fn comparisons() -> usize {
+        dict::KEY_COMPARISONS.with(std::cell::Cell::get)
+    }
+
+    fn validations() -> usize {
+        VALUES_VALIDATED.with(std::cell::Cell::get)
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Key {
+        Int(i64),
+        Text(String),
+    }
+
+    unsafe fn key_value(key: &Key) -> chelis_value {
+        match key {
+            Key::Int(value) => internal_value_from_i64(*value),
+            Key::Text(text) => {
+                chelis_value_take_string(chelis_string_from_utf8(text.as_ptr(), text.len() as i64))
+            }
+        }
+    }
+
+    unsafe fn read_key(value: chelis_value) -> Key {
+        if value.tag == CHELIS_VALUE_STRING {
+            Key::Text(string_value(value.payload.string).value.clone())
+        } else {
+            Key::Int(i64::from_ne_bytes(value.payload.scalar.bits.to_ne_bytes()))
+        }
+    }
+
+    unsafe fn read_int(value: chelis_value) -> i64 {
+        i64::from_ne_bytes(value.payload.scalar.bits.to_ne_bytes())
+    }
+
+    /// A `List[(K, i64)]` of owned pairs.
+    unsafe fn pairs(entries: &[(Key, i64)]) -> *mut chelis_list {
+        let mut items = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            let pair = [key_value(key), internal_value_from_i64(*value)];
+            let tuple = chelis_tuple_from_values(pair.as_ptr(), 2);
+            chelis_value_release(pair[0]);
+            items.push(chelis_value_take_tuple(tuple));
+        }
+        new_list(items, "container_cost_tests pairs")
+    }
+
+    /// The dictionary's entries in its stored (insertion) order, as
+    /// `chelis_dict_entries` exposes them.
+    unsafe fn contents(dict: *const chelis_dict) -> Vec<(Key, i64)> {
+        let list = chelis_dict_entries(dict);
+        let out = (*list)
+            .live()
+            .iter()
+            .map(|pair| {
+                let items = &(*pair.payload.tuple).items;
+                (read_key(items[0]), read_int(items[1]))
+            })
+            .collect();
+        chelis_list_release(list);
+        out
+    }
+
+    unsafe fn lookup(dict: *const chelis_dict, key: &Key) -> Option<i64> {
+        let probe = key_value(key);
+        let option = chelis_dict_get(dict, probe);
+        let found = (*option).value.map(|value| read_int(value));
+        assert_eq!(chelis_dict_contains(dict, probe), found.is_some());
+        chelis_option_release(option);
+        chelis_value_release(probe);
+        found
+    }
+
+    /// [05-OP-32]'s rule over a plain vector: a repeat replaces the value in
+    /// place, a new key appends, removal keeps the order of the rest.
+    fn model_upsert(model: &mut Vec<(Key, i64)>, key: Key, value: i64) {
+        match model.iter_mut().find(|(held, _)| *held == key) {
+            Some(entry) => entry.1 = value,
+            None => model.push((key, value)),
+        }
+    }
+
+    fn int_keys(n: usize) -> Vec<(Key, i64)> {
+        (0..n as i64).map(|i| (Key::Int(i), i)).collect()
+    }
+
+    fn text_keys(n: usize) -> Vec<(Key, i64)> {
+        (0..n as i64)
+            .map(|i| (Key::Text(i.to_string()), i))
+            .collect()
+    }
+
+    const N: usize = 4096;
+
+    #[test]
+    fn dict_of_compares_and_validates_linearly_in_its_pairs() {
+        for entries in [int_keys(N), text_keys(N)] {
+            unsafe {
+                let list = pairs(&entries);
+                let (compared, validated) = (comparisons(), validations());
+                let dict = chelis_dict_from_pairs(list);
+                let compared = comparisons() - compared;
+                let validated = validations() - validated;
+                // Each incoming key is validated once and its key and value
+                // cloned once; a lookup probes about one bucket.
+                assert!(validated <= 4 * N, "{validated} validations for {N} pairs");
+                assert!(
+                    compared <= 2 * N,
+                    "{compared} key comparisons for {N} pairs"
+                );
+                assert_eq!(contents(dict), entries);
+                chelis_dict_release(dict);
+                chelis_list_release(list);
+            }
+        }
+    }
+
+    /// The probe is validated once at the entry point; the stored keys it is
+    /// compared with were validated when they entered and are not again. A
+    /// dictionary small enough to scan makes every lookup compare against
+    /// every stored key, so a per-comparison validation would show here at
+    /// once.
+    #[test]
+    fn a_lookup_validates_only_its_probe_key() {
+        const LOOKUPS: usize = 1000;
+        for entries in [int_keys(8), text_keys(8)] {
+            unsafe {
+                let list = pairs(&entries);
+                let dict = chelis_dict_from_pairs(list);
+                let absent = key_value(&match &entries[0].0 {
+                    Key::Int(_) => Key::Int(-1),
+                    Key::Text(_) => Key::Text("absent".to_owned()),
+                });
+                let (compared, validated) = (comparisons(), validations());
+                for _ in 0..LOOKUPS {
+                    assert!(!chelis_dict_contains(dict, absent));
+                }
+                assert_eq!(comparisons() - compared, LOOKUPS * entries.len());
+                assert_eq!(validations() - validated, LOOKUPS);
+                chelis_value_release(absent);
+                chelis_dict_release(dict);
+                chelis_list_release(list);
+            }
+        }
+    }
+
+    #[test]
+    fn lookups_and_owned_accumulators_compare_a_bounded_number_of_keys() {
+        for entries in [int_keys(N), text_keys(N)] {
+            unsafe {
+                let before = comparisons();
+                let mut dict = chelis_dict_from_pairs(pairs(&[]));
+                for (key, value) in &entries {
+                    let (key, value) = (key_value(key), internal_value_from_i64(*value));
+                    dict = chelis_dict_insert_owned(dict, key, value);
+                    chelis_value_release(key);
+                }
+                for (key, value) in &entries {
+                    assert_eq!(lookup(dict, key), Some(*value));
+                }
+                for (key, _) in &entries {
+                    let key = key_value(key);
+                    dict = chelis_dict_remove_owned(dict, key);
+                    chelis_value_release(key);
+                }
+                let compared = comparisons() - before;
+                assert_eq!(chelis_dict_len(dict), 0);
+                // N inserts, 2N lookups (get and contains) and N removals.
+                assert!(
+                    compared <= 8 * N,
+                    "{compared} key comparisons for {} operations",
+                    4 * N
+                );
+                chelis_dict_release(dict);
+            }
+        }
+    }
+
+    /// splitmix64, so the operation sequence is the same on every run.
+    fn next(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// Random inserts, removals, merges, duplicate-laden `dict_of`s and
+    /// lookups, through both the consuming and the cloning entry points,
+    /// agree with the reference model on every value and on stored order.
+    /// The key range is small next to the operation count, so the store
+    /// passes through linear-scan size, index growth, collisions, holes and
+    /// compaction many times.
+    #[test]
+    fn random_operation_sequences_match_the_linear_reference() {
+        for (seed, range, text) in [(1_u64, 40_u64, false), (2, 300, false), (3, 200, true)] {
+            let mut state = seed;
+            let make_key = |raw: u64| {
+                if text {
+                    Key::Text(format!("k{raw}é"))
+                } else {
+                    // Negative and positive keys with equal low bits.
+                    Key::Int((raw as i64 - (range as i64) / 2) << 20)
+                }
+            };
+            let mut model: Vec<(Key, i64)> = Vec::new();
+            unsafe {
+                let mut dict = chelis_dict_from_pairs(pairs(&[]));
+                for step in 0..6000_i64 {
+                    let choice = next(&mut state) % 10;
+                    let key = make_key(next(&mut state) % range);
+                    let probe = key_value(&key);
+                    match choice {
+                        0..=3 => {
+                            let value = internal_value_from_i64(step);
+                            dict = if choice == 0 {
+                                let fresh = chelis_dict_insert(dict, probe, value);
+                                chelis_dict_release(dict);
+                                fresh
+                            } else {
+                                chelis_dict_insert_owned(dict, probe, value)
+                            };
+                            model_upsert(&mut model, key, step);
+                        }
+                        4..=6 => {
+                            dict = if choice == 4 {
+                                let fresh = chelis_dict_remove(dict, probe);
+                                chelis_dict_release(dict);
+                                fresh
+                            } else {
+                                chelis_dict_remove_owned(dict, probe)
+                            };
+                            model.retain(|(held, _)| *held != key);
+                        }
+                        7 => {
+                            let mut incoming = Vec::new();
+                            for offset in 0..(next(&mut state) % 12) {
+                                let key = make_key(next(&mut state) % range);
+                                incoming.push((key, step * 100 + offset as i64));
+                            }
+                            let list = pairs(&incoming);
+                            let rhs = chelis_dict_from_pairs(list);
+                            chelis_list_release(list);
+                            let mut rhs_model = Vec::new();
+                            for (key, value) in incoming {
+                                model_upsert(&mut rhs_model, key, value);
+                            }
+                            assert_eq!(contents(rhs), rhs_model);
+                            dict = if next(&mut state).is_multiple_of(2) {
+                                let fresh = chelis_dict_merge(dict, rhs);
+                                chelis_dict_release(dict);
+                                fresh
+                            } else {
+                                chelis_dict_merge_owned(dict, rhs)
+                            };
+                            chelis_dict_release(rhs);
+                            for (key, value) in rhs_model {
+                                model_upsert(&mut model, key, value);
+                            }
+                        }
+                        _ => {
+                            let expected = model
+                                .iter()
+                                .find(|(held, _)| *held == key)
+                                .map(|(_, value)| *value);
+                            assert_eq!(lookup(dict, &key), expected, "seed {seed} step {step}");
+                        }
+                    }
+                    chelis_value_release(probe);
+                    assert_eq!(chelis_dict_len(dict) as usize, model.len());
+                    if step % 97 == 0 {
+                        assert_eq!(contents(dict), model, "seed {seed} step {step}");
+                        // A shared copy is a dense clone with its own index.
+                        chelis_dict_retain(dict);
+                        let copy = chelis_dict_insert(
+                            dict,
+                            key_value(&make_key(0)),
+                            internal_value_from_i64(-1),
+                        );
+                        chelis_dict_release(dict);
+                        let mut copy_model = model.clone();
+                        model_upsert(&mut copy_model, make_key(0), -1);
+                        assert_eq!(contents(copy), copy_model);
+                        for (key, value) in &copy_model {
+                            assert_eq!(lookup(copy, key), Some(*value));
+                        }
+                        chelis_dict_release(copy);
+                    }
+                }
+                assert_eq!(contents(dict), model);
+                for raw in 0..range {
+                    let key = make_key(raw);
+                    let expected = model.iter().find(|(held, _)| *held == key).map(|(_, v)| *v);
+                    assert_eq!(lookup(dict, &key), expected);
+                }
+                chelis_dict_release(dict);
+            }
+        }
+    }
+
+    #[test]
+    fn dict_of_keeps_the_first_position_and_the_last_value_of_a_repeated_key() {
+        let mut entries: Vec<(Key, i64)> = (0..50).map(|i| (Key::Int(i % 17), i)).collect();
+        entries.push((Key::Int(3), 999));
+        let mut model = Vec::new();
+        for (key, value) in entries.clone() {
+            model_upsert(&mut model, key, value);
+        }
+        unsafe {
+            let list = pairs(&entries);
+            let dict = chelis_dict_from_pairs(list);
+            assert_eq!(contents(dict), model);
+            assert_eq!(lookup(dict, &Key::Int(3)), Some(999));
+            chelis_dict_release(dict);
+            chelis_list_release(list);
+        }
     }
 }
