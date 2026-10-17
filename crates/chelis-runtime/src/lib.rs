@@ -7628,16 +7628,6 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
     );
     let reduction_space =
         metadata_or_fail(IterationSpace::new(&reduction_shape), "einsum reduction");
-    // The loop below buffers no reduction, but a reduction whose accumulator
-    // bytes exceed i64 still fails here, as `chelis eval`, which reserves one
-    // output's products, also fails it.
-    metadata_or_fail(
-        reduction_space
-            .elements()
-            .bytes(accumulator)
-            .and_then(ByteCount::allocation),
-        "einsum reduction buffer",
-    );
     let out = allocate_tensor(output_metadata, "einsum output");
     // chelis#3702: each operand offset is affine in the label coordinates, so
     // the per-label strides are computed once (a repeated label, a diagonal,
@@ -7708,6 +7698,13 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         Output: RuntimeAccumulationOutput<Accumulator>,
     {
         let out_size = (*out).count();
+        #[cfg(test)]
+        EINSUM_SUBTREES_HELD.with(|held| held.set(0));
+        // chelis#3805: the reduction is streamed, never stored, so its count
+        // sizes no buffer, and an empty output does not consult it at all.
+        if out_size == 0 {
+            return;
+        }
         let reduction_total = metadata_or_fail(reduction.elements().as_usize(), "einsum reduction");
         let lp = Source::data_ptr_unchecked(lhs as *mut chelis_tensor);
         let rp = Source::data_ptr_unchecked(rhs as *mut chelis_tensor);
@@ -7746,8 +7743,6 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         };
         let mut out_at = EinsumOdometer::new(&plan.output);
         let mut outer_at = EinsumOdometer::new(&outer);
-        #[cfg(test)]
-        EINSUM_SUBTREES_HELD.with(|held| held.set(0));
         for out_linear in 0..out_size {
             // chelis#3782: each product enters the canonical tree as it is
             // formed, so an output holds one partial sum per completed

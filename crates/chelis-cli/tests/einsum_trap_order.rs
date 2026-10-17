@@ -10,6 +10,10 @@
 //! lanes evaluate the operations of a doubly overflowing row in different
 //! orders. Each case's expected outcome comes from a model that checks every
 //! product and tree node, independent of any evaluation order.
+//!
+//! An einsum whose output is empty traps on nothing its reduction would
+//! hold (chelis#3805): both lanes return the empty tensor however many
+//! products the reduction names.
 
 #[path = "common/host_effect_parity.rs"]
 mod parity;
@@ -202,5 +206,43 @@ fn integer_einsum_traps_identically_whatever_overflows_first() {
                 );
             }
         }
+    }
+}
+
+/// Runtime operand builders shared by the empty-output witnesses: each is
+/// a runtime-extent tensor, so the einsum stays on the runtime kernel.
+const EMPTY_OUTPUT_HELPERS: &str = "\
+def g32(n: i64, lo: f32) -> tensor[*, f32] = {
+  l = cumsum(expand(to_tensor([lo]), 0i32, n), 0i32)
+  c = cos(l)
+  mul(sin(add(l, l)), exp(add(add(c, c), c)))
+}
+def k32(n: i64, v: f32) -> tensor[*, f32] = expand(to_tensor([v]), 0i32, n)
+";
+
+/// chelis#3805: an empty output over a reduction whose stored products
+/// would exceed i64 bytes returns the empty tensor in both lanes; the
+/// compiled kernel streams its reduction, so the count sizes nothing.
+#[test]
+fn an_empty_output_ignores_the_size_of_its_reduction() {
+    let witnesses = [
+        (
+            "einsum_empty_f64",
+            "def probe[k, m, n](p: tensor[0, k, n, f32], q: tensor[0, m, k, f32]) -> tensor[0, m, n, f64] = einsum(\"bkn,bmk->bmn\", p, q, accumulator=f64)\n\
+             r_probe = probe(reshape(mul(g32(0i64, 1.3f32), k32(0i64, 1.0f32)), [0i64, 2305843009213693952i64, 0i64]), reshape(mul(g32(0i64, 2.1f32), k32(0i64, 1.0f32)), [0i64, 0i64, 2305843009213693952i64]))\n",
+            "r_probe = tensor(shape=[0, 0, 0], data=[])\n",
+        ),
+        (
+            "einsum_empty_bf16",
+            "def probe[b, k](p: tensor[k, 0, bf16], q: tensor[3, b, 0, k, bf16]) -> tensor[3, b, 0, 0, bf16] = einsum(\"kn,abmk->abmn\", p, q, accumulator=f32)\n\
+             r_probe = probe(reshape(cast(mul(g32(0i64, 1.3f32), k32(0i64, 1.0f32)), bf16), [4611686018427387904i64, 0i64]), reshape(cast(mul(g32(0i64, 2.1f32), k32(0i64, 1.0f32)), bf16), [3i64, 0i64, 0i64, 4611686018427387904i64]))\n",
+            "r_probe = tensor(shape=[3, 0, 0, 0], data=[])\n",
+        ),
+    ];
+    for (name, witness, expected) in witnesses {
+        let source = format!("{EMPTY_OUTPUT_HELPERS}{witness}");
+        let run = parity::assert_lanes_agree(&source, name);
+        assert_eq!(run.status, Some(0), "{name}: {run:?}");
+        assert_eq!(run.stdout, expected, "{name}: {run:?}");
     }
 }
