@@ -146,6 +146,11 @@ fn an_empty_declared_entry_declares_nothing() {
     let output = build(dir.path(), BLAS_PROGRAM, Some(("/abs/include:", ":")), true);
     assert!(output.status.success(), "{}", text(&output.stderr));
     let stdout = text(&output.stdout);
-    assert!(stdout.contains("-isystem/abs/include"), "{stdout}");
-    assert!(!stdout.contains("-L"), "{stdout}");
+    let compile = stdout
+        .lines()
+        .find(|line| line.starts_with("Compile:"))
+        .unwrap_or_else(|| panic!("no Compile line: {stdout}"));
+    assert!(compile.contains("-isystem/abs/include"), "{compile}");
+    assert!(!compile.contains(" -L"), "{compile}");
+    assert!(!compile.contains("-Wl,-rpath"), "{compile}");
 }
