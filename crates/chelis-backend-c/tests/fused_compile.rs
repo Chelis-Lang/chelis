@@ -167,17 +167,16 @@ fn c_fused_reduce_sum_no_intermediate() {
         "Fused reduce should contain step variable 'float v0'"
     );
     // Fused leaves enter the same canonical tree as materialized Sum.
-    assert!(src.contains("__sum_level_"));
-    assert!(src.contains("] = v"));
+    assert!(src.contains("_level[64]"));
+    assert!(src.contains("__carry = v"));
     assert!(!src.contains("acc0 +="));
 
-    // There should be NO separate allocation for the FusedElem output.
-    // The tree scratch is now a checked runtime tensor. It is distinct from
-    // materializing the fused elementwise result across every output group.
+    // There should be NO separate allocation for the FusedElem output, and
+    // the canonical tree streams through locals rather than scratch.
     let alloc_count = src.matches("chelis_alloc(").count();
     assert_eq!(
-        alloc_count, 3,
-        "Fused add→neg→sum requires one constant, one result, and checked tree scratch"
+        alloc_count, 2,
+        "Fused add→neg→sum requires one constant and one result"
     );
     let fused_node = fused
         .nodes()
@@ -185,7 +184,7 @@ fn c_fused_reduce_sum_no_intermediate() {
         .find(|node| matches!(node.op, RiscOp::FusedElem { .. }))
         .unwrap();
     assert!(!src.contains(&format!("chelis_tensor *t{} =", fused_node.id.0)));
-    assert!(src.contains("chelis_reduction_check_scratch("));
+    assert!(!src.contains("chelis_reduction_check_scratch("));
 }
 
 #[test]

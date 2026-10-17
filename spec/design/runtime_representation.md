@@ -671,17 +671,16 @@ have no reachable groups; empty selected domains retain their operation's identi
 Exact result shapes are checked after the existing ordered extent claims and before
 submission. The plan survives input repurpose or release without retaining storage.
 
-Sum and Count allocate tree scratch through checked runtime tensors, at the actual
-accumulator representation. Scratch bytes and target projection are checked before
-result allocation; each worker owns its scratch tensor and write guard. Sum keeps
-#1299's adjacent-pair tree and integer finalization; Count keeps its original
-row-major leaves, checked int64 pairs, and odd tails. Existing dtype rejection,
-non-Sum arithmetic, and vendor-selection obligations remain separately owned.
-Kernel scratch remains outside the shared planner's distinct DAG-slot bound;
-using checked runtime allocation does not make scratch a planned tensor slot.
+Sum and Count keep no tree scratch. Each group streams its leaves through a
+stack-local carry tree at the actual accumulator representation, one level per bit
+of the checked i64 leaf count, so a worker takes no runtime tensor or write guard
+per group. Sum keeps #1299's adjacent-pair tree and integer finalization; Count
+keeps its original row-major leaves, checked int64 pairs, and odd tails. Existing
+dtype rejection, non-Sum arithmetic, and vendor-selection obligations remain
+separately owned.
 
-This is one shippable adoption slice because result validation, loop bounds, source
-indices, and scratch capacity must agree for the same grouping. Its oracle combines
+This is one shippable adoption slice because result validation, loop bounds, and
+source indices must agree for the same grouping. Its oracle combines
 `checked_c_reduction` and the private `checked_metadata`/`metadata_compile` controls
 in debug and release, generated native and sanitizer executions, existing fused,
 integer-promotion and exact-tree regressions, and `count_bool_axes.ch` parity.

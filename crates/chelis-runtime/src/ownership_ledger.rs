@@ -5,6 +5,7 @@
 //! release artifacts contain no ledger state or environment dependency.
 
 use std::ffi::c_void;
+use std::fmt::Display;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,7 +39,7 @@ impl Kind {
 
 #[cfg(feature = "ownership-ledger")]
 mod enabled {
-    use super::{c_void, Kind};
+    use super::{c_void, Display, Kind};
     use chelis_unord::UnordMap;
     use std::env;
     use std::fs::{File, OpenOptions};
@@ -195,11 +196,17 @@ mod enabled {
         let _ = with_state(State::write_summary);
     }
 
-    pub(crate) fn allocate(pointer: *const c_void, kind: Kind, bytes: u64, site: &str) -> bool {
+    pub(crate) fn allocate(
+        pointer: *const c_void,
+        kind: Kind,
+        bytes: u64,
+        site: impl Display,
+    ) -> bool {
         if pointer.is_null() {
             return false;
         }
         with_state(|state| {
+            let site = &site.to_string();
             let key = pointer as usize;
             if state
                 .by_pointer
@@ -332,11 +339,12 @@ mod enabled {
         .unwrap_or(true)
     }
 
-    pub(crate) fn borrow(pointer: *const c_void, site: &str) {
+    pub(crate) fn borrow(pointer: *const c_void, site: impl Display) {
         if pointer.is_null() {
             return;
         }
         let _ = with_state(|state| {
+            let site = &site.to_string();
             let key = pointer as usize;
             let Some(allocation) = state.by_pointer.get(&key).copied() else {
                 state.invalid("invalid_borrow", key, site);
@@ -361,7 +369,12 @@ pub(crate) use enabled::{allocate, borrow, finalize, release, resize, retain};
 
 #[cfg(not(feature = "ownership-ledger"))]
 #[inline(always)]
-pub(crate) fn allocate(_pointer: *const c_void, _kind: Kind, _bytes: u64, _site: &str) -> bool {
+pub(crate) fn allocate(
+    _pointer: *const c_void,
+    _kind: Kind,
+    _bytes: u64,
+    _site: impl Display,
+) -> bool {
     true
 }
 
@@ -391,4 +404,4 @@ pub(crate) fn resize(_pointer: *const c_void, _bytes: u64, _site: &str) -> bool 
 
 #[cfg(not(feature = "ownership-ledger"))]
 #[inline(always)]
-pub(crate) fn borrow(_pointer: *const c_void, _site: &str) {}
+pub(crate) fn borrow(_pointer: *const c_void, _site: impl Display) {}

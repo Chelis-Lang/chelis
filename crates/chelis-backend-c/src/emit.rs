@@ -259,6 +259,31 @@ enum CarriedLeaf {
     Unchanged,
 }
 
+/// [05-OP-30]'s adjacent-pair tree, streamed one leaf at a time with no
+/// runtime scratch. Completed subtrees wait at the level their size names, so
+/// leaf `i` combines with one waiting subtree per trailing one bit of `i`, and
+/// after the last leaf the waiting subtrees fold rightmost first. Both steps
+/// reproduce the in-place pass-by-pass tree exactly: every pass pairs aligned
+/// power-of-two blocks, and the odd block it carries is always the tail.
+struct CarryTree {
+    /// Prefix of the emitted locals.
+    name: String,
+    /// C element type of every node.
+    element: String,
+    /// Up to eight independent trees sharing one leaf count, one per lane.
+    lanes: Option<String>,
+}
+
+impl CarryTree {
+    /// Iterations are separate output elements, never a reassociated
+    /// reduction. Lane j touches only its own leaf slot and its own column of
+    /// every level, and source payloads are immutable and distinct from the
+    /// tree's locals.
+    fn independent_lanes_hint() -> &'static str {
+        "#if defined(__clang__)\n#pragma clang loop vectorize(enable)\n#elif defined(__GNUC__)\n#pragma GCC ivdep\n#endif"
+    }
+}
+
 struct MatmulEmitSpec {
     a: NodeId,
     b: NodeId,
@@ -6464,12 +6489,10 @@ impl CEmitter {
             self.line(&format!("t{id}_contributions = chelis_int_checked_add(t{id}_contributions, chelis_int_checked_mul(t{first}_size, {width}, 64, \"ordered List cotangent count overflow\"), 64, \"ordered List cotangent count overflow\");"));
             offset += width;
         }
-        self.emit_sum_level(
-            id,
-            &format!("t{id}_contributions"),
-            node.output_type.precision,
-        );
-        self.line(&format!("int64_t t{id}_leaf = 0;"));
+        let precision = node.output_type.precision;
+        let tree = Self::sum_tree(id, precision, None);
+        let combine = Self::sum_combine(precision);
+        self.emit_carry_tree_open(&tree);
         offset = 0;
         for &width in groups {
             let first = node.inputs[offset].0;
@@ -6478,10 +6501,8 @@ impl CEmitter {
             ));
             self.indent += 1;
             for input in &node.inputs[offset..offset + width] {
-                self.line(&format!(
-                    "__sum_level_{id}[t{id}_leaf++] = ((const {et}*)t{}_data)[row];",
-                    input.0
-                ));
+                let leaf = format!("((const {et}*)t{}_data)[row]", input.0);
+                self.emit_carry_tree_push(&tree, Some(&leaf), &combine);
             }
             self.indent -= 1;
             self.line("}");
@@ -6490,7 +6511,7 @@ impl CEmitter {
         self.line("{");
         self.indent += 1;
         self.line("const int64_t outer = 0;");
-        self.emit_sum_fold_with(id, node.output_type.precision, CarriedLeaf::Unchanged);
+        self.emit_sum_store(id, &tree, precision, CarriedLeaf::Unchanged);
         self.indent -= 1;
         self.line("}");
     }
@@ -7480,7 +7501,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     }
 
     /// Snapshot one checked grouping before output shape claims or storage reuse.
-    #[allow(clippy::too_many_arguments)]
     fn emit_reduction_plan(
         &mut self,
         id: usize,
@@ -7489,7 +7509,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         axes: &[usize],
         output_ty: &TensorType,
         operation: &str,
-        scratch: bool,
     ) {
         let axes_name = format!("t{id}_reduction_axes");
         self.emit_affine_bounds(
@@ -7546,11 +7565,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             output_ty.dims.len(),
             axes.len(),
         );
-        if scratch {
-            self.line(&format!(
-                "chelis_reduction_check_scratch(t{id}_reduction, {exemplar});"
-            ));
-        }
     }
 
     /// [05-OP-29] dedicated multi-axis bool count. The input is visited in
@@ -7583,7 +7597,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             axes,
             ty,
             "CHELIS_REDUCE_COUNT",
-            true,
         );
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("if (t{a}_dtype != CHELIS_DTYPE_BOOL) {{"));
@@ -7606,11 +7619,20 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("chelis_tensor *__count_scratch_{id} = chelis_alloc(1, &__count_n_{id}, CHELIS_DTYPE_I64);"));
-        self.line(&format!("chelis_tensor_write *__count_guard_{id} = chelis_tensor_begin_write(__count_scratch_{id});"));
-        self.line(&format!(
-            "int64_t *__level_{id} = (int64_t*)chelis_tensor_write_view(__count_guard_{id}).data;"
-        ));
+        let tree = CarryTree {
+            name: format!("__count_{id}"),
+            element: Self::index_c_type().to_owned(),
+            lanes: None,
+        };
+        let trap = NumericTrap::Overflow {
+            op: "count",
+            prim: Prim::Int64,
+        }
+        .to_string();
+        let combine = |left: &str, right: &str| {
+            format!("chelis_int_checked_add({left}, {right}, 64, {trap:?})")
+        };
+        self.emit_carry_tree_open(&tree);
         self.line(&format!(
             "for (int64_t __r_{id} = 0; __r_{id} < __count_n_{id}; __r_{id}++) {{"
         ));
@@ -7625,28 +7647,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!(
             "if (__bit_{id} != 0 && __bit_{id} != 1) {{ fprintf(stderr, \"count input is not an exact bool\\n\"); abort(); }}"
         ));
-        self.line(&format!(
-            "__level_{id}[__r_{id}] = (__bit_{id} == 1) ? 1 : 0;"
-        ));
+        self.emit_carry_tree_push(&tree, Some(&format!("(__bit_{id} == 1) ? 1 : 0")), &combine);
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("int64_t __level_n_{id} = __count_n_{id};"));
-        let trap = NumericTrap::Overflow {
-            op: "count",
-            prim: Prim::Int64,
-        }
-        .to_string();
-        let fold = Self::adjacent_pair_fold_lines(
-            &format!("__level_{id}"),
-            &format!("__level_n_{id}"),
-            |left, right| format!("chelis_int_checked_add({left}, {right}, 64, {trap:?})"),
-        );
-        self.emit_relative_lines(fold);
-        self.line(&format!(
-            "__count_out_{id}[outer] = (__count_n_{id} == 0) ? 0 : __level_{id}[0];"
-        ));
-        self.line(&format!("chelis_tensor_end_write(__count_guard_{id});"));
-        self.line(&format!("chelis_tensor_release(__count_scratch_{id});"));
+        let total = format!("__count_total_{id}");
+        self.emit_carry_tree_total(&tree, &total, "0", None, &combine);
+        self.line(&format!("__count_out_{id}[outer] = {total};"));
         self.indent -= 1;
         self.line("}");
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
@@ -7665,49 +7671,22 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// `level[0..count)`, folded in place into `level[0]`. Each pass combines
     /// positions `2j` and `2j + 1` in order and carries an odd last leaf
     /// unchanged; `combine` spells one addition of two element expressions.
-    /// Every canonical fold the C backend emits goes through this loop, so
-    /// the tree's order has one definition in the lane. `count` is an
-    /// `int64_t` lvalue the fold consumes.
+    /// This fold serves a leaf buffer an operation materializes once; a
+    /// per-output reduction streams the same tree through a [`CarryTree`]
+    /// and allocates nothing. `count` is an `int64_t` lvalue the fold
+    /// consumes.
     pub(crate) fn adjacent_pair_fold_lines(
         level: &str,
         count: &str,
         combine: impl Fn(&str, &str) -> String,
     ) -> Vec<(usize, String)> {
-        Self::adjacent_pair_fold_lanes_lines(level, count, None, combine)
-    }
-
-    /// Iterations are separate output elements, never a reassociated reduction.
-    /// Lane j accesses only slots congruent to j modulo eight; overlap in an
-    /// in-place pair is within that iteration, never with a different lane.
-    /// Source payloads are immutable and distinct from checked tree scratch.
-    fn independent_lanes_hint() -> &'static str {
-        "#if defined(__clang__)\n#pragma clang loop vectorize(enable)\n#elif defined(__GNUC__)\n#pragma GCC ivdep\n#endif"
-    }
-
-    fn adjacent_pair_fold_lanes_lines(
-        level: &str,
-        count: &str,
-        lanes: Option<&str>,
-        combine: impl Fn(&str, &str) -> String,
-    ) -> Vec<(usize, String)> {
         let index = Self::index_c_type();
-        let slot = |position: &str| match lanes {
-            Some(_) => format!("{level}[({position}) * 8 + __pair_lane]"),
-            None => format!("{level}[{position}]"),
-        };
-        let sum = combine(&slot("__pair_left"), &slot("__pair_right"));
-        let assignment = format!(
-            "{} = (__pair_right < {count}) ? {sum} : {};",
-            slot("__pair"),
-            slot("__pair_left")
+        let sum = combine(
+            &format!("{level}[__pair_left]"),
+            &format!("{level}[__pair_right]"),
         );
-        let assignment = match lanes {
-            Some(lanes) => format!(
-                "{}\nfor ({index} __pair_lane = 0; __pair_lane < {lanes}; ++__pair_lane) {{ {assignment} }}",
-                Self::independent_lanes_hint()
-            ),
-            None => assignment,
-        };
+        let assignment =
+            format!("{level}[__pair] = (__pair_right < {count}) ? {sum} : {level}[__pair_left];");
         vec![
             (0, format!("while ({count} > 1) {{")),
             (
@@ -8005,115 +7984,178 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("chelis_tensor_release(t{id}_scan_input);"));
     }
 
-    /// Allocate the leaves of [05-OP-30]'s adjacent-pair tree. An empty
-    /// slice has no leaves: its identity is introduced only at the final store.
-    fn emit_sum_level(&mut self, id: usize, axis_size: &str, precision: Prim) {
-        self.emit_sum_level_lanes(id, axis_size, precision, false);
-    }
-
-    fn emit_sum_level_lanes(&mut self, id: usize, axis_size: &str, precision: Prim, blocked: bool) {
-        let et = Self::elem_type(&TensorType {
-            dims: vec![],
-            precision,
-        });
-        let index_et = Self::elem_type(&TensorType {
-            dims: vec![],
-            precision: Prim::Int64,
-        });
-        self.line(&format!("{index_et} __sum_n_{id} = {axis_size};"));
-        let dtype = Self::dtype_macro(&TensorType {
-            dims: vec![],
-            precision,
-        });
-        if blocked {
-            self.line(&format!(
-                "{index_et} __sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};"
-            ));
-            self.line(&format!(
-                "chelis_tensor *__sum_scratch_{id} = chelis_alloc(2, __sum_shape_{id}, {dtype});"
-            ));
-        } else {
-            self.line(&format!(
-                "chelis_tensor *__sum_scratch_{id} = chelis_alloc(1, &__sum_n_{id}, {dtype});"
-            ));
+    /// One addition of [05-OP-30]'s Sum tree at accumulator `precision`:
+    /// reduced floats add in f32 and round back, integers add with the
+    /// checked overflow trap, and f32/f64 add at their own width. The
+    /// stored total alone takes NaN finalization.
+    fn sum_combine(precision: Prim) -> impl Fn(&str, &str) -> String {
+        let et = Self::prim_elem_type(precision);
+        let index_et = Self::index_c_type();
+        move |left, right| {
+            if matches!(precision, Prim::F16 | Prim::Bf16) {
+                let load = Self::reduced_to_f32_fn(precision);
+                let store = Self::f32_to_reduced_fn(precision);
+                format!("{store}({load}({left}) + {load}({right}))")
+            } else if precision.is_integer() {
+                let bits = Self::integer_width(precision);
+                let trap = NumericTrap::Overflow {
+                    op: "sum",
+                    prim: precision,
+                }
+                .to_string();
+                format!(
+                    "({et})chelis_int_checked_add(({index_et}){left}, ({index_et}){right}, {bits}, {trap:?})"
+                )
+            } else {
+                format!("{left} + {right}")
+            }
         }
+    }
+
+    /// Open a [`CarryTree`] before its leaf loop. At most 63 occupied levels
+    /// represent an admitted signed-i64 leaf count, so 64 levels never
+    /// overflow; levels live in the iteration's own stack frame, so parallel
+    /// iterations never share them.
+    fn emit_carry_tree_open(&mut self, tree: &CarryTree) {
+        let index = Self::index_c_type();
+        let CarryTree { name, element, .. } = tree;
+        if tree.lanes.is_some() {
+            self.line(&format!("{element} {name}_level[64][8];"));
+            self.line(&format!("{element} {name}_leaf[8];"));
+        } else {
+            self.line(&format!("{element} {name}_level[64];"));
+        }
+        self.line(&format!("{index} {name}_count = 0;"));
+    }
+
+    /// Enter the next leaf: `leaf` for a single-lane tree, or the lane
+    /// values already stored in `{name}_leaf` for a laned one. Leaf `i`
+    /// first combines with the completed subtree at each level its trailing
+    /// one bits name, the earlier subtree always on the left.
+    fn emit_carry_tree_push(
+        &mut self,
+        tree: &CarryTree,
+        leaf: Option<&str>,
+        combine: &impl Fn(&str, &str) -> String,
+    ) {
+        let index = Self::index_c_type();
+        let CarryTree {
+            name,
+            element,
+            lanes,
+        } = tree;
+        self.line("{");
+        self.indent += 1;
+        let (carry, level) = match lanes {
+            Some(_) => (
+                format!("{name}_leaf[__carry_lane]"),
+                format!("{name}_level[__depth][__carry_lane]"),
+            ),
+            None => {
+                let leaf = leaf.expect("a single-lane carry tree pushes one leaf");
+                self.line(&format!("{element} __carry = {leaf};"));
+                ("__carry".to_owned(), format!("{name}_level[__depth]"))
+            }
+        };
+        let per_lane = |statement: String| match lanes {
+            Some(lanes) => format!(
+                "{}\nfor ({index} __carry_lane = 0; __carry_lane < {lanes}; ++__carry_lane) {{ {statement} }}",
+                CarryTree::independent_lanes_hint()
+            ),
+            None => statement,
+        };
+        self.line(&format!("{index} __depth = 0;"));
         self.line(&format!(
-            "chelis_tensor_write *__sum_guard_{id} = chelis_tensor_begin_write(__sum_scratch_{id});"
+            "for ({index} __pending = {name}_count++; __pending & 1; __pending >>= 1, ++__depth) {{"
         ));
+        self.indent += 1;
+        self.line(&per_lane(format!("{carry} = {};", combine(&level, &carry))));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&per_lane(format!("{level} = {carry};")));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Declare `total` as the tree's root after its last leaf. The
+    /// completed subtrees, from the last (lowest level) to the first, fold
+    /// rightmost first, which is the adjacent-pair tree's carried-tail
+    /// order. An empty tree is `zero`, introduced without an addition.
+    /// `lane` selects one lane of a laned tree.
+    fn emit_carry_tree_total(
+        &mut self,
+        tree: &CarryTree,
+        total: &str,
+        zero: &str,
+        lane: Option<&str>,
+        combine: &impl Fn(&str, &str) -> String,
+    ) {
+        let index = Self::index_c_type();
+        let flag = Self::prim_elem_type(Prim::Bool);
+        let CarryTree { name, element, .. } = tree;
+        let level = match lane {
+            Some(lane) => format!("{name}_level[__depth][{lane}]"),
+            None => format!("{name}_level[__depth]"),
+        };
+        self.line(&format!("{element} {total} = {zero};"));
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("{flag} __found = 0;"));
+        self.line(&format!("{index} __depth = 0;"));
         self.line(&format!(
-            "{et} *__sum_level_{id} = ({et}*)chelis_tensor_write_view(__sum_guard_{id}).data;"
+            "for ({index} __remaining = {name}_count; __remaining; __remaining >>= 1, ++__depth) {{"
         ));
+        self.indent += 1;
+        self.line("if (__remaining & 1) {");
+        self.indent += 1;
+        self.line(&format!(
+            "{total} = __found ? {} : {level};",
+            combine(&level, total)
+        ));
+        self.line("__found = 1;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
     }
 
-    /// Pair in positional order, round/check each actual addition at the
-    /// accumulator width, and carry odd leaves without adding an identity.
-    /// Fused and materialized Sum use this same emitted tree.
-    fn emit_sum_fold(&mut self, id: usize, precision: Prim) {
-        self.emit_sum_fold_with(id, precision, CarriedLeaf::Finalized);
+    /// The Sum tree of node `id`, at its accumulator precision.
+    fn sum_tree(id: usize, precision: Prim, lanes: Option<&str>) -> CarryTree {
+        CarryTree {
+            name: format!("__sum_{id}"),
+            element: Self::prim_elem_type(precision).to_owned(),
+            lanes: lanes.map(str::to_owned),
+        }
     }
 
-    fn emit_sum_fold_with(&mut self, id: usize, precision: Prim, carried: CarriedLeaf) {
-        self.emit_sum_fold_lanes_with(id, precision, carried, false);
-    }
-
-    fn emit_sum_fold_lanes_with(
+    /// Store the root of a Sum tree into `t{id}_data[outer]` (and the
+    /// following lanes of a laned tree).
+    fn emit_sum_store(
         &mut self,
         id: usize,
+        tree: &CarryTree,
         precision: Prim,
         carried: CarriedLeaf,
-        blocked: bool,
     ) {
-        if carried == CarriedLeaf::Unchanged {
-            self.line(&format!("const int t{id}_carried = __sum_n_{id} == 1;"));
-        }
-        let et = Self::elem_type(&TensorType {
-            dims: vec![],
-            precision,
-        });
-        let index_et = Self::elem_type(&TensorType {
-            dims: vec![],
-            precision: Prim::Int64,
-        });
+        let index_et = Self::index_c_type();
+        let combine = Self::sum_combine(precision);
         let zero = Self::scalar_zero_literal(precision);
-        let lanes = format!("__sum_lanes_{id}");
-        let fold = Self::adjacent_pair_fold_lanes_lines(
-            &format!("__sum_level_{id}"),
-            &format!("__sum_n_{id}"),
-            blocked.then_some(lanes.as_str()),
-            |left, right| {
-                if matches!(precision, Prim::F16 | Prim::Bf16) {
-                    let load = Self::reduced_to_f32_fn(precision);
-                    let store = Self::f32_to_reduced_fn(precision);
-                    format!("{store}({load}({left}) + {load}({right}))")
-                } else if precision.is_integer() {
-                    let bits = Self::integer_width(precision);
-                    let trap = NumericTrap::Overflow {
-                        op: "sum",
-                        prim: precision,
-                    }
-                    .to_string();
-                    format!(
-                        "({et})chelis_int_checked_add(({index_et}){left}, ({index_et}){right}, {bits}, {trap:?})"
-                    )
-                } else {
-                    format!("{left} + {right}")
-                }
-            },
-        );
-        self.emit_relative_lines(fold);
-        // [04-NUM-2]: the stored total is finalized once. A carried leaf (a
-        // one-element group) has had no addition, so at f16 and bf16 it
-        // finalizes by the same widening and canonicalizing narrowing a sum
-        // takes.
-        if blocked {
-            self.line(Self::independent_lanes_hint());
+        let name = &tree.name;
+        if let Some(lanes) = &tree.lanes {
             self.line(&format!(
                 "for ({index_et} __sum_lane = 0; __sum_lane < {lanes}; ++__sum_lane) {{"
             ));
             self.indent += 1;
         }
-        let first = if blocked { "__sum_lane" } else { "0" };
-        let total = format!("__sum_n_{id} ? __sum_level_{id}[{first}] : {zero}");
+        let lane = tree.lanes.as_ref().map(|_| "__sum_lane");
+        self.emit_carry_tree_total(tree, &format!("{name}_total"), zero, lane, &combine);
+        // [04-NUM-2]: the stored total is finalized once. A carried leaf (a
+        // one-element group) has had no addition, so at f16 and bf16 it
+        // finalizes by the same widening and canonicalizing narrowing a sum
+        // takes.
+        let total = format!("{name}_total");
         let total = if matches!(precision, Prim::F16 | Prim::Bf16) {
             format!(
                 "{}({}({total}))",
@@ -8132,20 +8174,20 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         };
         let total = match carried {
             CarriedLeaf::Finalized => total,
-            CarriedLeaf::Unchanged => format!("t{id}_carried ? __sum_level_{id}[0] : {total}"),
+            // spec/06 §2.4: one contribution, untouched by any addition.
+            CarriedLeaf::Unchanged => format!("{name}_count == 1 ? {name}_total : {total}"),
         };
-        let output = if blocked {
+        let output = if lane.is_some() {
             "outer + __sum_lane"
         } else {
             "outer"
         };
+        let et = &tree.element;
         self.line(&format!("(({et}*)t{id}_data)[{output}] = {total};"));
-        if blocked {
+        if lane.is_some() {
             self.indent -= 1;
             self.line("}");
         }
-        self.line(&format!("chelis_tensor_end_write(__sum_guard_{id});"));
-        self.line(&format!("chelis_tensor_release(__sum_scratch_{id});"));
     }
 
     /// Sum loads each source at its storage width, then finalizes every
@@ -8166,11 +8208,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             &[axis],
             ty,
             "CHELIS_REDUCE_SUM",
-            false,
         );
         self.emit_slot_wrapper(id, ty);
         let index = Self::prim_elem_type(Prim::Int64);
-        let flag = Self::prim_elem_type(Prim::Bool);
         let acc = Self::elem_type(ty);
         self.open_element_loop(
             id,
@@ -8179,11 +8219,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             Some("#pragma omp parallel for"),
         );
         self.line(crate::fp_env::ENTRY);
-        // At most 63 occupied levels represent an admitted signed-i64 leaf
-        // count. Equal-sized left subtrees combine on carries; folding the
-        // remaining right tail upward reproduces the adjacent-pair tree.
-        self.line(&format!("{acc} __carry_level_{id}[64];"));
-        self.line(&format!("{flag} __carry_used_{id}[64] = {{ 0 }};"));
+        let tree = Self::sum_tree(id, ty.precision, None);
+        self.emit_carry_tree_open(&tree);
         self.line(&format!(
             "for ({index} leaf = 0; leaf < t{id}_leaf_count; ++leaf) {{"
         ));
@@ -8198,37 +8235,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         } else {
             stored
         };
-        self.line(&format!("{acc} carry = ({acc})({value});"));
-        self.line(&format!("{index} depth = 0;"));
-        self.line(&format!("while (__carry_used_{id}[depth]) {{"));
-        self.indent += 1;
-        self.line(&format!("carry = __carry_level_{id}[depth] + carry;"));
-        self.line(&format!("__carry_used_{id}[depth++] = 0;"));
+        self.emit_carry_tree_push(
+            &tree,
+            Some(&format!("({acc})({value})")),
+            &Self::sum_combine(ty.precision),
+        );
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("__carry_level_{id}[depth] = carry;"));
-        self.line(&format!("__carry_used_{id}[depth] = 1;"));
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "{acc} total = {};",
-            Self::scalar_zero_literal(ty.precision)
-        ));
-        self.line(&format!("{flag} found = 0;"));
-        self.line(&format!("for ({index} depth = 0; depth < 64; ++depth) {{"));
-        self.indent += 1;
-        self.line(&format!("if (__carry_used_{id}[depth]) {{"));
-        self.indent += 1;
-        self.line(&format!(
-            "total = found ? __carry_level_{id}[depth] + total : __carry_level_{id}[depth];"
-        ));
-        self.line("found = 1;");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        let total = finalize_elem(self.nan_finalization, "total".into(), ty);
-        self.line(&format!("(({acc}*)t{id}_data)[outer] = {total};"));
+        self.emit_sum_store(id, &tree, ty.precision, CarriedLeaf::Finalized);
         self.line(crate::fp_env::EXIT);
         self.close_element_loop();
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
@@ -8244,7 +8258,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     ) {
         let a = inputs[0].0;
         let input_ty = &dag.get(inputs[0]).unwrap().output_type;
-        let axis_size = format!("t{id}_leaf_count");
         let acc_et = Self::elem_type(ty);
         let operand_et = Self::elem_type(input_ty);
         self.emit_reduction_plan(
@@ -8254,7 +8267,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             &[axis],
             ty,
             "CHELIS_REDUCE_SUM",
-            true,
         );
         self.emit_slot_wrapper(id, ty);
         self.open_element_loop(
@@ -8263,9 +8275,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             &format!("t{id}_size"),
             Some("#pragma omp parallel for"),
         );
-        self.emit_sum_level(id, &axis_size, ty.precision);
+        let tree = Self::sum_tree(id, ty.precision, None);
+        self.emit_carry_tree_open(&tree);
         self.line(&format!(
-            "for (int64_t __reduce_i = 0; __reduce_i < __sum_n_{id}; __reduce_i++) {{"
+            "for (int64_t __reduce_i = 0; __reduce_i < t{id}_leaf_count; __reduce_i++) {{"
         ));
         self.indent += 1;
         self.line(&format!(
@@ -8281,12 +8294,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // An integer sum under an activation adds zeros where its row is
         // inactive, so it cannot overflow there (spec/10 section 3.2).
         let load = self.gated(load, 0);
-        self.line(&format!(
-            "__sum_level_{id}[__reduce_i] = ({acc_et})({load});"
-        ));
+        self.emit_carry_tree_push(
+            &tree,
+            Some(&format!("({acc_et})({load})")),
+            &Self::sum_combine(ty.precision),
+        );
         self.indent -= 1;
         self.line("}");
-        self.emit_sum_fold(id, ty.precision);
+        self.emit_sum_store(id, &tree, ty.precision, CarriedLeaf::Finalized);
         self.close_element_loop();
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
     }
@@ -8331,7 +8346,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             &[axis],
             ty,
             "CHELIS_REDUCE_SUM",
-            true,
         );
         self.emit_slot_wrapper(id, ty);
         if blocked {
@@ -8370,17 +8384,19 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 "{{ const {index_type} __c = __rest % t{lhs}_extent{d}; __rest /= t{lhs}_extent{d}; __lhs_{id} += __c * t{lhs}_scale{d}; __rhs_{id} += __c * t{rhs}_scale{d}; }}"
             ));
         }
-        self.emit_sum_level_lanes(id, &format!("t{id}_leaf_count"), ty.precision, blocked);
+        let lanes = format!("__sum_lanes_{id}");
+        let tree = Self::sum_tree(id, ty.precision, blocked.then_some(lanes.as_str()));
+        self.emit_carry_tree_open(&tree);
         self.line(&format!(
-            "for ({index_type} __reduce_i = 0; __reduce_i < __sum_n_{id}; __reduce_i++) {{"
+            "for ({index_type} __reduce_i = 0; __reduce_i < t{id}_leaf_count; __reduce_i++) {{"
         ));
         self.indent += 1;
         if blocked {
             if !Self::is_reduced_float(product_ty) {
-                self.line(Self::independent_lanes_hint());
+                self.line(CarryTree::independent_lanes_hint());
             }
             self.line(&format!(
-                "for ({index_type} __sum_lane = 0; __sum_lane < __sum_lanes_{id}; ++__sum_lane) {{"
+                "for ({index_type} __sum_lane = 0; __sum_lane < {lanes}; ++__sum_lane) {{"
             ));
             self.indent += 1;
         }
@@ -8408,19 +8424,19 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 product_ty,
             )
         };
-        let slot = if blocked {
-            "__reduce_i * 8 + __sum_lane"
-        } else {
-            "__reduce_i"
-        };
-        self.line(&format!("__sum_level_{id}[{slot}] = ({acc_et})({leaf});"));
+        let leaf = format!("({acc_et})({leaf})");
+        let combine = Self::sum_combine(ty.precision);
         if blocked {
+            self.line(&format!("{}_leaf[__sum_lane] = {leaf};", tree.name));
             self.indent -= 1;
             self.line("}");
+            self.emit_carry_tree_push(&tree, None, &combine);
+        } else {
+            self.emit_carry_tree_push(&tree, Some(&leaf), &combine);
         }
         self.indent -= 1;
         self.line("}");
-        self.emit_sum_fold_lanes_with(id, ty.precision, CarriedLeaf::Finalized, blocked);
+        self.emit_sum_store(id, &tree, ty.precision, CarriedLeaf::Finalized);
         self.close_element_loop();
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
         for view in [lhs, rhs] {
@@ -8529,7 +8545,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             &[axis],
             ty,
             runtime_operation,
-            false,
         );
         let empty = self.gated_check(&format!("t{id}_leaf_count == 0"));
         self.line(&format!("if ({empty}) {{"));
@@ -8649,7 +8664,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             } else {
                 "CHELIS_REDUCE_PROD"
             },
-            false,
         );
         self.emit_slot_wrapper(id, ty);
         let output_is_scalar = ty.dims.is_empty();
@@ -8906,7 +8920,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             precision: arithmetic_prim,
         };
         let arithmetic_et = Self::elem_type(&arithmetic_ty);
-        let arithmetic_dtype = Self::dtype_macro(&arithmetic_ty);
         let load = |index: &str| {
             let stored = format!("((const {storage_et}*)t{a}_data)[{index}]");
             if matches!(prim, Prim::F16 | Prim::Bf16) {
@@ -8956,31 +8969,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 "(({storage_et}*)t{id}_data)[outer] = ((const {storage_et}*)t{a}_data)[best_src];"
             ));
         } else {
-            self.line(&format!("int64_t level_n = t{id}_window_count;"));
-            self.line(&format!(
-                "chelis_tensor *level_tensor = chelis_alloc(1, &level_n, {arithmetic_dtype});"
-            ));
-            self.line(
-                "chelis_tensor_write *level_guard = chelis_tensor_begin_write(level_tensor);",
-            );
-            self.line(&format!(
-                "{arithmetic_et} *level = ({arithmetic_et}*)chelis_tensor_write_view(level_guard).data;"
-            ));
-            self.line(&format!(
-                "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
-            ));
-            self.indent += 1;
-            self.line(&format!(
-                "int64_t src_idx = {};",
-                self.projection_index(id, "outer", "leaf")
-            ));
-            self.line(&format!(
-                "level[leaf] = ({arithmetic_et})({});",
-                load("src_idx")
-            ));
-            self.indent -= 1;
-            self.line("}");
-            let fold = Self::adjacent_pair_fold_lines("level", "level_n", |left, right| {
+            let tree = CarryTree {
+                name: "window".into(),
+                element: arithmetic_et.to_owned(),
+                lanes: None,
+            };
+            let combine = |left: &str, right: &str| {
                 if prim.is_integer() {
                     let bits = Self::integer_width(prim);
                     let trap = NumericTrap::Overflow {
@@ -8994,9 +8988,30 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 } else {
                     format!("{left} + {right}")
                 }
-            });
-            self.emit_relative_lines(fold);
-            self.line(&format!("{arithmetic_et} result = level[0];"));
+            };
+            self.emit_carry_tree_open(&tree);
+            self.line(&format!(
+                "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "int64_t src_idx = {};",
+                self.projection_index(id, "outer", "leaf")
+            ));
+            self.emit_carry_tree_push(
+                &tree,
+                Some(&format!("({arithmetic_et})({})", load("src_idx"))),
+                &combine,
+            );
+            self.indent -= 1;
+            self.line("}");
+            self.emit_carry_tree_total(
+                &tree,
+                "result",
+                &format!("({arithmetic_et})0"),
+                None,
+                &combine,
+            );
             if matches!(reducer, ReduceWindowKind::Mean) {
                 self.line(&format!(
                     "result = result / ({arithmetic_et})t{id}_window_count;"
@@ -9013,8 +9028,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                     "(({storage_et}*)t{id}_data)[outer] = ({storage_et}){result};"
                 ));
             }
-            self.line("chelis_tensor_end_write(level_guard);");
-            self.line("chelis_tensor_release(level_tensor);");
         }
         self.indent -= 1;
         self.line("}");
@@ -9102,7 +9115,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             precision: arithmetic_prim,
         };
         let arithmetic_et = Self::elem_type(&arithmetic_ty);
-        let arithmetic_dtype = Self::dtype_macro(&arithmetic_ty);
         let load_x = |index: &str| {
             let stored = format!("((const {storage_et}*)t{x}_data)[{index}]");
             if matches!(prim, Prim::F16 | Prim::Bf16) {
@@ -9127,15 +9139,13 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             "for (int64_t dst_idx = 0; dst_idx < t{id}_size; dst_idx++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t contribution_capacity = t{g}_size;"));
-        self.line(&format!(
-            "chelis_tensor *contribution_tensor = chelis_alloc(1, &contribution_capacity, {arithmetic_dtype});"
-        ));
-        self.line("chelis_tensor_write *contribution_guard = chelis_tensor_begin_write(contribution_tensor);");
-        self.line(&format!(
-            "{arithmetic_et} *contributions = ({arithmetic_et}*)chelis_tensor_write_view(contribution_guard).data;"
-        ));
-        self.line("int64_t contribution_n = 0;");
+        let tree = CarryTree {
+            name: "contributions".into(),
+            element: arithmetic_et.to_owned(),
+            lanes: None,
+        };
+        let combine = |left: &str, right: &str| format!("{left} + {right}");
+        self.emit_carry_tree_open(&tree);
         self.line(&format!(
             "for (int64_t outer = 0; outer < t{g}_size; outer++) {{"
         ));
@@ -9224,17 +9234,16 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 self.line("}");
             }
         }
-        self.line("contributions[contribution_n++] = contribution;");
+        self.emit_carry_tree_push(&tree, Some("contribution"), &combine);
         self.indent -= 1;
         self.line("}");
-        let fold =
-            Self::adjacent_pair_fold_lines("contributions", "contribution_n", |left, right| {
-                format!("{left} + {right}")
-            });
-        self.emit_relative_lines(fold);
-        self.line(&format!(
-            "{arithmetic_et} result = contribution_n ? contributions[0] : ({arithmetic_et})0;"
-        ));
+        self.emit_carry_tree_total(
+            &tree,
+            "result",
+            &format!("({arithmetic_et})0"),
+            None,
+            &combine,
+        );
         if matches!(prim, Prim::F16 | Prim::Bf16) {
             self.line(&format!(
                 "((uint16_t*)t{id}_data)[dst_idx] = {}(result);",
@@ -9246,8 +9255,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 "(({storage_et}*)t{id}_data)[dst_idx] = ({storage_et}){result};"
             ));
         }
-        self.line("chelis_tensor_end_write(contribution_guard);");
-        self.line("chelis_tensor_release(contribution_tensor);");
         self.indent -= 1;
         self.line("}");
         self.line(&format!("chelis_window_plan_release(t{id}_window);"));
@@ -9308,7 +9315,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             } else {
                 "CHELIS_REDUCE_ARGMIN"
             },
-            false,
         );
         let empty = self.gated_check(&format!("t{id}_leaf_count == 0"));
         self.line(&format!("if ({empty}) {{"));
@@ -9442,7 +9448,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             } else {
                 "CHELIS_REDUCE_MAX"
             },
-            reduce_kind == "sum",
         );
         if reduce_kind == "max" {
             // The checked plan reports zero leaves for an empty result even
@@ -9473,8 +9478,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         } else {
             "-INFINITY"
         };
+        let tree = Self::sum_tree(id, out_ty.precision, None);
         if reduce_kind == "sum" {
-            self.emit_sum_level(id, &axis_size, out_ty.precision);
+            self.emit_carry_tree_open(&tree);
         } else {
             self.line(&format!("float acc = {init};"));
         }
@@ -9632,7 +9638,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // Accumulate the last step's result
         let last = ops.len() - 1;
         if reduce_kind == "sum" {
-            self.line(&format!("__sum_level_{id}[__reduce_i] = v{last};"));
+            self.emit_carry_tree_push(
+                &tree,
+                Some(&format!("v{last}")),
+                &Self::sum_combine(out_ty.precision),
+            );
         } else {
             // #172: fused max_reduce propagates NaN (torch parity),
             // matching the non-fused `chelis_max_f32` path.
@@ -9641,7 +9651,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.indent -= 1;
         self.line("}");
         if reduce_kind == "sum" {
-            self.emit_sum_fold(id, out_ty.precision);
+            self.emit_sum_store(id, &tree, out_ty.precision, CarriedLeaf::Finalized);
         } else {
             self.line(&format!("((float*)t{id}_data)[outer] = acc;"));
         }
@@ -11806,7 +11816,7 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("__sum_level_"));
+        assert!(c.contains("__sum_") && c.contains("_level[64]"));
         assert!(!c.contains("chelis_sum_f32("));
         assert!(c.contains("for (int64_t __reduce_i"));
     }
@@ -12695,7 +12705,7 @@ mod tests {
         );
         dag.add_node(decl, RiscOp::Neg, vec![s], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("__sum_level_"));
+        assert!(c.contains("__sum_") && c.contains("_level[64]"));
         assert!(!c.contains("chelis_sum_f32("));
         // The slow (non-contiguous) path emits a typed pointer cast then negates.
         assert!(c.contains("((float*)t1_data)[idx]"));
@@ -13131,7 +13141,7 @@ mod tests {
             .expect("matmul codegen test DAG must verify ownership");
         let result = crate::codegen_with_options(verified, "test_fn", options).unwrap();
         assert!(!result.c_source.contains("cblas_sgemm("));
-        assert!(result.c_source.contains("__sum_level_"));
+        assert!(result.c_source.contains("_level[64]"));
     }
 
     #[test]
@@ -13202,10 +13212,10 @@ mod tests {
         assert!(!c.contains("cblas_sgemm("));
         assert!(
             c.lines()
-                .any(|line| line.contains("__sum_n_") && line.ends_with("_leaf_count;"))
+                .any(|line| line.contains("__reduce_i < t") && line.contains("_leaf_count;"))
         );
         assert!(c.contains("chelis_reduction_count("));
-        assert!(c.contains("__sum_level_"));
+        assert!(c.contains("__sum_") && c.contains("_level[64]"));
     }
 
     #[test]

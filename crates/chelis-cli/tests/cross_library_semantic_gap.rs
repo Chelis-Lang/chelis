@@ -203,12 +203,10 @@ fn inline_matmul_forms_preserve_primitive_arithmetic_and_storage() {
         );
         // The sum computes each product of the two [8,16,4] expansions
         // inside its canonical tree (chelis#3370), so neither expansion nor
-        // their product is stored: the reduced [8,4] output is the only
-        // literal-shape submission, and the second allocation site owns the
-        // [16,8] column scratch via its checked dynamic leaf count, with
-        // unused lanes in the four-column tail excluded from arithmetic.
-        assert_eq!(counts.allocs, 2);
-        assert_eq!(counts.reduction_scratch_allocs, 1);
+        // their product is stored, and the tree streams through locals
+        // (chelis#3700): the reduced [8,4] output is the only allocation.
+        assert_eq!(counts.allocs, 1);
+        assert_eq!(counts.reduction_scratch_allocs, 0);
         assert_eq!(counts.total_alloc_bytes, 8 * 4 * 4);
     }
     assert_eq!(direct_c.total_alloc_bytes, inline_c.total_alloc_bytes);

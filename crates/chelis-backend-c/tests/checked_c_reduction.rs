@@ -51,48 +51,31 @@ fn validate(source: &str) -> Result<(), String> {
             return Err(format!("emit_node: missing checked dispatch {required}"));
         }
     }
-    let wrapper = method(source, "emit_sum_level");
-    if !wrapper.contains("self.emit_sum_level_lanes(id, axis_size, precision, false);")
-        || ["malloc(", "sizeof(", "chelis_alloc("]
-            .iter()
-            .any(|raw| wrapper.contains(raw))
-    {
-        return Err("unchecked Sum scratch delegation".into());
-    }
-    let scratch = method(source, "emit_sum_level_lanes");
-    for required in [
-        "__sum_n_{id} = {axis_size};",
-        "if blocked {",
-        "__sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};",
-        "chelis_alloc(2, __sum_shape_{id}, {dtype})",
-        "} else {",
-        "chelis_alloc(1, &__sum_n_{id}, {dtype})",
-        "chelis_tensor_begin_write(__sum_scratch_{id})",
-        "chelis_tensor_write_view(__sum_guard_{id}).data",
+    // chelis#3700: the canonical Sum tree streams through stack locals, so
+    // none of its emitters allocates, and it holds one slot per level of an
+    // admitted i64 leaf count.
+    for name in [
+        "emit_carry_tree_open",
+        "emit_carry_tree_push",
+        "emit_carry_tree_total",
+        "emit_sum_store",
     ] {
-        if scratch.matches(required).count() != 1 {
-            return Err(format!("unchecked Sum scratch: {required}"));
+        let body = method(source, name);
+        if [
+            "malloc(",
+            "sizeof(",
+            "chelis_alloc(",
+            "chelis_tensor_begin_write(",
+        ]
+        .iter()
+        .any(|raw| body.contains(raw))
+        {
+            return Err(format!("{name}: Sum tree scratch allocation"));
         }
     }
-    if scratch.contains("malloc(")
-        || scratch.contains("sizeof(")
-        || scratch.matches("chelis_alloc(").count() != 2
-    {
-        return Err("unchecked Sum scratch owner".into());
-    }
-    let ordered = [
-        "__sum_n_{id} = {axis_size};",
-        "if blocked {",
-        "__sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};",
-        "chelis_alloc(2, __sum_shape_{id}, {dtype})",
-        "} else {",
-        "chelis_alloc(1, &__sum_n_{id}, {dtype})",
-        "chelis_tensor_begin_write(__sum_scratch_{id})",
-        "chelis_tensor_write_view(__sum_guard_{id}).data",
-    ]
-    .map(|token| scratch.find(token).unwrap());
-    if !ordered.windows(2).all(|pair| pair[0] < pair[1]) {
-        return Err("Sum scratch domain/allocation/write order".into());
+    let open = method(source, "emit_carry_tree_open");
+    if !open.contains("{name}_level[64][8];") || !open.contains("{name}_level[64];") {
+        return Err("Sum tree levels are not bounded by the i64 leaf count".into());
     }
     let inlined = method(source, "emit_inlined_product_sum");
     let check = inlined
@@ -102,17 +85,17 @@ fn validate(source: &str) -> Result<(), String> {
         .find("self.emit_slot_wrapper(")
         .ok_or("missing inlined Sum output")?;
     let leaves = inlined
-        .find("self.emit_sum_level_lanes(")
-        .ok_or("missing inlined Sum scratch")?;
+        .find("self.emit_carry_tree_open(")
+        .ok_or("missing inlined Sum tree")?;
     if check >= output || output >= leaves {
-        return Err("inlined Sum unchecked scratch domain".into());
+        return Err("inlined Sum unchecked tree domain".into());
     }
     let checked_domain = inlined[check..output]
         .split_whitespace()
         .collect::<String>()
         .replace(",)", ")");
-    if !checked_domain.contains("ty,\"CHELIS_REDUCE_SUM\",true)") {
-        return Err("inlined Sum unchecked scratch domain".into());
+    if !checked_domain.contains("ty,\"CHELIS_REDUCE_SUM\")") {
+        return Err("inlined Sum unchecked tree domain".into());
     }
     let plan = method(source, "emit_reduction_plan");
     for required in [
@@ -120,7 +103,6 @@ fn validate(source: &str) -> Result<(), String> {
         "chelis_shape_reduction_plan(",
         "chelis_reduction_check_target(",
         "self.emit_runtime_dim_sites(",
-        "chelis_reduction_check_scratch(",
         "self.emit_projection_terms(",
         "chelis_reduction_term(",
     ] {
@@ -186,69 +168,35 @@ fn bypassing_each_consumer_and_scratch_owner_is_rejected() {
             "emit_node: checked reduction dispatch {required}"
         );
     }
-    assert!(
-        validate(&source.replace("chelis_alloc(1, &__sum_n_{id}", "malloc(1, &__sum_n_{id}"))
-            .is_err()
-    );
-    let wrapper = method(source, "emit_sum_level");
+    for name in [
+        "emit_carry_tree_open",
+        "emit_carry_tree_push",
+        "emit_carry_tree_total",
+        "emit_sum_store",
+    ] {
+        let body = method(source, name);
+        for raw in ["malloc(", "chelis_alloc(", "chelis_tensor_begin_write("] {
+            let allocating = body.replacen("{\n", &format!("{{\n        {raw});\n"), 1);
+            assert!(
+                validate(&source.replace(body, &allocating)).is_err(),
+                "{name}: {raw}"
+            );
+        }
+    }
+    let open = method(source, "emit_carry_tree_open");
     assert!(
         validate(&source.replace(
-            wrapper,
-            &wrapper.replace(
-                "self.emit_sum_level_lanes(id, axis_size, precision, false);",
-                "self.emit_sum_level_lanes(id, axis_size, precision, true);",
-            )
+            open,
+            &open.replace("{name}_level[64];", "{name}_level[32];")
         ))
         .is_err(),
-        "scalar scratch must delegate to one lane"
-    );
-    let scratch = method(source, "emit_sum_level_lanes");
-    for original in [
-        "__sum_n_{id} = {axis_size};",
-        "if blocked {",
-        "__sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};",
-        "chelis_alloc(2, __sum_shape_{id}, {dtype})",
-        "chelis_alloc(1, &__sum_n_{id}, {dtype})",
-        "chelis_tensor_begin_write(__sum_scratch_{id})",
-        "chelis_tensor_write_view(__sum_guard_{id}).data",
-    ] {
-        assert!(
-            validate(&source.replace(scratch, &scratch.replace(original, "removed("))).is_err(),
-            "scratch owner: {original}"
-        );
-    }
-    let reversed = scratch
-        .replace(
-            "__sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};",
-            "__domain_placeholder__",
-        )
-        .replace(
-            "chelis_alloc(2, __sum_shape_{id}, {dtype})",
-            "__sum_shape_{id}[2] = {{ __sum_n_{id}, 8 }};",
-        )
-        .replace(
-            "__domain_placeholder__",
-            "chelis_alloc(2, __sum_shape_{id}, {dtype})",
-        );
-    assert!(
-        validate(&source.replace(scratch, &reversed)).is_err(),
-        "domain must precede vector allocation"
+        "the tree must keep one level per bit of an i64 leaf count"
     );
     let inlined = method(source, "emit_inlined_product_sum");
-    for original in ["self.emit_reduction_plan(", "self.emit_sum_level_lanes("] {
+    for original in ["self.emit_reduction_plan(", "self.emit_carry_tree_open("] {
         assert!(
             validate(&source.replace(inlined, &inlined.replace(original, "removed("))).is_err(),
-            "inlined scratch: {original}"
+            "inlined tree: {original}"
         );
     }
-    assert_eq!(
-        inlined.matches("true,").count(),
-        1,
-        "one checked scratch-domain flag"
-    );
-    let unchecked = inlined.replacen("true,", "false,", 1);
-    assert!(
-        validate(&source.replace(inlined, &unchecked)).is_err(),
-        "inlined Sum must check its scratch domain"
-    );
 }

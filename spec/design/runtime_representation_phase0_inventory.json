@@ -2284,7 +2284,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_general",
-      "sample": "for (int64_t __reduce_i = 0; __reduce_i < __sum_n_{id}; __reduce_i++) {{"
+      "sample": "for (int64_t __reduce_i = 0; __reduce_i < t{id}_leaf_count; __reduce_i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window",

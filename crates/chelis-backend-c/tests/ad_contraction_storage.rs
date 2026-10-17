@@ -336,11 +336,7 @@ fn canonical_forward_products_keep_the_specialized_c_path() {
             source.contains("__sum_columns_"),
             "the existing eight-column kernel must stay selected: {source}"
         );
-        for generic in [
-            "chelis_metadata_plan_tensor(",
-            "__carry_level_",
-            "_deferred_owner",
-        ] {
+        for generic in ["chelis_metadata_plan_tensor(", "_deferred_owner"] {
             assert!(
                 !source.contains(generic),
                 "forward product must retain its specialized kernel: {generic}"
@@ -392,7 +388,8 @@ fn deferred_movement_sum_uses_the_canonical_bounded_carry_tree() {
             );
             dag.add_root(sum);
             let generated = support::codegen(&dag, "carry").unwrap().c_source;
-            assert!(generated.contains("__carry_level_"));
+            assert!(generated.contains("_deferred_owner"));
+            assert!(generated.contains("_level[64]"));
             assert!(!generated.contains("chelis_reduction_check_scratch("));
             let values = (0..count)
                 .map(|i| match i % 5 {
@@ -576,8 +573,7 @@ fn wildcard_ad_products_keep_original_position_agreement_and_results() {
         let code = support::codegen(&dag, "wildcard_ad").unwrap().c_source;
         assert!(code.contains("chelis_metadata_product_plan("));
         assert!(
-            code.find("chelis_metadata_product_plan(").unwrap()
-                < code.find("__carry_level_").unwrap()
+            code.find("chelis_metadata_product_plan(").unwrap() < code.find("_level[64]").unwrap()
         );
         let mut mismatch = inputs([3, 5, 7]);
         mismatch.insert(
@@ -993,7 +989,7 @@ fn deep_movement_child() {
             dag.add_root(sum);
             if mode.ends_with("emit") || mode.ends_with("compiler") {
                 let code = support::codegen(&dag, "deep").unwrap();
-                assert!(code.c_source.contains("__carry_level_"));
+                assert!(code.c_source.contains("_level[64]"));
                 assert_eq!(
                     code.c_source.matches("const float __view_value_").count(),
                     if numeric { depth } else { 0 },

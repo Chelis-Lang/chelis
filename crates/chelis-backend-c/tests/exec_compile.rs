@@ -31,6 +31,13 @@ use support::{codegen, codegen_with_options, emit_host_program};
 
 mod common;
 
+/// Whether `src` declares a Sum carry tree whose nodes are C `element`s.
+fn sum_tree_of(src: &str, element: &str) -> bool {
+    src.lines().any(|line| {
+        line.trim_start().starts_with(&format!("{element} __sum_")) && line.ends_with("_level[64];")
+    })
+}
+
 fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
     let probe = common::probe_dir("checked_c_indexing");
     let dir = probe.path();
@@ -2773,10 +2780,10 @@ fn exec_count_multi_axis_matches_exact_int64_result() {
     assert!(generated.c_source.contains("chelis_tensor_rank(t0)"));
     assert!(!generated.c_source.contains("t0->ndim"));
     for balanced_tree_fragment in [
-        "while (__level_n_1 > 1)",
-        "int64_t __pair_left = 2 * __pair",
-        "int64_t __pair_right = __pair_left + 1",
-        "chelis_int_checked_add(__level_1[__pair_left], __level_1[__pair_right]",
+        "int64_t __count_1_level[64];",
+        "__pending & 1",
+        "__carry = chelis_int_checked_add(__count_1_level[__depth], __carry",
+        "chelis_int_checked_add(__count_1_level[__depth], __count_total_1",
     ] {
         assert!(
             generated.c_source.contains(balanced_tree_fragment),
@@ -4164,7 +4171,7 @@ fn ws_a1_exec_f64_reduce_sum_matches_reference() {
         "f64 reduce_sum must allocate an f64 output tensor:\n{src}"
     );
     assert!(
-        src.contains("__sum_level_"),
+        src.contains("_level[64]"),
         "f64 sum needs a tree at its accumulator width: {src}"
     );
     assert!(
@@ -4172,7 +4179,7 @@ fn ws_a1_exec_f64_reduce_sum_matches_reference() {
         "f64 reduce_sum must not retain dtype-specific compatibility fills:\n{src}"
     );
     assert!(
-        src.contains("double *__sum_level_"),
+        sum_tree_of(src, "double"),
         "f64 reduce_sum accumulator must be a double, not float:\n{src}"
     );
     assert!(
@@ -4261,11 +4268,11 @@ fn ws_a1_exec_i32_reduce_sum_produces_integer_result_no_float_cast() {
         "i32 reduce_sum must allocate an i32 output tensor:\n{src}"
     );
     assert!(
-        src.contains("int32_t *__sum_level_"),
+        sum_tree_of(src, "int32_t"),
         "i32 reduce_sum accumulator must be int32_t (integer-exact), not float:\n{src}"
     );
     assert!(
-        !src.contains("float *__sum_level_"),
+        !sum_tree_of(src, "float"),
         "i32 reduce_sum must NOT use a float accumulator (silent precision change):\n{src}"
     );
     assert!(
@@ -4554,11 +4561,11 @@ fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
         "mixed-dtype program must use CHELIS_DTYPE_I32 for i32 tensors:\n{src}"
     );
     assert!(
-        src.contains("double *__sum_level_"),
+        sum_tree_of(src, "double"),
         "mixed-dtype program must use a double accumulator for the f64 sum:\n{src}"
     );
     assert!(
-        src.contains("int32_t *__sum_level_"),
+        sum_tree_of(src, "int32_t"),
         "mixed-dtype program must use an int32_t accumulator for the i32 sum:\n{src}"
     );
 
@@ -5051,7 +5058,7 @@ fn exec_i8_reduce_sum_promotes_to_i32() {
     // this catches a regression where the codegen silently picks the
     // operand precision (the F1 footgun class for reductions).
     assert!(
-        src.contains("int32_t *__sum_level_"),
+        sum_tree_of(src, "int32_t"),
         "i8 reduce_sum must accumulate in int32_t (per spec §5.7.1); got:\n{src}"
     );
     assert!(
@@ -5112,7 +5119,7 @@ fn exec_i16_reduce_sum_promotes_to_i32() {
     let src = &result.c_source;
 
     assert!(
-        src.contains("int32_t *__sum_level_"),
+        sum_tree_of(src, "int32_t"),
         "i16 reduce_sum must accumulate in int32_t (per spec §5.7.1); got:\n{src}"
     );
 
@@ -7578,8 +7585,8 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
     );
     assert_eq!(
         function_body.matches("chelis_alloc(").count(),
-        if reduce_kind == "sum" { 2 } else { 1 },
-        "fused reduction allocates its result and Sum's checked tree scratch:\n{src}"
+        1,
+        "fused reduction allocates only its result; Sum's tree streams through locals:\n{src}"
     );
     assert!(!function_body.contains(&format!("chelis_tensor *t{} =", fused_node.id.0)));
 
