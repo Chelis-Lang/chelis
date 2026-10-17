@@ -1444,6 +1444,73 @@ fn issue_3741_retained_contracts_normalize_once_not_per_application() {
     );
 }
 
+fn evaluate_result_or_failure(source: &str) -> Result<String, String> {
+    let checked = checked_surf(source);
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+        .map(|outcome| {
+            outcome
+                .host_bindings
+                .get("result")
+                .map(render_value)
+                .expect("fixture binds `result`")
+        })
+        .map_err(|failure| failure.message)
+}
+
+/// chelis#3761: an application walks a List argument's elements only when
+/// they hold a tensor whose entry the formal claims. A fold that grows a
+/// `List[i64]` visits no element at any step, while a formal over
+/// `List[tensor[2, f32]]` still visits, and checks, every element.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With the walk
+/// unconditional, the `List[i64]` fold visited every accumulated element at
+/// every step: 5,050 and 80,200 elements at 100 and 400 steps.
+#[test]
+fn issue_3761_list_without_tensors_is_not_walked_per_application() {
+    for steps in [100usize, 400] {
+        super::eval::reset_entry_claim_work();
+        let result = evaluate_result(&format!(
+            "result = len(fold(fn (acc: List[i64], i: i64) -> append(acc, i), [0i64], \
+             range(0i64, {steps}i64)))\n"
+        ));
+        assert_eq!(result, (steps + 1).to_string());
+        let visited = super::eval::entry_list_element_steps();
+        eprintln!("#3761 receipt: {steps} steps visited {visited} List[i64] elements");
+        assert_eq!(
+            visited, 0,
+            "#3761: a List[i64] accumulator owes no per-element entry step"
+        );
+    }
+    let tensors = |second: &str| {
+        format!(
+            "def first(xs: List[tensor[2, f32]]) -> tensor[2, f32] = index(xs, 0i64)\n\
+             result = first([to_tensor([1.0f32, 2.0f32]), to_tensor({second}), \
+             to_tensor([5.0f32, 6.0f32])])\n"
+        )
+    };
+    super::eval::reset_entry_claim_work();
+    assert_eq!(
+        evaluate_result(&tensors("[3.0f32, 4.0f32]")),
+        "tensor(shape=[2], data=[1.0, 2.0])"
+    );
+    assert_eq!(
+        super::eval::entry_list_element_steps(),
+        3,
+        "#3761: a List of claimed tensors is still walked element by element"
+    );
+    let error = evaluate_result_or_failure(&tensors("[3.0f32]"))
+        .expect_err("the second element's extent violates its claim");
+    assert!(
+        error.contains("extent `2`: claimed = 2, xs[1] axis 0 = 1"),
+        "#3761: the walk still names the offending element: {error}"
+    );
+}
+
 /// chelis#3778: what a closure's fixed syntax determines about its entry
 /// (normalized parameter and result types and the entry contract) is built
 /// once per closure value, not at every application. The fold applies one

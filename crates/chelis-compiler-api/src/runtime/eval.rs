@@ -1217,6 +1217,7 @@ thread_local! {
     static ENTRY_CLAIM_TRAVERSAL_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static FORWARDING_ROUTE_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static COMPOSITION_SOURCE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static ENTRY_LIST_ELEMENT_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static CLOSURE_ENTRY_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -1224,6 +1225,14 @@ thread_local! {
 #[cfg(test)]
 pub(super) fn closure_entry_builds() -> u64 {
     CLOSURE_ENTRY_BUILDS.with(std::cell::Cell::get)
+}
+
+/// List elements an application's entry walk visits for its direct formals
+/// (chelis#3761). Separate from the claim units above, whose bounds are
+/// stated for the accumulator receipts.
+#[cfg(test)]
+pub(super) fn entry_list_element_steps() -> u64 {
+    ENTRY_LIST_ELEMENT_STEPS.with(std::cell::Cell::get)
 }
 
 /// Conservative structural-comparison budget, including checked metadata.
@@ -1247,6 +1256,7 @@ pub(super) fn reset_entry_claim_work() {
     ENTRY_CLAIM_TRAVERSAL_WORK.with(|v| v.set(0));
     COMPOSITION_SOURCE_BYTES.with(|v| v.set(0));
     FORWARDING_ROUTE_WORK.with(|v| v.set(0));
+    ENTRY_LIST_ELEMENT_STEPS.with(|v| v.set(0));
     CLOSURE_ENTRY_BUILDS.with(|v| v.set(0));
 }
 #[cfg(test)]
@@ -1445,8 +1455,16 @@ fn actualize_entry_contract(
                         "input `{path}` does not match its declared tensor type"
                     ));
                 };
+                // Elements that hold no tensor owe no entry actual, so a
+                // `List[i64]` argument costs no per-element step at each
+                // application (chelis#3761).
+                if !inner.has_tensor() {
+                    return Ok(());
+                }
                 let checked_item = checked.and_then(checked_list_element);
                 for (index, item) in items.iter().enumerate() {
+                    #[cfg(test)]
+                    ENTRY_LIST_ELEMENT_STEPS.with(|v| v.set(v.get() + 1));
                     collect(inner, checked_item, item, format!("{path}[{index}]"), out)?;
                 }
             }
