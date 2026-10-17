@@ -1,6 +1,6 @@
 //! Type environment: maps variable names to type schemes.
 
-use chelis_unord::{UnordMap, UnordSet};
+use chelis_unord::{PersistentMap, PersistentSet, UnordMap, UnordSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -188,7 +188,7 @@ struct ValueBinding {
 pub struct Env {
     // Schemes are immutable once bound. Lexical snapshots copy the name map,
     // while sharing signature bodies until a scope replaces its own binding.
-    bindings: UnordMap<String, ValueBinding>,
+    bindings: PersistentMap<String, ValueBinding>,
     /// Active constructor bindings, separate from ordinary value lookup.
     ///
     /// Every exact owner remains available so constructor syntax can select by
@@ -199,7 +199,7 @@ pub struct Env {
     /// binding may replace `bindings[name]` for bare value position without
     /// changing constructor position.
     #[serde(default)]
-    constructor_bindings: UnordMap<String, Vec<ConstructorBinding>>,
+    constructor_bindings: PersistentMap<String, Vec<ConstructorBinding>>,
     /// Names introduced by the current lexical scope (function parameters,
     /// block bindings, and pattern bindings). Builtin-specific inference may
     /// only dispatch on a name from the closed builtin vocabulary when that
@@ -207,7 +207,7 @@ pub struct Env {
     /// check-time provenance, not part of the reusable or serialized type
     /// environment.
     #[serde(skip)]
-    lexical_bindings: UnordSet<String>,
+    lexical_bindings: PersistentSet<String>,
     /// Current declaration's type/dimension/rank binders. Installed only on
     /// the cloned environment used to infer that declaration, inherited by
     /// nested lexical clones, and omitted from cached checker state.
@@ -216,7 +216,7 @@ pub struct Env {
     /// Rejected declarations still have usable body constraints. These frames
     /// belong to this check only and never become cached/public signatures.
     #[serde(skip)]
-    rejected_signatures: UnordMap<String, Arc<RejectedSignature>>,
+    rejected_signatures: PersistentMap<String, Arc<RejectedSignature>>,
     /// Declared result trusted only while checking a linker-reserved
     /// [05-OP-35] stdlib wrapper whose runtime-axis shape proof is owned by
     /// #1298. Never serialized or exposed to entry source.
@@ -231,7 +231,7 @@ pub struct Env {
     /// type/dimension/rank in one object prevents an ordinary annotation from
     /// receiving lexical permission without declaration-owned identity.
     #[serde(skip)]
-    declared_binder_identities: UnordMap<String, DeclarationBinderIdentities>,
+    declared_binder_identities: PersistentMap<String, DeclarationBinderIdentities>,
     /// Members of the recursive group being inferred whose declared header
     /// omits a type, each with the provisional scheme
     /// [`Self::bind_holed_group_member`] bound it at, shared with its binding
@@ -277,13 +277,13 @@ pub struct Env {
     /// answers the second one for [`Self::top_level_value_visibility`], which
     /// is the only authority on eager-value scope.
     #[serde(skip)]
-    top_level_value_ordinals: UnordMap<String, usize>,
+    top_level_value_ordinals: PersistentMap<String, usize>,
     /// The binding an eager top-level value shadows, when its name was
     /// already bound by an import or a stacked library phase. Before that
     /// value's own declaration the outer binding is still the one in scope,
     /// so lookup falls back here rather than reporting the name unbound.
     #[serde(skip)]
-    shadowed_prior_bindings: UnordMap<String, Scheme>,
+    shadowed_prior_bindings: PersistentMap<String, Scheme>,
     /// Flattened declaration index currently being inferred. Set by the
     /// driver loop at each scheduled declaration and inherited by every
     /// lexical clone, so nested scopes compare against the declaration that
@@ -507,7 +507,7 @@ impl Env {
             Arc::new(scheme.clone()),
             BindingFacts::default(),
         );
-        let candidates = self.constructor_bindings.entry(name).or_default();
+        let candidates = self.constructor_bindings.get_or_insert_with(name, Vec::new);
         candidates.retain(|candidate| candidate.owner != owner);
         candidates.push(ConstructorBinding { owner, scheme });
     }
