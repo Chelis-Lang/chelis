@@ -1260,7 +1260,7 @@ pub(super) fn finish_unified_app(
                 };
                 match sort_operand {
                     Type::Tensor(dims, precision) => {
-                        return Type::Tuple(vec![
+                        return Type::tuple(vec![
                             Type::Tensor(dims.clone(), precision),
                             Type::Tensor(dims, TensorPrec::Concrete(Prim::Int64)),
                         ]);
@@ -1625,7 +1625,7 @@ pub(super) fn finish_unified_app(
                         };
                         let mut piece_dims = dims.clone();
                         piece_dims[axis] = Dim::Wildcard;
-                        return Type::Adt(
+                        return Type::adt(
                             "List".to_string(),
                             vec![Type::Tensor(piece_dims, precision)],
                         );
@@ -1693,7 +1693,7 @@ pub(super) fn finish_unified_app(
                 }
                 match list_arg {
                     Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                        return Type::Adt("List".to_string(), vec![args[0].clone()]);
+                        return Type::adt("List".to_string(), vec![args[0].clone()]);
                     }
                     Type::Error(_) => return result_ty,
                     Type::Var(_) => {
@@ -1750,9 +1750,9 @@ pub(super) fn finish_unified_app(
                 }
                 match list_arg {
                     Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                        return Type::Adt(
+                        return Type::adt(
                             "List".to_string(),
-                            vec![Type::Adt("List".to_string(), vec![args[0].clone()])],
+                            vec![Type::adt("List".to_string(), vec![args[0].clone()])],
                         );
                     }
                     Type::Error(_) => return result_ty,
@@ -1805,7 +1805,7 @@ pub(super) fn finish_unified_app(
                         }
                     }
                 }
-                return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+                return Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
             }
             "tensor_scan" => {
                 // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64)
@@ -1845,10 +1845,7 @@ pub(super) fn finish_unified_app(
                 // arg 1: callback `(T, i64) -> T`.
                 if let Err(te) = unify(
                     &subst.apply(&arg_tys[1]),
-                    &Type::Fn(
-                        vec![elem_ty.clone(), i64.clone()],
-                        Box::new(elem_ty.clone()),
-                    ),
+                    &Type::function(vec![elem_ty.clone(), i64.clone()], elem_ty.clone()),
                     subst,
                 ) {
                     return report(
@@ -1919,24 +1916,24 @@ pub(super) fn finish_unified_app(
             "read_file" => return Type::Prim(Prim::String),
             "write_file" => return Type::Unit,
             "read_lines" => {
-                return Type::Adt("List".to_string(), vec![Type::Prim(Prim::String)]);
+                return Type::adt("List".to_string(), vec![Type::Prim(Prim::String)]);
             }
             "read_bytes" => {
-                return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+                return Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
             }
             "file_exists" => return Type::Prim(Prim::Bool),
             "list_dir" => {
-                return Type::Adt("List".to_string(), vec![Type::Prim(Prim::String)]);
+                return Type::adt("List".to_string(), vec![Type::Prim(Prim::String)]);
             }
-            "mmap_file" => return Type::Adt("MappedFile".to_string(), Vec::new()),
+            "mmap_file" => return Type::adt("MappedFile".to_string(), Vec::new()),
             "mmap_read" => {
-                return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+                return Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
             }
             "mmap_len" => return Type::Prim(Prim::Int64),
             // spec/05 §2.6: `process_run(cmd, args)` returns
             // `(exit_code, stdout, stderr)`.
             "process_run" => {
-                return Type::Tuple(vec![
+                return Type::tuple(vec![
                     Type::Prim(Prim::Int64),
                     Type::Prim(Prim::String),
                     Type::Prim(Prim::String),

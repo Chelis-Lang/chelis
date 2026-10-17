@@ -6,6 +6,7 @@ use chelis_types::{
     types::{Scheme, Type},
 };
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct CountingAllocator;
@@ -32,10 +33,10 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 fn wide_env(count: usize) -> Env {
     let mut env = Env::new();
     for index in 0..count {
-        let arguments = (0..256).map(|_| Type::Ref(Box::new(Type::Unit))).collect();
+        let arguments = (0..256).map(|_| Type::reference(Type::Unit)).collect();
         env.bind(
             format!("neuron_{index}"),
-            Scheme::mono(Type::Fn(arguments, Box::new(Type::Unit))),
+            Scheme::mono(Type::Fn(arguments, Arc::new(Type::Unit))),
         );
     }
     env

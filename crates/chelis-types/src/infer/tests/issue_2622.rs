@@ -1,8 +1,13 @@
-//! chelis#2622: the semantic view of a stamped type applies the
-//! substitution to a linear number of type nodes.
+//! chelis#2622: checking a program nested `n` deep applies the substitution
+//! to a linear number of type nodes.
 //!
-//! The view applied the substitution again at every level of the type it
-//! walked, so one stamp of depth `d` visited about `d^2 / 2` nodes.
+//! The semantic view of a stamped type applied the substitution again at
+//! every level of the type it walked, so one stamp of depth `d` visited about
+//! `d^2 / 2` nodes. Closing an epoch applies the substitution to every
+//! node's recorded type; a tuple chain `n` deep records a type of size about
+//! `n - k` at depth `k`, so applying to each in full visited about `n^2`
+//! nodes. The records share their children, and one memo across the epoch
+//! applies each shared subtree once.
 //!
 //! The oracle counts the nodes `Subst::apply` visits. The count is
 //! deterministic for a fixed program. Doubling the depth must grow it by at
@@ -19,6 +24,20 @@ fn grows_linearly(small: usize, large: usize) -> bool {
 
 fn i32_type() -> &'static str {
     "(t-prim {} i32)"
+}
+
+/// The issue's witness: a tuple chain of literals.
+fn literal_chain(depth: usize) -> String {
+    let leaf = format!("(lit {{type: {}}} 1)", i32_type());
+    let body = format!("(tuple {{}} {leaf} ").repeat(depth) + &leaf + &")".repeat(depth);
+    format!("(def {{}} main (fn {{}} (params {{}}) {body}))\n")
+}
+
+/// The same chain over a parameter whose type is a variable, so every
+/// recorded type stays open until the declaration generalizes.
+fn variable_chain(depth: usize) -> String {
+    let body = "(tuple {} (var {} x) ".repeat(depth) + "(var {} x)" + &")".repeat(depth);
+    format!("(def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} _)}})) {body}))\n")
 }
 
 /// One deep type and almost no expression nodes: an identity function whose
@@ -60,6 +79,16 @@ fn assert_linear(label: &str, generate: fn(usize) -> String) {
 }
 
 #[test]
+fn issue_2622_a_literal_tuple_chain_applies_linearly() {
+    assert_linear("literal tuple chain", literal_chain);
+}
+
+#[test]
+fn issue_2622_a_variable_tuple_chain_applies_linearly() {
+    assert_linear("variable tuple chain", variable_chain);
+}
+
+#[test]
 fn issue_2622_a_deep_annotated_type_applies_linearly() {
     assert_linear("deep annotated parameter", annotated_parameter);
 }
@@ -81,7 +110,7 @@ fn issue_2622_the_detector_rejects_a_semantic_view_that_reapplies_per_level() {
     }
     fn nested(depth: usize) -> Type {
         (0..depth).fold(Type::Prim(Prim::Int32), |inner, _| {
-            Type::Tuple(vec![Type::Prim(Prim::Int32), inner])
+            Type::tuple(vec![Type::Prim(Prim::Int32), inner])
         })
     }
     let subst = Subst::new();

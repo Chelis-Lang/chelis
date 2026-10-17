@@ -145,7 +145,7 @@ pub(super) fn finish_conversion_app(
                                 TensorPrec::Var(var) => Type::Var(*var),
                             };
                             let inner = (rank..result_dims.len()).fold(scalar, |inner, _| {
-                                Type::Adt("List".to_string(), vec![inner])
+                                Type::adt("List".to_string(), vec![inner])
                             });
                             if let Err(te) = unify(&Type::Var(element), &inner, subst) {
                                 return Some(report(errors, te.into()));
@@ -227,7 +227,7 @@ pub(super) fn finish_conversion_app(
                             // following index look unresolved at [04-INF-9]'s
                             // declaration boundary (chelis#2126).
                             TensorPrec::Var(variable) => {
-                                return Some(Type::Adt(
+                                return Some(Type::adt(
                                     "List".to_string(),
                                     vec![Type::Var(variable)],
                                 ));
@@ -253,7 +253,7 @@ pub(super) fn finish_conversion_app(
                                 site.source_site,
                             ));
                         }
-                        return Some(Type::Adt("List".to_string(), vec![Type::Prim(precision)]));
+                        return Some(Type::adt("List".to_string(), vec![Type::Prim(precision)]));
                     }
                     Type::Error(_) => return Some(result_ty.clone()),
                     Type::Var(_) => {
@@ -612,7 +612,7 @@ pub(super) fn require_to_tensor_leaf(
     let mut depth = 0usize;
     while let Type::Adt(name, arguments) = &leaf
         && name == "List"
-        && let [element] = arguments.as_slice()
+        && let [element] = &arguments[..]
     {
         leaf = subst.apply(element);
         depth += 1;

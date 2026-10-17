@@ -297,7 +297,7 @@ mod tests {
                 subst
                     .insert_type(
                         variable,
-                        Type::Adt("List".into(), vec![Type::Prim(Prim::F32)])
+                        Type::adt("List".into(), vec![Type::Prim(Prim::F32)])
                     )
                     .is_err()
             );

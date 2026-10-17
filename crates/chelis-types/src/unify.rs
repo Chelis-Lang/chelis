@@ -22,6 +22,7 @@
 //! body for the canonical reproducer.
 
 use chelis_unord::{PersistentMap, PersistentSet, UnordMap, UnordSet};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,20 @@ thread_local! {
 pub(crate) fn take_apply_visits() -> usize {
     APPLY_VISITS.with(|visits| visits.replace(0))
 }
+
+/// Applied shared children for [`Subst::apply_memoized`], keyed by the
+/// address of the child's allocation. Each entry holds the original child as
+/// well as its applied form, so the address cannot be freed and reused while
+/// the memo lives. The memo is only ever looked up, never iterated.
+#[derive(Default)]
+pub(crate) struct ApplyMemo {
+    children: AppliedShared<Type>,
+    lists: AppliedShared<[Type]>,
+    arguments: AppliedShared<[NominalArg]>,
+}
+
+/// Original and applied form of each shared child, by allocation address.
+type AppliedShared<T> = UnordMap<usize, (Arc<T>, Arc<T>)>;
 
 const INTERNAL_VMAP_AXIS_PREFIX: &str = "\0vmap-axis:";
 
@@ -1064,14 +1079,11 @@ pub(crate) fn collection_contract_callable_type(constraint: &CollectionConstrain
         operand, result, ..
     } = constraint
     {
-        return Type::Fn(
-            vec![Type::Ref(Box::new(operand.clone()))],
-            Box::new(result.clone()),
-        );
+        return Type::function(vec![Type::reference(operand.clone())], result.clone());
     }
     Type::Fn(
         constraint.operands().into_iter().cloned().collect(),
-        Box::new(constraint.result().clone()),
+        Arc::new(constraint.result().clone()),
     )
 }
 
@@ -1086,12 +1098,12 @@ fn collect_non_callable_tvars(ty: &Type, vars: &mut UnordSet<TypeVar>) {
             vars.insert(*var);
         }
         Type::Adt(_, arguments) | Type::Tuple(arguments) => {
-            for argument in arguments {
+            for argument in arguments.iter() {
                 collect_non_callable_tvars(argument, vars);
             }
         }
         Type::KindedAdt(_, arguments) => {
-            for argument in arguments {
+            for argument in arguments.iter() {
                 if let NominalArg::Type(ty) = argument {
                     collect_non_callable_tvars(ty, vars);
                 }
@@ -2589,41 +2601,99 @@ impl Subst {
     /// Path-compresses any chains of length ≥ 2 it encounters so future
     /// lookups land in O(1).
     pub fn apply(&self, ty: &Type) -> Type {
+        self.apply_with(ty, None)
+    }
+
+    /// [`Subst::apply`] for one of many types that share subtrees, such as
+    /// the types recorded for every node of one declaration: a node's type
+    /// shares its children with the types recorded for the nodes inside it.
+    /// `memo` answers a shared child it has already applied, so applying to
+    /// every recorded type visits each distinct subtree once instead of once
+    /// per enclosing record (chelis#2622).
+    ///
+    /// The result is the one `apply` returns. The substitution must not
+    /// gain a binding while `memo` is in use. Path compression is `apply`'s
+    /// only effect on it, and compression leaves every variable on a resolved
+    /// chain pointing at that chain's end, whichever variables are resolved
+    /// first and however often, so the substitution ends in the state that
+    /// applying to each type in full would leave.
+    pub(crate) fn apply_memoized(&self, ty: &Type, memo: &mut ApplyMemo) -> Type {
+        self.apply_with(ty, Some(memo))
+    }
+
+    fn apply_with(&self, ty: &Type, mut memo: Option<&mut ApplyMemo>) -> Type {
         #[cfg(test)]
         APPLY_VISITS.with(|visits| visits.set(visits.get() + 1));
         match ty {
             Type::Var(v) => match self.resolve_tvar(*v) {
                 Type::Var(variable) => Type::Var(variable),
-                bound => self.apply(&bound),
+                bound => self.apply_with(&bound, memo),
             },
             Type::Fn(args, ret) => {
-                let args = args.iter().map(|a| self.apply(a)).collect();
-                let ret = Box::new(self.apply(ret));
-                Type::Fn(args, ret)
+                let args = self.apply_list(args, memo.as_deref_mut());
+                Type::Fn(args, self.apply_child(ret, memo))
             }
-            Type::Ref(inner) => Type::Ref(Box::new(self.apply(inner))),
+            Type::Ref(inner) => Type::Ref(self.apply_child(inner, memo)),
             Type::Tensor(dims, prec) => {
                 Type::Tensor(self.apply_tensor_dims(dims), self.apply_tensor_prec(prec))
             }
-            Type::Adt(name, args) => {
-                let args = args.iter().map(|a| self.apply(a)).collect();
-                Type::Adt(name.clone(), args)
+            Type::Adt(name, args) => Type::Adt(name.clone(), self.apply_list(args, memo)),
+            Type::KindedAdt(name, args) => {
+                Type::KindedAdt(name.clone(), self.apply_arguments(args, memo))
             }
-            Type::KindedAdt(name, args) => Type::KindedAdt(
-                name.clone(),
-                args.iter()
-                    .map(|argument| match argument {
-                        NominalArg::Type(ty) => NominalArg::Type(self.apply(ty)),
-                        NominalArg::Dimension(dim) => NominalArg::Dimension(self.apply_dim(dim)),
-                    })
-                    .collect(),
-            ),
-            Type::Tuple(ts) => {
-                let ts = ts.iter().map(|t| self.apply(t)).collect();
-                Type::Tuple(ts)
-            }
+            Type::Tuple(ts) => Type::Tuple(self.apply_list(ts, memo)),
             Type::Prim(_) | Type::Unit | Type::Error(_) => ty.clone(),
         }
+    }
+
+    fn apply_child(&self, child: &Arc<Type>, mut memo: Option<&mut ApplyMemo>) -> Arc<Type> {
+        let key = Arc::as_ptr(child).addr();
+        if let Some((_, applied)) = memo.as_deref().and_then(|memo| memo.children.get(&key)) {
+            return applied.clone();
+        }
+        let applied = Arc::new(self.apply_with(child, memo.as_deref_mut()));
+        if let Some(memo) = memo {
+            memo.children.insert(key, (child.clone(), applied.clone()));
+        }
+        applied
+    }
+
+    fn apply_list(&self, items: &Arc<[Type]>, mut memo: Option<&mut ApplyMemo>) -> Arc<[Type]> {
+        let key = Arc::as_ptr(items).cast::<Type>().addr();
+        if let Some((_, applied)) = memo.as_deref().and_then(|memo| memo.lists.get(&key)) {
+            return applied.clone();
+        }
+        let applied = items
+            .iter()
+            .map(|item| self.apply_with(item, memo.as_deref_mut()))
+            .collect::<Arc<[Type]>>();
+        if let Some(memo) = memo {
+            memo.lists.insert(key, (items.clone(), applied.clone()));
+        }
+        applied
+    }
+
+    fn apply_arguments(
+        &self,
+        arguments: &Arc<[NominalArg]>,
+        mut memo: Option<&mut ApplyMemo>,
+    ) -> Arc<[NominalArg]> {
+        let key = Arc::as_ptr(arguments).cast::<NominalArg>().addr();
+        if let Some((_, applied)) = memo.as_deref().and_then(|memo| memo.arguments.get(&key)) {
+            return applied.clone();
+        }
+        let applied = arguments
+            .iter()
+            .map(|argument| match argument {
+                NominalArg::Type(ty) => NominalArg::Type(self.apply_with(ty, memo.as_deref_mut())),
+                NominalArg::Dimension(dim) => NominalArg::Dimension(self.apply_dim(dim)),
+            })
+            .collect::<Arc<[NominalArg]>>();
+        if let Some(memo) = memo {
+            memo.arguments
+                .insert(key, (arguments.clone(), applied.clone()));
+        }
+        applied
     }
 
     /// Apply this substitution to a scheme body without substituting through
@@ -2680,19 +2750,19 @@ impl Subst {
                         )
                     })
                     .collect(),
-                Box::new(self.apply_excluding(
+                Arc::new(self.apply_excluding(
                     ret,
                     quantified_tvars,
                     quantified_dvars,
                     quantified_rvars,
                 )),
             ),
-            Type::Ref(inner) => Type::Ref(Box::new(self.apply_excluding(
+            Type::Ref(inner) => Type::reference(self.apply_excluding(
                 inner,
                 quantified_tvars,
                 quantified_dvars,
                 quantified_rvars,
-            ))),
+            )),
             Type::Tensor(dims, prec) => {
                 let resolved_dims =
                     self.apply_tensor_dims_excluding(dims, quantified_dvars, quantified_rvars);
@@ -2980,40 +3050,41 @@ impl Subst {
     /// Semantic annotation/name-query view. Never use this before the authored
     /// result guards: projecting a labelled identity to Name erases rigidity.
     pub(crate) fn semantic_type(&self, ty: &Type) -> Type {
-        self.semantic_view(self.apply(ty))
+        self.semantic_view(&self.apply(ty))
     }
 
     /// The semantic view of a type `apply` has already resolved. `apply`
     /// resolves every child, so the children need only the dimension
     /// projection; applying again at each level would rebuild every subtree
     /// once per enclosing level, quadratic in the type's depth (chelis#2622).
-    fn semantic_view(&self, ty: Type) -> Type {
+    fn semantic_view(&self, ty: &Type) -> Type {
         match ty {
-            Type::Tensor(dims, prec) => {
-                Type::Tensor(dims.iter().map(|d| self.semantic_dim(d)).collect(), prec)
-            }
-            Type::Fn(args, ret) => Type::Fn(
-                args.into_iter().map(|a| self.semantic_view(a)).collect(),
-                Box::new(self.semantic_view(*ret)),
+            Type::Tensor(dims, prec) => Type::Tensor(
+                dims.iter().map(|d| self.semantic_dim(d)).collect(),
+                prec.clone(),
             ),
-            Type::Ref(inner) => Type::Ref(Box::new(self.semantic_view(*inner))),
+            Type::Fn(args, ret) => Type::Fn(
+                args.iter().map(|a| self.semantic_view(a)).collect(),
+                Arc::new(self.semantic_view(ret)),
+            ),
+            Type::Ref(inner) => Type::reference(self.semantic_view(inner)),
             Type::Tuple(items) => {
-                Type::Tuple(items.into_iter().map(|t| self.semantic_view(t)).collect())
+                Type::Tuple(items.iter().map(|t| self.semantic_view(t)).collect())
             }
             Type::Adt(name, args) => Type::Adt(
-                name,
-                args.into_iter().map(|t| self.semantic_view(t)).collect(),
+                name.clone(),
+                args.iter().map(|t| self.semantic_view(t)).collect(),
             ),
             Type::KindedAdt(name, args) => Type::KindedAdt(
-                name,
-                args.into_iter()
+                name.clone(),
+                args.iter()
                     .map(|a| match a {
                         NominalArg::Type(t) => NominalArg::Type(self.semantic_view(t)),
-                        NominalArg::Dimension(d) => NominalArg::Dimension(self.semantic_dim(&d)),
+                        NominalArg::Dimension(d) => NominalArg::Dimension(self.semantic_dim(d)),
                     })
                     .collect(),
             ),
-            other => other,
+            other => other.clone(),
         }
     }
 
@@ -3362,7 +3433,7 @@ impl Subst {
             (Type::Fn(inferred_args, inferred_ret), Type::Fn(declared_args, declared_ret))
                 if inferred_args.len() == declared_args.len() =>
             {
-                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args.iter()) {
                     self.project_tvar_restrictions_inner(inferred, declared)?;
                 }
                 self.project_tvar_restrictions_inner(inferred_ret, declared_ret)
@@ -3387,7 +3458,7 @@ impl Subst {
             (Type::Adt(inferred_name, inferred_args), Type::Adt(declared_name, declared_args))
                 if inferred_name == declared_name && inferred_args.len() == declared_args.len() =>
             {
-                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args.iter()) {
                     self.project_tvar_restrictions_inner(inferred, declared)?;
                 }
                 Ok(())
@@ -3396,7 +3467,7 @@ impl Subst {
                 Type::KindedAdt(inferred_name, inferred_args),
                 Type::KindedAdt(declared_name, declared_args),
             ) if inferred_name == declared_name && inferred_args.len() == declared_args.len() => {
-                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args.iter()) {
                     if let (NominalArg::Type(inferred), NominalArg::Type(declared)) =
                         (inferred, declared)
                     {
@@ -3406,7 +3477,7 @@ impl Subst {
                 Ok(())
             }
             (Type::Tuple(inferred), Type::Tuple(declared)) if inferred.len() == declared.len() => {
-                for (inferred, declared) in inferred.iter().zip(declared) {
+                for (inferred, declared) in inferred.iter().zip(declared.iter()) {
                     self.project_tvar_restrictions_inner(inferred, declared)?;
                 }
                 Ok(())
@@ -3736,7 +3807,7 @@ fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeErr
                     ),
                 });
             }
-            for (a1, a2) in args1.iter().zip(args2) {
+            for (a1, a2) in args1.iter().zip(args2.iter()) {
                 match (a1, a2) {
                     (NominalArg::Type(t1), NominalArg::Type(t2)) => unify(t1, t2, subst)?,
                     (NominalArg::Dimension(d1), NominalArg::Dimension(d2)) => {
@@ -4439,7 +4510,7 @@ fn check_introduced_name_rank_collision(
             }
             Type::Ref(inner) => collect(inner, names, rvars),
             Type::Fn(fn_args, fn_ret) => {
-                for a in fn_args {
+                for a in fn_args.iter() {
                     collect(a, names, rvars);
                 }
                 collect(fn_ret, names, rvars);
@@ -4717,16 +4788,16 @@ mod tests {
         let outer = Type::Var(TypeVar(100));
         let inner = Type::Var(TypeVar(101));
         let mut subst = Subst::new();
-        unify(&outer, &Type::Tuple(vec![inner.clone()]), &mut subst).unwrap();
+        unify(&outer, &Type::tuple(vec![inner.clone()]), &mut subst).unwrap();
         unify(&inner, &Type::Prim(Prim::F32), &mut subst).unwrap();
         assert_eq!(
             subst.apply(&outer),
-            Type::Tuple(vec![Type::Prim(Prim::F32)])
+            Type::tuple(vec![Type::Prim(Prim::F32)])
         );
         assert!(
             unify(
                 &outer,
-                &Type::Tuple(vec![Type::Prim(Prim::Bool)]),
+                &Type::tuple(vec![Type::Prim(Prim::Bool)]),
                 &mut subst
             )
             .is_err()
@@ -4759,8 +4830,8 @@ mod tests {
         let mut subst = Subst::new();
         subst.protect_dimensions([DimVar(0)]);
         let tensor = |dim| Type::Tensor(vec![dim], TensorPrec::Concrete(Prim::F32));
-        let left = Type::Tuple(vec![tensor(Dim::Var(DimVar(0))), Type::Unit]);
-        let right = Type::Tuple(vec![tensor(Dim::Name("fixed".into())), tensor(Dim::Lit(1))]);
+        let left = Type::tuple(vec![tensor(Dim::Var(DimVar(0))), Type::Unit]);
+        let right = Type::tuple(vec![tensor(Dim::Name("fixed".into())), tensor(Dim::Lit(1))]);
         assert!(unify(&left, &right, &mut subst).is_err());
         assert_eq!(subst.dimension_label(DimVar(0)), None);
         unify_dim(&Dim::Var(DimVar(0)), &Dim::Name("other".into()), &mut subst).unwrap();
@@ -4800,15 +4871,15 @@ mod tests {
         )
         .unwrap();
         assert!(subst.dimension_label_undo.lock().unwrap().is_empty());
-        let lhs = Type::Tuple(vec![
-            Type::Tuple(vec![
+        let lhs = Type::tuple(vec![
+            Type::tuple(vec![
                 tensor(Dim::Var(DimVar(1))),
                 tensor(Dim::Var(DimVar(2))),
             ]),
             Type::Unit,
         ]);
-        let rhs = Type::Tuple(vec![
-            Type::Tuple(vec![
+        let rhs = Type::tuple(vec![
+            Type::tuple(vec![
                 tensor(Dim::Name("other".into())),
                 tensor(Dim::Var(DimVar(1))),
             ]),
@@ -5074,8 +5145,8 @@ mod tests {
             &mut subst,
         )
         .unwrap();
-        let lhs = Type::Tuple(vec![Type::Var(tv), Type::Unit]);
-        let rhs = Type::Tuple(vec![tensor(Dim::Var(dv)), tensor(Dim::Lit(1))]);
+        let lhs = Type::tuple(vec![Type::Var(tv), Type::Unit]);
+        let rhs = Type::tuple(vec![tensor(Dim::Var(dv)), tensor(Dim::Lit(1))]);
         assert!(unify(&lhs, &rhs, &mut subst).is_err());
         assert_eq!(
             subst.apply(&Type::Var(tv)),
@@ -5234,7 +5305,7 @@ mod tests {
         let younger_d = vg.fresh_dvar();
         let younger_r = vg.fresh_rvar();
 
-        let composite = Type::Tuple(vec![
+        let composite = Type::tuple(vec![
             Type::Var(younger_t),
             Type::Tensor(
                 vec![Dim::Var(younger_d), Dim::Rank(younger_r)],
@@ -5263,7 +5334,7 @@ mod tests {
         let mut env = crate::env::Env::new();
         env.bind(
             "outer".to_string(),
-            Scheme::mono(Type::Tuple(vec![
+            Scheme::mono(Type::tuple(vec![
                 Type::Tensor(vec![Dim::Var(older_d)], TensorPrec::Concrete(Prim::F32)),
                 Type::Tensor(
                     vec![Dim::Rank(older_ground_r)],
@@ -5296,7 +5367,7 @@ mod tests {
         assert_eq!(subst.level_of_rvar(younger_r), 0);
         subst.leave_level(inner, &vg);
         let escaped = env.generalize(
-            &Type::Tuple(vec![
+            &Type::tuple(vec![
                 Type::Tensor(
                     vec![Dim::Var(younger_d_alias)],
                     TensorPrec::Concrete(Prim::F32),
@@ -5322,7 +5393,7 @@ mod tests {
         let mut env = crate::env::Env::new();
         env.bind(
             "outer".to_string(),
-            Scheme::mono(Type::Tuple(vec![
+            Scheme::mono(Type::tuple(vec![
                 Type::Var(older_type),
                 Type::Tensor(vec![], TensorPrec::Var(older_precision)),
             ])),
@@ -5354,7 +5425,7 @@ mod tests {
         assert_eq!(subst.level_of_tvar(younger_precision), 0);
         subst.leave_level(inner, &vg);
         let escaped = env.generalize(
-            &Type::Tuple(vec![
+            &Type::tuple(vec![
                 Type::Tensor(vec![Dim::Var(younger_dim)], TensorPrec::Concrete(Prim::F32)),
                 Type::Tensor(vec![], TensorPrec::Var(younger_precision)),
             ]),
@@ -5747,19 +5818,19 @@ mod tests {
             .expect("an unbounded variable accepts any single dtype family");
         let inferred_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(inferred_precision));
         let declared_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(declared_precision));
-        let inferred = Type::Fn(
+        let inferred = Type::function(
             vec![
-                Type::Ref(Box::new(inferred_tensor)),
+                Type::reference(inferred_tensor),
                 Type::Var(inferred_precision),
             ],
-            Box::new(Type::Unit),
+            Type::Unit,
         );
-        let declared = Type::Fn(
+        let declared = Type::function(
             vec![
-                Type::Ref(Box::new(declared_tensor)),
+                Type::reference(declared_tensor),
                 Type::Var(declared_precision),
             ],
-            Box::new(Type::Unit),
+            Type::Unit,
         );
 
         subst
@@ -5787,8 +5858,8 @@ mod tests {
         subst
             .narrow_tvar_restriction(second_source, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
-        let inferred = Type::Tuple(vec![Type::Var(first_source), Type::Var(second_source)]);
-        let declared = Type::Tuple(vec![Type::Var(first_target), Type::Prim(Prim::Int32)]);
+        let inferred = Type::tuple(vec![Type::Var(first_source), Type::Var(second_source)]);
+        let declared = Type::tuple(vec![Type::Var(first_target), Type::Prim(Prim::Int32)]);
         let restrictions_before = subst.tvar_restrictions_snapshot();
 
         let error = subst
@@ -5817,7 +5888,7 @@ mod tests {
         let sibling_var = vg.fresh_tvar();
         subst.leave_level(sibling_level, &vg);
         let scheme = env.generalize(
-            &Type::Tuple(vec![Type::Var(pp1_var), Type::Var(sibling_var)]),
+            &Type::tuple(vec![Type::Var(pp1_var), Type::Var(sibling_var)]),
             &subst,
         );
         assert_eq!(scheme.tvars, vec![sibling_var]);
@@ -5848,18 +5919,18 @@ mod tests {
     #[test]
     fn unify_fn_types() {
         let mut s = Subst::new();
-        let f1 = Type::Fn(vec![Type::Prim(Prim::F32)], Box::new(Type::Prim(Prim::F32)));
-        let f2 = Type::Fn(vec![Type::Prim(Prim::F32)], Box::new(Type::Prim(Prim::F32)));
+        let f1 = Type::function(vec![Type::Prim(Prim::F32)], Type::Prim(Prim::F32));
+        let f2 = Type::function(vec![Type::Prim(Prim::F32)], Type::Prim(Prim::F32));
         assert!(unify(&f1, &f2, &mut s).is_ok());
     }
 
     #[test]
     fn unify_fn_arity_mismatch() {
         let mut s = Subst::new();
-        let f1 = Type::Fn(vec![Type::Prim(Prim::F32)], Box::new(Type::Prim(Prim::F32)));
-        let f2 = Type::Fn(
+        let f1 = Type::function(vec![Type::Prim(Prim::F32)], Type::Prim(Prim::F32));
+        let f2 = Type::function(
             vec![Type::Prim(Prim::F32), Type::Prim(Prim::F32)],
-            Box::new(Type::Prim(Prim::F32)),
+            Type::Prim(Prim::F32),
         );
         let err = unify(&f1, &f2, &mut s).unwrap_err();
         assert!(matches!(err.kind, TypeErrorKind::ArityMismatch));
@@ -6905,16 +6976,16 @@ mod tests {
     #[test]
     fn unify_adt_same() {
         let mut s = Subst::new();
-        let a1 = Type::Adt("Option".into(), vec![Type::Prim(Prim::F32)]);
-        let a2 = Type::Adt("Option".into(), vec![Type::Prim(Prim::F32)]);
+        let a1 = Type::adt("Option".into(), vec![Type::Prim(Prim::F32)]);
+        let a2 = Type::adt("Option".into(), vec![Type::Prim(Prim::F32)]);
         assert!(unify(&a1, &a2, &mut s).is_ok());
     }
 
     #[test]
     fn unify_adt_name_mismatch() {
         let mut s = Subst::new();
-        let a1 = Type::Adt("Option".into(), vec![Type::Prim(Prim::F32)]);
-        let a2 = Type::Adt("Result".into(), vec![Type::Prim(Prim::F32)]);
+        let a1 = Type::adt("Option".into(), vec![Type::Prim(Prim::F32)]);
+        let a2 = Type::adt("Result".into(), vec![Type::Prim(Prim::F32)]);
         assert!(unify(&a1, &a2, &mut s).is_err());
     }
 
@@ -6924,7 +6995,7 @@ mod tests {
         let v = g.fresh_tvar();
         let mut s = Subst::new();
         // Try to unify ?0 with List(?0) — should fail with occurs check
-        let list_v = Type::Adt("List".into(), vec![Type::Var(v)]);
+        let list_v = Type::adt("List".into(), vec![Type::Var(v)]);
         let err = unify(&Type::Var(v), &list_v, &mut s).unwrap_err();
         assert!(matches!(err.kind, TypeErrorKind::OccursCheck));
     }
@@ -6946,8 +7017,8 @@ mod tests {
     #[test]
     fn unify_tuple_types() {
         let mut s = Subst::new();
-        let t1 = Type::Tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::Int32)]);
-        let t2 = Type::Tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::Int32)]);
+        let t1 = Type::tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::Int32)]);
+        let t2 = Type::tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::Int32)]);
         assert!(unify(&t1, &t2, &mut s).is_ok());
     }
 

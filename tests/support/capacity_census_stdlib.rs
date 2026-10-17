@@ -135,26 +135,26 @@ impl Closure {
             match ty {
                 Type::Adt(name, args) => {
                     out.insert(name.clone());
-                    for arg in args {
+                    for arg in args.iter() {
                         dependencies(arg, out);
                     }
                 }
                 Type::KindedAdt(name, args) => {
                     out.insert(name.clone());
-                    for arg in args {
+                    for arg in args.iter() {
                         if let NominalArg::Type(ty) = arg {
                             dependencies(ty, out);
                         }
                     }
                 }
                 Type::Fn(args, ret) => {
-                    for arg in args {
+                    for arg in args.iter() {
                         dependencies(arg, out);
                     }
                     dependencies(ret, out);
                 }
                 Type::Tuple(parts) => {
-                    for part in parts {
+                    for part in parts.iter() {
                         dependencies(part, out);
                     }
                 }
@@ -246,13 +246,13 @@ impl Closure {
                 }
             }
             Type::Fn(args, ret) => {
-                for arg in args {
+                for arg in args.iter() {
                     result.extend(self.capacity(arg, bare, params, names));
                 }
                 result.extend(self.capacity(ret, bare, params, names));
             }
             Type::Tuple(parts) => {
-                for part in parts {
+                for part in parts.iter() {
                     result.extend(self.capacity(part, bare, params, names));
                 }
             }

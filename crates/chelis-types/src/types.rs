@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::Arc;
 
 use chelis_vocab::RuntimeDType;
 use serde::{Deserialize, Serialize};
@@ -861,29 +862,37 @@ impl fmt::Display for NominalArg {
 }
 
 /// Chelis type.
+///
+/// Every recursive position is shared behind an `Arc`, so cloning a type
+/// copies one pointer per child instead of the child's whole tree, and a
+/// type nested `n` deep that every enclosing node records costs `O(n)` to
+/// keep rather than `O(n^2)` (chelis#2622). The children are immutable once
+/// built, so the sharing is never observable. `Arc` serializes, compares, and formats
+/// as its contents, so the wire forms, equality, and `Debug` output are the
+/// same as for owned children.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
     /// Primitive type (f32, i32, bool, etc.).
     Prim(Prim),
     /// Function type: args → return.
-    Fn(Vec<Type>, Box<Type>),
+    Fn(Arc<[Type]>, Arc<Type>),
     /// Read-only non-owning borrow of a value.
-    Ref(Box<Type>),
+    Ref(Arc<Type>),
     /// Tensor type: dimensions + precision slot. Precision is
     /// `TensorPrec::Concrete(_)` for fully-monomorphized tensors and
     /// `TensorPrec::Var(_)` for sig-quantified precision polymorphism
     /// per `spec/04-type-system.md` §5.8 (WS-A5).
     Tensor(Vec<Dim>, TensorPrec),
     /// Algebraic data type whose arguments are all ordinary types.
-    Adt(String, Vec<Type>),
+    Adt(String, Arc<[Type]>),
     /// Algebraic data type with at least one dimension-kinded argument.
     /// Keeping this representation distinct makes a dimension impossible to
     /// consume through an ordinary `Type::Adt` argument path.
-    KindedAdt(String, Vec<NominalArg>),
+    KindedAdt(String, Arc<[NominalArg]>),
     /// Type variable (for inference).
     Var(TypeVar),
     /// Tuple type.
-    Tuple(Vec<Type>),
+    Tuple(Arc<[Type]>),
     /// Unit type.
     Unit,
     /// Error sentinel -- used for partial inference past errors. Carries a
@@ -893,6 +902,33 @@ pub enum Type {
     /// silent `Type::Error` is unconstructible outside the diagnostics module
     /// (spec/design/checker_totality.md §C3, chelis#731 Phase 2).
     Error(ErrorWitness),
+}
+
+impl Type {
+    /// A function type from its parameter types and result type.
+    pub fn function(params: Vec<Type>, result: Type) -> Self {
+        Self::Fn(params.into(), Arc::new(result))
+    }
+
+    /// A read-only borrow of `referent`.
+    pub fn reference(referent: Type) -> Self {
+        Self::Ref(Arc::new(referent))
+    }
+
+    /// A tuple of `items`.
+    pub fn tuple(items: Vec<Type>) -> Self {
+        Self::Tuple(items.into())
+    }
+
+    /// An algebraic data type whose arguments are all ordinary types.
+    pub fn adt(name: String, args: Vec<Type>) -> Self {
+        Self::Adt(name, args.into())
+    }
+
+    /// An algebraic data type with at least one dimension-kinded argument.
+    pub fn kinded_adt(name: String, args: Vec<NominalArg>) -> Self {
+        Self::KindedAdt(name, args.into())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1283,7 +1319,7 @@ impl ResultOrigin {
                     args.iter()
                         .map(|ty| split(ty, variables, occurrences, vg))
                         .collect(),
-                    Box::new(split(ret, variables, occurrences, vg)),
+                    Arc::new(split(ret, variables, occurrences, vg)),
                 ),
                 Type::Tuple(items) => Type::Tuple(
                     items
@@ -1308,7 +1344,7 @@ impl ResultOrigin {
                         })
                         .collect(),
                 ),
-                Type::Ref(inner) => Type::Ref(Box::new(split(inner, variables, occurrences, vg))),
+                Type::Ref(inner) => Type::reference(split(inner, variables, occurrences, vg)),
                 Type::Tensor(dims, TensorPrec::Var(var)) if variables.contains(var) => {
                     let Type::Var(fresh) = split(&Type::Var(*var), variables, occurrences, vg)
                     else {

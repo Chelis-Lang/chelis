@@ -6,6 +6,7 @@
 //! groups and run them.
 
 use super::*;
+use std::sync::Arc;
 
 /// The hoist order: the total order the body-inference schedule used before
 /// chelis#1134 and still uses as its priority. Every module function is
@@ -502,7 +503,7 @@ pub(super) fn prebind_cyclic_component_schemes(
                 };
                 Type::Fn(
                     (0..arity).map(|_| vg.fresh_type()).collect(),
-                    Box::new(vg.fresh_type()),
+                    Arc::new(vg.fresh_type()),
                 )
             }
             None => vg.fresh_type(),

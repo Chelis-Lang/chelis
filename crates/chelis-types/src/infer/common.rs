@@ -5,6 +5,7 @@
 
 use super::*;
 use chelis_deep::cons_spine::{ConsSpine, ConsSpineTail};
+use std::sync::Arc;
 
 /// Observe a decoded vocabulary node's tag, metadata and children.
 ///
@@ -459,7 +460,7 @@ pub(super) fn narrow_wildcards_with(ty: &Type, template: &Type, param_dims: &[Di
                 .zip(t_args.iter())
                 .map(|(a, t)| narrow_wildcards_with(a, t, param_dims))
                 .collect();
-            let new_ret = Box::new(narrow_wildcards_with(ret, t_ret, param_dims));
+            let new_ret = Arc::new(narrow_wildcards_with(ret, t_ret, param_dims));
             Type::Fn(new_args, new_ret)
         }
         (Type::Tuple(ts), Type::Tuple(t_ts)) if ts.len() == t_ts.len() => {
@@ -481,7 +482,7 @@ pub(super) fn narrow_wildcards_with(ty: &Type, template: &Type, param_dims: &[Di
         (Type::KindedAdt(n, args), Type::KindedAdt(_, t_args)) if args.len() == t_args.len() => {
             let new_args = args
                 .iter()
-                .zip(t_args)
+                .zip(t_args.iter())
                 .map(|(argument, template)| match (argument, template) {
                     (NominalArg::Type(ty), NominalArg::Type(template)) => {
                         NominalArg::Type(narrow_wildcards_with(ty, template, param_dims))
@@ -524,9 +525,9 @@ pub(super) fn param_bound_dims(decl_ty: &Type) -> Vec<Dim> {
                     .cloned(),
             ),
             Type::Ref(inner) => pending.push(inner),
-            Type::Tuple(items) | Type::Adt(_, items) => pending.extend(items),
+            Type::Tuple(items) | Type::Adt(_, items) => pending.extend(items.iter()),
             Type::KindedAdt(_, items) => {
-                for item in items {
+                for item in items.iter() {
                     match item {
                         NominalArg::Type(ty) => pending.push(ty),
                         NominalArg::Dimension(dim @ (Dim::Name(_) | Dim::Var(_))) => {
@@ -537,7 +538,7 @@ pub(super) fn param_bound_dims(decl_ty: &Type) -> Vec<Dim> {
                 }
             }
             Type::Fn(args, result) => {
-                pending.extend(args);
+                pending.extend(args.iter());
                 pending.push(result);
             }
             Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => {}
@@ -1317,7 +1318,7 @@ impl<'a> AliasExpansionSession<'a> {
                     .collect::<Vec<_>>();
 
                 if seen.contains(name) {
-                    return Type::Adt(name.clone(), resolved_args);
+                    return Type::adt(name.clone(), resolved_args);
                 }
                 if let Some((_, _, cached)) =
                     self.cache.iter().find(|(cached_name, cached_args, _)| {
@@ -1328,12 +1329,12 @@ impl<'a> AliasExpansionSession<'a> {
                 }
 
                 let Some(alias) = self.adt_reg.resolve_alias(name) else {
-                    return Type::Adt(name.clone(), resolved_args);
+                    return Type::adt(name.clone(), resolved_args);
                 };
                 let Some((type_subst, dim_subst)) =
                     crate::adt::nominal_substitutions(&alias.param_args, &nominal_args)
                 else {
-                    return Type::Adt(name.clone(), resolved_args);
+                    return Type::adt(name.clone(), resolved_args);
                 };
                 let substituted =
                     crate::adt::substitute_nominal_type(&alias.body, &type_subst, &dim_subst);
@@ -1393,7 +1394,7 @@ impl<'a> AliasExpansionSession<'a> {
                     })
                     .collect::<Vec<_>>();
                 if seen.contains(name) {
-                    return Type::KindedAdt(name.clone(), resolved_args);
+                    return Type::kinded_adt(name.clone(), resolved_args);
                 }
                 if let Some((_, _, cached)) =
                     self.cache.iter().find(|(cached_name, cached_args, _)| {
@@ -1403,12 +1404,12 @@ impl<'a> AliasExpansionSession<'a> {
                     return cached.clone();
                 }
                 let Some(alias) = self.adt_reg.resolve_alias(name) else {
-                    return Type::KindedAdt(name.clone(), resolved_args);
+                    return Type::kinded_adt(name.clone(), resolved_args);
                 };
                 let Some((type_subst, dim_subst)) =
                     crate::adt::nominal_substitutions(&alias.param_args, &resolved_args)
                 else {
-                    return Type::KindedAdt(name.clone(), resolved_args);
+                    return Type::kinded_adt(name.clone(), resolved_args);
                 };
                 let substituted =
                     crate::adt::substitute_nominal_type(&alias.body, &type_subst, &dim_subst);
@@ -1465,9 +1466,9 @@ impl<'a> AliasExpansionSession<'a> {
                 args.iter()
                     .map(|arg| self.resolve_inner(arg, seen))
                     .collect(),
-                Box::new(self.resolve_inner(ret, seen)),
+                Arc::new(self.resolve_inner(ret, seen)),
             ),
-            Type::Ref(inner) => Type::Ref(Box::new(self.resolve_inner(inner, seen))),
+            Type::Ref(inner) => Type::reference(self.resolve_inner(inner, seen)),
             Type::Tuple(items) => Type::Tuple(
                 items
                     .iter()
@@ -1575,15 +1576,15 @@ fn install_exact_op35_dependency_contracts(
                 tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
-                body: Type::Fn(
+                body: Type::function(
                     vec![
-                        Type::Ref(Box::new(Type::Var(tensor))),
+                        Type::reference(Type::Var(tensor)),
                         Type::Prim(Prim::Int32),
                         Type::Prim(Prim::Int32),
                         Type::Prim(Prim::Int32),
-                        Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]),
+                        Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]),
                     ],
-                    Box::new(Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)])),
+                    Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]),
                 ),
             },
         );

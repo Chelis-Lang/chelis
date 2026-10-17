@@ -40,7 +40,7 @@ pub(super) fn finish_registered_aggregate(
             let element = vg.fresh_type();
             if let Err(error) = unify(
                 &arg_tys[2],
-                &Type::Adt("List".to_string(), vec![element.clone()]),
+                &Type::adt("List".to_string(), vec![element.clone()]),
                 subst,
             ) {
                 return report(errors, error.into());
@@ -64,8 +64,8 @@ pub(super) fn finish_registered_aggregate(
             };
             if rule == builtins::AggregateRule::Scan {
                 vec![
-                    Type::Adt("List".to_string(), vec![arg_tys[1].clone()]),
-                    Type::Adt("List".to_string(), vec![callback_result]),
+                    Type::adt("List".to_string(), vec![arg_tys[1].clone()]),
+                    Type::adt("List".to_string(), vec![callback_result]),
                 ]
             } else {
                 vec![arg_tys[1].clone(), callback_result]
@@ -168,7 +168,7 @@ impl builtins::AggregateRule {
             {
                 vec![
                     list.clone(),
-                    Type::Adt("List".to_string(), vec![value.clone()]),
+                    Type::adt("List".to_string(), vec![value.clone()]),
                 ]
             }
             (AggregateRule::Concat, [left @ Type::Adt(a, aa), right @ Type::Adt(b, ba)])
@@ -181,7 +181,7 @@ impl builtins::AggregateRule {
             {
                 vec![
                     dict.clone(),
-                    Type::Adt("Dict".to_string(), vec![key.clone(), value.clone()]),
+                    Type::adt("Dict".to_string(), vec![key.clone(), value.clone()]),
                 ]
             }
             (AggregateRule::DictMerge, [left @ Type::Adt(a, aa), right @ Type::Adt(b, ba)])
@@ -386,7 +386,7 @@ pub(crate) fn decide_collection_constraint(
             let half = key_operation_surface(operand, Prim::Key)?;
             Ok(Some(CollectionDecision::RequiredEquality {
                 actual: result.clone(),
-                expected: Type::Tuple(vec![half.clone(), half]),
+                expected: Type::tuple(vec![half.clone(), half]),
             }))
         }
         CollectionConstraint::SplitKeys { operand, count, .. } => {
@@ -410,8 +410,8 @@ pub(crate) fn decide_collection_constraint(
                 _ => Dim::Wildcard,
             });
             Ok(Some(CollectionDecision::RequiredEquality {
-                actual: Type::Tuple(vec![count.clone(), result.clone()]),
-                expected: Type::Tuple(vec![
+                actual: Type::tuple(vec![count.clone(), result.clone()]),
+                expected: Type::tuple(vec![
                     Type::Prim(Prim::Int64),
                     Type::Tensor(dims, TensorPrec::Concrete(Prim::Key)),
                 ]),
@@ -431,8 +431,8 @@ pub(crate) fn decide_collection_constraint(
             // equation. A private validation must not discard bindings that
             // later applications or local result publication still require.
             Ok(Some(CollectionDecision::RequiredEquality {
-                actual: Type::Tuple(vec![index.clone(), result.clone()]),
-                expected: Type::Tuple(vec![expected, key]),
+                actual: Type::tuple(vec![index.clone(), result.clone()]),
+                expected: Type::tuple(vec![expected, key]),
             }))
         }
         CollectionConstraint::Len { operand, .. } => match queried_container(operand) {
@@ -900,19 +900,19 @@ pub(super) fn finish_collection_app(
             let out_ty = vg.fresh_type();
             if let Err(te) = unify(
                 &subst.apply(&arg_tys[0]),
-                &Type::Fn(vec![elem_ty.clone()], Box::new(out_ty.clone())),
+                &Type::function(vec![elem_ty.clone()], out_ty.clone()),
                 subst,
             ) {
                 return Some(report(errors, te.into()));
             }
             if let Err(te) = unify(
                 &subst.apply(&arg_tys[1]),
-                &Type::Adt("List".to_string(), vec![elem_ty]),
+                &Type::adt("List".to_string(), vec![elem_ty]),
                 subst,
             ) {
                 return Some(report(errors, te.into()));
             }
-            return Some(Type::Adt("List".to_string(), vec![subst.apply(&out_ty)]));
+            return Some(Type::adt("List".to_string(), vec![subst.apply(&out_ty)]));
         }
         "filter" => {
             if arg_tys.len() != 2 {
@@ -928,7 +928,7 @@ pub(super) fn finish_collection_app(
             let elem_ty = vg.fresh_type();
             if let Err(te) = unify(
                 &subst.apply(&arg_tys[0]),
-                &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
+                &Type::function(vec![elem_ty.clone()], Type::Prim(Prim::Bool)),
                 subst,
             ) {
                 return Some(report(
@@ -943,12 +943,12 @@ pub(super) fn finish_collection_app(
             }
             if let Err(te) = unify(
                 &subst.apply(&arg_tys[1]),
-                &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
+                &Type::adt("List".to_string(), vec![elem_ty.clone()]),
                 subst,
             ) {
                 return Some(report(errors, te.into()));
             }
-            return Some(Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]));
+            return Some(Type::adt("List".to_string(), vec![subst.apply(&elem_ty)]));
         }
         "partition" => {
             if arg_tys.len() != 2 {
@@ -964,7 +964,7 @@ pub(super) fn finish_collection_app(
             let elem_ty = vg.fresh_type();
             if let Err(te) = unify(
                 &subst.apply(&arg_tys[0]),
-                &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
+                &Type::function(vec![elem_ty.clone()], Type::Prim(Prim::Bool)),
                 subst,
             ) {
                 return Some(report(
@@ -979,13 +979,13 @@ pub(super) fn finish_collection_app(
             }
             if let Err(te) = unify(
                 &subst.apply(&arg_tys[1]),
-                &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
+                &Type::adt("List".to_string(), vec![elem_ty.clone()]),
                 subst,
             ) {
                 return Some(report(errors, te.into()));
             }
-            let out_list = Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]);
-            return Some(Type::Tuple(vec![out_list.clone(), out_list]));
+            let out_list = Type::adt("List".to_string(), vec![subst.apply(&elem_ty)]);
+            return Some(Type::tuple(vec![out_list.clone(), out_list]));
         }
         "flat_map" => {
             if arg_tys.len() != 2 {
@@ -1002,9 +1002,9 @@ pub(super) fn finish_collection_app(
             let out_elem_ty = vg.fresh_type();
             if let Err(te) = unify(
                 &subst.apply(&arg_tys[0]),
-                &Type::Fn(
+                &Type::function(
                     vec![elem_ty.clone()],
-                    Box::new(Type::Adt("List".to_string(), vec![out_elem_ty.clone()])),
+                    Type::adt("List".to_string(), vec![out_elem_ty.clone()]),
                 ),
                 subst,
             ) {
@@ -1012,12 +1012,12 @@ pub(super) fn finish_collection_app(
             }
             if let Err(te) = unify(
                 &subst.apply(&arg_tys[1]),
-                &Type::Adt("List".to_string(), vec![elem_ty]),
+                &Type::adt("List".to_string(), vec![elem_ty]),
                 subst,
             ) {
                 return Some(report(errors, te.into()));
             }
-            return Some(Type::Adt(
+            return Some(Type::adt(
                 "List".to_string(),
                 vec![subst.apply(&out_elem_ty)],
             ));
@@ -1032,7 +1032,7 @@ pub(super) fn finish_collection_app(
                             Type::Adt(inner_name, inner_args)
                                 if inner_name == "List" && inner_args.len() == 1 =>
                             {
-                                return Some(Type::Adt(
+                                return Some(Type::adt(
                                     "List".to_string(),
                                     vec![inner_args[0].clone()],
                                 ));
@@ -1103,9 +1103,9 @@ pub(super) fn finish_collection_app(
                         && lhs_args.len() == 1
                         && rhs_args.len() == 1 =>
                 {
-                    return Some(Type::Adt(
+                    return Some(Type::adt(
                         "List".to_string(),
-                        vec![Type::Tuple(vec![lhs_args[0].clone(), rhs_args[0].clone()])],
+                        vec![Type::tuple(vec![lhs_args[0].clone(), rhs_args[0].clone()])],
                     ));
                 }
                 // chelis#1512: an upstream failure keeps the early
@@ -1136,9 +1136,9 @@ pub(super) fn finish_collection_app(
             if let Some(first_arg) = arg_tys.first() {
                 match subst.apply(first_arg) {
                     Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                        return Some(Type::Adt(
+                        return Some(Type::adt(
                             "List".to_string(),
-                            vec![Type::Tuple(vec![Type::Prim(Prim::Int64), args[0].clone()])],
+                            vec![Type::tuple(vec![Type::Prim(Prim::Int64), args[0].clone()])],
                         ));
                     }
                     Type::Error(_) => return Some(result_ty.clone()),
@@ -1173,14 +1173,14 @@ pub(super) fn finish_collection_app(
                         // result determines them (`dict_of([])`), and the
                         // key rule below decides once the key is known.
                         if let Type::Var(_) = subst.apply(&args[0]) {
-                            let pair = Type::Tuple(vec![vg.fresh_type(), vg.fresh_type()]);
+                            let pair = Type::tuple(vec![vg.fresh_type(), vg.fresh_type()]);
                             if let Err(te) = unify(&args[0], &pair, subst) {
                                 return Some(report(errors, te.into()));
                             }
                         }
                         match subst.apply(&args[0]) {
                             Type::Tuple(items) if items.len() == 2 => {
-                                let dict = Type::Adt(
+                                let dict = Type::adt(
                                     "Dict".to_string(),
                                     vec![items[0].clone(), items[1].clone()],
                                 );
@@ -1262,7 +1262,7 @@ pub(super) fn finish_collection_app(
                     if let Err(te) = unify(&args[0], &key_ty, subst) {
                         return Some(report(errors, te.into()));
                     }
-                    return Some(Type::Adt("Option".to_string(), vec![subst.apply(&args[1])]));
+                    return Some(Type::adt("Option".to_string(), vec![subst.apply(&args[1])]));
                 }
                 (Type::Error(_), _) | (_, Type::Error(_)) => return Some(result_ty.clone()),
                 // chelis#2523: not a `Dict` YET. Suspending re-enters this
@@ -1346,7 +1346,7 @@ pub(super) fn finish_collection_app(
                     if let Err(te) = unify(&args[0], &key_ty, subst) {
                         return Some(report(errors, te.into()));
                     }
-                    return Some(Type::Adt(
+                    return Some(Type::adt(
                         "Dict".to_string(),
                         vec![subst.apply(&args[0]), subst.apply(&args[1])],
                     ));
@@ -1379,7 +1379,7 @@ pub(super) fn finish_collection_app(
             if let Some(first_arg) = arg_tys.first() {
                 match subst.apply(first_arg) {
                     Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
-                        return Some(Type::Adt("List".to_string(), vec![args[0].clone()]));
+                        return Some(Type::adt("List".to_string(), vec![args[0].clone()]));
                     }
                     Type::Error(_) => return Some(result_ty.clone()),
                     Type::Var(_) => {
@@ -1405,7 +1405,7 @@ pub(super) fn finish_collection_app(
             if let Some(first_arg) = arg_tys.first() {
                 match subst.apply(first_arg) {
                     Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
-                        return Some(Type::Adt("List".to_string(), vec![args[1].clone()]));
+                        return Some(Type::adt("List".to_string(), vec![args[1].clone()]));
                     }
                     Type::Error(_) => return Some(result_ty.clone()),
                     Type::Var(_) => {
@@ -1431,9 +1431,9 @@ pub(super) fn finish_collection_app(
             if let Some(first_arg) = arg_tys.first() {
                 match subst.apply(first_arg) {
                     Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
-                        return Some(Type::Adt(
+                        return Some(Type::adt(
                             "List".to_string(),
-                            vec![Type::Tuple(vec![args[0].clone(), args[1].clone()])],
+                            vec![Type::tuple(vec![args[0].clone(), args[1].clone()])],
                         ));
                     }
                     Type::Error(_) => return Some(result_ty.clone()),
@@ -1522,10 +1522,10 @@ mod aggregate_origin_tests {
             let mut vg = VarGen::default();
             let input = vg.fresh_type();
             let result = vg.fresh_type();
-            let unknown = Type::Fn(vec![input.clone()], Box::new(vg.fresh_type()));
-            let known = Type::Fn(vec![Type::Prim(Prim::F32)], Box::new(Type::Prim(Prim::F32)));
-            let list = |value| Type::Adt("List".to_string(), vec![value]);
-            let dict = |value| Type::Adt("Dict".to_string(), vec![Type::Prim(Prim::String), value]);
+            let unknown = Type::function(vec![input.clone()], vg.fresh_type());
+            let known = Type::function(vec![Type::Prim(Prim::F32)], Type::Prim(Prim::F32));
+            let list = |value| Type::adt("List".to_string(), vec![value]);
+            let dict = |value| Type::adt("Dict".to_string(), vec![Type::Prim(Prim::String), value]);
             let operands = match rule {
                 AggregateRule::Append => vec![list(known), unknown],
                 AggregateRule::Concat => vec![list(unknown), list(known)],

@@ -29535,7 +29535,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Type::Tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::F32)]),
+            Type::tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::F32)]),
         );
 
         let resolved = resolve_host_type_alias(
@@ -29555,7 +29555,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
-                Type::Tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::F32)]),
+                Type::tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::F32)]),
             );
         }
 
@@ -29590,7 +29590,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Type::Tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::F32)]),
+            Type::tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::F32)]),
         );
 
         assert!(

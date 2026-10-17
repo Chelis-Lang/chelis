@@ -37,12 +37,12 @@ fn issue_872_declared_function_alias_retains_erased_opaque_return() {
         // its aliased declaration remains authoritative in that case.
         let sigs = BTreeMap::from([(
             "make".to_string(),
-            Type::Fn(
+            Type::function(
                 vec![Type::Prim(chelis_types::types::Prim::F32)],
-                Box::new(Type::Adt(
+                Type::adt(
                     "Option".into(),
                     vec![Type::Var(chelis_types::types::TypeVar(0))],
-                )),
+                ),
             ),
         )]);
         let col = collect_obligations(&exprs, &invs, &sigs);
@@ -306,7 +306,7 @@ fn issue_872_kinded_type_arguments_are_edges_but_dimensions_are_not() {
     let dims = vec![NominalArg::Dimension(Dim::Lit(3))];
     assert_eq!(
         decompose_return(
-            &Type::KindedAdt("Sized".into(), dims.clone()),
+            &Type::kinded_adt("Sized".into(), dims.clone()),
             "T",
             &records
         )
@@ -316,7 +316,7 @@ fn issue_872_kinded_type_arguments_are_edges_but_dimensions_are_not() {
     for opaque in [false, true] {
         let mut args = dims.clone();
         args.push(NominalArg::Type(if opaque { adt("T") } else { Type::Unit }));
-        let result = decompose_return(&Type::KindedAdt("Sized".into(), args), "T", &records);
+        let result = decompose_return(&Type::kinded_adt("Sized".into(), args), "T", &records);
         assert_eq!(result.is_err(), opaque, "{result:?}");
         let raw = proof_node(
             DeepTag::TAdt,
@@ -434,10 +434,10 @@ def probability(x: f32) -> Probability = Probability { value: x }
 // --- direct decompose unit tests over Type ---
 
 fn adt(name: &str) -> Type {
-    Type::Adt(name.to_string(), vec![])
+    Type::adt(name.to_string(), vec![])
 }
 fn opt(inner: Type) -> Type {
-    Type::Adt("Option".to_string(), vec![inner])
+    Type::adt("Option".to_string(), vec![inner])
 }
 
 #[test]
@@ -451,7 +451,7 @@ fn decompose_direct() {
 #[test]
 fn decompose_option_of_tuple() {
     // Option[(Probability, f32)]
-    let ty = opt(Type::Tuple(vec![
+    let ty = opt(Type::tuple(vec![
         adt("Probability"),
         Type::Prim(chelis_types::types::Prim::F32),
     ]));
@@ -470,7 +470,7 @@ fn decompose_option_of_tuple() {
 #[test]
 fn decompose_unsupported_container_rejects() {
     // List[Probability] is an unsupported container.
-    let ty = Type::Adt("List".to_string(), vec![adt("Probability")]);
+    let ty = Type::adt("List".to_string(), vec![adt("Probability")]);
     assert!(decompose_return(&ty, "Probability", &empty_records()).is_err());
 }
 

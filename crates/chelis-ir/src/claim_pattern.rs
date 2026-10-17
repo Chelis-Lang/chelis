@@ -891,27 +891,27 @@ fn applications<'t>(ty: &'t Type, out: &mut Vec<(&'t str, Vec<NominalArg>)>) {
     match ty {
         Type::Adt(name, args) => {
             out.push((name, args.iter().cloned().map(NominalArg::Type).collect()));
-            for arg in args {
+            for arg in args.iter() {
                 applications(arg, out);
             }
         }
         Type::KindedAdt(name, args) => {
-            out.push((name, args.clone()));
-            for arg in args {
+            out.push((name, args.to_vec()));
+            for arg in args.iter() {
                 if let NominalArg::Type(arg) = arg {
                     applications(arg, out);
                 }
             }
         }
         Type::Fn(args, ret) => {
-            for arg in args {
+            for arg in args.iter() {
                 applications(arg, out);
             }
             applications(ret, out);
         }
         Type::Ref(inner) => applications(inner, out),
         Type::Tuple(items) => {
-            for item in items {
+            for item in items.iter() {
                 applications(item, out);
             }
         }

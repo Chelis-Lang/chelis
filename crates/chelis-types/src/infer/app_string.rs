@@ -249,7 +249,7 @@ pub(super) fn string_route_result(
             if let Some(first_arg) = arg_tys.first() {
                 match subst.apply(first_arg) {
                     Type::Prim(Prim::String) | Type::Error(_) => {
-                        return Some(Type::Adt(
+                        return Some(Type::adt(
                             "Option".to_string(),
                             vec![Type::Prim(Prim::Int64)],
                         ));
@@ -259,7 +259,7 @@ pub(super) fn string_route_result(
                             arg_tys,
                             result_ty,
                             product,
-                            Type::Adt("Option".to_string(), vec![Type::Prim(Prim::Int64)]),
+                            Type::adt("Option".to_string(), vec![Type::Prim(Prim::Int64)]),
                         ));
                     }
                     other => {
@@ -282,14 +282,14 @@ pub(super) fn string_route_result(
             if let Some(first_arg) = arg_tys.first() {
                 match subst.apply(first_arg) {
                     Type::Prim(Prim::String) | Type::Error(_) => {
-                        return Some(Type::Adt("Option".to_string(), vec![Type::Prim(Prim::F64)]));
+                        return Some(Type::adt("Option".to_string(), vec![Type::Prim(Prim::F64)]));
                     }
                     Type::Var(_) => {
                         return Some(site.defer(
                             arg_tys,
                             result_ty,
                             product,
-                            Type::Adt("Option".to_string(), vec![Type::Prim(Prim::F64)]),
+                            Type::adt("Option".to_string(), vec![Type::Prim(Prim::F64)]),
                         ));
                     }
                     other => {

@@ -51,21 +51,21 @@ impl ResultScope {
                 (Type::Fn(args, result), Type::Fn(other_args, other_result))
                     if args.len() == other_args.len() =>
                 {
-                    pairs.extend(args.iter().zip(other_args));
+                    pairs.extend(args.iter().zip(other_args.iter()));
                     pairs.push((result, other_result));
                 }
                 (Type::Tuple(items), Type::Tuple(other)) if items.len() == other.len() => {
-                    pairs.extend(items.iter().zip(other));
+                    pairs.extend(items.iter().zip(other.iter()));
                 }
                 (Type::Adt(name, items), Type::Adt(other_name, other))
                     if name == other_name && items.len() == other.len() =>
                 {
-                    pairs.extend(items.iter().zip(other));
+                    pairs.extend(items.iter().zip(other.iter()));
                 }
                 (Type::KindedAdt(name, items), Type::KindedAdt(other_name, other))
                     if name == other_name && items.len() == other.len() =>
                 {
-                    for (left, right) in items.iter().zip(other) {
+                    for (left, right) in items.iter().zip(other.iter()) {
                         match (left, right) {
                             (NominalArg::Type(left), NominalArg::Type(right)) => {
                                 pairs.push((left, right));
@@ -191,11 +191,11 @@ mod tests {
             let var = |id| Type::Var(TypeVar(offset + id));
             for container in [
                 var(1),
-                Type::Fn(vec![var(1)], Box::new(var(1))),
-                Type::Tuple(vec![var(1)]),
-                Type::Adt("List".to_string(), vec![var(1)]),
-                Type::KindedAdt("Holder".to_string(), vec![NominalArg::Type(var(1))]),
-                Type::Ref(Box::new(var(1))),
+                Type::function(vec![var(1)], var(1)),
+                Type::tuple(vec![var(1)]),
+                Type::adt("List".to_string(), vec![var(1)]),
+                Type::kinded_adt("Holder".to_string(), vec![NominalArg::Type(var(1))]),
+                Type::reference(var(1)),
             ] {
                 let mut equations = vec![
                     ResultConstraint::Join {
@@ -225,10 +225,10 @@ mod tests {
     #[test]
     fn independent_structural_fields_keep_their_polymorphism() {
         let var = |id| Type::Var(TypeVar(id));
-        let function = |id| Type::Fn(vec![var(id)], Box::new(var(id)));
+        let function = |id| Type::function(vec![var(id)], var(id));
         let equation = ResultConstraint::Annotation {
-            actual: Type::Tuple(vec![var(0), function(1)]),
-            declared: Type::Tuple(vec![var(2), function(3)]),
+            actual: Type::tuple(vec![var(0), function(1)]),
+            declared: Type::tuple(vec![var(2), function(3)]),
         };
         let mut scheme = quantified(&[1, 2, 3]);
         ResultScope::new(&[equation]).retain_closed_quantifiers(&mut scheme);

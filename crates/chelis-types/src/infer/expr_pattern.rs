@@ -703,7 +703,7 @@ pub(super) fn pattern_bindings(
                 let pattern_ty = if elems.is_empty() {
                     Type::Unit
                 } else {
-                    Type::Tuple(elems.clone())
+                    Type::tuple(elems.clone())
                 };
                 if let Err(error) = unify(pattern_shape_type(&resolved), &pattern_ty, subst) {
                     errors.push(at_check_site(pat, error.into()));

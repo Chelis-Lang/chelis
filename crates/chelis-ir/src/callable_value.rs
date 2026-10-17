@@ -514,15 +514,12 @@ mod tests {
                 param_kinds: vec![NominalParamKind::Dimension],
                 param_vars: Vec::new(),
                 param_args: vec![NominalArg::Dimension(Dim::Var(parameter))],
-                body: Type::Fn(
-                    vec![Type::Ref(Box::new(Type::Tensor(
+                body: Type::function(
+                    vec![Type::reference(Type::Tensor(
                         vec![Dim::Wildcard],
                         TensorPrec::Concrete(Prim::F64),
-                    )))],
-                    Box::new(Type::Tensor(
-                        vec![Dim::Var(parameter)],
-                        TensorPrec::Concrete(Prim::Bool),
-                    )),
+                    ))],
+                    Type::Tensor(vec![Dim::Var(parameter)], TensorPrec::Concrete(Prim::Bool)),
                 ),
             },
         );

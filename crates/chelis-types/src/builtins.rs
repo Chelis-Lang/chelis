@@ -10,6 +10,7 @@
 use crate::adt::{AdtDef, AdtRegistry, VariantInfo};
 use crate::env::Env;
 use crate::types::*;
+use std::sync::Arc;
 
 pub const BUILTIN_NAMES: &[&str] = &[
     "add",
@@ -2834,7 +2835,7 @@ pub fn builtin_env() -> (Env, VarGen) {
 
     // --- Signature builders ---
     fn borrowed(ty: Type) -> Type {
-        Type::Ref(Box::new(ty))
+        Type::reference(ty)
     }
 
     // ∀D,p. (tensor[D,p], tensor[D,p]) → tensor[D,p]
@@ -2860,9 +2861,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[tv]),
             dvars: vec![dv],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
-                Box::new(Type::Var(tv)),
+                Type::Var(tv),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -2879,7 +2880,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[tv]),
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
+            body: Type::function(vec![borrowed(Type::Var(tv))], Type::Var(tv)),
         };
         env.bind(name.to_string(), scheme);
     }
@@ -2916,12 +2917,12 @@ pub fn builtin_env() -> (Env, VarGen) {
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
-                vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
+                vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))].into(),
                 // The application checker replaces this with bool on the
                 // operand's surface. Keeping the placeholder independent
                 // avoids binding an unresolved operand variable to bool
                 // before that procedural result rule runs.
-                Box::new(Type::Var(output)),
+                Arc::new(Type::Var(output)),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -2938,9 +2939,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
-                Box::new(Type::Var(tv)),
+                Type::Var(tv),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -2956,7 +2957,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
+            body: Type::function(vec![borrowed(Type::Var(tv))], Type::Var(tv)),
         };
         env.bind(name.to_string(), scheme);
     }
@@ -2973,14 +2974,14 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[t1, t2, t3, epsilon]),
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![
                     borrowed(Type::Var(t1)),
                     borrowed(Type::Var(t2)),
                     borrowed(Type::Var(t3)),
                     borrowed(Type::Var(epsilon)),
                 ],
-                Box::new(Type::Var(t1)),
+                Type::Var(t1),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -2997,9 +2998,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[t1, t2]),
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![borrowed(Type::Var(t1)), borrowed(Type::Var(t2))],
-                Box::new(Type::Var(out)),
+                Type::Var(out),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3015,9 +3016,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[input]),
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![borrowed(Type::Var(input)), Type::Prim(Prim::Int32)],
-                Box::new(Type::Var(out)),
+                Type::Var(out),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3031,7 +3032,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     fn tensor_reduce_window(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let out = vg.fresh_tvar();
-        let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+        let int_list = Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
         let scheme = Scheme {
             result_origin: None,
             constraints: vec![],
@@ -3039,9 +3040,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[input]),
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![borrowed(Type::Var(input)), int_list.clone(), int_list],
-                Box::new(Type::Var(out)),
+                Type::Var(out),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3057,7 +3058,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![
                     borrowed(Type::Var(input)),
                     // [05-DIM-1]: axis-domain axis (i32), extent-domain
@@ -3065,7 +3066,7 @@ pub fn builtin_env() -> (Env, VarGen) {
                     Type::Prim(Prim::Int32),
                     Type::Prim(Prim::Int64),
                 ],
-                Box::new(Type::Var(out)),
+                Type::Var(out),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3084,13 +3085,13 @@ pub fn builtin_env() -> (Env, VarGen) {
             rvars: vec![rank],
             // [05-OP-37]: the key comes first and is consumed; the tensor is
             // borrowed.
-            body: Type::Fn(
+            body: Type::function(
                 vec![
                     Type::Prim(Prim::Key),
                     borrowed(input.clone()),
                     Type::Var(precision),
                 ],
-                Box::new(input),
+                input,
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3109,14 +3110,14 @@ pub fn builtin_env() -> (Env, VarGen) {
             rvars: vec![rank],
             // [05-OP-8]: the key comes first and is consumed; the template
             // is borrowed; `low` and `high` have the template's dtype `p`.
-            body: Type::Fn(
+            body: Type::function(
                 vec![
                     Type::Prim(Prim::Key),
                     borrowed(template.clone()),
                     Type::Var(precision),
                     Type::Var(precision),
                 ],
-                Box::new(template),
+                template,
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3133,20 +3134,20 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![
                     borrowed(Type::Var(input)),
                     borrowed(Type::Var(kernel)),
-                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]),
-                    Type::Adt(
+                    Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]),
+                    Type::adt(
                         "List".to_string(),
-                        vec![Type::Tuple(vec![
+                        vec![Type::tuple(vec![
                             Type::Prim(Prim::Int64),
                             Type::Prim(Prim::Int64),
                         ])],
                     ),
                 ],
-                Box::new(Type::Var(output)),
+                Type::Var(output),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3161,9 +3162,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[input]),
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![borrowed(Type::Var(input)), Type::Prim(Prim::Int32)],
-                Box::new(Type::Var(input)),
+                Type::Var(input),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3185,7 +3186,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(vec![Type::Var(input)], Box::new(Type::Var(output))),
+            body: Type::function(vec![Type::Var(input)], Type::Var(output)),
         };
         env.bind(name.to_string(), scheme);
     }
@@ -3218,10 +3219,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[lhs, rhs]),
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
-                vec![Type::Var(lhs), Type::Var(rhs)],
-                Box::new(Type::Var(output)),
-            ),
+            body: Type::function(vec![Type::Var(lhs), Type::Var(rhs)], Type::Var(output)),
         };
         env.bind(name.to_string(), scheme);
     }
@@ -3241,9 +3239,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[lhs, rhs]),
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![borrowed(Type::Var(lhs)), borrowed(Type::Var(rhs))],
-                Box::new(Type::Var(output)),
+                Type::Var(output),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3261,9 +3259,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![Type::Var(a), Type::Var(b), Type::Var(c)],
-                Box::new(Type::Var(output)),
+                Type::Var(output),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3281,9 +3279,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[a]),
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![borrowed(Type::Var(a)), Type::Var(b), Type::Var(c)],
-                Box::new(Type::Var(output)),
+                Type::Var(output),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3301,9 +3299,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![borrowed(Type::Var(a)), borrowed(Type::Var(b)), Type::Var(c)],
-                Box::new(Type::Var(output)),
+                Type::Var(output),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3321,13 +3319,13 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[a, b, c]),
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![
                     borrowed(Type::Var(a)),
                     borrowed(Type::Var(b)),
                     borrowed(Type::Var(c)),
                 ],
-                Box::new(Type::Var(output)),
+                Type::Var(output),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3345,9 +3343,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![Type::Var(a), borrowed(Type::Var(b)), borrowed(Type::Var(c))],
-                Box::new(Type::Var(output)),
+                Type::Var(output),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3367,7 +3365,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![
                     Type::Var(a),
                     Type::Var(b),
@@ -3375,7 +3373,7 @@ pub fn builtin_env() -> (Env, VarGen) {
                     Type::Var(d),
                     Type::Var(e),
                 ],
-                Box::new(Type::Var(output)),
+                Type::Var(output),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3394,9 +3392,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![Type::Var(a), Type::Var(b), Type::Var(c), Type::Var(d)],
-                Box::new(Type::Var(output)),
+                Type::Var(output),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3412,10 +3410,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
-                vec![borrowed(Type::Var(input))],
-                Box::new(Type::Var(output)),
-            ),
+            body: Type::function(vec![borrowed(Type::Var(input))], Type::Var(output)),
         };
         env.bind(name.to_string(), scheme);
     }
@@ -3429,7 +3424,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
+            body: Type::function(vec![borrowed(Type::Var(tv))], Type::Var(tv)),
         };
         env.bind(name.to_string(), scheme);
     }
@@ -3445,9 +3440,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: operand_value_restrictions(name, &[lhs]),
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![borrowed(Type::Var(lhs)), Type::Var(rhs)],
-                Box::new(Type::Var(output)),
+                Type::Var(output),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -3508,10 +3503,7 @@ pub fn builtin_env() -> (Env, VarGen) {
                 tvar_restrictions: operand_value_restrictions(kind.name(), &[input]),
                 dvars: vec![],
                 rvars: vec![],
-                body: Type::Fn(
-                    vec![borrowed(Type::Var(input))],
-                    Box::new(Type::Var(output)),
-                ),
+                body: Type::function(vec![borrowed(Type::Var(input))], Type::Var(output)),
             },
         );
     }
@@ -3564,7 +3556,7 @@ pub fn builtin_env() -> (Env, VarGen) {
                 tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
-                body: Type::Fn(args, Box::new(result)),
+                body: Type::function(args, result),
             },
         );
     }
@@ -3656,9 +3648,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![Type::Prim(Prim::Bool), Type::Prim(Prim::String)],
-                Box::new(Type::Unit),
+                Type::Unit,
             ),
         },
     );
@@ -3673,9 +3665,9 @@ pub fn builtin_env() -> (Env, VarGen) {
                 tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
-                body: Type::Fn(
+                body: Type::function(
                     vec![Type::Var(value), Type::Var(value), Type::Prim(Prim::String)],
-                    Box::new(Type::Unit),
+                    Type::Unit,
                 ),
             },
         );
@@ -3702,14 +3694,14 @@ pub fn builtin_env() -> (Env, VarGen) {
                 tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
                 dvars: vec![],
                 rvars: vec![rank],
-                body: Type::Fn(
+                body: Type::function(
                     vec![
                         borrowed(tensor.clone()),
                         borrowed(tensor),
                         Type::Var(precision),
                         Type::Prim(Prim::String),
                     ],
-                    Box::new(Type::Unit),
+                    Type::Unit,
                 ),
             },
         );
@@ -3726,13 +3718,13 @@ pub fn builtin_env() -> (Env, VarGen) {
                 tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
-                body: Type::Fn(
+                body: Type::function(
                     vec![
                         borrowed(Type::Var(tensor_tv)),
                         borrowed(Type::Var(tensor_tv)),
                         Type::Prim(Prim::String),
                     ],
-                    Box::new(Type::Unit),
+                    Type::Unit,
                 ),
             },
         );
@@ -3746,10 +3738,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
-                vec![Type::Prim(Prim::String)],
-                Box::new(Type::Prim(Prim::Int64)),
-            ),
+            body: Type::function(vec![Type::Prim(Prim::String)], Type::Prim(Prim::Int64)),
         },
     );
     env.bind(
@@ -3761,10 +3750,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
-                vec![Type::Prim(Prim::Int64)],
-                Box::new(Type::Prim(Prim::String)),
-            ),
+            body: Type::function(vec![Type::Prim(Prim::Int64)], Type::Prim(Prim::String)),
         },
     );
     generic_unop("string_len", &mut env, &mut vg);
@@ -3780,9 +3766,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![Type::Prim(Prim::String), Type::Prim(Prim::String)],
-                Box::new(Type::Prim(Prim::Bool)),
+                Type::Prim(Prim::Bool),
             ),
         },
     );
@@ -3795,9 +3781,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![Type::Prim(Prim::String), Type::Prim(Prim::String)],
-                Box::new(Type::Prim(Prim::Bool)),
+                Type::Prim(Prim::Bool),
             ),
         },
     );
@@ -3810,9 +3796,9 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![Type::Prim(Prim::String), Type::Prim(Prim::String)],
-                Box::new(Type::Prim(Prim::Bool)),
+                Type::Prim(Prim::Bool),
             ),
         },
     );
@@ -3845,7 +3831,7 @@ pub fn builtin_env() -> (Env, VarGen) {
                 tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
-                body: Type::Fn(vec![Type::Var(consumed)], Box::new(Type::Unit)),
+                body: Type::function(vec![Type::Var(consumed)], Type::Unit),
             },
         );
     }
@@ -3862,19 +3848,16 @@ pub fn builtin_env() -> (Env, VarGen) {
         let item = vg.fresh_tvar();
         let callback_result = vg.fresh_tvar();
         let published = vg.fresh_tvar();
-        let list = |ty| Type::Adt("List".to_string(), vec![ty]);
+        let list = |ty| Type::adt("List".to_string(), vec![ty]);
         let output = |ty| if list_result { list(ty) } else { ty };
         let signature = |callback_result, result| {
-            Type::Fn(
+            Type::function(
                 vec![
-                    Type::Fn(
-                        vec![Type::Var(initial), Type::Var(item)],
-                        Box::new(callback_result),
-                    ),
+                    Type::function(vec![Type::Var(initial), Type::Var(item)], callback_result),
                     Type::Var(initial),
                     list(Type::Var(item)),
                 ],
-                Box::new(result),
+                result,
             )
         };
         env.bind(
@@ -3924,13 +3907,13 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(
+            body: Type::function(
                 vec![
                     Type::Var(tensor_scan_a),
                     Type::Var(tensor_scan_b),
                     Type::Var(tensor_scan_c),
                 ],
-                Box::new(Type::Var(tensor_scan_ret)),
+                Type::Var(tensor_scan_ret),
             ),
         },
     );
@@ -3959,8 +3942,8 @@ pub fn builtin_env() -> (Env, VarGen) {
     // `chelis-effects` by name. `process_run` is eval/test-only (Hull Phase 0a)
     // and rejected by the C/HIP build backends.
     let string = || Type::Prim(Prim::String);
-    let list_of = |element: Type| Type::Adt("List".to_string(), vec![element]);
-    let mapped_file = || Type::Adt("MappedFile".to_string(), Vec::new());
+    let list_of = |element: Type| Type::adt("List".to_string(), vec![element]);
+    let mapped_file = || Type::adt("MappedFile".to_string(), Vec::new());
     for (name, params, result) in [
         ("read_file", vec![string()], string()),
         ("write_file", vec![string(), string()], Type::Unit),
@@ -3976,23 +3959,23 @@ pub fn builtin_env() -> (Env, VarGen) {
         (
             "process_run",
             vec![string(), list_of(string())],
-            Type::Tuple(vec![Type::Prim(Prim::Int64), string(), string()]),
+            Type::tuple(vec![Type::Prim(Prim::Int64), string(), string()]),
         ),
         // [05-OP-75]: `(seconds, nanoseconds)` from one host clock reading.
         (
             "clock_wall_read",
             vec![],
-            Type::Tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]),
+            Type::tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]),
         ),
         (
             "clock_monotonic_read",
             vec![],
-            Type::Tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]),
+            Type::tuple(vec![Type::Prim(Prim::Int64), Type::Prim(Prim::Int64)]),
         ),
     ] {
         env.bind(
             name.to_string(),
-            Scheme::mono(Type::Fn(params, Box::new(result))),
+            Scheme::mono(Type::function(params, result)),
         );
     }
     generic_binop("round_to", &mut env, &mut vg);
@@ -4013,20 +3996,20 @@ pub fn builtin_env() -> (Env, VarGen) {
     // mode the generic scheme gave it, so ownership lowering is unchanged.
     env.bind(
         "mmap_read".to_string(),
-        Scheme::mono(Type::Fn(
+        Scheme::mono(Type::function(
             vec![
-                Type::Adt("MappedFile".to_string(), Vec::new()),
+                Type::adt("MappedFile".to_string(), Vec::new()),
                 Type::Prim(Prim::Int64),
                 Type::Prim(Prim::Int64),
             ],
-            Box::new(Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)])),
+            Type::adt("List".to_string(), vec![Type::Prim(Prim::Int64)]),
         )),
     );
     env.bind(
         "mmap_len".to_string(),
-        Scheme::mono(Type::Fn(
-            vec![Type::Adt("MappedFile".to_string(), Vec::new())],
-            Box::new(Type::Prim(Prim::Int64)),
+        Scheme::mono(Type::function(
+            vec![Type::adt("MappedFile".to_string(), Vec::new())],
+            Type::Prim(Prim::Int64),
         )),
     );
     // [05-OP-81]: mapped-range text and digests take the handle and exact
@@ -4034,13 +4017,13 @@ pub fn builtin_env() -> (Env, VarGen) {
     for name in ["mmap_text", "mmap_sha256"] {
         env.bind(
             name.to_string(),
-            Scheme::mono(Type::Fn(
+            Scheme::mono(Type::function(
                 vec![
-                    Type::Adt("MappedFile".to_string(), Vec::new()),
+                    Type::adt("MappedFile".to_string(), Vec::new()),
                     Type::Prim(Prim::Int64),
                     Type::Prim(Prim::Int64),
                 ],
-                Box::new(Type::Prim(Prim::String)),
+                Type::Prim(Prim::String),
             )),
         );
     }
@@ -4073,7 +4056,7 @@ pub fn builtin_env() -> (Env, VarGen) {
 
 pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRegistry) {
     let option_tvar = vg.fresh_tvar();
-    let option_type = Type::Adt("Option".to_string(), vec![Type::Var(option_tvar)]);
+    let option_type = Type::adt("Option".to_string(), vec![Type::Var(option_tvar)]);
 
     env.bind_constructor(
         "Some".to_string(),
@@ -4085,7 +4068,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
-            body: Type::Fn(vec![Type::Var(option_tvar)], Box::new(option_type.clone())),
+            body: Type::function(vec![Type::Var(option_tvar)], option_type.clone()),
         },
     );
     env.bind_constructor(
@@ -4126,11 +4109,11 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         });
 
     let list_tvar = vg.fresh_tvar();
-    let list_type = Type::Adt("List".to_string(), vec![Type::Var(list_tvar)]);
+    let list_type = Type::adt("List".to_string(), vec![Type::Var(list_tvar)]);
 
-    let cons_type = Type::Fn(
+    let cons_type = Type::function(
         vec![Type::Var(list_tvar), list_type.clone()],
-        Box::new(list_type.clone()),
+        list_type.clone(),
     );
 
     env.bind_constructor(
@@ -4549,12 +4532,12 @@ mod tests {
             vec![Dim::Name("batch".into())],
             TensorPrec::Concrete(Prim::F32),
         );
-        let expected_fn = Type::Fn(
+        let expected_fn = Type::function(
             vec![
-                Type::Ref(Box::new(tensor_f32.clone())),
-                Type::Ref(Box::new(tensor_f32.clone())),
+                Type::reference(tensor_f32.clone()),
+                Type::reference(tensor_f32.clone()),
             ],
-            Box::new(tensor_f32),
+            tensor_f32,
         );
 
         assert!(unify(&add_ty, &expected_fn, &mut subst).is_ok());
@@ -4578,9 +4561,9 @@ mod tests {
             vec![Dim::Name("batch".into())],
             TensorPrec::Concrete(Prim::Bf16),
         );
-        let bad_fn = Type::Fn(
-            vec![Type::Ref(Box::new(t1)), Type::Ref(Box::new(t2))],
-            Box::new(Type::Var(vg.fresh_tvar())),
+        let bad_fn = Type::function(
+            vec![Type::reference(t1), Type::reference(t2)],
+            Type::Var(vg.fresh_tvar()),
         );
 
         assert!(unify(&add_ty, &bad_fn, &mut subst).is_err());
@@ -4601,9 +4584,9 @@ mod tests {
             TensorPrec::Concrete(Prim::F32),
         );
         let t2 = Type::Prim(Prim::Int32);
-        let bad_fn = Type::Fn(
-            vec![Type::Ref(Box::new(t1)), Type::Ref(Box::new(t2))],
-            Box::new(Type::Var(vg.fresh_tvar())),
+        let bad_fn = Type::function(
+            vec![Type::reference(t1), Type::reference(t2)],
+            Type::Var(vg.fresh_tvar()),
         );
 
         assert!(unify(&add_ty, &bad_fn, &mut subst).is_err());
