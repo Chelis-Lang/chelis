@@ -6138,11 +6138,15 @@ fn unique_terminal_match<'a>(map: &'a BTreeMap<String, Expr>, name: &str) -> Opt
 /// Incoming function parameters and literal callable aliases keep the numeric
 /// resolver's existing identities. A computed local value never acquires one
 /// merely because the checker accepts its later use as a callee.
+///
+/// The walk copies these bindings at every binder it enters, so the name sets
+/// are persistent: a copy shares them, and a binder pays for the names it
+/// adds rather than for the scope (chelis#3763).
 #[derive(Clone, Default)]
 struct LowerabilityBindings {
-    names: UnordSet<String>,
-    host_calls: UnordSet<String>,
-    unresolved_callables: UnordSet<String>,
+    names: PersistentSet<String>,
+    host_calls: PersistentSet<String>,
+    unresolved_callables: PersistentSet<String>,
     supplied_formals: Option<Vec<SuppliedCallable>>,
     inside_vmap: bool,
     unresolved_vmap: std::rc::Rc<Cell<bool>>,

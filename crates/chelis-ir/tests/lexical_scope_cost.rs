@@ -1,8 +1,10 @@
 //! Lowering pays for the names each binder adds, not for the scope it
-//! enters. `LowerCtx::lower_fn` once copied the value scope and the local
-//! callables at every function form, and every top-level definition is one,
-//! so lowering a library of `n` definitions copied `n^2 / 2` entries
-//! (chelis#3774).
+//! enters. Two walks once copied their whole lexical scope at every binder:
+//! `LowerCtx::lower_fn` copied the value scope and the local callables at
+//! every function form, and every top-level definition is one, so lowering
+//! a library of `n` definitions copied `n^2 / 2` entries (chelis#3774); and
+//! the lowerability walk copied its name sets at every `let`, so classifying
+//! a chain of `k` bindings copied `k^2 / 2` names (chelis#3763).
 //!
 //! The oracle is the heap bytes each walk allocates, counted by this binary's
 //! allocator, which is deterministic for a fixed program. The counter is
@@ -79,10 +81,33 @@ fn library(n: usize) -> CheckedProgram {
     checked(&source)
 }
 
+/// chelis#3763's probe: one definition whose body chains `k` bindings.
+fn chain(k: usize) -> CheckedProgram {
+    let mut source =
+        String::from("def f(x: tensor[3, f32]) -> tensor[3, f32] = {\n  a0 = neg(x)\n");
+    for index in 1..k {
+        writeln!(source, "  a{index} = neg(a{})", index - 1).unwrap();
+    }
+    writeln!(source, "  a{}\n}}", k - 1).unwrap();
+    source.push_str("out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n");
+    checked(&source)
+}
+
 fn lowering_bytes(program: &CheckedProgram) -> usize {
     let (lowered, bytes) =
         allocated(|| chelis_ir::lower::try_lower_program_to_library(program).expect("it lowers"));
     drop(lowered);
+    bytes
+}
+
+fn classification_bytes(program: &CheckedProgram) -> usize {
+    let (verdicts, bytes) =
+        allocated(|| chelis_ir::lower::top_level_lowering_map(program.exprs(), program.type_env()));
+    assert_eq!(
+        verdicts.get("f"),
+        Some(&true),
+        "the chain lowers to the DAG"
+    );
     bytes
 }
 
@@ -103,6 +128,18 @@ fn lowering_a_library_allocates_linearly_in_its_definitions() {
         assert!(
             grows_linearly(pair[0], pair[1]),
             "lowering a library allocated superlinearly in its definitions: {bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn classifying_a_let_chain_allocates_linearly_in_its_bindings() {
+    let bytes = on_measuring_thread(|| [250, 500, 1000].map(|k| classification_bytes(&chain(k))));
+    eprintln!("classification bytes at k = 250, 500, 1000: {bytes:?}");
+    for pair in bytes.windows(2) {
+        assert!(
+            grows_linearly(pair[0], pair[1]),
+            "classifying a let chain allocated superlinearly in its bindings: {bytes:?}"
         );
     }
 }
