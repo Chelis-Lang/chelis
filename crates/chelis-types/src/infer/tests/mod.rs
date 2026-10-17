@@ -2007,6 +2007,7 @@ mod issue_2622;
 mod issue_2975;
 mod issue_3717;
 mod issue_3797;
+mod issue_3819;
 mod more;
 mod post_app_ledger_key;
 mod post_app_replay_precedence;
