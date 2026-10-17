@@ -52,7 +52,34 @@ impl HostVerification {
     }
 }
 
+mod live;
+
+use live::{LiveSet, UnitOwnerFacts};
+#[cfg(test)]
+pub(super) use live::{live_entry_visits, with_reference_scans_counted};
+
+#[cfg(test)]
+thread_local! {
+    static VERIFY_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static CALL_GRAPH_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Whole-program verifications run on this thread.
+#[cfg(test)]
+pub(super) fn verify_calls() -> u64 {
+    VERIFY_CALLS.with(std::cell::Cell::get)
+}
+
+/// Call-graph nodes and calls visited on this thread while finding the
+/// components the live-byte bound composes over.
+#[cfg(test)]
+pub(super) fn call_graph_visits() -> u64 {
+    CALL_GRAPH_VISITS.with(std::cell::Cell::get)
+}
+
 pub(super) fn verify(program: &OwnershipProgram) -> Result<HostVerification, OwnershipError> {
+    #[cfg(test)]
+    VERIFY_CALLS.with(|calls| calls.set(calls.get() + 1));
     if super::last_use::has_schedule(program) {
         super::last_use::verify_canonical(program)?;
     }
@@ -1057,8 +1084,12 @@ fn verify_unit(
     check_params(unit)?;
     check_reachable(unit, &blocks)?;
 
+    let owner_facts = UnitOwnerFacts::new(unit);
     let entry = blocks[&unit.entry];
-    let initial: BTreeSet<_> = entry.params.iter().map(|p| p.owner).collect();
+    let mut initial = LiveSet::new(&owner_facts);
+    for param in &entry.params {
+        initial.insert(param.owner);
+    }
     let mut incoming = BTreeMap::from([(unit.entry, initial)]);
     let mut queue = VecDeque::from([unit.entry]);
     let mut max_live_heap_owners = 0;
@@ -1068,8 +1099,8 @@ fn verify_unit(
         let block = blocks[&id];
         let mut live = incoming[&id].clone();
         check_borrows(unit, block.id, &live)?;
-        max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live));
-        local_max_live_bytes = local_max_live_bytes.maximum(live_byte_cost(unit, &live)?);
+        max_live_heap_owners = max_live_heap_owners.max(live.heap_owned_count());
+        local_max_live_bytes = local_max_live_bytes.maximum(live.byte_cost()?);
         for operation in &block.ops {
             if let Op::Apply {
                 kind: ApplyKind::DirectCall { callee },
@@ -1077,15 +1108,14 @@ fn verify_unit(
                 ..
             } = &operation.kind
             {
-                let mut carry = live.clone();
-                for arg in args {
-                    if arg.use_ == OwnershipUse::Move {
-                        carry.remove(&arg.owner);
-                    }
-                }
+                let moved = args
+                    .iter()
+                    .filter(|arg| arg.use_ == OwnershipUse::Move)
+                    .map(|arg| arg.owner)
+                    .collect();
                 direct_calls.push(DirectCallLiveCost {
                     callee: *callee,
-                    carry: live_byte_cost(unit, &carry)?,
+                    carry: live.byte_cost_without(&moved)?,
                 });
             }
             if let Some(dest) = destination(&operation.kind)
@@ -1093,7 +1123,7 @@ fn verify_unit(
             {
                 // Account for the transient point after result allocation and
                 // before moved inputs receive their post-operation terminal.
-                max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live) + 1);
+                max_live_heap_owners = max_live_heap_owners.max(live.heap_owned_count() + 1);
                 if !matches!(
                     &operation.kind,
                     Op::Apply {
@@ -1102,7 +1132,7 @@ fn verify_unit(
                     }
                 ) {
                     local_max_live_bytes = local_max_live_bytes.maximum(add_live_byte_bounds(
-                        live_byte_cost(unit, &live)?,
+                        live.byte_cost()?,
                         owner_byte_cost(unit, dest)?,
                     ));
                 }
@@ -1116,8 +1146,8 @@ fn verify_unit(
                 callable_schemas,
                 &mut live,
             )?;
-            max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live));
-            local_max_live_bytes = local_max_live_bytes.maximum(live_byte_cost(unit, &live)?);
+            max_live_heap_owners = max_live_heap_owners.max(live.heap_owned_count());
+            local_max_live_bytes = local_max_live_bytes.maximum(live.byte_cost()?);
         }
         verify_terminator(
             unit,
@@ -1296,14 +1326,6 @@ fn operation_exists_in_block(unit: &Unit, block: BlockId, operation: OpId) -> bo
         })
 }
 
-fn live_heap_count(unit: &Unit, live: &BTreeSet<OwnerId>) -> usize {
-    live.iter()
-        .filter(|owner| {
-            unit.owners[owner].origin == OwnerOrigin::Owned && unit.owners[owner].class.is_heap()
-        })
-        .count()
-}
-
 /// Sum two live-byte bounds. A sum beyond u64 has no finite representable
 /// bound and is [`super::LiveByteBound::Unbounded`]: the summary is an
 /// analysis result, never a reason to refuse a program whose allocations each
@@ -1375,38 +1397,126 @@ fn owner_byte_cost(unit: &Unit, owner: OwnerId) -> Result<super::LiveByteBound, 
         .map_or(super::LiveByteBound::Unbounded, super::LiveByteBound::Exact))
 }
 
-fn live_byte_cost(
-    unit: &Unit,
-    live: &BTreeSet<OwnerId>,
-) -> Result<super::LiveByteBound, OwnershipError> {
-    let mut result = super::LiveByteBound::Exact(0);
-    for owner in live {
-        let info = unit
-            .owners
-            .get(owner)
-            .ok_or_else(|| incomplete(unit, *owner, "metadata"))?;
-        if info.origin != OwnerOrigin::Owned || !info.class.is_heap() {
+/// The strongly connected components of the direct-call graph, found by one
+/// iterative pass of Tarjan's algorithm, so the work is linear in units plus
+/// calls (chelis#3723). Roots are taken in ascending unit order and callees in
+/// call order, so the components and their order are deterministic.
+fn call_graph_components(facts: &BTreeMap<UnitId, UnitLiveFacts>) -> Vec<Vec<UnitId>> {
+    let nodes = facts.keys().copied().collect::<Vec<_>>();
+    let index_of = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| (*unit, index))
+        .collect::<BTreeMap<_, _>>();
+    let successors = nodes
+        .iter()
+        .map(|unit| {
+            facts[unit]
+                .direct_calls
+                .iter()
+                .filter_map(|call| index_of.get(&call.callee).copied())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut discovered = vec![None::<usize>; nodes.len()];
+    let mut lowlink = vec![0; nodes.len()];
+    let mut on_stack = vec![false; nodes.len()];
+    let mut stack = Vec::new();
+    let mut components = Vec::new();
+    let mut next_discovery = 0;
+    for root in 0..nodes.len() {
+        if discovered[root].is_some() {
             continue;
         }
-        result = add_live_byte_bounds(result, owner_byte_cost(unit, *owner)?);
+        // Each frame is a node and the position of its next unexplored callee.
+        let mut frames = vec![(root, 0)];
+        while let Some(&(node, position)) = frames.last() {
+            if position == 0 && discovered[node].is_none() {
+                #[cfg(test)]
+                CALL_GRAPH_VISITS.with(|visits| visits.set(visits.get() + 1));
+                discovered[node] = Some(next_discovery);
+                lowlink[node] = next_discovery;
+                next_discovery += 1;
+                stack.push(node);
+                on_stack[node] = true;
+            }
+            if let Some(&callee) = successors[node].get(position) {
+                #[cfg(test)]
+                CALL_GRAPH_VISITS.with(|visits| visits.set(visits.get() + 1));
+                frames.last_mut().expect("current frame").1 += 1;
+                match discovered[callee] {
+                    None => frames.push((callee, 0)),
+                    Some(order) if on_stack[callee] => lowlink[node] = lowlink[node].min(order),
+                    Some(_) => {}
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(caller, _)) = frames.last() {
+                lowlink[caller] = lowlink[caller].min(lowlink[node]);
+            }
+            if Some(lowlink[node]) == discovered[node] {
+                let mut component = Vec::new();
+                loop {
+                    let member = stack.pop().expect("component root is on the stack");
+                    on_stack[member] = false;
+                    component.push(nodes[member]);
+                    if member == node {
+                        break;
+                    }
+                }
+                component.sort_unstable();
+                components.push(component);
+            }
+        }
     }
-    Ok(result)
+    #[cfg(test)]
+    if nodes.len() <= 64 {
+        let mut found = components.clone();
+        found.sort_unstable();
+        assert_eq!(
+            found,
+            reference_call_graph_components(facts),
+            "linear components diverged from pairwise reachability"
+        );
+    }
+    components
 }
 
-fn unit_reaches(start: UnitId, target: UnitId, facts: &BTreeMap<UnitId, UnitLiveFacts>) -> bool {
-    let mut pending = vec![start];
-    let mut visited = BTreeSet::new();
-    while let Some(unit) = pending.pop() {
-        if unit == target {
-            return true;
+/// The components by pairwise reachability, as verification found them
+/// before the linear pass: a test-build cross-check on small call graphs.
+#[cfg(test)]
+fn reference_call_graph_components(facts: &BTreeMap<UnitId, UnitLiveFacts>) -> Vec<Vec<UnitId>> {
+    let reaches = |start: UnitId, target: UnitId| {
+        let mut pending = vec![start];
+        let mut visited = BTreeSet::new();
+        while let Some(unit) = pending.pop() {
+            if unit == target {
+                return true;
+            }
+            if visited.insert(unit)
+                && let Some(next) = facts.get(&unit)
+            {
+                pending.extend(next.direct_calls.iter().map(|call| call.callee));
+            }
         }
-        if visited.insert(unit)
-            && let Some(next) = facts.get(&unit)
-        {
-            pending.extend(next.direct_calls.iter().map(|call| call.callee));
+        false
+    };
+    let mut remaining = facts.keys().copied().collect::<BTreeSet<_>>();
+    let mut components = Vec::new();
+    while let Some(first) = remaining.first().copied() {
+        let component = remaining
+            .iter()
+            .copied()
+            .filter(|candidate| reaches(first, *candidate) && reaches(*candidate, first))
+            .collect::<Vec<_>>();
+        for unit in &component {
+            remaining.remove(unit);
         }
+        components.push(component);
     }
-    false
+    components.sort_unstable();
+    components
 }
 
 #[derive(Debug)]
@@ -1419,21 +1529,7 @@ fn compose_live_byte_bound(
     units: &[Unit],
     facts: &BTreeMap<UnitId, UnitLiveFacts>,
 ) -> Result<super::LiveByteBound, OwnershipError> {
-    let mut remaining = units.iter().map(|unit| unit.id).collect::<BTreeSet<_>>();
-    let mut components = Vec::<BTreeSet<UnitId>>::new();
-    while let Some(first) = remaining.first().copied() {
-        let component = remaining
-            .iter()
-            .copied()
-            .filter(|candidate| {
-                unit_reaches(first, *candidate, facts) && unit_reaches(*candidate, first, facts)
-            })
-            .collect::<BTreeSet<_>>();
-        for unit in &component {
-            remaining.remove(unit);
-        }
-        components.push(component);
-    }
+    let components = call_graph_components(facts);
     let component_of = components
         .iter()
         .enumerate()
@@ -1780,7 +1876,7 @@ fn verify_op(
     definitions: &BTreeSet<OwnerId>,
     units: &BTreeMap<UnitId, &Unit>,
     callable_schemas: &BTreeMap<UnitId, CallableSchema>,
-    live: &mut BTreeSet<OwnerId>,
+    live: &mut LiveSet<'_>,
 ) -> Result<(), OwnershipError> {
     match op {
         Op::Define { dest, .. } => define(unit, *dest, live),
@@ -1978,13 +2074,13 @@ fn verify_op(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn verify_terminator(
+fn verify_terminator<'a>(
     unit: &Unit,
     block: &Block,
     definitions: &BTreeSet<OwnerId>,
     blocks: &BTreeMap<BlockId, &Block>,
-    live: &BTreeSet<OwnerId>,
-    incoming: &mut BTreeMap<BlockId, BTreeSet<OwnerId>>,
+    live: &LiveSet<'a>,
+    incoming: &mut BTreeMap<BlockId, LiveSet<'a>>,
     queue: &mut VecDeque<BlockId>,
 ) -> Result<(), OwnershipError> {
     match &block.terminator {
@@ -2127,14 +2223,14 @@ fn verify_terminator(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn transfer(
+fn transfer<'a>(
     unit: &Unit,
     block: &Block,
     edge: &Edge,
     definitions: &BTreeSet<OwnerId>,
     blocks: &BTreeMap<BlockId, &Block>,
-    live: &BTreeSet<OwnerId>,
-    incoming: &mut BTreeMap<BlockId, BTreeSet<OwnerId>>,
+    live: &LiveSet<'a>,
+    incoming: &mut BTreeMap<BlockId, LiveSet<'a>>,
     queue: &mut VecDeque<BlockId>,
 ) -> Result<(), OwnershipError> {
     let target = blocks
@@ -2179,7 +2275,9 @@ fn transfer(
             next.remove(&param.owner);
         }
     }
-    next.extend(target.params.iter().map(|p| p.owner));
+    for param in &target.params {
+        next.insert(param.owner);
+    }
     for terminal in &edge.terminals {
         verify_edge_terminal(unit, block.id, terminal.kind, definitions, &mut next)?;
     }
@@ -2207,7 +2305,7 @@ fn verify_edge_terminal(
     block: BlockId,
     terminal: Terminal,
     definitions: &BTreeSet<OwnerId>,
-    live: &mut BTreeSet<OwnerId>,
+    live: &mut LiveSet<'_>,
 ) -> Result<(), OwnershipError> {
     let owner = terminal.owner();
     if !definitions.contains(&owner) {
@@ -2299,7 +2397,7 @@ fn use_operand(
     operand: &Operand,
     expected: Option<OwnershipUse>,
     definitions: &BTreeSet<OwnerId>,
-    live: &mut BTreeSet<OwnerId>,
+    live: &mut LiveSet<'_>,
 ) -> Result<(), OwnershipError> {
     if !definitions.contains(&operand.owner) {
         return Err(incomplete(unit, operand.owner, "definition"));
@@ -2336,9 +2434,7 @@ fn use_operand(
                 block: block.0,
             });
         }
-        if let Some(borrow) = live.iter().find(|candidate| {
-            unit.owners[candidate].origin == OwnerOrigin::BorrowedFrom(operand.owner)
-        }) {
+        if let Some(borrow) = live.first_borrow_of(operand.owner) {
             return Err(OwnershipError::LiveBorrowAtConsume {
                 unit: unit.name.clone(),
                 owner: operand.owner.0,
@@ -2351,7 +2447,7 @@ fn use_operand(
     Ok(())
 }
 
-fn define(unit: &Unit, owner: OwnerId, live: &mut BTreeSet<OwnerId>) -> Result<(), OwnershipError> {
+fn define(unit: &Unit, owner: OwnerId, live: &mut LiveSet<'_>) -> Result<(), OwnershipError> {
     if unit.owners[&owner].origin != OwnerOrigin::Owned {
         return Err(OwnershipError::BadClass {
             unit: unit.name.clone(),
@@ -2363,13 +2459,9 @@ fn define(unit: &Unit, owner: OwnerId, live: &mut BTreeSet<OwnerId>) -> Result<(
     Ok(())
 }
 
-fn check_borrows(
-    unit: &Unit,
-    block: BlockId,
-    live: &BTreeSet<OwnerId>,
-) -> Result<(), OwnershipError> {
-    for owner in live {
-        if let OwnerOrigin::BorrowedFrom(source) = unit.owners[owner].origin
+fn check_borrows(unit: &Unit, block: BlockId, live: &LiveSet<'_>) -> Result<(), OwnershipError> {
+    for owner in live.iter() {
+        if let OwnerOrigin::BorrowedFrom(source) = unit.owners[&owner].origin
             && !live.contains(&source)
         {
             return Err(OwnershipError::OwnerNotLive {
@@ -2382,11 +2474,7 @@ fn check_borrows(
     Ok(())
 }
 
-fn check_terminal(
-    unit: &Unit,
-    block: BlockId,
-    live: &BTreeSet<OwnerId>,
-) -> Result<(), OwnershipError> {
+fn check_terminal(unit: &Unit, block: BlockId, live: &LiveSet<'_>) -> Result<(), OwnershipError> {
     if let Some(owner) = live
         .iter()
         .find(|owner| unit.owners[owner].origin == OwnerOrigin::Owned)
@@ -2404,10 +2492,11 @@ fn check_terminal(
 /// The owners live in `from` and not in `to`, labelled with their source
 /// binding names. A join mismatch is only actionable if the reader can see
 /// which owner the two paths disagree about (chelis#2122).
-fn owner_difference(unit: &Unit, from: &BTreeSet<OwnerId>, to: &BTreeSet<OwnerId>) -> String {
+fn owner_difference(unit: &Unit, from: &LiveSet<'_>, to: &LiveSet<'_>) -> String {
     let labels = from
-        .difference(to)
-        .map(|owner| crate::ownership::render::owner_label(unit, *owner))
+        .iter()
+        .filter(|owner| !to.contains(owner))
+        .map(|owner| crate::ownership::render::owner_label(unit, owner))
         .collect::<Vec<_>>();
     if labels.is_empty() {
         "none".to_string()

@@ -1493,6 +1493,11 @@ enum OwnershipProof {
         program: ir::OwnershipProgram,
         sites: ir::HostSiteMap,
         nested_dags: Vec<NestedDagProof>,
+        /// The verification `last_use::schedule` computed for exactly
+        /// `program`. No code mutates a constructed proof, so the boundary
+        /// reuses it instead of verifying the same program again
+        /// (chelis#3730).
+        verification: verify::HostVerification,
     },
     Dag(DagOwnershipPlan),
 }
@@ -1520,9 +1525,11 @@ pub struct OwnershipProgram<P: EmissionPayload> {
 #[derive(Debug)]
 pub struct VerifiedOwnershipProgram<P: EmissionPayload>(OwnershipProgram<P>, VerificationProof);
 
+/// The specialization [`verify_ownership`] checked. A host program's
+/// [`verify::HostVerification`] travels in its [`OwnershipProof::Host`].
 #[derive(Debug)]
 enum VerificationProof {
-    Host(verify::HostVerification),
+    Host,
     Dag,
 }
 
@@ -1563,7 +1570,7 @@ fn lower_host_ownership_impl(
         &mut sites,
     )?;
     let mut sites = sites.finish();
-    last_use::schedule(&mut program, &mut sites)?;
+    let verification = last_use::schedule(&mut program, &mut sites)?.into_verification();
     let nested_dags = lower_nested_dags(&host)?;
     Ok(OwnershipProgram {
         payload: HostEmissionPayload {
@@ -1574,6 +1581,7 @@ fn lower_host_ownership_impl(
             program,
             sites,
             nested_dags,
+            verification,
         },
     })
 }
@@ -1598,15 +1606,15 @@ pub fn verify_ownership<P: EmissionPayload>(
                 program: ir_program,
                 sites,
                 nested_dags,
+                verification: _,
             },
             PayloadKind::Host,
         ) => {
-            let verification = verify::verify(ir_program)?;
             let payload = host_payload(&program)?;
             verify::verify_host_sites(&payload.program, &payload.manifest, ir_program, sites)?;
             verify_manifest_sinks(payload, ir_program, sites)?;
             verify_nested_dags(&program, nested_dags)?;
-            VerificationProof::Host(verification)
+            VerificationProof::Host
         }
         (OwnershipProof::Dag(plan), PayloadKind::Dag) => {
             let dag = dag_payload(&program)?;
@@ -1687,6 +1695,7 @@ impl VerifiedHostProgram {
             program,
             sites,
             nested_dags,
+            verification,
         } = &self.0.proof
         else {
             unreachable!("sealed host specialization")
@@ -1694,7 +1703,7 @@ impl VerifiedHostProgram {
         let payload = (&self.0.payload as &dyn std::any::Any)
             .downcast_ref::<HostEmissionPayload>()
             .expect("sealed host payload specialization");
-        let VerificationProof::Host(verification) = &self.1 else {
+        let VerificationProof::Host = &self.1 else {
             unreachable!("sealed host verification specialization")
         };
         VerifiedHostEmission {
@@ -1707,7 +1716,9 @@ impl VerifiedHostProgram {
     }
 
     pub fn live_set_bound(&self) -> &VerifiedLiveSetBound {
-        let VerificationProof::Host(verification) = &self.1 else {
+        let (OwnershipProof::Host { verification, .. }, VerificationProof::Host) =
+            (&self.0.proof, &self.1)
+        else {
             unreachable!("sealed host verification specialization")
         };
         verification.live_set_bound()

@@ -4078,3 +4078,431 @@ fn the_copy_rewrite_takes_one_operand_census_per_unit() {
         "{CHAINS} upgrades took {censuses} operand censuses of one unit"
     );
 }
+
+/// The largest growth factor between consecutive sizes of a doubling sweep.
+/// Every count must be positive: a sweep that never reaches the counted work
+/// proves nothing.
+fn max_doubling_ratio(visits: &[u64]) -> f64 {
+    assert!(
+        visits.iter().all(|&count| count > 0),
+        "the sweep must exercise the counted work: {visits:?}"
+    );
+    visits
+        .windows(2)
+        .map(|pair| pair[1] as f64 / pair[0] as f64)
+        .fold(0.0, f64::max)
+}
+
+/// chelis#3723: a chain of `count` self-recursive functions, each calling the
+/// previous one, so the call graph has `count` singleton cyclic components.
+fn recursive_call_chain_program(count: u32) -> RawProgram {
+    let call = |dest: u32, callee: u32| Op::Apply {
+        dest: Some(OwnerId(dest)),
+        label: "chain call".into(),
+        kind: ApplyKind::DirectCall {
+            callee: UnitId(callee),
+        },
+        schema: OperationSchema::new(
+            Vec::new(),
+            Some(ValueClass::NonHeap(NonHeapKind::Scalar(Prim::Int64))),
+        ),
+        args: Vec::new(),
+    };
+    let mut units = vec![Unit {
+        id: UnitId(0),
+        name: "roots".into(),
+        kind: UnitKind::Roots,
+        schedule: ScheduleState::Phase2ScopeExit,
+        callable_body: None,
+        entry: BlockId(0),
+        blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
+        owners: BTreeMap::new(),
+    }];
+    for index in 1..=count {
+        let ops = if index == 1 {
+            vec![call(0, index)]
+        } else {
+            vec![
+                call(0, index),
+                Op::Discard { owner: OwnerId(0) },
+                call(1, index - 1),
+            ]
+        };
+        let result = if index == 1 { 0 } else { 1 };
+        units.push(Unit {
+            id: UnitId(index),
+            name: format!("h{index}"),
+            kind: UnitKind::Function,
+            schedule: ScheduleState::Phase2ScopeExit,
+            callable_body: Some(CallableBody::new(BlockId(0))),
+            entry: BlockId(0),
+            blocks: vec![block(
+                0,
+                vec![],
+                ops,
+                Terminator::Return {
+                    result: Operand::move_(OwnerId(result)),
+                },
+            )],
+            owners: (0..=result)
+                .map(|owner| (OwnerId(owner), info(Prim::Int64, OwnerOrigin::Owned)))
+                .collect(),
+        });
+    }
+    RawProgram { units }
+}
+
+#[test]
+fn live_byte_composition_finds_call_graph_components_in_linear_work() {
+    // Call-graph nodes visited while composing the verified live-byte bound
+    // (chelis#3723). Pairwise reachability makes a call chain cubic, about 8x
+    // per doubling.
+    let visits = [50, 100, 200, 400]
+        .iter()
+        .map(|&count| {
+            let before = super::verify::call_graph_visits();
+            let verified = super::verify::verify(&recursive_call_chain_program(count)).unwrap();
+            assert_eq!(
+                verified.live_set_bound().max_live_bytes,
+                LiveByteBound::Exact(0)
+            );
+            super::verify::call_graph_visits() - before
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        max_doubling_ratio(&visits) <= 2.2,
+        "call-graph visits per doubling must stay linear: {visits:?}"
+    );
+}
+
+/// chelis#2330: a direct call's carry is the live-byte bound without the
+/// owners it moves. The running totals subtract the moved owners instead of
+/// copying the set; the test build cross-checks every read against the
+/// copy-and-rescan, across unknown, exact, unbounded and overflowing costs
+/// (the order-dependent case included), a duplicate move, and moving
+/// everything.
+/// The callee does not exist, so each program is rejected at the call, after
+/// its carry is costed.
+#[test]
+fn direct_call_carry_excludes_moved_owners_like_a_rescan() {
+    let half = 1usize << 61;
+    let dynamic = value_info(
+        ConcreteHostType::Tensor(TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        }),
+        OwnerOrigin::Owned,
+    );
+    let layouts = [
+        [
+            dynamic.clone(),
+            fixed_tensor_info(half),
+            fixed_tensor_info(half),
+        ],
+        [
+            fixed_tensor_info(half),
+            dynamic.clone(),
+            fixed_tensor_info(half),
+        ],
+        [
+            fixed_tensor_info(half),
+            fixed_tensor_info(half),
+            dynamic.clone(),
+        ],
+        [
+            fixed_tensor_info(half),
+            fixed_tensor_info(half),
+            fixed_tensor_info(3),
+        ],
+        [dynamic.clone(), dynamic.clone(), fixed_tensor_info(half)],
+        // A tensor whose byte size exceeds u64 costs `Unbounded`.
+        [
+            fixed_tensor_info(usize::MAX),
+            fixed_tensor_info(3),
+            dynamic.clone(),
+        ],
+        [
+            fixed_tensor_info(3),
+            fixed_tensor_info(usize::MAX),
+            fixed_tensor_info(usize::MAX),
+        ],
+    ];
+    let move_sets: [&[u32]; 9] = [
+        &[],
+        &[0],
+        &[1],
+        &[2],
+        &[0, 1],
+        &[1, 2],
+        &[0, 2],
+        &[1, 1],
+        &[0, 1, 2],
+    ];
+    for layout in &layouts {
+        for moved in move_sets {
+            let mut ops = (0..3).map(define).collect::<Vec<_>>();
+            ops.push(Op::Apply {
+                dest: Some(OwnerId(3)),
+                label: "carry call".into(),
+                kind: ApplyKind::DirectCall { callee: UnitId(99) },
+                schema: OperationSchema::new(
+                    Vec::new(),
+                    Some(ValueClass::NonHeap(NonHeapKind::Scalar(Prim::Int64))),
+                ),
+                args: moved
+                    .iter()
+                    .map(|owner| Operand::move_(OwnerId(*owner)))
+                    .collect(),
+            });
+            let mut owners = layout
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(owner, info)| (OwnerId(u32::try_from(owner).unwrap()), info))
+                .collect::<BTreeMap<_, _>>();
+            owners.insert(OwnerId(3), info(Prim::Int64, OwnerOrigin::Owned));
+            let program = roots(vec![block(0, vec![], ops, Terminator::Exit)], owners);
+            assert!(
+                matches!(
+                    super::verify::verify(&program),
+                    Err(OwnershipError::MissingUnit { unit: 99, .. })
+                ),
+                "moving {moved:?} must reach the call"
+            );
+        }
+    }
+}
+
+/// chelis#3723: deterministic pseudo-random call graphs, cyclic and acyclic.
+/// The test build checks the linear components against pairwise
+/// reachability on every graph of at most 64 units, and the composed bound
+/// is the same whichever way the components are found.
+#[test]
+fn call_graph_components_agree_with_pairwise_reachability() {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = |bound: u32| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        u32::try_from(state % u64::from(bound)).unwrap()
+    };
+    for _ in 0..64 {
+        let count = 2 + next(30);
+        let mut units = vec![Unit {
+            id: UnitId(0),
+            name: "roots".into(),
+            kind: UnitKind::Roots,
+            schedule: ScheduleState::Phase2ScopeExit,
+            callable_body: None,
+            entry: BlockId(0),
+            blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
+            owners: BTreeMap::new(),
+        }];
+        for index in 1..=count {
+            let calls = next(4);
+            // A tensor live across every call gives each call a positive
+            // carry, so a cycle is unbounded and the bound sees the partition.
+            let mut ops = vec![define(0)];
+            let mut owners = BTreeMap::from([(OwnerId(0), fixed_tensor_info(1 + index as usize))]);
+            for call in 0..calls {
+                let dest = 1 + call;
+                ops.push(Op::Apply {
+                    dest: Some(OwnerId(dest)),
+                    label: "random call".into(),
+                    kind: ApplyKind::DirectCall {
+                        callee: UnitId(1 + next(count)),
+                    },
+                    schema: OperationSchema::new(
+                        Vec::new(),
+                        Some(ValueClass::NonHeap(NonHeapKind::Scalar(Prim::Int64))),
+                    ),
+                    args: Vec::new(),
+                });
+                ops.push(Op::Discard {
+                    owner: OwnerId(dest),
+                });
+                owners.insert(OwnerId(dest), info(Prim::Int64, OwnerOrigin::Owned));
+            }
+            let result = 1 + calls;
+            ops.push(Op::Drop {
+                owner: Operand::move_(OwnerId(0)),
+            });
+            ops.push(define(result));
+            owners.insert(OwnerId(result), info(Prim::Int64, OwnerOrigin::Owned));
+            units.push(Unit {
+                id: UnitId(index),
+                name: format!("f{index}"),
+                kind: UnitKind::Function,
+                schedule: ScheduleState::Phase2ScopeExit,
+                callable_body: Some(CallableBody::new(BlockId(0))),
+                entry: BlockId(0),
+                blocks: vec![block(
+                    0,
+                    vec![],
+                    ops,
+                    Terminator::Return {
+                        result: Operand::move_(OwnerId(result)),
+                    },
+                )],
+                owners,
+            });
+        }
+        super::verify::verify(&RawProgram { units }).unwrap();
+    }
+}
+
+/// chelis#2330: `n` fixed tensors defined in one block, carried across a jump
+/// and dropped in reverse order in the next. Every operation reads the
+/// live-heap count and live-byte bound, every drop moves an owner, and the
+/// jump copies and checks the whole live set once per block.
+fn wide_live_set_program(count: u32) -> RawProgram {
+    let defines = (0..count).map(define).collect::<Vec<_>>();
+    let drops = (0..count)
+        .rev()
+        .map(|owner| Op::Drop {
+            owner: Operand::move_(OwnerId(owner)),
+        })
+        .collect::<Vec<_>>();
+    roots(
+        vec![
+            block(0, vec![], defines, Terminator::Jump(edge(1, vec![]))),
+            block(1, vec![], drops, Terminator::Exit),
+        ],
+        (0..count)
+            .map(|owner| (OwnerId(owner), fixed_tensor_info(4)))
+            .collect(),
+    )
+}
+
+/// The live-set entries one `verify` visits for each size in a doubling sweep.
+fn live_entry_visit_sweep(sizes: &[u32]) -> Vec<u64> {
+    sizes
+        .iter()
+        .map(|&count| {
+            let before = super::verify::live_entry_visits();
+            let verified = super::verify::verify(&wide_live_set_program(count)).unwrap();
+            assert_eq!(
+                verified.live_set_bound().max_live_heap_owners(),
+                count as usize
+            );
+            assert_eq!(
+                verified.live_set_bound().max_live_bytes,
+                LiveByteBound::Exact(16 * u64::from(count))
+            );
+            super::verify::live_entry_visits() - before
+        })
+        .collect()
+}
+
+#[test]
+fn verify_reads_live_set_aggregates_without_rescanning_the_live_set() {
+    // The quadratic quantity itself (chelis#2330): live-set entries visited
+    // across the whole verification. A per-operation scan of a live set that
+    // grows with the body makes it grow about 4x per doubling.
+    let visits = live_entry_visit_sweep(&[80, 160, 320, 640]);
+    assert!(
+        max_doubling_ratio(&visits) <= 2.2,
+        "live-set entries visited per doubling must stay linear: {visits:?}"
+    );
+}
+
+#[test]
+fn live_set_visit_guard_catches_a_reintroduced_per_operation_scan() {
+    // Negative control: the test build cross-checks every running aggregate
+    // against a full scan of the live set. Counting those scans is exactly a
+    // per-operation rescan, and the guard above must see it go quadratic.
+    let visits = super::verify::with_reference_scans_counted(|| {
+        live_entry_visit_sweep(&[80, 160, 320, 640])
+    });
+    assert!(
+        max_doubling_ratio(&visits) >= 3.5,
+        "a per-operation live-set scan must read as quadratic: {visits:?}"
+    );
+}
+
+/// chelis#2330: the running live-byte totals reproduce the owner-order sum
+/// even where that sum depends on order. With an unknown cost on the lowest
+/// owner, the sum is unknown before the two exact costs overflow u64; the
+/// test build cross-checks every read against that ordered full scan.
+#[test]
+fn running_live_byte_totals_keep_the_owner_order_sum() {
+    let half = 1usize << 61;
+    let dynamic = value_info(
+        ConcreteHostType::Tensor(TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        }),
+        OwnerOrigin::Owned,
+    );
+    let program = |owners: [OwnerInfo; 3]| {
+        let mut ops = (0..3).map(define).collect::<Vec<_>>();
+        ops.extend((0..3).rev().map(|owner| Op::Drop {
+            owner: Operand::move_(OwnerId(owner)),
+        }));
+        roots(
+            vec![block(0, vec![], ops, Terminator::Exit)],
+            owners
+                .into_iter()
+                .enumerate()
+                .map(|(owner, info)| (OwnerId(u32::try_from(owner).unwrap()), info))
+                .collect(),
+        )
+    };
+    let unknown_first = program([
+        dynamic.clone(),
+        fixed_tensor_info(half),
+        fixed_tensor_info(half),
+    ]);
+    assert_eq!(
+        super::verify::verify(&unknown_first)
+            .unwrap()
+            .live_set_bound()
+            .max_live_bytes,
+        LiveByteBound::Unknown
+    );
+    let unknown_last = program([fixed_tensor_info(half), fixed_tensor_info(half), dynamic]);
+    assert_eq!(
+        super::verify::verify(&unknown_last)
+            .unwrap()
+            .live_set_bound()
+            .max_live_bytes,
+        LiveByteBound::Unbounded
+    );
+}
+
+fn lower_source_for_ownership(source: &str) -> super::HostOwnershipProgram {
+    let declarations = chelis_surf::parser::parse_str(source).expect("surf parse");
+    let deep = chelis_surf::desugar::desugar_program(&declarations).expect("desugar");
+    let checked = chelis_types::check_typed_program(&deep)
+        .unwrap_or_else(|errors| panic!("type check: {:?}", errors.errors));
+    let checked = chelis_effects::check_program(&checked)
+        .unwrap_or_else(|error| panic!("effects: {error:?}"));
+    let checked = chelis_types::check_linearity(&checked)
+        .unwrap_or_else(|error| panic!("linearity: {error:?}"));
+    let realizability =
+        chelis_effects::realizability::infer_realizability(&checked, &[Prim::F32, Prim::Bool]);
+    let manifest = chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
+    let compiled = crate::host::try_lower_compiled_program_with_manifest(&checked, &manifest)
+        .unwrap_or_else(|diagnostic| panic!("host lowering: {diagnostic:?}"));
+    let host = compiled.host.expect("test source must have a host lane");
+    let manifested = chelis_types::manifest::ManifestedProgram::new(
+        checked,
+        manifest,
+        chelis_types::types::Target::C,
+    );
+    super::lower_host_ownership(&manifested, host).unwrap()
+}
+
+#[test]
+fn host_build_verifies_each_distinct_ownership_program_once() {
+    // chelis#3730: the conservative pre-schedule graph and the scheduled
+    // program are verified once each. The boundary reuses the scheduled
+    // program's verification rather than running it again on the same
+    // sealed program.
+    let source = "def bump(x: i64) -> i64 = add(x, 1i64)\nr = bump(3i64)\n";
+    let before = super::verify::verify_calls();
+    let lowered = lower_source_for_ownership(source);
+    let verified = super::verify_ownership(lowered).unwrap();
+    assert_eq!(super::verify::verify_calls() - before, 2);
+    assert!(verified.render().contains("unit bump Function"));
+}
