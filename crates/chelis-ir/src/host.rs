@@ -530,6 +530,7 @@ impl PreparedHostProgram {
 
     /// A session over the program that reuses and extends the shared facts.
     pub fn session(&self) -> HostLoweringSession<'_> {
+        HOST_LOWERING_SESSIONS.fetch_add(1, Ordering::Relaxed);
         HostLoweringSession {
             program: &self.program,
             facts: DefLaneFacts::default(),
@@ -696,23 +697,25 @@ fn take_top_level_name_index_builds() -> u64 {
     TOP_LEVEL_NAME_INDEX_BUILDS.with(|builds| builds.replace(0))
 }
 
-/// Sessions opened by [`HostLoweringSession::new`] since the process started.
-/// Each derives every program-wide fact afresh, so an entry point that opens
-/// one per ask instead of one per program repeats that work per ask, which no
-/// type can forbid (chelis#1921). A test drives a public entry with one ask
-/// and with many, and asserts the count does not grow with the asks.
-static FRESH_HOST_LOWERING_SESSIONS: AtomicU64 = AtomicU64::new(0);
+/// Host-lowering sessions opened since the process started, by
+/// [`HostLoweringSession::new`] or [`PreparedHostProgram::session`]. A fresh
+/// session derives every program-wide fact again, and even a prepared one
+/// starts its per-definition kernel decisions empty, so an entry point that
+/// opens one per ask instead of one per program repeats that work per ask,
+/// which no type can forbid (chelis#1921). A test drives a public entry with
+/// one ask and with many, and asserts the count does not grow with the asks.
+static HOST_LOWERING_SESSIONS: AtomicU64 = AtomicU64::new(0);
 
 #[doc(hidden)]
-pub fn fresh_host_lowering_sessions() -> u64 {
-    FRESH_HOST_LOWERING_SESSIONS.load(Ordering::Relaxed)
+pub fn host_lowering_sessions() -> u64 {
+    HOST_LOWERING_SESSIONS.load(Ordering::Relaxed)
 }
 
 impl<'program> HostLoweringSession<'program> {
     /// Begin a session over `program`. Nothing is derived here; every field
     /// fills in on its first miss.
     pub fn new(program: &'program CheckedProgram) -> Self {
-        FRESH_HOST_LOWERING_SESSIONS.fetch_add(1, Ordering::Relaxed);
+        HOST_LOWERING_SESSIONS.fetch_add(1, Ordering::Relaxed);
         Self {
             program,
             facts: DefLaneFacts::default(),
@@ -3351,7 +3354,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     let session = HostLoweringSession::new(program);
     lower_named_tensor_entry_with(
         &session,
-        &named_tensor_entry_context(&session),
+        &std::cell::OnceCell::new(),
         name,
         crate::lower::try_lower_subexpr_program_with_ordered_inputs,
     )
@@ -3366,7 +3369,7 @@ pub fn lower_named_tensor_entry_dags<'a>(
     names: &'a [String],
 ) -> impl Iterator<Item = Option<crate::Dag>> + 'a {
     let session = HostLoweringSession::new(program);
-    let context = named_tensor_entry_context(&session);
+    let context = std::cell::OnceCell::new();
     names.iter().map(move |name| {
         lower_named_tensor_entry_with(
             &session,
@@ -3387,7 +3390,7 @@ pub fn lower_named_tensor_entry_dag_with_trace(
     let session = HostLoweringSession::new(program);
     lower_named_tensor_entry_with(
         &session,
-        &named_tensor_entry_context(&session),
+        &std::cell::OnceCell::new(),
         name,
         crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace,
     )
@@ -3406,9 +3409,12 @@ fn named_tensor_entry_context(
 
 // Observation must not duplicate the entry's source scope or result claim.
 // Only the actual lowerer's optional return product differs.
+///
+/// `context` is built on the first entry that has a tensor signature, so a
+/// name without one costs no lowering context.
 fn lower_named_tensor_entry_with<T>(
     program: &HostLoweringSession<'_>,
-    context: &crate::lower::SubexprLoweringContext,
+    context: &std::cell::OnceCell<crate::lower::SubexprLoweringContext>,
     name: &str,
     lower: impl FnOnce(
         &Expr,
@@ -3425,6 +3431,7 @@ fn lower_named_tensor_entry_with<T>(
     // would let the host fallback emit an undefined-symbol call to
     // the grad function.
     // `scope` is this def's own declared parameter list.
+    let context = context.get_or_init(|| named_tensor_entry_context(program));
     match lower(&body_expr, scope, context, result_claim.as_ref(), true) {
         Ok(lowered) => Some(lowered),
         Err(diagnostic) if diagnostic.fatal => {

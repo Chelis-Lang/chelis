@@ -5902,7 +5902,7 @@ fn callee_body_requires_host(
 ) -> bool {
     let memoized =
         !lowerability_memo_disabled() && !walk.recursion.is_recursive(name, top_level_defs);
-    let key = (name.to_string(), supplied);
+    let key = (name.to_string(), supplied.clone());
     let cached = memoized
         .then(|| walk.callee_bodies.get(&key).copied())
         .flatten();
@@ -5911,7 +5911,7 @@ fn callee_body_requires_host(
         None => {
             LOWERABILITY_CALLEE_BODY_WALKS.with(|walks| walks.set(walks.get() + 1));
             let bindings = LowerabilityBindings {
-                supplied_formals: key.1.clone(),
+                supplied_formals: supplied,
                 ..LowerabilityBindings::default()
             };
             let requires_host = expr_depends_on_nonlowerable_name(
@@ -34918,6 +34918,27 @@ mod lowerability_memo_tests {
         def c[p: Float](h: (&tensor[2, p] -> tensor[2, bool]), x: tensor[2, p]) -> tensor[2, bool] = xp(x)\n\
         def xp[p: Float](x: tensor[2, p]) -> tensor[2, bool] = c(is_finite, x)\n";
 
+    /// A recursive group whose answers depend on which members the stack
+    /// holds, found by the program generator below. The walk per call site
+    /// classifies `d1` host; replaying the group's walks memoized while
+    /// classifying `d0` would classify it numeric.
+    const STACK_DEPENDENT_GROUP: &str = "\
+        def d0(x: tensor[2, f64]) -> tensor[2, bool] = and(d2(is_finite, x), and({\n\
+          pair = (is_finite, is_nan)\n\
+          d1(pair.0, x)\n\
+        }, {\n\
+          pair = (is_finite, is_nan)\n\
+          d5(pair.0, x)\n\
+        }))\n\
+        def d1(h: (&tensor[2, f64] -> tensor[2, bool]), x: tensor[2, f64]) -> tensor[2, bool] = and(and(d3(x), and(d3(x), d2(is_nan, x))), h(x))\n\
+        def d2(h: (&tensor[2, f64] -> tensor[2, bool]), x: tensor[2, f64]) -> tensor[2, bool] = and(d0(x), h(x))\n\
+        def d3(x: tensor[2, f64]) -> tensor[2, bool] = is_nan(x)\n\
+        def d5(h: (&tensor[2, f64] -> tensor[2, bool]), x: tensor[2, f64]) -> tensor[2, bool] = {\n\
+          h = is_nan\n\
+          and(h(x), d0(x))\n\
+        }\n\
+        out = d1(is_finite, to_tensor([1.0f64, 2.0f64]))\n";
+
     /// An answer and the callee bodies its classification walked.
     type Walked<T> = (T, u64);
 
@@ -35032,6 +35053,9 @@ mod lowerability_memo_tests {
             let ((memoized, _), (unmemoized, _)) = lowering_map(&source);
             assert_eq!(memoized, unmemoized, "the memo changes no verdict");
         }
+        let ((memoized, _), (unmemoized, _)) = lowering_map(STACK_DEPENDENT_GROUP);
+        assert_eq!(memoized, unmemoized, "the memo changes no verdict");
+        assert_eq!(memoized.get("d1"), Some(&false), "{memoized:?}");
 
         // Only the outside declarations' own walks could be shared, and each
         // runs once, so the group's members are walked exactly as often as
@@ -35041,6 +35065,204 @@ mod lowerability_memo_tests {
         assert_eq!(
             walks, rewalks,
             "a recursive group's member is never memoized"
+        );
+    }
+
+    /// Two calls of one callee that supply different callable facts: a
+    /// literal callable, and a projection out of a local pair that applying
+    /// needs the host for. A memo that forgot the supplied facts would answer
+    /// the second call with the first call's numeric verdict.
+    const CALLS_SUPPLYING_DIFFERENT_FACTS: &str = "\
+        def c(h: (&tensor[2, f64] -> tensor[2, bool]), x: tensor[2, f64]) -> tensor[2, bool] = h(x)\n\
+        def m(x: tensor[2, f64]) -> tensor[2, bool] = and(c(is_finite, x), {\n\
+          pair = (is_finite, is_nan)\n\
+          c(pair.0, x)\n\
+        })\n";
+
+    #[test]
+    fn a_callee_is_memoized_per_supplied_callable_facts() {
+        let ((memoized, _), (unmemoized, _)) = lowering_map(CALLS_SUPPLYING_DIFFERENT_FACTS);
+        assert_eq!(memoized, unmemoized, "the memo changes no verdict");
+        assert_eq!(memoized.get("m"), Some(&false), "{memoized:?}");
+    }
+
+    /// A deterministic source of small programs mixing every edge the walk
+    /// crosses: callable-formal, precision-polymorphic and plain declarations,
+    /// host-only bodies, vmap targets, recursion and shadowed binders, with
+    /// forwarded formals, literal builtins and projected callables as actuals.
+    struct ProgramGenerator(u64);
+
+    impl ProgramGenerator {
+        fn below(&mut self, bound: usize) -> usize {
+            // xorshift64*: deterministic, so a failure names its seed.
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            (self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 33) as usize % bound
+        }
+
+        fn actual(&mut self, forwarded: bool) -> String {
+            match self.below(if forwarded { 5 } else { 4 }) {
+                0 => "is_finite".to_string(),
+                1 => "is_nan".to_string(),
+                2 => "pair.0".to_string(),
+                3 => "pair.1".to_string(),
+                _ => "h".to_string(),
+            }
+        }
+
+        /// A `tensor[2, bool]` expression over `x`, in a body whose formal `h`
+        /// is a callable when `callable`, and whose `x` is precision-generic
+        /// when `generic`.
+        fn body(&mut self, kinds: &[Kind], callable: bool, generic: bool, depth: usize) -> String {
+            let choice = if depth == 0 {
+                self.below(3)
+            } else {
+                self.below(7)
+            };
+            match choice {
+                0 => "is_finite(x)".to_string(),
+                1 if callable => "h(x)".to_string(),
+                1 => "is_nan(x)".to_string(),
+                2 | 3 => {
+                    let target = self.below(kinds.len());
+                    match kinds[target] {
+                        Kind::Callable if !generic => {
+                            let actual = self.actual(callable);
+                            if actual.starts_with("pair") {
+                                format!(
+                                    "{{\n  pair = (is_finite, is_nan)\n  d{target}({actual}, x)\n}}"
+                                )
+                            } else {
+                                format!("d{target}({actual}, x)")
+                            }
+                        }
+                        Kind::Plain | Kind::Host if !generic => format!("d{target}(x)"),
+                        Kind::Generic => format!("d{target}(x)"),
+                        _ => "is_nan(x)".to_string(),
+                    }
+                }
+                4 if callable && !generic => {
+                    // A local that shadows the callable formal.
+                    let inner = self.body(kinds, false, generic, depth - 1);
+                    format!("{{\n  h = is_nan\n  and(h(x), {inner})\n}}")
+                }
+                _ => {
+                    let left = self.body(kinds, callable, generic, depth - 1);
+                    let right = self.body(kinds, callable, generic, depth - 1);
+                    format!("and({left}, {right})")
+                }
+            }
+        }
+
+        fn program(&mut self) -> (String, Vec<String>) {
+            let count = 2 + self.below(5);
+            let kinds = (0..count)
+                .map(|_| match self.below(4) {
+                    0 => Kind::Callable,
+                    1 => Kind::Generic,
+                    2 => Kind::Plain,
+                    _ => Kind::Host,
+                })
+                .collect::<Vec<_>>();
+            let mut source = String::new();
+            for (index, kind) in kinds.iter().enumerate() {
+                let (header, callable, generic) = match kind {
+                    Kind::Callable => (
+                        "(h: (&tensor[2, f64] -> tensor[2, bool]), x: tensor[2, f64])",
+                        true,
+                        false,
+                    ),
+                    Kind::Generic => ("[p: Float](x: tensor[2, p])", false, true),
+                    Kind::Plain | Kind::Host => ("(x: tensor[2, f64])", false, false),
+                };
+                let body = self.body(&kinds, callable, generic, 3);
+                let body = if *kind == Kind::Host {
+                    format!("{{\n  _ = print(\"d{index}\")\n  {body}\n}}")
+                } else {
+                    body
+                };
+                source.push_str(&format!(
+                    "def d{index}{header} -> tensor[2, bool] = {body}\n"
+                ));
+            }
+            // Callable vmap templates forwarding their formal or a builtin.
+            let maps = self.below(3);
+            let signature = "[n](h: (&tensor[2, f32] -> tensor[2, f32]), x: tensor[n, 2, f32]) -> tensor[n, 2, f32]";
+            for index in 0..maps {
+                let body = match (index, self.below(3)) {
+                    (0, _) | (_, 0) => "vmap(h)(x)".to_string(),
+                    (_, 1) => format!("v{}(neg, x)", self.below(index)),
+                    _ => format!("add(v{0}(h, x), v{0}(neg, x))", self.below(index)),
+                };
+                source.push_str(&format!("def v{index}{signature} = {body}\n"));
+            }
+            let root = self.below(count);
+            let call = match kinds[root] {
+                Kind::Callable => format!("d{root}(is_finite, to_tensor([1.0f64, 2.0f64]))"),
+                _ => format!("d{root}(to_tensor([1.0f64, 2.0f64]))"),
+            };
+            source.push_str(&format!("out = {call}\n"));
+            let functions = (0..count)
+                .map(|index| format!("d{index}"))
+                .chain((0..maps).map(|index| format!("v{index}")))
+                .collect();
+            (source, functions)
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Callable,
+        Generic,
+        Plain,
+        Host,
+    }
+
+    fn try_checked(source: &str) -> Option<CheckedProgram> {
+        let decls = chelis_surf::parser::parse_str(source).ok()?;
+        let deep = chelis_surf::desugar::desugar_program(&decls).ok()?;
+        let typed = chelis_types::check_ir_program(&deep).ok()?;
+        let effected = chelis_effects::check_program(&typed).ok()?;
+        chelis_types::check_linearity(&effected).ok()
+    }
+
+    /// Every lowerability query answers the same with and without the memo
+    /// over a fixed-seed corpus of generated programs.
+    #[test]
+    fn generated_programs_answer_the_same_with_and_without_the_memo() {
+        const PROGRAMS: usize = 400;
+        let mut generator = ProgramGenerator(0x3707_3727_c0de_5eed);
+        let mut checked_programs = 0;
+        for _ in 0..PROGRAMS {
+            let (source, functions) = generator.program();
+            let Some(checked) = try_checked(&source) else {
+                continue;
+            };
+            checked_programs += 1;
+            let definitions = collect_top_level_defs(checked.exprs());
+            let ((memoized, _), (unmemoized, _)) = with_and_without_memo(|| {
+                let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
+                let answers = functions
+                    .iter()
+                    .filter_map(|name| definitions.get(name))
+                    .map(|body| {
+                        (
+                            function_has_unresolved_vmap_target(body, &definitions),
+                            expr_is_dag_lowerable(body, &checked),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (lowered, answers)
+            });
+            assert_eq!(
+                memoized, unmemoized,
+                "the memo changes an answer for:\n{source}"
+            );
+        }
+        assert!(
+            checked_programs >= PROGRAMS / 4,
+            "only {checked_programs} of {PROGRAMS} generated programs check"
         );
     }
 

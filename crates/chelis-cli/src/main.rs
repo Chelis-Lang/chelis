@@ -13726,12 +13726,12 @@ mod runtime_dim_reject_tests {
 /// chelis#3728 and chelis#1921: `chelis cost` lowers every named entry of one
 /// program through one host-lowering session. It opened a fresh session per
 /// entry, each re-deriving every program-wide fact, so the command cost the
-/// square of the definition count. The count of fresh sessions is
+/// square of the definition count. The count of opened sessions is
 /// process-wide, and nextest runs each test in its own process.
 #[cfg(test)]
 mod cost_session_tests {
     use super::copy_cost_for_file;
-    use chelis_ir::host::fresh_host_lowering_sessions;
+    use chelis_ir::host::host_lowering_sessions;
 
     fn source(definitions: usize) -> String {
         let mut source = String::new();
@@ -13751,9 +13751,9 @@ mod cost_session_tests {
         for definitions in [1, 8] {
             let path = directory.path().join(format!("defs_{definitions}.ch"));
             std::fs::write(&path, source(definitions)).expect("write fixture");
-            let before = fresh_host_lowering_sessions();
+            let before = host_lowering_sessions();
             let report = copy_cost_for_file(&path).expect("cost");
-            let sessions = fresh_host_lowering_sessions() - before;
+            let sessions = host_lowering_sessions() - before;
             assert_eq!(
                 report.summary.functions.len(),
                 definitions,

@@ -1,8 +1,9 @@
 //! chelis#3728 and chelis#1921: an evaluation that selects parameterized host
 //! declarations asks each one's kernel input demand through one session over
 //! the prepared host program. It opened a fresh session per selected
-//! declaration, each re-deriving every program-wide fact. The count of fresh
-//! sessions is process-wide, and nextest runs each test in its own process.
+//! declaration, each re-deriving every program-wide fact. The count of opened
+//! sessions, prepared ones included, is process-wide, and nextest runs each
+//! test in its own process.
 
 use std::collections::BTreeMap;
 
@@ -10,7 +11,7 @@ use chelis_compiler_api::compiler::eval_selected;
 use chelis_compiler_api::schema::{
     EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorValue,
 };
-use chelis_ir::host::fresh_host_lowering_sessions;
+use chelis_ir::host::host_lowering_sessions;
 #[path = "../../../tests/support/wire_values.rs"]
 mod wire_values;
 
@@ -34,7 +35,7 @@ fn evaluate(declarations: usize, roots: &[String]) -> (EvalResult, u64) {
             data: wire_values::storage_f32(vec![1.0, 2.0]),
         },
     )]);
-    let before = fresh_host_lowering_sessions();
+    let before = host_lowering_sessions();
     let result = eval_selected(
         EvalRequest {
             source_kind: SourceKind::Surf,
@@ -44,7 +45,7 @@ fn evaluate(declarations: usize, roots: &[String]) -> (EvalResult, u64) {
         roots,
     )
     .expect("evaluate");
-    (result, fresh_host_lowering_sessions() - before)
+    (result, host_lowering_sessions() - before)
 }
 
 fn root_value(result: &EvalResult, name: &str) -> serde_json::Value {

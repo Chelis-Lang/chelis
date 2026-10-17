@@ -1,4 +1,4 @@
-//! chelis#1921 and chelis#3728: a public host-lowering entry opens one fresh
+//! chelis#1921 and chelis#3728: a public host-lowering entry opens one
 //! session per program, never one per ask. A fresh session derives every
 //! program-wide fact again, and no type can bound how long a caller holds
 //! one, so these tests count the sessions an entry opens with one ask and
@@ -6,7 +6,7 @@
 //! own process.
 
 use chelis_ir::host::{
-    fresh_host_lowering_sessions, lower_named_tensor_entry_dag, lower_named_tensor_entry_dags,
+    host_lowering_sessions, lower_named_tensor_entry_dag, lower_named_tensor_entry_dags,
     try_lower_compiled_program,
 };
 
@@ -38,9 +38,9 @@ fn chain(definitions: usize) -> (chelis_types::CheckedProgram, Vec<String>) {
 }
 
 fn sessions_during<T>(entry: impl FnOnce() -> T) -> (T, u64) {
-    let before = fresh_host_lowering_sessions();
+    let before = host_lowering_sessions();
     let result = entry();
-    (result, fresh_host_lowering_sessions() - before)
+    (result, host_lowering_sessions() - before)
 }
 
 /// Evidentiary status: REGRESSION TEST for the batch entry `chelis cost`
