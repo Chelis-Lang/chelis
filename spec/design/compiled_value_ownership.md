@@ -269,6 +269,16 @@ owner on every owned result edge. If a result value is an argument or capture:
 These rules close the mechanisms behind [#1344] and [#1356] without a
 “returns argument N” summary.
 
+A consuming argument that names an owner is an ordinary consume, and spec/04
+handles ordinary consuming fan-out with inserted copies. Lowering cannot tell
+an owner's last read from an earlier one, so it hands every consuming call
+argument that names an owner a `Copy` of it, wherever the call stands and
+however many of its slots name that owner; only a fresh value moves directly.
+Whether the copy was needed is decided by the last-use schedule (C7), never by
+the slot or by tail position: the copy at the owner's last read becomes a
+move, and a call that names one owner in several slots keeps one copy per slot
+except that one.
+
 The artifact boundary is an adapter before these internal edges. It may pass an
 `EntryBorrow` directly to a borrowed formal, but it must copy before an owned
 formal so the internal move never consumes the caller's owner.
@@ -582,7 +592,19 @@ post-dominance, not source scope alone:
 - a loop iteration drops non-carried owners before the back-edge;
 - a tail call happens only after all non-argument frame owners are terminated;
   and
-- a manifested root consumes its owner before process teardown.
+- a manifested root consumes its owner before process teardown; and
+- a copy whose source's terminal follows it directly was the source's last
+  read, so the source itself moves to the copy's consumer.
+
+The last rule is a rewrite after scheduling, keyed on the schedule rather than
+on where the read stands. When an owner's scheduled `Drop` follows a `Copy` of
+it with only scheduled terminals in between, and that copy's single use is a
+move later in the same block (an application operand, a `Return`, or a `Jump`
+argument) that does not already name the owner, the consumer receives the
+owner, and the `Copy`, the `Drop` and the copy's identity disappear. A retain
+cancelled by a release becomes nothing, and the result is exactly the IR a
+move at that position would have produced, so the verifier re-checks it as any
+other move. Copy scalars keep their copies, which cost nothing.
 
 For a verified direct self-tail call with a scalar result and no delegated
 entry receipt, the C host emitter reuses the private function frame as a loop.

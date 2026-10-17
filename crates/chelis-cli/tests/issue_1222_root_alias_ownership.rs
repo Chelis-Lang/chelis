@@ -901,8 +901,11 @@ fn call_escape_retain_inside_a_block_keeps_its_matching_release() {
     if skip_without_cc() {
         return;
     }
+    // `base` is read again after the call, so the call is not its last use
+    // and must take the escape retain; at a last use the call would move it
+    // (chelis#2206).
     let source = "def idl(p: List[i64]) -> List[i64] = p\n\
-                  def h3() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = idl(base)\n  len(r)\n}\n\
+                  def h3() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = idl(base)\n  add(len(r), len(base))\n}\n\
                   n = h3()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "escape_retain_balance");
     let body = emitted_function(&emitted, "int64_t h3()");
@@ -934,10 +937,11 @@ fn call_escape_retain_survives_a_callee_that_may_return_a_captured_binding() {
     // `f1` returns its parameter on one branch and a captured top-level
     // binding on the other, so the result is both argument-aliasing and
     // outer-aliasing. The retain has already fired for the argument, so
-    // the outer-alias verdict must not cancel the release.
+    // the outer-alias verdict must not cancel the release. `base` is read
+    // again after the call so the call is not its last use (chelis#2206).
     let source = "g: List[i64] = [9i64]\n\
                   def f1(p: List[i64], c: bool) -> List[i64] = if c then p else g\n\
-                  def h1() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = f1(base, true)\n  len(r)\n}\n\
+                  def h1() -> i64 = {\n  base: List[i64] = [1i64, 2i64]\n  r = f1(base, true)\n  add(len(r), len(base))\n}\n\
                   n = h1()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "escape_retain_outer");
     let body = emitted_function(&emitted, "int64_t h1()");

@@ -280,7 +280,7 @@ raw = string_concat(\"12\", \"34\")\n\
 n = gate(raw, false)\n";
 
 #[test]
-fn parameter_alias_arm_retains_before_block_release() {
+fn parameter_alias_arm_moves_a_parameter_at_its_last_use() {
     if skip_without_cc() {
         return;
     }
@@ -293,17 +293,19 @@ fn parameter_alias_arm_retains_before_block_release() {
     let (_, arguments) = assigned_call_to(body, "chelis_string_len", Some("__result"));
     let joined = copied_string_owner(body, arguments[0]);
     let joined_release_call = format!("chelis_string_release({joined});");
+    // The aliasing arm is `text`'s last use, so the arm hands the parameter
+    // itself to the joined owner (chelis#2206): no retain, and the parameter
+    // is released only on the arm that does not consume it.
     assert_eq!(
         count_in(body, "chelis_string_retain("),
-        1,
-        "the parameter-aliasing arm must retain into the owned slot; the \
-         fresh string_slice arm already owns its result:\n{body}"
+        0,
+        "the parameter-aliasing arm is the parameter's last use and moves it:\n{body}"
     );
     assert_eq!(
         count_in(body, "chelis_string_release(text);"),
-        2,
-        "the body-owned parameter must have one release site in each mutually \
-         exclusive branch:\n{body}"
+        1,
+        "only the string_slice arm, which does not consume the parameter, \
+         releases it:\n{body}"
     );
     assert_eq!(
         count_in(body, &joined_release_call),
@@ -312,25 +314,63 @@ fn parameter_alias_arm_retains_before_block_release() {
     );
     assert_eq!(
         count_in(body, "chelis_string_release("),
-        3,
-        "the two exclusive parameter-release sites plus the joined-result \
-         release are the complete source-level release plan:\n{body}"
+        2,
+        "the slice arm's parameter release plus the joined-result release are \
+         the complete source-level release plan:\n{body}"
     );
+}
 
+/// The chelis#1344 hazard itself: the parameter outlives the block, so the
+/// aliasing arm shares an allocation the block keeps using and must retain
+/// into the owned slot before either owner is released.
+const PARAM_ALIAS_ARM_LIVE: &str = "def gate(text: string, negative: bool) -> i64 = {\n\
+  digits = if negative then string_slice(text, 1i64, sub(string_len(text), 1i64)) else text\n\
+  add(string_len(digits), string_len(text))\n\
+}\n\
+raw = string_concat(\"12\", \"34\")\n\
+n = gate(raw, false)\n";
+
+#[test]
+fn parameter_alias_arm_retains_before_block_release() {
+    if skip_without_cc() {
+        return;
+    }
+    let (stdout, emitted) = build_run_and_emit(PARAM_ALIAS_ARM_LIVE, "param_alias_arm_live");
+    assert_eq!(
+        shared_line(&stdout, "n"),
+        shared_line(
+            &eval_stdout(PARAM_ALIAS_ARM_LIVE, "param_alias_arm_live"),
+            "n"
+        ),
+    );
+    let body = emitted_function(&emitted, "int64_t gate(chelis_string text, bool negative)");
+    assert_eq!(
+        count_in(body, "chelis_string_retain("),
+        1,
+        "the parameter-aliasing arm must retain into the owned slot; the \
+         fresh string_slice arm already owns its result:\n{body}"
+    );
+    assert_eq!(
+        count_in(body, "chelis_string_release(text);"),
+        1,
+        "the body-owned parameter is released once, after its last read:\n{body}"
+    );
+    assert_eq!(
+        count_in(body, "chelis_string_release("),
+        2,
+        "the joined-result release and the parameter release are the \
+         complete source-level release plan:\n{body}"
+    );
     let alias_retain = body
         .find("chelis_string_retain(text);")
         .expect("parameter-aliasing arm retain");
-    let alias_release = alias_retain
-        + body[alias_retain..]
-            .find("chelis_string_release(text);")
-            .expect("parameter-aliasing arm release");
-    let joined_release = body
-        .find(&joined_release_call)
-        .expect("joined-result release");
+    let releases = body
+        .match_indices("chelis_string_release(")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
     assert!(
-        alias_retain < alias_release && alias_release < joined_release,
-        "the alias arm must retain before releasing its parameter owner, and \
-         the joined result must be released afterward:\n{body}"
+        releases.iter().all(|release| alias_retain < *release),
+        "the alias arm must retain before either owner is released:\n{body}"
     );
 }
 
@@ -338,13 +378,15 @@ fn parameter_alias_arm_retains_before_block_release() {
 // 3. The call-escape sibling: the callee returns its parameter, so the
 //    caller's binding shares the allocation of a value the caller was
 //    handed. Pre-fix this underflowed the string refcount when the outer
-//    caller released its own binding.
+//    caller released its own binding. `wrap` reads `text` again after the
+//    call, so the call is not its last use and the parameter stays owned
+//    (at a last use the call would move it, chelis#2206).
 // ---------------------------------------------------------------------------
 
 const CALL_ESCAPE_PARAM: &str = "def pass_through(s: string) -> string = s\n\
 def wrap(text: string) -> i64 = {\n\
   d = pass_through(text)\n\
-  string_len(d)\n\
+  add(string_len(d), string_len(text))\n\
 }\n\
 def outer(s0: string) -> i64 = {\n\
   raw = string_concat(s0, s0)\n\
