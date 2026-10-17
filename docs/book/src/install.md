@@ -116,7 +116,9 @@ generated static library.
 ## Install with Nix
 
 The Chelis flake builds the compiler from source for Linux x86_64 and macOS
-arm64. Run a release compiler, or install it in your Nix profile:
+arm64. It is a second channel beside the release binaries. `chelisup` stays
+the installer of release toolchains and selects the compiler version for each
+project. Run a release compiler, or install it in your Nix profile:
 
 ```sh
 nix run github:Chelis-Lang/chelis/v0.20.0 -- --version
