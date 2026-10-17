@@ -161,6 +161,19 @@ inner collection; tests pin the public inherent and trait sets, including derive
 traits, assert that the private storage is the ordered collection, and assert that
 the crate claims no `disallowed_types` allowance of its own.
 
+`PersistentMap` and `PersistentSet` keep the same boundary over different
+storage, for a lexical scope whose snapshots outlive the binder that took them:
+a reference-counted balanced tree whose `Clone` shares the nodes and whose
+change through one copy copies only the path it touches. They have no callback
+exit, and `to_sorted` and `into_sorted`, and `PersistentMap`'s `Serialize`, are
+their only ordered exits; that serialization is key-sorted and byte-identical to
+the `UnordMap` with the same contents. They implement neither equality nor
+hashing. Their `clear` and destruction release entries in an order set by the
+tree's shape, which is a function of the sequence of changes that built it:
+deterministic for fixed inputs, but not key order. That is admissible only because no value stored in
+them may have an observable `Drop` or `Clone` side effect, so neither order can
+reach a verdict, an artifact, or a cache payload.
+
 Most former hash-map uses in the workspace are lookup-only and move to the
 wrapper unchanged; the rest iterate and move to `BTreeMap` when their key is `Ord` and
 the canonical order, or materialize the wrapper's key-sorted exit before any

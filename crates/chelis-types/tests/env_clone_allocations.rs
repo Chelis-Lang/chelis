@@ -1,4 +1,6 @@
-//! Lexical environment snapshots must not duplicate every function signature.
+//! Lexical environment snapshots must not duplicate every function signature,
+//! nor copy the name map itself: a snapshot's cost does not depend on how
+//! many names are bound (chelis#3750).
 use chelis_types::{
     env::Env,
     types::{Scheme, Type},
@@ -25,26 +27,40 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-#[test]
-fn snapshots_bound_allocations_and_preserve_lexical_isolation_and_serialization() {
+/// An environment binding `count` wide signatures, which model a
+/// scalar-unrolled layer's neuron helpers.
+fn wide_env(count: usize) -> Env {
     let mut env = Env::new();
-    // Wide signatures model a scalar-unrolled layer's neuron helpers.
-    for index in 0..512 {
+    for index in 0..count {
         let arguments = (0..256).map(|_| Type::Ref(Box::new(Type::Unit))).collect();
         env.bind(
             format!("neuron_{index}"),
             Scheme::mono(Type::Fn(arguments, Box::new(Type::Unit))),
         );
     }
-    let serialized = serde_json::to_vec(&env).unwrap();
+    env
+}
+
+/// The bytes one snapshot of `env` allocates.
+fn snapshot_bytes(env: &Env) -> (Env, usize) {
     let before = BYTES.load(Ordering::Relaxed);
-    let mut inner = std::hint::black_box(env.clone());
-    let allocated = BYTES.load(Ordering::Relaxed) - before;
+    let snapshot = std::hint::black_box(env.clone());
+    (snapshot, BYTES.load(Ordering::Relaxed) - before)
+}
+
+#[test]
+fn snapshots_bound_allocations_and_preserve_lexical_isolation_and_serialization() {
+    let mut env = wide_env(512);
+    let serialized = serde_json::to_vec(&env).unwrap();
+    let (mut inner, allocated) = snapshot_bytes(&env);
     eprintln!("512-signature snapshot allocated {allocated} bytes");
-    // Leave generous room for the name map and provenance, but not duplicated bodies.
-    assert!(
-        allocated < 512 * 1024,
-        "snapshot copied signature bodies: {allocated} bytes"
+    // The snapshot shares the name map, so its cost is the same for every
+    // environment size; one with a single binding allocates as much.
+    let (_, single) = snapshot_bytes(&wide_env(1));
+    assert_eq!(
+        allocated, single,
+        "a snapshot's cost grew with the bound names: {single} bytes for one binding, \
+         {allocated} for 512"
     );
     assert_eq!(serde_json::to_vec(&inner).unwrap(), serialized);
     let decoded: Env = serde_json::from_slice(&serialized).unwrap();
