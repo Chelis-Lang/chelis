@@ -597,6 +597,7 @@ fn collect_expected_controls(
     let mut result = BTreeMap::new();
     for (unit_index, unit) in program.units.iter().enumerate() {
         for block in &unit.blocks {
+            super::locations::note_site_lookup_entries(1);
             let mut insert = |edge: &Edge, kind: super::ir::HostSiteKind| {
                 if result.insert((unit_index, edge.id), kind).is_some() {
                     Err(OwnershipError::HostSiteMap {
