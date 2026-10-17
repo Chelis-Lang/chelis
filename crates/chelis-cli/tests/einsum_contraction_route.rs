@@ -16,8 +16,9 @@
 //! matrix-vector product, a runtime contraction extent, an integer
 //! contraction, a lead label only the column operand carries, two runtime
 //! rows (including empty ones whose row product would overflow i64 before a
-//! zero factor), and empty batches whose expansion strides would exceed i64,
-//! with static or runtime rows. Its f16 and bf16 `matmul`s share the sum's narrowing.
+//! zero factor), a runtime row product whose operand would need a permuted
+//! copy, at f32, f16, bf16 and f64, and empty batches whose expansion strides
+//! would exceed i64, with static or runtime rows. Its f16 and bf16 `matmul`s share the sum's narrowing.
 
 mod common;
 
@@ -67,6 +68,10 @@ const RETAINED: &[&str] = &[
     "integer",
     "broadcast_columns",
     "paired_rows",
+    "mak32",
+    "mak16",
+    "makbf",
+    "mak64",
     "empty_pair",
     "empty_mixed",
     "huge_empty",

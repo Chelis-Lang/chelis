@@ -461,7 +461,9 @@ pub fn lower_einsum(
 /// row operand's `rows` and `m` flatten into one row axis, so the column
 /// operand is never copied along a label it lacks. The flattened extent is
 /// static, or one runtime extent beside static extents of nonzero product,
-/// computed from the row operand's own shape when that product exceeds one.
+/// computed from the row operand's own shape when that product exceeds one;
+/// such a computed product needs both operands already in order, so it stores
+/// no permuted copy the runtime kernel would not.
 ///
 /// The products are then `[batch.., rows * m, k, n]`, and the reduction
 /// visits `k` in increasing order, the atom's one assignment order for a
@@ -578,6 +580,18 @@ pub fn einsum_contraction(
         labels: if swapped { [b, a] } else { [a, b] },
         accumulator,
     };
+    // A computed row product holds no more than the runtime kernel only when
+    // both operands are already in order: a permuted copy of either would be
+    // an operand-sized buffer the runtime kernel never stores.
+    let order = |tail: &[u8], rows: &[u8]| -> Vec<u8> {
+        plan.batch.iter().chain(rows).chain(tail).copied().collect()
+    };
+    if matches!(flat, RowExtent::Product(_))
+        && (plan.labels[0] != order(&[plan.m, plan.k], &plan.rows)
+            || plan.labels[1] != order(&[plan.k, plan.n], &[]))
+    {
+        return None;
+    }
     // Every shape the graph plans, the expansion included, has strides, an
     // element count and a byte size that fit i64 at the accumulator, the
     // widest dtype any of them holds.
@@ -1655,7 +1669,7 @@ mod einsum_contraction_tests {
         }
     }
 
-    fn c_storage_bytes(dag: &Dag, binding: f64) -> (f64, f64) {
+    fn c_storage_bytes(dag: &Dag, binding: f64) -> StorageBytes {
         let program = crate::ownership::verify_ownership(
             crate::ownership::lower_dag_ownership(dag.clone()).expect("contraction lowers"),
         )
@@ -1687,12 +1701,77 @@ mod einsum_contraction_tests {
             .iter()
             .find(|node| plan.emission().roots().contains(&node.id))
             .expect("root");
+        // `chelis_tensor_einsum` allocates its result and, for a nonempty
+        // result, one accumulator per product of an output's reduction.
+        let sum = nodes
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Sum { .. }))
+            .expect("product sum");
+        let RiscOp::Sum { axis, .. } = sum.op else {
+            unreachable!()
+        };
+        let reduction = shapes[sum.inputs[0].0][axis];
+        let accumulator = sum
+            .output_type
+            .precision
+            .runtime_dtype()
+            .unwrap()
+            .byte_width() as f64;
+        let result = bytes(root);
+        let kernel = if result > 0.0 {
+            result + reduction * accumulator
+        } else {
+            0.0
+        };
         let permuted: f64 = nodes
             .iter()
             .filter(|node| matches!(node.op, RiscOp::Permute { .. }))
             .map(bytes)
             .sum();
-        (slots.values().sum(), bytes(root) + permuted)
+        StorageBytes {
+            held: slots.values().sum(),
+            kernel,
+            permuted,
+            computed_rows: nodes
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Shape { .. })),
+        }
+    }
+
+    /// What the C lane holds for a lowered contraction, and what the runtime
+    /// kernel would hold for the same case.
+    struct StorageBytes {
+        held: f64,
+        kernel: f64,
+        permuted: f64,
+        computed_rows: bool,
+    }
+
+    impl StorageBytes {
+        /// The route holds no more than the runtime kernel. A permuted
+        /// operand's copy is admitted only on forms routed before chelis#3781
+        /// (static rows or one runtime row beside extents of one), and a
+        /// computed row product permutes nothing (chelis#3832 round 1).
+        fn check(&self, context: &str) {
+            assert!(
+                !(self.computed_rows && self.permuted > 0.0),
+                "{context}: a computed row product permutes {} bytes",
+                self.permuted
+            );
+            let bound = self.kernel
+                + if self.computed_rows {
+                    0.0
+                } else {
+                    self.permuted
+                };
+            assert!(
+                self.held <= bound,
+                "{context}: the C lane holds {} bytes, over the runtime kernel's {} (+{} permuted)",
+                self.held,
+                self.kernel,
+                self.permuted
+            );
+        }
     }
 
     /// Whether the runtime would allocate `shape` at `precision`: its
@@ -1862,11 +1941,8 @@ mod einsum_contraction_tests {
                                 .collect()
                         };
                         if allocatable(&shape(&a), p) && allocatable(&shape(&b), p) {
-                            let (held, bound) = c_storage_bytes(&dag, binding);
-                            assert!(
-                                held <= bound,
-                                "`{equation}` {a:?} {b:?} {p:?}: the C lane holds {held} bytes, over {bound}"
-                            );
+                            c_storage_bytes(&dag, binding)
+                                .check(&format!("`{equation}` {a:?} {b:?} {p:?} at {binding}"));
                             computed_rows += usize::from(
                                 runtime_rows == 1
                                     && dag
@@ -2041,11 +2117,9 @@ mod einsum_contraction_tests {
                             continue;
                         }
                         peak_checked += 1;
-                        let (held, bound) = c_storage_bytes(&dag, binding);
-                        assert!(
-                            held <= bound,
-                            "`{equation}` {a:?} {b:?} {p:?}/{accumulator:?}: the C lane holds {held} bytes, over {bound}"
-                        );
+                        c_storage_bytes(&dag, binding).check(&format!(
+                            "`{equation}` {a:?} {b:?} {p:?}/{accumulator:?} at {binding}"
+                        ));
                     }
                     // Without a static zero, the operands' existence in memory
                     // bounds every runtime extent. A static zero removes that

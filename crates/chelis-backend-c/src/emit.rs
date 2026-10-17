@@ -11641,13 +11641,11 @@ mod tests {
                     ("mk,kn->mn", lit(&[6, 4]), lit(&[3, 8]), "mk,kn->mn")
                 };
                 let first_w = lit(&[4, 4]);
-                let second_w = lit(&[
-                    mid.last().map_or(0, |d| match d {
-                        DimInfo::Lit(n) => *n,
-                        _ => 0,
-                    }),
-                    5,
-                ]);
+                let second_w = if runtime_rows {
+                    lit(&[4, 5])
+                } else {
+                    lit(&[8, 5])
+                };
                 let mut dag = Dag::new();
                 let owner = Owner::from(dag.declare("probe"));
                 let load = |dag: &mut Dag, name: &str, dims: &[DimInfo]| {
