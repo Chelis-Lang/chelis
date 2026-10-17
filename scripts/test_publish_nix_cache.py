@@ -136,7 +136,8 @@ def assert_releases_reach_the_publisher(release: str, nix: str) -> None:
     publish_steps = [
         step for step in nix.split("\n      - ") if f"\n        {PUBLISH_RUN}\n" in f"\n{step}\n"
     ]
-    if len(publish_steps) != 2:
+    native_jobs = len(re.findall(r"^    name: Nix Packages \(", nix, re.MULTILINE))
+    if len(publish_steps) != native_jobs:
         raise AssertionError("each native Nix job must have one publish step")
     for step in publish_steps:
         if f"\n        {PUBLISH_GATE}\n" not in step:
