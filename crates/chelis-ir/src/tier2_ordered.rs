@@ -1575,6 +1575,86 @@ mod einsum_contraction_tests {
     /// contraction, every slot at its largest owner, with each runtime
     /// extent at `binding`, and the bound the runtime kernel sets: the result,
     /// plus each operand the graph must permute (chelis#3802).
+    /// `dag` with its root `root` read by `consumer`: a sum over the last
+    /// axis, a product with a loaded tensor then that sum, an inserted axis
+    /// then a sum over it, or a flattening reshape then a sum. Each keeps the
+    /// contraction's output a private input of another node, which an inlined
+    /// product may claim.
+    fn with_consumer(dag: &Dag, root: NodeId, consumer: &str) -> Dag {
+        let mut dag = dag.clone();
+        let owner = dag.get(root).unwrap().owner;
+        let out = dag.get(root).unwrap().output_type.clone();
+        let rank = out.dims.len();
+        let accumulator = out.precision.default_reduce_sum_accumulator().unwrap();
+        let sum = |dag: &mut Dag, input: NodeId, axis: usize| {
+            let mut dims = dag.get(input).unwrap().output_type.dims.clone();
+            dims.remove(axis);
+            dag.add_node(
+                owner,
+                RiscOp::Sum { axis, accumulator },
+                vec![input],
+                ty(&dims, accumulator),
+                None,
+            )
+        };
+        let top = match consumer {
+            "sum" => sum(&mut dag, root, rank - 1),
+            "mul-sum" => {
+                let v = dag.add_node(
+                    owner,
+                    RiscOp::Load { name: "v".into() },
+                    vec![],
+                    out.clone(),
+                    None,
+                );
+                let product = dag.add_node(owner, RiscOp::Mul, vec![root, v], out.clone(), None);
+                sum(&mut dag, product, rank - 1)
+            }
+            "insert-sum" => {
+                let mut dims = vec![DimInfo::Lit(2)];
+                dims.extend(out.dims.clone());
+                let inserted = dag.add_node(
+                    owner,
+                    RiscOp::Expand {
+                        axis: 0,
+                        size: RtDim::Lit(2),
+                    },
+                    vec![root],
+                    ty(&dims, out.precision),
+                    None,
+                );
+                sum(&mut dag, inserted, 0)
+            }
+            _ => {
+                let flat = DimInfo::Named("flat".into(), None);
+                let reshaped = dag.add_node(
+                    owner,
+                    RiscOp::Reshape {
+                        new_shape: vec![RtDim::Sym("flat".into())],
+                    },
+                    vec![root],
+                    ty(&[flat], out.precision),
+                    None,
+                );
+                sum(&mut dag, reshaped, 0)
+            }
+        };
+        dag.set_roots(vec![top]);
+        dag
+    }
+
+    /// The C storage plan of `dag` builds, so every node an inlined product
+    /// claims has exactly one storage decision (chelis#3802).
+    fn assert_c_storage_plans(dag: &Dag, context: &str) {
+        let program = crate::ownership::verify_ownership(
+            crate::ownership::lower_dag_ownership(dag.clone()).expect("consumer lowers"),
+        )
+        .expect("consumer ownership verifies");
+        if let Err(error) = crate::ownership::plan_c_storage(program) {
+            panic!("{context}: {error}");
+        }
+    }
+
     fn c_storage_bytes(dag: &Dag, binding: f64) -> (f64, f64) {
         let program = crate::ownership::verify_ownership(
             crate::ownership::lower_dag_ownership(dag.clone()).expect("contraction lowers"),
@@ -1719,6 +1799,7 @@ mod einsum_contraction_tests {
         ];
         let (mut accepted, mut assignments, mut refused) = (0usize, 0usize, 0usize);
         let mut computed_rows = 0usize;
+        let mut consumed = 0usize;
         for equation in [
             "abmk,kn->abmn",
             "bamk,kn->abmn",
@@ -1767,6 +1848,13 @@ mod einsum_contraction_tests {
                     assignments += assert_existing_operands_plan_no_trap(
                         equation, &a, &b, p, None, &dag, root,
                     );
+                    for consumer in ["sum", "mul-sum", "insert-sum", "reshape-sum"] {
+                        assert_c_storage_plans(
+                            &with_consumer(&dag, root, consumer),
+                            &format!("`{equation}` {a:?} {b:?} {p:?} under {consumer}"),
+                        );
+                        consumed += 1;
+                    }
                     for binding in [0.0f64, 7.0] {
                         let shape = |dims: &[DimInfo]| -> Vec<f64> {
                             dims.iter()
@@ -1792,7 +1880,11 @@ mod einsum_contraction_tests {
             }
         }
         assert!(
-            accepted > 1000 && assignments > 1000 && refused > 200 && computed_rows > 200,
+            accepted > 1000
+                && assignments > 1000
+                && refused > 200
+                && computed_rows > 200
+                && consumed > 4000,
             "{accepted} accepted, {assignments} assignments, {refused} two-runtime-row refusals, {computed_rows} computed rows"
         );
     }

@@ -11446,6 +11446,183 @@ mod tests {
         CEmitter::emit_dag(verified, name)
     }
 
+    /// chelis#3802: every node an inlined product claims has exactly one
+    /// storage decision. Over routed contractions at f32 and f16, with static
+    /// and runtime rows, each read whole or through a sum, a product then
+    /// sum, an insertion then sum, or a reshape then sum (`matmul`'s
+    /// `reshape(matmul(x, w), [n])`), the C storage plan builds, every
+    /// kernel output owns a slot, every component is skipped, and the
+    /// program emits.
+    #[test]
+    fn inlined_product_storage_decisions_are_exclusive_and_emit() {
+        use chelis_ir::dag::{NodeId, Owner};
+        use chelis_ir::ownership::StoragePlacement;
+        let lit = |dims: &[usize]| dims.iter().map(|&n| DimInfo::Lit(n)).collect::<Vec<_>>();
+        let runtime = |name: &str| DimInfo::Named(name.into(), None);
+        let mut emitted = 0usize;
+        for (equation, a, b) in [
+            ("mk,kn->mn", lit(&[6, 8]), lit(&[8, 4])),
+            ("amk,kn->amn", lit(&[2, 3, 8]), lit(&[8, 4])),
+            (
+                "amk,kn->amn",
+                vec![runtime("a"), DimInfo::Lit(3), DimInfo::Lit(8)],
+                lit(&[8, 4]),
+            ),
+            (
+                "amk,kn->amn",
+                vec![DimInfo::Lit(1), runtime("s"), DimInfo::Lit(8)],
+                lit(&[8, 4]),
+            ),
+            ("mak,kn->amn", lit(&[3, 2, 8]), lit(&[8, 4])),
+            ("bmk,bkn->bmn", lit(&[2, 3, 8]), lit(&[2, 8, 4])),
+            ("nk,mk->mn", lit(&[4, 8]), lit(&[6, 8])),
+        ] {
+            for p in [Prim::F32, Prim::F16] {
+                for consumer in ["root", "sum", "mul-sum", "insert-sum", "reshape-sum"] {
+                    let ty = |dims: &[DimInfo]| TensorType {
+                        dims: dims.to_vec(),
+                        precision: p,
+                    };
+                    let contraction = chelis_ir::tier2_ordered::einsum_contraction(
+                        equation,
+                        &ty(&a),
+                        &ty(&b),
+                        None,
+                    )
+                    .expect("contraction form");
+                    let mut dag = Dag::new();
+                    let owner = Owner::from(dag.declare("probe"));
+                    let x = dag.add_node(
+                        owner,
+                        RiscOp::Load { name: "x".into() },
+                        vec![],
+                        ty(&a),
+                        None,
+                    );
+                    let y = dag.add_node(
+                        owner,
+                        RiscOp::Load { name: "y".into() },
+                        vec![],
+                        ty(&b),
+                        None,
+                    );
+                    let out = chelis_ir::tier2_ordered::lower_einsum_contraction(
+                        owner,
+                        &mut dag,
+                        &contraction,
+                        [(x, &ty(&a)), (y, &ty(&b))],
+                        None,
+                    )
+                    .expect("contraction lowers");
+                    let out_ty = dag.get(out).unwrap().output_type.clone();
+                    let rank = out_ty.dims.len();
+                    let sum = |dag: &mut Dag, input: NodeId, axis: usize| {
+                        let input_ty = dag.get(input).unwrap().output_type.clone();
+                        let accumulator = if p == Prim::F16 { Prim::F32 } else { p };
+                        let mut dims = input_ty.dims.clone();
+                        dims.remove(axis);
+                        dag.add_node(
+                            owner,
+                            RiscOp::Sum { axis, accumulator },
+                            vec![input],
+                            TensorType {
+                                dims,
+                                precision: accumulator,
+                            },
+                            None,
+                        )
+                    };
+                    let root = match consumer {
+                        "root" => out,
+                        "sum" => sum(&mut dag, out, rank - 1),
+                        "mul-sum" => {
+                            let v = dag.add_node(
+                                owner,
+                                RiscOp::Load { name: "v".into() },
+                                vec![],
+                                out_ty.clone(),
+                                None,
+                            );
+                            let product = dag.add_node(
+                                owner,
+                                RiscOp::Mul,
+                                vec![out, v],
+                                out_ty.clone(),
+                                None,
+                            );
+                            sum(&mut dag, product, rank - 1)
+                        }
+                        "insert-sum" => {
+                            let mut dims = vec![DimInfo::Lit(2)];
+                            dims.extend(out_ty.dims.clone());
+                            let inserted = dag.add_node(
+                                owner,
+                                RiscOp::Expand {
+                                    axis: 0,
+                                    size: RtDim::Lit(2),
+                                },
+                                vec![out],
+                                TensorType { dims, precision: p },
+                                None,
+                            );
+                            sum(&mut dag, inserted, 0)
+                        }
+                        _ => {
+                            let static_count: Option<usize> = out_ty
+                                .dims
+                                .iter()
+                                .map(|dim| match dim {
+                                    DimInfo::Lit(n) => Some(*n),
+                                    _ => None,
+                                })
+                                .product();
+                            let Some(count) = static_count else {
+                                continue;
+                            };
+                            let flat = dag.add_node(
+                                owner,
+                                RiscOp::Reshape {
+                                    new_shape: vec![RtDim::Lit(count)],
+                                },
+                                vec![out],
+                                TensorType {
+                                    dims: vec![DimInfo::Lit(count)],
+                                    precision: p,
+                                },
+                                None,
+                            );
+                            sum(&mut dag, flat, 0)
+                        }
+                    };
+                    dag.set_roots(vec![root]);
+                    let verified =
+                        crate::testing::verified_dag(&dag, crate::CodegenOptions::default())
+                            .expect("probe DAG verifies ownership");
+                    let emission = verified.emission();
+                    let plan = chelis_ir::ownership::plan_c_storage_layout(emission)
+                        .unwrap_or_else(|error| panic!("`{equation}` {p:?} {consumer}: {error}"));
+                    for product in emission.reduction_inlined_products() {
+                        assert!(
+                            plan.placements()[product.output().0].slot().is_some(),
+                            "`{equation}` {p:?} {consumer}: the kernel output owns no slot"
+                        );
+                        for node in product.skipped() {
+                            assert!(
+                                matches!(plan.placements()[node.0], StoragePlacement::Skipped),
+                                "`{equation}` {p:?} {consumer}: component n{} is stored",
+                                node.0
+                            );
+                        }
+                    }
+                    emit_test_dag(&dag, "probe")
+                        .unwrap_or_else(|error| panic!("`{equation}` {p:?} {consumer}: {error:?}"));
+                    emitted += 1;
+                }
+            }
+        }
+        assert!(emitted >= 60, "{emitted} programs emitted");
+    }
+
     /// `x: [name]` doubled, with `span` on the addition.
     fn doubled_named(name: &str, span: &str) -> Dag {
         let ty = TensorType {

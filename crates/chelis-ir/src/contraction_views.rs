@@ -92,7 +92,13 @@ pub(crate) fn contraction_views_with_products(
     products: &[crate::fuse::InlinedProduct],
 ) -> ContractionViews {
     let mut opaque = vec![false; dag.len()];
-    for node in opaque_consumers {
+    // A node an inlined product stores its total in has dense storage, never
+    // a recipe.
+    for node in opaque_consumers.iter().chain(
+        products
+            .iter()
+            .filter_map(|product| product.reshaped.as_ref()),
+    ) {
         opaque[node.0] = true;
     }
     let candidate: Vec<_> = dag
