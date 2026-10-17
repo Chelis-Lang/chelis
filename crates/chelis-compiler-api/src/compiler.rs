@@ -3768,6 +3768,9 @@ fn manifest_for_eval<'a>(
     let facts = compiled.eval_facts();
     let realizability = &facts.realizability;
     let mut specialized: Vec<RootEntry> = Vec::new();
+    // One session over the prepared host program answers every candidate's
+    // kernel query, rather than a fresh session per candidate (chelis#3728).
+    let mut demand_session = None;
 
     for candidate in candidate_names {
         if facts.base_def_names.contains(candidate)
@@ -3857,7 +3860,12 @@ fn manifest_for_eval<'a>(
         }
 
         if selected_roots.len() != selected_entries.len() {
-            match selected_host_input_demand(compiled, candidate, &parameter_names) {
+            let session = demand_session.get_or_insert_with(|| {
+                compiled
+                    .host_program()
+                    .map(crate::runtime::PreparedHostEvaluation::session)
+            });
+            match selected_host_input_demand(session.as_ref(), candidate, &parameter_names) {
                 Ok(Some(inputs)) => {
                     if inputs.iter().any(|name| {
                         signature
@@ -3938,27 +3946,22 @@ fn manifest_for_eval<'a>(
 /// that runtime stages, including declared shape witnesses. The temporary
 /// product is never reused for execution: runtime owns its current Random
 /// context and any entered lowering error.
+///
+/// `session` is over the host program the evaluation runs, the library
+/// composed with the source; `None` when the two do not compose.
 fn selected_host_input_demand(
-    compiled: &CompiledSource,
+    session: Option<&chelis_ir::host::HostLoweringSession<'_>>,
     name: &str,
     parameters: &BTreeSet<String>,
 ) -> std::result::Result<Option<BTreeSet<String>>, chelis_ir::lower::LowerDiagnostic> {
-    let composed;
-    let checked = if let Some(library) = &compiled.library_runtime {
-        composed =
-            CheckedProgram::compose(&library.checked, compiled.checked()).ok_or_else(|| {
-                chelis_ir::lower::LowerDiagnostic::new(
-                    "runtime kernel program lost its checked library proof".to_owned(),
-                    None,
-                    None,
-                )
-            })?;
-        &composed
-    } else {
-        compiled.checked()
-    };
-    let session = chelis_ir::host::HostLoweringSession::new(checked);
-    chelis_ir::host::host_def_kernel(&session, name).map(|kernel| {
+    let session = session.ok_or_else(|| {
+        chelis_ir::lower::LowerDiagnostic::new(
+            "runtime kernel program lost its checked library proof".to_owned(),
+            None,
+            None,
+        )
+    })?;
+    chelis_ir::host::host_def_kernel(session, name).map(|kernel| {
         kernel.map(|kernel| {
             kernel
                 .inputs
@@ -7508,9 +7511,16 @@ mod tests {
             .into();
         let lowering_message = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906) at source span `surf:940..946`";
         assert_eq!(
-            selected_host_input_demand(&compiled, "bad", &parameters)
-                .unwrap_err()
-                .to_string(),
+            selected_host_input_demand(
+                compiled
+                    .host_program()
+                    .map(crate::runtime::PreparedHostEvaluation::session)
+                    .as_ref(),
+                "bad",
+                &parameters
+            )
+            .unwrap_err()
+            .to_string(),
             lowering_message,
         );
         let tensor = |shape: &[i64], data| crate::schema::TensorValue {

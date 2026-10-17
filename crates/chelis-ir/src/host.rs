@@ -696,10 +696,23 @@ fn take_top_level_name_index_builds() -> u64 {
     TOP_LEVEL_NAME_INDEX_BUILDS.with(|builds| builds.replace(0))
 }
 
+/// Sessions opened by [`HostLoweringSession::new`] since the process started.
+/// Each derives every program-wide fact afresh, so an entry point that opens
+/// one per ask instead of one per program repeats that work per ask, which no
+/// type can forbid (chelis#1921). A test drives a public entry with one ask
+/// and with many, and asserts the count does not grow with the asks.
+static FRESH_HOST_LOWERING_SESSIONS: AtomicU64 = AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn fresh_host_lowering_sessions() -> u64 {
+    FRESH_HOST_LOWERING_SESSIONS.load(Ordering::Relaxed)
+}
+
 impl<'program> HostLoweringSession<'program> {
     /// Begin a session over `program`. Nothing is derived here; every field
     /// fills in on its first miss.
     pub fn new(program: &'program CheckedProgram) -> Self {
+        FRESH_HOST_LOWERING_SESSIONS.fetch_add(1, Ordering::Relaxed);
         Self {
             program,
             facts: DefLaneFacts::default(),
@@ -3293,12 +3306,7 @@ pub fn preferred_tensor_entry_name(program: &ConcreteHostProgram) -> Option<&str
         .map(|function| function.name.as_str())
 }
 
-type NamedTensorEntryLoweringInputs = (
-    Expr,
-    Vec<(String, TensorType)>,
-    Option<TensorType>,
-    Arc<BTreeMap<String, Expr>>,
-);
+type NamedTensorEntryLoweringInputs = (Expr, Vec<(String, TensorType)>, Option<TensorType>);
 
 fn named_tensor_entry_lowering_inputs(
     program: &HostLoweringSession<'_>,
@@ -3334,7 +3342,7 @@ fn named_tensor_entry_lowering_inputs(
     let result_claim = lookup_declared_type_expr(program, name)
         .and_then(|ty| parse_expanded_fn_type_expr(program, &ty))
         .and_then(|(_, result)| tensor_type_from_host_input(&result));
-    Some((body_expr, scope, result_claim, defs))
+    Some((body_expr, scope, result_claim))
 }
 
 pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Option<crate::Dag> {
@@ -3343,9 +3351,30 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     let session = HostLoweringSession::new(program);
     lower_named_tensor_entry_with(
         &session,
+        &named_tensor_entry_context(&session),
         name,
         crate::lower::try_lower_subexpr_program_with_ordered_inputs,
     )
+}
+
+/// [`lower_named_tensor_entry_dag`] for each of `names` in order, lowered as
+/// the iterator is consumed, through one session and one lowering context. A
+/// caller asking for many entries of one program derives the program's facts
+/// once rather than once per entry (chelis#3728).
+pub fn lower_named_tensor_entry_dags<'a>(
+    program: &'a CheckedProgram,
+    names: &'a [String],
+) -> impl Iterator<Item = Option<crate::Dag>> + 'a {
+    let session = HostLoweringSession::new(program);
+    let context = named_tensor_entry_context(&session);
+    names.iter().map(move |name| {
+        lower_named_tensor_entry_with(
+            &session,
+            &context,
+            name,
+            crate::lower::try_lower_subexpr_program_with_ordered_inputs,
+        )
+    })
 }
 
 /// [`lower_named_tensor_entry_dag`] with the lowering trace of the same
@@ -3358,8 +3387,20 @@ pub fn lower_named_tensor_entry_dag_with_trace(
     let session = HostLoweringSession::new(program);
     lower_named_tensor_entry_with(
         &session,
+        &named_tensor_entry_context(&session),
         name,
         crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace,
+    )
+}
+
+/// The lowering context a named tensor entry's body lowers in.
+fn named_tensor_entry_context(
+    program: &HostLoweringSession<'_>,
+) -> crate::lower::SubexprLoweringContext {
+    crate::lower::prepare_checked_subexpr_lowering_context(
+        program,
+        cached_program_defs(program),
+        Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     )
 }
 
@@ -3367,6 +3408,7 @@ pub fn lower_named_tensor_entry_dag_with_trace(
 // Only the actual lowerer's optional return product differs.
 fn lower_named_tensor_entry_with<T>(
     program: &HostLoweringSession<'_>,
+    context: &crate::lower::SubexprLoweringContext,
     name: &str,
     lower: impl FnOnce(
         &Expr,
@@ -3376,19 +3418,14 @@ fn lower_named_tensor_entry_with<T>(
         bool,
     ) -> Result<T, crate::lower::LowerDiagnostic>,
 ) -> Option<T> {
-    let (body_expr, scope, result_claim, defs) = named_tensor_entry_lowering_inputs(program, name)?;
+    let (body_expr, scope, result_claim) = named_tensor_entry_lowering_inputs(program, name)?;
     // Issue #197: a fatal lowering diagnostic (AD-rejection) must
     // propagate as a panic so the outer `catch_lowering_external`
     // surfaces it to the user. Silently absorbing it with `.ok()`
     // would let the host fallback emit an undefined-symbol call to
     // the grad function.
-    let context = crate::lower::prepare_checked_subexpr_lowering_context(
-        program,
-        defs,
-        Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
-    );
     // `scope` is this def's own declared parameter list.
-    match lower(&body_expr, scope, &context, result_claim.as_ref(), true) {
+    match lower(&body_expr, scope, context, result_claim.as_ref(), true) {
         Ok(lowered) => Some(lowered),
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
