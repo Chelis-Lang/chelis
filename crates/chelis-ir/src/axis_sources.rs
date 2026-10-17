@@ -1571,6 +1571,12 @@ fn member_is_interface(dag: &Dag, member: &ClassMember) -> bool {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// DAG nodes that interface-input scans visit (chelis#3726).
+    static INTERFACE_SCAN_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The ABI input slot of each `Load` name, assigned by first occurrence in
 /// node order.
 ///
@@ -1588,28 +1594,47 @@ fn member_is_interface(dag: &Dag, member: &ClassMember) -> bool {
 /// emitter's `input_labels` assigns, so a guard's order here and its slot there cannot
 /// disagree.
 pub fn ordered_interface_loads(nodes: &[DagNode]) -> Vec<&DagNode> {
-    let mut seen = Vec::new();
-    let mut loads = Vec::new();
-    for node in nodes {
-        if let RiscOp::Load { name } = &node.op
-            && !seen.contains(&name.as_str())
-        {
-            seen.push(name.as_str());
-            loads.push(node);
-        }
-    }
-    loads
+    #[cfg(test)]
+    INTERFACE_SCAN_WORK.with(|work| work.set(work.get() + nodes.len()));
+    let mut seen = chelis_unord::UnordSet::new();
+    nodes
+        .iter()
+        .filter(|node| matches!(&node.op, RiscOp::Load { name } if seen.insert(name.as_str())))
+        .collect()
 }
 
-/// Locate a witness in the single ordered interface-input set.
-fn abi_input_slot(dag: &Dag, load: NodeId) -> Option<usize> {
-    let name = match &dag.get(load)?.op {
-        RiscOp::Load { name } => name.as_str(),
-        _ => return None,
-    };
-    ordered_interface_loads(dag.nodes())
-        .iter()
-        .position(|node| matches!(&node.op, RiscOp::Load { name: other } if other.as_str() == name))
+/// The ordered interface-input set of one DAG and the slot of each `Load`
+/// name in it, from one [`ordered_interface_loads`] scan.
+///
+/// A derivation builds this once and reads every slot from it. Each guard
+/// endpoint and each class member once scanned the DAG again, which made C
+/// emission cubic in the number of runtime-extent inputs (chelis#3726).
+struct InterfaceSlots<'a> {
+    loads: Vec<&'a DagNode>,
+    by_name: chelis_unord::UnordMap<&'a str, usize>,
+}
+
+impl<'a> InterfaceSlots<'a> {
+    fn of(dag: &'a Dag) -> Self {
+        let loads = ordered_interface_loads(dag.nodes());
+        let by_name = loads
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, node)| match &node.op {
+                RiscOp::Load { name } => Some((name.as_str(), slot)),
+                _ => None,
+            })
+            .collect();
+        Self { loads, by_name }
+    }
+
+    /// Find a witness in the single ordered interface-input set.
+    fn slot(&self, dag: &Dag, load: NodeId) -> Option<usize> {
+        let RiscOp::Load { name } = &dag.get(load)?.op else {
+            return None;
+        };
+        self.by_name.get(name.as_str()).copied()
+    }
 }
 
 /// Whether a pass-through output axis restates its input's axis under a
@@ -2132,6 +2157,7 @@ fn split_by_scope(
 }
 
 pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
+    let slots = InterfaceSlots::of(dag);
     let mut grouped: Vec<(DimClaim, Vec<OrderedMember>)> = Vec::new();
     for node in dag.nodes() {
         let sources = output_axis_sources(dag, node.id);
@@ -2162,6 +2188,7 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
             let claim = DimClaim::Name(name.clone());
             let entry = OrderedMember::new(
                 dag,
+                &slots,
                 ClassMember {
                     node: node.id,
                     axis,
@@ -2234,12 +2261,12 @@ struct OrderedMember {
 }
 
 impl OrderedMember {
-    fn new(dag: &Dag, member: ClassMember) -> Self {
+    fn new(dag: &Dag, slots: &InterfaceSlots<'_>, member: ClassMember) -> Self {
         // A named class takes its canonical value from an axis declaring
         // that name, not from a foreign value that merely claims equality.
         let slot = match member.source {
             AxisSource::ExternalAxis { load, axis } => {
-                abi_input_slot(dag, load).map(|slot| (slot, axis))
+                slots.slot(dag, load).map(|slot| (slot, axis))
             }
             _ => None,
         };
@@ -2250,7 +2277,12 @@ impl OrderedMember {
         }
     }
 
-    fn literal_guard_key(&self, dag: &Dag, witnesses: &CallerWitnesses) -> OrderKey {
+    fn literal_guard_key(
+        &self,
+        dag: &Dag,
+        slots: &InterfaceSlots<'_>,
+        witnesses: &CallerWitnesses,
+    ) -> OrderKey {
         // A literal result claim follows its output owner, even when the
         // extent's value can be read from an earlier interface witness.
         let input_axis = literal_result_interface_observation(
@@ -2259,9 +2291,9 @@ impl OrderedMember {
             self.member.node,
             self.member.axis,
         )
-        .and_then(|observation| observation.entry_axis(dag));
+        .and_then(|observation| observation.entry_axis(dag, slots));
         let slot =
-            input_axis.and_then(|(load, axis)| abi_input_slot(dag, load).map(|slot| (slot, axis)));
+            input_axis.and_then(|(load, axis)| slots.slot(dag, load).map(|slot| (slot, axis)));
         (slot.is_none(), slot, self.node, self.member.axis)
     }
 
@@ -2271,6 +2303,7 @@ impl OrderedMember {
 }
 
 pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
+    let slots = InterfaceSlots::of(dag);
     let mut grouped: Vec<(DimClaim, Vec<OrderedMember>)> = Vec::new();
 
     for node in dag.nodes() {
@@ -2291,6 +2324,7 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
             }
             let entry = OrderedMember::new(
                 dag,
+                &slots,
                 ClassMember {
                     node: node.id,
                     axis,
@@ -2308,7 +2342,7 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
     let mut classes: Vec<(OrderKey, RuntimeDimClass)> = Vec::new();
     for (claim, mut members) in split_by_scope(dag, grouped) {
         let order_key = |member: &OrderedMember| match claim {
-            DimClaim::Literal(_) => member.literal_guard_key(dag, &witnesses),
+            DimClaim::Literal(_) => member.literal_guard_key(dag, &slots, &witnesses),
             DimClaim::Name(_) => member.key(),
         };
         members.sort_by_cached_key(order_key);
@@ -2684,6 +2718,7 @@ pub fn witness_entry_obligations(
         | crate::dag::ExtentWitnessSite::LiteralResultClaim
         | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => return None,
     };
+    let slots = InterfaceSlots::of(dag);
     let read_for = |id: NodeId| -> Option<ExtentRecord> {
         let observed = dag.get(id)?;
         let RiscOp::ExtentWitness {
@@ -2695,7 +2730,7 @@ pub fn witness_entry_obligations(
             return None;
         };
         let load = load_through_casts(dag, id, 0)?;
-        abi_input_slot(dag, load)?;
+        slots.slot(dag, load)?;
         Some(ExtentRecord::Read {
             load,
             axis: usize::try_from(*axis).ok()?,
@@ -2738,9 +2773,10 @@ pub fn witness_entry_obligations(
 /// Literal and unit checks become due at the observed input. Equal-position
 /// checks retain derivation order. Exact duplicate comparisons are emitted once.
 pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
+    let slots = InterfaceSlots::of(dag);
     let position = |(load, axis)| {
         (
-            abi_input_slot(dag, load).expect("entry witness is an input"),
+            slots.slot(dag, load).expect("entry witness is an input"),
             axis,
         )
     };
@@ -2749,7 +2785,7 @@ pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
     // is ready at that witness's signature position. The token identifies
     // the obligation; a matching physical dimension is not ownership proof.
     for (_, source, required) in literal_result_interface_claims(dag) {
-        let Some(observed) = source.entry_axis(dag) else {
+        let Some(observed) = source.entry_axis(dag, &slots) else {
             continue;
         };
         guards.push(EntryExtentGuard::Literal {
@@ -2789,7 +2825,7 @@ pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
         for member in &class.members {
             let observed =
                 literal_result_interface_observation(dag, &witnesses, member.node, member.axis)
-                    .and_then(|observation| observation.entry_axis(dag))
+                    .and_then(|observation| observation.entry_axis(dag, &slots))
                     .or_else(|| {
                         // A body result cannot invent an input obligation. Keep
                         // the independent input check only when that input's own
@@ -2901,6 +2937,7 @@ pub fn entry_validation_plan_for_resolved_loads(
     dag: &Dag,
     resolved_loads: &[NodeId],
 ) -> Vec<EntryValidationStep> {
+    let slots = InterfaceSlots::of(dag);
     let due = |guard: &EntryExtentGuard| match guard {
         EntryExtentGuard::Named {
             canonical,
@@ -2909,20 +2946,22 @@ pub fn entry_validation_plan_for_resolved_loads(
         } => {
             let position = |(load, axis): (NodeId, usize)| {
                 (
-                    abi_input_slot(dag, load).expect("entry witness is an input"),
+                    slots.slot(dag, load).expect("entry witness is an input"),
                     axis,
                 )
             };
             position(*canonical).max(position(*observed))
         }
         EntryExtentGuard::Literal { observed, .. } => (
-            abi_input_slot(dag, observed.0).expect("entry witness is an input"),
+            slots
+                .slot(dag, observed.0)
+                .expect("entry witness is an input"),
             observed.1,
         ),
     };
     let guards = entry_extent_guards(dag);
     let mut steps = Vec::new();
-    for (slot, first) in ordered_interface_loads(dag.nodes()).into_iter().enumerate() {
+    for (slot, first) in slots.loads.iter().copied().enumerate() {
         let RiscOp::Load { name } = &first.op else {
             unreachable!()
         };
@@ -3783,7 +3822,7 @@ pub(crate) fn result_axis_is_unwitnessed_input_axis(dag: &Dag, owner: NodeId, ax
         load,
         axis: input_axis,
     }
-    .entry_axis(dag)
+    .entry_axis(dag, &InterfaceSlots::of(dag))
     .is_some()
         && dag
             .get(load)
@@ -3798,21 +3837,21 @@ enum LiteralResultInterfaceObservation {
 }
 
 impl LiteralResultInterfaceObservation {
-    fn entry_axis(self, dag: &Dag) -> Option<(NodeId, usize)> {
+    fn entry_axis(self, dag: &Dag, slots: &InterfaceSlots<'_>) -> Option<(NodeId, usize)> {
         match self {
             Self::Witness(witness) => {
                 let node = dag.get(witness)?;
                 let RiscOp::ExtentWitness { parameter, .. } = &node.op else {
                     return None;
                 };
-                let observed = interface_witness_axis(dag, witness)?;
+                let observed = interface_witness_axis(dag, slots, witness)?;
                 let RiscOp::Load { name } = &dag.get(observed.0)?.op else {
                     return None;
                 };
                 (parameter == name.as_str()).then_some(observed)
             }
             Self::InputAxis { load, axis } => {
-                abi_input_slot(dag, load)?;
+                slots.slot(dag, load)?;
                 Some((load, axis))
             }
         }
@@ -3886,7 +3925,11 @@ fn literal_result_interface_observation(
     walk(dag, witnesses, owner, axis, owner, dag.len())
 }
 
-fn interface_witness_axis(dag: &Dag, witness: NodeId) -> Option<(NodeId, usize)> {
+fn interface_witness_axis(
+    dag: &Dag,
+    slots: &InterfaceSlots<'_>,
+    witness: NodeId,
+) -> Option<(NodeId, usize)> {
     let node = dag.get(witness)?;
     let RiscOp::ExtentWitness {
         axis: RtAxis::Lit(axis),
@@ -3896,7 +3939,7 @@ fn interface_witness_axis(dag: &Dag, witness: NodeId) -> Option<(NodeId, usize)>
         return None;
     };
     let load = load_through_casts(dag, witness, 0)?;
-    abi_input_slot(dag, load)?;
+    slots.slot(dag, load)?;
     Some((load, usize::try_from(axis).ok()?))
 }
 
@@ -3996,10 +4039,11 @@ fn literal_result_interface_claims(
 pub fn literal_result_witness_requirements(
     dag: &Dag,
 ) -> std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>> {
+    let slots = InterfaceSlots::of(dag);
     let mut requirements = std::collections::BTreeMap::<NodeId, Vec<_>>::new();
     for (_, observed, required) in literal_result_interface_claims(dag) {
         if let LiteralResultInterfaceObservation::Witness(witness) = observed
-            && observed.entry_axis(dag).is_none()
+            && observed.entry_axis(dag, &slots).is_none()
         {
             requirements.entry(witness).or_default().push(required);
         }
@@ -5378,6 +5422,74 @@ mod tests {
                 "every scatter writes into a copy of its target, so the shape is the target's: {op:?}"
             );
             assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+        }
+    }
+
+    /// The library of chelis#3726's probe: `f` reads `inputs` parameters that
+    /// all claim the runtime extent `n`, and adds them in a chain.
+    fn shared_extent_library(inputs: usize) -> crate::lower::LoweredLibrary {
+        let params = (1..=inputs)
+            .map(|i| format!("x{i}: tensor[n, f32]"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let body = (2..=inputs).fold("x1".to_string(), |body, i| format!("add({body}, x{i})"));
+        let source = format!("def f[n]({params}) -> tensor[n, f32] = {body}\n");
+        let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+        let checked = chelis_types::check_typed_program(
+            &chelis_surf::desugar::desugar_program(&declarations).unwrap(),
+        )
+        .unwrap();
+        let checked = chelis_effects::check_program(&checked).unwrap();
+        let checked = chelis_types::check_linearity(&checked).unwrap();
+        crate::lower::try_lower_program_to_library(&checked).unwrap()
+    }
+
+    /// chelis#3726: one derivation of entry guards, runtime-extent classes, or
+    /// a witness's entry obligations scans the interface inputs a fixed number
+    /// of times. When each guard endpoint and each class member scanned them
+    /// again, C emission was cubic in the number of runtime-extent inputs.
+    #[test]
+    fn entry_derivations_scan_the_interface_a_fixed_number_of_times() {
+        for inputs in [4, 8, 16, 32] {
+            let library = shared_extent_library(inputs);
+            let dag = library.dag();
+            let nodes = dag.nodes().len();
+            let witness = dag
+                .nodes()
+                .iter()
+                .rev()
+                .find(|node| matches!(node.op, RiscOp::ExtentWitness { .. }))
+                .expect("the probe has caller witnesses")
+                .id;
+            let derivations: [(&str, &dyn Fn()); 5] = [
+                ("entry guards", &|| {
+                    assert_eq!(entry_extent_guards(dag).len(), inputs - 1);
+                }),
+                ("entry plan", &|| {
+                    entry_validation_plan(dag);
+                }),
+                ("runtime classes", &|| {
+                    assert_eq!(derive_runtime_dim_classes(dag).len(), 1);
+                }),
+                ("dim witnesses", &|| {
+                    derive_dim_witnesses(dag);
+                }),
+                ("witness obligations", &|| {
+                    witness_entry_obligations(dag, witness);
+                }),
+            ];
+            for (name, derive) in derivations {
+                INTERFACE_SCAN_WORK.with(|work| work.set(0));
+                derive();
+                let visits = INTERFACE_SCAN_WORK.with(std::cell::Cell::get);
+                eprintln!(
+                    "interface scans, {inputs} inputs: {name} visited {visits} of {nodes} nodes"
+                );
+                assert!(
+                    visits <= 8 * nodes,
+                    "{inputs} inputs: {name} visited {visits} nodes of a {nodes}-node DAG"
+                );
+            }
         }
     }
 }
