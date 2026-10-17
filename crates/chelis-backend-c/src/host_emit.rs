@@ -3534,7 +3534,10 @@ typedef struct __chelis_global_origin_scope {
     __chelis_host_result_claim_block *claims;
 } __chelis_global_origin_scope;
 
-static void __chelis_global_origin_retain(const __chelis_host_result_origin *origin) {
+/* The origin helpers below stay out of line: inlined at every root, scope
+   and assignment, they dominated the C compiler's time on large host bodies
+   (chelis#3692). */
+static __attribute__((noinline)) void __chelis_global_origin_retain(const __chelis_host_result_origin *origin) {
     if (origin != NULL) {
         __chelis_host_result_origin *node = (__chelis_host_result_origin *)origin;
         if (node->references == SIZE_MAX) abort();
@@ -3545,7 +3548,7 @@ static void __chelis_global_origin_retain(const __chelis_host_result_origin *ori
 /* Detach a zero-reference node in constant work, then use its former arena
    link as an iterative retirement queue. Shared children are enqueued only
    when their last edge/root disappears. */
-static void __chelis_global_origin_retire(const __chelis_host_result_origin *origin, __chelis_host_result_origin **pending) {
+static __attribute__((noinline)) void __chelis_global_origin_retire(const __chelis_host_result_origin *origin, __chelis_host_result_origin **pending) {
     if (origin == NULL) return;
     __chelis_host_result_origin *node = (__chelis_host_result_origin *)origin;
     if (node->references == 0) abort();
@@ -3556,7 +3559,7 @@ static void __chelis_global_origin_retire(const __chelis_host_result_origin *ori
     *pending = node;
 }
 
-static void __chelis_global_origin_release(const __chelis_host_result_origin *origin) {
+static __attribute__((noinline)) void __chelis_global_origin_release(const __chelis_host_result_origin *origin) {
     __chelis_host_result_origin *pending = NULL;
     __chelis_global_origin_retire(origin, &pending);
     while (pending != NULL) {
@@ -3573,25 +3576,25 @@ static void __chelis_global_origin_release(const __chelis_host_result_origin *or
     }
 }
 
-static void __chelis_global_origin_assign(const __chelis_host_result_origin **slot, const __chelis_host_result_origin *origin) {
+static __attribute__((noinline)) void __chelis_global_origin_assign(const __chelis_host_result_origin **slot, const __chelis_host_result_origin *origin) {
     __chelis_global_origin_retain(origin);
     const __chelis_host_result_origin *previous = *slot;
     *slot = origin;
     __chelis_global_origin_release(previous);
 }
 
-static void __chelis_global_origin_root_enter(__chelis_host_result_origin_arena *arena, __chelis_global_origin_root *root, const __chelis_host_result_origin **slot) {
+static __attribute__((noinline)) void __chelis_global_origin_root_enter(__chelis_host_result_origin_arena *arena, __chelis_global_origin_root *root, const __chelis_host_result_origin **slot) {
     root->previous = arena->root_head;
     root->slot = slot;
     arena->root_head = root;
     __chelis_global_origin_retain(*slot);
 }
 
-static __chelis_global_origin_scope __chelis_global_origin_scope_enter(__chelis_host_result_origin_arena *arena) {
+static __attribute__((noinline)) __chelis_global_origin_scope __chelis_global_origin_scope_enter(__chelis_host_result_origin_arena *arena) {
     return (__chelis_global_origin_scope){ arena->root_head, arena->claim_head };
 }
 
-static void __chelis_global_origin_scope_leave(__chelis_host_result_origin_arena *arena, __chelis_global_origin_scope scope) {
+static __attribute__((noinline)) void __chelis_global_origin_scope_leave(__chelis_host_result_origin_arena *arena, __chelis_global_origin_scope scope) {
     while (arena->root_head != scope.roots) {
         __chelis_global_origin_root *root = arena->root_head;
         arena->root_head = root->previous;
