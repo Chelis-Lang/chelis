@@ -5,7 +5,7 @@
 use crate::callable_value::{
     NormalizedCallableContract, StaticBuiltinValue as ResolvedBuiltinValue,
 };
-use chelis_unord::{UnordMap, UnordSet};
+use chelis_unord::{PersistentMap, PersistentSet, UnordMap, UnordSet};
 use std::any::Any;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -8155,10 +8155,17 @@ struct ValueFacts {
 /// shadows. Lowering used to keep each fact in its own name-keyed table beside
 /// the values, which every binder had to clear by hand, and a function-literal
 /// parameter did not clear the shape table (chelis#469).
+///
+/// Every table is persistent, so a function form, a `let`, or a function
+/// literal that snapshots the scope copies no entry (chelis#3774), and the
+/// names whose facts carry witnesses are indexed, so clearing or saving the
+/// witnesses costs the witnessed bindings rather than the whole scope.
 #[derive(Clone, Default)]
 struct ValueScope {
-    values: UnordMap<String, LoweredValue>,
-    facts: UnordMap<String, ValueFacts>,
+    values: PersistentMap<String, LoweredValue>,
+    facts: PersistentMap<String, ValueFacts>,
+    /// Exactly the names whose facts carry witnesses.
+    witnessed: PersistentSet<String>,
 }
 
 impl ValueScope {
@@ -8184,21 +8191,36 @@ impl ValueScope {
 
     /// Bind `name` to `value` with no facts.
     fn insert(&mut self, name: String, value: LoweredValue) -> Option<LoweredValue> {
-        self.facts.remove(&name);
+        self.drop_facts(&name);
         self.values.insert(name, value)
     }
 
     /// Bind `name` to `value` with `facts`, replacing every fact of the
     /// binding it shadows.
     fn insert_with_facts(&mut self, name: String, value: LoweredValue, facts: ValueFacts) {
-        self.facts.insert(name.clone(), facts);
+        self.put_facts(name.clone(), facts);
         self.values.insert(name, value);
     }
 
     /// A binder of `name` that binds no lowered value (a callable): its
     /// facts replace the shadowed binding's.
     fn replace_facts(&mut self, name: &str, facts: ValueFacts) {
-        self.facts.insert(name.to_string(), facts);
+        self.put_facts(name.to_string(), facts);
+    }
+
+    /// The one way facts enter the scope, keeping the witness index exact.
+    fn put_facts(&mut self, name: String, facts: ValueFacts) {
+        if facts.witnesses.is_some() {
+            self.witnessed.insert(name.clone());
+        } else {
+            self.witnessed.remove(&name);
+        }
+        self.facts.insert(name, facts);
+    }
+
+    fn drop_facts(&mut self, name: &str) {
+        self.witnessed.remove(name);
+        self.facts.remove(name);
     }
 
     fn facts<Q>(&self, name: &Q) -> Option<&ValueFacts>
@@ -8244,15 +8266,18 @@ impl ValueScope {
     /// Record the declaring shape witnesses of the value `name` is already
     /// bound to.
     fn set_witnesses(&mut self, name: &str, witnesses: (NodeId, Vec<NodeId>)) {
-        self.facts.entry(name.to_string()).or_default().witnesses = Some(witnesses);
+        self.witnessed.insert(name.to_string());
+        self.facts
+            .get_or_insert_with(name.to_string(), ValueFacts::default)
+            .witnesses = Some(witnesses);
     }
 
     /// Every binding's witnesses, as one activation saves them.
     fn witness_snapshot(&self) -> UnordMap<String, (NodeId, Vec<NodeId>)> {
-        self.facts
+        self.witnessed
             .to_sorted()
             .into_iter()
-            .filter_map(|(name, facts)| Some((name.clone(), facts.witnesses.clone()?)))
+            .filter_map(|name| Some((name.clone(), self.witnesses(name)?.clone())))
             .collect()
     }
 
@@ -8266,12 +8291,12 @@ impl ValueScope {
 
     fn clear_witnesses(&mut self) {
         let names = self
-            .facts
+            .witnessed
             .to_sorted()
             .into_iter()
-            .filter(|(_, facts)| facts.witnesses.is_some())
-            .map(|(name, _)| name.clone())
+            .cloned()
             .collect::<Vec<_>>();
+        self.witnessed.clear();
         for name in names {
             if let Some(facts) = self.facts.get_mut(&name) {
                 facts.witnesses = None;
@@ -8310,7 +8335,7 @@ impl ValueScope {
             self.values.insert(alias.to_string(), value);
         }
         if let Some(facts) = facts {
-            self.facts.insert(alias.to_string(), facts);
+            self.put_facts(alias.to_string(), facts);
         }
         bound
     }
@@ -8319,15 +8344,11 @@ impl ValueScope {
     /// the start of this scope rebased into another graph, whose values are
     /// added back with [`Self::rebase_value`].
     fn facts_only(&self, keep: impl Fn(&ValueFacts) -> ValueFacts) -> Self {
-        Self {
-            values: UnordMap::new(),
-            facts: self
-                .facts
-                .to_sorted()
-                .into_iter()
-                .map(|(name, facts)| (name.clone(), keep(facts)))
-                .collect(),
+        let mut scope = Self::default();
+        for (name, facts) in self.facts.to_sorted() {
+            scope.put_facts(name.clone(), keep(facts));
         }
+        scope
     }
 
     /// Set the value of a binding rebased into another graph, keeping the
@@ -8340,7 +8361,7 @@ impl ValueScope {
     fn without_facts(&self) -> Self {
         Self {
             values: self.values.clone(),
-            facts: UnordMap::new(),
+            ..Self::default()
         }
     }
 
@@ -8359,7 +8380,7 @@ where
     type Output = LoweredValue;
 
     fn index(&self, name: &Q) -> &LoweredValue {
-        &self.values[name]
+        self.values.get(name).expect("no entry found for key")
     }
 }
 
@@ -8368,8 +8389,8 @@ where
 #[derive(Clone, Default)]
 struct LexicalScope {
     bindings: ValueScope,
-    local_callables: UnordMap<String, CallableExpr>,
-    fn_typed_params: UnordSet<String>,
+    local_callables: PersistentMap<String, CallableExpr>,
+    fn_typed_params: PersistentSet<String>,
 }
 
 /// Parent-to-sub-context translation state for one transform's captured
@@ -9768,7 +9789,7 @@ struct LowerCtx<'program> {
     /// the consuming reshape. This construction map never escapes lowering.
     reshape_targets: BTreeMap<NodeId, usize>,
     invocation_witnesses: Vec<NodeId>,
-    local_callables: UnordMap<String, CallableExpr>,
+    local_callables: PersistentMap<String, CallableExpr>,
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     resolved_builtin_values: ResolvedBuiltinValueCache,
@@ -9823,7 +9844,7 @@ struct LowerCtx<'program> {
     /// param is registered; saved/restored across nested `fn` scopes
     /// alongside `bindings` and `local_callables`. See
     /// `docs/archive/investigations/pipe_fn_param_stage_diagnosis.md`.
-    fn_typed_params: UnordSet<String>,
+    fn_typed_params: PersistentSet<String>,
     /// Dataflow-local completeness evidence for unresolved callable
     /// applications. Grad subcontexts record a fresh result marker for each
     /// unresolved application, then reject only when one is reverse-reachable
@@ -9986,7 +10007,7 @@ impl<'program> LowerCtx<'program> {
             reshape_targets: BTreeMap::new(),
             local_unit_refinements: BTreeMap::new(),
             invocation_witnesses: Vec::new(),
-            local_callables: UnordMap::new(),
+            local_callables: PersistentMap::new(),
             program_types: program_types.into(),
             program_defs,
             resolved_builtin_values: Arc::new(OnceLock::new()),
@@ -9999,7 +10020,7 @@ impl<'program> LowerCtx<'program> {
             inlining_depths: UnordMap::new(),
             inlining_active: 0,
             declaration_root_claim: false,
-            fn_typed_params: UnordSet::new(),
+            fn_typed_params: PersistentSet::new(),
             callable_dependency_state: CallableDependencyState::default(),
             rootless_defs: BTreeSet::new(),
             top_level_values: UnordMap::new(),
@@ -10074,8 +10095,8 @@ impl<'program> LowerCtx<'program> {
     /// bind, a builtin or a top-level value, keeps its spelling.
     fn pin_free_names(&mut self, expr: &Expr, top_level: bool) -> Expr {
         fn pin<V: Clone>(
-            table: &mut UnordMap<String, V>,
-            top: Option<&mut UnordMap<String, V>>,
+            table: &mut PersistentMap<String, V>,
+            top: Option<&mut PersistentMap<String, V>>,
             name: &str,
             alias: &str,
         ) -> bool {
