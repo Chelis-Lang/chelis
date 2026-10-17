@@ -102,7 +102,7 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
             "library-v11-key-input.bin",
             "library-v11.tc",
             b"chelis_library_typecheck_v".as_slice(),
-            29_u32,
+            30_u32,
             library_cache_key_input_bytes(&dep_decls, std_key),
             lib_key,
         ),
@@ -633,7 +633,7 @@ fn change_program_literal_within(payload: &mut [u8], range: std::ops::Range<usiz
 /// confines the edit to the `CheckedProgram` half of the payload, so the
 /// lowering is left exactly as the producer wrote it, the envelope digest is
 /// recomputed, and the re-lowered program must disagree with it on every disk
-/// route that carries a lowering. The dependency route, which carries none, is
+/// route that carries a lowering. A typecheck cache entry without one is
 /// `caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violation`.
 #[test]
 fn cache_reconstruction_rejects_a_program_only_literal_edit_after_checksum_recomputed() {
@@ -725,12 +725,11 @@ const LINEARITY_EDIT_SOURCE: &str = "module Dep.Ops\nexport (settle)\n\n\
 /// has nothing to compare its checked program against, so an edit confined to
 /// the program under a recomputed checksum can only be caught by the effect
 /// and linearity checkers. The decoders of such payloads therefore keep
-/// rerunning them: the dependency typecheck cache (`LibraryContext`), whose
-/// wire never carries a lowering, and a `StdLibContext` whose optional
-/// lowering is absent. In each, one use of `w` in `settle` is renamed to `x`,
-/// which `drop` has already ended (no inserted copy repairs a use after a
-/// `drop`), and the resealed entry must be rejected as a linearity violation
-/// rather than bound.
+/// rerunning them: a dependency typecheck cache (`LibraryContext`) or a
+/// `StdLibContext` whose optional lowering is absent. In each, one use of `w`
+/// in `settle` is renamed to `x`, which `drop` has already ended (no inserted
+/// copy repairs a use after a `drop`), and the resealed entry must be rejected
+/// as a linearity violation rather than bound.
 #[test]
 fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violation() {
     let directory = tempfile::tempdir().unwrap();
@@ -740,20 +739,26 @@ fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violati
     let dependency = build_library_context(&empty_stdlib, &decls)
         .unwrap()
         .expect("the dependency must compose");
+    assert!(
+        dependency.library_dag().is_some(),
+        "the fixture must lower, so removing the lowering is the edit this control makes"
+    );
     let dependency_key = library_cache_key(&decls, [0x5a; 32]);
     let dependency_path = directory.path().join("dependency.tc");
     cache_envelope::save(&dependency_path, dependency_key, &dependency).unwrap();
-    let dependency_bytes = fs::read(&dependency_path).unwrap();
+    let dependency_bytes = strip_stored_lowering(&dependency_path);
+    let unlowered = cache_envelope::load::<LibraryContext>(&dependency_path, dependency_key)
+        .unwrap()
+        .expect("the dependency entry without a lowering must still hit");
+    assert!(unlowered.library_dag().is_none());
     assert_linearity_edit_is_rejected::<LibraryContext>(
-        "dependency typecheck cache",
+        "dependency typecheck cache without a lowering",
         &dependency_path,
         dependency_key,
         &dependency_bytes,
+        "was already consumed by call to `drop`",
     );
 
-    // The same library as a standard library, with its stored lowering
-    // replaced by `None`: the payload's third field is the `Option`, and
-    // bincode spells `None` as one zero byte.
     let stdlib = build_stdlib_context(&decls).unwrap();
     assert!(
         stdlib.library_dag().is_some(),
@@ -762,32 +767,7 @@ fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violati
     let stdlib_key = stdlib_cache_key(&decls, [0x5a; 32]);
     let stdlib_path = directory.path().join("stdlib.tc");
     cache_envelope::save(&stdlib_path, stdlib_key, &stdlib).unwrap();
-    let std_magic = b"CHELIS_CACHE_ENV_V1\n";
-    let mut envelope: SharedFixtureEnvelope = bincode::deserialize(
-        fs::read(&stdlib_path)
-            .unwrap()
-            .strip_prefix(std_magic)
-            .unwrap(),
-    )
-    .unwrap();
-    let (type_env, program, lowering): (
-        chelis_types::TypeEnv,
-        chelis_types::CheckedProgram,
-        Option<chelis_ir::lower::LoweredLibrary>,
-    ) = bincode::deserialize(&envelope.payload).unwrap();
-    assert!(lowering.is_some());
-    let program_end =
-        usize::try_from(bincode::serialized_size(&(&type_env, &program)).unwrap()).unwrap();
-    let lowering_end =
-        program_end + usize::try_from(bincode::serialized_size(&lowering).unwrap()).unwrap();
-    let mut payload = envelope.payload[..program_end].to_vec();
-    payload.extend(bincode::serialize(&None::<chelis_ir::lower::LoweredLibrary>).unwrap());
-    payload.extend_from_slice(&envelope.payload[lowering_end..]);
-    envelope.payload = payload;
-    envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
-    let mut stdlib_bytes = std_magic.to_vec();
-    stdlib_bytes.extend(bincode::serialize(&envelope).unwrap());
-    fs::write(&stdlib_path, &stdlib_bytes).unwrap();
+    let stdlib_bytes = strip_stored_lowering(&stdlib_path);
     let unlowered = cache_envelope::load::<StdLibContext>(&stdlib_path, stdlib_key)
         .unwrap()
         .expect("the stdlib entry without a lowering must still hit");
@@ -797,7 +777,137 @@ fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violati
         &stdlib_path,
         stdlib_key,
         &stdlib_bytes,
+        "was already consumed by call to `drop`",
     );
+}
+
+/// chelis#3729: a typecheck cache entry that carries a lowering adopts the
+/// stored effect and linearity results, so the same program-only edit into a
+/// use after consume, resealed, must be rejected by the lowering comparison
+/// that replaces the reruns. Both typecheck caches are exercised, the
+/// dependency cache being the route this change moved onto the comparison.
+#[test]
+fn caches_with_a_lowering_reject_a_program_only_edit_into_a_linearity_violation() {
+    let directory = tempfile::tempdir().unwrap();
+    let decls = chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE).unwrap();
+
+    let empty_stdlib = build_stdlib_context(&[]).unwrap();
+    let dependency = build_library_context(&empty_stdlib, &decls)
+        .unwrap()
+        .expect("the dependency must compose");
+    assert!(dependency.library_dag().is_some());
+    let dependency_key = library_cache_key(&decls, [0x5a; 32]);
+    let dependency_path = directory.path().join("dependency.tc");
+    cache_envelope::save(&dependency_path, dependency_key, &dependency).unwrap();
+    let dependency_bytes = fs::read(&dependency_path).unwrap();
+    assert_linearity_edit_is_rejected::<LibraryContext>(
+        "dependency typecheck cache",
+        &dependency_path,
+        dependency_key,
+        &dependency_bytes,
+        "lowered library payload does not match",
+    );
+
+    let stdlib = build_stdlib_context(&decls).unwrap();
+    assert!(stdlib.library_dag().is_some());
+    let stdlib_key = stdlib_cache_key(&decls, [0x5a; 32]);
+    let stdlib_path = directory.path().join("stdlib.tc");
+    cache_envelope::save(&stdlib_path, stdlib_key, &stdlib).unwrap();
+    let stdlib_bytes = fs::read(&stdlib_path).unwrap();
+    assert_linearity_edit_is_rejected::<StdLibContext>(
+        "stdlib typecheck cache",
+        &stdlib_path,
+        stdlib_key,
+        &stdlib_bytes,
+        "lowered library payload does not match",
+    );
+}
+
+/// chelis#3729: a typecheck cache hit whose entry carries a lowering runs no
+/// checker pass over the cached library, and one whose lowering is absent runs
+/// exactly one. The count is the decoders' calls to
+/// `chelis_pipeline_core::validate_cached_library`, the only place a load
+/// reruns the effect and linearity checkers; the stripped entries are the
+/// negative control that the count observes those reruns at all.
+#[test]
+fn typecheck_cache_hits_with_a_lowering_rerun_no_checker() {
+    let directory = tempfile::tempdir().unwrap();
+    let decls = chelis_surf::parser::parse_str(LINEARITY_EDIT_SOURCE).unwrap();
+    let empty_stdlib = build_stdlib_context(&[]).unwrap();
+    let dependency = build_library_context(&empty_stdlib, &decls)
+        .unwrap()
+        .expect("the dependency must compose");
+    let dependency_key = library_cache_key(&decls, [0x5a; 32]);
+    let dependency_path = directory.path().join("dependency.tc");
+    cache_envelope::save(&dependency_path, dependency_key, &dependency).unwrap();
+    let stdlib = build_stdlib_context(&decls).unwrap();
+    let stdlib_key = stdlib_cache_key(&decls, [0x5a; 32]);
+    let stdlib_path = directory.path().join("stdlib.tc");
+    cache_envelope::save(&stdlib_path, stdlib_key, &stdlib).unwrap();
+
+    let reruns_during = |load: &dyn Fn()| {
+        let before = chelis_pipeline_core::cached_library_checker_reruns();
+        load();
+        chelis_pipeline_core::cached_library_checker_reruns() - before
+    };
+    let load_dependency = || {
+        cache_envelope::load::<LibraryContext>(&dependency_path, dependency_key)
+            .unwrap()
+            .expect("the dependency entry must hit");
+    };
+    let load_stdlib = || {
+        cache_envelope::load::<StdLibContext>(&stdlib_path, stdlib_key)
+            .unwrap()
+            .expect("the stdlib entry must hit");
+    };
+
+    assert_eq!(
+        reruns_during(&load_dependency),
+        0,
+        "a dependency cache hit with a lowering reran the checkers"
+    );
+    assert_eq!(
+        reruns_during(&load_stdlib),
+        0,
+        "a stdlib cache hit with a lowering reran the checkers"
+    );
+
+    strip_stored_lowering(&dependency_path);
+    strip_stored_lowering(&stdlib_path);
+    assert_eq!(reruns_during(&load_dependency), 1);
+    assert_eq!(reruns_during(&load_stdlib), 1);
+}
+
+/// Replace a typecheck cache entry's stored lowering with `None`, reseal the
+/// envelope, write it back, and return the new bytes. Both typecheck wires
+/// open with `(TypeEnv, CheckedProgram, Option<LoweredLibrary>)`, and bincode
+/// spells `None` as one zero byte.
+fn strip_stored_lowering(path: &Path) -> Vec<u8> {
+    let std_magic = b"CHELIS_CACHE_ENV_V1\n";
+    let mut envelope: SharedFixtureEnvelope =
+        bincode::deserialize(fs::read(path).unwrap().strip_prefix(std_magic).unwrap()).unwrap();
+    let (type_env, program, lowering): (
+        chelis_types::TypeEnv,
+        chelis_types::CheckedProgram,
+        Option<chelis_ir::lower::LoweredLibrary>,
+    ) = bincode::deserialize(&envelope.payload).unwrap();
+    assert!(
+        lowering.is_some(),
+        "the entry must carry a lowering to strip"
+    );
+    let program_end =
+        usize::try_from(bincode::serialized_size(&(&type_env, &program)).unwrap()).unwrap();
+    let lowering_end =
+        program_end + usize::try_from(bincode::serialized_size(&lowering).unwrap()).unwrap();
+    let mut payload = envelope.payload[..program_end].to_vec();
+    payload.extend(bincode::serialize(&None::<chelis_ir::lower::LoweredLibrary>).unwrap());
+    payload.extend_from_slice(&envelope.payload[lowering_end..]);
+    envelope.payload = payload;
+    envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
+    let mut bytes = std_magic.to_vec();
+    bytes.extend(bincode::serialize(&envelope).unwrap());
+    fs::write(path, &bytes).unwrap();
+    bytes
 }
 
 /// Try renaming every occurrence of `w` inside the checked program of the
@@ -806,13 +916,16 @@ fn caches_without_a_lowering_reject_a_program_only_edit_into_a_linearity_violati
 /// Which occurrence is the body's use rather than a binder or other metadata
 /// is a detail of the Deep encoding, so an edit counts when the linearity
 /// checker, run directly over the edited program, reports the use after
-/// consume. Every such edit, resealed, must be rejected by the load with the
-/// linearity checker's diagnostic, and at least one must exist.
+/// consume. Every such edit, resealed, must be rejected by the load with a
+/// diagnostic containing `expected_rejection` (the linearity checker's on a
+/// rerun route, the lowering comparison's on an adopting one), and at least
+/// one must exist.
 fn assert_linearity_edit_is_rejected<T: cache_envelope::CachePayload>(
     label: &str,
     path: &Path,
     key: [u8; 32],
     original: &[u8],
+    expected_rejection: &str,
 ) {
     fs::write(path, original).unwrap();
     cache_envelope::load::<T>(path, key)
@@ -877,8 +990,8 @@ fn assert_linearity_edit_is_rejected<T: cache_envelope::CachePayload>(
         };
         assert!(
             matches!(error, cache_envelope::CacheError::Decode(ref message)
-                if message.contains("was already consumed by call to `drop`")),
-            "{label}: the rejection must be the linearity checker's: {error}"
+                if message.contains(expected_rejection)),
+            "{label}: the rejection must contain {expected_rejection:?}: {error}"
         );
     }
     assert!(

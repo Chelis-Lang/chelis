@@ -107,9 +107,10 @@ The selected source-free boundary is a faithful snapshot from a trusted
 checker producer. Structural admission, hashes, build IDs, and proof IDs do
 not prove that a malicious producer included every required label. Existing
 owner-cache validation remains necessary: the lowering comparison on the
-stdlib and compiled-context caches, and the effect/linearity reruns on the
-dependency cache and on a stdlib cache entry without a lowering, whose
-payloads have no lowering to compare (chelis#2558).
+compiled-context cache and on a typecheck cache entry (chelis-std or
+dependency) that stores a lowering, and the effect/linearity reruns on a
+typecheck cache entry without one, which has no lowering to compare
+(chelis#2558, chelis#3729).
 No public Dim/Type/Scheme variant, School API, source signature, or runtime
 tensor layout change is selected.
 

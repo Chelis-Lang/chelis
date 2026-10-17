@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use chelis_types::infer::SignatureInferenceMetadata;
 use chelis_types::{
     CheckedProgram, InferResult, TypeAnalysisOutcome, TypeEnv, analyze_ir_program,
@@ -67,8 +69,8 @@ pub fn check_prepared_library(
 /// The effect and linearity results the program carries are the producer's,
 /// adopted rather than recomputed. That is sound only for a caller whose
 /// payload also carries a lowering of the program, so only the
-/// `CompiledContext` decoder and a `StdLibContext` decoder holding a stored
-/// lowering call it. They establish the rest before or after this call: the envelope's payload digest, format
+/// `CompiledContext` decoder and a typecheck cache decoder (chelis-std or
+/// dependency) holding a stored lowering call it. They establish the rest before or after this call: the envelope's payload digest, format
 /// version and build identity pin the bytes to a producer running this
 /// compiler build, the live source hash and cache identity (a compiled context)
 /// or the content-derived cache key (a typecheck cache) pin them to the sources
@@ -101,11 +103,25 @@ pub fn bind_cached_library(
     })
 }
 
+thread_local! {
+    static CACHED_LIBRARY_CHECKER_RERUNS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many times this thread has rerun the effect and linearity checkers
+/// over a decoded cached library through [`validate_cached_library`].
+///
+/// Diagnostic evidence for the cache oracles, which count the checker passes
+/// a cache load pays (chelis#3729); not a stable interface.
+#[doc(hidden)]
+pub fn cached_library_checker_reruns() -> u64 {
+    CACHED_LIBRARY_CHECKER_RERUNS.with(Cell::get)
+}
+
 /// Bind cached library products that carry no lowering, rerunning the effect
 /// and linearity checkers over the program.
 ///
-/// This is the `LibraryContext` (dependency typecheck cache) decoder's route,
-/// and a `StdLibContext` decoder's when its optional lowering is absent. Such
+/// This is a typecheck cache decoder's route (chelis-std's `StdLibContext` or
+/// the dependency `LibraryContext`) when its optional lowering is absent. Such
 /// a payload carries the type environment and the checked program and nothing
 /// derived from them, so an edit confined to the program under a recomputed
 /// payload digest has no second derivation to disagree with. The reruns are
@@ -120,6 +136,7 @@ pub fn validate_cached_library(
     if !cached_type_env.matches_checked_program(&cached_program) {
         return Err(LibraryRejection::ContextMismatch);
     }
+    CACHED_LIBRARY_CHECKER_RERUNS.with(|count| count.set(count.get() + 1));
     let effected = chelis_effects::check_program(&cached_program)
         .map_err(|errors| LibraryRejection::Effects { errors })?;
     let program = chelis_types::check_linearity(&effected)

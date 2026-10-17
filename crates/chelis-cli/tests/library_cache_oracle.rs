@@ -55,6 +55,12 @@
 //!     with identical diagnostics in cache-disabled, cold, and warm builds.
 //! 12. An invalid file outside the selected Reef target does not block build.
 //! 13. An unreachable tensor_scan definition builds in every cache mode.
+//! 14. `warm_dependency_hit_matches_cache_disabled_on_accepted_and_rejected_entries`
+//!     — with the dependency cache warm (its entry carries a lowering, so the
+//!     load adopts the stored effect and linearity results, chelis#3729), entry
+//!     edits that break a type, an effect or a linearity rule reject with the
+//!     diagnostics a cache-disabled build gives, and an accepted entry emits
+//!     the same C.
 
 use assert_cmd::Command;
 use std::fs;
@@ -968,5 +974,86 @@ fn chelis_std_importing_build_monolithic_vs_cache_warm_c_identical() {
     assert_eq!(
         mono_c, warm_c,
         "chelis-std-importing build C must be byte-identical, monolithic vs cache-warm"
+    );
+}
+
+/// A dependency with a shape-polymorphic definition over a borrowed tensor, so
+/// the stored lowering the warm hit compares against covers a symbolic extent.
+const POLYMORPHIC_DEPENDENCY: &str = "module Azdep.Math\nexport (az_add, az_poly)\n\n\
+    def az_add(x: i32, y: i32) -> i32 = add(x, y)\n\
+    def az_poly[n](x: &tensor[n, f32]) -> tensor[n, f32] = add(mul(x, x), sub(add(x, x), x))\n";
+
+#[test]
+fn warm_dependency_hit_matches_cache_disabled_on_accepted_and_rejected_entries() {
+    let (scratch, cache_home) = fresh_cache_home();
+    let accepted = "module PseudoApp.Main\nimport Azdep.Math (az_add, az_poly)\n\n\
+        def main_value() ->i32 = az_add(cast(3, i32), cast(4, i32))\n\
+        r = az_poly(to_tensor([1.0f32, 2.0f32]))\n";
+    let entry = stage_dep_fixture(scratch.path(), POLYMORPHIC_DEPENDENCY, accepted);
+
+    let (cold_ok, cold_error, cold_c) = build_probe(&entry, &cache_home, &[]);
+    assert!(cold_ok, "the cold build must accept: {cold_error}");
+    let artifacts = library_cache_artifacts(&cache_home);
+    assert_eq!(
+        artifacts.len(),
+        1,
+        "the cold build must write one dependency cache entry"
+    );
+    let (disabled_ok, disabled_error, disabled_c) =
+        build_probe(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let (warm_ok, warm_error, warm_c) = build_probe(&entry, &cache_home, &[]);
+    assert!(disabled_ok && warm_ok, "{disabled_error}\n{warm_error}");
+    assert_eq!(disabled_error, warm_error);
+    assert_eq!(disabled_c, warm_c, "warm C must equal cache-disabled C");
+    assert_eq!(cold_c, warm_c, "warm C must equal cold C");
+
+    let rejected: &[(&str, &str, &[&str])] = &[
+        (
+            "type",
+            "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\n\
+             def main_value() ->i32 = az_add(cast(3, i32), cast(4.0, f64))\n",
+            &[],
+        ),
+        (
+            "effect",
+            "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\n\
+             def main_value() -> i32 ! {} = {\n  seen: unit = print(cast(1.0, f64))\n  \
+             az_add(cast(3, i32), cast(4, i32))\n}\n",
+            &["body performs effects", "not declared"],
+        ),
+        (
+            "linearity",
+            "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\n\
+             def main_value() ->i32 = az_add(cast(3, i32), cast(4, i32))\n\
+             def settle(t: tensor[4, f32]) -> tensor[4, f32] = {\n  _ = drop(t)\n  realize(t)\n}\n",
+            &["already consumed"],
+        ),
+    ];
+    for (label, body, fragments) in rejected {
+        fs::write(&entry, body).expect("rewrite entry");
+        let (disabled_ok, disabled_error, _) =
+            build_probe(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+        let (warm_ok, warm_error, _) = build_probe(&entry, &cache_home, &[]);
+        assert!(
+            !disabled_ok && !warm_ok,
+            "[{label}] the entry error must reject: disabled={disabled_ok} warm={warm_ok}"
+        );
+        assert_eq!(
+            disabled_error, warm_error,
+            "[{label}] a warm dependency hit must not change the entry's diagnostics"
+        );
+        for fragment in *fragments {
+            assert!(
+                warm_error.contains(fragment),
+                "[{label}] the rejection must report {fragment:?}: {warm_error}"
+            );
+        }
+    }
+
+    let mut after = library_cache_artifacts(&cache_home);
+    after.sort();
+    assert_eq!(
+        artifacts, after,
+        "entry edits must reuse the one dependency cache entry, not rewrite it"
     );
 }

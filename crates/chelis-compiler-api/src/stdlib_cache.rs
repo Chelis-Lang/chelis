@@ -197,42 +197,51 @@ impl<'de> Deserialize<'de> for StdLibContext {
     {
         let wire = StdLibContextWire::deserialize(deserializer)?;
         let _linked = chelis_types::install_linked_program_guard();
-        // The stored effect and linearity results are adopted only when a
-        // stored lowering is re-derived and compared below; without one the
-        // program has nothing else to disagree with, so the checkers rerun
-        // (chelis#2558).
-        let library = if wire.library_dag.is_some() {
-            chelis_pipeline_core::bind_cached_library(wire.type_env, wire.library_checked)
-        } else {
-            chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
-        }
-        .map_err(serde::de::Error::custom)?;
-        let library_dag = match wire.library_dag {
-            Some(cached) => {
-                if cached.library_proof_id() != library.program().library_proof_id() {
-                    return Err(serde::de::Error::custom(
-                        "the lowered library does not match the checked library",
-                    ));
-                }
-                let expected =
-                    crate::pipeline::lower_library(&library).map_err(serde::de::Error::custom)?;
-                if !cache_envelope::lowered_library_payload_matches(&cached, expected.raw())
-                    .map_err(serde::de::Error::custom)?
-                {
-                    return Err(serde::de::Error::custom(
-                        "the lowered library payload does not match the checked library",
-                    ));
-                }
-                Some(expected)
-            }
-            None => None,
-        };
+        let (library, library_dag) =
+            bind_typecheck_cache_library(wire.type_env, wire.library_checked, wire.library_dag)
+                .map_err(serde::de::Error::custom)?;
         Ok(Self {
             library,
             library_dag,
             structural_stats: wire.structural_stats,
         })
     }
+}
+
+/// Bind a decoded typecheck cache payload under the one rule
+/// `spec/design/checker_totality.md` section C3 states for every on-disk
+/// route: the stored effect and linearity results are adopted only when the
+/// payload carries a lowering of the program, and that lowering is re-derived
+/// from the program and compared byte for byte. Without one the program has
+/// nothing else to disagree with, so both checkers rerun (chelis#2558). Both
+/// typecheck caches, chelis-std's and the dependency library's, decode
+/// through here.
+pub(crate) fn bind_typecheck_cache_library(
+    type_env: TypeEnv,
+    program: CheckedProgram,
+    lowering: Option<IrLoweredLibrary>,
+) -> Result<
+    (
+        crate::pipeline::CheckedLibrary,
+        Option<crate::pipeline::LoweredLibrary>,
+    ),
+    String,
+> {
+    let Some(cached) = lowering else {
+        let library = chelis_pipeline_core::validate_cached_library(type_env, program)
+            .map_err(|rejection| rejection.to_string())?;
+        return Ok((library, None));
+    };
+    let library = chelis_pipeline_core::bind_cached_library(type_env, program)
+        .map_err(|rejection| rejection.to_string())?;
+    if cached.library_proof_id() != library.program().library_proof_id() {
+        return Err("the lowered library does not match the checked library".to_string());
+    }
+    let expected = crate::pipeline::lower_library(&library).map_err(|error| error.to_string())?;
+    if !cache_envelope::lowered_library_payload_matches(&cached, expected.raw())? {
+        return Err("the lowered library payload does not match the checked library".to_string());
+    }
+    Ok((library, Some(expected)))
 }
 
 /// The 32-byte content-addressed cache key for a chelis-std sub-context.

@@ -42,12 +42,14 @@
 //! On a hit the loaded [`LibraryContext`] is the same artifact a cold
 //! build produces: the dependency decls are content-addressed, the
 //! chelis-std base is itself a byte-identical cached artifact, and the
-//! proof-bound library extension over that base is deterministic. Decode
-//! reruns the effect and linearity checks to rebind the proof rather than
-//! adopting the stored checker results. The stdlib and compiled-context
-//! decoders adopt them because they re-lower the program and compare it
-//! against a stored lowering; this wire carries no lowering, so the reruns
-//! are what reject an edited program (chelis#2558). So the entry checked
+//! proof-bound library extension over that base is deterministic. The
+//! producer stores a lowering of the composed library whenever it lowers
+//! standalone, and decode then re-lowers the program, compares the result
+//! against the stored lowering, and adopts the stored effect and linearity
+//! results, as the stdlib and compiled-context decoders do; an entry without a
+//! lowering reruns both checkers instead (chelis#2558, chelis#3729). Either
+//! way the decoded program is the one a cold build checked, which
+//! `cached_program_is_a_checker_fixed_point` locks. So the entry checked
 //! against a warm-loaded context composes to the same whole-program
 //! `CheckedProgram` as the cold path —
 //! and, per the acceptance oracle, as the monolithic path. The cache is a
@@ -78,6 +80,7 @@
 //! type-check through the monolithic checker under that flag, so it is the
 //! oracle's monolithic-vs-layered seam for both cache layers.
 
+use chelis_ir::lower::LoweredLibrary as IrLoweredLibrary;
 use chelis_types::{CheckedProgram, TypeEnv};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -133,10 +136,11 @@ const LIBRARY_CACHE_FORMAT_VERSION: u32 =
 ///
 /// Built by [`build_library_context`] on top of a [`StdLibContext`],
 /// cached under [`library_cache_key`]. Holds the two outer-context
-/// products the entry-file analysis needs; it deliberately does NOT carry
-/// a lowered library DAG or structural stats, because the `chelis build`
-/// path lowers the final composed whole-program `CheckedProgram` and never
-/// reads a fitness report off this sub-context.
+/// products the entry-file analysis needs, plus a lowering of the composed
+/// library that exists only so a decoder can compare instead of rerunning
+/// the checkers: the `chelis build` path lowers the final composed
+/// whole-program `CheckedProgram` itself, and never reads a fitness report
+/// off this sub-context, so it carries no structural stats.
 ///
 /// Cheap to clone: the heavy state is `Arc`-shared inside `TypeEnv`.
 #[derive(Debug, Clone)]
@@ -148,6 +152,15 @@ pub struct LibraryContext {
     /// types win on shadow over chelis-std, exactly as the monolithic
     /// whole-library build produces.
     library: crate::pipeline::CheckedLibrary,
+    /// A lowering of `library`, stored so a decoder can re-derive it and
+    /// compare instead of rerunning the effect and linearity checkers (see
+    /// [`crate::stdlib_cache::bind_typecheck_cache_library`]).
+    ///
+    /// `None` when the composed library cannot be lowered as a standalone
+    /// library: a definition whose lowering needs a caller to pin a symbolic
+    /// axis makes the unpruned whole-library lowering decline. Such an entry
+    /// still caches the typecheck, and its decoder reruns the checkers.
+    library_dag: Option<crate::pipeline::LoweredLibrary>,
     /// Number of expanded Deep exprs the dependency decls contribute.
     ///
     /// The build-lane caller must expand `dependencies ++ entry` as ONE
@@ -187,18 +200,27 @@ impl LibraryContext {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
         self.library.program()
     }
+
+    /// The stored lowering of the composed library, when it lowers
+    /// standalone. A decoder that holds one re-derives and compares it rather
+    /// than rerunning the effect and linearity checkers.
+    pub fn library_dag(&self) -> Option<&crate::pipeline::LoweredLibrary> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        self.library_dag.as_ref()
+    }
 }
 
-/// Serde carrier for the cache envelope. Decode revalidates the proof: it
-/// checks the type-environment relationship and reruns effect and linearity
-/// before it rebinds the `CheckedLibrary`. A forged or mismatched entry is
-/// rejected, never trusted. The stdlib and compiled-context parsers skip the
-/// reruns because their wires carry a lowering they re-derive and compare;
-/// this one carries none, so it keeps them (chelis#2558).
+/// Serde carrier for the cache envelope. Decode binds it through
+/// [`crate::stdlib_cache::bind_typecheck_cache_library`]: it checks the
+/// type-environment relationship, then re-derives and compares the stored
+/// lowering when there is one, or reruns effect and linearity when there is
+/// none, before it rebinds the `CheckedLibrary`. A mismatched entry is
+/// rejected, never trusted (chelis#2558, chelis#3729).
 #[derive(Serialize, Deserialize)]
 struct LibraryContextWire {
     type_env: TypeEnv,
     library_checked: CheckedProgram,
+    library_dag: Option<IrLoweredLibrary>,
     dependency_expanded_len: usize,
     dependency_deep_digest: [u8; 32],
 }
@@ -211,6 +233,10 @@ impl Serialize for LibraryContext {
         LibraryContextWire {
             type_env: self.library.type_env().clone(),
             library_checked: self.library.program().clone(),
+            library_dag: self
+                .library_dag
+                .as_ref()
+                .map(|library| library.raw().clone()),
             dependency_expanded_len: self.dependency_expanded_len,
             dependency_deep_digest: self.dependency_deep_digest,
         }
@@ -225,11 +251,15 @@ impl<'de> Deserialize<'de> for LibraryContext {
     {
         let wire = LibraryContextWire::deserialize(deserializer)?;
         let _linked = chelis_types::install_linked_program_guard();
-        let library =
-            chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
-                .map_err(serde::de::Error::custom)?;
+        let (library, library_dag) = crate::stdlib_cache::bind_typecheck_cache_library(
+            wire.type_env,
+            wire.library_checked,
+            wire.library_dag,
+        )
+        .map_err(serde::de::Error::custom)?;
         Ok(Self {
             library,
+            library_dag,
             dependency_expanded_len: wire.dependency_expanded_len,
             dependency_deep_digest: wire.dependency_deep_digest,
         })
@@ -610,8 +640,13 @@ pub fn build_library_context(
         }
     };
 
+    // Best-effort, as for chelis-std: a library that does not lower
+    // standalone is still cached, and its decoder reruns the checkers.
+    let library_dag = crate::pipeline::lower_library(&library).ok();
+
     Ok(Some(LibraryContext {
         library,
+        library_dag,
         dependency_expanded_len,
         dependency_deep_digest,
     }))
@@ -651,7 +686,7 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_the_single_node_spelling() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 29);
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 30);
     }
 
     #[test]
