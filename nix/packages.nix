@@ -218,14 +218,26 @@ let
       exit 0
     fi
 
+    # The one operand of "link DIR" or "uninstall VERSION", also after "--".
+    # Empty for any other argument shape.
+    single_operand() {
+      operand=""
+      if [ "\$#" -eq 2 ]; then
+        operand="\$2"
+      elif [ "\$#" -eq 3 ] && [ "\$2" = "--" ]; then
+        operand="\$3"
+      fi
+    }
+
     if [ "\''${1:-}" = "link" ]; then
       resolve_chelis_home
       set_gc_root_paths
       "$out/libexec/chelisup" "\$@" || exit \$?
-      if [ "\$#" -ne 2 ] || [ ! -d "\$2" ]; then
+      single_operand "\$@"
+      if [ -z "\$operand" ] || [ ! -d "\$operand" ]; then
         exit 0
       fi
-      link_target="\$(${pkgs.coreutils}/bin/realpath -e -- "\$2")"
+      link_target="\$(${pkgs.coreutils}/bin/realpath -e -- "\$operand")"
       for entry in "\$chelis_home/toolchains"/*; do
         if [ ! -L "\$entry" ] \
           || [ "\$(${pkgs.coreutils}/bin/readlink "\$entry")" != "\$link_target" ]; then
@@ -252,11 +264,15 @@ let
       exit 0
     fi
 
-    if [ "\''${1:-}" = "uninstall" ] && [ "\$#" -eq 2 ]; then
+    if [ "\''${1:-}" = "uninstall" ]; then
       resolve_chelis_home
       set_gc_root_paths
       "$out/libexec/chelisup" "\$@" || exit \$?
-      toolchain_root="\$gc_root_dir/toolchain-\$2"
+      single_operand "\$@"
+      if [ -z "\$operand" ]; then
+        exit 0
+      fi
+      toolchain_root="\$gc_root_dir/toolchain-\$operand"
       if [ -e "\$toolchain_root" ] || [ -L "\$toolchain_root" ]; then
         ${pkgs.coreutils}/bin/rm -f "\$toolchain_root"
         printf 'removed %s\n' "\$toolchain_root"

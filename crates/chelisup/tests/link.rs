@@ -6,7 +6,10 @@
 
 mod common;
 
-use common::{build_fixture_tarball, run_cli, run_shim, write_default, write_fake_toolchain};
+use common::{
+    bin as chelisup_bin, build_fixture_tarball, run_cli, run_shim, write_default,
+    write_fake_toolchain,
+};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -404,4 +407,86 @@ fn install_of_a_linked_version_keeps_the_link() {
         dir.canonicalize().unwrap()
     );
     assert!(home.path().join("bin").join("chelis").is_file());
+}
+
+#[test]
+fn link_refuses_a_directory_inside_the_chelis_home() {
+    let home = tempfile::tempdir().unwrap();
+    write_fake_toolchain(home.path(), "0.1.0");
+    // The home itself holds bin/chelis once the shim exists.
+    fs::create_dir_all(home.path().join("bin")).unwrap();
+    fs::copy(
+        entry(home.path(), "0.1.0").join("bin/chelis"),
+        home.path().join("bin/chelis"),
+    )
+    .unwrap();
+    for inside in [home.path().to_path_buf(), entry(home.path(), "0.1.0")] {
+        let out = link(home.path(), &inside);
+        assert!(!out.status.success(), "linked {}", inside.display());
+        assert!(
+            stderr(&out).contains("inside the chelis home"),
+            "stderr: {}",
+            stderr(&out)
+        );
+    }
+    assert!(
+        !fs::symlink_metadata(entry(home.path(), "0.1.0"))
+            .unwrap()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn link_refuses_a_directory_whose_bin_chelis_is_the_shim() {
+    let home = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let dir = external_toolchain(external.path(), "pkg", "chelis 0.5.0\n");
+    assert!(link(home.path(), &dir).status.success());
+    fs::create_dir_all(home.path().join("bin")).unwrap();
+    fs::copy(chelisup_bin(), home.path().join("bin/chelis")).unwrap();
+
+    let alias = external.path().join("alias");
+    fs::create_dir_all(alias.join("bin")).unwrap();
+    std::os::unix::fs::symlink(home.path().join("bin/chelis"), alias.join("bin/chelis")).unwrap();
+    let out = link(home.path(), &alias);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("is the chelis shim"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert_eq!(
+        fs::read_link(entry(home.path(), "0.5.0")).unwrap(),
+        dir.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn uninstall_removes_a_half_removed_directory_that_link_refuses() {
+    let home = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    fs::create_dir_all(entry(home.path(), "0.5.0")).unwrap();
+    let dir = external_toolchain(external.path(), "pkg", "chelis 0.5.0\n");
+
+    let refused = link(home.path(), &dir);
+    assert!(!refused.status.success());
+    assert!(stderr(&refused).contains("chelisup uninstall 0.5.0"));
+
+    let out = run_cli(home.path(), home.path(), &["uninstall", "0.5.0"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_no_entry(home.path(), "0.5.0");
+    assert!(link(home.path(), &dir).status.success());
+}
+
+#[test]
+fn link_leaves_no_scratch_entry_in_the_toolchain_store() {
+    let home = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let dir = external_toolchain(external.path(), "pkg", "chelis 0.5.0\n");
+    assert!(link(home.path(), &dir).status.success());
+    let names: Vec<String> = fs::read_dir(home.path().join("toolchains"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["0.5.0".to_string()]);
 }

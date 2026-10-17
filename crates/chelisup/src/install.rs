@@ -784,8 +784,10 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 /// Remove an installed toolchain. For a `chelisup link`, dangling or not,
-/// remove only the link and never its target. Errors on a malformed
-/// version or a version with no store entry. Returns what it removed.
+/// remove only the link and never its target. A directory without
+/// `bin/chelis`, left by a half-removed install, is removed too. Errors on
+/// a malformed version or a version with no store entry. Returns what it
+/// removed.
 ///
 /// `pub(crate)`: chelisup owns the toolchain lifecycle. Other crates drive
 /// it through the `chelisup` binary, never in-process (see [`install`]).
@@ -796,7 +798,7 @@ pub(crate) fn uninstall(store: &Store, version: &str) -> Result<Uninstalled, Str
     if link_target.is_some() {
         fs::remove_file(&dir)
             .map_err(|e| format!("could not remove the link {}: {e}", dir.display()))?;
-    } else if store.is_installed(version) {
+    } else if dir.is_dir() {
         fs::remove_dir_all(&dir).map_err(|e| format!("could not remove {}: {e}", dir.display()))?;
     } else {
         return Err(format!(

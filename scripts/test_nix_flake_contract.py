@@ -728,7 +728,7 @@ class NixFlakeContractTests(unittest.TestCase):
             self.assertFalse(root.exists())
             self.assertFalse(root.is_symlink())
 
-            linked_again = chelisup("link", store_toolchain / "bin" / "..")
+            linked_again = chelisup("link", "--", store_toolchain / "bin" / "..")
             self.assertEqual(linked_again.returncode, 0, linked_again.stderr)
             self.assertEqual(root.resolve(), store_toolchain.resolve())
 
@@ -742,6 +742,15 @@ class NixFlakeContractTests(unittest.TestCase):
 
             missing = chelisup("uninstall", "0.0.7")
             self.assertNotEqual(missing.returncode, 0)
+
+            linked_last = chelisup("link", store_toolchain)
+            self.assertEqual(linked_last.returncode, 0, linked_last.stderr)
+            self.assertTrue(root.is_symlink())
+            removed_last = chelisup("uninstall", "--", "0.0.7")
+            self.assertEqual(removed_last.returncode, 0, removed_last.stderr)
+            self.assertFalse(entry.is_symlink())
+            self.assertFalse(root.exists())
+            self.assertFalse(root.is_symlink())
 
 
 class NixSourceContractTests(unittest.TestCase):

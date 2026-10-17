@@ -214,7 +214,8 @@ cold-start and routing layer reef structurally cannot be. New monorepo member
 - `chelisup update` — self-update the installer.
 - `chelisup uninstall <ver>` / `chelisup self uninstall`. `uninstall` accepts
   only an exact `X.Y.Z`. For a linked toolchain it removes the link and never
-  changes the target.
+  changes the target. It also removes a directory without `bin/chelis` that a
+  partial removal left.
 
 #### 5.1.1 Linked toolchains
 
@@ -236,6 +237,10 @@ link and refreshes only the shim.
 `chelisup uninstall <ver>`. A new `link` of an already linked version replaces
 that link. A missing or failing `bin/chelis`, or any other version output,
 makes `link` fail and leaves the store unchanged.
+
+`link` refuses a directory inside `~/.chelis`, and a `bin/chelis` that resolves
+to the shim. Such a link makes the shim run itself, or ties one store entry to
+another.
 
 A dangling link is a link whose target has no `bin/chelis`. It counts as not
 installed. The shim then names the target and the two remedies, `chelisup

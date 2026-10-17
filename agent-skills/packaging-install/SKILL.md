@@ -43,7 +43,8 @@ design doc §5.5.
 ```
 ~/.chelis/
   bin/{chelis, chelisup}     the shim + the installer
-  toolchains/<ver>/          side-by-side toolchains (<ver>/bin/chelis is real)
+  toolchains/<ver>/          side-by-side toolchains (<ver>/bin/chelis is real,
+                             or <ver> is a `chelisup link`)
   reef/                       the reef registry
   src/                        the source-crate store
   default                     the recorded default version

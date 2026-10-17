@@ -40,11 +40,31 @@ pub(crate) fn link(store: &Store, dir: &Path) -> Result<LinkOutcome, String> {
             target.display()
         ));
     }
+    // A directory in the chelis home holds the shim or another toolchain.
+    // A link to it makes the shim run itself, or ties one entry to another.
+    if let Ok(home) = store.home().canonicalize()
+        && target.starts_with(&home)
+    {
+        return Err(format!(
+            "cannot link {}: it is inside the chelis home {}",
+            target.display(),
+            home.display()
+        ));
+    }
     let binary = target.join("bin").join("chelis");
     if !binary.is_file() {
         return Err(format!(
             "cannot link {}: it has no bin/chelis",
             target.display()
+        ));
+    }
+    if let (Ok(real), Ok(shim)) = (binary.canonicalize(), store.shim_path().canonicalize())
+        && real == shim
+    {
+        return Err(format!(
+            "cannot link {}: its bin/chelis is the chelis shim {}",
+            target.display(),
+            shim.display()
         ));
     }
     let version = reported_version(&binary)?;
@@ -62,9 +82,12 @@ pub(crate) fn link(store: &Store, dir: &Path) -> Result<LinkOutcome, String> {
     let toolchains = store.toolchains_dir();
     fs::create_dir_all(&toolchains)
         .map_err(|e| format!("could not create {}: {e}", toolchains.display()))?;
-    // Make the new link under a scratch name, then rename it over the
-    // entry, so an existing link is replaced in one step.
-    let scratch = toolchains.join(format!(".link-{version}-{}", std::process::id()));
+    // Make the new link under a scratch name in the home, outside
+    // `toolchains/`, then rename it over the entry. This replaces an
+    // existing link in one step.
+    let scratch = store
+        .home()
+        .join(format!(".chelisup-link-{version}-{}", std::process::id()));
     let _ = fs::remove_file(&scratch);
     make_symlink(&target, &scratch)?;
     if let Err(e) = fs::rename(&scratch, &entry) {
