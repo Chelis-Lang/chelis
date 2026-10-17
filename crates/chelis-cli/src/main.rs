@@ -17,7 +17,7 @@ use chelis_compiler_api::schema::{
 use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, ExprCarrier as DeepExprCarrier};
 use chelis_std_bundle::EMBEDDED_RUNTIME;
-use chelis_surf::ast::{Decl, ImportKind};
+use chelis_surf::ast::Decl;
 use chelis_types::types::{Dim, Effect, EffectSet, NominalArg, TensorPrec, Type};
 use chelis_unord::{UnordMap, UnordSet};
 use chelis_vocab::DiagnosticKind;
@@ -7948,7 +7948,10 @@ fn cmd_test(
     // and the discovered test files import, and every worker runs its files
     // against this one context.
     let test_entries = test_entry_imports(&test_files);
-    let context = match chelis_compiler_api::load_or_compile_for_package(
+    // chelis#3744: the parent only hands the context on, so on a cache hit it
+    // passes the verified cache bytes through rather than encoding the decoded
+    // context again.
+    let context = match chelis_compiler_api::load_or_compile_package_context(
         &reef_home_path,
         &cwd,
         &test_entries,
@@ -7963,6 +7966,7 @@ fn cmd_test(
                 &test_entries,
                 &EMBEDDED_RUNTIME,
             )
+            .map(chelis_compiler_api::LoadedContext::from)
             .map_err(|err| format!("compile test context: {}", compiler_error_messages(&err)))?
         }
         Err(err) => {
@@ -7972,8 +7976,7 @@ fn cmd_test(
             ));
         }
     };
-    let (context_bytes, context_digest) = context.encode_for_handoff()?;
-    drop(context);
+    let (context_bytes, context_digest) = context.into_handoff()?;
     let context_handoff = CompiledContextHandoff::new(
         CompiledContextTempfile::write(&context_bytes)?,
         &context_digest,
@@ -8295,12 +8298,10 @@ struct ClassifiedTestJobs {
 /// and is left to chelis#1391's follow-up rather than guessed at here.
 ///
 /// The bound is a constant rather than a function of the worker count so that
-/// batch composition stays machine-independent. `BatchScope` collisions are
-/// judged per batch, so a core-count-dependent partition would make *which*
-/// files demote -- and therefore the `CHELIS_TEST_EXPLAIN_BATCHING` output and
-/// any abandoned-batch warning -- differ between two machines running the same
-/// suite. Smaller scopes also collide less often, so sharding admits strictly
-/// more files to batching than one shared scope did.
+/// batch composition stays machine-independent. A shard succeeds or is
+/// abandoned as a unit, so a core-count-dependent partition would make the
+/// files an abandoned-batch warning names differ between two machines running
+/// the same suite.
 const MAX_BATCH_FILES: usize = 4;
 
 struct TestBatchManifestTempfile {
@@ -8618,8 +8619,13 @@ fn classify_test_jobs_for_batch(
     let mut batch_shards: Vec<Vec<TestBatchManifestFile>> = Vec::new();
     let mut shard: Vec<TestBatchManifestFile> = Vec::new();
     let mut file_jobs = Vec::new();
-    let mut batch_scope = BatchScope::default();
 
+    // Admission is a property of each file alone. The batch worker rewrites
+    // every file as its own module before combining them
+    // (`rewrite_isolated_entry_modules_with_reef_graph`), so two files that
+    // declare or import the same name cannot collide or capture each other's
+    // binding, and a file's route never depends on its neighbours
+    // (chelis#3746).
     for job in test_jobs {
         let source = match fs::read_to_string(&job.file) {
             Ok(source) => source,
@@ -8661,20 +8667,8 @@ fn classify_test_jobs_for_batch(
             file_jobs.push(job.clone());
             continue;
         }
-        // Close the shard before admitting into it, so each shard's scope
-        // covers exactly the files that shard compiles together. A file that
-        // collides inside one shard is demoted as before; it is not retried
-        // against the next shard, because retrying would make a file's own
-        // placement depend on the order the shards filled up.
         if shard.len() >= max_batch_files {
             batch_shards.push(std::mem::take(&mut shard));
-            batch_scope = BatchScope::default();
-        }
-        let scope = test_file_scope_names(&flat);
-        if let Some(collision) = batch_scope.admit(&job.rel_display, &scope) {
-            explain_batch_demotion(&job.rel_display, &collision);
-            file_jobs.push(job.clone());
-            continue;
         }
         shard.push(TestBatchManifestFile {
             index: job.index,
@@ -8698,8 +8692,8 @@ fn classify_test_jobs_for_batch(
 ///
 /// Demotion is by design and silent, because it produces the same rows and the
 /// same exit code. The reason is computed regardless, though, and without a way
-/// to read it a maintainer tuning a slow suite has to bisect the colliding
-/// names by hand, which is what chelis#1261's reporter did across five of them.
+/// to read it a maintainer tuning a slow suite has to find the demoted files by
+/// hand.
 const EXPLAIN_BATCHING_ENV: &str = "CHELIS_TEST_EXPLAIN_BATCHING";
 
 fn explain_batch_demotion(rel_display: &str, reason: &str) {
@@ -8707,139 +8701,6 @@ fn explain_batch_demotion(rel_display: &str, reason: &str) {
         return;
     }
     eprintln!("note: {rel_display} is not in the suite batch: {reason}");
-}
-
-/// Top-level names one test file contributes to a shared compilation unit,
-/// split by how each name entered scope.
-///
-/// `--batch-mode auto` merges every batched file's flattened declarations into
-/// a single unit, so the batch has one top-level scope. A name that file A
-/// imports and file B declares therefore resolves to B's declaration inside A
-/// as well, which recompiles A against a binding it never asked for
-/// (chelis#1261). Import-versus-declaration is a batch scope collision on the
-/// same footing as declaration-versus-declaration, so the colliding file takes
-/// the per-file worker path instead.
-struct TestFileScopeNames {
-    /// Names the file itself binds at top level, including ADT variant
-    /// constructors (a merged unit has one constructor namespace).
-    declared: Vec<String>,
-    /// Explicitly imported `import M (a, b)` names, each paired with `M`.
-    /// Two files importing the same name from the same module agree on what
-    /// it means; two files importing it from different modules do not.
-    imported: Vec<(String, String)>,
-    /// Set by an `import M (..)`. This runner cannot enumerate a wildcard's
-    /// name set without resolving the package graph, so it cannot prove that
-    /// no sibling declaration captures one of those names.
-    wildcard_import: bool,
-}
-
-fn test_file_scope_names(decls: &[Decl]) -> TestFileScopeNames {
-    let mut declared = Vec::new();
-    let mut imported = Vec::new();
-    let mut wildcard_import = false;
-    for decl in decls {
-        match decl {
-            Decl::FunDef { name, .. }
-            | Decl::Sig { name, .. }
-            | Decl::TypeAlias { name, .. }
-            | Decl::MacroDef { name, .. }
-            | Decl::Property { name, .. } => declared.push(name.clone()),
-            Decl::TypeDef { name, variants, .. } => {
-                declared.push(name.clone());
-                declared.extend(variants.iter().map(|variant| variant.name.clone()));
-            }
-            Decl::Dim { names, .. } => declared.extend(names.iter().cloned()),
-            Decl::Import { module, kind, .. } => match kind {
-                ImportKind::Names(names) => {
-                    imported.extend(names.iter().map(|name| (name.clone(), module.clone())));
-                }
-                ImportKind::All => wildcard_import = true,
-                // A qualified import binds only `M.name`, which no unqualified
-                // sibling declaration in the merged unit can capture.
-                ImportKind::Qualified => {}
-            },
-            // Exhaustive on purpose. A future `Decl` variant that binds a
-            // top-level name would silently contribute nothing here and reopen
-            // exactly the blind spot chelis#1261 reported, so a new variant has
-            // to stop this compiling until someone classifies it.
-            //
-            // `Module` is already flattened away before this runs. `LetDef`
-            // makes a file ineligible for batching on its own (module-init
-            // bindings), so its name never reaches a shared scope. `Export`
-            // marks existing declarations visible and binds nothing.
-            Decl::Module { .. } | Decl::LetDef { .. } | Decl::Export { .. } => {}
-        }
-    }
-    TestFileScopeNames {
-        declared,
-        imported,
-        wildcard_import,
-    }
-}
-
-/// The accumulated top-level scope of a suite batch.
-///
-/// The parent's eligibility classifier and the batch worker's own guard both
-/// admit files through this one type so the two can never disagree about what
-/// "collision" means: a worker that rejected a file the parent had already
-/// batched would turn every such suite into a silent per-file fallback.
-#[derive(Default)]
-struct BatchScope {
-    /// Declared name to the file that declared it.
-    declared: UnordMap<String, String>,
-    /// Imported name to the module it came from and the file that imported it.
-    imported: UnordMap<String, (String, String)>,
-}
-
-impl BatchScope {
-    /// Admit `file` into the batch, or report the collision that keeps it out.
-    ///
-    /// Names are checked against the files already admitted before any of this
-    /// file's own names are recorded, so a file that legitimately repeats a
-    /// name internally (a `sig` beside its `def`) is not a collision with
-    /// itself.
-    fn admit(&mut self, file: &str, scope: &TestFileScopeNames) -> Option<String> {
-        if scope.wildcard_import {
-            return Some(format!(
-                "{file} imports a whole module, and this runner cannot enumerate \
-                 the names that brings into the shared batch scope"
-            ));
-        }
-        for name in &scope.declared {
-            if let Some(owner) = self.declared.get(name) {
-                return Some(format!("`{name}` is declared by both {owner} and {file}"));
-            }
-            if let Some((module, owner)) = self.imported.get(name) {
-                return Some(format!(
-                    "`{name}` is declared by {file} and imported from `{module}` by {owner}"
-                ));
-            }
-        }
-        for (name, module) in &scope.imported {
-            if let Some(owner) = self.declared.get(name) {
-                return Some(format!(
-                    "`{name}` is imported from `{module}` by {file} and declared by {owner}"
-                ));
-            }
-            if let Some((seen_module, owner)) = self.imported.get(name)
-                && seen_module != module
-            {
-                return Some(format!(
-                    "`{name}` is imported from `{seen_module}` by {owner} \
-                     and from `{module}` by {file}"
-                ));
-            }
-        }
-        for name in &scope.declared {
-            self.declared.insert(name.clone(), file.to_string());
-        }
-        for (name, module) in &scope.imported {
-            self.imported
-                .entry(name.clone())
-                .or_insert_with(|| (module.clone(), file.to_string()));
-        }
-        None
-    }
 }
 
 /// Why `--batch-mode auto` gave up on an attempted suite batch and re-ran its
@@ -10711,11 +10572,6 @@ where
 {
     let mut entries = Vec::new();
     let mut selected = Vec::<(usize, String, String)>::new();
-    // Same admission rule the parent classifier applied, so this guard can only
-    // reject a manifest the parent should never have built. A stricter guard
-    // here would reject legitimate batches and turn them into silent per-file
-    // fallbacks, which is how the two used to disagree.
-    let mut batch_scope = BatchScope::default();
 
     for file in files {
         let source = fs::read_to_string(&file.file)
@@ -10723,10 +10579,6 @@ where
         let parsed = chelis_surf::parser::parse_str(&source)
             .map_err(|e| format!("parse {}: {e}", file.file.display()))?;
         let flat = flatten_module_decls(&parsed);
-        if let Some(collision) = batch_scope.admit(&file.rel_display, &test_file_scope_names(&flat))
-        {
-            return Err(format!("test batch scope collision: {collision}"));
-        }
 
         let tests = match enumerate_test_fns(&flat, None, &file.rel_display) {
             EnumerationOutcome::Tests(tests) => tests,

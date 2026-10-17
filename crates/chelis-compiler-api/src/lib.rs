@@ -52,7 +52,8 @@ pub use compiler::{
 pub use compiler::{add_function, replace_function_body};
 pub use context::{
     CacheError, CacheIdentity, CompiledContext, ContextHash, ContextLoadPath, HandoffDigest,
-    compile_reef_context, compile_reef_context_for_entries, load_or_compile_for_package,
+    LoadedContext, compile_reef_context, compile_reef_context_for_entries,
+    compiled_context_payload_encodes, load_or_compile_for_package, load_or_compile_package_context,
     load_or_compile_with_local_registry_fallback,
 };
 /// Experimental decode chokepoint for opaque-type invariant revalidation
@@ -97,8 +98,8 @@ pub fn registered_clarabel_solve_symbol(
 }
 pub use stdlib_cache::{
     StdLibContext, build_declaration_context, build_stdlib_context, cache_disabled,
-    load_or_build_stdlib_context, stdlib_cache_key, stdlib_cache_key_input_bytes,
-    typecheck_cache_dir,
+    declaration_context_builds, load_or_build_stdlib_context, stdlib_cache_key,
+    stdlib_cache_key_input_bytes, typecheck_cache_dir,
 };
 
 /// Pinned compiler version for fixture `reef.toml` files in tests and for

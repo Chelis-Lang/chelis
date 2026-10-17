@@ -202,26 +202,55 @@ impl Serialize for CompiledContext {
     }
 }
 
-impl CompiledContextWire {
+/// The leading fields of a [`CompiledContextWire`] payload: everything but the
+/// transmitted lowering.
+struct CheckedParts {
+    source_hash: ContextHash,
+    identity: CacheIdentity,
+    reef_state: PreparedReefGraph,
+    type_env: TypeEnv,
+    library_checked: CheckedProgram,
+}
+
+impl CheckedParts {
+    /// Decode the checked parts of a payload field by field and leave the
+    /// transmitted lowering unread (chelis#2256). bincode lays out a struct as
+    /// its fields in order with nothing between them, so these are exactly the
+    /// first five fields of the wire.
+    fn decode(payload: &[u8]) -> bincode::Result<Self> {
+        use bincode::Options;
+        // The options `bincode::deserialize` uses, under which the wire is
+        // encoded; the trailing lowering is what is left unread.
+        let options = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes();
+        let mut reader = payload;
+        let mut deserializer = bincode::Deserializer::with_reader(&mut reader, options);
+        Ok(Self {
+            source_hash: ContextHash::deserialize(&mut deserializer)?,
+            identity: CacheIdentity::deserialize(&mut deserializer)?,
+            reef_state: PreparedReefGraph::deserialize(&mut deserializer)?,
+            type_env: TypeEnv::deserialize(&mut deserializer)?,
+            library_checked: CheckedProgram::deserialize(&mut deserializer)?,
+        })
+    }
+
     /// Rebuild the producer's context from a payload the caller authenticated.
     ///
     /// The precondition is [`CompiledContext::decode_authenticated`]'s: the
     /// bytes were compared against a digest that did not travel with them. Under
     /// it, this reconstructs the producer's exact value. The library is bound
-    /// exactly as `Deserialize` binds it; the lowered library is re-derived
-    /// rather than adopted, which keeps `chelis_pipeline_core::LoweredLibrary`'s
-    /// rule that only `lower_library` can construct one. The comparison of that
-    /// re-derivation against the transmitted lowering, which `Deserialize`
-    /// performs, is omitted: the out-of-band digest already rejects every payload
-    /// but the producer's.
+    /// exactly as `Deserialize` binds it; the lowered library is re-derived,
+    /// which keeps `chelis_pipeline_core::LoweredLibrary`'s rule that only
+    /// `lower_library` can construct one. The transmitted lowering is never
+    /// decoded: comparing the re-derivation against it, which `Deserialize`
+    /// does, has nothing to establish once the out-of-band digest has rejected
+    /// every payload but the producer's.
     fn into_authenticated_context(self) -> Result<CompiledContext, String> {
         let _linked = chelis_types::install_linked_program_guard();
         let library =
             chelis_pipeline_core::bind_cached_library(self.type_env, self.library_checked)
                 .map_err(|rejection| rejection.to_string())?;
-        if self.library_dag.library_proof_id() != library.program().library_proof_id() {
-            return Err("the lowered library does not match the checked library".to_string());
-        }
         let library_dag = crate::pipeline::lower_library(&library).map_err(|e| e.to_string())?;
         Ok(CompiledContext {
             source_hash: self.source_hash,
@@ -268,6 +297,18 @@ impl<'de> Deserialize<'de> for CompiledContext {
             library_dag,
         })
     }
+}
+
+/// Compiled-context envelope encodes since the process started: a work counter
+/// that lets a test assert a warm `chelis test` hands its workers the verified
+/// cache bytes rather than encoding the context again (chelis#3744).
+static CONTEXT_ENVELOPE_ENCODES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn compiled_context_payload_encodes() -> u64 {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    CONTEXT_ENVELOPE_ENCODES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl CompiledContext {
@@ -338,8 +379,8 @@ impl CompiledContext {
     /// consistent (chelis#2257). This route rejects both.
     ///
     /// Given that, the lowered-payload comparison has nothing left to establish
-    /// here, and it is the only step this route omits: both routes bind the
-    /// transmitted checked program the same way, as
+    /// here, so this route omits it and never decodes the transmitted lowering:
+    /// both routes bind the transmitted checked program the same way, as
     /// `both_decode_routes_reconstruct_identical_contexts` requires.
     pub fn decode_authenticated(bytes: &[u8], expected: &HandoffDigest) -> Result<Self, String> {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
@@ -349,6 +390,7 @@ impl CompiledContext {
     }
 
     fn envelope_bytes(&self) -> Result<(Vec<u8>, HandoffDigest), CacheError> {
+        CONTEXT_ENVELOPE_ENCODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let payload =
             bincode::serialize(self).map_err(|e| CacheError::Encode(format!("payload: {e}")))?;
         let payload_sha256: [u8; 32] = Sha256::digest(&payload).into();
@@ -387,7 +429,14 @@ impl CompiledContext {
     pub fn save(&self, path: &Path) -> Result<(), CacheError> {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
         let (bytes, _) = self.envelope_bytes()?;
+        write_cache_file(path, &bytes)
+    }
+}
 
+/// Persist encoded envelope bytes to `path` as [`CompiledContext::save`]
+/// describes.
+fn write_cache_file(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
+    {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -470,7 +519,7 @@ impl CompiledContext {
                     path: tmp_path.clone(),
                     source: e,
                 })?;
-            f.write_all(&bytes).map_err(|e| CacheError::Io {
+            f.write_all(bytes).map_err(|e| CacheError::Io {
                 op: "write_tmp",
                 path: tmp_path.clone(),
                 source: e,
@@ -493,7 +542,9 @@ impl CompiledContext {
         })?;
         Ok(())
     }
+}
 
+impl CompiledContext {
     /// Phase I — load `path` if its stored `source_hash` matches the hash
     /// freshly recomputed from `package_dir`. Returns:
     ///
@@ -553,6 +604,20 @@ impl CompiledContext {
         runtime: &'static EmbeddedRuntime,
     ) -> Result<Option<Self>, CacheError> {
         let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        Ok(load_verified_if_fresh(path, package_dir, entries, runtime)?
+            .map(LoadedContext::into_context))
+    }
+}
+
+/// [`CompiledContext::load_if_fresh_for_entries`], keeping the verified file
+/// bytes and their payload digest beside the context.
+fn load_verified_if_fresh(
+    path: &Path,
+    package_dir: &Path,
+    entries: &EntryImports,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<Option<LoadedContext>, CacheError> {
+    {
         // Read the entire file into memory before any decode work — no
         // streaming-decode windows where a half-written tail looks like
         // a full envelope.
@@ -594,9 +659,18 @@ impl CompiledContext {
             return Ok(None);
         }
 
-        envelope.into_context().map(Some)
+        let digest = HandoffDigest(envelope.payload_sha256);
+        let context = envelope.into_context()?;
+        // `into_context` checked the embedded digest against the payload, so
+        // `digest` is the verified payload digest of exactly `bytes`.
+        Ok(Some(LoadedContext {
+            context,
+            envelope: Some((bytes, digest)),
+        }))
     }
+}
 
+impl CompiledContext {
     /// Convenience for callers that only have a `reef_home` + `package_dir`
     /// and want the canonical cache location. Phase H wires `cmd_eval` and
     /// `cmd_check` through this helper; the disk-cache key is
@@ -697,6 +771,64 @@ pub fn load_or_compile_for_package(
     runtime: &'static EmbeddedRuntime,
 ) -> Result<CompiledContext, CompilerError> {
     let _fp_env = chelis_runtime::FpEnvGuard::enter();
+    load_or_compile_package_context(
+        reef_home,
+        package_dir,
+        entries,
+        verbose_corruption_to_stderr,
+        runtime,
+    )
+    .map(LoadedContext::into_context)
+}
+
+/// A compiled context, with the envelope bytes it was verified from or saved as
+/// and their payload digest, when there are any.
+///
+/// The worker handoff is those same bytes, so a caller that only hands the
+/// context on (`chelis test`'s parent) can pass them through instead of
+/// encoding the context again (chelis#3744).
+pub struct LoadedContext {
+    context: CompiledContext,
+    envelope: Option<(Vec<u8>, HandoffDigest)>,
+}
+
+impl From<CompiledContext> for LoadedContext {
+    fn from(context: CompiledContext) -> Self {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        Self {
+            context,
+            envelope: None,
+        }
+    }
+}
+
+impl LoadedContext {
+    pub fn into_context(self) -> CompiledContext {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        self.context
+    }
+
+    /// The same bytes and digest as [`CompiledContext::encode_for_handoff`]:
+    /// the envelope in hand when there is one, an encode otherwise.
+    pub fn into_handoff(self) -> Result<(Vec<u8>, HandoffDigest), String> {
+        let _fp_env = chelis_runtime::FpEnvGuard::enter();
+        match self.envelope {
+            Some(envelope) => Ok(envelope),
+            None => self.context.encode_for_handoff(),
+        }
+    }
+}
+
+/// [`load_or_compile_for_package`], keeping the envelope bytes beside the
+/// context.
+pub fn load_or_compile_package_context(
+    reef_home: &Path,
+    package_dir: &Path,
+    entries: &EntryImports,
+    verbose_corruption_to_stderr: bool,
+    runtime: &'static EmbeddedRuntime,
+) -> Result<LoadedContext, CompilerError> {
+    let _fp_env = chelis_runtime::FpEnvGuard::enter();
     // Resolve the compiled-context cache directory. When `CHELIS_REEF_HOME`
     // is set, `reef_home` is non-empty and the cache lives at
     // `<reef_home>/.cache/compiled/`. When it is unset, `reef_home` is
@@ -711,7 +843,8 @@ pub fn load_or_compile_for_package(
         match crate::stdlib_cache::cache_dir_for("compiled") {
             Some(dir) => dir,
             None => {
-                return compile_reef_context_for_entries(reef_home, package_dir, entries, runtime);
+                return compile_reef_context_for_entries(reef_home, package_dir, entries, runtime)
+                    .map(LoadedContext::from);
             }
         }
     } else {
@@ -751,14 +884,8 @@ pub fn load_or_compile_for_package(
     // Step 2: probe the disk cache. A clean miss (Ok(None)) is fine.
     // Corrupt / version-skewed / hash-mismatched files fall through to a
     // full compile + overwrite, with a stderr breadcrumb for the operator.
-    match CompiledContext::load_if_fresh_for_entries(
-        &cache_path,
-        reef_home,
-        package_dir,
-        entries,
-        runtime,
-    ) {
-        Ok(Some(ctx)) => return Ok(ctx),
+    match load_verified_if_fresh(&cache_path, package_dir, entries, runtime) {
+        Ok(Some(loaded)) => return Ok(loaded),
         Ok(None) => {}
         // A cancelled load judged nothing: propagate the cancellation and
         // leave the file alone (chelis#2617).
@@ -781,16 +908,24 @@ pub fn load_or_compile_for_package(
     // The save is best-effort — if it fails, the compile result is still
     // usable for this invocation; only the next invocation pays the cold
     // cost again.
-    let ctx = compile_reef_context_for_entries(reef_home, package_dir, entries, runtime)?;
-    if let Err(e) = ctx.save(&cache_path)
-        && verbose_corruption_to_stderr
-    {
-        eprintln!(
-            "chelis: warning: failed to save compiled context cache to {}: {e}",
-            cache_path.display()
-        );
-    }
-    Ok(ctx)
+    // One encode serves both the file and, for `chelis test`, the handoff.
+    let context = compile_reef_context_for_entries(reef_home, package_dir, entries, runtime)?;
+    let saved = context
+        .envelope_bytes()
+        .and_then(|envelope| write_cache_file(&cache_path, &envelope.0).map(|()| envelope));
+    let envelope = match saved {
+        Ok(envelope) => Some(envelope),
+        Err(e) => {
+            if verbose_corruption_to_stderr {
+                eprintln!(
+                    "chelis: warning: failed to save compiled context cache to {}: {e}",
+                    cache_path.display()
+                );
+            }
+            None
+        }
+    };
+    Ok(LoadedContext { context, envelope })
 }
 
 /// Which route [`load_or_compile_with_local_registry_fallback`] took to
@@ -1107,9 +1242,8 @@ impl CacheEnvelope {
             });
         }
         poll_cancellation_before_payload_decode()?;
-        let wire: CompiledContextWire =
-            bincode::deserialize(&self.payload).map_err(|e| payload_decode_error(&e))?;
-        let context = wire.into_authenticated_context().map_err(|e| {
+        let parts = CheckedParts::decode(&self.payload).map_err(|e| payload_decode_error(&e))?;
+        let context = parts.into_authenticated_context().map_err(|e| {
             if chelis_types::cancellation_requested() {
                 CacheError::Cancelled
             } else {

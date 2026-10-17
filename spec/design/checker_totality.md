@@ -1495,9 +1495,9 @@ No new CLI option or JSON field is introduced.
    product is appended to the prepared library snapshot without passing
    through the eval-entry rewriter a second time. Raw declarations from two
    files never coexist in one source scope.
-4. **Admission is not authority.** `BatchScope` remains a conservative
-   performance/admission rule and continues to explain demotions, but no
-   successful verdict depends on its name inventory being complete. A batch
+4. **Admission is not authority.** Batch admission is a per-file
+   performance rule (`chelis_native_testing_plan.md`); no successful verdict
+   depends on it, and shared names between files never demote a file. A batch
    rejection that requires per-file attribution uses the already-reported
    fallback and produces the same file/test rows and exit verdict as
    `--batch-mode file`; it cannot disappear behind the fallback.

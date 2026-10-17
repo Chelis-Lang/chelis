@@ -580,9 +580,7 @@ pub fn run_surf_decls_properties_with_contract_decls(
     options: &PropertyRunOptions,
 ) -> Result<PropertyRunResult, String> {
     let properties = collect_surf_properties(entry_decls, module_decls, options.only.as_deref())?;
-    // Prepared lazily once, shared by every scalar SMT goal and guard plan.
-    // The source declarations continue to own discovery and concrete execution.
-    let semantic_program = OnceCell::new();
+    let programs = SurfFilePrograms::default();
     // Proof-only scalar extraction bypasses the runtime lowerer. Check the
     // exact linked declaration set once for all selected scalar Beacon goals,
     // before any result can be reported by Tide or a direct library caller.
@@ -612,7 +610,7 @@ pub fn run_surf_decls_properties_with_contract_decls(
                 property,
                 options,
                 &scalar_check,
-                &semantic_program,
+                &programs,
             )
             .with_goal(goal),
         );
@@ -783,6 +781,18 @@ fn property_contracts(options: &[PropertyOption]) -> Vec<String> {
 // Surf property running (Tier B -> Tier C, with injection)
 // ===========================================================================
 
+/// The views of one Surf file's declarations that every property in the file
+/// shares, each prepared lazily on first use.
+#[derive(Default)]
+struct SurfFilePrograms {
+    /// Shared by every scalar SMT goal and guard plan. The source
+    /// declarations continue to own discovery and concrete execution.
+    semantic: OnceCell<Result<SemanticSurfProgram, String>>,
+    /// Shared by every property's samples and every domain witness
+    /// confirmation (chelis#3745).
+    evaluation: SurfEvalProgramCell,
+}
+
 fn prove_surf_property(
     decls: &[Decl],
     module_decls: &[Decl],
@@ -790,8 +800,10 @@ fn prove_surf_property(
     property: &Property,
     options: &PropertyRunOptions,
     scalar_check: &Result<(), String>,
-    semantic_program: &OnceCell<Result<SemanticSurfProgram, String>>,
+    programs: &SurfFilePrograms,
 ) -> PropertyOutcome {
+    let semantic_program = &programs.semantic;
+    let eval_program = &programs.evaluation;
     if expanded_contracts(property)
         .iter()
         .any(|id| id == "clarabel.qp.ideal_optimality" || id == "clarabel.qp.assume_psd")
@@ -935,6 +947,7 @@ fn prove_surf_property(
         if let Some(mut outcome) = try_surf_tier_b(
             semantic,
             decls,
+            eval_program,
             trusted_contract_decls,
             property,
             options,
@@ -950,8 +963,14 @@ fn prove_surf_property(
                 outcome.display_status() == "passed",
                 &outcome.disclosed_qualifiers(),
             ) {
-                let mut probe =
-                    prove_surf_property_fuzz(decls, property, options, seed, semantic_program);
+                let mut probe = prove_surf_property_fuzz(
+                    decls,
+                    property,
+                    options,
+                    seed,
+                    semantic_program,
+                    eval_program,
+                );
                 // The probe can become the published record, so it carries the
                 // same contract assumptions the Tier C fall-through below
                 // attaches. Without this a refutation under `auto` would
@@ -983,7 +1002,14 @@ fn prove_surf_property(
     }
 
     // Tier C: fuzz.
-    let mut outcome = prove_surf_property_fuzz(decls, property, options, seed, semantic_program);
+    let mut outcome = prove_surf_property_fuzz(
+        decls,
+        property,
+        options,
+        seed,
+        semantic_program,
+        eval_program,
+    );
     outcome.append_assumptions(contract_assumptions);
     outcome
 }
@@ -2527,6 +2553,7 @@ fn try_surf_tier_b(
     // chelis#3635 domain-witness confirmation uses them here, and it runs the
     // same evaluation a Tier C sample gets.
     authored: &[Decl],
+    eval_program: &SurfEvalProgramCell,
     trusted_contract_decls: &[Decl],
     property: &Property,
     options: &PropertyRunOptions,
@@ -2855,7 +2882,7 @@ fn try_surf_tier_b(
         // one), and an unconfirmed one reports exactly what it reported before
         // this lane existed.
         crate::tier_b::TierBResult::DomainDisproved { reason, witness } => {
-            match confirm_surf_domain_witness(authored, property, &witness) {
+            match confirm_surf_domain_witness(authored, eval_program, property, &witness) {
                 DomainWitness::Confirmed(counterexample) => Some(PropertyOutcome::new(
                     property.name.clone(),
                     PropertyStatus::Failed,
@@ -3745,6 +3772,7 @@ fn prove_surf_property_fuzz(
     options: &PropertyRunOptions,
     seed: u64,
     semantic_program: &OnceCell<Result<SemanticSurfProgram, String>>,
+    eval_program: &SurfEvalProgramCell,
 ) -> PropertyOutcome {
     let samples_needed = if options.samples != 100 {
         options.samples
@@ -3778,13 +3806,9 @@ fn prove_surf_property_fuzz(
         REJECTION_SAMPLING_METHOD
     };
 
-    // The sample roots join this program, so they are named fresh against
-    // every name it spells (chelis#3267). The evaluator desugars the same
-    // declarations, so a program that does not desugar fails here exactly as
-    // its first sample would.
-    let roots = match chelis_surf::desugar::desugar_program(decls) {
-        Ok(program) => SampleRoots::for_program(&program),
-        Err(reason) => {
+    let (roots, library) = match surf_eval_program(decls, eval_program) {
+        Ok(program) => (&program.roots, &program.library),
+        Err(SurfEvalProgramError::Desugar(reason)) => {
             return error(
                 &property.name,
                 seed,
@@ -3792,12 +3816,8 @@ fn prove_surf_property_fuzz(
             )
             .with_sampling(sampling_method, 0, 0);
         }
-    };
-
-    let library = match chelis_compiler_api::build_declaration_context(decls) {
-        Ok(library) => library,
-        Err(err) => {
-            return error(&property.name, seed, compiler_error_message(err)).with_sampling(
+        Err(SurfEvalProgramError::Compile(message)) => {
+            return error(&property.name, seed, message.clone()).with_sampling(
                 sampling_method,
                 0,
                 0,
@@ -3847,7 +3867,7 @@ fn prove_surf_property_fuzz(
             }
         };
         if !property.preconditions.is_empty() {
-            match eval_surf_sample(&library, property, &roots, &sample, true) {
+            match eval_surf_sample(library, property, roots, &sample, true) {
                 Ok(false) => continue,
                 Ok(true) => {}
                 Err(err) => {
@@ -3860,11 +3880,11 @@ fn prove_surf_property_fuzz(
             }
         }
         accepted += 1;
-        match eval_surf_sample(&library, property, &roots, &sample, false) {
+        match eval_surf_sample(library, property, roots, &sample, false) {
             Ok(true) => {}
             Ok(false) => {
                 let (shrunk, shrink_steps) =
-                    shrink_surf_counterexample(&library, property, &roots, sample);
+                    shrink_surf_counterexample(library, property, roots, sample);
                 return PropertyOutcome::new(
                     property.name.clone(),
                     PropertyStatus::Failed,
@@ -3972,6 +3992,7 @@ enum DomainWitness {
 /// why an unconfirmed witness can only decline.
 fn confirm_surf_domain_witness(
     decls: &[Decl],
+    eval_program: &SurfEvalProgramCell,
     property: &Property,
     witness: &serde_json::Value,
 ) -> DomainWitness {
@@ -3979,17 +4000,26 @@ fn confirm_surf_domain_witness(
         Ok(sample) => sample,
         Err(reason) => return DomainWitness::Declined(reason),
     };
-    let roots = match chelis_surf::desugar::desugar_program(decls) {
-        Ok(program) => SampleRoots::for_program(&program),
-        Err(reason) => return DomainWitness::Declined(format!("witness desugar failed: {reason}")),
-    };
-    let library = match chelis_compiler_api::build_declaration_context(decls) {
-        Ok(library) => library,
-        Err(err) => return DomainWitness::Declined(compiler_error_message(err)),
+    let program = match surf_eval_program(decls, eval_program) {
+        Ok(program) => program,
+        Err(SurfEvalProgramError::Desugar(reason)) => {
+            return DomainWitness::Declined(format!("witness desugar failed: {reason}"));
+        }
+        Err(SurfEvalProgramError::Compile(message)) => {
+            return DomainWitness::Declined(message.clone());
+        }
     };
     resolve_domain_witness(
         sample,
-        |sample, precondition| eval_surf_sample(&library, property, &roots, sample, precondition),
+        |sample, precondition| {
+            eval_surf_sample(
+                &program.library,
+                property,
+                &program.roots,
+                sample,
+                precondition,
+            )
+        },
         property.preconditions.len(),
     )
 }
@@ -4582,10 +4612,49 @@ fn cast_expr(expr: Expr, ty: &str) -> Expr {
     )
 }
 
+/// What concrete evaluation of a Surf file's samples needs: the sample roots
+/// and the checked declaration context. Both depend only on the file's
+/// declarations, so one value serves every property and every domain witness
+/// in the file (chelis#3745); building it per property paid a full library
+/// check and lowering each time.
+struct SurfEvalProgram {
+    roots: SampleRoots,
+    library: chelis_compiler_api::StdLibContext,
+}
+
+/// Why a file's [`SurfEvalProgram`] could not be built. Each caller words the
+/// failure for its own record, as it did when it built the program itself.
+enum SurfEvalProgramError {
+    Desugar(String),
+    Compile(String),
+}
+
+type SurfEvalProgramCell = OnceCell<Result<SurfEvalProgram, SurfEvalProgramError>>;
+
+fn surf_eval_program<'a>(
+    decls: &[Decl],
+    cell: &'a SurfEvalProgramCell,
+) -> Result<&'a SurfEvalProgram, &'a SurfEvalProgramError> {
+    cell.get_or_init(|| {
+        // The sample roots join this program, so they are named fresh against
+        // every name it spells (chelis#3267). The evaluator desugars the same
+        // declarations, so a program that does not desugar fails here exactly
+        // as its first sample would.
+        let roots = match chelis_surf::desugar::desugar_program(decls) {
+            Ok(program) => SampleRoots::for_program(&program),
+            Err(reason) => return Err(SurfEvalProgramError::Desugar(reason.to_string())),
+        };
+        let library = chelis_compiler_api::build_declaration_context(decls)
+            .map_err(|err| SurfEvalProgramError::Compile(compiler_error_message(err)))?;
+        Ok(SurfEvalProgram { roots, library })
+    })
+    .as_ref()
+}
+
 /// The two roots a property sample declares in the program it evaluates: the
 /// property probe and the precondition probe. Each is named through
 /// [`fresh_root_name`] against the whole program (chelis#3267), once per
-/// property run, so a module that defines the plain spelling keeps its
+/// file, so a module that defines the plain spelling keeps its
 /// definition and its verdict.
 struct SampleRoots {
     probe: String,
