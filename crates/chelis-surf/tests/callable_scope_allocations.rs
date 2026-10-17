@@ -55,8 +55,11 @@ fn allocations_during<T>(work: impl FnOnce() -> T) -> (T, u64) {
     (value, ALLOCATIONS.with(Cell::get))
 }
 
-/// N callable definitions, with a value definition holding a block every
-/// tenth definition so that the Deep `let` origin walk is exercised too.
+/// N callable definitions. Every tenth definition is followed by value
+/// definitions holding a block, a `match` and a lambda, a macro definition,
+/// and a type with an invariant, so that every scope the resolver opens, in
+/// the Surf walk and in the Deep origin walk, is opened a number of times
+/// that grows with N.
 fn library_source(definitions: usize) -> String {
     let mut source = String::from("def pair(x: f32, w: f32) -> f32 = mul(x, w)\n");
     for index in 0..definitions {
@@ -69,6 +72,18 @@ fn library_source(definitions: usize) -> String {
             writeln!(
                 source,
                 "alias_{index} = {{\n  local = filler_{index}\n  local\n}}"
+            )
+            .unwrap();
+            writeln!(
+                source,
+                "pick_{index} = match true with {{\n  | true => filler_{index}\n  | false => filler_{index}\n}}"
+            )
+            .unwrap();
+            writeln!(source, "lam_{index} = fn (x: i64) -> filler_{index}(x)").unwrap();
+            writeln!(source, "macro m_{index}(x) = filler_{index}(x)").unwrap();
+            writeln!(
+                source,
+                "@opaque\n@invariant(p) (p.value >= 0i64)\ntype Box{index} =\n  | Box{index} {{ value: i64 }}"
             )
             .unwrap();
         }
