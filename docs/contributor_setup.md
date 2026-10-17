@@ -269,11 +269,11 @@ Open a new shell after installation. The repository pins the Devenv
 release with:
 
 ```sh
-nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/360b5eb1397291383d10845a63a0247981bd5598
+nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/v2.4.0
 devenv --version
 ```
 
-The pinned CLI reports `2.2.3`. Do not run `devenv init`; this checkout
+The pinned CLI reports `2.4.0`. Do not run `devenv init`. This checkout
 already has its configuration. If Devenv reports a Bash evaluation error
 on macOS, install a current Bash with
 `nix-env --install --attr bashInteractive -f https://github.com/NixOS/nixpkgs/tarball/nixpkgs-unstable`.
@@ -292,7 +292,7 @@ Inside a persistent shell, use `cargo build -p chelis-cli` and
 channel.
 
 For optional local direnv activation, install direnv and enable its hook in
-your shell after installing the pinned Devenv 2.2.3. Create an ignored `.envrc`
+your shell after installing the pinned Devenv 2.4.0. Create an ignored `.envrc`
 in each worktree with:
 
 ```sh
