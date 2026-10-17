@@ -143,15 +143,21 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
     `selected-callable-arguments`; a call whose parameters are all tensors
     keeps the lane the Tensor-lane realizability check gives it. The Host lane
     holds every dtype, so this assignment never narrows a value and satisfies
-    [05-OBS-10]. The entry's required inputs stay its tensor inputs. Admission
-    decodes each argument through the value codec, so a record of an
-    invariant-carrying type is revalidated as every in-process value of that
-    type is, and checks the decoded value against the parameter's checked type:
-    a scalar's dtype tag equals the declared primitive; booleans, strings,
-    keys and unit match their own types; tuples, `List`, and `Dict` check every
-    element; and a record's constructor belongs to the declared data type. A
-    value of a generic user data type is rejected at the call boundary, since
-    its field types depend on arguments the codec does not resolve.
+    [05-OBS-10]. The entry's required inputs stay its tensor inputs: the live
+    tensor parameters, never an argued one. A call the manifest does not
+    specialize, because a live tensor parameter has no binding, is an error
+    rather than a result without its root. Admission is one type-directed walk
+    of each argument against the parameter's checked type, at every depth,
+    before anything evaluates: a scalar's dtype tag equals the declared
+    primitive; booleans, strings, keys and unit match their own types; tuples,
+    `List` and `Dict` admit every element at its declared type; a tensor's
+    dtype and every literal extent equal the declared ones; and a record's or
+    variant's constructor belongs to the declared data type, each field
+    admitted at its declared type. A value of an invariant-carrying type is
+    then revalidated against the invariant tables the compile derives once, as
+    every in-process value of that type is. A value of a generic user data type
+    (its field types depend on type arguments) and a tensor whose declared
+    extents are not all literal are rejected at the call boundary (#3804).
 
 ## Coordination
 

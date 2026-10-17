@@ -2686,13 +2686,10 @@ impl PreparedEval {
     }
 }
 
-/// Check one call's argument values against `root`'s checked signature and
-/// decode them through the value codec (spec/05 [05-OBS-9]): every authored
-/// non-tensor parameter has exactly one argument, its value has exactly the
-/// parameter's checked type (no promotion and no narrowing), and every other
-/// supplied name is an error. A record value is decoded against the program's
-/// declarations, its invariant revalidated, as every in-process value of an
-/// invariant-carrying type is.
+/// Admit one call's argument values against `root`'s checked signature
+/// ([05-OBS-9]): every non-tensor parameter has exactly one argument, no other
+/// name is supplied, and each value is admitted against the parameter's
+/// checked type by [`admit_value`] before anything evaluates.
 fn admit_call(
     compiled: &CompiledSource,
     root: &str,
@@ -2717,10 +2714,11 @@ fn admit_call(
             )));
         }
     }
-    let program = compiled
-        .host_program()
-        .map(crate::runtime::PreparedHostEvaluation::program);
-    let mut decoded = BTreeMap::new();
+    let admission = Admission {
+        compiled,
+        adts: compiled.checked().adt_registry(),
+    };
+    let mut admitted = BTreeMap::new();
     for param in &signature.params {
         let tensor = type_is_tensor_runtime_input(&param.checked_type);
         let value = match (tensor, arguments.get(&param.name)) {
@@ -2740,41 +2738,260 @@ fn admit_call(
             }
             (false, Some(value)) => value,
         };
-        let runtime = if execution_value_has_record(value) {
-            let program = program.ok_or_else(|| {
-                reject(
-                    "a record argument needs the host program, and the library and the \
-                        source did not compose"
-                        .to_string(),
-                )
-            })?;
-            crate::decode::try_decode_adt_value(program.exprs(), value)
-        } else {
-            crate::decode::decode_without_records(value)
-        }
-        .map_err(|error| {
-            reject(format!(
-                "argument `{}` of `{root}` does not decode: {error}",
-                param.name
-            ))
-        })?;
-        argument_conforms(
-            &runtime,
-            &param.checked_type,
-            compiled.checked().adt_registry(),
-        )
-        .map_err(|reason| {
-            reject(format!(
-                "argument `{}` of `{root}` is not a value of its parameter type `{}`: {reason}",
-                param.name, param.checked_type
-            ))
-        })?;
-        decoded.insert(param.name.clone(), runtime);
+        let runtime = admission
+            .admit(value, &param.checked_type, &param.name)
+            .map_err(|reason| reject(format!("argument `{}` of `{root}` {reason}", param.name)))?;
+        admitted.insert(param.name.clone(), runtime);
     }
     Ok(crate::runtime::HostCall {
         root: root.to_string(),
-        arguments: decoded,
+        arguments: admitted,
     })
+}
+
+/// The tables a record argument's invariant revalidation reads, derived from
+/// the host program once per compile.
+struct ArgumentInvariants {
+    invariants: UnordMap<String, crate::runtime::InvariantEntry>,
+    adt_fields: UnordMap<String, Vec<String>>,
+    module_constants: UnordMap<String, DeepExpr>,
+}
+
+/// One call's admission context: the compile whose checked types the
+/// arguments must have.
+struct Admission<'a> {
+    compiled: &'a CompiledSource,
+    adts: &'a chelis_types::adt::AdtRegistry,
+}
+
+impl Admission<'_> {
+    /// Admit `value` as a value of exactly `ty`, at every depth, and build the
+    /// runtime value the call receives. `at` names the position for the
+    /// rejection (`p`, `p.inner`, `xs[2]`). A scalar's dtype tag must equal
+    /// the declared primitive; a tensor's dtype and every literal extent must
+    /// equal the declared ones; tuples, lists and dicts admit every element at
+    /// its declared type; a record's or variant's constructor must belong to
+    /// the declared data type and every field is admitted at its declared
+    /// type. A value of an invariant-carrying type is then revalidated, as
+    /// every in-process value of that type is. Nothing is converted.
+    fn admit(
+        &self,
+        value: &ExecutionValue,
+        ty: &chelis_types::types::Type,
+        at: &str,
+    ) -> std::result::Result<RuntimeValue, String> {
+        let admitted = self.admit_at(value, ty, at)?;
+        if execution_value_has_record(value) {
+            let tables = self.invariants()?;
+            crate::runtime::revalidate_adt_value(
+                &admitted,
+                &tables.invariants,
+                &tables.adt_fields,
+                &tables.module_constants,
+            )
+            .map_err(|violation| format!("breaks an invariant: {violation}"))?;
+        }
+        Ok(admitted)
+    }
+
+    fn invariants(&self) -> std::result::Result<&ArgumentInvariants, String> {
+        self.compiled
+            .argument_invariants
+            .get_or_init(|| {
+                let program = self
+                    .compiled
+                    .host_program()
+                    .map(crate::runtime::PreparedHostEvaluation::program)?;
+                let exprs = program.exprs();
+                Some(ArgumentInvariants {
+                    invariants: crate::runtime::collect_type_invariants(exprs),
+                    adt_fields: crate::runtime::collect_adt_ctor_fields(exprs),
+                    module_constants: crate::runtime::collect_zero_arg_constants(exprs),
+                })
+            })
+            .as_ref()
+            .ok_or_else(|| {
+                "is a record, and its invariant needs the host program, which did not compose"
+                    .to_string()
+            })
+    }
+
+    fn admit_at(
+        &self,
+        value: &ExecutionValue,
+        ty: &chelis_types::types::Type,
+        at: &str,
+    ) -> std::result::Result<RuntimeValue, String> {
+        // A nested payload grows the native stack as the codec's own walk does.
+        stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
+            self.admit_inner(value, ty, at)
+        })
+    }
+
+    fn admit_inner(
+        &self,
+        value: &ExecutionValue,
+        ty: &chelis_types::types::Type,
+        at: &str,
+    ) -> std::result::Result<RuntimeValue, String> {
+        use chelis_types::types::{Dim, TensorPrec, Type};
+        let mismatch = || {
+            Err(format!(
+                "is not a value of its parameter type: `{at}` is {}, and its type is `{ty}`",
+                describe_execution_value(value)
+            ))
+        };
+        match (ty, value) {
+            (Type::Ref(inner), _) => self.admit_at(value, inner, at),
+            (Type::Prim(Prim::Bool), ExecutionValue::Bool { value }) => {
+                Ok(RuntimeValue::Bool(*value))
+            }
+            (Type::Prim(Prim::String), ExecutionValue::String { value }) => {
+                Ok(RuntimeValue::String(value.clone()))
+            }
+            (Type::Prim(Prim::Key), ExecutionValue::Key { bits }) => {
+                Ok(RuntimeValue::Key(bits.key()))
+            }
+            (Type::Unit, ExecutionValue::Unit) => Ok(RuntimeValue::Unit),
+            (Type::Prim(prim), ExecutionValue::Scalar { value }) if value.get().prim() == *prim => {
+                Ok(RuntimeValue::from_scalar_value(value.get()))
+            }
+            (Type::Tuple(types), ExecutionValue::Tuple { value: items })
+                if types.len() == items.len() =>
+            {
+                let items = types
+                    .iter()
+                    .zip(items.iter())
+                    .enumerate()
+                    .map(|(index, (ty, item))| self.admit_at(item, ty, &format!("{at}.{index}")))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(RuntimeValue::Tuple(items.into()))
+            }
+            (Type::Adt(name, args), ExecutionValue::List { value: items })
+                if name == "List" && args.len() == 1 =>
+            {
+                let items = items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| self.admit_at(item, &args[0], &format!("{at}[{index}]")))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(RuntimeValue::List(items.into()))
+            }
+            (Type::Adt(name, args), ExecutionValue::Dict { entries })
+                if name == "Dict" && args.len() == 2 =>
+            {
+                let entries = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        Ok((
+                            self.admit_at(&entry.key, &args[0], &format!("{at}{{key {index}}}"))?,
+                            self.admit_at(
+                                &entry.value,
+                                &args[1],
+                                &format!("{at}{{value {index}}}"),
+                            )?,
+                        ))
+                    })
+                    .collect::<std::result::Result<Vec<_>, String>>()?;
+                Ok(RuntimeValue::Dict(entries.into()))
+            }
+            (Type::Tensor(dims, TensorPrec::Concrete(prim)), ExecutionValue::Tensor { value }) => {
+                let tensor = crate::decode::wire_tensor_to_ir(value)
+                    .map_err(|error| format!("is not a tensor value: `{at}`: {error}"))?;
+                if tensor.prim() != *prim {
+                    return mismatch();
+                }
+                if dims.len() != tensor.shape.len() {
+                    return mismatch();
+                }
+                for (dim, extent) in dims.iter().zip(tensor.shape.iter()) {
+                    match dim {
+                        Dim::Lit(declared) if usize::try_from(*declared).ok() == Some(*extent) => {}
+                        Dim::Lit(_) => return mismatch(),
+                        _ => {
+                            return Err(format!(
+                                "has a tensor at `{at}` of type `{ty}`, whose extents are not all \
+                                 literal; a call argument admits a tensor only at a literal shape"
+                            ));
+                        }
+                    }
+                }
+                Ok(RuntimeValue::Tensor(
+                    crate::runtime::RuntimeTensorValue::new(tensor),
+                ))
+            }
+            (Type::Adt(name, _), ExecutionValue::Adt { .. })
+                if name == "List" || name == "Dict" =>
+            {
+                mismatch()
+            }
+            (Type::Adt(name, args), ExecutionValue::Adt { ctor, fields }) => {
+                if !args.is_empty() {
+                    return Err(format!(
+                        "has a value of the generic data type `{name}` at `{at}`, which a call \
+                         argument does not admit"
+                    ));
+                }
+                let Some((owner, variant)) = self.adts.lookup_variant(ctor) else {
+                    return mismatch();
+                };
+                if owner != name {
+                    return mismatch();
+                }
+                if variant.fields.len() != fields.len() {
+                    return Err(format!(
+                        "is not a value of its parameter type: `{at}` gives `{ctor}` {} field(s), \
+                         and the constructor declares {}",
+                        fields.len(),
+                        variant.fields.len()
+                    ));
+                }
+                let admitted = variant
+                    .fields
+                    .iter()
+                    .zip(fields.iter())
+                    .enumerate()
+                    .map(|(index, ((field, field_ty), field_value))| {
+                        let label = match field {
+                            Some(field) => format!("{at}.{field}"),
+                            None => format!("{at}.{index}"),
+                        };
+                        self.admit_at(field_value, field_ty, &label)
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let field_names = variant
+                    .fields
+                    .iter()
+                    .map(|(field, _)| field.clone())
+                    .collect::<Option<Vec<_>>>();
+                Ok(RuntimeValue::Adt {
+                    ctor: ctor.clone(),
+                    source_name: chelis_types::linked_constructor_source_name(owner, ctor)
+                        .unwrap_or(ctor)
+                        .to_string(),
+                    fields: admitted.into(),
+                    field_names,
+                })
+            }
+            _ => mismatch(),
+        }
+    }
+}
+
+fn describe_execution_value(value: &ExecutionValue) -> String {
+    match value {
+        ExecutionValue::Tensor { .. } => "a tensor".to_string(),
+        ExecutionValue::Scalar { value } => format!("a scalar `{}`", value.get().prim().name()),
+        ExecutionValue::Bool { .. } => "a bool".to_string(),
+        ExecutionValue::Key { .. } => "a key".to_string(),
+        ExecutionValue::String { .. } => "a string".to_string(),
+        ExecutionValue::List { .. } => "a list".to_string(),
+        ExecutionValue::Dict { .. } => "a dict".to_string(),
+        ExecutionValue::Tuple { value } => format!("a tuple of {}", value.len()),
+        ExecutionValue::Adt { ctor, .. } => format!("a `{ctor}` value"),
+        ExecutionValue::Unit => "unit".to_string(),
+    }
 }
 
 fn execution_value_has_record(value: &ExecutionValue) -> bool {
@@ -2799,69 +3016,6 @@ fn execution_value_has_record_inner(value: &ExecutionValue) -> bool {
         | ExecutionValue::Key { .. }
         | ExecutionValue::String { .. }
         | ExecutionValue::Unit => false,
-    }
-}
-
-/// Whether a decoded argument is a value of exactly `ty`. A scalar's dtype tag
-/// must equal the declared primitive; containers check every element; a
-/// record's constructor must belong to the declared data type, whose fields
-/// the codec already checked against their declarations.
-fn argument_conforms(
-    value: &RuntimeValue,
-    ty: &chelis_types::types::Type,
-    adts: &chelis_types::adt::AdtRegistry,
-) -> std::result::Result<(), String> {
-    // A nested value grows the native stack as the codec's own walk does.
-    stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || {
-        argument_conforms_inner(value, ty, adts)
-    })
-}
-
-fn argument_conforms_inner(
-    value: &RuntimeValue,
-    ty: &chelis_types::types::Type,
-    adts: &chelis_types::adt::AdtRegistry,
-) -> std::result::Result<(), String> {
-    use chelis_types::types::Type;
-    let mismatch = || Err(format!("it is {}", crate::runtime::describe_value(value)));
-    match (ty, value) {
-        (Type::Ref(inner), _) => argument_conforms(value, inner, adts),
-        (Type::Prim(Prim::Bool), RuntimeValue::Bool(_))
-        | (Type::Prim(Prim::String), RuntimeValue::String(_))
-        | (Type::Prim(Prim::Key), RuntimeValue::Key(_))
-        | (Type::Unit, RuntimeValue::Unit) => Ok(()),
-        (Type::Prim(prim), RuntimeValue::Scalar(payload)) if payload.dtype() == *prim => Ok(()),
-        (Type::Tuple(types), RuntimeValue::Tuple(values)) if types.len() == values.len() => types
-            .iter()
-            .zip(values.iter())
-            .try_for_each(|(ty, value)| argument_conforms(value, ty, adts)),
-        (Type::Adt(name, args), RuntimeValue::List(values))
-            if name == "List" && args.len() == 1 =>
-        {
-            values
-                .iter()
-                .try_for_each(|value| argument_conforms(value, &args[0], adts))
-        }
-        (Type::Adt(name, args), RuntimeValue::Dict(entries))
-            if name == "Dict" && args.len() == 2 =>
-        {
-            entries.iter().try_for_each(|(key, value)| {
-                argument_conforms(key, &args[0], adts)?;
-                argument_conforms(value, &args[1], adts)
-            })
-        }
-        (Type::Adt(name, args), RuntimeValue::Adt { ctor, .. }) => {
-            if !args.is_empty() {
-                return Err(format!(
-                    "a value of the generic data type `{name}` is not admitted as a call argument"
-                ));
-            }
-            match adts.lookup_variant(ctor) {
-                Some((owner, _)) if owner == name => Ok(()),
-                _ => mismatch(),
-            }
-        }
-        _ => mismatch(),
     }
 }
 
@@ -3093,6 +3247,7 @@ fn compile_decls_against_library(
         native_clarabel_solve: false,
         eval_facts: std::sync::OnceLock::new(),
         host_program: std::sync::OnceLock::new(),
+        argument_invariants: std::sync::OnceLock::new(),
     })
 }
 
@@ -3309,6 +3464,24 @@ fn eval_compiled_call(
         call,
     )?;
     let manifest = effective_manifest.as_ref();
+    // A call is owed exactly when its inputs are supplied ([05-OBS-7]); a call
+    // the manifest does not specialize has an unbound live tensor input, and
+    // it is an error, never a result without its root.
+    if let Some(call) = call
+        && !manifest
+            .entries
+            .iter()
+            .any(|entry| entry.def_name == call.root)
+    {
+        return Err(stage_error(
+            EVAL_STAGE,
+            format!(
+                "the call of `{}` is not owed: a tensor parameter its body reads has no binding",
+                call.root
+            ),
+            GeneralKind::EvalError,
+        ));
+    }
     let selected =
         selected_root_names.map(|roots| roots.iter().cloned().collect::<BTreeSet<String>>());
     let observed_entries = manifest
@@ -3877,6 +4050,10 @@ struct CompiledSource {
     /// the first evaluation. `None` inside means composition failed, and each
     /// evaluation reports that failure itself.
     host_program: std::sync::OnceLock<Option<crate::runtime::PreparedHostEvaluation>>,
+    /// The invariant tables a call's record arguments are revalidated
+    /// against, derived on the first record argument. `None` inside means
+    /// the host program did not compose.
+    argument_invariants: std::sync::OnceLock<Option<ArgumentInvariants>>,
 }
 
 /// The facts every evaluation of one [`CompiledSource`] needs and none of
@@ -4094,7 +4271,13 @@ fn manifest_for_eval<'a>(
         let arguments = call
             .filter(|call| call.root == candidate)
             .map(|call| &call.arguments);
-        let argued = |name: &str| arguments.is_some_and(|arguments| arguments.contains_key(name));
+        let argued = |name: &str| {
+            arguments.is_some_and(|arguments| {
+                arguments
+                    .keys()
+                    .any(|parameter| is_lowered_input_of(name, parameter))
+            })
+        };
         let live_parameter_names =
             chelis_effects::realizability::referenced_runtime_inputs(body, &parameter_names)
                 .into_iter()
@@ -4120,6 +4303,9 @@ fn manifest_for_eval<'a>(
         if let Some(top_level_inputs) = realizability.required_inputs_by_def.get(candidate) {
             required_inputs.extend(top_level_inputs.iter().cloned());
         }
+        // The callable's lowered body reads an argued parameter as a graph
+        // input; the call supplies it, so it is never a required input.
+        required_inputs.retain(|input| !argued(input));
         if !required_inputs
             .iter()
             .all(|input| available.contains(input.as_str()))
@@ -4256,6 +4442,28 @@ fn selected_host_input_demand(
                 .collect()
         })
     })
+}
+
+/// Whether `input` is a graph input the lowering gives `parameter`: the
+/// parameter itself, or a component of a tuple parameter, which lowering
+/// names `parameter__0`, `parameter__0__1` and so on.
+fn is_lowered_input_of(input: &str, parameter: &str) -> bool {
+    let Some(mut rest) = input.strip_prefix(parameter) else {
+        return false;
+    };
+    while !rest.is_empty() {
+        let Some(component) = rest.strip_prefix("__") else {
+            return false;
+        };
+        let digits = component
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(component.len());
+        if digits == 0 {
+            return false;
+        }
+        rest = &component[digits..];
+    }
+    true
 }
 
 fn type_is_tensor_runtime_input(ty: &chelis_types::types::Type) -> bool {
@@ -4590,6 +4798,7 @@ fn compiled_from_pipeline_outcome(
         native_clarabel_solve: false,
         eval_facts: std::sync::OnceLock::new(),
         host_program: std::sync::OnceLock::new(),
+        argument_invariants: std::sync::OnceLock::new(),
     })
 }
 

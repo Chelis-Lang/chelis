@@ -44,6 +44,8 @@ def maybe(o: Option[i64]) -> bool = true
 
 def scaled(t: tensor[2, f32], k: f32) -> f32 = k
 
+def tensor_echo(t: tensor[2, f32], k: f32) -> tensor[2, f32] = t
+
 def constant() -> i64 = 7i64
 "#;
 
@@ -247,7 +249,9 @@ fn malformed_calls_are_rejected_before_evaluation() {
         ctor: "Positive".to_string(),
         fields: vec![scalar_f32(-1.0)],
     };
-    assert!(rejection(&program, "positive_value", vec![("p", broken)]).contains("does not decode"));
+    assert!(
+        rejection(&program, "positive_value", vec![("p", broken)]).contains("breaks an invariant")
+    );
     let valid = ExecutionValue::Adt {
         ctor: "Positive".to_string(),
         fields: vec![scalar_f32(2.0)],
@@ -261,10 +265,7 @@ fn malformed_calls_are_rejected_before_evaluation() {
         fields: vec![scalar_integer(Prim::Int64, 1)],
     };
     let generic = rejection(&program, "maybe", vec![("o", some)]);
-    assert!(
-        generic.contains("generic") || generic.contains("does not decode"),
-        "{generic}"
-    );
+    assert!(generic.contains("generic data type `Option`"), "{generic}");
 
     // A tensor parameter arrives as a binding, never as an argument.
     let tensor_argument = rejection(
@@ -275,6 +276,39 @@ fn malformed_calls_are_rejected_before_evaluation() {
     assert!(
         tensor_argument.contains("arrives as a binding"),
         "{tensor_argument}"
+    );
+
+    // Tensor parameters follow the free-tensor-input rule: a live one is a
+    // required input, and a call without its binding is rejected rather than
+    // returning no root; a dead one needs no binding.
+    let unbound = rejection(&program, "tensor_echo", vec![("k", scalar_f32(1.0))]);
+    assert!(unbound.contains("is not owed"), "{unbound}");
+    let tensor: ExecutionValue = serde_json::from_value(serde_json::json!({
+        "type": "tensor",
+        "value": {"shape": [2], "data": {"dtype": "f32", "bits": ["3f800000", "40000000"]}}
+    }))
+    .unwrap();
+    let ExecutionValue::Tensor { value: binding } = &tensor else {
+        unreachable!("a tensor fixture");
+    };
+    let echoed = program
+        .call_root(
+            "tensor_echo",
+            args(vec![("k", scalar_f32(1.0))]),
+            BTreeMap::from([("t".to_string(), binding.clone())]),
+        )
+        .expect("a call with its live tensor bound evaluates");
+    assert_eq!(root_value(&echoed), serde_json::to_value(&tensor).unwrap());
+    let dead = program
+        .call_root(
+            "scaled",
+            args(vec![("k", scalar_f32(2.5))]),
+            BTreeMap::new(),
+        )
+        .expect("a dead tensor parameter needs no binding");
+    assert_eq!(
+        root_value(&dead),
+        serde_json::to_value(scalar_f32(2.5)).unwrap()
     );
 
     assert!(rejection(&program, "constant", vec![]).contains("is not a parameterized definition"));
