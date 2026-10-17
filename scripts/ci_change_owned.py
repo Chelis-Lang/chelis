@@ -171,11 +171,12 @@ STANDING_EXECUTION = {
 TARGETED_REBASE_REUSED_OWNER_JOBS = frozenset({("ci.yml", "ci-fast")})
 TARGETED_REBASE_SUPPORTED_OWNER_JOBS = frozenset(
     {
-        # cargo-nix, like docs, runs on every ci.yml event, so a targeted
-        # rebase still runs it.
+        # cargo-nix and nix-eval, like docs, run on every ci.yml event, so a
+        # targeted rebase still runs them.
         ("ci.yml", "cargo-nix"),
         ("ci.yml", "docs"),
         ("ci.yml", "lint-rust"),
+        ("ci.yml", "nix-eval"),
         ("ci.yml", "script-unit"),
         ("conformance.yml", "conformance"),
     }

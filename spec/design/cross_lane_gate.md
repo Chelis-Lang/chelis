@@ -42,7 +42,7 @@ that the unimplemented command or Nix acceptance check passes.
 | Build/link/run patterns | `crates/chelis-cli/tests/parity.rs`; `scripts/core_fragment_parity_receipt.py` | The former uses the shared resolver; the latter runs the emitted recipe through a shell. Neither is a hermetic runner to copy unchanged. |
 | Locked flake | `flake.nix`, `flake.lock` | Already present and locked. |
 | Check scaffolding | `nix/checks.nix`, `nix/contracts.nix` | `supportedSystems` includes `x86_64-linux`; `runtimeConsumers.x86_64-linux = "OpenBLAS"`. |
-| Nix CI entry | `.github/workflows/nix-packages.yml` | `nix flake check --print-build-logs`, on `workflow_dispatch` and published release only. |
+| Nix CI entry | `.github/workflows/nix-packages.yml` | `nix flake check --print-build-logs`, on `workflow_dispatch`, published release, and the daily `main` schedule. |
 | Flake contract test | `scripts/test_nix_flake_contract.py` | Enroll a new check here. |
 
 The issue body says it "introduces a locked flake." That is stale: the flake,
@@ -221,8 +221,9 @@ host toolchain. A local macOS run does not satisfy this requirement.
 A configured Linux builder or the hosted Linux workflow can supply the required evidence.
 
 Routine PR CI does not run it. `.github/workflows/nix-packages.yml` triggers
-only on `workflow_dispatch` and published releases, so claiming [#763] complete
-requires an explicit dispatch on the candidate and a link to that run.
+only on `workflow_dispatch`, published releases, and a daily schedule on
+`main`. A claim that [#763] is complete therefore needs an explicit dispatch on
+the candidate and a link to that run.
 A future required PR job can run the same sandboxed command.
 Neither a skipped job nor an unexecuted command counts as a pass.
 

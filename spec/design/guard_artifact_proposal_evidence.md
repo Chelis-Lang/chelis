@@ -43,7 +43,7 @@ it preserves the earlier measurements under their original commits.
 | Phase 3 required-test digests | `faithful_observation.md` Phase 3 rationale and oracle mutations | Originating failure classes, chelis#1724, chelis#1818, chelis#1918 | Retired in chelis#2053 after corpus derivation, mandatory changed-test review, and standing body/result controls. The finite mutation set is covered; arbitrary test semantics are not proved. |
 | Phase 4B atom/region digests | Oracle doctrine, dtype amendment ledger, post-chelis#1495 moves | Per-move anchor and region classification | Retired in chelis#2045 after granular reporting and acknowledgements; identities, anchors, boundaries and semantic controls remain. |
 | Phase A digest | Runtime-extent design and move receipts | Closed corpus, measured moves | Keep while Phase A remains closed. |
-| Nix workflow digest | Test docstring and issue history | Temporary event policy, no movement | Keep with an explicit retirement condition. |
+| Nix workflow digest | Test docstring and issue history | Temporary event policy, reviewed freeze moves | Keep with an explicit retirement condition. |
 | Loud-unsupported count baseline | Loud-unsupported rationale and chelis#1348 | Shrink-only census and true catches | Keep. |
 | Expand call/insert inventories | Headers, checker owner, history, chelis#1936 mutations | Scanner sensitivity versus semantic classification | Retired by chelis#1968 after checker-backed replacement; stale PR selection removed by chelis#1998. |
 | Closed-vocabulary markers | Complete test header/tables and known evasions | Positive use versus finite forbidden spellings | Crate-granular positive evidence implemented by chelis#1960. |
