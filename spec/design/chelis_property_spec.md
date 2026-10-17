@@ -421,34 +421,55 @@ grid coverage needs 1936 attempts, and `44^n` for `n` binders, so **no index
 policy covers the grid within a budget linear in the schedule length**; each
 one only chooses which vanishing fraction to spend the budget on.
 
-The weaker claim — that no index policy reaches *any* off-diagonal pair
-cheaply — would be false, and the figures above are what refute it: a
+The weaker claim -- that no index policy reaches *any* off-diagonal pair
+cheaply -- would be false, and the figures above are what refute it: a
 full-schedule odometer reaches the pair (binder 1's candidate `a`, binder 2's
-candidate `b`) at cell `a + 44b`, so the `x / y` counterexample is its cell 1,
-earlier than this policy's attempt 13. What it buys that with is the per-binder
-coverage chelis#3636 exists to provide, holding the slowest binder at 3 of its
-44 classes. So the choice between them is not "reachable or not"; it is which
-coverage to keep, and the argument that settles it is the next paragraph's.
+candidate `b`) at cell `a + 44b`, so the `x / y` counterexample is its cell 1.
+What it buys that with is the per-binder coverage chelis#3636 exists to
+provide. So the choice between them is not "reachable or not"; it is which
+coverage to keep.
 
-So the policy is a budget policy, and it rests on the observation that **the
-grid is only large because the schedule is fine-grained.** The 44 candidates
-collapse into a handful of *magnitude classes*, and it is the classes, not the
-individual rungs, that decide whether a pair overflows, underflows, or
-cancels. Tier C therefore spends the budget in two interleaved halves,
-for a property with **two or more binders**:
+So the policy is a budget policy, and it rests on two observations. First,
+**the grid is only large because the schedule is fine-grained**: the 44
+candidates collapse into a handful of *magnitude classes*, and it is the
+classes, not the individual rungs, that decide whether a pair overflows,
+underflows, or cancels. Second, **the attempts after the schedule is spent
+were already nearly worthless**: they draw uniformly over the narrow proposal
+window (chelis#644 owns its width), which is exactly the draw chelis#3636
+exists because it refutes so little. Those are the attempts the pairing takes.
 
-- **even attempts carry the diagonal**, unchanged: attempt `2i` proposes every
-  binder's edge candidate `i`, falling back to the uniform draw once a
-  binder's schedule is spent. Every binder still reaches every one of its own
-  classes, in the same order, at half the previous rate;
-- **odd attempts carry the off-diagonal phase**: attempt `2i + 1` proposes
-  cell `i` of a mixed-radix odometer over each binder's **extremal class
-  representatives**, and falls back to the uniform draw once the cells are
-  spent.
+For a property with **two or more scheduled binders**:
+
+- **the diagonal runs first, at chelis#3636's unchanged one-for-one rate**:
+  attempt `i` proposes every binder's edge candidate `i`, until that binder's
+  schedule is spent. Nothing rations it, so no diagonal candidate is ever
+  displaced and the schedule is reached in exactly the samples it was before;
+- **then the off-diagonal phase**: the attempts that would have been uniform
+  draws propose cell `attempt - max(DIAGONAL_SPAN, len)` of a mixed-radix
+  odometer over each binder's **extremal class representatives**, until the
+  cells are spent;
+- **then the uniform draw**, as before.
+
+`DIAGONAL_SPAN` is 44, the length of an unguarded `f64` schedule, so for a
+binder without `!=` exclusions the diagonal is complete before any cell is
+proposed. A binder whose own schedule is longer keeps walking it and enters
+the cell phase later, which offsets its cells relative to a
+shorter-scheduled sibling: that costs some pairs and loses nothing, and
+binders with equal-length schedules -- the ordinary case, including every
+binder of one dtype under the same guards -- stay aligned.
+
+An earlier revision interleaved the two, one attempt each. That revision is
+recorded here because its failure is the reason for the rule above: halving
+the diagonal's rate meant a schedule longer than half the budget reached its
+tail only past the budget. Each `!=` exclusion adds two candidates, so a
+two-binder property with four exclusions per binder has 52 and needed 103
+samples; it reported `fuzz_validated` at the default 100 where it had refuted
+at 52. **Relocating chelis#3697's own defect onto the long-schedule axis is
+not a fix for it.** The diagonal is therefore not rationed at all.
 
 A binder's representatives are selected *from its own edge candidates*, so the
-phase introduces no value the diagonal does not already propose on its own --
-the only new thing is which values are **paired**. There are at most
+phase introduces no value the diagonal does not already propose -- the only
+new thing is which values are **paired**. There are at most
 `EXTREMAL_CLASSES` of them, in this order, deduplicated by bit pattern:
 
 1. the largest candidate, which for a binder unbounded above is `+MAX`;
@@ -473,38 +494,35 @@ order predecessors already drawn in that attempt. The digit order is the
 binders' sampling order: topological order in the constraint-directed lane,
 declaration order in the typed-generator lane.
 
+The cell phase is capped at `MAX_CELLS` attempts, 256, whatever the arity.
+`EXTREMAL_CLASSES.pow(arity)` grows past any budget -- `6^5` is 7776 -- and an
+attempt spent on a cell is one not spent on the uniform draw, so for a
+property whose precondition rejects every extremal representative an
+unbounded phase converts a run that collected its samples into an exhausted
+generator. That was measured: a five-binder rejection-lane property went from
+`passed` to `status:"error"` with 78 of 100 samples accepted. The cap bounds
+the cost, and a high-arity property covers a prefix of its grid.
+
 The arithmetic this buys, for the two-binder case at the default 100 samples:
-50 diagonal attempts cover all 44 per-binder classes, and 36 cells cover the
-whole `6 x 6` extremal grid, leaving 14 attempts on uniform draws. The issue's
-own `x / y` counterexample is the cell pairing `x`'s largest candidate with
-`y`'s smallest positive one, and is reached at attempt 13. For three binders
-the `216` cells exceed the default budget, so the phase covers a prefix of
-them and a larger `--samples` reaches the rest; scaling the *default* budget
-with the binder count is deliberately **not** part of this policy, because it
-would change the cost of every run to serve the arity that needs it least
-often.
+44 diagonal attempts cover all 44 per-binder classes, 36 cells cover the whole
+`6 x 6` extremal grid at attempts 44 through 79, and 20 attempts remain on
+uniform draws. The issue's own `x / y` counterexample is the cell pairing
+`x`'s largest candidate with `y`'s smallest positive one, cell 6, so attempt
+50 -- the fifty-first attempt refutes. For three binders the 216 cells exceed
+the default budget, so the phase covers a prefix of them and a larger
+`--samples` reaches the rest.
 
-Three consequences are deliberate and bounded:
+Two consequences are deliberate and bounded:
 
-- The interleave **halves the rate** at which a multi-binder property's
-  diagonal is walked, so one refuted only at a late candidate needs about
-  twice the samples it did. The last of the 44 unguarded `f64` candidates is
-  index 43, proposed at diagonal attempt 86, so **87 samples** now reach the
-  whole schedule where 44 did before, and the default budget of 100 still
-  covers it. Budgets in `[44, 87)` are a **new** degradation band that this
-  policy introduces: they used to cover the schedule completely and now reach
-  a prefix. That is a real cost of the split, not a restatement of the older
-  one — a budget "smaller than the schedule" was `[1, 44)` and is unchanged.
-- A single-binder property takes **neither** half: its attempts index the
-  schedule exactly as before. An odometer over one binder's own classes is the
-  diagonal, so the phase would only halve the rate at which that schedule is
-  walked and buy nothing.
-- A schedule longer than the span the interleave gives it -- a property with
-  several `!=` exclusions, each contributing two neighbours -- has its tail
-  entries displaced to later attempts rather than dropped, because the
-  fallback only engages once `candidates.get` returns `None`. The
-  representatives are drawn from the same list, so the extremes survive the
-  displacement and only mid-ladder rungs arrive later.
+- A single-binder property takes **no cell**: an odometer over one binder's
+  own classes is the diagonal, so the phase would buy nothing. Its attempts
+  index the schedule exactly as before.
+- Up to `min(EXTREMAL_CLASSES^n, MAX_CELLS)` attempts that would have been
+  uniform draws are cells instead -- 36 of the default budget's 56 such
+  attempts for two binders. That is the whole cost of the policy: the
+  diagonal is untouched at every arity, so a property refuted on the schedule
+  is refuted in the same number of samples as before, and only a property
+  refuted by a *uniform* draw over the narrow window sees fewer chances at it.
 
 Nothing here depends on the seed: the cells are a fixed function of the
 attempt ordinal, so a pair-refuted property is refuted under every seed, and
@@ -514,9 +532,9 @@ still runs, and a rejected cell is a rejected sample that consumes its attempt.
 
 Three other budget policies were weighed and not taken:
 
-- **Scaling the default sample budget with the binder count.** Rejected above:
-  it changes the cost of every run to serve the arity that needs it least
-  often, and `--samples` already serves the arity that does.
+- **Scaling the default sample budget with the binder count.** It would change
+  the cost of every run to serve the arity that needs it least often, and
+  `--samples` already serves the arity that does.
 - **A per-property pairing strategy, declared in source.** This would compose
   with a per-binder domain option, so it is worth revisiting *with* that
   option rather than before it. On its own it adds language surface to solve a

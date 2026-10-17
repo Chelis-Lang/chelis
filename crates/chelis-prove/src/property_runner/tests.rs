@@ -2292,7 +2292,7 @@ fn issue_3636_scheduled_attempts_may_leave_the_proposal_window() {
 //
 // Three properties of the pairing decide whether it is safe, and none is
 // observable through a CLI property: that a representative is always a value
-// the diagonal already proposes, that the interleave leaves arity one alone,
+// the diagonal already proposes, that the cells leave arity one alone,
 // and that the cells run out so a long run regains its uniform draws.
 
 /// Every representative comes from the binder's own candidate list, there are
@@ -2393,53 +2393,120 @@ fn issue_3697_narrow_guards_fill_fewer_extremal_roles() {
     );
 }
 
-/// A single-binder property is not interleaved: its attempt ordinal indexes
-/// the schedule one-for-one, which is chelis#3636's behaviour unchanged.
+/// A single-binder property takes no cell: its attempt ordinal indexes the
+/// schedule one-for-one, which is chelis#3636's behaviour unchanged.
 #[test]
-fn issue_3697_arity_one_is_never_interleaved() {
+fn issue_3697_arity_one_takes_no_cell() {
     for attempt in 0..128 {
         assert_eq!(
-            schedule_slot(attempt, 1, 0),
+            schedule_slot(attempt, 1, 0, 44),
             ScheduleSlot::Diagonal(attempt),
             "attempt {attempt}"
         );
     }
 }
 
-/// Two binders split the budget in half: even attempts carry the diagonal at
-/// half the previous rate, odd attempts carry the cells, and each binder
-/// takes its own digit of the same cell.
+/// The diagonal completes at its original one-for-one rate before any cell is
+/// proposed, and the cells then take the attempts that would have been
+/// uniform draws.
+///
+/// This is the round-2 repair. An earlier revision interleaved the two, one
+/// attempt each, which halved the diagonal's rate; the regression that caused
+/// is pinned below.
 #[test]
-fn issue_3697_two_binders_interleave_the_diagonal_and_the_cells() {
-    assert_eq!(schedule_slot(0, 2, 0), ScheduleSlot::Diagonal(0));
-    assert_eq!(schedule_slot(0, 2, 1), ScheduleSlot::Diagonal(0));
-    assert_eq!(schedule_slot(84, 2, 0), ScheduleSlot::Diagonal(42));
-    assert_eq!(schedule_slot(84, 2, 1), ScheduleSlot::Diagonal(42));
+fn issue_3697_the_diagonal_completes_before_any_cell() {
+    // Every attempt inside the span is a diagonal attempt at its own index,
+    // for either binder.
+    for attempt in 0..DIAGONAL_SPAN {
+        for position in 0..2 {
+            assert_eq!(
+                schedule_slot(attempt, 2, position, 44),
+                ScheduleSlot::Diagonal(attempt),
+                "attempt {attempt}, position {position}"
+            );
+        }
+    }
+    // The first cell lands on the first attempt past the span, and each
+    // binder reads its own digit of it.
+    assert_eq!(
+        schedule_slot(DIAGONAL_SPAN, 2, 0, 44),
+        ScheduleSlot::Cell(0)
+    );
+    assert_eq!(
+        schedule_slot(DIAGONAL_SPAN, 2, 1, 44),
+        ScheduleSlot::Cell(0)
+    );
     // Cell 6 is digit 0 for the first binder and digit 1 for the second: the
-    // pairing that refutes chelis#3697's own `x / y` reproduction, where the
-    // guards leave each binder three representatives.
-    assert_eq!(schedule_slot(13, 2, 0), ScheduleSlot::Cell(0));
-    assert_eq!(schedule_slot(13, 2, 1), ScheduleSlot::Cell(1));
+    // pairing that refutes chelis#3697's own `x / y` reproduction.
+    assert_eq!(
+        schedule_slot(DIAGONAL_SPAN + 6, 2, 0, 44),
+        ScheduleSlot::Cell(0)
+    );
+    assert_eq!(
+        schedule_slot(DIAGONAL_SPAN + 6, 2, 1, 44),
+        ScheduleSlot::Cell(1)
+    );
+}
+
+/// A schedule longer than the span keeps the diagonal until it is spent, so
+/// its tail is never displaced past the budget.
+///
+/// This is the exact defect round 2 measured: each `!=` exclusion adds two
+/// candidates, and under the interleaved revision a two-binder property with
+/// four exclusions per binder (52 candidates) reached its last candidate only
+/// at attempt 103, so it reported `fuzz_validated` at the default budget of
+/// 100 where it had refuted at 52.
+#[test]
+fn issue_3697_a_long_schedule_keeps_its_diagonal() {
+    let long = 52;
+    for attempt in 0..long {
+        assert_eq!(
+            schedule_slot(attempt, 2, 0, long),
+            ScheduleSlot::Diagonal(attempt),
+            "attempt {attempt} of a {long}-candidate schedule"
+        );
+    }
+    // Its cells begin where its own schedule ends, not where the span does.
+    assert_eq!(schedule_slot(long, 2, 0, long), ScheduleSlot::Cell(0));
 }
 
 /// The cells run out, so a run longer than the grid regains the uniform
-/// draws the odometer displaced. Without this the window would never be
-/// sampled again at any budget.
+/// draws they displaced. Without this the window would never be sampled again
+/// at any budget.
 #[test]
 fn issue_3697_cells_exhaust_and_yield_back_to_the_uniform_draw() {
     let cells = EXTREMAL_CLASSES * EXTREMAL_CLASSES;
-    // The last cell, then the first attempt past the grid.
+    assert!(cells < MAX_CELLS, "two binders are under the cap");
     assert!(matches!(
-        schedule_slot(2 * (cells - 1) + 1, 2, 0),
+        schedule_slot(DIAGONAL_SPAN + cells - 1, 2, 0, 44),
         ScheduleSlot::Cell(_)
     ));
-    assert_eq!(schedule_slot(2 * cells + 1, 2, 0), ScheduleSlot::Random);
-    // Even attempts past the grid are still the diagonal, which falls back to
-    // a random draw on its own once the candidate list is spent.
     assert_eq!(
-        schedule_slot(2 * cells, 2, 0),
-        ScheduleSlot::Diagonal(cells)
+        schedule_slot(DIAGONAL_SPAN + cells, 2, 0, 44),
+        ScheduleSlot::Random
     );
+}
+
+/// The cap bounds the cell phase whatever the arity. `6^5` is 7776, and an
+/// attempt spent on a cell is one not spent on the uniform draw: round 2
+/// measured a five-binder rejection-lane property turning from `passed` into
+/// an exhausted generator once the cells claimed every other attempt.
+#[test]
+fn issue_3697_the_cell_phase_is_capped_whatever_the_arity() {
+    for arity in [5usize, 8, 25, usize::MAX] {
+        assert!(
+            matches!(
+                schedule_slot(DIAGONAL_SPAN + MAX_CELLS - 1, arity, 0, 44),
+                ScheduleSlot::Cell(_)
+            ),
+            "arity {arity}"
+        );
+        assert_eq!(
+            schedule_slot(DIAGONAL_SPAN + MAX_CELLS, arity, 0, 44),
+            ScheduleSlot::Random,
+            "arity {arity}: the cap must bound the phase"
+        );
+    }
 }
 
 /// An absurd arity must not panic. `EXTREMAL_CLASSES.pow(arity)` overflows
@@ -2449,11 +2516,11 @@ fn issue_3697_cells_exhaust_and_yield_back_to_the_uniform_draw() {
 #[test]
 fn issue_3697_an_absurd_arity_does_not_overflow() {
     for arity in [25usize, 64, 1024, usize::MAX] {
-        let slot = schedule_slot(4097, arity, 0);
+        let slot = schedule_slot(DIAGONAL_SPAN + 7, arity, 0, 44);
         assert!(matches!(slot, ScheduleSlot::Cell(_)), "arity {arity}");
         // A high-order digit is simply zero: the odometer has not reached it.
         assert_eq!(
-            schedule_slot(4097, arity, 24),
+            schedule_slot(DIAGONAL_SPAN + 7, arity, 24, 44),
             ScheduleSlot::Cell(0),
             "arity {arity}"
         );
@@ -2487,7 +2554,7 @@ fn issue_3697_integer_representatives_are_the_schedules_prefix() {
 ///
 /// They are two places stating one fact, and when they disagreed the cost was
 /// not a crash but a silent loss of the feature: a `bool` binder switched the
-/// interleave on while ignoring its own slot, so a property with one
+/// odometer on while ignoring its own slot, so a property with one
 /// *scheduled* binder beside it paid the halved diagonal rate for no pairing
 /// benefit, and a `bool` declared first consumed digit 0 and multiplied every
 /// useful cell index by the radix -- which pushed a two-float-binder
@@ -2528,14 +2595,12 @@ fn issue_3697_schedule_participation_matches_the_sampler() {
             })
             .unwrap_or_else(|| panic!("`{spelling}` must yield a typed binder"));
 
-        let draw = |slot| {
+        let draw = |attempt| {
             let mut rng = Lcg::new(7);
-            sample_value("v", &ty, &mut rng, slot).map(|value| value.json)
+            sample_value("v", &ty, &mut rng, attempt, Some((0, 2))).map(|value| value.json)
         };
-        let first = draw(ScheduleSlot::Diagonal(0))
-            .unwrap_or_else(|error| panic!("`{spelling}` must sample: {error:?}"));
-        let second = draw(ScheduleSlot::Diagonal(1))
-            .unwrap_or_else(|error| panic!("`{spelling}` must sample: {error:?}"));
+        let first = draw(0).unwrap_or_else(|error| panic!("`{spelling}` must sample: {error:?}"));
+        let second = draw(1).unwrap_or_else(|error| panic!("`{spelling}` must sample: {error:?}"));
         let moved = first != second;
         let scheduled = takes_schedule_slot(&ty);
         assert_eq!(
@@ -2550,7 +2615,7 @@ fn issue_3697_schedule_participation_matches_the_sampler() {
 }
 
 /// The odometer's arity and digit positions count only the scheduled binders,
-/// so an unscheduled one neither switches the interleave on nor takes a digit.
+/// so an unscheduled one neither switches the odometer on nor takes a digit.
 #[test]
 fn issue_3697_unscheduled_binders_take_no_digit() {
     let sp = chelis_deep::Span::new(0, 0);

@@ -9,39 +9,40 @@
 //! values still reported `fuzz_validated`.
 //!
 //! The policy is in `spec/design/chelis_property_spec.md`, "The off-diagonal
-//! phase": for two or more binders, even attempts carry the diagonal
-//! unchanged and odd attempts carry a mixed-radix odometer over each binder's
-//! **extremal class representatives**, which are selected from that binder's
-//! own edge candidates. Each test below names the part of that policy it
-//! pins, and every positive test is paired with the control that keeps it
-//! from passing for the wrong reason.
+//! phase": the diagonal runs first at chelis#3636's unchanged one-for-one
+//! rate, and once a binder's schedule is spent the attempts that would have
+//! been uniform draws carry a mixed-radix odometer over each binder's
+//! **extremal class representatives**, selected from that binder's own edge
+//! candidates. Each test below names the part of that policy it pins, and
+//! every positive test is paired with the control that keeps it from passing
+//! for the wrong reason.
 //!
 //! **On discrimination.** Every element of the policy was removed in turn and
-//! the failure observed, rather than asserted. Eleven mutations, all detected:
+//! the failure observed, rather than asserted. The rows, with the test that
+//! catches each:
 //!
 //! | removed | caught by |
 //! |---|---|
-//! | the off-diagonal half | every pairing test here |
-//! | the diagonal half | `..._the_diagonal_survives_the_interleave` |
-//! | the arity-one carve-out | `..._single_binder_schedule_is_not_interleaved` |
+//! | the off-diagonal phase | every pairing test here |
+//! | the diagonal's priority over the cells | `..._the_whole_diagonal_still_needs_only_forty_four_samples` |
+//! | the long-schedule exemption | `..._a_long_schedule_is_not_displaced_past_the_budget` |
+//! | the cell cap | `..._a_high_arity_rejection_lane_property_still_collects_its_samples` |
+//! | the arity-one carve-out | `..._single_binder_schedule_takes_no_cell` |
 //! | the digit's dependence on binder position | every pairing test here |
 //! | the largest-candidate role | `..._the_refuting_pair_is_off_diagonal_...` |
 //! | the smallest-candidate role | `..._the_largest_negative_role_...` |
 //! | the smallest-positive role | `..._the_smallest_positive_role_...` |
 //! | the largest-negative role | `..._the_largest_negative_role_...` |
 //! | the moderate role | `..._typed_generator_lane_pairs_off_diagonal` |
+//! | counting only the scheduled binders | `..._an_unscheduled_binder_...`, `..._a_leading_unscheduled_binder_...` |
 //! | the zero role | unit test only -- see below |
-//! | the cell cap | unit test only -- see below |
 //!
-//! Two elements have no discriminator at this level, and this says so rather
-//! than implying a dedicated one. The **zero role** cannot be isolated by a
-//! property: wherever the guards admit a zero it is also the interval's
-//! endpoint or its smallest-magnitude candidate, so another role proposes it
-//! anyway and only the exact role list can see the difference. The **cell
-//! cap** is the point at which the odometer yields back to the uniform draw,
-//! which no property can observe without asserting a probability. Both are
-//! pinned exactly in `chelis-prove`'s `property_runner::tests`, under the
-//! same `issue_3697_` prefix.
+//! The **zero role** has no discriminator at this level, and this says so
+//! rather than implying one: wherever the guards admit a zero it is also the
+//! interval's endpoint or its smallest-magnitude candidate, so another role
+//! proposes it anyway and only the exact role list can see the difference. It
+//! is pinned in `chelis-prove`'s `property_runner::tests`, under the same
+//! `issue_3697_` prefix, along with the slot arithmetic no property observes.
 use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::tempdir;
@@ -153,9 +154,10 @@ fn issue_3697_the_refuting_pair_is_off_diagonal_and_guard_admitted() {
 ///
 /// `MAX` is each binder's largest-candidate representative and the minimum
 /// subnormal its smallest-positive one, which for these guards are digits 0
-/// and 1 of a three-representative list: cell 6, and so attempt 13. The
-/// fourteenth attempt is therefore the one that refutes, under every seed,
-/// and that count is the whole mechanism claim.
+/// and 1 of a three-representative list: cell 6. The cells begin once the
+/// diagonal is spent, at attempt `DIAGONAL_SPAN` = 44, so cell 6 is attempt
+/// 50 and the fifty-first attempt refutes, under every seed. That count is
+/// the whole mechanism claim.
 #[test]
 fn issue_3697_the_refuting_cell_is_reached_at_a_fixed_attempt() {
     let source = "module Pair.Exact
@@ -173,8 +175,8 @@ where x > 0.0f64, y > 0.0f64:
             "seed {seed}: {record:#}"
         );
         assert_eq!(
-            record["attempted_samples"], 14,
-            "seed {seed}: the cell is attempt 13, so the fourteenth attempt \
+            record["attempted_samples"], 51,
+            "seed {seed}: the cell is attempt 50, so the fifty-first attempt \
              refutes; a different count means the pairing moved: {record:#}"
         );
     }
@@ -200,14 +202,13 @@ where x > 0.0f64, y > 0.0f64:
     assert_eq!(record["rejected_samples"], 0, "{record:#}");
 }
 
-/// The diagonal survives the interleave, at half the previous rate. This
-/// property is false only when *both* binders take the schedule's last
-/// magnitude rung, `1e-323`, which sits at candidate index 42 of the
-/// unguarded `f64` schedule: a diagonal attempt reaches it at attempt 84, and
-/// no extremal class representative is that rung, so only the diagonal
-/// refutes this.
+/// The cells do not ration the diagonal. This property is false only when
+/// *both* binders take the schedule's last magnitude rung, `1e-323`, at
+/// candidate index 42 of the unguarded `f64` schedule, which the diagonal
+/// reaches at attempt 42. No extremal class representative is that rung, so
+/// only the diagonal refutes this.
 #[test]
-fn issue_3697_the_diagonal_survives_the_interleave() {
+fn issue_3697_the_diagonal_is_not_rationed_by_the_cells() {
     let source = "module Pair.Diagonal
 @property not_both_bottom forall(x: f64, y: f64):
   ((x != 1.0e-323f64) || (y != 1.0e-323f64))
@@ -218,12 +219,11 @@ fn issue_3697_the_diagonal_survives_the_interleave() {
     assert_eq!(witness(&record, "y"), 1.0e-323, "{record:#}");
 }
 
-/// A single-binder property takes neither half: its attempt ordinal still
-/// indexes the schedule one-for-one. `1e-323` is candidate 42, so a budget of
-/// 44 samples reaches it; if the interleave applied at arity one the diagonal
-/// would only have reached candidate 21 and this would pass.
+/// A single-binder property takes no cell at all: an odometer over one
+/// binder's own classes is the diagonal, so there would be nothing to gain.
+/// `1e-323` is candidate 42, reached at attempt 42.
 #[test]
-fn issue_3697_single_binder_schedule_is_not_interleaved() {
+fn issue_3697_single_binder_schedule_takes_no_cell() {
     let source = "module Pair.Single
 @property not_bottom forall(x: f64):
   (x != 1.0e-323f64)
@@ -340,7 +340,7 @@ fn issue_3697_true_typed_generator_property_still_passes() {
 }
 
 /// The order-guard shapes chelis#3636 fixed are multi-binder, so the
-/// interleave runs on exactly the path whose predecessor handling is most
+/// odometer runs on exactly the path whose predecessor handling is most
 /// delicate: a cell value for an order successor must still be resolved
 /// against the predecessor already drawn. These passed before the
 /// off-diagonal phase and must still pass.
@@ -396,7 +396,7 @@ fn issue_3697_unsupportable_multi_binder_shapes_still_fail_closed() {
 /// The exclusion is the control: `x != 0.0f64` must still hold of the
 /// witness, so a cell cannot become a route around a `!=` guard.
 #[test]
-fn issue_3697_exclusions_keep_their_neighbours_under_the_interleave() {
+fn issue_3697_exclusions_keep_their_neighbours_beside_the_cells() {
     let source = "module Pair.Excluded
 def subject(x: f64, y: f64) -> f64 = (1.0f64 / (x - y))
 @property quotient_finite forall(x: f64, y: f64)
@@ -460,21 +460,23 @@ fn issue_3697_the_largest_negative_role_pairs_with_a_huge_operand() {
     assert_eq!(witness(&record, "y"), -f64::from_bits(1), "{record:#}");
 }
 
-// --- only the scheduled binders join the interleave ----------------------
+// --- only the scheduled binders join the odometer ------------------------
 //
 // Round 1's P1. `arity` and `position` were read off the property's whole
 // parameter list, but a `bool`, a `string` and a tensor binder draw at random
-// whatever the attempt. Such a binder therefore switched the interleave on
-// while contributing nothing to it, and consumed an odometer digit that
-// multiplied every useful cell index by the radix.
+// whatever the attempt. Such a binder therefore switched the odometer on
+// while contributing nothing to it, and consumed a digit that multiplied
+// every useful cell index by the radix.
 
 /// Half (a): a property with one *scheduled* binder beside a `bool` must keep
 /// the arity-one carve-out. `1e-323` is candidate 42 of the unguarded `f64`
-/// schedule, so a budget of 44 reaches it one attempt at a time; under the
-/// defect the interleave halved the rate and this passed at 44, 50 and 86,
-/// refuting only at 87.
+/// schedule. Under the round-1 defect the unscheduled binder switched the
+/// odometer on, and the revision in force at the time also rationed the
+/// diagonal, so this passed where `forall(x: f64)` refuted. Both are fixed,
+/// and the assertion is equality with the single-binder baseline rather than
+/// a hardcoded count, so it holds whatever the rate.
 #[test]
-fn issue_3697_an_unscheduled_binder_does_not_halve_the_diagonal() {
+fn issue_3697_an_unscheduled_binder_does_not_shift_the_diagonal() {
     let plain = "module Pair.Plain
 @property not_bottom forall(x: f64):
   (x != 1.0e-323f64)
@@ -561,33 +563,89 @@ fn issue_3697_an_integer_binder_still_counts_beside_an_unscheduled_one() {
     assert_eq!(record["counterexample"]["n"], -999, "{record:#}");
 }
 
-/// The cost of the split, pinned at the exact budget. The design doc states
-/// that 87 samples now reach the whole 44-candidate schedule where 44 did
-/// before, and that `[44, 87)` is a new degradation band. A figure in prose
-/// drifts; this is the measurement.
+/// The diagonal keeps chelis#3636's one-for-one rate, so the whole
+/// 44-candidate schedule is still reached in 44 samples, exactly as before
+/// this change.
 ///
-/// `-1e-323` is candidate 43, the schedule's last entry, proposed at diagonal
-/// attempt 86. No extremal representative is that rung, so only the diagonal
-/// reaches it.
+/// An earlier revision of this policy interleaved the diagonal with the cells
+/// one attempt each, which made the same schedule need 87 samples and opened
+/// a `[44, 87)` band where a property that used to refute no longer did. The
+/// diagonal is no longer rationed, so that band does not exist; this test is
+/// what would fail if it came back.
+///
+/// `-1e-323` is candidate 43, the schedule's last entry. No extremal
+/// representative is that rung, so only the diagonal reaches it.
 #[test]
-fn issue_3697_the_whole_diagonal_needs_eighty_seven_samples() {
+fn issue_3697_the_whole_diagonal_still_needs_only_forty_four_samples() {
     let source = "module Pair.LastCandidate
 @property not_last forall(x: f64, y: f64):
   ((x != -1.0e-323f64) || (y != -1.0e-323f64))
 ";
-    for samples in ["44", "86"] {
-        let (code, record) = prove(source, samples, "0");
-        assert_eq!(
-            code, 0,
-            "samples {samples} is inside the new degradation band and must not reach \
-             candidate 43: {record:#}"
-        );
-    }
-    for samples in ["87", "100"] {
+    let (code, record) = prove(source, "43", "0");
+    assert_eq!(
+        code, 0,
+        "candidate 43 is not reachable in 43 samples: {record:#}"
+    );
+    for samples in ["44", "100"] {
         let (code, record) = prove(source, samples, "0");
         assert_eq!(code, 1, "samples {samples}: {record:#}");
-        assert_eq!(record["attempted_samples"], 87, "{record:#}");
+        assert_eq!(
+            record["attempted_samples"], 44,
+            "the diagonal must stay one-for-one: {record:#}"
+        );
         assert_eq!(witness(&record, "x"), -1.0e-323, "{record:#}");
         assert_eq!(witness(&record, "y"), -1.0e-323, "{record:#}");
     }
+}
+
+/// A schedule longer than the span is not displaced past the budget. Round 2
+/// of this pull request's review measured the regression this pins: each `!=`
+/// exclusion adds two candidates, so four per binder gives 52, and under the
+/// interleaved revision the pair refuted only at 103 samples — reporting
+/// `fuzz_validated` at the default 100 where the pre-change schedule had
+/// refuted at 52. That is chelis#3697's own defect on a different axis, so it
+/// is pinned at the default budget and below it.
+#[test]
+fn issue_3697_a_long_schedule_is_not_displaced_past_the_budget() {
+    let source = "module Pair.LongSchedule
+@property not_last forall(x: f64, y: f64)
+where x != 5.0f64, x != 6.0f64, x != 7.0f64, x != 8.0f64,
+      y != 5.0f64, y != 6.0f64, y != 7.0f64, y != 8.0f64:
+  ((x != -1.0e-323f64) || (y != -1.0e-323f64))
+";
+    for samples in ["60", "100"] {
+        for seed in ["0", "7", "99"] {
+            let (code, record) = prove(source, samples, seed);
+            assert_eq!(code, 1, "samples {samples} seed {seed}: {record:#}");
+            assert_eq!(
+                record["attempted_samples"], 52,
+                "the 52-candidate schedule must still finish at 52: {record:#}"
+            );
+        }
+    }
+}
+
+/// The cell phase is capped, so a high-arity property whose precondition
+/// rejects every extremal representative still collects its samples.
+///
+/// Round 2 measured this too: with the cells claiming every other attempt,
+/// `6^5 = 7776` of them exceeded half the default attempt budget, and a
+/// five-binder rejection-lane property that had passed became an exhausted
+/// generator reporting `unsupported`.
+#[test]
+fn issue_3697_a_high_arity_rejection_lane_property_still_collects_its_samples() {
+    let source = "module Pair.Rejected
+@property all_above_one forall(a: f64, b: f64, c: f64, d: f64, e: f64, z: bool)
+where a > 1.1f64, a < 9.7f64, b > 1.1f64, b < 9.7f64, c > 1.1f64, c < 9.7f64,
+      d > 1.1f64, d < 9.7f64, e > 1.1f64, e < 9.7f64:
+  ((((((a > 1.0f64) && (b > 1.0f64)) && (c > 1.0f64)) && (d > 1.0f64)) && (e > 1.0f64)) || z)
+";
+    let (code, record) = prove(source, "100", "0");
+    assert_eq!(code, 0, "{record:#}");
+    assert_eq!(record["status"], "passed", "{record:#}");
+    assert_eq!(record["accepted_samples"], 100, "{record:#}");
+    assert_ne!(
+        record["status"], "error",
+        "the capped cell phase must not exhaust the generator: {record:#}"
+    );
 }

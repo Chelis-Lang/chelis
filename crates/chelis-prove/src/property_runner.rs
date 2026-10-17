@@ -3348,7 +3348,7 @@ fn magnitude_rank(value: f64) -> (u32, u64) {
 /// Only the arms of [`sample_value`] that consult their [`ScheduleSlot`] do:
 /// the integer widths and `f32`/`f64`. A `bool`, a `string` and a tensor are
 /// drawn at random whatever the attempt, so they must not switch the
-/// interleave on, and must not consume an odometer digit either -- a digit
+/// odometer on, and must not consume a digit either -- a digit
 /// spent on a binder that ignores it multiplies every useful cell index by
 /// the radix, which pushed a two-float-binder refutation from attempt 62 to
 /// attempt 362 and so past the default budget.
@@ -3367,7 +3367,7 @@ fn takes_schedule_slot(ty: &TypeExpr) -> bool {
     }
 }
 
-/// The interleave's arity, and each parameter's digit position within it,
+/// The odometer's arity, and each parameter's digit position within it,
 /// counting **only** the binders that take a schedule slot (chelis#3697).
 ///
 /// A parameter that takes none gets `None` and is drawn at random.
@@ -3398,40 +3398,70 @@ enum ScheduleSlot {
     Random,
 }
 
+/// The attempts the diagonal owns before the off-diagonal phase may begin
+/// (chelis#3697). It is the length of an unguarded `f64` schedule, which is
+/// the longest a binder without `!=` exclusions produces, so for those
+/// binders the diagonal is complete before a cell is ever proposed.
+const DIAGONAL_SPAN: usize = 44;
+
+/// The most attempts the off-diagonal phase may claim, whatever the arity
+/// (chelis#3697).
+///
+/// `EXTREMAL_CLASSES.pow(arity)` grows past any budget — `6^5` is 7776 — and
+/// an attempt spent on a cell is an attempt not spent on the uniform draw.
+/// For a property whose precondition rejects every extremal representative,
+/// an unbounded cell phase therefore converts a run that collected its
+/// samples into an exhausted generator. The cap bounds that cost: beyond it
+/// the phase yields, and a high-arity property covers a prefix of its grid.
+const MAX_CELLS: usize = 256;
+
 /// Decide what attempt `attempt` proposes for the binder at `position` of a
-/// property with `arity` binders (chelis#3697).
+/// property with `arity` *scheduled* binders, whose own schedule holds
+/// `schedule_len` candidates (chelis#3697).
 ///
-/// For two or more binders the budget is split in two interleaved halves:
-/// even attempts carry the diagonal, odd attempts carry the odometer. The
-/// split is a declared fraction of the budget rather than a phase boundary,
-/// so no constant has to bound the longest schedule a property can produce,
-/// and a binder whose own list outruns the interleave has its tail entries
-/// *displaced* to later attempts rather than dropped.
+/// The diagonal comes first and **keeps chelis#3636's one-for-one rate**:
+/// attempt `i` proposes candidate `i` until the binder's schedule is spent.
+/// Only then does the off-diagonal phase begin, taking the attempts that
+/// would otherwise be uniform draws over the narrow proposal window — which
+/// is what makes the pairing nearly free, since those draws refute little
+/// (chelis#644 owns the window's width).
 ///
-/// A single-binder property takes neither half: an odometer over one binder's
-/// classes *is* the diagonal, so interleaving would only halve the rate at
-/// which that schedule is walked and buy nothing. Its attempts therefore
-/// index the schedule one-for-one, exactly as before.
+/// An earlier revision interleaved the two halves, one attempt each. That
+/// halved the diagonal's rate, and a schedule longer than half the budget
+/// then reached its tail only past the budget: a two-binder property with
+/// four `!=` exclusions per binder (52 candidates, so 103 samples at half
+/// rate) reported `fuzz_validated` at the default 100 where it had refuted at
+/// 52. Relocating chelis#3697's own defect onto the long-schedule axis is not
+/// a fix for it, so the diagonal is no longer rationed.
 ///
-/// The cells stop once the grid is covered, so a long run regains the uniform
-/// draws the odometer displaced. The digit is taken by repeated division
-/// rather than by `EXTREMAL_CLASSES.pow(position)`, which overflows for an
-/// absurd arity; the cap uses `checked_pow` for the same reason and treats an
-/// overflowing grid as uncapped.
-fn schedule_slot(attempt: usize, arity: usize, position: usize) -> ScheduleSlot {
-    if arity < 2 {
+/// A binder whose schedule outruns `DIAGONAL_SPAN` keeps walking it and so
+/// enters the cell phase later than a shorter-scheduled sibling. Their cells
+/// are then offset relative to each other, which costs some pairs and loses
+/// nothing: every binder still proposes its whole schedule, and binders with
+/// equal-length schedules — the ordinary case, including every binder of one
+/// dtype under the same guards — stay aligned.
+///
+/// A single-binder property takes no cell at all: an odometer over one
+/// binder's own classes *is* the diagonal.
+fn schedule_slot(
+    attempt: usize,
+    arity: usize,
+    position: usize,
+    schedule_len: usize,
+) -> ScheduleSlot {
+    if arity < 2 || attempt < DIAGONAL_SPAN || attempt < schedule_len {
         return ScheduleSlot::Diagonal(attempt);
     }
-    if attempt.is_multiple_of(2) {
-        return ScheduleSlot::Diagonal(attempt / 2);
-    }
-    let cell = attempt / 2;
     let cells = EXTREMAL_CLASSES
         .checked_pow(u32::try_from(arity).unwrap_or(u32::MAX))
-        .unwrap_or(usize::MAX);
+        .unwrap_or(usize::MAX)
+        .min(MAX_CELLS);
+    let cell = attempt - DIAGONAL_SPAN.max(schedule_len);
     if cell >= cells {
         return ScheduleSlot::Random;
     }
+    // The digit is taken by repeated division rather than by
+    // `EXTREMAL_CLASSES.pow(position)`, which overflows for an absurd arity.
     let mut rest = cell;
     for _ in 0..position {
         rest /= EXTREMAL_CLASSES;
@@ -3803,13 +3833,13 @@ impl ConstraintSamplingPlan {
                 .resolve(name, self.ranges[name], &values)
                 .ok_or_else(unresolvable)?;
             let candidates = float_edge_candidates(kind, lower, upper, excluded);
+            let slot = schedule_slot(attempt, arity, position, candidates.len());
             // Once both schedules are spent the draw is a random one,
             // preferring the narrower proposal window (chelis#644 owns its
             // width). The window is only a preference: an order predecessor
             // drawn from the admissible range can sit outside this binder's
             // window entirely, and a window that admits nothing then yields
             // to the admissible range rather than failing the attempt.
-            let slot = schedule_slot(attempt, arity, position);
             let draw = match scheduled_float(slot, &candidates) {
                 Some(candidate) => candidate,
                 None => {
@@ -4559,12 +4589,10 @@ fn sample_property(
             SamplingError::Unsupported(format!("{} is missing an explicit type", param.name))
         })?;
         // A binder that takes no schedule entry neither switches the
-        // interleave on nor consumes an odometer digit; its arm ignores the
-        // slot and draws at random.
-        let slot = position.map_or(ScheduleSlot::Random, |position| {
-            schedule_slot(attempt, arity, position)
-        });
-        values.push(sample_value(&param.name, ty, rng, slot)?);
+        // off-diagonal phase on nor consumes an odometer digit; its arm
+        // ignores the seat and draws at random.
+        let seat = position.map(|position| (position, arity));
+        values.push(sample_value(&param.name, ty, rng, attempt, seat)?);
     }
     Ok(Sample { values })
 }
@@ -4640,24 +4668,34 @@ fn sample_property_with_constraints(
 /// Draw one binder value for the typed generator: the lane a property takes
 /// when it has no guards at all, or guards the constraint plan cannot read.
 ///
-/// `slot` is what the run's attempt ordinal selects for this binder: the
-/// binder's deterministic edge points (chelis#3636) — for a binder with no
+/// `attempt` is the run's zero-based attempt ordinal. It selects the binder's
+/// deterministic edge points first (chelis#3636) — for a binder with no
 /// guards the admissible range is the whole dtype, so `±MAX` and the
 /// subnormals are reached here — then, for two or more *scheduled* binders,
 /// the off-diagonal odometer over the extremal classes (chelis#3697), then
 /// the historical uniform draw. Guards still filter the proposal: a
 /// precondition rejects an edge point exactly as it rejects a random one.
 ///
-/// The caller resolves the slot, because the odometer's arity and digit order
-/// count only the binders that take one: see [`arity_and_positions`]. The
-/// arms below that ignore `slot` are exactly the types
-/// [`takes_schedule_slot`] rejects, and a test holds the two in agreement.
+/// `seat` is this binder's `(position, arity)` among the binders that take a
+/// schedule entry at all, or `None` for one that takes none: see
+/// [`arity_and_positions`]. The arms below that ignore it are exactly the
+/// types [`takes_schedule_slot`] rejects, and a test holds the two in
+/// agreement.
+///
+/// The slot is resolved per arm rather than by the caller, because where the
+/// diagonal ends depends on how many candidates *this* binder's dtype and
+/// guards produce.
 fn sample_value(
     name: &str,
     ty: &TypeExpr,
     rng: &mut Lcg,
-    slot: ScheduleSlot,
+    attempt: usize,
+    seat: Option<(usize, usize)>,
 ) -> Result<SampleValue, SamplingError> {
+    let slot = |schedule_len: usize| match seat {
+        Some((position, arity)) => schedule_slot(attempt, arity, position, schedule_len),
+        None => ScheduleSlot::Random,
+    };
     let sp = chelis_deep::Span::new(0, 0);
     match ty {
         TypeExpr::Named(type_name, _) if type_name == "bool" => {
@@ -4677,7 +4715,8 @@ fn sample_value(
             let (lo, hi) = crate::opaque::int_sample_bounds(type_name)
                 .expect("is_int_width implies int_sample_bounds");
             let candidates = int_edge_candidates(lo, hi);
-            let value = scheduled_int(slot, &candidates).unwrap_or_else(|| rng.next_i64(lo, hi));
+            let value = scheduled_int(slot(candidates.len()), &candidates)
+                .unwrap_or_else(|| rng.next_i64(lo, hi));
             let lit = Expr::Lit(Literal::Int(value), sp);
             if type_name == "i32" {
                 // i32 is the integer-literal default; no cast needed.
@@ -4702,8 +4741,8 @@ fn sample_value(
             let candidates = float_edge_candidates(kind, lower, upper, &[]);
             // The uniform window stays `[-10, 10]`; widening it is
             // chelis#644's separate question.
-            let value =
-                scheduled_float(slot, &candidates).unwrap_or_else(|| rng.next_f64(-10.0, 10.0));
+            let value = scheduled_float(slot(candidates.len()), &candidates)
+                .unwrap_or_else(|| rng.next_f64(-10.0, 10.0));
             Ok(float_sample(name, type_name, value))
         }
         TypeExpr::Named(type_name, _) if type_name == "string" => {
@@ -6042,12 +6081,10 @@ fn sample_deep_property(
             SamplingError::Unsupported(format!("{} is missing an explicit type", param.name))
         })?;
         // A binder that takes no schedule entry neither switches the
-        // interleave on nor consumes an odometer digit; its arm ignores the
-        // slot and draws at random.
-        let slot = position.map_or(ScheduleSlot::Random, |position| {
-            schedule_slot(attempt, arity, position)
-        });
-        values.push(sample_value(&param.name, ty, rng, slot)?);
+        // off-diagonal phase on nor consumes an odometer digit; its arm
+        // ignores the seat and draws at random.
+        let seat = position.map(|position| (position, arity));
+        values.push(sample_value(&param.name, ty, rng, attempt, seat)?);
     }
     Ok(Sample { values })
 }
