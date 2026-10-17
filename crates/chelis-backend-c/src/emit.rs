@@ -73,10 +73,15 @@ pub struct CEmitter {
     use_blas: bool,
     /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
     reduction_inlined: chelis_unord::UnordSet<usize>,
-    /// Products a sum computes leaf by leaf, by the sum's node id
-    /// ([`chelis_ir::fuse::InlinedProduct`]). Their `Mul` emits nothing and
-    /// their expansions emit only their checked plans.
+    /// Products a sum computes leaf by leaf, by the id of the node that runs
+    /// the kernel: the sum, or its narrowing
+    /// ([`chelis_ir::fuse::InlinedProduct`]). Their `Mul` and widenings emit
+    /// nothing and their expansions emit only their checked plans.
     inlined_products: BTreeMap<usize, chelis_ir::fuse::InlinedProduct>,
+    /// For each inlined sum its narrowing stores in its place, the first
+    /// expansion and the summed axis: its extents are that expansion's
+    /// without the axis.
+    unstored_sums: BTreeMap<usize, (usize, usize)>,
     /// Additional recipes preserve the specialized forward-product path.
     deferred_views: chelis_ir::contraction_views::ContractionViews,
     deferred_ranks: BTreeMap<usize, usize>,
@@ -1023,6 +1028,7 @@ impl CEmitter {
         }
 
         let seeds = dag.trap_seeds();
+        let inlined_products = dag.reduction_inlined_products();
         let deferred_views = dag.contraction_views();
         let mut deferred_metadata = BTreeSet::new();
         let mut deferred_ranks = BTreeMap::new();
@@ -1079,10 +1085,17 @@ impl CEmitter {
                 .into_iter()
                 .map(|id| id.0)
                 .collect(),
-            inlined_products: dag
-                .reduction_inlined_products()
-                .into_iter()
-                .map(|inlined| (inlined.sum.0, inlined))
+            inlined_products: inlined_products
+                .iter()
+                .map(|inlined| (inlined.output().0, *inlined))
+                .collect(),
+            unstored_sums: inlined_products
+                .iter()
+                .filter(|inlined| inlined.narrowing.is_some())
+                .filter_map(|inlined| match dag.get(inlined.sum)?.op {
+                    RiscOp::Sum { axis, .. } => Some((inlined.sum.0, (inlined.views[0].0, axis))),
+                    _ => None,
+                })
                 .collect(),
             deferred_views,
             deferred_ranks,
@@ -1346,20 +1359,29 @@ impl CEmitter {
                 continue;
             }
             e.emit_input_axis_result_guards(node, dag);
-            if e.inlined_view(node.id).is_some() && matches!(node.op, RiscOp::Mul) {
-                // A product its sum computes inline keeps its extent checks
-                // here, on its expansions' plan extents, and computes nothing.
+            if let Some(inlined) = e.inlined_component(node.id) {
+                // A product its kernel computes inline keeps its extent checks
+                // here, on its expansions' plan extents, and computes nothing;
+                // so do the expansions' widenings and a sum whose narrowing
+                // runs the kernel.
                 e.emit_span_comments(node);
                 e.nan_finalization = crate::fp_env::risc_nan_finalization(&node.op);
-                let [lhs, rhs] = [node.inputs[0].0, node.inputs[1].0];
-                let context = if chelis_ir::tier2::is_matmul_product(node, |id| dag.get(id)) {
-                    "CHELIS_PRODUCT_MATMUL"
-                } else {
-                    "CHELIS_PRODUCT_MUL"
-                };
-                e.line(&format!(
-                    "chelis_movement_check_product(t{lhs}_movement, t{rhs}_movement, {context});"
-                ));
+                if node.id == inlined.product {
+                    let [lhs, rhs] = inlined.views.map(|view| view.0);
+                    let context = if chelis_ir::tier2::is_matmul_product(node, |id| dag.get(id)) {
+                        "CHELIS_PRODUCT_MATMUL"
+                    } else {
+                        "CHELIS_PRODUCT_MUL"
+                    };
+                    e.line(&format!(
+                        "chelis_movement_check_product(t{lhs}_movement, t{rhs}_movement, {context});"
+                    ));
+                } else if node.id == inlined.sum {
+                    let extents = (0..node.output_type.dims.len())
+                        .map(|axis| (axis, e.tensor_extent(node.id, axis)))
+                        .collect::<Vec<_>>();
+                    e.emit_runtime_dim_sites(node.id.0, &extents);
+                }
                 e.emit_same_shape_result_guards(node);
             } else if matches!(node.op, RiscOp::Mul)
                 && (e.deferred_views.is_deferred(node.id)
@@ -2544,13 +2566,21 @@ impl CEmitter {
             }
             RiscOp::Realize => self.emit_realize(id, &node.inputs, &node.output_type),
             RiscOp::Cast { .. } => {
-                self.emit_cast(
-                    id,
-                    &node.inputs,
-                    &node.output_type,
-                    dag,
-                    /* named = */ None,
-                )
+                if let Some(inlined) = self.inlined_products.get(&id).copied() {
+                    let sum = dag.get(inlined.sum).expect("verified inlined sum");
+                    let RiscOp::Sum { axis, .. } = sum.op else {
+                        unreachable!("an inlined product ends in its sum");
+                    };
+                    self.emit_inlined_product_sum(id, axis, inlined, &node.output_type, dag);
+                } else {
+                    self.emit_cast(
+                        id,
+                        &node.inputs,
+                        &node.output_type,
+                        dag,
+                        /* named = */ None,
+                    )
+                }
             }
             RiscOp::NamedCast { mode, .. } => {
                 self.emit_cast(id, &node.inputs, &node.output_type, dag, Some(*mode))
@@ -6511,7 +6541,7 @@ impl CEmitter {
         self.line("{");
         self.indent += 1;
         self.line("const int64_t outer = 0;");
-        self.emit_sum_store(id, &tree, precision, CarriedLeaf::Unchanged);
+        self.emit_sum_store(id, &tree, precision, CarriedLeaf::Unchanged, None);
         self.indent -= 1;
         self.line("}");
     }
@@ -8135,12 +8165,16 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
 
     /// Store the root of a Sum tree into `t{id}_data[outer]` (and the
     /// following lanes of a laned tree).
+    ///
+    /// With `stored`, each total converts to that dtype through the checked
+    /// float cast a materialized `Cast` would apply.
     fn emit_sum_store(
         &mut self,
         id: usize,
         tree: &CarryTree,
         precision: Prim,
         carried: CarriedLeaf,
+        stored: Option<Prim>,
     ) {
         let index_et = Self::index_c_type();
         let combine = Self::sum_combine(precision);
@@ -8185,7 +8219,17 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         } else {
             "outer"
         };
-        let et = &tree.element;
+        let (et, total) = match stored {
+            Some(target) => {
+                let plan = CheckedCastPlan::new(precision, target)
+                    .expect("a sum narrows through a checked cast");
+                (
+                    Self::prim_elem_type(target).to_owned(),
+                    crate::host_emit::checked_cast_c_expr(plan, &total),
+                )
+            }
+            None => (tree.element.clone(), total),
+        };
         self.line(&format!("(({et}*)t{id}_data)[{output}] = {total};"));
         if lane.is_some() {
             self.indent -= 1;
@@ -8245,7 +8289,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         );
         self.indent -= 1;
         self.line("}");
-        self.emit_sum_store(id, &tree, ty.precision, CarriedLeaf::Finalized);
+        self.emit_sum_store(id, &tree, ty.precision, CarriedLeaf::Finalized, None);
         self.line(crate::fp_env::EXIT);
         self.close_element_loop();
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
@@ -8304,7 +8348,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         );
         self.indent -= 1;
         self.line("}");
-        self.emit_sum_store(id, &tree, ty.precision, CarriedLeaf::Finalized);
+        self.emit_sum_store(id, &tree, ty.precision, CarriedLeaf::Finalized, None);
         self.close_element_loop();
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
     }
@@ -8315,6 +8359,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// two expansions' checked projections, and enters the same canonical
     /// tree ([05-OP-30]) at the same position as the materialized graph's
     /// leaf, so the result bits are identical.
+    ///
+    /// An operand widening converts each element as the leaf reads it, and a
+    /// narrowing converts each finalized total as it is stored through the
+    /// checked float cast the materialized `Cast` applies; `id` is then the
+    /// narrowing `Cast`, whose slot holds the result (chelis#3783).
     fn emit_inlined_product_sum(
         &mut self,
         id: usize,
@@ -8327,6 +8376,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .get(inlined.product)
             .expect("verified inlined product")
             .output_type;
+        let sum = dag.get(inlined.sum).expect("verified inlined sum");
+        // The total finalizes as the sum's, even where its narrowing runs it.
+        self.nan_finalization = crate::fp_env::risc_nan_finalization(&sum.op);
+        let sum_ty = &sum.output_type;
+        let stored = inlined.narrowing.map(|_| ty.precision);
         let [lhs, rhs] = inlined.views.map(|view| view.0);
         let [lhs_source, rhs_source] = inlined
             .views
@@ -8340,14 +8394,20 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             dims: vec![],
             precision: Prim::Int64,
         });
-        let acc_et = Self::elem_type(ty);
-        let operand_et = Self::elem_type(product_ty);
+        let acc_et = Self::elem_type(sum_ty);
+        // Each operand's stored dtype and, through a widening, its read.
+        let [lhs_read_ty, rhs_read_ty] = inlined.views.map(|view| {
+            dag.get(view)
+                .expect("verified expansion")
+                .output_type
+                .precision
+        });
         self.emit_reduction_plan(
             id,
             ReductionInput::StaticShape,
             product_ty,
             &[axis],
-            ty,
+            sum_ty,
             "CHELIS_REDUCE_SUM",
         );
         self.emit_slot_wrapper(id, ty);
@@ -8388,7 +8448,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             ));
         }
         let lanes = format!("__sum_lanes_{id}");
-        let tree = Self::sum_tree(id, ty.precision, blocked.then_some(lanes.as_str()));
+        let tree = Self::sum_tree(id, sum_ty.precision, blocked.then_some(lanes.as_str()));
         self.emit_carry_tree_open(&tree);
         self.line(&format!(
             "for ({index_type} __reduce_i = 0; __reduce_i < t{id}_leaf_count; __reduce_i++) {{"
@@ -8403,17 +8463,39 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             ));
             self.indent += 1;
         }
-        let read = |source: usize, side: &str, view: usize| {
+        let read = |source: usize, side: &str, view: usize, stored: Prim| {
             let lane = if blocked && side == "rhs" {
                 " + __sum_lane"
             } else {
                 ""
             };
-            format!(
-                "((const {operand_et}*)t{source}_data)[__{side}_{id} + __reduce_i * t{view}_scale{axis}{lane}]"
-            )
+            let stored_et = Self::prim_elem_type(stored);
+            let element = format!(
+                "((const {stored_et}*)t{source}_data)[__{side}_{id} + __reduce_i * t{view}_scale{axis}{lane}]"
+            );
+            // The widening is exact, so the converted value is the stored
+            // one. The materialized `Cast` also canonicalizes a NaN, but the
+            // product's own finalization canonicalizes every NaN product, so
+            // the leaf's bits do not depend on the operand NaN's payload.
+            match (stored, product_ty.precision) {
+                (from, to) if from == to => element,
+                (Prim::F16 | Prim::Bf16, Prim::F32) => {
+                    format!("{}({element})", Self::reduced_to_f32_fn(stored))
+                }
+                (Prim::F16 | Prim::Bf16 | Prim::F32, Prim::F64) => {
+                    crate::host_emit::cast_float_as_double(stored, &element)
+                }
+                (from, to) => unreachable!(
+                    "an inlined widening is exact, not {} to {}",
+                    from.name(),
+                    to.name()
+                ),
+            }
         };
-        let (lhs_read, rhs_read) = (read(lhs_source, "lhs", lhs), read(rhs_source, "rhs", rhs));
+        let (lhs_read, rhs_read) = (
+            read(lhs_source, "lhs", lhs, lhs_read_ty),
+            read(rhs_source, "rhs", rhs, rhs_read_ty),
+        );
         // The leaf the materialized `Mul` stores, as the `Sum` loads it
         // (`emit_binary`, `emit_binary_reduced_f`, `emit_reduce_sum_general`).
         let leaf = if Self::is_reduced_float(product_ty) {
@@ -8428,7 +8510,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             )
         };
         let leaf = format!("({acc_et})({leaf})");
-        let combine = Self::sum_combine(ty.precision);
+        let combine = Self::sum_combine(sum_ty.precision);
         if blocked {
             self.line(&format!("{}_leaf[__sum_lane] = {leaf};", tree.name));
             self.indent -= 1;
@@ -8439,7 +8521,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         }
         self.indent -= 1;
         self.line("}");
-        self.emit_sum_store(id, &tree, ty.precision, CarriedLeaf::Finalized);
+        self.emit_sum_store(id, &tree, sum_ty.precision, CarriedLeaf::Finalized, stored);
         self.close_element_loop();
         self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
         for view in [lhs, rhs] {
@@ -9654,7 +9736,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.indent -= 1;
         self.line("}");
         if reduce_kind == "sum" {
-            self.emit_sum_store(id, &tree, out_ty.precision, CarriedLeaf::Finalized);
+            self.emit_sum_store(id, &tree, out_ty.precision, CarriedLeaf::Finalized, None);
         } else {
             self.line(&format!("((float*)t{id}_data)[outer] = acc;"));
         }
@@ -10421,10 +10503,26 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.inlined_products.values().find_map(|inlined| {
             if inlined.views.contains(&node) {
                 Some(node.0)
+            } else if let Some(side) = inlined.casts.iter().position(|cast| *cast == Some(node)) {
+                Some(inlined.views[side].0)
             } else {
                 (inlined.product == node).then_some(inlined.views[0].0)
             }
         })
+    }
+
+    /// The inlined product whose kernel computes `node` without storing it
+    /// and without emitting it elsewhere: its product, an expansion's
+    /// widening, or a sum whose narrowing runs the kernel.
+    fn inlined_component(&self, node: NodeId) -> Option<chelis_ir::fuse::InlinedProduct> {
+        self.inlined_products
+            .values()
+            .find(|inlined| {
+                inlined.product == node
+                    || inlined.casts.contains(&Some(node))
+                    || (inlined.narrowing.is_some() && inlined.sum == node)
+            })
+            .copied()
     }
 
     /// The C expression for `node`'s extent at `axis`: its tensor's
@@ -10433,6 +10531,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     fn tensor_extent(&self, node: NodeId, axis: usize) -> String {
         if self.emitted_metadata.contains(&node) {
             return format!("chelis_metadata_plan_shape(t{}_metadata)[{axis}]", node.0);
+        }
+        if let Some(&(view, summed)) = self.unstored_sums.get(&node.0) {
+            let axis = if axis < summed { axis } else { axis + 1 };
+            return format!("t{view}_extent{axis}");
         }
         match self.inlined_view(node) {
             Some(view) => format!("t{view}_extent{axis}"),

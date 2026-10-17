@@ -485,33 +485,66 @@ pub fn reduction_inlined_fused_elems(dag: &Dag) -> UnordSet<NodeId> {
 /// the sum instead of materializing the expanded operands and their product
 /// (chelis#3370).
 ///
-/// Each leaf is still the operand-dtype product the `Mul` defines, entering
-/// the `Sum`'s canonical tree ([05-OP-30]) in the same position, so the
-/// result bits are those of the materialized graph. Float multiplication
-/// has no trap, and both expansions keep their checked plans, so the traps
-/// are too.
+/// Each leaf is still the product the `Mul` defines, entering the `Sum`'s
+/// canonical tree ([05-OP-30]) in the same position, so the result bits are
+/// those of the materialized graph. Float multiplication has no trap, and
+/// both expansions keep their checked plans, so the traps are too.
+///
+/// Either `Mul` operand may instead be an exact float widening `Cast` of its
+/// expansion, the conversion [05-OP-33]'s einsum makes before it multiplies
+/// at a wider accumulator (chelis#3783); the lane converts each element as it
+/// reads it. The `Sum` may likewise end in a float `Cast`, the narrowing to a
+/// reduced-float result, which the lane applies to each finalized total as it
+/// stores it. Neither conversion traps, so the bits and traps are still the
+/// materialized graph's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InlinedProduct {
     pub sum: NodeId,
     pub product: NodeId,
     /// The `Mul`'s two `Expand` operands, in operand order.
     pub views: [NodeId; 2],
+    /// The exact widening `Cast` between each expansion and the `Mul`, if
+    /// any.
+    pub casts: [Option<NodeId>; 2],
+    /// The float `Cast` that is the `Sum`'s one consumer, if the lane stores
+    /// the converted total in its place.
+    pub narrowing: Option<NodeId>,
 }
 
 impl InlinedProduct {
-    /// The product and its two expansions, which the lane does not store.
-    pub fn skipped(&self) -> [NodeId; 3] {
-        [self.product, self.views[0], self.views[1]]
+    /// The nodes the lane does not store: the product, its expansions and
+    /// their conversions, and the sum when its narrowing stores instead.
+    pub fn skipped(&self) -> Vec<NodeId> {
+        let mut skipped = vec![self.product, self.views[0], self.views[1]];
+        skipped.extend(self.casts.iter().flatten());
+        if self.narrowing.is_some() {
+            skipped.push(self.sum);
+        }
+        skipped
     }
+
+    /// The node whose position and storage hold the lane's kernel.
+    pub fn output(&self) -> NodeId {
+        self.narrowing.unwrap_or(self.sum)
+    }
+}
+
+/// Whether every value of `from` converts exactly to `to`, a wider float.
+fn exact_float_widening(from: Prim, to: Prim) -> bool {
+    matches!(
+        (from, to),
+        (Prim::F16 | Prim::Bf16, Prim::F32 | Prim::F64) | (Prim::F32, Prim::F64)
+    )
 }
 
 /// Every [`InlinedProduct`] in `dag`.
 ///
-/// A match requires that nothing else reads the intermediates: the product
-/// and each expansion have exactly one consumer, are no other node's shape
-/// or claim dependency, and carry no activation, and no `Drop` releases an
-/// expansion's operand before the sum reads it. The expansions and the
-/// product share a rank and dtype. Each lane must check actual operand-shape
+/// A match requires that nothing else reads the intermediates: the product,
+/// each expansion and each conversion have exactly one consumer, are no other
+/// node's shape or claim dependency, and carry no activation, and no `Drop`
+/// releases an expansion's operand before the kernel reads it. The product
+/// shares its rank with the expansions and its dtype with the expansions or
+/// their widening casts. Each lane must check actual operand-shape
 /// agreement at the original product position, before its result claims,
 /// even when the expansions' declared dimension identities differ. An extent claim an intermediate owns stays
 /// the lane's to check at that intermediate's position, from the extents
@@ -519,9 +552,13 @@ impl InlinedProduct {
 pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
     let consumer_count = build_consumer_counts(dag);
     let mut dependency = vec![false; dag.len()];
+    let mut consumer = vec![None; dag.len()];
     for node in dag.nodes() {
         for id in node.shape_deps.iter().chain(&node.result_claim_deps) {
             dependency[id.0] = true;
+        }
+        for id in &node.inputs {
+            consumer[id.0] = Some(node.id);
         }
     }
     let private = |node: &DagNode| {
@@ -546,41 +583,73 @@ pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
         let Some(product) = dag.get(sum.inputs[0]) else {
             continue;
         };
+        let precision = product.output_type.precision;
         if !matches!(product.op, RiscOp::Mul)
             || product.inputs.len() != 2
-            || !matches!(
-                product.output_type.precision,
-                Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
-            )
+            || !matches!(precision, Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16)
             || !private(product)
         {
             continue;
         }
-        let [Some(lhs), Some(rhs)] = [product.inputs[0], product.inputs[1]].map(|id| dag.get(id))
+        let rank = product.output_type.dims.len();
+        // An operand is an expansion at the product dtype, or an exact
+        // widening of an expansion to it.
+        let operand = |id: NodeId| -> Option<(NodeId, Option<NodeId>)> {
+            let node = dag.get(id)?;
+            let (view, cast) = match node.op {
+                RiscOp::Cast { new_precision }
+                    if new_precision == precision && node.inputs.len() == 1 && private(node) =>
+                {
+                    (dag.get(node.inputs[0])?, Some(node.id))
+                }
+                _ => (node, None),
+            };
+            let converts = match cast {
+                Some(_) => exact_float_widening(view.output_type.precision, precision),
+                None => view.output_type.precision == precision,
+            };
+            (matches!(view.op, RiscOp::Expand { .. })
+                && private(view)
+                && converts
+                && view.output_type.dims.len() == rank)
+                .then_some((view.id, cast))
+        };
+        let (Some((lhs, lhs_cast)), Some((rhs, rhs_cast))) =
+            (operand(product.inputs[0]), operand(product.inputs[1]))
         else {
             continue;
         };
-        let admitted = |view: &DagNode| {
-            matches!(view.op, RiscOp::Expand { .. })
-                && private(view)
-                && view.output_type.precision == product.output_type.precision
-                && view.output_type.dims.len() == product.output_type.dims.len()
+        // The kernel reads the expansions' operands where it runs.
+        let released_before = |kernel: NodeId| {
+            [lhs, rhs]
+                .iter()
+                .filter_map(|view| dag.get(*view))
+                .flat_map(|view| &view.inputs)
+                .any(|id| first_drop[id.0] < kernel.0)
         };
-        if !admitted(lhs) || !admitted(rhs) {
+        if released_before(sum.id) {
             continue;
         }
-        let released_early = lhs
-            .inputs
-            .iter()
-            .chain(&rhs.inputs)
-            .any(|id| first_drop[id.0] < sum.id.0);
-        if released_early {
-            continue;
-        }
+        // Only `Drop`s, which never trap, may run between the sum and its
+        // narrowing, so running the kernel there moves no trap past another.
+        let narrowing = consumer[sum.id.0]
+            .filter(|_| private(sum))
+            .and_then(|id| dag.get(id))
+            .filter(|cast| {
+                matches!(cast.op, RiscOp::Cast { new_precision } if new_precision.is_float())
+                    && cast.owner.activation.is_none()
+                    && dag.nodes()[sum.id.0 + 1..cast.id.0]
+                        .iter()
+                        .all(|between| matches!(between.op, RiscOp::Drop))
+                    && !released_before(cast.id)
+            })
+            .map(|cast| cast.id);
         found.push(InlinedProduct {
             sum: sum.id,
             product: product.id,
-            views: [lhs.id, rhs.id],
+            views: [lhs, rhs],
+            casts: [lhs_cast, rhs_cast],
+            narrowing,
         });
     }
     found
@@ -990,6 +1059,8 @@ mod tests {
                     sum,
                     product,
                     views: [lhs, rhs],
+                    casts: [None, None],
+                    narrowing: None,
                 }],
                 "{prim:?}"
             );
@@ -1011,6 +1082,8 @@ mod tests {
                 sum,
                 product,
                 views: [lhs, rhs],
+                casts: [None, None],
+                narrowing: None,
             }]
         );
         dag.add_root(rhs);
@@ -1047,6 +1120,184 @@ mod tests {
         for (case, prim, extra) in observed {
             let (dag, _) = matmul_graph(prim, extra);
             assert_eq!(reduction_inlined_products(&dag), vec![], "{case}");
+        }
+    }
+
+    /// [05-OP-33]'s einsum at a wider accumulator: each `stored` expansion
+    /// widens to `accumulator`, which the product and sum hold, and the sum
+    /// narrows to `stored` after `between` runs, which also sees an
+    /// unrelated load. Returns the DAG, the two loads, both expansions, both
+    /// widenings, the product, the sum and the narrowing.
+    fn converted_graph(
+        stored: Prim,
+        accumulator: Prim,
+        between: impl FnOnce(&mut Dag, [NodeId; 3]),
+    ) -> (Dag, [NodeId; 9]) {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let ty = |dims: &[usize], precision| TensorType {
+            dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+            precision,
+        };
+        let load = |dag: &mut Dag, name: &str, dims: &[usize]| {
+            dag.add_node(
+                decl,
+                RiscOp::Load { name: name.into() },
+                vec![],
+                ty(dims, stored),
+                None,
+            )
+        };
+        let unrelated = load(&mut dag, "c", &[1]);
+        let a = load(&mut dag, "a", &[2, 3]);
+        let b = load(&mut dag, "b", &[3, 4]);
+        let expand = |axis, size| RiscOp::Expand {
+            axis,
+            size: crate::dag::RtDim::Lit(size),
+        };
+        let widen = RiscOp::Cast {
+            new_precision: accumulator,
+        };
+        let lhs = dag.add_node(decl, expand(2, 4), vec![a], ty(&[2, 3, 4], stored), None);
+        let rhs = dag.add_node(decl, expand(0, 2), vec![b], ty(&[2, 3, 4], stored), None);
+        let wide_lhs = dag.add_node(
+            decl,
+            widen.clone(),
+            vec![lhs],
+            ty(&[2, 3, 4], accumulator),
+            None,
+        );
+        let wide_rhs = dag.add_node(decl, widen, vec![rhs], ty(&[2, 3, 4], accumulator), None);
+        let product = dag.add_node(
+            decl,
+            RiscOp::Mul,
+            vec![wide_lhs, wide_rhs],
+            ty(&[2, 3, 4], accumulator),
+            None,
+        );
+        let sum = dag.add_node(
+            decl,
+            RiscOp::Sum {
+                axis: 1,
+                accumulator,
+            },
+            vec![product],
+            ty(&[2, 4], accumulator),
+            None,
+        );
+        between(&mut dag, [a, b, unrelated]);
+        let narrowing = dag.add_node(
+            decl,
+            RiscOp::Cast {
+                new_precision: stored,
+            },
+            vec![sum],
+            ty(&[2, 4], stored),
+            None,
+        );
+        dag.add_root(narrowing);
+        (
+            dag,
+            [a, b, lhs, rhs, wide_lhs, wide_rhs, product, sum, narrowing],
+        )
+    }
+
+    /// chelis#3783: an exact widening of each expansion and a float cast of
+    /// the sum join the inlined product, at every widening the float
+    /// dtypes have.
+    #[test]
+    fn exact_widenings_and_the_sum_narrowing_are_inlined() {
+        for (stored, accumulator) in [
+            (Prim::F16, Prim::F32),
+            (Prim::Bf16, Prim::F32),
+            (Prim::F16, Prim::F64),
+            (Prim::Bf16, Prim::F64),
+            (Prim::F32, Prim::F64),
+        ] {
+            let (dag, [_, _, lhs, rhs, wide_lhs, wide_rhs, product, sum, narrowing]) =
+                converted_graph(stored, accumulator, |_, _| {});
+            let inlined = InlinedProduct {
+                sum,
+                product,
+                views: [lhs, rhs],
+                casts: [Some(wide_lhs), Some(wide_rhs)],
+                narrowing: Some(narrowing),
+            };
+            assert_eq!(
+                reduction_inlined_products(&dag),
+                vec![inlined],
+                "{stored:?}"
+            );
+            assert_eq!(inlined.output(), narrowing);
+            assert!(inlined.skipped().contains(&sum));
+        }
+        // A `Drop` that releases nothing the kernel reads may run between.
+        let (dag, [.., narrowing]) = converted_graph(Prim::F16, Prim::F32, |dag, [.., other]| {
+            let decl = dag.declare("other");
+            let ty = dag.get(other).unwrap().output_type.clone();
+            dag.add_node(decl, RiscOp::Drop, vec![other], ty, None);
+        });
+        assert_eq!(
+            reduction_inlined_products(&dag)[0].narrowing,
+            Some(narrowing)
+        );
+    }
+
+    /// A conversion that is not exact, that something else reads, or that
+    /// would move the kernel past a release or another operation stays a
+    /// node of its own.
+    #[test]
+    fn inexact_observed_or_displaced_conversions_are_not_inlined() {
+        // Neither reduced float holds the other exactly, and a narrowing
+        // is no widening.
+        for (stored, accumulator) in [
+            (Prim::F16, Prim::Bf16),
+            (Prim::Bf16, Prim::F16),
+            (Prim::F64, Prim::F32),
+        ] {
+            let (dag, _) = converted_graph(stored, accumulator, |_, _| {});
+            assert_eq!(
+                reduction_inlined_products(&dag),
+                vec![],
+                "{stored:?} to {accumulator:?}"
+            );
+        }
+        // A widening read twice is stored.
+        let (mut dag, [.., wide_lhs, _, _, _, _]) =
+            converted_graph(Prim::F16, Prim::F32, |_, _| {});
+        dag.add_root(wide_lhs);
+        assert_eq!(reduction_inlined_products(&dag), vec![]);
+        // A sum read twice stores itself, and its cast stays a cast.
+        let (mut dag, [.., sum, _]) = converted_graph(Prim::F16, Prim::F32, |_, _| {});
+        dag.add_root(sum);
+        let inlined = reduction_inlined_products(&dag);
+        assert_eq!(inlined.len(), 1);
+        assert_eq!(inlined[0].narrowing, None);
+        // An operand released, or any other operation run, between the sum
+        // and its narrowing keeps the kernel at the sum.
+        type Between = fn(&mut Dag, [NodeId; 3]);
+        let displaced: [(&str, Between); 2] = [
+            ("operand released", |dag, [a, ..]| {
+                let decl = dag.declare("other");
+                let ty = dag.get(a).unwrap().output_type.clone();
+                dag.add_node(decl, RiscOp::Drop, vec![a], ty, None);
+            }),
+            ("another operation", |dag, [.., other]| {
+                let decl = dag.declare("other");
+                let ty = dag.get(other).unwrap().output_type.clone();
+                let neg = dag.add_node(decl, RiscOp::Neg, vec![other], ty, None);
+                dag.add_root(neg);
+            }),
+        ];
+        for (case, between) in displaced {
+            let (dag, [.., sum, _]) = converted_graph(Prim::F16, Prim::F32, between);
+            let inlined = reduction_inlined_products(&dag);
+            assert_eq!(inlined.len(), 1, "{case}");
+            assert_eq!(
+                (inlined[0].sum, inlined[0].narrowing),
+                (sum, None),
+                "{case}"
+            );
         }
     }
 }

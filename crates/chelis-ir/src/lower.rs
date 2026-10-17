@@ -20268,7 +20268,6 @@ impl<'program> LowerCtx<'program> {
                         &mut self.dag,
                         &plan,
                         [(a, &a_ty), (b, &b_ty)],
-                        accumulator,
                         span.as_deref(),
                     )
                 }) {

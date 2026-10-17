@@ -2127,7 +2127,7 @@ pub(crate) fn checked_cast_overflow_condition(
     }
 }
 
-fn cast_float_as_double(source: Prim, value: &str) -> String {
+pub(crate) fn cast_float_as_double(source: Prim, value: &str) -> String {
     match source {
         Prim::F64 | Prim::F32 => format!("(double)({value})"),
         Prim::F16 => format!("(double)chelis_f16_to_f32({value})"),
