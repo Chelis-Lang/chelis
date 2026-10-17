@@ -1,4 +1,4 @@
-//! chelis#3736 / chelis#3703 / chelis#3781 / chelis#3783: a compiled float
+//! chelis#3736 / chelis#3703 / chelis#3783: a compiled float
 //! `einsum` whose [05-OP-33] contraction is spec/05 §4.1's product sum over
 //! one reduction label runs the emitted product-sum kernel `matmul` uses,
 //! with the bits `chelis eval` computes; every other einsum keeps the runtime
@@ -7,14 +7,15 @@
 //! The fixture covers both sides. Its routed definitions span f32 and f64,
 //! f16 and bf16 at their f32 default, f16 and f32 at an f64 accumulator,
 //! permuted and swapped operands, batch and runtime row extents (including
-//! zero rows), flattened row labels, including a runtime row beside a static
-//! one and two runtime rows, a 257-leaf tree, inf, NaN and signed-zero
-//! products, an f16 total that overflows to inf, and an f16 double-rounding
-//! witness. Its retained definitions are a diagonal, two and zero reduction
-//! labels, a matrix-vector product, a runtime contraction extent, an integer
-//! contraction, a lead label only the column operand carries, and empty
-//! batches whose expansion strides would exceed i64, with static or runtime
-//! rows. Its f16 and bf16 `matmul`s share the sum's narrowing.
+//! zero rows), flattened row labels, a 257-leaf tree, inf, NaN and
+//! signed-zero products, an f16 total that overflows to inf, and an f16
+//! double-rounding witness. Its retained definitions are a diagonal, two and
+//! zero reduction labels, a matrix-vector product, a runtime contraction
+//! extent, an integer contraction, a lead label only the column operand
+//! carries, a runtime row beside a static row above one and two runtime rows
+//! (chelis#3781; including empty ones whose row product would overflow i64
+//! before a zero factor), and empty batches whose expansion strides would
+//! exceed i64, with static or runtime rows. Its f16 and bf16 `matmul`s share the sum's narrowing.
 
 mod common;
 
@@ -46,9 +47,6 @@ const ROUTED: &[&str] = &[
     "wide",
     "widened",
     "narrowed",
-    "product_rows",
-    "paired_rows",
-    "narrow_rows",
     "batched_brain",
     "special_half",
     "special_wide",
@@ -62,6 +60,11 @@ const RETAINED: &[&str] = &[
     "runtime_depth",
     "integer",
     "broadcast_columns",
+    "product_rows",
+    "narrow_rows",
+    "paired_rows",
+    "empty_pair",
+    "empty_mixed",
     "huge_empty",
     "zero_batch_rows",
 ];
