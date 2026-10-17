@@ -1,18 +1,20 @@
-//! chelis#3736 / chelis#3703: a compiled f32 or f64 `einsum`, at its own
-//! accumulator, whose [05-OP-33] contraction is spec/05 §4.1's product sum
-//! over one reduction label runs the emitted product-sum kernel `matmul`
-//! uses, with the bits `chelis eval` computes; every other einsum keeps the
-//! runtime kernel.
+//! chelis#3736 / chelis#3703 / chelis#3781 / chelis#3783: a compiled float
+//! `einsum` whose [05-OP-33] contraction is spec/05 §4.1's product sum over
+//! one reduction label runs the emitted product-sum kernel `matmul` uses,
+//! with the bits `chelis eval` computes; every other einsum keeps the runtime
+//! kernel.
 //!
 //! The fixture covers both sides. Its routed definitions span f32 and f64,
+//! f16 and bf16 at their f32 default, f16 and f32 at an f64 accumulator,
 //! permuted and swapped operands, batch and runtime row extents (including
-//! zero rows), flattened row labels, a 257-leaf tree, and inf, NaN and
-//! signed-zero products. Its retained definitions are a diagonal, two and
-//! zero reduction labels, a matrix-vector product, a runtime contraction
-//! extent, an integer contraction, a lead label only the column operand
-//! carries, f16 and bf16 operands, an f64 accumulator over f32 operands, an
-//! f16 double-rounding witness, and empty batches whose expansion strides
-//! would exceed i64, with static or runtime rows.
+//! zero rows), flattened row labels, including a runtime row beside a static
+//! one and two runtime rows, a 257-leaf tree, inf, NaN and signed-zero
+//! products, an f16 total that overflows to inf, and an f16 double-rounding
+//! witness. Its retained definitions are a diagonal, two and zero reduction
+//! labels, a matrix-vector product, a runtime contraction extent, an integer
+//! contraction, a lead label only the column operand carries, and empty
+//! batches whose expansion strides would exceed i64, with static or runtime
+//! rows. Its f16 and bf16 `matmul`s share the sum's narrowing.
 
 mod common;
 
@@ -39,6 +41,17 @@ const ROUTED: &[&str] = &[
     "interleaved",
     "sequence",
     "special",
+    "half",
+    "brain",
+    "wide",
+    "widened",
+    "narrowed",
+    "product_rows",
+    "paired_rows",
+    "narrow_rows",
+    "batched_brain",
+    "special_half",
+    "special_wide",
 ];
 
 const RETAINED: &[&str] = &[
@@ -49,11 +62,6 @@ const RETAINED: &[&str] = &[
     "runtime_depth",
     "integer",
     "broadcast_columns",
-    "half",
-    "brain",
-    "wide",
-    "widened",
-    "narrowed",
     "huge_empty",
     "zero_batch_rows",
 ];
@@ -96,18 +104,30 @@ fn build_source(source: &Path, out_dir: &Path, stem: &str) -> String {
     std::fs::read_to_string(out_dir.join(format!("{stem}.c"))).expect("generated C")
 }
 
-/// The element counts of every statically shaped `chelis_alloc` in `emitted`.
-fn static_allocations(emitted: &str) -> Vec<u64> {
+/// The element count and dtype of every statically shaped `chelis_alloc`
+/// in `emitted`.
+fn static_allocations_with_dtype(emitted: &str) -> Vec<(u64, &str)> {
     emitted
         .match_indices("chelis_alloc(")
         .filter_map(|(at, _)| {
             let rest = &emitted[at..];
             let dims = &rest[rest.find("(int64_t[]){")? + "(int64_t[]){".len()..];
-            let dims = &dims[..dims.find('}')?];
-            dims.split(',')
+            let (dims, rest) = dims.split_at(dims.find('}')?);
+            let dtype = rest[1..rest.find(')')?].trim_start_matches(',').trim();
+            let count = dims
+                .split(',')
                 .map(|dim| dim.trim().parse::<u64>().ok())
-                .product::<Option<u64>>()
+                .product::<Option<u64>>()?;
+            Some((count, dtype))
         })
+        .collect()
+}
+
+/// The element counts of every statically shaped `chelis_alloc` in `emitted`.
+fn static_allocations(emitted: &str) -> Vec<u64> {
+    static_allocations_with_dtype(emitted)
+        .into_iter()
+        .map(|(count, _)| count)
         .collect()
 }
 
@@ -162,14 +182,22 @@ fn routed_and_retained_einsums_match_eval_bit_for_bit() {
         .expect("eval");
     let eval = stdout(&eval, "eval");
     let bindings = eval.lines().filter(|line| line.starts_with("r_")).count();
-    assert_eq!(bindings, ROUTED.len() + RETAINED.len() + 2, "{eval}");
+    let declared = std::fs::read_to_string(FIXTURE)
+        .expect("fixture")
+        .lines()
+        .filter(|line| line.starts_with("r_"))
+        .count();
+    assert_eq!(bindings, declared, "{eval}");
     assert_eq!(compiled, eval);
     // 1 + 2^-11 + 2^-40 rounds once from f64 to the f16 above 1, and to 1
     // through an intermediate f32; at the f32 accumulator the 2^-40 term is
     // already gone and the tie rounds to even.
+    // An f16 total above 65504 narrows to inf; at f64 it is exact.
     for line in [
         "r_widened = tensor(shape=[1, 1], data=[1.001])",
         "r_narrowed = tensor(shape=[1, 1], data=[1.0])",
+        "r_special_half = tensor(shape=[3, 2], data=[NaN, NaN, 0.0, 0.0, inf, 2.5])",
+        "r_special_wide = tensor(shape=[3, 2], data=[NaN, NaN, 0.0, 0.0, 90000.0, 2.5])",
     ] {
         assert!(
             eval.lines().any(|printed| printed == line),
@@ -205,5 +233,52 @@ fn a_row_only_lead_label_allocates_no_copy_of_the_other_operand() {
     assert!(
         largest <= 512 * 512,
         "a {largest}-element allocation exceeds the largest operand: {allocations:?}"
+    );
+}
+
+/// chelis#3783: a reduced-float or widened contraction converts each operand
+/// as the kernel reads it and narrows each total as it stores it, so no
+/// allocation holds more bytes than an operand or the result. Storing the
+/// widened operands would allocate the f64 product, 128 MB for `wide`, and
+/// storing the f32 sum would allocate 16 MB for `outer`, twice its f16
+/// result.
+#[test]
+fn converted_contractions_allocate_no_accumulator_width_copy() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("converted.ch");
+    std::fs::write(
+        &source,
+        "module EinsumConverted\n\
+         def outer(x: tensor[2048, 1, f16], w: tensor[1, 2048, f16]) -> tensor[2048, 2048, f16] = einsum(\"mk,kn->mn\", x, w)\n\
+         def wide(x: tensor[64, 4096, bf16], w: tensor[4096, 64, bf16]) -> tensor[64, 64, bf16] = einsum(\"mk,kn->mn\", x, w, accumulator=f64)\n\
+         r_outer = outer(reshape(expand(cast(to_tensor([0.5f32]), f16), 0i32, 2048i64), [2048i64, 1i64]), reshape(expand(cast(to_tensor([0.25f32]), f16), 0i32, 2048i64), [1i64, 2048i64]))\n\
+         r_wide = wide(reshape(expand(cast(to_tensor([0.5f32]), bf16), 0i32, 262144i64), [64i64, 4096i64]), reshape(expand(cast(to_tensor([0.25f32]), bf16), 0i32, 262144i64), [4096i64, 64i64]))\n",
+    )
+    .expect("write program");
+    let emitted = build_source(&source, &dir.path().join("out"), "converted");
+    for name in ["outer", "wide"] {
+        assert!(
+            !body(&emitted, name).contains("chelis_tensor_einsum("),
+            "`{name}` still calls the runtime einsum kernel"
+        );
+    }
+    let allocations = static_allocations_with_dtype(&emitted);
+    assert!(!allocations.is_empty(), "no static allocation was read");
+    let largest = allocations
+        .iter()
+        .map(|&(count, dtype)| {
+            let width = match dtype {
+                "CHELIS_DTYPE_F16" | "CHELIS_DTYPE_BF16" => 2,
+                "CHELIS_DTYPE_F32" => 4,
+                "CHELIS_DTYPE_F64" | "CHELIS_DTYPE_I64" => 8,
+                other => panic!("an allocation of {other}"),
+            };
+            count * width
+        })
+        .max()
+        .unwrap();
+    assert!(
+        largest <= 2048 * 2048 * 2,
+        "a {largest}-byte allocation exceeds the largest operand or result: {allocations:?}"
     );
 }

@@ -97,6 +97,11 @@ enum TensorViewKind {
         lhs: TensorValue,
         rhs: TensorValue,
     },
+    /// An exact float widening of `source` to the view's precision, the
+    /// conversion an inlined product reads its operand through.
+    Convert {
+        source: TensorValue,
+    },
     CartesianAdd {
         lhs: TensorValue,
         rhs: TensorValue,
@@ -149,7 +154,8 @@ impl Drop for TensorView {
             match kind {
                 TensorViewKind::Reshape { source }
                 | TensorViewKind::Permute { source, .. }
-                | TensorViewKind::Expand { source, .. } => pending.push(source),
+                | TensorViewKind::Expand { source, .. }
+                | TensorViewKind::Convert { source } => pending.push(source),
                 TensorViewKind::Product { lhs, rhs }
                 | TensorViewKind::CartesianAdd { lhs, rhs, .. } => {
                     pending.push(rhs);
@@ -189,6 +195,7 @@ impl TensorView {
             Value(&'a TensorValue, usize),
             Product,
             Add,
+            Convert(Prim),
             Gather(&'a TensorValue),
         }
         let mut pending = ViewFrames::new();
@@ -249,6 +256,10 @@ impl TensorView {
                             pending.push(Frame::Value(rhs, index));
                             pending.push(Frame::Value(lhs, index));
                         }
+                        TensorViewKind::Convert { source } => {
+                            pending.push(Frame::Convert(view.precision));
+                            pending.push(Frame::Value(source, index));
+                        }
                         TensorViewKind::Gather { source, indices } => {
                             pending.push(Frame::Gather(source));
                             pending.push(Frame::Value(indices, index));
@@ -266,6 +277,14 @@ impl TensorView {
                         chelis_types::dtype_semantics::int_binop(IntBinOp::Add, lhs, rhs)
                             .expect("Cartesian extrema established total integer addition")
                     };
+                    values.push(value);
+                }
+                Frame::Convert(prim) => {
+                    let value = values.pop().expect("converted scalar");
+                    let value = CheckedCastPlan::new(value.prim(), prim)
+                        .ok()
+                        .and_then(|plan| plan.cast_scalar("cast", value).ok())
+                        .expect("an exact float widening is total");
                     values.push(value);
                 }
                 Frame::Gather(source) => {
@@ -4636,8 +4655,12 @@ where
             if product.skipped().iter().any(|node| roots.contains(node)) {
                 continue;
             }
+            // The sum stays dense; its product, expansions and widenings
+            // are read in place.
             for node in product.skipped() {
-                virtual_nodes[node.0] = true;
+                if node != product.sum {
+                    virtual_nodes[node.0] = true;
+                }
             }
         }
         for indices in crate::fuse::cartesian_gather_indices(dag) {
@@ -6103,7 +6126,21 @@ where
                     .get(node.inputs[0])
                     .map(|n| n.output_type.precision)
                     .unwrap_or(*new_precision);
-                cast_value(input, src_prec, *new_precision)?
+                // An inlined product's widening reads its expansion in place.
+                if virtual_nodes[node.id.0]
+                    && matches!(input.storage, EvalStorage::View(_))
+                    && input.prim() == src_prec
+                {
+                    TensorValue::from_view(
+                        input.shape.clone(),
+                        *new_precision,
+                        TensorViewKind::Convert {
+                            source: input.clone(),
+                        },
+                    )
+                } else {
+                    cast_value(input, src_prec, *new_precision)?
+                }
             }
             RiscOp::BlasMatmul { .. } => {
                 let lhs = &values[&node.inputs[0]];
