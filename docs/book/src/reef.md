@@ -100,9 +100,9 @@ chelis reef install --from-lockfile --artifact-dir fetched
 ```
 
 The import makes no network request. It compares each file with the
-`reef.lock` hash before it writes to the registry, so a missing file or a
-different file stops the import. Reef keeps the locked `remote_origin` of each
-package in its registry.
+`reef.lock` hash before it writes to the registry. A missing file or a
+different file fails its package, and the command then exits with an error.
+Reef keeps the locked `remote_origin` of each package in its registry.
 
 ## Create a package
 

@@ -6192,8 +6192,10 @@ fn verified_locked_file(dir: &Path, file: &str, pinned: &str) -> Result<PathBuf,
             path.display()
         ));
     }
-    let actual = sha256_file(&path)?;
-    if actual != pinned.to_ascii_lowercase() {
+    let actual = sha256_file(&path).map_err(|error| format!("hash {}: {error}", path.display()))?;
+    // Reef writes lowercase pins. An exact comparison rejects any other
+    // spelling here, before the registry write.
+    if actual != pinned {
         return Err(format!(
             "SHA-256 mismatch for {}: reef.lock pins {pinned}, but the file hashes to {actual}",
             path.display()
