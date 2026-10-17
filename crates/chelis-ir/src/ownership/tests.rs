@@ -4039,3 +4039,42 @@ fn one_owner_moved_through_two_slots_of_one_application_is_rejected() {
         Err(OwnershipError::OwnerNotLive { owner: 0, .. })
     ));
 }
+
+/// The copy rewrite takes its operand census once per unit, however many
+/// copies it upgrades: a per-candidate census is a scan of the unit per copy,
+/// quadratic in the unit (round-1 finding on chelis#3751). Eight independent
+/// copy-at-last-use chains in one unit all upgrade under one census.
+#[test]
+fn the_copy_rewrite_takes_one_operand_census_per_unit() {
+    const CHAINS: u32 = 8;
+    let mut ops = Vec::new();
+    for chain in 0..CHAINS {
+        let base = chain * 3;
+        ops.extend([
+            define(base),
+            copy_op(base + 1, base),
+            consume_op(base + 2, &[base + 1]),
+            root(base + 2),
+        ]);
+    }
+    let mut entry = block(0, vec![], ops, Terminator::Exit);
+    entry
+        .ops
+        .extend((0..CHAINS).map(|chain| provisional(900 + chain, chain * 3, true)));
+    let mut program = roots(vec![entry], string_owners(CHAINS * 3));
+    let before = super::last_use::OPERAND_CENSUSES.with(std::cell::Cell::get);
+    schedule(&mut program).unwrap();
+    let censuses = super::last_use::OPERAND_CENSUSES.with(std::cell::Cell::get) - before;
+    let copies = ops_of(&program)
+        .iter()
+        .filter(|op| matches!(op, Op::Copy { .. }))
+        .count();
+    assert_eq!(
+        copies, 0,
+        "every chain's copy is its source's last read and upgrades"
+    );
+    assert_eq!(
+        censuses, 1,
+        "{CHAINS} upgrades took {censuses} operand censuses of one unit"
+    );
+}

@@ -96,6 +96,28 @@ const CORPUS: &[(&str, &str)] = &[
          if (n == 0i64) then add(len(a), len(b)) else walk(b, b, (n - 1i64))\n\
          out = walk([1i64], [2i64, 3i64], 3i64)\n",
     ),
+    // The chelis#1222 / chelis#1344 escape shapes at the value's last use,
+    // which now move: a callee that returns its argument, one that may return
+    // its argument or a captured binding, and a parameter passed through. The
+    // wrappers take a parameter so that they are not roots themselves.
+    (
+        "escape_identity_at_last_use",
+        "def idl(p: List[i64]) -> List[i64] = p\n\
+         def h3(k: i64) -> i64 = {\n  base: List[i64] = [1i64, k]\n  r = idl(base)\n  len(r)\n}\nout = h3(2i64)\n",
+    ),
+    (
+        "escape_may_return_captured_at_last_use",
+        "g: List[i64] = [9i64]\n\
+         def fc(p: List[i64], c: bool) -> List[i64] = if c then p else g\n\
+         def h1(k: i64) -> i64 = {\n  base: List[i64] = [1i64, k]\n  r = fc(base, true)\n  len(r)\n}\nout = h1(2i64)\n",
+    ),
+    (
+        "escape_parameter_at_last_use",
+        "def pass_through(s: string) -> string = s\n\
+         def wrap(text: string) -> i64 = {\n  d = pass_through(text)\n  string_len(d)\n}\n\
+         def outer(s0: string) -> i64 = {\n  raw = string_concat(s0, s0)\n  n = wrap(raw)\n  add(n, string_len(raw))\n}\n\
+         out = outer(\"hi\")\n",
+    ),
     (
         "root_value_reused",
         "xs: List[i64] = [1i64, 2i64]\nout = f2(xs, xs)\n",

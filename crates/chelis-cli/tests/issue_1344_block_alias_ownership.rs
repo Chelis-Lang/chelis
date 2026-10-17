@@ -420,6 +420,50 @@ fn call_escape_of_parameter_retains_the_result() {
     );
 }
 
+/// The moved twin of the row above, in the original #1344 shape: `wrap`
+/// reads `text` only through the call, so the call moves the parameter
+/// (chelis#2206) and `d` is the same allocation handed back. The block owes
+/// no retain and releases `d` once; the outer caller's own `raw` stays
+/// balanced, which the run against eval checks.
+const CALL_ESCAPE_PARAM_MOVED: &str = "def pass_through(s: string) -> string = s\n\
+def wrap(text: string) -> i64 = {\n\
+  d = pass_through(text)\n\
+  string_len(d)\n\
+}\n\
+def outer(s0: string) -> i64 = {\n\
+  raw = string_concat(s0, s0)\n\
+  n = wrap(raw)\n\
+  add(n, string_len(raw))\n\
+}\n\
+val = outer(\"hi\")\n";
+
+#[test]
+fn call_escape_of_a_parameter_at_its_last_use_moves_it() {
+    if skip_without_cc() {
+        return;
+    }
+    let (stdout, emitted) = build_run_and_emit(CALL_ESCAPE_PARAM_MOVED, "call_escape_param_moved");
+    assert_eq!(
+        shared_line(&stdout, "val"),
+        shared_line(
+            &eval_stdout(CALL_ESCAPE_PARAM_MOVED, "call_escape_param_moved"),
+            "val"
+        ),
+    );
+    let body = emitted_function(&emitted, "int64_t wrap(chelis_string text)");
+    assert_eq!(
+        count_in(body, "chelis_string_retain("),
+        0,
+        "the call is the parameter's last use and moves it:\n{body}"
+    );
+    assert_eq!(
+        count_in(body, "chelis_string_release("),
+        1,
+        "the returned owner `d` is released once, and the moved parameter \
+         is not released again:\n{body}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 4. Negative parity: a binding whose value is freshly allocated takes no
 //    alias retain. This pins that the fix is the targeted transfer-leaf

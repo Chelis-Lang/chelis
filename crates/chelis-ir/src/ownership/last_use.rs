@@ -334,27 +334,49 @@ fn upgrade_container_last_use_moves(
 /// name the owner. The owner then lives from the copy to that consumer and is
 /// read by nothing in between, because the scheduler placed its terminal
 /// before the consumer. The final `verify` re-checks the result.
+///
+/// The cost is linear in the program apart from the in-block removals: the
+/// operand census is taken once per unit and kept current as rewrites land,
+/// and the host-site actions of every removed operation are dropped in one
+/// pass over the site map at the end.
 fn upgrade_copy_last_use_moves(
     program: &mut OwnershipProgram,
     sites: &mut HostSiteMap,
 ) -> Result<usize, OwnershipError> {
     let mut upgraded = 0;
+    let mut removed = BTreeSet::new();
     for (unit_index, unit) in program.units.iter_mut().enumerate() {
+        let mut census = owner_operand_counts(unit);
         let mut block_index = 0;
         while block_index < unit.blocks.len() {
             let mut index = 0;
             while index < unit.blocks[block_index].ops.len() {
-                let Some(rewrite) = copy_upgrade_at(unit, block_index, index) else {
+                let Some(rewrite) = copy_upgrade_at(unit, &census, block_index, index) else {
                     index += 1;
                     continue;
                 };
-                apply_copy_upgrade(unit, unit_index, block_index, &rewrite, sites);
+                apply_copy_upgrade(unit, block_index, &rewrite, &mut census);
+                let block = unit.blocks[block_index].id;
+                removed.insert((unit_index, block, rewrite.copy_id));
+                removed.insert((unit_index, block, rewrite.drop_id));
                 upgraded += 1;
                 // The `Copy` before this index is gone; the operation that
                 // followed the removed `Drop` now sits at `index - 1`.
                 index = rewrite.copy_index;
             }
             block_index += 1;
+        }
+    }
+    if !removed.is_empty() {
+        for record in &mut sites.records {
+            record.actions.retain(|action| match action {
+                HostSiteAction::Operation {
+                    unit,
+                    block,
+                    operation,
+                } => !removed.contains(&(*unit, *block, *operation)),
+                _ => true,
+            });
         }
     }
     Ok(upgraded)
@@ -379,7 +401,12 @@ enum CopyConsumer {
 
 /// Recognize a scheduled `Drop` at `drop_index` that retires the source of
 /// the `Copy` directly before it (only scheduled scope exits between).
-fn copy_upgrade_at(unit: &Unit, block_index: usize, drop_index: usize) -> Option<CopyUpgrade> {
+fn copy_upgrade_at(
+    unit: &Unit,
+    census: &BTreeMap<OwnerId, usize>,
+    block_index: usize,
+    drop_index: usize,
+) -> Option<CopyUpgrade> {
     let block = &unit.blocks[block_index];
     let terminal = &block.ops[drop_index];
     let Op::Drop { owner: dropped } = &terminal.kind else {
@@ -399,7 +426,7 @@ fn copy_upgrade_at(unit: &Unit, block_index: usize, drop_index: usize) -> Option
         return None;
     }
     let copy = *dest;
-    if owner_operand_count(unit, copy) != 1 {
+    if census.get(&copy).copied() != Some(1) {
         return None;
     }
     let names_owner = |operands: &[Operand]| operands.iter().any(|arg| arg.owner == owner);
@@ -446,12 +473,14 @@ fn copy_upgrade_at(unit: &Unit, block_index: usize, drop_index: usize) -> Option
     })
 }
 
+/// Rewrite one recognized copy and keep the operand census current: the copy
+/// identity leaves the unit, and the owner loses the copy's source operand and
+/// its `Drop` and gains the consumer's operand.
 fn apply_copy_upgrade(
     unit: &mut Unit,
-    unit_index: usize,
     block_index: usize,
     rewrite: &CopyUpgrade,
-    sites: &mut HostSiteMap,
+    census: &mut BTreeMap<OwnerId, usize>,
 ) {
     let block = &mut unit.blocks[block_index];
     match rewrite.consumer {
@@ -473,44 +502,44 @@ fn apply_copy_upgrade(
     }
     block.ops.remove(rewrite.drop_index);
     block.ops.remove(rewrite.copy_index);
-    let block_id = block.id;
     unit.owners.remove(&rewrite.copy);
-    for record in &mut sites.records {
-        record.actions.retain(|action| {
-            !matches!(
-                action,
-                HostSiteAction::Operation {
-                    unit,
-                    block,
-                    operation,
-                } if *unit == unit_index
-                    && *block == block_id
-                    && (*operation == rewrite.copy_id || *operation == rewrite.drop_id)
-            )
-        });
+    census.remove(&rewrite.copy);
+    if let Some(count) = census.get_mut(&rewrite.owner) {
+        *count = count.saturating_sub(1);
     }
 }
 
-/// Every operand position in `unit` that names `owner`, counting operation
-/// operands, terminator operands, edge arguments and edge terminals.
-fn owner_operand_count(unit: &Unit, owner: OwnerId) -> usize {
-    let mut count = 0;
+#[cfg(test)]
+thread_local! {
+    /// How many whole-unit operand censuses the copy rewrite has taken on
+    /// this thread, for the test that bounds them at one per unit.
+    pub(super) static OPERAND_CENSUSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// For every owner `unit` names, how many operand positions name it:
+/// operation operands, terminator operands, edge arguments and edge
+/// terminals.
+fn owner_operand_counts(unit: &Unit) -> BTreeMap<OwnerId, usize> {
+    #[cfg(test)]
+    OPERAND_CENSUSES.with(|scans| scans.set(scans.get() + 1));
+    let mut counts = BTreeMap::new();
+    let mut note = |owner: OwnerId| *counts.entry(owner).or_insert(0) += 1;
     for block in &unit.blocks {
         for operation in &block.ops {
-            count += match &operation.kind {
-                Op::Apply { args, .. } => args.iter().filter(|arg| arg.owner == owner).count(),
+            match &operation.kind {
+                Op::Apply { args, .. } => args.iter().for_each(|arg| note(arg.owner)),
                 Op::Copy {
                     source: operand, ..
                 }
                 | Op::Project { source: operand }
                 | Op::LoopItem { list: operand, .. }
                 | Op::Drop { owner: operand }
-                | Op::RootConsume { owner: operand, .. } => usize::from(operand.owner == owner),
-                Op::Discard { owner: discarded } => usize::from(*discarded == owner),
-                Op::Define { .. } => 0,
-            };
+                | Op::RootConsume { owner: operand, .. } => note(operand.owner),
+                Op::Discard { owner } => note(*owner),
+                Op::Define { .. } => {}
+            }
         }
-        count += match &block.terminator {
+        match &block.terminator {
             Terminator::Return { result: operand }
             | Terminator::Branch {
                 condition: operand, ..
@@ -518,19 +547,17 @@ fn owner_operand_count(unit: &Unit, owner: OwnerId) -> usize {
             | Terminator::Match {
                 scrutinee: operand, ..
             }
-            | Terminator::Loop { list: operand, .. } => usize::from(operand.owner == owner),
-            Terminator::Jump(_) | Terminator::Exit => 0,
-        };
+            | Terminator::Loop { list: operand, .. } => note(operand.owner),
+            Terminator::Jump(_) | Terminator::Exit => {}
+        }
         for edge in block.terminator.edges() {
-            count += edge.args.iter().filter(|arg| arg.owner == owner).count();
-            count += edge
-                .terminals
+            edge.args.iter().for_each(|arg| note(arg.owner));
+            edge.terminals
                 .iter()
-                .filter(|terminal| terminal.kind.owner() == owner)
-                .count();
+                .for_each(|terminal| note(terminal.kind.owner()));
         }
     }
-    count
+    counts
 }
 
 pub(super) fn verify_canonical(program: &OwnershipProgram) -> Result<(), OwnershipError> {
