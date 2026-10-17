@@ -47,6 +47,9 @@ Chelis is distributed as prebuilt binaries for Linux x86_64 and macOS arm64,
 published on the [releases](https://github.com/Chelis-Lang/chelis/releases)
 page. The [install guide](https://chelis.ch/docs/chelis/install/) has the
 steps and the native C compiler `chelis build` needs on each platform.
+Nix users can build the compiler from the flake of this repository. The
+[Nix section](https://chelis.ch/docs/chelis/install/#install-with-nix) of the
+install guide has the commands and the binary cache settings.
 
 ## Documentation
 

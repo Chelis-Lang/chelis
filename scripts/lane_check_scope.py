@@ -51,7 +51,9 @@ def create(args: argparse.Namespace) -> None:
             raise ValueError(f"missing {name} in pinned closure: {path}")
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise ValueError("lane-check proof must run on native x86_64 Linux")
-    chelis = args.chelis / "bin" / "chelis"
+    # `bin/chelis` is a wrapper. The lane check compares this path with the
+    # executable that runs, which is the real compiler.
+    chelis = args.chelis / "libexec" / "chelis"
     compiler = args.compiler / "bin" / "cc"
     if not compiler.exists() or not chelis.exists():
         raise ValueError("pinned compiler or Chelis executable missing")

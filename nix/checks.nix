@@ -5,6 +5,7 @@
   contracts,
   cvc5,
   built,
+  nixfmt,
   packages,
   apps,
 }:
@@ -186,7 +187,7 @@ let
       null
     else
       pkgs.runCommand "chelis-build-id" { nativeBuildInputs = [ pkgs.binutils-unwrapped ]; } ''
-        notes="$(readelf --notes ${packages.chelis}/bin/chelis)"
+        notes="$(readelf --notes ${packages.chelis}/libexec/chelis)"
         if ! grep -q 'Build ID: [0-9a-f]' <<<"$notes"; then
           echo "the chelis executable has no GNU build id" >&2
           exit 1
@@ -403,10 +404,57 @@ let
       ''
         export_dir="$TMPDIR/compiler-export"
         ${packages.chelis}/bin/chelis runtime export "$export_dir"
-        python3 ${root}/scripts/verify_runtime_package.py "$export_dir" ${packages.chelis}
-        python3 ${root}/scripts/verify_runtime_package.py "$export_dir" ${packages.chelis-runtime}
+        python3 ${built.packageScripts}/verify_runtime_package.py "$export_dir" ${packages.chelis}
+        python3 ${built.packageScripts}/verify_runtime_package.py "$export_dir" ${packages.chelis-runtime}
         touch "$out"
       '';
+
+  # A user environment without a C toolchain: `env -i` clears the environment,
+  # and PATH names an empty directory. The wrapper supplies the C compiler for
+  # the executable and `ar` for the static library. The real compiler without
+  # the wrapper must fail in the same environment. Otherwise the check proves
+  # nothing about the wrapper.
+  wrappedBuild =
+    let
+      examples = lib.fileset.toSource {
+        root = ../examples;
+        fileset = lib.fileset.unions [
+          ../examples/hello_tensor.ch
+          ../examples/native_library.ch
+        ];
+      };
+      bare = "env -i PATH=/var/empty HOME=$TMPDIR TMPDIR=$TMPDIR";
+    in
+    pkgs.runCommand "chelis-wrapped-build" { } ''
+      cp ${examples}/hello_tensor.ch ${examples}/native_library.ch "$TMPDIR/"
+      chmod u+w "$TMPDIR"/*.ch
+      cd "$TMPDIR"
+
+      ${bare} ${packages.chelis}/bin/chelis build hello_tensor.ch -o hello
+      actual="$(${bare} ./hello/hello_tensor)"
+      expected='main = tensor(shape=[3], data=[5.0, 7.0, 9.0])'
+      if [ "$actual" != "$expected" ]; then
+        echo "unexpected output of the wrapped build" >&2
+        printf 'expected: %s\nactual: %s\n' "$expected" "$actual" >&2
+        exit 1
+      fi
+
+      ${bare} ${packages.chelis}/bin/chelis build native_library.ch -o library
+      if [ "$(head -c 8 library/libnative_library.a)" != '!<arch>' ]; then
+        echo "the wrapped build did not write a static library archive" >&2
+        exit 1
+      fi
+
+      status=0
+      ${bare} ${packages.chelis}/libexec/chelis build hello_tensor.ch -o unwrapped \
+        2>"$TMPDIR/unwrapped-stderr" || status=$?
+      if [ "$status" -eq 0 ] || ! grep -q 'was not found' "$TMPDIR/unwrapped-stderr"; then
+        echo "the unwrapped compiler found a C compiler on an empty PATH" >&2
+        cat "$TMPDIR/unwrapped-stderr" >&2
+        exit 1
+      fi
+      touch "$out"
+    '';
 
   chelisupBehavior = pkgs.runCommand "chelisup-behavior" { } ''
     ${packages.chelisup}/bin/chelisup --help >/dev/null
@@ -426,27 +474,27 @@ let
         touch "$out"
       '';
 
+  # The flake source holds the tracked files only. Thus this file set is each
+  # tracked `.nix` file except the generated `Cargo.nix` (chelis#1454).
+  nixFiles = lib.fileset.fileFilter (file: file.hasExt "nix") ./..;
+  nixSources = lib.fileset.toSource {
+    root = ./..;
+    fileset = lib.fileset.difference nixFiles ../Cargo.nix;
+  };
   nixFormat =
     pkgs.runCommand "nix-format"
       {
-        nativeBuildInputs = [ pkgs.nixfmt ];
+        nativeBuildInputs = [ nixfmt ];
+        passthru.sources = nixSources;
       }
       ''
-        nixfmt --check \
-          ${root}/devenv.nix \
-          ${root}/devenv/ci.nix \
-          ${root}/devenv/entry-shell.nix \
-          ${root}/devenv/commands.nix \
-          ${root}/devenv/generated-files.nix \
-          ${root}/devenv/git-hooks.nix \
-          ${root}/devenv/smoke-tests.nix \
-          ${root}/devenv/toolchains.nix \
-          ${root}/flake.nix \
-          ${./checks.nix} \
-          ${./contracts.nix} \
-          ${./cvc5.nix} \
-          ${./packages.nix} \
-          ${./source.nix}
+        cd ${nixSources}
+        find . -type f -name '*.nix' -print | sort >"$TMPDIR/files"
+        if ! grep -qx './flake.nix' "$TMPDIR/files" || grep -qx './Cargo.nix' "$TMPDIR/files"; then
+          echo "the nixFormat file set must hold flake.nix and must not hold Cargo.nix" >&2
+          exit 1
+        fi
+        tr '\n' '\0' <"$TMPDIR/files" | xargs -0 nixfmt --check
         touch "$out"
       '';
 
@@ -464,6 +512,7 @@ let
     runtimeConsumer
     runtimeCorrespondence
     runtimeShape
+    wrappedBuild
   ]
   ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
     buildId
@@ -493,6 +542,7 @@ in
     runtimeConsumer
     runtimeCorrespondence
     runtimeShape
+    wrappedBuild
     ;
   chelis = packages.chelis;
   chelis-runtime = packages.chelis-runtime;

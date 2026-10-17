@@ -112,3 +112,87 @@ compiler it used, and `--emit-c` prints the exact compile command.
 calling a compiler, so it needs none of these tools. See
 [Build programs](backends.md) for compiler overrides and linking a
 generated static library.
+
+## Install with Nix
+
+The Chelis flake builds the compiler from source for Linux x86_64 and macOS
+arm64. Run a release compiler, or install it in your Nix profile:
+
+```sh
+nix run github:Chelis-Lang/chelis/v0.20.0 -- --version
+nix profile install github:Chelis-Lang/chelis/v0.20.0
+```
+
+The flake has three packages:
+
+| Package | Contents |
+|---|---|
+| `chelis` (the default) | The compiler, the runtime archive in `lib/`, and its headers in `include/`. |
+| `chelis-runtime` | Only the runtime archive and its headers, for C programs that link generated code. |
+| `chelisup` | The toolchain manager. |
+
+The `chelis` package carries a C compiler and binutils from Nix. Its
+`bin/chelis` puts them first on `PATH`, so `chelis build` needs no host C
+compiler or `ar`. `CHELIS_CC` and `CHELIS_AR` still select another
+toolchain. See [Build programs](backends.md) for these overrides.
+
+To add the packages to your own Nix package set, use the overlay of the flake.
+It adds `chelis`, `chelis-runtime`, and `chelisup` for a system that the flake
+supports:
+
+```nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.chelis.url = "github:Chelis-Lang/chelis/v0.20.0";
+
+  outputs = { nixpkgs, chelis, ... }:
+    let
+      pkgs = import nixpkgs {
+        system = "x86_64-linux";
+        overlays = [ chelis.overlays.default ];
+      };
+    in
+    {
+      devShells.x86_64-linux.default = pkgs.mkShell { packages = [ pkgs.chelis ]; };
+    };
+}
+```
+
+### Use the binary cache
+
+Without a binary cache, Nix compiles the compiler, its Rust dependencies, and
+the cvc5 solver. That takes a long time. The `chelis-lang` cache holds these
+builds for each release:
+
+- substituter: `https://chelis-lang.cachix.org`
+- public key: `chelis-lang.cachix.org-1:F4W65FQ7sunLoF2q6rzkWNTIBd3P/tJ/NFcv12OS9v8=`
+
+The flake names this cache, but Nix uses the cache settings of a flake only
+for a trusted user. A trusted user is `root`, a user in `trusted-users`, or
+the user of a single-user install. A trusted user can accept the settings
+with `--accept-flake-config`, or add the cache with `cachix use chelis-lang`.
+For each other user, the Nix daemon prints `ignoring untrusted substituter`
+and compiles the packages.
+
+On NixOS, add the cache to the system configuration and rebuild the system:
+
+```nix
+nix.settings = {
+  extra-substituters = [ "https://chelis-lang.cachix.org" ];
+  extra-trusted-public-keys = [
+    "chelis-lang.cachix.org-1:F4W65FQ7sunLoF2q6rzkWNTIBd3P/tJ/NFcv12OS9v8="
+  ];
+};
+```
+
+On another Linux system or on macOS, an administrator adds these lines to
+`/etc/nix/nix.conf`:
+
+```text
+extra-substituters = https://chelis-lang.cachix.org
+extra-trusted-public-keys = chelis-lang.cachix.org-1:F4W65FQ7sunLoF2q6rzkWNTIBd3P/tJ/NFcv12OS9v8=
+```
+
+Then the administrator restarts the Nix daemon. On Linux with systemd, use
+`sudo systemctl restart nix-daemon`. On macOS, use
+`sudo launchctl kickstart -k system/org.nixos.nix-daemon`.

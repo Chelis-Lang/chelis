@@ -338,9 +338,14 @@ class NixFlakeContractTests(unittest.TestCase):
     def test_contract_stubs_cover_package_shape_and_behavior(self) -> None:
         contracts = nix_json("eval", "--json", "--file", "nix/contracts.nix")
         shapes = contracts["packageShapes"]
+        # bin/chelis is the wrapper, and libexec/chelis is the real compiler.
+        self.assertEqual(
+            shapes["chelis"]["required"][:2],
+            ["bin/chelis", "libexec/chelis"],
+        )
         self.assertEqual(
             shapes["chelis"]["allowedProductExecutables"],
-            ["bin/chelis"],
+            ["bin/chelis", "libexec/chelis"],
         )
         self.assertEqual(shapes["chelis"]["forbidden"], ["bin/chelisup"])
         self.assertEqual(
@@ -349,6 +354,7 @@ class NixFlakeContractTests(unittest.TestCase):
                 "bin",
                 "include",
                 "lib",
+                "libexec",
                 *shapes["chelis"]["required"],
             ],
         )
@@ -381,6 +387,204 @@ class NixFlakeContractTests(unittest.TestCase):
         for header in EXPECTED_HEADERS:
             self.assertIn(f"include/{header}", shapes["chelis"]["required"])
             self.assertIn(f"include/{header}", shapes["chelis-runtime"]["required"])
+
+    @REQUIRES_NIX
+    def test_packages_and_apps_carry_metadata(self) -> None:
+        main_programs = {"chelis": "chelis", "chelis-runtime": None, "chelisup": "chelisup"}
+        for system in EXPECTED_SYSTEMS:
+            for name, main_program in main_programs.items():
+                with self.subTest(system=system, package=name):
+                    meta = nix_json(
+                        "eval",
+                        "--json",
+                        f".#packages.{system}.{name}.meta",
+                        "--apply",
+                        "meta: { inherit (meta) description homepage platforms; "
+                        "license = meta.license.spdxId; "
+                        "mainProgram = meta.mainProgram or null; }",
+                    )
+                    self.assertTrue(meta["description"])
+                    self.assertEqual(meta["homepage"], "https://chelis.ch")
+                    self.assertEqual(meta["license"], "MIT")
+                    self.assertEqual(sorted(meta["platforms"]), EXPECTED_SYSTEMS)
+                    self.assertEqual(meta["mainProgram"], main_program)
+            for app in EXPECTED_APPS:
+                with self.subTest(system=system, app=app):
+                    description = nix_raw(
+                        "eval", "--raw", f".#apps.{system}.{app}.meta.description"
+                    )
+                    self.assertTrue(description)
+
+    @REQUIRES_NIX
+    def test_overlay_adds_the_packages_of_the_consumer_system(self) -> None:
+        system = nix_raw(
+            "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"
+        )
+        flake = f"builtins.getFlake {json.dumps(str(REPO_ROOT))}"
+        names = ["chelis", "chelis-runtime", "chelisup"]
+        overlaid = nix_json(
+            "eval",
+            "--impure",
+            "--json",
+            "--expr",
+            f"let flake = {flake}; "
+            "pkgs = import flake.inputs.nixpkgs { "
+            f"system = {json.dumps(system)}; overlays = [ flake.overlays.default ]; }}; "
+            f"in map (name: pkgs.${{name}}.drvPath) {json.dumps(names).replace(',', '')}",
+        )
+        packages = [
+            nix_raw("eval", "--raw", f".#packages.{system}.{name}.drvPath")
+            for name in names
+        ]
+        self.assertEqual(overlaid, packages)
+        # Negative control: a system that the flake does not support gets
+        # no package from the overlay.
+        unsupported = nix_json(
+            "eval",
+            "--impure",
+            "--json",
+            "--expr",
+            f"builtins.attrNames (({flake}).overlays.default {{ }} "
+            '{ stdenv.hostPlatform.system = "riscv64-linux"; })',
+        )
+        self.assertEqual(unsupported, [])
+
+    @REQUIRES_NIX
+    def test_formatter_and_format_check_share_one_nixfmt(self) -> None:
+        for system in EXPECTED_SYSTEMS:
+            with self.subTest(system=system):
+                formatter = nix_raw(
+                    "eval", "--raw", f".#formatter.{system}.passthru.nixfmt.drvPath"
+                )
+                check = nix_json(
+                    "eval",
+                    "--json",
+                    f".#checks.{system}.nixFormat.nativeBuildInputs",
+                    "--apply",
+                    "map (input: input.drvPath)",
+                )
+                self.assertEqual(check, [formatter])
+
+    @REQUIRES_NIX
+    def test_format_check_covers_each_tracked_nix_file_except_cargo_nix(self) -> None:
+        system = nix_raw(
+            "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"
+        )
+        sources = Path(
+            nix_raw("eval", "--raw", f".#checks.{system}.nixFormat.sources")
+        )
+        drv = nix_raw("eval", "--raw", f".#checks.{system}.nixFormat.drvPath")
+        references = nix_raw("path-info", "--json", drv)
+        self.assertIn(sources.name, references)
+        covered = sorted(
+            path.relative_to(sources).as_posix() for path in sources.rglob("*.nix")
+        )
+        tracked = subprocess.run(
+            ["git", "ls-files", "*.nix"],
+            cwd=REPO_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout.split()
+        self.assertIn("Cargo.nix", tracked)
+        self.assertEqual(covered, sorted(set(tracked) - {"Cargo.nix"}))
+
+    @REQUIRES_NIX
+    def test_formatter_formats_tracked_files_except_cargo_nix(self) -> None:
+        system = nix_raw(
+            "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"
+        )
+        formatter = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", f".#formatter.{system}")
+        )
+        program = formatter / "bin" / "chelis-nix-format"
+        unformatted = "{ a=1; }\n"
+        with tempfile.TemporaryDirectory() as raw:
+            work = Path(raw)
+            for name in ("Cargo.nix", "default.nix", "untracked.nix"):
+                (work / name).write_text(unformatted, encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+            subprocess.run(
+                ["git", "add", "Cargo.nix", "default.nix"], cwd=work, check=True
+            )
+            checked = subprocess.run(
+                [program, "--check"],
+                cwd=work,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            self.assertNotEqual(checked.returncode, 0)
+            self.assertIn("default.nix", checked.stdout)
+            self.assertNotIn("Cargo.nix", checked.stdout)
+            self.assertNotIn("untracked.nix", checked.stdout)
+            formatted = subprocess.run(
+                [program], cwd=work, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(formatted.returncode, 0, formatted.stderr)
+            self.assertNotEqual((work / "default.nix").read_text(), unformatted)
+            self.assertEqual((work / "Cargo.nix").read_text(), unformatted)
+            self.assertEqual((work / "untracked.nix").read_text(), unformatted)
+            rechecked = subprocess.run(
+                [program, "--check"], cwd=work, capture_output=True, check=False
+            )
+            self.assertEqual(rechecked.returncode, 0, rechecked.stderr)
+
+    @REQUIRES_NIX
+    def test_documentation_edit_keeps_every_package_derivation(self) -> None:
+        def derivations(flake: Path) -> dict[str, dict[str, str]]:
+            return nix_json(
+                "eval",
+                "--json",
+                f"path:{flake}#packages",
+                "--apply",
+                "builtins.mapAttrs (_system: builtins.mapAttrs "
+                "(_name: package: package.drvPath))",
+            )
+
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout.split(b"\0")
+        with tempfile.TemporaryDirectory() as raw:
+            flake = Path(raw) / "flake"
+            for name in tracked:
+                if not name:
+                    continue
+                source = REPO_ROOT / os.fsdecode(name)
+                if source.is_symlink() or source.is_file():
+                    target = flake / os.fsdecode(name)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target, follow_symlinks=False)
+            before = derivations(flake)
+            self.assertEqual(sorted(before), EXPECTED_SYSTEMS)
+
+            readme = flake / "README.md"
+            readme.write_text(
+                readme.read_text(encoding="utf-8") + "\nA documentation edit.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(derivations(flake), before)
+
+            # Negative control: an edit of a script that the packages run
+            # changes the two packages that run it, and only those.
+            script = flake / "scripts" / "verify_runtime_package.py"
+            script.write_text(
+                script.read_text(encoding="utf-8") + "\n# A script edit.\n",
+                encoding="utf-8",
+            )
+            after = derivations(flake)
+            for system in EXPECTED_SYSTEMS:
+                with self.subTest(system=system):
+                    changed = sorted(
+                        name
+                        for name in before[system]
+                        if before[system][name] != after[system][name]
+                    )
+                    self.assertEqual(changed, ["chelis", "chelis-runtime", "default"])
 
     @REQUIRES_NIX
     def test_chelisup_install_roots_the_nix_closure_and_self_uninstall_removes_it(self) -> None:
@@ -988,6 +1192,22 @@ class NixSourceContractTests(unittest.TestCase):
         self.assertNotIn("crate2nixGraphSync", checks)
         self.assertNotIn("crate2nixRegeneration", checks)
         self.assertFalse((REPO_ROOT / "scripts/check_crate2nix_sync.py").exists())
+
+    def test_packages_do_not_interpolate_the_flake_source(self) -> None:
+        # The Nix test of a documentation edit proves the result. This rule
+        # finds the cause of a failure without Nix.
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        self.assertNotIn("${root}", packages)
+        self.assertIn("python3 ${packageScripts}/verify_runtime_package.py", packages)
+
+    def test_format_check_derives_its_file_set(self) -> None:
+        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
+        format_check = checks[checks.index("  nixFiles =") :]
+        format_check = format_check[: format_check.index("\n\n")]
+        self.assertIn('lib.fileset.fileFilter (file: file.hasExt "nix") ./..', format_check)
+        self.assertIn("../Cargo.nix", format_check)
+        self.assertNotIn("${root}/", format_check)
+        self.assertNotIn("${./", format_check)
 
     def test_version_contract_requires_exact_cli_output(self) -> None:
         checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
