@@ -509,6 +509,15 @@ pub struct InlinedProduct {
     /// The float `Cast` that is the `Sum`'s one consumer, if the lane stores
     /// the converted total in its place.
     pub narrowing: Option<NodeId>,
+    /// The `Reshape` each expansion reads, if the expansion is its one
+    /// element reader: the lane reads the reshape's dense operand in place
+    /// through the reshape's metadata instead of storing it (chelis#3802).
+    pub view_reshapes: [Option<NodeId>; 2],
+    /// The `Reshape` that is the total's one consumer, if the lane stores the
+    /// total directly in the reshape's slot: a reshape keeps row-major
+    /// element order, so each total lands at its own flat position
+    /// (chelis#3802).
+    pub reshaped: Option<NodeId>,
 }
 
 impl InlinedProduct {
@@ -517,14 +526,23 @@ impl InlinedProduct {
     pub fn skipped(&self) -> Vec<NodeId> {
         let mut skipped = vec![self.product, self.views[0], self.views[1]];
         skipped.extend(self.casts.iter().flatten());
-        if self.narrowing.is_some() {
+        if self.output() != self.sum {
             skipped.push(self.sum);
+        }
+        if let (Some(narrowing), Some(_)) = (self.narrowing, self.reshaped) {
+            skipped.push(narrowing);
         }
         skipped
     }
 
     /// The node whose position and storage hold the lane's kernel.
     pub fn output(&self) -> NodeId {
+        self.reshaped.or(self.narrowing).unwrap_or(self.sum)
+    }
+
+    /// The node holding the total before any trailing reshape: the sum, or
+    /// its narrowing.
+    pub fn total(&self) -> NodeId {
         self.narrowing.unwrap_or(self.sum)
     }
 }
@@ -553,13 +571,21 @@ pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
     let consumer_count = build_consumer_counts(dag);
     let mut dependency = vec![false; dag.len()];
     let mut consumer = vec![None; dag.len()];
+    // Reads of a node's elements, as opposed to its extents.
+    let mut payload_readers = vec![0usize; dag.len()];
     for node in dag.nodes() {
         for id in node.shape_deps.iter().chain(&node.result_claim_deps) {
             dependency[id.0] = true;
         }
-        for id in &node.inputs {
+        for (slot, id) in node.inputs.iter().enumerate() {
             consumer[id.0] = Some(node.id);
+            if crate::contraction_views::payload_slot(node, slot) {
+                payload_readers[id.0] += 1;
+            }
         }
+    }
+    for root in dag.roots() {
+        payload_readers[root.0] += 1;
     }
     let private = |node: &DagNode| {
         consumer_count[node.id.0] == 1 && !dependency[node.id.0] && node.owner.activation.is_none()
@@ -644,12 +670,45 @@ pub fn reduction_inlined_products(dag: &Dag) -> Vec<InlinedProduct> {
                     && !released_before(cast.id)
             })
             .map(|cast| cast.id);
+        // A private reshape of the total may hold it directly, under the same
+        // conditions as the narrowing. Its target is literal or symbolic, so
+        // it reads no other node.
+        let total = narrowing.unwrap_or(sum.id);
+        let reshaped = dag
+            .get(total)
+            .filter(|node| private(node))
+            .and_then(|_| consumer[total.0])
+            .and_then(|id| dag.get(id))
+            .filter(|reshape| {
+                matches!(reshape.op, RiscOp::Reshape { .. })
+                    && reshape.inputs.len() == 1
+                    && reshape.owner.activation.is_none()
+                    && dag.nodes()[total.0 + 1..reshape.id.0]
+                        .iter()
+                        .all(|between| matches!(between.op, RiscOp::Drop))
+                    && !released_before(reshape.id)
+            })
+            .map(|reshape| reshape.id);
+        // An expansion's reshape of a dense operand reorders no element, so
+        // the kernel can read the operand through it, when the expansion is
+        // its one element reader; other nodes may read its extents.
+        let view_reshape = |view: NodeId| {
+            let source = dag.get(dag.get(view)?.inputs[0])?;
+            (matches!(source.op, RiscOp::Reshape { .. })
+                && payload_readers[source.id.0] == 1
+                && !dependency[source.id.0]
+                && source.owner.activation.is_none()
+                && source.output_type.precision.is_float())
+            .then_some(source.id)
+        };
         found.push(InlinedProduct {
             sum: sum.id,
             product: product.id,
             views: [lhs, rhs],
             casts: [lhs_cast, rhs_cast],
             narrowing,
+            view_reshapes: [view_reshape(lhs), view_reshape(rhs)],
+            reshaped,
         });
     }
     found
@@ -1061,6 +1120,8 @@ mod tests {
                     views: [lhs, rhs],
                     casts: [None, None],
                     narrowing: None,
+                    view_reshapes: [None, None],
+                    reshaped: None,
                 }],
                 "{prim:?}"
             );
@@ -1084,6 +1145,8 @@ mod tests {
                 views: [lhs, rhs],
                 casts: [None, None],
                 narrowing: None,
+                view_reshapes: [None, None],
+                reshaped: None,
             }]
         );
         dag.add_root(rhs);
@@ -1222,6 +1285,8 @@ mod tests {
                 views: [lhs, rhs],
                 casts: [Some(wide_lhs), Some(wide_rhs)],
                 narrowing: Some(narrowing),
+                view_reshapes: [None, None],
+                reshaped: None,
             };
             assert_eq!(
                 reduction_inlined_products(&dag),
@@ -1299,5 +1364,134 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    /// A row-flattened product sum: `x [2, 3, 4]` reshaped to `[6, 4]`,
+    /// expanded against `w [4, 5]`, summed over the shared axis, and the
+    /// `[6, 5]` total reshaped back to `[2, 3, 5]`, with `between` run before
+    /// the trailing reshape. Returns the DAG, the row reshape and the trailing
+    /// reshape.
+    fn reshaped_graph(between: impl FnOnce(&mut Dag, [NodeId; 3])) -> (Dag, [NodeId; 2]) {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let ty = |dims: &[usize]| TensorType {
+            dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+            precision: Prim::F32,
+        };
+        let lit = |dims: &[usize]| dims.iter().map(|&n| crate::dag::RtDim::Lit(n)).collect();
+        let load = |dag: &mut Dag, name: &str, dims: &[usize]| {
+            dag.add_node(
+                decl,
+                RiscOp::Load { name: name.into() },
+                vec![],
+                ty(dims),
+                None,
+            )
+        };
+        let x = load(&mut dag, "x", &[2, 3, 4]);
+        let w = load(&mut dag, "w", &[4, 5]);
+        let rows = dag.add_node(
+            decl,
+            RiscOp::Reshape {
+                new_shape: lit(&[6, 4]),
+            },
+            vec![x],
+            ty(&[6, 4]),
+            None,
+        );
+        let expand = |axis, size| RiscOp::Expand {
+            axis,
+            size: crate::dag::RtDim::Lit(size),
+        };
+        let lhs = dag.add_node(decl, expand(2, 5), vec![rows], ty(&[6, 4, 5]), None);
+        let rhs = dag.add_node(decl, expand(0, 6), vec![w], ty(&[6, 4, 5]), None);
+        let product = dag.add_node(decl, RiscOp::Mul, vec![lhs, rhs], ty(&[6, 4, 5]), None);
+        let sum = dag.add_node(
+            decl,
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            vec![product],
+            ty(&[6, 5]),
+            None,
+        );
+        between(&mut dag, [x, rows, sum]);
+        let out = dag.add_node(
+            decl,
+            RiscOp::Reshape {
+                new_shape: lit(&[2, 3, 5]),
+            },
+            vec![sum],
+            ty(&[2, 3, 5]),
+            None,
+        );
+        dag.add_root(out);
+        (dag, [rows, out])
+    }
+
+    /// chelis#3802: the expansion's reshape is read in place and the total's
+    /// reshape holds it, so the kernel runs at the trailing reshape.
+    #[test]
+    fn row_and_output_reshapes_join_the_inlined_product() {
+        let (dag, [rows, out]) = reshaped_graph(|_, _| {});
+        let inlined = reduction_inlined_products(&dag);
+        assert_eq!(inlined.len(), 1);
+        assert_eq!(inlined[0].view_reshapes, [Some(rows), None]);
+        assert_eq!(inlined[0].reshaped, Some(out));
+        assert_eq!(inlined[0].output(), out);
+        assert!(inlined[0].skipped().contains(&inlined[0].sum));
+        assert!(!inlined[0].skipped().contains(&rows));
+        // Another node may read the row reshape's extents.
+        let (dag, [rows, _]) = reshaped_graph(|dag, [x, rows, _]| {
+            let decl = dag.declare("other");
+            let ty = dag.get(x).unwrap().output_type.clone();
+            let read = dag.add_node(
+                decl,
+                RiscOp::Expand {
+                    axis: 0,
+                    size: crate::dag::RtDim::InputAxis {
+                        tensor: 1,
+                        axis: crate::dag::RtAxis::Lit(0),
+                    },
+                },
+                vec![x, rows],
+                TensorType {
+                    dims: [vec![DimInfo::Lit(6)], ty.dims].concat(),
+                    precision: ty.precision,
+                },
+                None,
+            );
+            dag.add_root(read);
+        });
+        assert_eq!(
+            reduction_inlined_products(&dag)[0].view_reshapes[0],
+            Some(rows)
+        );
+    }
+
+    /// A reshape something else reads as data, a total read twice, or another
+    /// operation between the total and its reshape keeps that reshape a node
+    /// of its own.
+    #[test]
+    fn observed_or_displaced_reshapes_stay_their_own_nodes() {
+        let (dag, [_, _]) = reshaped_graph(|dag, [_, rows, _]| dag.add_root(rows));
+        assert_eq!(
+            reduction_inlined_products(&dag)[0].view_reshapes,
+            [None, None]
+        );
+        let (dag, [_, _]) = reshaped_graph(|dag, [_, _, sum]| dag.add_root(sum));
+        assert_eq!(reduction_inlined_products(&dag)[0].reshaped, None);
+        let (dag, [_, _]) = reshaped_graph(|dag, [x, _, _]| {
+            let decl = dag.declare("other");
+            let ty = dag.get(x).unwrap().output_type.clone();
+            let neg = dag.add_node(decl, RiscOp::Neg, vec![x], ty, None);
+            dag.add_root(neg);
+        });
+        let inlined = reduction_inlined_products(&dag);
+        assert_eq!(
+            (inlined[0].reshaped, inlined[0].output()),
+            (None, inlined[0].sum)
+        );
     }
 }

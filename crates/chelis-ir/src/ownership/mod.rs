@@ -366,12 +366,17 @@ impl<'a> VerifiedDagView<'a> {
     /// Additional checked recipes, leaving the existing specialized product
     /// kernel's component nodes to that kernel's independent metadata path.
     pub fn contraction_views(self) -> crate::contraction_views::ContractionViews {
-        let specialized = self
-            .reduction_inlined_products()
+        let products = self.reduction_inlined_products();
+        let specialized = products
             .iter()
             .flat_map(crate::fuse::InlinedProduct::skipped)
             .collect::<Vec<_>>();
-        crate::contraction_views::contraction_views_excluding(self.dag, &[], &specialized)
+        crate::contraction_views::contraction_views_with_products(
+            self.dag,
+            &[],
+            &specialized,
+            &products,
+        )
     }
 
     pub fn first_integer_abs_node(self) -> Option<NodeId> {

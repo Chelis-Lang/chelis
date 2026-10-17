@@ -31,6 +31,15 @@ def matmul_half(x: tensor[3, 37, f16], w: tensor[37, 5, f16]) -> tensor[3, 5, f1
 def matmul_brain(x: tensor[3, 37, bf16], w: tensor[37, 5, bf16]) -> tensor[3, 5, bf16] = matmul(x, w)
 def empty_pair[a, b, m](x: tensor[a, b, m, 8, f32], w: tensor[8, 5, f32]) -> tensor[a, b, m, 5, f32] = einsum("abmk,kn->abmn", x, w)
 def empty_mixed[a, m](x: tensor[a, 3, m, 8, f32], w: tensor[8, 5, f32]) -> tensor[a, 3, m, 5, f32] = einsum("abmk,kn->abmn", x, w)
+def reused(x: tensor[2, 3, 37, f32], w: tensor[37, 5, f32]) -> tensor[2, 3, 37, f32] = {
+  e = einsum("amk,kn->amn", x, w)
+  mul(x, insert(sum(e, 2i32), 2i32, 37i64))
+}
+def moved(x: tensor[2, 3, 37, f32], w: tensor[37, 5, f32]) -> tensor[2, 3, 37, f32] = {
+  y = exp(x)
+  e = einsum("amk,kn->amn", y, w)
+  mul(neg(y), insert(sum(e, 2i32), 2i32, 37i64))
+}
 def broadcast_columns(x: tensor[3, 13, f32], w: tensor[2, 13, 5, f32]) -> tensor[2, 3, 5, f32] = einsum("mk,bkn->bmn", x, w)
 def widened(x: tensor[1, 3, f16], w: tensor[3, 1, f16]) -> tensor[1, 1, f16] = einsum("mk,kn->mn", x, w, accumulator=f64)
 def narrowed(x: tensor[1, 3, f16], w: tensor[3, 1, f16]) -> tensor[1, 1, f16] = einsum("mk,kn->mn", x, w)
@@ -68,6 +77,8 @@ r_matmul_half = matmul_half(reshape(cast(g32(111i64, 5.9022f32), f16), [3i64, 37
 r_matmul_brain = matmul_brain(reshape(cast(g32(111i64, 6.0484f32), bf16), [3i64, 37i64]), reshape(cast(g32(185i64, 6.1215f32), bf16), [37i64, 5i64]))
 r_empty_pair = empty_pair(reshape(g32(0i64, 6.1946f32), [4294967296i64, 4294967296i64, 0i64, 8i64]), reshape(g32(40i64, 6.2677f32), [8i64, 5i64]))
 r_empty_mixed = empty_mixed(reshape(g32(0i64, 6.3408f32), [4611686018427387904i64, 3i64, 0i64, 8i64]), reshape(g32(40i64, 6.4139f32), [8i64, 5i64]))
+r_reused = reused(reshape(g32(222i64, 6.487f32), [2i64, 3i64, 37i64]), reshape(g32(185i64, 6.5601f32), [37i64, 5i64]))
+r_moved = moved(reshape(g32(222i64, 6.6332f32), [2i64, 3i64, 37i64]), reshape(g32(185i64, 6.7063f32), [37i64, 5i64]))
 r_broadcast_columns = broadcast_columns(reshape(g32(39i64, 4.7326f32), [3i64, 13i64]), reshape(g32(130i64, 4.8057f32), [2i64, 13i64, 5i64]))
 r_widened = widened(cast(to_tensor([[1.0f32, 0.015625f32, 9.5367431640625e-7f32]]), f16), cast(to_tensor([[1.0f32], [0.03125f32], [9.5367431640625e-7f32]]), f16))
 r_narrowed = narrowed(cast(to_tensor([[1.0f32, 0.015625f32, 9.5367431640625e-7f32]]), f16), cast(to_tensor([[1.0f32], [0.03125f32], [9.5367431640625e-7f32]]), f16))

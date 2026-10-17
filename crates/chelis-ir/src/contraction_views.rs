@@ -41,7 +41,7 @@ fn recipe(node: &DagNode) -> bool {
 
 /// `InputAxis` auxiliary slots supply extents, never tensor elements. A
 /// scalar bound is a payload read even when another bound names its shape.
-fn payload_slot(node: &DagNode, slot: usize) -> bool {
+pub(crate) fn payload_slot(node: &DagNode, slot: usize) -> bool {
     if matches!(node.op, RiscOp::Shape { .. } | RiscOp::Drop) {
         return false;
     }
@@ -76,6 +76,20 @@ pub(crate) fn contraction_views_excluding(
     dag: &Dag,
     exposed: &[NodeId],
     opaque_consumers: &[NodeId],
+) -> ContractionViews {
+    contraction_views_with_products(dag, exposed, opaque_consumers, &[])
+}
+
+/// [`contraction_views_excluding`], where each inlined product's kernel
+/// also reads its expansions' private reshapes as views of their dense
+/// operands (chelis#3802). Such a reshape is deferred and read by the
+/// kernel, at the kernel's position; its operand stays dense, so the read
+/// is the operand's own element order.
+pub(crate) fn contraction_views_with_products(
+    dag: &Dag,
+    exposed: &[NodeId],
+    opaque_consumers: &[NodeId],
+    products: &[crate::fuse::InlinedProduct],
 ) -> ContractionViews {
     let mut opaque = vec![false; dag.len()];
     for node in opaque_consumers {
@@ -129,14 +143,30 @@ pub(crate) fn contraction_views_excluding(
             }
         }
     }
+    let mut kernel_view = vec![false; dag.len()];
+    let mut dense = vec![false; dag.len()];
+    for product in products {
+        for reshape in product.view_reshapes.iter().flatten() {
+            if candidate[reshape.0] {
+                kernel_view[reshape.0] = true;
+                dense[dag.nodes()[reshape.0].inputs[0].0] = true;
+                last_read[reshape.0] = last_read[reshape.0].max(product.output().0);
+            }
+        }
+    }
     for root in dag.roots().iter().chain(exposed) {
         supported[root.0] = false;
+        kernel_view[root.0] = false;
         last_read[root.0] = dag.len();
     }
     let eligible: Vec<_> = dag
         .nodes()
         .iter()
-        .map(|node| candidate[node.id.0] && reaches_sum[node.id.0] && supported[node.id.0])
+        .map(|node| {
+            !dense[node.id.0]
+                && (kernel_view[node.id.0]
+                    || (candidate[node.id.0] && reaches_sum[node.id.0] && supported[node.id.0]))
+        })
         .collect();
     let movement: Vec<_> = dag
         .nodes()

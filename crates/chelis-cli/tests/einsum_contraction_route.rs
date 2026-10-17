@@ -1,4 +1,5 @@
-//! chelis#3736 / chelis#3703 / chelis#3783: a compiled float
+//! chelis#3736 / chelis#3703 / chelis#3781 / chelis#3783 / chelis#3802: a
+//! compiled float
 //! `einsum` whose [05-OP-33] contraction is spec/05 §4.1's product sum over
 //! one reduction label runs the emitted product-sum kernel `matmul` uses,
 //! with the bits `chelis eval` computes; every other einsum keeps the runtime
@@ -7,15 +8,16 @@
 //! The fixture covers both sides. Its routed definitions span f32 and f64,
 //! f16 and bf16 at their f32 default, f16 and f32 at an f64 accumulator,
 //! permuted and swapped operands, batch and runtime row extents (including
-//! zero rows), flattened row labels, a 257-leaf tree, inf, NaN and
-//! signed-zero products, an f16 total that overflows to inf, and an f16
-//! double-rounding witness. Its retained definitions are a diagonal, two and
-//! zero reduction labels, a matrix-vector product, a runtime contraction
-//! extent, an integer contraction, a lead label only the column operand
-//! carries, a runtime row beside a static row above one and two runtime rows
-//! (chelis#3781; including empty ones whose row product would overflow i64
-//! before a zero factor), and empty batches whose expansion strides would
-//! exceed i64, with static or runtime rows. Its f16 and bf16 `matmul`s share the sum's narrowing.
+//! zero rows), flattened row labels, including one runtime row beside a
+//! static row above one (chelis#3781), operands read again or reused after
+//! the contraction, a 257-leaf tree, inf, NaN and signed-zero products, an
+//! f16 total that overflows to inf, and an f16 double-rounding witness. Its
+//! retained definitions are a diagonal, two and zero reduction labels, a
+//! matrix-vector product, a runtime contraction extent, an integer
+//! contraction, a lead label only the column operand carries, two runtime
+//! rows (including empty ones whose row product would overflow i64 before a
+//! zero factor), and empty batches whose expansion strides would exceed i64,
+//! with static or runtime rows. Its f16 and bf16 `matmul`s share the sum's narrowing.
 
 mod common;
 
@@ -50,6 +52,10 @@ const ROUTED: &[&str] = &[
     "batched_brain",
     "special_half",
     "special_wide",
+    "product_rows",
+    "narrow_rows",
+    "reused",
+    "moved",
 ];
 
 const RETAINED: &[&str] = &[
@@ -60,8 +66,6 @@ const RETAINED: &[&str] = &[
     "runtime_depth",
     "integer",
     "broadcast_columns",
-    "product_rows",
-    "narrow_rows",
     "paired_rows",
     "empty_pair",
     "empty_mixed",
@@ -284,4 +288,129 @@ fn converted_contractions_allocate_no_accumulator_width_copy() {
         largest <= 2048 * 2048 * 2,
         "a {largest}-byte allocation exceeds the largest operand or result: {allocations:?}"
     );
+}
+
+/// The C function a routed definition's tensor body compiles to.
+fn tensor_helper<'a>(emitted: &'a str, name: &str) -> &'a str {
+    let hex: String = name.bytes().map(|b| format!("{b:02x}")).collect();
+    let start = emitted
+        .find(&format!("static void chelis_fn_{hex}__tensor_0__private("))
+        .unwrap_or_else(|| panic!("no tensor helper for `{name}`"));
+    let rest = &emitted[start..];
+    &rest[..rest.find("\n}\n").expect("the helper closes")]
+}
+
+/// chelis#3802: a routed contraction reads its row operand through the
+/// flattening reshape and stores each total straight into the output
+/// reshape's slot, so its tensor helper allocates exactly its result, as the
+/// runtime kernel does. The sweep covers `K > N`, `N > K` and `K = N`, static
+/// and runtime rows (one runtime row beside a static row, chelis#3781), and
+/// f32, f16 and f32 at an f64 accumulator. Copying the row operand or the
+/// result at either reshape would allocate a second buffer.
+#[test]
+fn routed_helpers_allocate_only_their_result() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("peak.ch");
+    let mut program = String::from(
+        "module EinsumPeak\n\
+         def g32(n: i64, lo: f32) -> tensor[*, f32] = cumsum(expand(to_tensor([lo]), 0i32, n), 0i32)\n",
+    );
+    let mut defs = Vec::new();
+    for (k, n) in [(64, 16), (16, 64), (32, 32)] {
+        for (dtype, result, accumulator) in [
+            ("f32", "f32", ""),
+            ("f16", "f16", ""),
+            ("f32", "f64", ", accumulator=f64"),
+        ] {
+            for runtime in [false, true] {
+                let name = format!(
+                    "p{k}x{n}{dtype}{result}{}",
+                    if runtime { "rt" } else { "st" }
+                );
+                let (generics, rows) = if runtime { ("[a]", "a") } else { ("", "8") };
+                program.push_str(&format!(
+                    "def {name}{generics}(x: tensor[{rows}, 3, {k}, {dtype}], w: tensor[{k}, {n}, {dtype}]) -> tensor[{rows}, 3, {n}, {result}] = einsum(\"amk,kn->amn\", x, w{accumulator})\n"
+                ));
+                let operand = |count: usize, lo: &str, shape: &str| {
+                    let generated = format!("g32({count}i64, {lo}f32)");
+                    let generated = if dtype == "f32" {
+                        generated
+                    } else {
+                        format!("cast({generated}, {dtype})")
+                    };
+                    format!("reshape({generated}, [{shape}])")
+                };
+                program.push_str(&format!(
+                    "r_{name} = {name}({}, {})\n",
+                    operand(24 * k, "0.001", &format!("8i64, 3i64, {k}i64")),
+                    operand(k * n, "0.002", &format!("{k}i64, {n}i64")),
+                ));
+                defs.push((name, rows, n));
+            }
+        }
+    }
+    std::fs::write(&source, &program).expect("write program");
+    let emitted = build_source(&source, &dir.path().join("out"), "peak");
+    for (name, rows, n) in &defs {
+        let helper = tensor_helper(&emitted, name);
+        assert!(
+            !helper.contains("chelis_tensor_einsum("),
+            "`{name}` still calls the runtime einsum kernel"
+        );
+        let allocations: Vec<&str> = helper
+            .lines()
+            .filter(|line| line.contains("chelis_alloc(") && !line.contains("chelis_alloc(0,"))
+            .collect();
+        assert_eq!(
+            allocations.len(),
+            1,
+            "`{name}` allocates more than its result: {allocations:#?}"
+        );
+        assert!(
+            allocations[0].contains(&format!("(int64_t[]){{ {rows}, 3, {n} }}")),
+            "`{name}` allocates something other than its result: {}",
+            allocations[0]
+        );
+    }
+}
+
+/// A reshape absorbed by the kernel still checks its target after the
+/// reduction plan and before it stores, so each failure keeps its text and
+/// the reduction plan's comes first when both fail.
+#[test]
+fn absorbed_reshape_keeps_its_check_and_the_trap_order() {
+    for (k, inputs, expected) in [
+        (
+            1,
+            "reshape(expand(to_tensor([1.0f32]), 0i32, 2i64), [2i64, 1i64]), reshape(expand(to_tensor([1.0f32]), 0i32, 4i64), [1i64, 4i64])",
+            "reshape target has 5 elements but the tensor has 8\nnumeric trap: domain in reshape at i64",
+        ),
+        (
+            0,
+            "reshape(expand(to_tensor([1.0f32]), 0i32, 0i64), [4611686018427387904i64, 0i64]), reshape(expand(to_tensor([1.0f32]), 0i32, 0i64), [0i64, 4i64])",
+            "Overflow: extent product exceeds i64\nnumeric trap: overflow in sum at i64",
+        ),
+    ] {
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("trap.ch");
+        std::fs::write(
+            &source,
+            format!(
+                "module EinsumTrap\n\
+                 def mm[a, n](x: tensor[a, {k}, f32], w: tensor[{k}, n, f32]) -> tensor[5, f32] = reshape(matmul(x, w), [5i64])\n\
+                 r = mm({inputs})\n"
+            ),
+        )
+        .expect("write program");
+        let out = dir.path().join("out");
+        let emitted = build_source(&source, &out, "trap");
+        assert!(
+            tensor_helper(&emitted, "mm").contains("_reshape_source"),
+            "the kernel did not absorb the reshape"
+        );
+        let run = StdCommand::new(out.join("trap")).output().expect("run");
+        assert!(!run.status.success(), "the program should trap");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(stderr.trim_end(), expected, "{stderr}");
+    }
 }
