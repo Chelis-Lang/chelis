@@ -2642,8 +2642,7 @@ impl WireDag {
                         .inputs
                         .iter()
                         .map(|input_id| {
-                            usize::try_from(*input_id).ok()
-                                .and_then(|id| self.nodes[..index].get(id))
+                            wire_earlier_node(&self.nodes, index, *input_id)
                                 .ok_or_else(|| {
                                     WireDagContractError::new(format!(
                                         "WireDag Compare node {} input {input_id} does not resolve to an earlier node",
@@ -2702,8 +2701,7 @@ impl WireDag {
                         .inputs
                         .iter()
                         .map(|input_id| {
-                            usize::try_from(*input_id).ok()
-                                .and_then(|id| self.nodes[..index].get(id))
+                            wire_earlier_node(&self.nodes, index, *input_id)
                                 .ok_or_else(|| {
                                     WireDagContractError::new(format!(
                                         "WireDag Logical node {} input {input_id} does not resolve to an earlier node",
@@ -2743,8 +2741,7 @@ impl WireDag {
                         .inputs
                         .iter()
                         .map(|input_id| {
-                            usize::try_from(*input_id).ok()
-                                .and_then(|id| self.nodes[..index].get(id))
+                            wire_earlier_node(&self.nodes, index, *input_id)
                                 .ok_or_else(|| {
                                     WireDagContractError::new(format!(
                                         "WireDag Where node {} input {input_id} does not resolve to an earlier node",
@@ -2799,7 +2796,7 @@ impl WireDag {
                     let input = node
                         .inputs
                         .first()
-                        .and_then(|id| self.nodes[..index].iter().find(|input| input.id == *id));
+                        .and_then(|id| wire_earlier_node(&self.nodes, index, *id));
                     if node.inputs.len() != 1
                         || input.is_none_or(|input| {
                             let p = Prim::parse_interchange_name(&input.output_type.precision);
@@ -2835,7 +2832,7 @@ impl WireDag {
                         || node
                             .inputs
                             .first()
-                            .and_then(|id| self.nodes[..index].iter().find(|input| input.id == *id))
+                            .and_then(|id| wire_earlier_node(&self.nodes, index, *id))
                             .is_none_or(|input| {
                                 !Prim::parse_interchange_name(&input.output_type.precision)
                                     .is_some_and(|p| p.is_float())
@@ -2862,22 +2859,18 @@ impl WireDag {
                         || !Prim::parse_interchange_name(&node.output_type.precision)
                             .is_some_and(|prim| prim.is_integer() || (mod_op && prim.is_float()))
                         || node.inputs.iter().any(|id| {
-                            self.nodes[..index]
-                                .iter()
-                                .find(|input| input.id == *id)
-                                .is_none_or(|input| {
-                                    input.output_type.precision != node.output_type.precision
-                                        || input.output_type.dims.len()
-                                            != node.output_type.dims.len()
-                                        || input
-                                            .output_type
-                                            .dims
-                                            .iter()
-                                            .zip(&node.output_type.dims)
-                                            .any(|(actual, expected)| {
-                                                !wire_dim_info_equal(actual, expected)
-                                            })
-                                })
+                            wire_earlier_node(&self.nodes, index, *id).is_none_or(|input| {
+                                input.output_type.precision != node.output_type.precision
+                                    || input.output_type.dims.len() != node.output_type.dims.len()
+                                    || input
+                                        .output_type
+                                        .dims
+                                        .iter()
+                                        .zip(&node.output_type.dims)
+                                        .any(|(actual, expected)| {
+                                            !wire_dim_info_equal(actual, expected)
+                                        })
+                            })
                         })
                     {
                         return Err(WireDagContractError::new(format!(
@@ -3272,15 +3265,12 @@ impl WireDag {
                     .inputs
                     .iter()
                     .map(|input_id| {
-                        self.nodes[..index]
-                            .iter()
-                            .find(|candidate| candidate.id == *input_id)
-                            .ok_or_else(|| {
-                                WireDagContractError::new(format!(
-                                    "WireDag ReLU node {} input {input_id} does not resolve to an earlier node",
-                                    node.id
-                                ))
-                            })
+                        wire_earlier_node(&self.nodes, index, *input_id).ok_or_else(|| {
+                            WireDagContractError::new(format!(
+                                "WireDag ReLU node {} input {input_id} does not resolve to an earlier node",
+                                node.id
+                            ))
+                        })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let Some(output_prim) = Prim::parse_interchange_name(&node.output_type.precision)
@@ -3324,15 +3314,12 @@ impl WireDag {
                 )));
             }
             let input_id = node.inputs[0];
-            let input = self.nodes[..index]
-                .iter()
-                .find(|candidate| candidate.id == input_id)
-                .ok_or_else(|| {
-                    WireDagContractError::new(format!(
-                        "WireDag Count node {} input {input_id} does not resolve to an earlier node",
-                        node.id
-                    ))
-                })?;
+            let input = wire_earlier_node(&self.nodes, index, input_id).ok_or_else(|| {
+                WireDagContractError::new(format!(
+                    "WireDag Count node {} input {input_id} does not resolve to an earlier node",
+                    node.id
+                ))
+            })?;
             if axes.is_empty() {
                 return Err(WireDagContractError::new(format!(
                     "WireDag Count node {} axes must be non-empty",
@@ -3440,15 +3427,12 @@ fn validate_wire_rt_dim(
             )));
         }
         let source_id = owner.inputs[slot];
-        nodes[..owner_index]
-            .iter()
-            .find(|candidate| candidate.id == source_id)
-            .ok_or_else(|| {
-                WireDagContractError::new(format!(
-                    "WireDag {label} node {} input slot {slot} does not resolve to an earlier node",
-                    owner.id
-                ))
-            })
+        wire_earlier_node(nodes, owner_index, source_id).ok_or_else(|| {
+            WireDagContractError::new(format!(
+                "WireDag {label} node {} input slot {slot} does not resolve to an earlier node",
+                owner.id
+            ))
+        })
     };
 
     match dim {
@@ -3593,7 +3577,7 @@ struct WireIngressWork {
     axis_expansions: usize,
     semantic_visits: usize,
     node_lookups: usize,
-    node_scan_steps: usize,
+    input_resolution_steps: usize,
     dependency_steps: usize,
     source_membership_steps: usize,
     witness_node_steps: usize,
@@ -3658,7 +3642,7 @@ impl WireIngressWork {
             axis_expansions,
             semantic_visits,
             node_lookups,
-            node_scan_steps,
+            input_resolution_steps,
             dependency_steps,
             source_membership_steps,
             witness_node_steps,
@@ -3719,7 +3703,7 @@ impl WireIngressWork {
             + axis_expansions
             + semantic_visits
             + node_lookups
-            + node_scan_steps
+            + input_resolution_steps
             + dependency_steps
             + source_membership_steps
             + witness_node_steps
@@ -3798,12 +3782,18 @@ fn wire_node_by_id(nodes: &[WireDagNode], id: u64) -> Option<&WireDagNode> {
         .ok()
         .and_then(|index| nodes.get(index))
         .filter(|node| node.id == id)
-        .or_else(|| {
-            nodes.iter().find(|node| {
-                wire_ingress_work!(node_scan_steps);
-                node.id == id
-            })
-        })
+}
+
+/// The input `id` of the node at `owner_index`, if it names an earlier node.
+///
+/// `dag_domains::validate` runs before every admission rule and requires each
+/// node id to equal its position, so an earlier node is found by indexing the
+/// prefix, never by searching it.
+fn wire_earlier_node(nodes: &[WireDagNode], owner_index: usize, id: u64) -> Option<&WireDagNode> {
+    wire_ingress_work!(input_resolution_steps);
+    usize::try_from(id)
+        .ok()
+        .and_then(|id| nodes[..owner_index].get(id))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -9546,6 +9536,179 @@ mod tests {
                 }
                 let bad = serde_json::json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "declarations":dag.declarations, "nodes":dag.nodes, "roots":dag.roots}).to_string();
                 assert!(WireDag::from_validated_json(&bad).is_err());
+            }
+        }
+    }
+
+    /// A chain of about `n` nodes over one Load in which every `family` node
+    /// reads the node just before it, so resolving that input by searching the
+    /// prefix would examine a number of nodes proportional to its position.
+    fn input_resolution_chain(family: &str, n: usize) -> serde_json::Value {
+        let node =
+            |id: usize, op: serde_json::Value, inputs: Vec<usize>, dims: &[i64], dtype: &str| {
+                let dims = dims
+                    .iter()
+                    .map(|size| serde_json::json!({"kind": "lit", "size": size}))
+                    .collect::<Vec<_>>();
+                serde_json::json!({"id": id, "declaration": 0, "activation": null, "shape_deps": [],
+                "span_id": null, "merged_spans": [], "inputs": inputs, "op": op,
+                "output_type": {"dims": dims, "precision": dtype}})
+            };
+        let dtype = if matches!(family, "mod" | "bitwise") {
+            "int32"
+        } else {
+            "f32"
+        };
+        let mut nodes = vec![node(
+            0,
+            serde_json::json!({"kind": "load", "name": "x"}),
+            vec![],
+            &[4],
+            dtype,
+        )];
+        while nodes.len() < n {
+            let id = nodes.len();
+            let previous = id - 1;
+            let (op, inputs) = match family {
+                "relu" => (serde_json::json!({"kind": "relu"}), vec![previous]),
+                "relu_adjoint" => (
+                    serde_json::json!({"kind": "relu_adjoint"}),
+                    vec![previous; 2],
+                ),
+                "cumsum" => (
+                    serde_json::json!({"kind": "cumsum", "axis": 0, "direction": "increasing"}),
+                    vec![previous],
+                ),
+                "mod" => (serde_json::json!({"kind": "mod"}), vec![previous; 2]),
+                "bitwise" => (
+                    serde_json::json!({"kind": "bitwise", "bitwise": "and"}),
+                    vec![previous; 2],
+                ),
+                "reshape" => (
+                    serde_json::json!({"kind": "reshape", "new_shape": [{"bound": "input_axis",
+                        "tensor": 1, "axis": {"axis": "lit", "value": 0}}]}),
+                    vec![previous; 2],
+                ),
+                "float_classify" | "count" => {
+                    // An Exp chain keeps a float spine; each classification, and
+                    // its count, reads the node just before it.
+                    nodes.push(node(
+                        id,
+                        serde_json::json!({"kind": "exp"}),
+                        vec![previous],
+                        &[4],
+                        "f32",
+                    ));
+                    let classify =
+                        serde_json::json!({"kind": "float_classify", "classification": "nan"});
+                    nodes.push(node(id + 1, classify, vec![id], &[4], "bool"));
+                    if family == "count" {
+                        let count = serde_json::json!({"kind": "count", "axes": [0]});
+                        nodes.push(node(id + 2, count, vec![id + 1], &[], "int64"));
+                    }
+                    let spine = nodes.len();
+                    nodes.push(node(
+                        spine,
+                        serde_json::json!({"kind": "exp"}),
+                        vec![id],
+                        &[4],
+                        "f32",
+                    ));
+                    continue;
+                }
+                _ => unreachable!("no input-resolution chain for {family}"),
+            };
+            nodes.push(node(id, op, inputs, &[4], dtype));
+        }
+        let root = nodes.len() - 1;
+        serde_json::json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "declarations": ["chain"],
+            "nodes": nodes, "roots": [root]})
+    }
+
+    /// chelis#3747: an admission rule resolves an input by its position,
+    /// examining one node, because `dag_domains::validate` has already made
+    /// every node id equal its position. The count is exact: each pass of the
+    /// two-pass validation resolves every input the family rule reads once, so
+    /// a rule that searched the prefix, or that stopped resolving through
+    /// `wire_earlier_node`, changes it.
+    #[test]
+    fn admission_rules_resolve_inputs_by_position() {
+        for (family, inputs_read) in [
+            ("relu", 1),
+            ("relu_adjoint", 2),
+            ("cumsum", 1),
+            ("float_classify", 1),
+            ("count", 1),
+            ("mod", 2),
+            ("bitwise", 2),
+            // One runtime-dimension slot per Reshape.
+            ("reshape", 1),
+        ] {
+            for n in [64, 128] {
+                let mut chain = input_resolution_chain(family, n);
+                let kind_count = |kind: &str| {
+                    chain["nodes"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|node| node["op"]["kind"] == kind)
+                        .count()
+                };
+                let family_nodes = kind_count(family);
+                // A Count chain also resolves each FloatClassify a Count reads.
+                let readers = if family == "count" {
+                    kind_count("float_classify")
+                } else {
+                    0
+                };
+                assert!(
+                    family_nodes * 4 >= n,
+                    "{family} n={n}: {family_nodes} family nodes"
+                );
+                WIRE_INGRESS_WORK.with(|work| work.set(Some(WireIngressWork::default())));
+                let admitted = WireDag::from_validated_json(&chain.to_string());
+                let work = WIRE_INGRESS_WORK.with(|work| work.replace(None).unwrap());
+                if let Err(error) = admitted {
+                    panic!("{family} n={n}: {error}");
+                }
+                assert_eq!(
+                    work.input_resolution_steps,
+                    2 * (family_nodes * inputs_read + readers),
+                    "{family} n={n}: {work:?}"
+                );
+
+                // The same chain with its last family node disagreeing with the
+                // input it resolves still reaches that rule and is rejected there.
+                let last = chain["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .rev()
+                    .find(|node| node["op"]["kind"] == family)
+                    .unwrap();
+                let id = last["id"].as_u64().unwrap();
+                if family == "reshape" {
+                    // Axis 1 is outside the rank-1 source its slot resolves to.
+                    last["op"]["new_shape"][0]["axis"]["value"] = serde_json::json!(1);
+                } else {
+                    let wrong = if last["output_type"]["precision"] == "f64" {
+                        "f32"
+                    } else {
+                        "f64"
+                    };
+                    last["output_type"]["precision"] = serde_json::json!(wrong);
+                    last["output_type"]["dims"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({"kind": "lit", "size": 4}));
+                }
+                let error = WireDag::from_validated_json(&chain.to_string())
+                    .expect_err("a family node that disagrees with its input must be rejected")
+                    .to_string();
+                assert!(
+                    error.contains(&format!("node {id}")),
+                    "{family} n={n}: {error}"
+                );
             }
         }
     }
