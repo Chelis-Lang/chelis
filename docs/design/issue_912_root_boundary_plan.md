@@ -142,22 +142,25 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
     assigned the Host lane with the `StructuralForm` reason
     `selected-callable-arguments`; a call whose parameters are all tensors
     keeps the lane the Tensor-lane realizability check gives it. The Host lane
-    holds every dtype, so this assignment never narrows a value and satisfies
-    [05-OBS-10]. The entry's required inputs stay its tensor inputs: the live
-    tensor parameters, never an argued one. A call the manifest does not
-    specialize, because a live tensor parameter has no binding, is an error
-    rather than a result without its root. Admission is one type-directed walk
-    of each argument against the parameter's checked type, at every depth,
-    before anything evaluates: a scalar's dtype tag equals the declared
-    primitive; booleans, strings, keys and unit match their own types; tuples,
-    `List` and `Dict` admit every element at its declared type; a tensor's
-    dtype and every literal extent equal the declared ones; and a record's or
-    variant's constructor belongs to the declared data type, each field
-    admitted at its declared type. A value of an invariant-carrying type is
-    then revalidated against the invariant tables the compile derives once, as
-    every in-process value of that type is. A value of a generic user data type
-    (its field types depend on type arguments) and a tensor whose declared
-    extents are not all literal are rejected at the call boundary (#3804).
+    holds every dtype, so the assignment satisfies [05-OBS-10]. The entry's
+    required inputs stay its tensor inputs: the live tensor parameters, never
+    an argued one. A call the manifest does not specialize, because an input
+    its result reads has no binding, is an error rather than a result without
+    its root.
+
+    Admission happens before anything evaluates, and converts nothing. A call
+    argument is a scalar whose dtype tag equals the declared primitive, a
+    boolean, or a string; a parameter of any other non-tensor type is rejected
+    with a typed `unsupported` diagnostic citing #3804. A tensor parameter's
+    binding is admitted at exactly the declared dtype and every literal extent,
+    and rejected otherwise, as the Tensor lane's input load rejects it; the
+    host evaluator's own binding ingress, which rounds or range-checks a
+    binding to its declared dtype, therefore receives only bindings already at
+    that dtype and changes none of them.
+    The container arguments #3804 tracks owe, beyond per-element types, each
+    type's own value rules: [05-OP-56] key uniqueness for a `Dict`, under the
+    [05-OP-32] key equivalence it cites; constructor lookup within the declared
+    type rather than by name across types; and invariant revalidation.
 
 ## Coordination
 

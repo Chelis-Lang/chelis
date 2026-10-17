@@ -660,12 +660,6 @@ impl PreparedHostEvaluation {
     pub(crate) fn session(&self) -> chelis_ir::host::HostLoweringSession<'_> {
         self.host.session()
     }
-
-    /// The program the host evaluator runs: the library composed with the
-    /// source, or the source alone.
-    pub(crate) fn program(&self) -> &CheckedProgram {
-        self.host.program()
-    }
 }
 
 /// Evaluate against a program prepared once for many evaluations

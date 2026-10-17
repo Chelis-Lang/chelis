@@ -1,20 +1,27 @@
-//! chelis#3801: a call argument is admitted against the parameter's checked
-//! type at every depth, before evaluation ([05-OBS-9]).
+//! chelis#3801: a call's inputs are admitted at exactly their declared types,
+//! before evaluation ([05-OBS-9]).
 //!
-//! Generated oracle. Each parameter type below has one well-formed value. For
-//! every position in that value, and for every foreign value that is not a
-//! value of the type declared at that position, the planted mutation must be
-//! rejected by admission, and the rejection must name the planted position.
-//! The well-formed value must be admitted, and its call must produce its owed
-//! root (an identity body returns the argument exactly). A value of an
-//! invariant-carrying type that breaks the invariant, planted at each depth
-//! where that type occurs, must be rejected too.
+//! Generated oracle over the three things a call receives.
+//!
+//! - Scalar, boolean and string parameters take call arguments. For each such
+//!   parameter type, every foreign value (every other scalar dtype, the other
+//!   kinds, containers, records, tensors) is rejected with an error naming the
+//!   parameter, and the well-formed value is admitted and returned bit-exactly
+//!   by an identity call.
+//! - Every other non-tensor parameter type (tuples, lists, dicts, records,
+//!   variants, opaque types, generic types) is a call argument the boundary
+//!   does not implement: every value, well-formed or not, is rejected with the
+//!   typed `unsupported` diagnostic that names the parameter and chelis#3804.
+//! - Tensor parameters arrive as bindings. For each tensor parameter type,
+//!   every binding of another dtype, another rank, or another literal extent
+//!   is rejected before evaluation, never cast or rounded; the well-formed
+//!   binding is admitted and returned bit-exactly.
 
 use std::collections::BTreeMap;
 
 #[allow(deprecated)]
 use chelis_compiler_api::compiler::{PreparedEval, prepare_eval};
-use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
+use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_types::types::Prim;
 use serde_json::json;
 
@@ -23,25 +30,7 @@ mod wire_values;
 
 use wire_values::{scalar_f32, scalar_f64, scalar_integer};
 
-/// A parameter type, as far as the oracle needs to describe it.
-#[derive(Clone, Debug)]
-enum Shape {
-    Scalar(Prim),
-    Bool,
-    Str,
-    Tuple(Vec<Shape>),
-    List(Box<Shape>),
-    /// A record or variant constructor of a named data type, with its fields
-    /// in declared order (`None` names a positional field).
-    Adt {
-        ty: &'static str,
-        ctor: &'static str,
-        fields: Vec<(Option<&'static str>, Shape)>,
-    },
-    Tensor(Prim, Vec<usize>),
-}
-
-const SOURCE_TYPES: &str = r#"module M
+const TYPES: &str = r#"module M
 @opaque
 @invariant(p) (p.v >= 0.0)
 type Positive =
@@ -50,328 +39,186 @@ type Positive =
 type Inner =
   | Inner { a: i64 }
 
-type Other =
-  | Other { b: f32 }
-
-type Outer =
-  | Outer { inner: Inner }
-
-type WithList =
-  | WithList { a: i64, xs: List[i64] }
-
-type WithTensor =
-  | WithTensor { t: tensor[3, f32] }
-
-type Holder =
-  | Holder { p: Positive }
-
 type Color =
   | Red
   | Green
 "#;
 
-fn shapes() -> Vec<(&'static str, Shape)> {
-    let inner = || Shape::Adt {
-        ty: "Inner",
-        ctor: "Inner",
-        fields: vec![(Some("a"), Shape::Scalar(Prim::Int64))],
-    };
-    let positive = || Shape::Adt {
-        ty: "Positive",
-        ctor: "Positive",
-        fields: vec![(Some("v"), Shape::Scalar(Prim::F32))],
-    };
+/// Scalar, boolean and string parameter types: the call-argument kinds.
+const ARGUMENT_TYPES: [&str; 10] = [
+    "i64", "i32", "i16", "i8", "f64", "f32", "f16", "bf16", "bool", "string",
+];
+
+/// Non-tensor parameter types the boundary does not implement as arguments,
+/// each with a value of that type.
+fn unimplemented_types() -> Vec<(&'static str, ExecutionValue)> {
     vec![
-        ("i64", Shape::Scalar(Prim::Int64)),
-        ("i32", Shape::Scalar(Prim::Int32)),
-        ("i16", Shape::Scalar(Prim::Int16)),
-        ("i8", Shape::Scalar(Prim::Int8)),
-        ("f64", Shape::Scalar(Prim::F64)),
-        ("f32", Shape::Scalar(Prim::F32)),
-        ("f16", Shape::Scalar(Prim::F16)),
-        ("bf16", Shape::Scalar(Prim::Bf16)),
-        ("bool", Shape::Bool),
-        ("string", Shape::Str),
         (
             "(i64, f32)",
-            Shape::Tuple(vec![Shape::Scalar(Prim::Int64), Shape::Scalar(Prim::F32)]),
+            ExecutionValue::Tuple {
+                value: vec![scalar_integer(Prim::Int64, 1), scalar_f32(1.0)],
+            },
         ),
         (
             "List[i64]",
-            Shape::List(Box::new(Shape::Scalar(Prim::Int64))),
-        ),
-        (
-            "Outer",
-            Shape::Adt {
-                ty: "Outer",
-                ctor: "Outer",
-                fields: vec![(Some("inner"), inner())],
+            ExecutionValue::List {
+                value: vec![scalar_integer(Prim::Int64, 1)],
             },
         ),
         (
-            "WithList",
-            Shape::Adt {
-                ty: "WithList",
-                ctor: "WithList",
-                fields: vec![
-                    (Some("a"), Shape::Scalar(Prim::Int64)),
-                    (
-                        Some("xs"),
-                        Shape::List(Box::new(Shape::Scalar(Prim::Int64))),
-                    ),
-                ],
-            },
+            "Dict[string, i64]",
+            serde_json::from_value(json!({"type": "dict", "entries": [
+                {"key": {"type": "string", "value": "a"},
+                 "value": {"type": "scalar", "value": {"dtype": "int64", "value": 1}}}
+            ]}))
+            .unwrap(),
         ),
         (
-            "WithTensor",
-            Shape::Adt {
-                ty: "WithTensor",
-                ctor: "WithTensor",
-                fields: vec![(Some("t"), Shape::Tensor(Prim::F32, vec![3]))],
-            },
-        ),
-        (
-            "Holder",
-            Shape::Adt {
-                ty: "Holder",
-                ctor: "Holder",
-                fields: vec![(Some("p"), positive())],
+            "Inner",
+            ExecutionValue::Adt {
+                ctor: "Inner".to_string(),
+                fields: vec![scalar_integer(Prim::Int64, 1)],
             },
         ),
         (
             "Color",
-            Shape::Adt {
-                ty: "Color",
-                ctor: "Red",
+            ExecutionValue::Adt {
+                ctor: "Red".to_string(),
                 fields: Vec::new(),
             },
         ),
-        ("List[Inner]", Shape::List(Box::new(inner()))),
-        ("List[Positive]", Shape::List(Box::new(positive()))),
         (
-            "(Inner, List[bool])",
-            Shape::Tuple(vec![inner(), Shape::List(Box::new(Shape::Bool))]),
+            "Positive",
+            ExecutionValue::Adt {
+                ctor: "Positive".to_string(),
+                fields: vec![scalar_f32(1.0)],
+            },
         ),
         (
-            "(tensor[3, f32], i64)",
-            Shape::Tuple(vec![
-                Shape::Tensor(Prim::F32, vec![3]),
-                Shape::Scalar(Prim::Int64),
-            ]),
-        ),
-        (
-            "List[tensor[3, f32]]",
-            Shape::List(Box::new(Shape::Tensor(Prim::F32, vec![3]))),
+            "Option[i64]",
+            ExecutionValue::Adt {
+                ctor: "Some".to_string(),
+                fields: vec![scalar_integer(Prim::Int64, 1)],
+            },
         ),
     ]
 }
 
-fn tensor(prim: Prim, shape: &[usize]) -> ExecutionValue {
-    let count = shape.iter().product::<usize>();
-    let bits = match prim {
-        Prim::F32 => vec![json!(format!("{:08x}", 1.0f32.to_bits())); count],
-        Prim::F64 => vec![json!(format!("{:016x}", 1.0f64.to_bits())); count],
-        other => panic!("no tensor fixture for {other:?}"),
-    };
-    serde_json::from_value(json!({"type": "tensor", "value": {
-        "shape": shape, "data": {"dtype": prim.name(), "bits": bits}
-    }}))
-    .expect("tensor fixture")
+/// Tensor parameter types with their dtype and literal shape.
+const TENSOR_TYPES: [(&str, Prim, &[usize]); 4] = [
+    ("tensor[3, f32]", Prim::F32, &[3]),
+    ("tensor[2, 2, f64]", Prim::F64, &[2, 2]),
+    ("tensor[3, i32]", Prim::Int32, &[3]),
+    ("tensor[3, i64]", Prim::Int64, &[3]),
+];
+
+fn half(prim: Prim, bits: &str) -> ExecutionValue {
+    serde_json::from_value(json!({"type": "scalar", "value": {"dtype": prim.name(), "bits": bits}}))
+        .unwrap()
 }
 
-fn scalar(prim: Prim) -> ExecutionValue {
-    match prim {
-        Prim::F32 => scalar_f32(1.5),
-        Prim::F64 => scalar_f64(1.5),
-        Prim::F16 | Prim::Bf16 => serde_json::from_value(
-            json!({"type": "scalar", "value": {"dtype": prim.name(), "bits": "3e00"}}),
-        )
-        .expect("half fixture"),
-        integer => scalar_integer(integer, 3),
-    }
-}
-
-/// The well-formed value of `shape`.
-fn well_formed(shape: &Shape) -> ExecutionValue {
-    match shape {
-        Shape::Scalar(prim) => scalar(*prim),
-        Shape::Bool => ExecutionValue::Bool { value: true },
-        Shape::Str => ExecutionValue::String {
-            value: "s".to_string(),
-        },
-        Shape::Tuple(items) => ExecutionValue::Tuple {
-            value: items.iter().map(well_formed).collect(),
-        },
-        Shape::List(item) => ExecutionValue::List {
-            value: vec![well_formed(item), well_formed(item)],
-        },
-        Shape::Adt { ctor, fields, .. } => ExecutionValue::Adt {
-            ctor: ctor.to_string(),
-            fields: fields.iter().map(|(_, shape)| well_formed(shape)).collect(),
-        },
-        Shape::Tensor(prim, extents) => tensor(*prim, extents),
-    }
-}
-
-/// Values planted in place of a well-formed position.
-fn foreign() -> Vec<ExecutionValue> {
-    vec![
-        scalar_integer(Prim::Int64, 1),
-        scalar_integer(Prim::Int32, 1),
-        scalar_integer(Prim::Int8, 1),
-        scalar_f32(1.0),
-        scalar_f64(1.0),
-        serde_json::from_value(
-            json!({"type": "scalar", "value": {"dtype": "f16", "bits": "3c00"}}),
+/// The well-formed argument of each argument type: values whose bits a
+/// conversion would change.
+fn well_formed(spelling: &str) -> ExecutionValue {
+    match spelling {
+        "i64" => scalar_integer(Prim::Int64, i64::MIN),
+        "i32" => scalar_integer(Prim::Int32, i32::MIN.into()),
+        "i16" => scalar_integer(Prim::Int16, i16::MIN.into()),
+        "i8" => scalar_integer(Prim::Int8, i8::MIN.into()),
+        "f64" => serde_json::from_value(
+            json!({"type": "scalar", "value": {"dtype": "f64", "bits": "7ff8000000000001"}}),
         )
         .unwrap(),
+        "f32" => serde_json::from_value(
+            json!({"type": "scalar", "value": {"dtype": "f32", "bits": "80000001"}}),
+        )
+        .unwrap(),
+        "f16" => half(Prim::F16, "7e01"),
+        "bf16" => half(Prim::Bf16, "8001"),
+        "bool" => ExecutionValue::Bool { value: true },
+        "string" => ExecutionValue::String {
+            value: "s".to_string(),
+        },
+        other => panic!("no fixture for {other}"),
+    }
+}
+
+fn tensor_value(prim: Prim, shape: &[usize]) -> TensorValue {
+    let count = shape.iter().product::<usize>();
+    let data = match prim {
+        Prim::F32 => json!({"dtype": "f32", "bits": (0..count)
+            .map(|index| format!("{:08x}", (1.1f32 + index as f32).to_bits()))
+            .collect::<Vec<_>>()}),
+        Prim::F64 => json!({"dtype": "f64", "bits": (0..count)
+            .map(|index| format!("{:016x}", (1.1f64 + index as f64).to_bits()))
+            .collect::<Vec<_>>()}),
+        Prim::Int32 => json!({"dtype": "int32", "values": (0..count)
+            .map(|index| index as i64 + 1).collect::<Vec<_>>()}),
+        Prim::Int64 => json!({"dtype": "int64", "values": (0..count)
+            .map(|index| index as i64 + 3_000_000_000).collect::<Vec<_>>()}),
+        other => panic!("no tensor fixture for {other:?}"),
+    };
+    serde_json::from_value(json!({"shape": shape, "data": data})).unwrap()
+}
+
+/// Values planted in place of a well-formed argument.
+fn foreign() -> Vec<ExecutionValue> {
+    let mut values = vec![
+        scalar_integer(Prim::Int64, 1),
+        scalar_integer(Prim::Int32, 1),
+        scalar_integer(Prim::Int16, 1),
+        scalar_integer(Prim::Int8, 1),
+        scalar_f64(1.0),
+        scalar_f32(1.0),
+        half(Prim::F16, "3c00"),
+        half(Prim::Bf16, "3f80"),
         ExecutionValue::Bool { value: false },
         ExecutionValue::String {
             value: "t".to_string(),
         },
         ExecutionValue::Unit,
-        ExecutionValue::Tuple {
-            value: vec![scalar_integer(Prim::Int64, 1)],
+        ExecutionValue::Tensor {
+            value: tensor_value(Prim::F32, &[1]),
         },
-        ExecutionValue::List {
-            value: vec![ExecutionValue::String {
-                value: "t".to_string(),
-            }],
-        },
-        ExecutionValue::Adt {
-            ctor: "Other".to_string(),
-            fields: vec![scalar_f32(1.0)],
-        },
-        ExecutionValue::Adt {
-            ctor: "Inner".to_string(),
-            fields: vec![scalar_f32(1.0)],
-        },
-        ExecutionValue::Adt {
-            ctor: "Inner".to_string(),
-            fields: Vec::new(),
-        },
-        ExecutionValue::Adt {
-            ctor: "Green".to_string(),
-            fields: Vec::new(),
-        },
-        tensor(Prim::F32, &[1]),
-        tensor(Prim::F32, &[3]),
-        tensor(Prim::F64, &[3]),
-        tensor(Prim::F32, &[3, 1]),
-    ]
+    ];
+    values.extend(unimplemented_types().into_iter().map(|(_, value)| value));
+    values
 }
 
-/// Whether the planted `value` is a value of `shape`, judged by the oracle
-/// independently of the compiler.
-fn is_value_of(value: &ExecutionValue, shape: &Shape) -> bool {
+/// Whether `value` is a value of the argument type `spelling`.
+fn is_value_of(value: &ExecutionValue, spelling: &str) -> bool {
     let json = serde_json::to_value(value).unwrap();
-    match shape {
-        Shape::Scalar(prim) => {
-            json["type"] == "scalar" && wire_dtype(&json["value"]["dtype"]) == Some(*prim)
-        }
-        Shape::Bool => json["type"] == "bool",
-        Shape::Str => json["type"] == "string",
-        Shape::Tuple(items) => match value {
-            ExecutionValue::Tuple { value } => {
-                value.len() == items.len()
-                    && value
-                        .iter()
-                        .zip(items)
-                        .all(|(value, item)| is_value_of(value, item))
-            }
-            _ => false,
-        },
-        Shape::List(item) => match value {
-            ExecutionValue::List { value } => value.iter().all(|value| is_value_of(value, item)),
-            _ => false,
-        },
-        Shape::Adt { ty, fields, .. } => match value {
-            ExecutionValue::Adt {
-                ctor,
-                fields: values,
-            } => {
-                let owner = match ctor.as_str() {
-                    "Red" | "Green" => "Color",
-                    other => other,
-                };
-                owner == *ty
-                    && values.len() == fields.len()
-                    && values
-                        .iter()
-                        .zip(fields)
-                        .all(|(value, (_, field))| is_value_of(value, field))
-            }
-            _ => false,
-        },
-        Shape::Tensor(prim, extents) => {
-            json["type"] == "tensor"
-                && wire_dtype(&json["value"]["data"]["dtype"]) == Some(*prim)
-                && json["value"]["shape"] == json!(extents)
+    match spelling {
+        "bool" => json["type"] == "bool",
+        "string" => json["type"] == "string",
+        _ => {
+            json["type"] == "scalar"
+                && json["value"]["dtype"]
+                    .as_str()
+                    .and_then(Prim::parse_interchange_name)
+                    == Prim::parse_name(spelling)
         }
     }
-}
-
-fn wire_dtype(spelling: &serde_json::Value) -> Option<Prim> {
-    Prim::parse_interchange_name(spelling.as_str()?)
-}
-
-/// Every position of `shape`'s well-formed value, as the admission names it,
-/// with the shape declared there and a function that rebuilds the value with
-/// that position replaced.
-type Planter = Box<dyn Fn(ExecutionValue) -> ExecutionValue>;
-
-fn positions(shape: &Shape, at: String) -> Vec<(String, Shape, Planter)> {
-    let mut out: Vec<(String, Shape, Planter)> =
-        vec![(at.clone(), shape.clone(), Box::new(|planted| planted))];
-    let children: Vec<(String, Shape, usize)> = match shape {
-        Shape::Tuple(items) => items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| (format!("{at}.{index}"), item.clone(), index))
-            .collect(),
-        Shape::List(item) => vec![(format!("{at}[1]"), (**item).clone(), 1)],
-        Shape::Adt { fields, .. } => fields
-            .iter()
-            .enumerate()
-            .map(|(index, (name, field))| {
-                let label = match name {
-                    Some(name) => format!("{at}.{name}"),
-                    None => format!("{at}.{index}"),
-                };
-                (label, field.clone(), index)
-            })
-            .collect(),
-        Shape::Scalar(_) | Shape::Bool | Shape::Str | Shape::Tensor(..) => Vec::new(),
-    };
-    for (label, child, index) in children {
-        let parent = well_formed(shape);
-        for (inner_label, inner_shape, inner_plant) in positions(&child, label) {
-            let parent = parent.clone();
-            let plant: Planter = Box::new(move |planted| {
-                let mut value = parent.clone();
-                let slot = match &mut value {
-                    ExecutionValue::Tuple { value }
-                    | ExecutionValue::List { value }
-                    | ExecutionValue::Adt { fields: value, .. } => &mut value[index],
-                    _ => unreachable!("a position has a container parent"),
-                };
-                *slot = inner_plant(planted);
-                value
-            });
-            out.push((inner_label, inner_shape, plant));
-        }
-    }
-    out
 }
 
 fn source() -> String {
-    let mut source = SOURCE_TYPES.to_string();
-    for (index, (spelling, _)) in shapes().iter().enumerate() {
+    let mut source = TYPES.to_string();
+    for (index, spelling) in ARGUMENT_TYPES.iter().enumerate() {
         source.push_str(&format!(
             "\ndef keep_{index}(p: {spelling}) -> i64 = 1i64\n"
         ));
         source.push_str(&format!(
             "\ndef same_{index}(p: {spelling}) -> {spelling} = p\n"
+        ));
+    }
+    for (index, (spelling, _)) in unimplemented_types().iter().enumerate() {
+        source.push_str(&format!(
+            "\ndef whole_{index}(p: {spelling}) -> i64 = 1i64\n"
+        ));
+    }
+    for (index, (spelling, _, _)) in TENSOR_TYPES.iter().enumerate() {
+        source.push_str(&format!(
+            "\ndef tensor_{index}(t: {spelling}, k: i64) -> {spelling} = t\n"
         ));
     }
     source
@@ -387,116 +234,159 @@ fn prepared() -> PreparedEval {
     .expect("oracle source compiles")
 }
 
+fn messages(error: chelis_compiler_api::compiler::CompilerError) -> String {
+    error
+        .errors
+        .iter()
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn call(
     program: &PreparedEval,
     root: &str,
-    value: ExecutionValue,
+    arguments: Vec<(&str, ExecutionValue)>,
+    bindings: Vec<(&str, TensorValue)>,
 ) -> Result<chelis_compiler_api::schema::EvalResult, String> {
-    let mut arguments = BTreeMap::new();
-    arguments.insert("p".to_string(), value);
     program
-        .call_root(root, arguments, BTreeMap::new())
-        .map_err(|error| {
-            error
-                .errors
-                .iter()
-                .map(|diagnostic| diagnostic.message.clone())
-                .collect::<Vec<_>>()
-                .join("; ")
-        })
+        .call_root(
+            root,
+            arguments
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value))
+                .collect(),
+            bindings
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value))
+                .collect(),
+        )
+        .map_err(messages)
 }
 
 #[test]
-fn every_planted_wrong_type_is_rejected_at_its_position() {
+fn argument_kinds_admit_exactly_their_declared_type() {
     let program = prepared();
     let mut planted = 0usize;
-    for (index, (spelling, shape)) in shapes().iter().enumerate() {
-        let keep = format!("keep_{index}");
-        let same = format!("same_{index}");
-
-        // The well-formed value is admitted, and the identity call returns it
-        // as its owed root.
-        let value = well_formed(shape);
-        let kept = call(&program, &keep, value.clone())
-            .unwrap_or_else(|error| panic!("{spelling}: well-formed value rejected: {error}"));
-        assert_eq!(kept.roots.len(), 1, "{spelling}: {:?}", kept.roots);
-        let returned = call(&program, &same, value)
-            .unwrap_or_else(|error| panic!("{spelling}: identity call rejected: {error}"));
-        assert!(
-            !returned.roots.is_empty(),
-            "{spelling}: the identity call produced no owed root"
+    for (index, spelling) in ARGUMENT_TYPES.iter().enumerate() {
+        let value = well_formed(spelling);
+        let returned = call(
+            &program,
+            &format!("same_{index}"),
+            vec![("p", value.clone())],
+            vec![],
+        )
+        .unwrap_or_else(|error| panic!("{spelling}: well-formed argument rejected: {error}"));
+        let [root] = returned.roots.as_slice() else {
+            panic!(
+                "{spelling}: the identity call owes one root: {:?}",
+                returned.roots
+            );
+        };
+        assert_eq!(
+            serde_json::to_value(&root.value).unwrap(),
+            serde_json::to_value(&value).unwrap(),
+            "{spelling}: the identity call changed its argument"
         );
-
-        for (position, declared, plant) in positions(shape, "p".to_string()) {
-            for foreign in foreign() {
-                if is_value_of(&foreign, &declared) {
-                    continue;
-                }
-                planted += 1;
-                let mutated = plant(foreign.clone());
-                let error = match call(&program, &keep, mutated) {
-                    Ok(result) => panic!(
-                        "{spelling}: {:?} planted at `{position}` (declared {declared:?}) was \
-                         admitted and evaluated to {:?}",
-                        serde_json::to_value(&foreign).unwrap(),
-                        result.roots
-                    ),
-                    Err(error) => error,
-                };
-                // The rejection names the planted position, or a position
-                // inside the planted value.
-                let named = ["`", ".", "[", "{"]
-                    .iter()
-                    .any(|next| error.contains(&format!("`{position}{next}")));
-                assert!(
-                    named
-                        && (error.contains("is not a value of its parameter type")
-                            || error.contains("field(s), and the constructor declares")),
-                    "{spelling}: the rejection of a value planted at `{position}` does not name \
-                     it: {error}"
-                );
-            }
-        }
-    }
-    assert!(planted > 400, "the oracle planted only {planted} mutations");
-
-    // An invariant-carrying value that breaks its invariant, at each depth.
-    let broken = ExecutionValue::Adt {
-        ctor: "Positive".to_string(),
-        fields: vec![scalar_f32(-1.0)],
-    };
-    for (index, (spelling, shape)) in shapes().iter().enumerate() {
-        for (position, declared, plant) in positions(shape, "p".to_string()) {
-            if !matches!(declared, Shape::Adt { ty: "Positive", .. }) {
+        for foreign in foreign() {
+            if is_value_of(&foreign, spelling) {
                 continue;
             }
-            let error = call(&program, &format!("keep_{index}"), plant(broken.clone()))
-                .expect_err("an invariant-breaking value is rejected");
+            planted += 1;
+            let error = match call(
+                &program,
+                &format!("keep_{index}"),
+                vec![("p", foreign.clone())],
+                vec![],
+            ) {
+                Ok(result) => panic!(
+                    "{spelling}: {} was admitted and evaluated to {:?}",
+                    serde_json::to_value(&foreign).unwrap(),
+                    result.roots
+                ),
+                Err(error) => error,
+            };
             assert!(
-                error.contains("breaks an invariant"),
-                "{spelling} at `{position}`: {error}"
+                error.contains("argument `p` of")
+                    && error.contains("is not a value of its parameter type"),
+                "{spelling}: {error}"
+            );
+        }
+    }
+    assert!(
+        planted >= 150,
+        "the oracle planted only {planted} arguments"
+    );
+}
+
+#[test]
+fn other_argument_types_are_typed_unsupported_rejections() {
+    let program = prepared();
+    for (index, (spelling, value)) in unimplemented_types().into_iter().enumerate() {
+        for planted in std::iter::once(value).chain(foreign()) {
+            let error = call(
+                &program,
+                &format!("whole_{index}"),
+                vec![("p", planted)],
+                vec![],
+            )
+            .expect_err("an unimplemented argument type is rejected");
+            assert!(
+                error.contains("a call argument of type")
+                    && error.contains("parameter `p`")
+                    && error.contains("3804"),
+                "{spelling}: {error}"
             );
         }
     }
 }
 
 #[test]
-fn identity_calls_return_their_argument_exactly() {
+fn tensor_bindings_are_admitted_at_their_exact_type_or_rejected() {
     let program = prepared();
-    for (index, (spelling, shape)) in shapes().iter().enumerate() {
-        if !matches!(shape, Shape::Scalar(_) | Shape::Bool | Shape::Str) {
-            continue;
-        }
-        let value = well_formed(shape);
-        let result = call(&program, &format!("same_{index}"), value.clone())
-            .unwrap_or_else(|error| panic!("{spelling}: {error}"));
-        let [root] = result.roots.as_slice() else {
+    let candidates: Vec<(Prim, Vec<usize>)> = [Prim::F32, Prim::F64, Prim::Int32, Prim::Int64]
+        .into_iter()
+        .flat_map(|prim| {
+            [vec![3], vec![2, 2], vec![4], vec![1, 3], vec![3, 1]]
+                .into_iter()
+                .map(move |shape| (prim, shape))
+        })
+        .collect();
+    let mut planted = 0usize;
+    for (index, (spelling, prim, shape)) in TENSOR_TYPES.iter().enumerate() {
+        let root = format!("tensor_{index}");
+        let k = || vec![("k", scalar_integer(Prim::Int64, 0))];
+        let binding = tensor_value(*prim, shape);
+        let result = call(&program, &root, k(), vec![("t", binding.clone())])
+            .unwrap_or_else(|error| panic!("{spelling}: well-formed binding rejected: {error}"));
+        let [returned] = result.roots.as_slice() else {
             panic!("{spelling}: {:?}", result.roots);
         };
         assert_eq!(
-            serde_json::to_value(&root.value).unwrap(),
-            serde_json::to_value(&value).unwrap(),
-            "{spelling}"
+            serde_json::to_value(&returned.value).unwrap(),
+            serde_json::to_value(ExecutionValue::Tensor { value: binding }).unwrap(),
+            "{spelling}: the identity call changed its binding"
         );
+        for (candidate_prim, candidate_shape) in &candidates {
+            if candidate_prim == prim && candidate_shape.as_slice() == *shape {
+                continue;
+            }
+            planted += 1;
+            let error = match call(
+                &program,
+                &root,
+                k(),
+                vec![("t", tensor_value(*candidate_prim, candidate_shape))],
+            ) {
+                Ok(result) => panic!(
+                    "{spelling}: a {candidate_prim:?} binding of shape {candidate_shape:?} was \
+                     admitted and evaluated to {:?}",
+                    result.roots
+                ),
+                Err(error) => error,
+            };
+            assert!(error.contains("binding `t` of"), "{spelling}: {error}");
+        }
     }
+    assert!(planted >= 70, "the oracle planted only {planted} bindings");
 }

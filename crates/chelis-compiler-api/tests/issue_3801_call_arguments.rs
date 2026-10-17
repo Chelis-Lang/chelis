@@ -7,8 +7,8 @@
 //! as literals computes, runs on the Host lane, and lists no argument among
 //! the manifest's required inputs. Every malformed call is rejected before
 //! evaluation: a missing, extra, tensor-valued or mistyped argument, a
-//! narrowing or a promotion, a value of a generic data type, and a record that
-//! breaks its type's invariant.
+//! narrowing or a promotion, and a live tensor parameter left unbound.
+//! `issue_3801_call_argument_admission` generates the per-type cases.
 
 use std::collections::BTreeMap;
 
@@ -24,23 +24,7 @@ mod wire_values;
 use wire_values::{scalar_f32, scalar_f64, scalar_integer};
 
 const SOURCE: &str = r#"module M
-@opaque
-@invariant(p) (p.v >= 0.0)
-type Positive =
-  | Positive { v: f32 }
-
-type Pair =
-  | Pair { left: i64, right: f32 }
-
 def mixed(x: i64, s: string, b: bool, y: f32) -> i64 = if (b && (s == "a") && (y > 1.0)) then add(x, 1i64) else x
-
-def pair_sum(p: Pair) -> f32 = (p.right + 1.0)
-
-def positive_value(p: Positive) -> f32 = p.v
-
-def list_length(xs: List[i64]) -> i64 = len(xs)
-
-def maybe(o: Option[i64]) -> bool = true
 
 def scaled(t: tensor[2, f32], k: f32) -> f32 = k
 
@@ -145,29 +129,6 @@ fn admitted_calls_compute_the_literal_application_on_the_host_lane() {
         );
     }
 
-    let record = ExecutionValue::Adt {
-        ctor: "Pair".to_string(),
-        fields: vec![scalar_integer(Prim::Int64, 2), scalar_f32(0.25)],
-    };
-    let result = program
-        .call_root("pair_sum", args(vec![("p", record)]), BTreeMap::new())
-        .expect("a record argument evaluates");
-    assert_eq!(
-        root_value(&result),
-        literal("pair_sum(Pair { left: 2i64, right: 0.25 })")
-    );
-
-    let list = ExecutionValue::List {
-        value: vec![
-            scalar_integer(Prim::Int64, 1),
-            scalar_integer(Prim::Int64, 2),
-        ],
-    };
-    let result = program
-        .call_root("list_length", args(vec![("xs", list)]), BTreeMap::new())
-        .expect("a list argument evaluates");
-    assert_eq!(root_value(&result), literal("list_length([1i64, 2i64])"));
-
     // The same compile serves every call: a second call of the same root with
     // other values computes its own result.
     let again = program
@@ -225,47 +186,6 @@ fn malformed_calls_are_rejected_before_evaluation() {
     assert!(
         rejection(&program, "mixed", wrong_kind).contains("argument `b` of `mixed` is not a value")
     );
-
-    let mismatched_list = ExecutionValue::List {
-        value: vec![scalar_integer(Prim::Int32, 1)],
-    };
-    assert!(
-        rejection(&program, "list_length", vec![("xs", mismatched_list)])
-            .contains("argument `xs` of `list_length` is not a value")
-    );
-
-    let wrong_record = ExecutionValue::Adt {
-        ctor: "Positive".to_string(),
-        fields: vec![scalar_f32(1.0)],
-    };
-    assert!(
-        rejection(&program, "pair_sum", vec![("p", wrong_record)])
-            .contains("argument `p` of `pair_sum` is not a value")
-    );
-
-    // A record value of an invariant-carrying type enters through the codec,
-    // which revalidates the invariant.
-    let broken = ExecutionValue::Adt {
-        ctor: "Positive".to_string(),
-        fields: vec![scalar_f32(-1.0)],
-    };
-    assert!(
-        rejection(&program, "positive_value", vec![("p", broken)]).contains("breaks an invariant")
-    );
-    let valid = ExecutionValue::Adt {
-        ctor: "Positive".to_string(),
-        fields: vec![scalar_f32(2.0)],
-    };
-    program
-        .call_root("positive_value", args(vec![("p", valid)]), BTreeMap::new())
-        .expect("a record that keeps its invariant is admitted");
-
-    let some = ExecutionValue::Adt {
-        ctor: "Some".to_string(),
-        fields: vec![scalar_integer(Prim::Int64, 1)],
-    };
-    let generic = rejection(&program, "maybe", vec![("o", some)]);
-    assert!(generic.contains("generic data type `Option`"), "{generic}");
 
     // A tensor parameter arrives as a binding, never as an argument.
     let tensor_argument = rejection(
