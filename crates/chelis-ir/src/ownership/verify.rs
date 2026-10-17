@@ -16,6 +16,7 @@ use super::ir::{
     OperationRole, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse, ParamMode, Terminal,
     Terminator, Unit, UnitId, UnitKind,
 };
+use super::locations::ProgramLocations;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CallableSchema {
@@ -40,9 +41,15 @@ struct UnitLiveFacts {
 pub(super) struct HostVerification {
     tail_calls: BTreeSet<(UnitId, OpId)>,
     live_set_bound: super::VerifiedLiveSetBound,
+    locations: ProgramLocations,
 }
 
 impl HostVerification {
+    /// Position tables of the program this verification describes.
+    pub(super) fn locations(&self) -> &ProgramLocations {
+        &self.locations
+    }
+
     pub(super) fn is_tail_call(&self, unit: UnitId, operation: OpId) -> bool {
         self.tail_calls.contains(&(unit, operation))
     }
@@ -126,6 +133,7 @@ pub(super) fn verify(program: &OwnershipProgram) -> Result<HostVerification, Own
             max_live_heap_owners,
             max_live_bytes: compose_live_byte_bound(&program.units, &live_facts)?,
         },
+        locations: ProgramLocations::new(program),
     })
 }
 
@@ -195,6 +203,10 @@ pub(super) fn verify_host_actions(
     let mut controls = BTreeMap::new();
     let mut roots = BTreeMap::new();
     let mut display_roots = Vec::new();
+    let locations = ProgramLocations::new(program);
+    // One derivation for the whole program; each control-edge action reads
+    // its row, and the bijection check below compares the whole table.
+    let expected_controls = collect_expected_controls(program);
     for (index, site) in sites.records.iter().enumerate() {
         if matches!(
             site.kind,
@@ -205,7 +217,10 @@ pub(super) fn verify_host_actions(
                 detail: format!("structural site {index} carries an ownership action"),
             });
         }
-        for action in &site.actions {
+        // What the site's earlier actions established, for the edge-local
+        // terminals that must follow their edge.
+        let mut anchors = SiteAnchors::default();
+        for (action_index, action) in site.actions.iter().enumerate() {
             let action_unit = match action {
                 HostSiteAction::Operation { unit, .. }
                 | HostSiteAction::Terminator { unit, .. }
@@ -231,19 +246,29 @@ pub(super) fn verify_host_actions(
                             | super::ir::HostSiteKind::FunctionReturn
                             | super::ir::HostSiteKind::ManifestRoot
                     );
-                    let Some(unit_ref) = program.units.get(unit) else {
+                    if program.units.get(unit).is_none() {
                         return Err(site_error(index, "operation names missing unit"));
-                    };
-                    if !unit_ref.blocks.iter().any(|item| item.id == block) {
+                    }
+                    if locations.block(program, unit, block).is_none() {
                         return Err(site_error(index, "operation names missing block"));
                     }
-                    if !operation_exists_in_block(unit_ref, block, operation) {
+                    let terminal = locations.terminal(program, unit, block, operation);
+                    if locations
+                        .operation(program, unit, block, operation)
+                        .is_none()
+                        && terminal.is_none()
+                    {
                         return Err(site_error(index, "operation identity is outside its block"));
                     }
-                    let is_edge_terminal = edge_for_operation(unit_ref, block, operation).is_some();
-                    if (is_edge_terminal
-                        && !operation_is_on_site_edge(program, site, unit, block, operation))
-                        || (!is_edge_terminal && !ordinary_site)
+                    let is_edge_terminal = terminal.is_some();
+                    let on_site_edge = is_edge_terminal
+                        && anchors
+                            .carries_terminal(program, &locations, site, unit, block, operation);
+                    anchors
+                        .operations
+                        .entry(operation)
+                        .or_insert((action_index, block));
+                    if (is_edge_terminal && !on_site_edge) || (!is_edge_terminal && !ordinary_site)
                     {
                         return Err(site_error(index, "operation has inappropriate site kind"));
                     }
@@ -263,10 +288,11 @@ pub(super) fn verify_host_actions(
                     if !terminals.insert((unit, block)) {
                         return Err(site_error(index, "terminator belongs to two sites"));
                     }
-                    let Some(unit_ref) = program.units.get(unit) else {
+                    anchors.terminators.insert(block);
+                    if program.units.get(unit).is_none() {
                         return Err(site_error(index, "terminator names missing unit"));
-                    };
-                    if !unit_ref.blocks.iter().any(|item| item.id == block) {
+                    }
+                    if locations.block(program, unit, block).is_none() {
                         return Err(site_error(index, "terminator names missing block"));
                     }
                 }
@@ -305,7 +331,9 @@ pub(super) fn verify_host_actions(
                     source,
                     target,
                 } => {
-                    let expected_kind = expected_control_kind(program, unit, edge, source, target)
+                    let expected_kind = locations
+                        .edge(program, unit, source, edge, target)
+                        .and_then(|_| expected_controls.as_ref().ok()?.get(&(unit, edge)).copied())
                         .ok_or_else(|| {
                             site_error(index, "edge is not a typed control successor")
                         })?;
@@ -315,23 +343,22 @@ pub(super) fn verify_host_actions(
                             "control edge has inappropriate site kind",
                         ));
                     }
-                    let Some(unit_ref) = program.units.get(unit) else {
+                    if program.units.get(unit).is_none() {
                         return Err(site_error(index, "edge names missing unit"));
-                    };
-                    let Some(block_ref) = unit_ref.blocks.iter().find(|item| item.id == source)
-                    else {
+                    }
+                    if locations.block(program, unit, source).is_none() {
                         return Err(site_error(index, "edge names missing source block"));
-                    };
-                    if !block_ref
-                        .terminator
-                        .edges()
-                        .any(|candidate| candidate.id == edge && candidate.target == target)
+                    }
+                    if locations
+                        .edge(program, unit, source, edge, target)
+                        .is_none()
                     {
                         return Err(site_error(index, "edge target is not a successor"));
                     }
                     if controls.insert((unit, edge), site.kind).is_some() {
                         return Err(site_error(index, "control edge belongs to two sites"));
                     }
+                    anchors.edges.insert((source, edge, target));
                 }
             }
         }
@@ -387,7 +414,7 @@ pub(super) fn verify_host_actions(
             detail: "ownership terminator/site correspondence is not bijective".to_string(),
         });
     }
-    let expected_controls = collect_expected_controls(program)?;
+    let expected_controls = expected_controls?;
     if controls != expected_controls {
         return Err(OwnershipError::HostSiteMap {
             detail: "ownership control-edge/site correspondence is not bijective".to_string(),
@@ -415,11 +442,8 @@ pub(super) fn verify_host_actions(
                     unit,
                     block,
                     operation,
-                } => program
-                    .units
-                    .get(unit)
-                    .and_then(|unit| unit.blocks.iter().find(|candidate| candidate.id == block))
-                    .and_then(|block| block.ops.iter().find(|candidate| candidate.id == operation))
+                } => locations
+                    .operation(program, unit, block, operation)
                     .map(|operation| &operation.kind),
                 _ => None,
             })
@@ -449,11 +473,8 @@ pub(super) fn verify_host_actions(
                     unit,
                     block,
                     operation,
-                } => program
-                    .units
-                    .get(unit)
-                    .and_then(|unit| unit.blocks.iter().find(|candidate| candidate.id == block))
-                    .and_then(|block| block.ops.iter().find(|candidate| candidate.id == operation))
+                } => locations
+                    .operation(program, unit, block, operation)
                     .map(|operation| &operation.kind),
                 _ => None,
             })
@@ -484,68 +505,90 @@ fn is_control_site(kind: super::ir::HostSiteKind) -> bool {
     )
 }
 
-fn operation_is_on_site_edge(
-    program: &OwnershipProgram,
-    site: &super::ir::HostSiteRecord,
-    unit: usize,
-    block: BlockId,
-    operation: OpId,
-) -> bool {
-    let Some(unit_ref) = program.units.get(unit) else {
-        return false;
-    };
-    let Some(edge) = edge_for_operation(unit_ref, block, operation) else {
-        return false;
-    };
-    let Some(operation_index) = site.actions.iter().position(
-        |action| matches!(action, HostSiteAction::Operation { operation: id, .. } if *id == operation),
-    ) else {
-        return false;
-    };
-    site.actions[..operation_index]
-        .iter()
-        .any(|action| match *action {
-            HostSiteAction::ControlEdge {
-                unit: action_unit,
-                edge: action_edge,
-                source,
-                target,
-            } => {
-                action_unit == unit
-                    && source == block
-                    && action_edge == edge.id
-                    && target == edge.target
-            }
-            HostSiteAction::Terminator {
-                unit: action_unit,
-                block: action_block,
-            } => {
-                action_unit == unit
-                    && action_block == block
-                    && matches!(
-                        unit_ref
-                            .blocks
-                            .iter()
-                            .find(|candidate| candidate.id == block)
-                            .map(|block| &block.terminator),
-                        Some(Terminator::Jump(jump)) if jump.id == edge.id
-                    )
-            }
-            _ => false,
-        })
+/// The earlier actions of one site that an edge-local terminal may follow.
+/// Every action of a site names the site's own unit, which the action loop
+/// checks first.
+#[derive(Default)]
+struct SiteAnchors {
+    /// Operations an earlier action of the site named: the first such
+    /// action's position and block.
+    operations: BTreeMap<OpId, (usize, BlockId)>,
+    /// Control edges, by source, identity and target.
+    edges: BTreeSet<(BlockId, EdgeId, BlockId)>,
+    /// Blocks whose terminator the site carries.
+    terminators: BTreeSet<BlockId>,
 }
 
-fn edge_for_operation(unit: &Unit, block: BlockId, operation: OpId) -> Option<&Edge> {
-    unit.blocks
-        .iter()
-        .find(|candidate| candidate.id == block)?
-        .terminator
-        .edges()
-        .find(|edge| {
-            edge.terminals
-                .iter()
-                .any(|terminal| terminal.id == operation)
-        })
+impl SiteAnchors {
+    /// Whether an earlier action of the site carries the edge of the
+    /// edge-local terminal `operation`: its control edge, or the block's
+    /// terminator when that is a jump along the edge.
+    ///
+    /// The answer belongs to the operation's first action in the site. When
+    /// an earlier action named it in the same block, that action passed this
+    /// check, and the repetition is reported as an operation belonging to two
+    /// sites. An earlier action naming the same identity in another block
+    /// (which identity verification rules out) is answered by scanning the
+    /// actions before it.
+    fn carries_terminal(
+        &self,
+        program: &OwnershipProgram,
+        locations: &ProgramLocations,
+        site: &super::ir::HostSiteRecord,
+        unit: usize,
+        block: BlockId,
+        operation: OpId,
+    ) -> bool {
+        let Some((edge, _)) = locations.terminal(program, unit, block, operation) else {
+            return false;
+        };
+        match self.operations.get(&operation) {
+            Some((_, first_block)) if *first_block == block => return true,
+            Some((first, _)) => {
+                return site.actions[..*first].iter().any(|action| match *action {
+                    HostSiteAction::ControlEdge {
+                        unit: action_unit,
+                        edge: action_edge,
+                        source,
+                        target,
+                    } => {
+                        action_unit == unit
+                            && source == block
+                            && action_edge == edge.id
+                            && target == edge.target
+                    }
+                    HostSiteAction::Terminator {
+                        unit: action_unit,
+                        block: action_block,
+                    } => {
+                        action_unit == unit
+                            && action_block == block
+                            && Self::jumps_along(program, locations, unit, block, edge.id)
+                    }
+                    _ => false,
+                });
+            }
+            None => {}
+        }
+        self.edges.contains(&(block, edge.id, edge.target))
+            || (self.terminators.contains(&block)
+                && Self::jumps_along(program, locations, unit, block, edge.id))
+    }
+
+    fn jumps_along(
+        program: &OwnershipProgram,
+        locations: &ProgramLocations,
+        unit: usize,
+        block: BlockId,
+        edge: EdgeId,
+    ) -> bool {
+        matches!(
+            locations
+                .block(program, unit, block)
+                .map(|block| &block.terminator),
+            Some(Terminator::Jump(jump)) if jump.id == edge
+        )
+    }
 }
 
 fn collect_expected_controls(
@@ -593,25 +636,6 @@ fn collect_expected_controls(
         }
     }
     Ok(result)
-}
-
-fn expected_control_kind(
-    program: &OwnershipProgram,
-    unit: usize,
-    edge: EdgeId,
-    source: BlockId,
-    target: BlockId,
-) -> Option<super::ir::HostSiteKind> {
-    let unit_ref = program.units.get(unit)?;
-    let block = unit_ref.blocks.iter().find(|block| block.id == source)?;
-    block
-        .terminator
-        .edges()
-        .find(|candidate| candidate.id == edge && candidate.target == target)?;
-    collect_expected_controls(program)
-        .ok()?
-        .get(&(unit, edge))
-        .copied()
 }
 
 fn site_error(index: usize, detail: &'static str) -> OwnershipError {
@@ -1330,20 +1354,6 @@ fn check_operation_ids(unit: &Unit) -> Result<(), OwnershipError> {
         }
     }
     Ok(())
-}
-
-fn operation_exists_in_block(unit: &Unit, block: BlockId, operation: OpId) -> bool {
-    unit.blocks
-        .iter()
-        .find(|candidate| candidate.id == block)
-        .is_some_and(|block| {
-            block.ops.iter().any(|candidate| candidate.id == operation)
-                || block
-                    .terminator
-                    .edges()
-                    .flat_map(|edge| &edge.terminals)
-                    .any(|terminal| terminal.id == operation)
-        })
 }
 
 /// Sum two live-byte bounds. A sum beyond u64 has no finite representable

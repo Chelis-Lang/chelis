@@ -118,6 +118,7 @@ mod classify;
 mod error;
 mod ir;
 mod last_use;
+mod locations;
 mod lower;
 mod render;
 mod storage;
@@ -126,6 +127,7 @@ mod verify;
 pub use crate::axis_sources::{CanonicalExtent, LocalGuardClaim, LocalGuardSite};
 pub use error::OwnershipError;
 pub use ir::{HostSiteId, HostSiteKind};
+pub use locations::counting_site_lookup_entries;
 pub use storage::{
     CStorageLane, ExactStorageCapacity, HipStorageLane, ReusableOwnedStorage, StorageLane,
     StoragePlacement, StorageSlotId, StorageSlotPlan, VerifiedStorageLayout, VerifiedStoragePlan,
@@ -895,17 +897,9 @@ fn verified_host_action<'a>(
             block,
             operation,
         } => {
-            let unit_ref = program.units.get(unit)?;
-            let block_ref = unit_ref
-                .blocks
-                .iter()
-                .find(|candidate| candidate.id == block)?;
-            if let Some(terminal) = block_ref
-                .terminator
-                .edges()
-                .flat_map(|edge| &edge.terminals)
-                .find(|terminal| terminal.id == operation)
-            {
+            let locations = verification.locations();
+            locations.block(program, unit, block)?;
+            if let Some((_, terminal)) = locations.terminal(program, unit, block, operation) {
                 let operation = VerifiedOperationId { key: operation.0 };
                 let block = block_id(block);
                 return Some(VerifiedHostAction::Operation(match terminal.kind {
@@ -921,10 +915,7 @@ fn verified_host_action<'a>(
                     },
                 }));
             }
-            let op = block_ref
-                .ops
-                .iter()
-                .find(|candidate| candidate.id == operation)?;
+            let op = locations.operation(program, unit, block, operation)?;
             let block = block_id(block);
             let operation_id = VerifiedOperationId { key: op.id.0 };
             Some(VerifiedHostAction::Operation(match &op.kind {
@@ -1060,16 +1051,9 @@ fn verified_host_action<'a>(
             source,
             target,
         } => {
-            let terminator = &program
-                .units
-                .get(unit)?
-                .blocks
-                .iter()
-                .find(|block| block.id == source)?
-                .terminator;
-            let edge = terminator
-                .edges()
-                .find(|edge| edge.id == edge_id && edge.target == target)?;
+            let edge = verification
+                .locations()
+                .edge(program, unit, source, edge_id, target)?;
             Some(VerifiedHostAction::ControlEdge {
                 source: block_id(source),
                 edge: verified_edge(program, unit, edge)?,
