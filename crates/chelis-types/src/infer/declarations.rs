@@ -5,6 +5,18 @@
 
 use super::*;
 
+// Counts the declarations the signature-metadata sweep visits, for the
+// chelis#3717 scaling oracle: the sweep visits each function declaration once.
+#[cfg(test)]
+thread_local! {
+    static SIGNATURE_SWEEP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_signature_sweep_visits() -> usize {
+    SIGNATURE_SWEEP_VISITS.with(|visits| visits.replace(0))
+}
+
 pub(super) fn top_level_decl_name(expr: &deep::Expr) -> Option<&str> {
     let (tag, _, kids) = stamped_parts(expr)?;
     if !matches!(
@@ -255,115 +267,114 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
         .ordered_members()
         .filter_map(|member| defs_by_name.get_mut(&member.name)?.pop_front())
         .collect::<Vec<_>>();
-    let passes = ordered_defs.len().max(1);
-    let imported_signatures = signature_context
+    let mut available_signatures = signature_context
         .functions
         .iter()
         .map(|(name, inference)| (name.clone(), inference.display_signature.clone()))
         .collect::<UnordMap<_, _>>();
 
-    // chelis#930: cooperative cancellation at declaration granularity. This
-    // fixed point runs one full sweep of every def per def (`passes` is the
-    // def count), which makes it the front end's other declaration-count-
-    // scaling pass — and on a large program the single most expensive one.
-    // Polling the inner loop rather than the outer sweep keeps the bound
-    // independent of program size: one declaration, not one O(n) sweep.
+    // `ordered_defs` is the plan's callee-first component order, so one sweep
+    // has every non-recursive callee's display signature in
+    // `available_signatures` before its callers read it, and a recursive
+    // member infers nothing read-only. A second sweep would read the same
+    // inputs and rebuild the same result (chelis#3717).
+    //
+    // chelis#930: cooperative cancellation at declaration granularity, so the
+    // bound is one declaration rather than one sweep.
     let cancel = crate::cancel::current_cancel_token();
-    'fixed_point: for _ in 0..passes {
-        functions.clear();
-        let mut available_signatures = imported_signatures.clone();
-        for expr in &ordered_defs {
-            if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
-                break 'fixed_point;
-            }
-            let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
-                continue;
-            };
-            let Some(name) = kids.first().and_then(symbol_name) else {
-                continue;
-            };
-            let Some(fn_kids) = kids
-                .get(1)
-                .and_then(|body| tagged_children(body, DeepTag::Fn))
-            else {
-                continue;
-            };
-            let Some(checked_signature) = type_env
-                .get(name)
-                .and_then(|expr| type_from_deep_expr(expr, type_headers, errors))
-            else {
-                continue;
-            };
-            let Type::Fn(checked_args, checked_ret) = checked_signature.clone() else {
-                continue;
-            };
-            let Some(params_expr) = fn_kids.first() else {
-                continue;
-            };
-            let Some(body) = fn_kids.get(1) else {
-                continue;
-            };
-            let param_infos = param_source_infos(params_expr);
-            let recursive_cycle = recursive_members.contains(name);
-            let all_written_by_defsig =
-                defsig_names.contains(name) && param_infos.iter().all(|(_, written)| !*written);
-            let mut display_args = checked_args.clone();
-            let mut params = Vec::new();
-
-            for (index, (pname, param_written)) in param_infos.iter().enumerate() {
-                let Some(checked_type) = checked_args.get(index).cloned() else {
-                    continue;
-                };
-                let written = all_written_by_defsig || *param_written;
-                // [04-LIN-9]: a key holder is never borrowed, so a parameter
-                // that carries a key is never inferred read-only.
-                let can_infer = !recursive_cycle
-                    && !written
-                    && type_contains_tensor(&checked_type)
-                    && !type_mentions_key(&checked_type)
-                    && !matches!(checked_type, Type::Ref(_));
-                let inferred_read_only = can_infer
-                    && !param_has_consuming_use_with_headers(
-                        body,
-                        pname,
-                        &available_signatures,
-                        type_env,
-                        type_headers,
-                        errors,
-                    );
-                let display_type = if inferred_read_only {
-                    Type::Ref(Box::new(checked_type.clone()))
-                } else {
-                    checked_type.clone()
-                };
-                if let Some(slot) = display_args.get_mut(index) {
-                    *slot = display_type.clone();
-                }
-                params.push(ParamSignatureInference {
-                    index,
-                    name: pname.clone(),
-                    written,
-                    inferred_read_only,
-                    checked_type,
-                    display_type,
-                });
-            }
-
-            let display_signature = Type::Fn(display_args, checked_ret);
-            available_signatures.insert(name.to_string(), display_signature.clone());
-            functions.insert(
-                name.to_string(),
-                FunctionSignatureInference {
-                    name: name.to_string(),
-                    authored_signature: defsig_names.contains(name),
-                    authored_signature_type: authored_signature_types.get(name).cloned(),
-                    recursive_cycle,
-                    checked_signature,
-                    display_signature,
-                    params,
-                },
-            );
+    for expr in &ordered_defs {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            break;
         }
+        #[cfg(test)]
+        SIGNATURE_SWEEP_VISITS.with(|visits| visits.set(visits.get() + 1));
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(fn_kids) = kids
+            .get(1)
+            .and_then(|body| tagged_children(body, DeepTag::Fn))
+        else {
+            continue;
+        };
+        let Some(checked_signature) = type_env
+            .get(name)
+            .and_then(|expr| type_from_deep_expr(expr, type_headers, errors))
+        else {
+            continue;
+        };
+        let Type::Fn(checked_args, checked_ret) = checked_signature.clone() else {
+            continue;
+        };
+        let Some(params_expr) = fn_kids.first() else {
+            continue;
+        };
+        let Some(body) = fn_kids.get(1) else {
+            continue;
+        };
+        let param_infos = param_source_infos(params_expr);
+        let recursive_cycle = recursive_members.contains(name);
+        let all_written_by_defsig =
+            defsig_names.contains(name) && param_infos.iter().all(|(_, written)| !*written);
+        let mut display_args = checked_args.clone();
+        let mut params = Vec::new();
+
+        for (index, (pname, param_written)) in param_infos.iter().enumerate() {
+            let Some(checked_type) = checked_args.get(index).cloned() else {
+                continue;
+            };
+            let written = all_written_by_defsig || *param_written;
+            // [04-LIN-9]: a key holder is never borrowed, so a parameter
+            // that carries a key is never inferred read-only.
+            let can_infer = !recursive_cycle
+                && !written
+                && type_contains_tensor(&checked_type)
+                && !type_mentions_key(&checked_type)
+                && !matches!(checked_type, Type::Ref(_));
+            let inferred_read_only = can_infer
+                && !param_has_consuming_use_with_headers(
+                    body,
+                    pname,
+                    &available_signatures,
+                    type_env,
+                    type_headers,
+                    errors,
+                );
+            let display_type = if inferred_read_only {
+                Type::Ref(Box::new(checked_type.clone()))
+            } else {
+                checked_type.clone()
+            };
+            if let Some(slot) = display_args.get_mut(index) {
+                *slot = display_type.clone();
+            }
+            params.push(ParamSignatureInference {
+                index,
+                name: pname.clone(),
+                written,
+                inferred_read_only,
+                checked_type,
+                display_type,
+            });
+        }
+
+        let display_signature = Type::Fn(display_args, checked_ret);
+        available_signatures.insert(name.to_string(), display_signature.clone());
+        functions.insert(
+            name.to_string(),
+            FunctionSignatureInference {
+                name: name.to_string(),
+                authored_signature: defsig_names.contains(name),
+                authored_signature_type: authored_signature_types.get(name).cloned(),
+                recursive_cycle,
+                checked_signature,
+                display_signature,
+                params,
+            },
+        );
     }
 
     SignatureInferenceMetadata { functions }
